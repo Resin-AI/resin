@@ -492,6 +492,30 @@ export const V1_MILESTONES_SPEC = [
   },
 ];
 
+const PROPRIETARY_EVIDENCE_PREFIXES = Object.freeze([
+  "apps/cloud/",
+  "apps/web/",
+  "packages/cloud-contracts/",
+  "fixtures/e2e/",
+  "infra/",
+]);
+
+function isProprietaryEvidencePath(relativePath) {
+  return PROPRIETARY_EVIDENCE_PREFIXES.some((prefix) => relativePath.startsWith(prefix));
+}
+
+export function resolveReleaseMilestones(rootDir = process.cwd()) {
+  if (fs.existsSync(path.join(rootDir, "apps", "cloud", "package.json"))) {
+    return V1_MILESTONES_SPEC;
+  }
+
+  return V1_MILESTONES_SPEC.map((milestone) => ({
+    ...milestone,
+    artifacts: milestone.artifacts.filter((artifact) => !isProprietaryEvidencePath(artifact)),
+    suites: milestone.suites.filter((suite) => !isProprietaryEvidencePath(suite)),
+  })).filter((milestone) => milestone.artifacts.length > 0 || milestone.suites.length > 0);
+}
+
 /**
  * Generates the complete, structured release evidence dataset.
  * @param {object} options
@@ -499,6 +523,7 @@ export const V1_MILESTONES_SPEC = [
  */
 export function generateReleaseEvidence(options = {}) {
   const rootDir = options.rootDir || process.cwd();
+  const milestoneSpecs = resolveReleaseMilestones(rootDir);
   const testOnly = options.testOnly === true;
 
   const rawCommitSha =
@@ -544,7 +569,7 @@ export function generateReleaseEvidence(options = {}) {
   let verifiedMilestonesCount = 0;
 
   const suiteResults = verificationEvidence?.suites || {};
-  const resolvedMilestones = V1_MILESTONES_SPEC.map((spec) => {
+  const resolvedMilestones = milestoneSpecs.map((spec) => {
     const resolvedArtifacts = spec.artifacts.map((relPath) => {
       totalArtifactsCount++;
       const fullPath = path.resolve(rootDir, relPath);
@@ -623,7 +648,7 @@ export function generateReleaseEvidence(options = {}) {
     }
   }
 
-  const fullyVerified = verifiedMilestonesCount === V1_MILESTONES_SPEC.length;
+  const fullyVerified = verifiedMilestonesCount === milestoneSpecs.length;
   return {
     schemaVersion: "2.0.0",
     release: RELEASE_VERSION,
@@ -650,7 +675,7 @@ export function generateReleaseEvidence(options = {}) {
     milestones: resolvedMilestones,
     qualification,
     summary: {
-      totalMilestones: V1_MILESTONES_SPEC.length,
+      totalMilestones: milestoneSpecs.length,
       verifiedMilestones: verifiedMilestonesCount,
       totalArtifacts: totalArtifactsCount,
       totalVerificationSuites: totalSuitesCount,

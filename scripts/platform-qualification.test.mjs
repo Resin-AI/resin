@@ -183,6 +183,7 @@ describe("real host platform qualification", () => {
     });
     expect(lane.checks.artifactDigest).toBe(true);
     expect(lane.checks.artifactLayout.verifiedFiles).toBeGreaterThan(0);
+    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
     expect(lane.checks.packagedCli).toBeUndefined();
     expect(fs.existsSync(path.join(outputDir, `${otherLane}.json`))).toBe(true);
   }, 60_000);
@@ -208,6 +209,7 @@ describe("real host platform qualification", () => {
     });
     expect(lane.checks.artifactDigest).toBe(true);
     expect(lane.checks.artifactLayout.verifiedFiles).toBeGreaterThan(0);
+    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
     expect(lane.checks.packagedCli).toBeUndefined();
     expect(fs.existsSync(path.join(outputDir, "wsl.json"))).toBe(true);
   }, 60_000);
@@ -240,8 +242,8 @@ describe("real host platform qualification", () => {
     expect(lane.checks.daemon.diagnostics).toBe(true);
     expect(lane.checks.mcp.catalogRefresh).toBe(true);
     expect(lane.checks.mcp.toolInvocation).toBe(true);
-    expect(lane.checks.cloud.live).toBe(true);
-    expect(lane.checks.cloud.ready).toBe(true);
+    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
+    expect(lane.checks.cloud).toBeUndefined();
     expect(lane.harnesses).toHaveLength(3);
     for (const harness of lane.harnesses) {
       expect(["ready", "unavailable"]).toContain(harness.status);

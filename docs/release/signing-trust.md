@@ -481,4 +481,4 @@ pnpm release:test
 - [Client & Cloud Rollback Procedures](rollback-procedure.md)
 - [Release Notes](v1.0.3-release-notes.md)
 - [Cross-Component Compatibility Matrix](compatibility-matrix.md)
-- [Operator Deployment Runbook](../operator/deployment.md)
+- [Security & Privacy Guide](../user/security-and-privacy.md)

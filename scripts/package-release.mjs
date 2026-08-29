@@ -870,20 +870,17 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
     },
     {
       path: "resin/bin/resin-daemon",
-      content:
-        "#!/usr/bin/env node\nimport { main } from '../apps/observer/dist/index.js';\nif (typeof main === 'function') {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (typeof exitCode === 'number' && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
+      content: "#!/usr/bin/env node\nimport '../apps/observer/dist/bin/daemon.js';\n",
       mode: 0o755,
     },
     {
       path: "resin/bin/resin-gateway",
-      content:
-        "#!/usr/bin/env node\nimport { main } from '../apps/gateway/dist/index.js';\nif (typeof main === 'function') {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (typeof exitCode === 'number' && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
+      content: "#!/usr/bin/env node\nimport '../apps/gateway/dist/bin/mcp-shim.js';\n",
       mode: 0o755,
     },
     {
       path: "resin/bin/resin-mcp",
-      content:
-        "#!/usr/bin/env node\nimport { main } from '../apps/gateway/dist/index.js';\nif (typeof main === 'function') {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (typeof exitCode === 'number' && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
+      content: "#!/usr/bin/env node\nimport '../apps/gateway/dist/bin/mcp-shim.js';\n",
       mode: 0o755,
     },
     {
@@ -944,6 +941,20 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
             arch: platform.arch,
             isWsl: platform.isWsl,
             releaseDate: RELEASE_DATE,
+          },
+          null,
+          2,
+        ),
+        mode: 0o644,
+      },
+      {
+        path: "resin/platform.json",
+        content: JSON.stringify(
+          {
+            releaseVersion: RELEASE_VERSION,
+            platform: platform.os,
+            arch: platform.arch,
+            isWsl: platform.isWsl,
           },
           null,
           2,

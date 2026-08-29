@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { resolveReleaseMilestones } from "./generate-release-evidence.mjs";
 import {
   PLATFORMS,
   RELEASE_VERSION,
@@ -121,6 +122,7 @@ export const ALLOWED_TOP_LEVEL_ENTRIES = Object.freeze([
   "resin/manifest.json",
   "resin/.resin-build-info.json",
   "resin/release-metadata.json",
+  "resin/platform.json",
 ]);
 
 /**
@@ -610,11 +612,20 @@ export function verifyReleaseEvidence(releaseDir, options = {}) {
         message: `Evidence commit '${evidence.commitSha}' does not match '${options.expectedCommitSha}'.`,
       });
     }
-    if (!Array.isArray(evidence.milestones) || evidence.milestones.length !== 21) {
+    const expectedMilestoneIds = resolveReleaseMilestones(options.rootDir || process.cwd()).map(
+      (milestone) => milestone.id,
+    );
+    const actualMilestoneIds = Array.isArray(evidence.milestones)
+      ? evidence.milestones.map((milestone) => milestone.id)
+      : [];
+    if (
+      actualMilestoneIds.length !== expectedMilestoneIds.length ||
+      actualMilestoneIds.some((id, index) => id !== expectedMilestoneIds[index])
+    ) {
       violations.push({
         rule: "INCOMPLETE_EVIDENCE_MILESTONES",
         file: "release-evidence.json",
-        message: "Release evidence must contain all 21 milestones.",
+        message: `Release evidence must contain all ${expectedMilestoneIds.length} repository-scoped milestones in canonical order.`,
       });
     } else if (evidence.mode !== "test-only") {
       for (const milestone of evidence.milestones) {
@@ -1306,8 +1317,12 @@ export function verifyDocumentation(rootDir = process.cwd()) {
     }
   }
 
-  // 2. Verify required operator docs
-  for (const doc of REQUIRED_OPERATOR_DOCS) {
+  // 2. Verify operator docs only when the proprietary cloud plane is present.
+  const includesProprietaryCloud = fs.existsSync(
+    path.join(rootDir, "apps", "cloud", "package.json"),
+  );
+  const requiredOperatorDocs = includesProprietaryCloud ? REQUIRED_OPERATOR_DOCS : [];
+  for (const doc of requiredOperatorDocs) {
     const full = path.join(docsDir, "operator", doc);
     if (!fs.existsSync(full)) {
       violations.push({
@@ -1502,6 +1517,7 @@ export function verifyRelease(options = {}) {
   const evidenceViolations = verifyReleaseEvidence(releaseDir, {
     allowTestEvidence,
     expectedCommitSha: options.expectedCommitSha || manifest?.releaseIdentity?.commitSha,
+    rootDir,
   });
   violations.push(...evidenceViolations);
   const evidencePath = path.join(releaseDir, "release-evidence.json");
