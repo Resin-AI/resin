@@ -1935,7 +1935,7 @@ describe("Anonymous Public Release Distribution", () => {
       const port = typeof address === "object" && address ? address.port : 0;
 
       try {
-        const fetched = await fetchBytes(`http://localhost:${port}/payload.bin`, {
+        const fetched = await fetchBytes(`http://127.0.0.1:${port}/payload.bin`, {
           allowInsecureHttpForTests: true,
         });
         expect(fetched).toEqual(payload);
