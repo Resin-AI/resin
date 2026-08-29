@@ -13,6 +13,7 @@ export {
   CODEX_DISPLAY_NAME,
   CODEX_MIN_SUPPORTED_VERSION,
   type CodexResolvedPaths,
+  type CodexProbeOptions,
   type CommandExecutor,
   type PathLookupFn,
   getCandidateBinaryNames,
@@ -42,6 +43,8 @@ export {
 export {
   DEFAULT_SCHEMA_VERSION,
   type CodexDecoderOptions,
+  type CodexTranscriptPayload,
+  type CodexTranscriptValue,
   CodexSessionDecoder,
   CodexRecordDecoder,
   decodeCodexRecord,

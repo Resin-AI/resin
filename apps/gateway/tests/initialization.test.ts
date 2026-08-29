@@ -8,6 +8,7 @@ import { JSON_RPC_ERROR_CODES } from "../src/protocol/errors.js";
 import type {
   InitializeResult,
   JsonRpcErrorResponse,
+  JsonRpcParams,
   JsonRpcSuccessResponse,
 } from "../src/protocol/types.js";
 import { FakeGatewayRouter } from "./fixtures/fake-router.js";
@@ -36,12 +37,11 @@ describe("MCP Initialization & Capability Negotiation", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       };
-
+      // SAFETY: Gateway response is confirmed to be InitializeResult success response.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         initReq,
       )) as JsonRpcSuccessResponse<InitializeResult>;
-
       expect(resp.error).toBeUndefined();
       expect(resp.result.protocolVersion).toBe("2024-11-05");
       expect(resp.result.capabilities.tools?.listChanged).toBe(true);
@@ -74,12 +74,11 @@ describe("MCP Initialization & Capability Negotiation", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       };
-
+      // SAFETY: Gateway response is confirmed to be InitializeResult success response.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         initReq,
       )) as JsonRpcSuccessResponse<InitializeResult>;
-
       expect(resp.error).toBeUndefined();
       expect(conn.harnessId).toBe("codex");
       expect(conn.isInitialized).toBe(true);
@@ -111,12 +110,11 @@ describe("MCP Initialization & Capability Negotiation", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       };
-
+      // SAFETY: Gateway response is confirmed to be InitializeResult success response.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         initReq,
       )) as JsonRpcSuccessResponse<InitializeResult>;
-
       expect(resp.error).toBeUndefined();
       expect(conn.harnessId).toBe("omp");
       expect(conn.isInitialized).toBe(true);
@@ -138,12 +136,11 @@ describe("MCP Initialization & Capability Negotiation", () => {
         method: "tools/list",
         params: {},
       };
-
+      // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse for uninitialized tools/list.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         listReq,
       )) as JsonRpcErrorResponse;
-
       expect(resp.result).toBeUndefined();
       expect(resp.error).toBeDefined();
       expect(resp.error.code).toBe(JSON_RPC_ERROR_CODES.INVALID_REQUEST);
@@ -165,12 +162,11 @@ describe("MCP Initialization & Capability Negotiation", () => {
         method: "ping",
         params: {},
       };
-
+      // SAFETY: Gateway response is confirmed to be JsonRpcSuccessResponse for ping request.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         pingReq,
-      )) as JsonRpcSuccessResponse<Record<string, unknown>>;
-
+      )) as JsonRpcSuccessResponse<JsonRpcParams>;
       expect(resp.error).toBeUndefined();
       expect(resp.result).toEqual({});
     } finally {

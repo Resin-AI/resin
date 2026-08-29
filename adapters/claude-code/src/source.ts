@@ -225,12 +225,13 @@ export class ClaudeSessionEventSource implements SessionEventSource {
         };
         this.cursor = cursor;
 
-        let rawPayload: unknown = line;
-        try {
-          rawPayload = JSON.parse(line);
-        } catch {
-          rawPayload = { text: line };
-        }
+        const rawPayload = (() => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return { text: line };
+          }
+        })();
 
         const record: RawHarnessRecord = {
           recordId: `${this.sessionId}-rec-${this.currentSequence}`,

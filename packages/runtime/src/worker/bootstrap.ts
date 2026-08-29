@@ -1,4 +1,9 @@
-import type { ToolManifest, ToolOutputSchema, ToolParameterSchema } from "@resin/contracts";
+import type {
+  CanonicalJsonRecord,
+  CanonicalJsonValue,
+  ToolOutputSchema,
+  ToolParameterSchema,
+} from "@resin/contracts";
 
 /**
  * Result of JSON Schema validation.
@@ -13,56 +18,94 @@ export interface SchemaValidationResult {
  * (such as ToolParameterSchema or ToolOutputSchema).
  */
 export function validateAgainstSchema(
-  schema: unknown,
-  value: unknown,
+  schema: ToolParameterSchema | ToolOutputSchema | CanonicalJsonValue | null | undefined,
+  value: CanonicalJsonValue,
   path = "",
 ): SchemaValidationResult {
-  if (!schema || typeof schema !== "object") {
+  if (!schema || !(schema instanceof Object) || Array.isArray(schema)) {
     return { valid: true, errors: [] };
   }
 
-  const s = schema as Record<string, unknown>;
+  // SAFETY: Tag check confirms schema is a JSON object record.
+  const s = schema as CanonicalJsonRecord;
   const errors: string[] = [];
 
   // Check if schema has an embedded .schema object (MCP/ToolOutputSchema convention)
-  if (s.schema && typeof s.schema === "object") {
-    return validateAgainstSchema(s.schema, value, path);
+  if (s.schema && s.schema instanceof Object && !Array.isArray(s.schema)) {
+    // SAFETY: Tag check confirms s.schema is a JSON object record.
+    return validateAgainstSchema(s.schema as CanonicalJsonRecord, value, path);
   }
 
-  const expectedType = typeof s.type === "string" ? s.type : undefined;
+  // SAFETY: String check confirms s.type is a string primitive.
+  const expectedType = String(s.type) === s.type ? (s.type as string) : undefined;
 
   if (expectedType) {
+    const isObjectRecord =
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.prototype.toString.call(value) === "[object Object]";
+
+    const valTag = Object.prototype.toString.call(value);
+    const valType =
+      value === null
+        ? "null"
+        : value === undefined
+          ? "undefined"
+          : Array.isArray(value)
+            ? "array"
+            : Number.isFinite(value)
+              ? "number"
+              : String(value) === value
+                ? "string"
+                : value === true || value === false
+                  ? "boolean"
+                  : isObjectRecord
+                    ? "object"
+                    : valTag === "[object Function]" || valTag === "[object AsyncFunction]"
+                      ? "function"
+                      : valTag === "[object BigInt]"
+                        ? "bigint"
+                        : valTag === "[object Symbol]"
+                          ? "symbol"
+                          : "unknown";
+
+    // SAFETY: Number.isFinite check confirms value is a finite number for integer test.
+    const isInteger = Number.isFinite(value) && Number.isInteger(value as number);
+
     if (expectedType === "null" && value !== null) {
-      errors.push(`${path || "root"}: expected null, got ${typeof value}`);
-    } else if (expectedType === "string" && typeof value !== "string") {
-      errors.push(`${path || "root"}: expected string, got ${typeof value}`);
-    } else if (expectedType === "number" && typeof value !== "number") {
-      errors.push(`${path || "root"}: expected number, got ${typeof value}`);
-    } else if (
-      expectedType === "integer" &&
-      (!Number.isInteger(value) || typeof value !== "number")
-    ) {
-      errors.push(`${path || "root"}: expected integer, got ${typeof value}`);
-    } else if (expectedType === "boolean" && typeof value !== "boolean") {
-      errors.push(`${path || "root"}: expected boolean, got ${typeof value}`);
+      errors.push(`${path || "root"}: expected null, got ${valType}`);
+    } else if (expectedType === "string" && String(value) !== value) {
+      errors.push(`${path || "root"}: expected string, got ${valType}`);
+    } else if (expectedType === "number" && !Number.isFinite(value)) {
+      errors.push(`${path || "root"}: expected number, got ${valType}`);
+    } else if (expectedType === "integer" && !isInteger) {
+      errors.push(`${path || "root"}: expected integer, got ${valType}`);
+    } else if (expectedType === "boolean" && value !== true && value !== false) {
+      errors.push(`${path || "root"}: expected boolean, got ${valType}`);
     } else if (expectedType === "array" && !Array.isArray(value)) {
-      errors.push(`${path || "root"}: expected array, got ${typeof value}`);
-    } else if (
-      expectedType === "object" &&
-      (typeof value !== "object" || value === null || Array.isArray(value))
-    ) {
+      errors.push(`${path || "root"}: expected array, got ${valType}`);
+    } else if (expectedType === "object" && !isObjectRecord) {
       errors.push(
-        `${path || "root"}: expected object, got ${Array.isArray(value) ? "array" : typeof value}`,
+        `${path || "root"}: expected object, got ${Array.isArray(value) ? "array" : valType}`,
       );
     }
   }
 
   // If value is an object, validate properties & required fields
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    const obj = value as Record<string, unknown>;
+  const isValueRecord =
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]";
+  if (isValueRecord) {
+    // SAFETY: Tag check confirms value is a record.
+    const obj = value as CanonicalJsonRecord;
+    // SAFETY: s.properties is verified or defaulted to empty record.
     const properties = (
-      s.properties && typeof s.properties === "object" ? s.properties : {}
-    ) as Record<string, unknown>;
+      s.properties && s.properties instanceof Object && !Array.isArray(s.properties)
+        ? s.properties
+        : {}
+    ) as CanonicalJsonRecord;
+    // SAFETY: s.required is checked for Array.isArray before cast.
     const required = Array.isArray(s.required) ? (s.required as string[]) : [];
     const additionalProperties = s.additionalProperties !== false;
 
@@ -77,7 +120,12 @@ export function validateAgainstSchema(
     for (const [propName, propSchema] of Object.entries(properties)) {
       if (propName in obj && obj[propName] !== undefined) {
         const propPath = path ? `${path}.${propName}` : propName;
-        const res = validateAgainstSchema(propSchema, obj[propName], propPath);
+        // SAFETY: propSchema is passed for validation against property value.
+        const res = validateAgainstSchema(
+          propSchema as CanonicalJsonRecord,
+          obj[propName],
+          propPath,
+        );
         errors.push(...res.errors);
       }
     }
@@ -93,10 +141,11 @@ export function validateAgainstSchema(
   }
 
   // If value is an array, validate items if defined
-  if (Array.isArray(value) && s.items && typeof s.items === "object") {
+  if (Array.isArray(value) && s.items && s.items instanceof Object && !Array.isArray(s.items)) {
     for (let i = 0; i < value.length; i++) {
       const itemPath = `${path || "root"}[${i}]`;
-      const res = validateAgainstSchema(s.items, value[i], itemPath);
+      // SAFETY: s.items is verified object sub-schema.
+      const res = validateAgainstSchema(s.items as CanonicalJsonRecord, value[i], itemPath);
       errors.push(...res.errors);
     }
   }
@@ -106,11 +155,6 @@ export function validateAgainstSchema(
     errors,
   };
 }
-
-/**
- * Embedded Deno worker bootstrap script source code.
- * This runs inside `deno run --no-prompt --deny-all ...`
- */
 export const DENO_WORKER_BOOTSTRAP_SOURCE = `// Resin Deno Worker Bootstrap Script
 // Runs inside permissionless Deno sandbox with --no-prompt --deny-all
 

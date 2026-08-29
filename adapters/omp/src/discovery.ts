@@ -12,23 +12,28 @@ import type {
   ProbeInstallationOptions,
   SessionStatus,
 } from "@resin/harness-contracts";
+import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 
 export interface OmpBreadcrumb {
   sessionId: string;
+  sessionDir?: string;
   workspacePath: string;
   lastActiveAt: string;
   pid?: number;
   status?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, string | number | boolean | null | undefined>;
 }
 
 export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
-  env?: NodeJS.ProcessEnv;
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
   cwd?: string;
   searchPaths?: string[];
+  customExecutablePath?: string;
+  customConfigPath?: string;
+  checkPermissions?: boolean;
 }
 
 /**
@@ -36,7 +41,7 @@ export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
  */
 export function resolveOmpHome(options?: {
   customHome?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
 }): string {
   const env = options?.env ?? process.env;
@@ -58,7 +63,7 @@ export function resolveOmpHome(options?: {
  */
 export async function findOmpExecutable(options?: {
   customExecutablePath?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
   searchPaths?: string[];
 }): Promise<string | null> {
@@ -178,14 +183,13 @@ export async function detectOmpVersion(
     const pkgJsonPath = path.join(currentDir, "package.json");
     try {
       const content = await fsp.readFile(pkgJsonPath, "utf8");
+      // SAFETY: package.json is parsed as a JSON manifest with an optional version field.
       const parsed = JSON.parse(content) as { version?: string };
-      if (parsed.version) {
+      if (parsed.version && String(parsed.version) === parsed.version) {
         const detected = parseOmpSemver(parsed.version);
         if (detected) return detected;
       }
-    } catch {
-      // continue upwards
-    }
+    } catch {}
     currentDir = path.dirname(currentDir);
   }
 
@@ -312,23 +316,43 @@ export async function inspectBreadcrumbs(
           try {
             const filePath = path.join(dir, entry.name);
             const content = await fsp.readFile(filePath, "utf8");
-            const parsed = JSON.parse(content) as Record<string, unknown>;
-            if (parsed.sessionId || parsed.session_id) {
-              breadcrumbs.push({
-                sessionId: String(parsed.sessionId ?? parsed.session_id),
-                workspacePath: String(
-                  parsed.workspacePath ?? parsed.workspace_path ?? workspacePath ?? "",
-                ),
-                lastActiveAt: String(
-                  parsed.lastActiveAt ?? parsed.timestamp ?? new Date().toISOString(),
-                ),
-                pid: typeof parsed.pid === "number" ? parsed.pid : undefined,
-                status: typeof parsed.status === "string" ? parsed.status : undefined,
-                metadata: parsed,
-              });
+            const parsedObj = JSON.parse(content);
+            if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
+              // SAFETY: Breadcrumb file contains a parsed JSON session breadcrumb record.
+              const parsed = parsedObj as Record<
+                string,
+                string | number | boolean | null | undefined
+              > & {
+                sessionId?: string;
+                session_id?: string;
+                workspacePath?: string;
+                workspace_path?: string;
+                lastActiveAt?: string;
+                timestamp?: string;
+                pid?: number;
+                status?: string;
+              };
+              if (parsed.sessionId || parsed.session_id) {
+                breadcrumbs.push({
+                  sessionId: String(parsed.sessionId ?? parsed.session_id),
+                  sessionDir: dir,
+                  workspacePath: String(
+                    parsed.workspacePath ?? parsed.workspace_path ?? workspacePath ?? "",
+                  ),
+                  lastActiveAt: String(
+                    parsed.lastActiveAt ?? parsed.timestamp ?? new Date().toISOString(),
+                  ),
+                  pid: Number.isInteger(parsed.pid) ? parsed.pid : undefined,
+                  status:
+                    parsed.status && String(parsed.status) === parsed.status
+                      ? parsed.status
+                      : undefined,
+                  metadata: parsed,
+                });
+              }
             }
           } catch {
-            // ignore malformed breadcrumb file
+            // ignore unparseable breadcrumb file
           }
         }
       }
@@ -353,18 +377,35 @@ export async function inspectBreadcrumbs(
   for (const ptrPath of pointerLocations) {
     try {
       const content = await fsp.readFile(ptrPath, "utf8");
-      const parsed = JSON.parse(content) as Record<string, unknown>;
-      if (parsed.sessionId || parsed.session_id) {
-        breadcrumbs.push({
-          sessionId: String(parsed.sessionId ?? parsed.session_id),
-          workspacePath: String(
-            parsed.workspacePath ?? parsed.workspace_path ?? workspacePath ?? "",
-          ),
-          lastActiveAt: String(parsed.lastActiveAt ?? parsed.timestamp ?? new Date().toISOString()),
-          pid: typeof parsed.pid === "number" ? parsed.pid : undefined,
-          status: typeof parsed.status === "string" ? parsed.status : undefined,
-          metadata: parsed,
-        });
+      const parsedObj = JSON.parse(content);
+      if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
+        // SAFETY: Pointer file contains a parsed JSON session pointer record.
+        const parsed = parsedObj as Record<string, string | number | boolean | null | undefined> & {
+          sessionId?: string;
+          session_id?: string;
+          workspacePath?: string;
+          workspace_path?: string;
+          lastActiveAt?: string;
+          timestamp?: string;
+          pid?: number;
+          status?: string;
+        };
+        if (parsed.sessionId || parsed.session_id) {
+          breadcrumbs.push({
+            sessionId: String(parsed.sessionId ?? parsed.session_id),
+            sessionDir: path.dirname(ptrPath),
+            workspacePath: String(
+              parsed.workspacePath ?? parsed.workspace_path ?? workspacePath ?? "",
+            ),
+            lastActiveAt: String(
+              parsed.lastActiveAt ?? parsed.timestamp ?? new Date().toISOString(),
+            ),
+            pid: Number.isInteger(parsed.pid) ? parsed.pid : undefined,
+            status:
+              parsed.status && String(parsed.status) === parsed.status ? parsed.status : undefined,
+            metadata: parsed,
+          });
+        }
       }
     } catch {
       // ignore missing pointer
@@ -373,6 +414,47 @@ export async function inspectBreadcrumbs(
 
   return breadcrumbs;
 }
+
+const OmpWorkspaceEntrySchema = z.union([
+  z.string().transform((entryPath) => {
+    const metadata: Record<string, string | number | boolean | null | undefined> = {};
+    return {
+      path: entryPath,
+      rootPath: undefined,
+      workspaceId: undefined,
+      name: undefined,
+      metadata,
+    };
+  }),
+  z
+    .object({
+      path: z.string().optional(),
+      rootPath: z.string().optional(),
+      workspaceId: z.string().optional(),
+      name: z.string().optional(),
+    })
+    .passthrough()
+    .transform((obj) => {
+      // SAFETY: Object structure represents parsed workspace JSON dictionary metadata.
+      const metadata = obj as Record<string, string | number | boolean | null | undefined>;
+      return {
+        path: obj.path,
+        rootPath: obj.rootPath,
+        workspaceId: obj.workspaceId,
+        name: obj.name,
+        metadata,
+      };
+    }),
+]);
+
+const OmpWorkspacesRegistrySchema = z.union([
+  z.array(OmpWorkspaceEntrySchema),
+  z
+    .object({
+      workspaces: z.array(OmpWorkspaceEntrySchema).optional(),
+    })
+    .passthrough(),
+]);
 
 /**
  * Discovers OMP workspaces from ~/.omp, session directories, breadcrumbs, and current directory.
@@ -433,24 +515,25 @@ export async function discoverOmpWorkspaces(
   try {
     const content = await fsp.readFile(workspacesRegistryFile, "utf8");
     const parsed = JSON.parse(content);
-    const list = Array.isArray(parsed) ? parsed : (parsed.workspaces ?? []);
-    for (const ws of list) {
-      const wsPath = typeof ws === "string" ? ws : (ws?.path ?? ws?.rootPath);
-      if (wsPath && typeof wsPath === "string") {
-        const absWsPath = path.resolve(wsPath);
-        const workspaceId =
-          typeof ws === "object" && ws?.workspaceId
-            ? String(ws.workspaceId)
-            : createWorkspaceIdFromPath(absWsPath);
-        workspacesMap.set(absWsPath, {
-          workspaceId,
-          rootPath: absWsPath,
-          name: typeof ws === "object" && ws?.name ? String(ws.name) : path.basename(absWsPath),
-          harnessId: "omp",
-          configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-          mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-          metadata: typeof ws === "object" ? ws : {},
-        });
+    const parsedRegistry = OmpWorkspacesRegistrySchema.safeParse(parsed);
+    if (parsedRegistry.success) {
+      const data = parsedRegistry.data;
+      const list = Array.isArray(data) ? data : (data.workspaces ?? []);
+      for (const ws of list) {
+        const wsPath = ws.path ?? ws.rootPath;
+        if (wsPath) {
+          const absWsPath = path.resolve(wsPath);
+          const workspaceId = ws.workspaceId ?? createWorkspaceIdFromPath(absWsPath);
+          workspacesMap.set(absWsPath, {
+            workspaceId,
+            rootPath: absWsPath,
+            name: ws.name ?? path.basename(absWsPath),
+            harnessId: "omp",
+            configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
+            mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
+            metadata: ws.metadata,
+          });
+        }
       }
     }
   } catch {
@@ -467,28 +550,39 @@ export async function discoverOmpWorkspaces(
           const wsMarkerFile = path.join(sessionsDir, entry.name, "workspace.json");
           try {
             const wsContent = await fsp.readFile(wsMarkerFile, "utf8");
-            const parsed = JSON.parse(wsContent) as {
-              path?: string;
-              rootPath?: string;
-              name?: string;
-              workspaceId?: string;
-            };
-            const p = parsed.path ?? parsed.rootPath;
-            if (p) {
-              const absWsPath = path.resolve(p);
-              const workspaceId = parsed.workspaceId ?? createWorkspaceIdFromPath(absWsPath);
-              workspacesMap.set(absWsPath, {
-                workspaceId,
-                rootPath: absWsPath,
-                name: path.basename(absWsPath),
-                harnessId: "omp",
-                configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-                mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-                metadata: parsed,
-              });
+            const parsedObj = JSON.parse(wsContent);
+            if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
+              // SAFETY: Workspace marker JSON contains workspace identity properties.
+              const parsed = parsedObj as {
+                path?: string;
+                rootPath?: string;
+                name?: string;
+                workspaceId?: string;
+              };
+              const wsPath = parsed.path ?? parsed.rootPath;
+              if (wsPath && String(wsPath) === wsPath) {
+                const absWsPath = path.resolve(wsPath);
+                if (!workspacesMap.has(absWsPath)) {
+                  workspacesMap.set(absWsPath, {
+                    workspaceId:
+                      parsed.workspaceId && String(parsed.workspaceId) === parsed.workspaceId
+                        ? parsed.workspaceId
+                        : createWorkspaceIdFromPath(absWsPath),
+                    rootPath: absWsPath,
+                    name:
+                      parsed.name && String(parsed.name) === parsed.name
+                        ? parsed.name
+                        : path.basename(absWsPath),
+                    harnessId: "omp",
+                    configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
+                    mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
+                    metadata: parsed,
+                  });
+                }
+              }
             }
           } catch {
-            // Not a workspace folder with workspace.json
+            // ignore unparseable workspace marker
           }
         }
       }
@@ -615,39 +709,53 @@ async function inspectSessionFile(
       .map((l) => l.trim())
       .filter(Boolean);
     totalLines = lines.length;
-
     if (lines.length > 0) {
       try {
-        const first = JSON.parse(lines[0]) as Record<string, unknown>;
-        if (first.timestamp || first.time || first.ts) {
-          createdAt = String(first.timestamp ?? first.time ?? first.ts);
+        const firstObj = JSON.parse(lines[0]);
+        if (firstObj instanceof Object && !Array.isArray(firstObj)) {
+          // SAFETY: First transcript line is parsed as an object containing timestamp metadata.
+          const first = firstObj as { timestamp?: string; time?: string; ts?: string };
+          if (first.timestamp || first.time || first.ts) {
+            createdAt = String(first.timestamp ?? first.time ?? first.ts);
+          }
         }
       } catch {
-        // ignore
+        // ignore first line parse error
       }
 
       for (const line of lines) {
         try {
-          const parsed = JSON.parse(line) as Record<string, unknown>;
-          if (parsed.timestamp || parsed.time || parsed.ts) {
-            updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
-          }
-
-          const eventType = String(parsed.type ?? parsed.event ?? "");
-          if (eventType === "session_lifecycle" || eventType === "lifecycle") {
-            const action = String(parsed.lifecycleType ?? parsed.action ?? "");
-            if (action === "end" || action === "complete" || action === "finish") {
-              status = "completed";
-            } else if (action === "crash" || action === "error" || action === "fatal") {
-              status = "failed";
-            } else if (action === "pause" || action === "suspend") {
-              status = "idle";
-            } else if (action === "start" || action === "resume") {
-              status = "active";
+          const parsedObj = JSON.parse(line);
+          if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
+            // SAFETY: Transcript record lines are objects containing timestamp and event action types.
+            const parsed = parsedObj as {
+              timestamp?: string;
+              time?: string;
+              ts?: string;
+              action?: string;
+              event?: string;
+              type?: string;
+              lifecycleType?: string;
+            };
+            if (parsed.timestamp || parsed.time || parsed.ts) {
+              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+            const eventType = String(parsed.type ?? parsed.event ?? "");
+            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
+              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
+              if (action === "end" || action === "complete" || action === "finish") {
+                status = "completed";
+              } else if (action === "crash" || action === "error" || action === "fatal") {
+                status = "failed";
+              } else if (action === "pause" || action === "suspend") {
+                status = "idle";
+              } else if (action === "start" || action === "resume") {
+                status = "active";
+              }
             }
           }
         } catch {
-          // ignore malformed line
+          // ignore unparseable line
         }
       }
     }

@@ -28,20 +28,43 @@ export type McpErrorCode =
   | JsonRpcErrorCode
   | (typeof MCP_ERROR_CODES)[keyof typeof MCP_ERROR_CODES];
 
+export type JsonRpcErrorData =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | readonly (string | number | boolean | null | undefined)[]
+  | { readonly [key: string]: string | number | boolean | null | undefined };
+
 export interface JsonRpcErrorObject {
   code: number;
   message: string;
-  data?: unknown;
+  data?: JsonRpcErrorData;
 }
+
+export type JsonRpcErrorCandidate =
+  | Error
+  | McpProtocolError
+  | JsonRpcErrorObject
+  | {
+      readonly code?: number | string | null | undefined;
+      readonly message?: string | null | undefined;
+    }
+  | string
+  | number
+  | boolean
+  | null
+  | undefined;
 
 /**
  * Custom error class for JSON-RPC and MCP protocol errors.
  */
 export class McpProtocolError extends Error {
   readonly code: number;
-  readonly data?: unknown;
+  readonly data?: JsonRpcErrorData;
 
-  constructor(code: number, message: string, data?: unknown) {
+  constructor(code: number, message: string, data?: JsonRpcErrorData) {
     super(message);
     this.name = "McpProtocolError";
     this.code = code;
@@ -50,29 +73,39 @@ export class McpProtocolError extends Error {
   }
 
   toJsonRpcError(): JsonRpcErrorObject {
-    return {
+    const errorObj: JsonRpcErrorObject = {
       code: this.code,
       message: this.message,
-      ...(this.data !== undefined ? { data: this.data } : {}),
     };
+    if (this.data !== undefined) {
+      errorObj.data = this.data;
+    }
+    return errorObj;
   }
 }
 
-export function createMcpError(code: number, message: string, data?: unknown): McpProtocolError {
+export function createMcpError(
+  code: number,
+  message: string,
+  data?: JsonRpcErrorData,
+): McpProtocolError {
   return new McpProtocolError(code, message, data);
 }
 
-export function isMcpProtocolError(error: unknown): error is McpProtocolError {
+export function isMcpProtocolError(error: JsonRpcErrorCandidate): error is McpProtocolError {
   if (error instanceof McpProtocolError) {
     return true;
   }
-  if (typeof error !== "object" || error === null) {
+  if (!error || !(error instanceof Object) || Array.isArray(error)) {
     return false;
   }
   if ("code" in error && "message" in error) {
     const candidateCode = error.code;
     const candidateMessage = error.message;
-    return typeof candidateCode === "number" && typeof candidateMessage === "string";
+    return (
+      Number.isFinite(candidateCode) &&
+      Object.prototype.toString.call(candidateMessage) === "[object String]"
+    );
   }
   return false;
 }

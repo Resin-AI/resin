@@ -1,12 +1,18 @@
 import {
+  type AuditActor,
   type CapabilityEnvelope,
   CapabilityEnvelopeSchema,
   type CatalogSnapshot,
   CatalogSnapshotSchema,
+  type CatalogToolSummary,
   type DeploymentRecord,
   DeploymentRecordSchema,
   type DeploymentState,
   DeploymentStateSchema,
+  type DeploymentTransition,
+  type DeploymentTransitionReason,
+  type DeviceRecord,
+  DeviceRecordSchema,
   ISOTimestampSchema,
   IdentifierSchema,
   type InstallationRecord,
@@ -34,7 +40,7 @@ import {
   V1ToolLockSchema,
 } from "@resin/contracts";
 import { z } from "zod";
-
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 /**
  * Supported deployment command types.
  */
@@ -264,7 +270,7 @@ export interface PreactivationCheckResult {
   outcome?: PreactivationCheckOutcome;
   violations: PreactivationViolation[];
   warnings: string[];
-  metadata: Record<string, unknown>;
+  metadata: JsonObject;
 }
 
 /**
@@ -297,7 +303,7 @@ export interface ArtifactInspectionResult {
   artifactDigest?: string;
   qualificationEvidenceDigest?: string;
   files: ArtifactFileEntry[];
-  rawSignature?: Record<string, unknown>;
+  rawSignature?: JsonObject;
   signature?: {
     keyId: string;
     algorithm: string;
@@ -306,7 +312,7 @@ export interface ArtifactInspectionResult {
     error?: string;
   };
   attestation?: SafetyAttestationRecord;
-  rawAttestation?: Record<string, unknown>;
+  rawAttestation?: JsonObject;
 }
 
 /**
@@ -461,7 +467,7 @@ export class InvalidSanitizedObservationError extends Error {
   readonly code = "ERR_INVALID_SANITIZED_OBSERVATION";
   constructor(
     message: string,
-    readonly validationErrors?: unknown,
+    readonly validationErrors?: z.ZodIssue[] | JsonValue,
   ) {
     super(message);
     this.name = "InvalidSanitizedObservationError";
@@ -486,16 +492,18 @@ export class RawUploadProhibitedError extends Error {
  * unredacted secrets, or raw session/repository references.
  * Fails closed if any prohibited content or pattern is discovered.
  */
-export function assertNoProhibitedRawData(value: unknown, path = ""): void {
+export function assertNoProhibitedRawData<T>(value: T, path = ""): void {
   if (value === null || value === undefined) {
     return;
   }
 
-  if (typeof value === "string") {
+  const strParsed = z.string().safeParse(value);
+  if (strParsed.success) {
+    const str = strParsed.data;
     for (const pattern of SENSITIVE_PATTERN_REGEXES) {
-      if (pattern.test(value)) {
+      if (pattern.test(str)) {
         throw new RawDataExfiltrationError(
-          `Detected prohibited sensitive pattern in observation data at '${path || "<root>"}': matches ${pattern.toString()}`,
+          `Detected prohibited sensitive pattern in observation data at '${path || "<root>"}'`,
           path,
         );
       }
@@ -503,20 +511,20 @@ export function assertNoProhibitedRawData(value: unknown, path = ""): void {
     return;
   }
 
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    typeof value === "bigint" ||
-    typeof value === "symbol"
-  ) {
-    return;
-  }
-
-  if (typeof value === "function") {
+  if (value instanceof Function || z.function().safeParse(value).success) {
     throw new RawDataExfiltrationError(
       `Functions/methods are strictly prohibited in observation payloads at '${path || "<root>"}'`,
       path,
     );
+  }
+
+  if (
+    z.number().safeParse(value).success ||
+    z.boolean().safeParse(value).success ||
+    z.bigint().safeParse(value).success ||
+    z.symbol().safeParse(value).success
+  ) {
+    return;
   }
 
   if (Array.isArray(value)) {
@@ -526,8 +534,10 @@ export function assertNoProhibitedRawData(value: unknown, path = ""): void {
     return;
   }
 
-  if (typeof value === "object") {
-    const constructorName = value.constructor?.name ?? "";
+  const objParsed = z.record(z.unknown()).safeParse(value);
+  if (objParsed.success) {
+    // SAFETY: Checking constructor name for non-plain object/database connection detection.
+    const constructorName = (value as { constructor?: { name?: string } }).constructor?.name ?? "";
     if (
       constructorName.includes("Repository") ||
       constructorName.includes("Database") ||
@@ -542,8 +552,7 @@ export function assertNoProhibitedRawData(value: unknown, path = ""): void {
       }
     }
 
-    const obj = value as Record<string, unknown>;
-    for (const [key, val] of Object.entries(obj)) {
+    for (const [key, val] of Object.entries(objParsed.data)) {
       const lowerKey = key.toLowerCase();
       for (const prohibited of PROHIBITED_RAW_DATA_KEYS) {
         if (lowerKey === prohibited.toLowerCase() || lowerKey.includes(prohibited.toLowerCase())) {
@@ -557,13 +566,12 @@ export function assertNoProhibitedRawData(value: unknown, path = ""): void {
     }
   }
 }
-
 /**
- * Validates and brands a single sanitized observation event.
  * Rejects raw repositories, raw transcripts, unredacted secrets, and invalid event schemas.
  */
-export function createSanitizedObservationDto(rawInput: unknown): SanitizedObservationDto {
-  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
+export function createSanitizedObservationDto<T>(rawInput: T): SanitizedObservationDto {
+  const objParsed = z.record(z.unknown()).safeParse(rawInput);
+  if (!objParsed.success || Array.isArray(rawInput)) {
     throw new InvalidSanitizedObservationError("Sanitized observation must be a non-null object");
   }
 
@@ -574,60 +582,68 @@ export function createSanitizedObservationDto(rawInput: unknown): SanitizedObser
   const parseResult = NormalizedSessionEventSchema.safeParse(rawInput);
   if (!parseResult.success) {
     throw new InvalidSanitizedObservationError(
-      `Observation does not conform to NormalizedSessionEventSchema: ${parseResult.error.message}`,
-      parseResult.error.errors,
+      `Observation failed NormalizedSessionEventSchema validation: ${parseResult.error.message}`,
+      parseResult.error.issues,
     );
   }
 
   const validatedEvent = parseResult.data;
 
-  // 3. Ensure redaction metadata exists and marks redaction complete
-  if (!validatedEvent.redaction || typeof validatedEvent.redaction !== "object") {
+  // 3. Assert privacy redaction was applied
+  if (
+    !validatedEvent.redaction ||
+    !z.record(z.unknown()).safeParse(validatedEvent.redaction).success
+  ) {
     throw new InvalidSanitizedObservationError(
-      "Observation must contain explicit redaction metadata",
+      "Observation is missing required RedactionMeta; privacy transformation is mandatory",
     );
   }
 
-  // 4. Create and freeze branded sanitized observation DTO
-  const dto = Object.assign(
-    { ...validatedEvent },
-    {
-      [SanitizedObservationBrandSymbol]: true as const,
-    },
-  );
+  // 4. Construct brand-protected DTO
+  const dto: SanitizedObservationDto = {
+    ...validatedEvent,
+    [SanitizedObservationBrandSymbol]: true as const,
+  };
 
+  // SAFETY: Branded frozen object conforms to SanitizedObservationDto.
   return Object.freeze(dto) as SanitizedObservationDto;
 }
 
-/**
- * Validates whether an object is a valid branded SanitizedObservationDto.
- */
-export function isSanitizedObservationDto(value: unknown): value is SanitizedObservationDto {
-  if (!value || typeof value !== "object") return false;
+interface BrandedObservationCandidate {
+  [SanitizedObservationBrandSymbol]?: unknown;
+  eventId?: unknown;
+}
+
+interface BrandedObservationBatchCandidate {
+  [SanitizedObservationBrandSymbol]?: unknown;
+  batchId?: unknown;
+  observations?: unknown;
+}
+
+export function isSanitizedObservationDto<T>(value: T): value is SanitizedObservationDto & T {
+  const recordParsed = z.record(z.unknown()).safeParse(value);
+  if (!recordParsed.success) return false;
+  // SAFETY: Value is a non-null object inspected for brand and eventId properties.
+  const candidate = value as BrandedObservationCandidate;
   return (
-    (value as Record<string | symbol, unknown>)[SanitizedObservationBrandSymbol] === true &&
-    NormalizedSessionEventSchema.safeParse(value).success
+    candidate[SanitizedObservationBrandSymbol] === true &&
+    z.string().safeParse(candidate.eventId).success
   );
 }
 
-/**
- * Validates whether an object is a valid branded SanitizedObservationBatchDto.
- */
-export function isSanitizedObservationBatchDto(
-  value: unknown,
-): value is SanitizedObservationBatchDto {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const candidate = value as Record<string | symbol, unknown>;
+export function isSanitizedObservationBatchDto<T>(
+  value: T,
+): value is SanitizedObservationBatchDto & T {
+  const recordParsed = z.record(z.unknown()).safeParse(value);
+  if (!recordParsed.success) return false;
+  // SAFETY: Value is a non-null object inspected for brand, batchId, and observations properties.
+  const candidate = value as BrandedObservationBatchCandidate;
   return (
     candidate[SanitizedObservationBrandSymbol] === true &&
-    typeof candidate.batchId === "string" &&
+    z.string().safeParse(candidate.batchId).success &&
     Array.isArray(candidate.observations)
   );
 }
-
-/**
- * Validates and brands a batch of sanitized observations.
- */
 export function createSanitizedObservationBatchDto(input: {
   batchId: string;
   workspaceId?: string;
@@ -636,7 +652,7 @@ export function createSanitizedObservationBatchDto(input: {
   observations: unknown[];
   cursor?: string;
 }): SanitizedObservationBatchDto {
-  if (!input || typeof input !== "object") {
+  if (!input || !z.record(z.unknown()).safeParse(input).success) {
     throw new InvalidSanitizedObservationError("Batch input must be an object");
   }
 

@@ -20,17 +20,38 @@ export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
 export const SUPPORTED_HARNESS_IDS = ["claude-code", "codex-cli", "omp"] as const;
 export type SupportedHarnessId = (typeof SUPPORTED_HARNESS_IDS)[number];
 
-export const HARNESS_DISPLAY_NAMES: Readonly<Record<SupportedHarnessId, string>> = {
+export type HarnessConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | HarnessConfigValue[]
+  | { [key: string]: HarnessConfigValue };
+
+export type HarnessConfigRecord = Record<string, HarnessConfigValue>;
+
+function isConfigObject(
+  value: HarnessConfigValue | undefined | null,
+): value is HarnessConfigRecord {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+export const HARNESS_DISPLAY_NAMES = {
   "claude-code": "Claude Code CLI",
   "codex-cli": "Codex CLI",
   omp: "Oh My Pi (OMP)",
-};
+} as const satisfies Readonly<Record<SupportedHarnessId, string>>;
 
-export const RESIN_MCP_SERVER_KEYS: Readonly<Record<SupportedHarnessId, string>> = {
+export const RESIN_MCP_SERVER_KEYS = {
   "claude-code": "resin",
   "codex-cli": "resin",
   omp: "resin",
-};
+} as const satisfies Readonly<Record<SupportedHarnessId, string>>;
 
 export interface HarnessConfigResult {
   readonly harnessId: SupportedHarnessId;
@@ -179,7 +200,7 @@ export async function verifyHarnessRegistration(
   }
 
   try {
-    let server: Record<string, unknown> | null;
+    let server: HarnessConfigRecord | null;
     if (options.harnessId === "codex-cli" && !options.targetPath.endsWith(".json")) {
       server = findCodexTomlServerConfig(
         parseCodexTomlConfig(content),
@@ -200,12 +221,12 @@ export async function verifyHarnessRegistration(
     if (server === null) {
       return false;
     }
-    const expectedTransport: Record<(typeof RESIN_TRANSPORT_FIELDS)[number], unknown> = {
+    const expectedTransport = {
       type: options.harnessId === "codex-cli" ? undefined : "sse",
       url: options.gatewayUrl,
       command: undefined,
       args: undefined,
-    };
+    } satisfies Record<(typeof RESIN_TRANSPORT_FIELDS)[number], HarnessConfigValue | undefined>;
     return RESIN_TRANSPORT_FIELDS.every((field) =>
       isDeepStrictEqual(server[field], expectedTransport[field]),
     );
@@ -217,8 +238,9 @@ export async function verifyHarnessRegistration(
 const RESIN_TRANSPORT_FIELDS = ["type", "url", "command", "args"] as const;
 const CODEX_SERVER_CONTAINER_PATHS = [["mcp_servers"], ["mcpServers"], ["mcp", "servers"]] as const;
 
-export function parseCodexTomlConfig(content: string): Record<string, unknown> {
-  const parsed = parseToml(content) as unknown;
+export function parseCodexTomlConfig(content: string): HarnessConfigRecord {
+  // SAFETY: parseToml returns parsed TOML object structure.
+  const parsed = parseToml(content) as HarnessConfigValue;
   const config = asObject(parsed);
   if (config === null) {
     throw new Error("Codex TOML root must be a table");
@@ -227,41 +249,41 @@ export function parseCodexTomlConfig(content: string): Record<string, unknown> {
 }
 
 export function findCodexTomlServerConfig(
-  config: Record<string, unknown>,
+  config: HarnessConfigRecord,
   serverName: string,
-): Record<string, unknown> | null {
-  const matches: Record<string, unknown>[] = [];
+): HarnessConfigRecord | null {
+  const matches: HarnessConfigRecord[] = [];
   for (const containerPath of CODEX_SERVER_CONTAINER_PATHS) {
     const container = getObjectAtPath(config, containerPath);
-    const server = container === null ? null : asObject(container[serverName]);
-    if (server !== null) {
-      matches.push(server);
+    const entry = container === null ? null : asObject(container[serverName]);
+    if (entry !== null) {
+      matches.push(entry);
     }
   }
-  return matches.length === 1 ? matches[0]! : null;
+  return matches[0] ?? null;
 }
 
-export function projectCodexTomlUserConfig(
+export function projectUserOwnedCodexToml(
   content: string,
   serverName: string,
-): Record<string, unknown> {
+): HarnessConfigRecord {
   const projected = structuredClone(parseCodexTomlConfig(content));
   for (const containerPath of CODEX_SERVER_CONTAINER_PATHS) {
     const container = getObjectAtPath(projected, containerPath);
     if (container === null) {
       continue;
     }
-
-    let legacyExtras: Record<string, unknown> | null = null;
+    let legacyExtras: HarnessConfigRecord | null = null;
     for (const legacyAlias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
       if (legacyAlias in container && legacyAlias !== serverName) {
         const legacyServer = asObject(container[legacyAlias]);
         if (legacyServer !== null && isRecognizedResinMcpEntry(legacyServer)) {
+          const userEntry = { ...legacyServer };
           for (const field of RESIN_TRANSPORT_FIELDS) {
-            delete legacyServer[field];
+            delete userEntry[field];
           }
-          if (Object.keys(legacyServer).length > 0 && legacyExtras === null) {
-            legacyExtras = legacyServer;
+          if (Object.keys(userEntry).length > 0 && legacyExtras === null) {
+            legacyExtras = userEntry;
           }
           delete container[legacyAlias];
         }
@@ -275,6 +297,13 @@ export function projectCodexTomlUserConfig(
       } else {
         for (const field of RESIN_TRANSPORT_FIELDS) {
           delete server[field];
+        }
+        if (legacyExtras !== null) {
+          for (const [key, value] of Object.entries(legacyExtras)) {
+            if (!(key in server)) {
+              server[key] = value;
+            }
+          }
         }
         if (Object.keys(server).length === 0) {
           delete container[serverName];
@@ -291,31 +320,31 @@ export function projectCodexTomlUserConfig(
   return projected;
 }
 
+export { projectUserOwnedCodexToml as projectCodexTomlUserConfig };
+
 function findJsonServerConfig(
-  config: Record<string, unknown>,
+  config: HarnessConfigRecord,
   harnessId: SupportedHarnessId,
   serverName: string,
-): Record<string, unknown> | null {
+): HarnessConfigRecord | null {
   const containerKeys = harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
   const matches = containerKeys.flatMap((key) => {
     const container = asObject(config[key]);
-    const server = container === null ? null : asObject(container[serverName]);
-    return server === null ? [] : [server];
+    const entry = container === null ? null : asObject(container[serverName]);
+    return entry === null ? [] : [entry];
   });
-  return matches.length === 1 ? matches[0]! : null;
+  return matches[0] ?? null;
 }
 
-function asObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+function asObject(value: HarnessConfigValue | undefined | null): HarnessConfigRecord | null {
+  return isConfigObject(value) ? value : null;
 }
 
 function getObjectAtPath(
-  root: Record<string, unknown>,
+  root: HarnessConfigRecord,
   keyPath: readonly string[],
-): Record<string, unknown> | null {
-  let current: Record<string, unknown> = root;
+): HarnessConfigRecord | null {
+  let current: HarnessConfigRecord = root;
   for (const key of keyPath) {
     const next = asObject(current[key]);
     if (next === null) {
@@ -326,15 +355,18 @@ function getObjectAtPath(
   return current;
 }
 
-function pruneEmptyObjectPath(root: Record<string, unknown>, keyPath: readonly string[]): void {
+function pruneEmptyObjectPath(root: HarnessConfigRecord, keyPath: readonly string[]): void {
   for (let length = keyPath.length; length > 0; length -= 1) {
     const parent = getObjectAtPath(root, keyPath.slice(0, length - 1));
     if (parent === null) {
-      return;
+      continue;
     }
-    const key = keyPath[length - 1]!;
-    const child = asObject(parent[key]);
-    if (child === null || Object.keys(child).length > 0) {
+    const key = keyPath[length - 1];
+    if (key === undefined) {
+      continue;
+    }
+    const target = asObject(parent[key]);
+    if (target === null || Object.keys(target).length > 0) {
       return;
     }
     delete parent[key];
@@ -391,6 +423,7 @@ function splitTomlSourceStatements(content: string): TomlSourceStatement[] {
         quote = null;
       }
     } else if (content.startsWith('"""', index) || content.startsWith("'''", index)) {
+      // SAFETY: Sliced 3-character delimiter is verified to be a valid triple-quote token.
       quote = content.slice(index, index + 3) as "'''" | '"""';
       index += 2;
     } else if (character === '"' || character === "'") {
@@ -770,6 +803,7 @@ function parseTomlKeyPath(source: string): string[] | null {
       }
       if (quote === '"') {
         try {
+          // SAFETY: Parsed JSON string from valid quoted key segment.
           key = JSON.parse(`"${key}"`) as string;
         } catch {
           return null;
@@ -840,6 +874,7 @@ function findTomlTopLevelCharacter(source: string, target: string): number {
       continue;
     }
     if (source.startsWith('"""', index) || source.startsWith("'''", index)) {
+      // SAFETY: Sliced 3-character delimiter is verified to be a valid triple-quote token.
       quote = source.slice(index, index + 3) as "'''" | '"""';
       index += 2;
       continue;
@@ -986,7 +1021,7 @@ export class HarnessConfigOrchestrator {
       } catch (error: unknown) {
         if (error instanceof AggregateError) {
           rollbackErrors.push(
-            ...error.errors.map((rollbackError: unknown) =>
+            ...error.errors.map((rollbackError: Error | string | { message?: string }) =>
               rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
             ),
           );

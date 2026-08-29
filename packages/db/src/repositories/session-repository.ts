@@ -7,7 +7,20 @@ import {
   WorkspaceRecordSchema,
   canonicalJson,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
+
+export type SessionMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SessionMetadataRecord
+  | SessionMetadataValue[];
+
+export interface SessionMetadataRecord {
+  [key: string]: SessionMetadataValue;
+}
 
 /**
  * Session entity representation.
@@ -19,8 +32,8 @@ export interface SessionRecord {
   status: string;
   startedAt: string;
   endedAt?: string;
-  metadata: Record<string, unknown>;
-  sourceIdentity: Record<string, unknown>;
+  metadata: SessionMetadataRecord;
+  sourceIdentity: SessionMetadataRecord;
   createdAt: string;
   updatedAt?: string;
 }
@@ -36,7 +49,7 @@ export interface RawRecordRef {
   storagePath?: string;
   byteSize: number;
   createdAt: string;
-  metadata: Record<string, unknown>;
+  metadata: SessionMetadataRecord;
 }
 
 /**
@@ -141,8 +154,8 @@ export class SessionRepository {
     status?: string;
     startedAt: string;
     endedAt?: string;
-    metadata?: Record<string, unknown>;
-    sourceIdentity?: Record<string, unknown>;
+    metadata?: SessionMetadataRecord;
+    sourceIdentity?: SessionMetadataRecord;
     createdAt?: string;
     updatedAt?: string;
   }): Promise<void> {
@@ -213,7 +226,7 @@ export class SessionRepository {
     limit?: number;
   }): Promise<SessionRecord[]> {
     const conditions: string[] = [];
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
 
     if (filter?.workspaceId) {
       conditions.push("workspace_id = ?");
@@ -347,7 +360,7 @@ export class SessionRepository {
 
   async listCursors(deviceId?: string): Promise<SyncCursor[]> {
     let sql = "SELECT * FROM source_cursors";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (deviceId) {
       sql += " WHERE device_id = ?";
       params.push(deviceId);
@@ -389,7 +402,7 @@ export class SessionRepository {
     storagePath?: string;
     byteSize?: number;
     createdAt?: string;
-    metadata?: Record<string, unknown>;
+    metadata?: SessionMetadataRecord;
   }): Promise<void> {
     const now = new Date().toISOString();
     this.conn.run(
@@ -510,7 +523,7 @@ export class SessionRepository {
     options?: { sinceSequence?: number; limit?: number },
   ): Promise<NormalizedSessionEvent[]> {
     const conditions = ["session_id = ?"];
-    const params: unknown[] = [sessionId];
+    const params: SQLBindValue[] = [sessionId];
 
     if (options?.sinceSequence !== undefined) {
       conditions.push("sequence > ?");

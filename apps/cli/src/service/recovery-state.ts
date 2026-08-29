@@ -71,6 +71,31 @@ export interface CrashDiagnosticInput {
   exitCode?: number;
   category?: RecoveryFailureCategory;
 }
+export type RecordCrashInput = CrashDiagnosticInput;
+
+export type DiagnosticJsonPrimitive = string | number | boolean | null;
+export type DiagnosticJsonValue =
+  | DiagnosticJsonPrimitive
+  | readonly DiagnosticJsonValue[]
+  | { readonly [key: string]: DiagnosticJsonValue }
+  | DiagnosticJsonValue[]
+  | { [key: string]: DiagnosticJsonValue };
+
+export function cloneRecoveryState(state: RecoveryState): RecoveryState {
+  const cloned: RecoveryState = {
+    version: state.version,
+    status: state.status,
+    restartCount: state.restartCount,
+    crashTimestamps: [...state.crashTimestamps],
+  };
+  if (state.trippedAt !== undefined) {
+    cloned.trippedAt = state.trippedAt;
+  }
+  if (state.lastFailure !== undefined) {
+    cloned.lastFailure = { ...state.lastFailure };
+  }
+  return cloned;
+}
 
 export interface RestartDecision {
   shouldRestart: boolean;
@@ -164,8 +189,8 @@ export function calculateRestartDelayMs(
   return Math.min(MAX_RESTART_DELAY_MS, Math.round(baseDelay * jitterMultiplier));
 }
 
-export function categorizeRecoveryFailure(error: unknown): RecoveryFailureCategory {
-  const detail = extractErrorDetail(error).toLowerCase();
+export function categorizeRecoveryFailure(cause: unknown): RecoveryFailureCategory {
+  const detail = extractErrorDetail(cause).toLowerCase();
 
   if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden|token expired|jwt expired/.test(detail)) {
     return "AUTHENTICATION";
@@ -184,17 +209,17 @@ export function categorizeRecoveryFailure(error: unknown): RecoveryFailureCatego
   if (/configuration|config(?:uration)? file|json (?:parse|syntax)|syntaxerror/.test(detail)) {
     return "CONFIGURATION";
   }
-  if (error instanceof Error || detail.length > 0) {
+  if (cause instanceof Error || detail.length > 0) {
     return "RUNTIME";
   }
   return "UNKNOWN";
 }
 
 export function sanitizeCrashDiagnostic(
-  error: unknown,
+  cause: unknown,
   redactor: SecretRedactor = createRecoverySecretRedactor(),
 ): string {
-  const detail = extractErrorDetail(error);
+  const detail = extractErrorDetail(cause);
   if (detail.length === 0) {
     return "No diagnostic detail was provided.";
   }
@@ -209,8 +234,10 @@ function redactPrivateDiagnosticContent(detail: string): string {
   if (/^[\s]*[\[{]/.test(detail)) {
     try {
       const parsed: unknown = JSON.parse(detail);
-      if (typeof parsed === "object" && parsed !== null) {
-        const serialized = JSON.stringify(parsed, redactPrivateDiagnosticField);
+      if (parsed !== null && !Array.isArray(parsed) && parsed instanceof Object) {
+        const serialized = JSON.stringify(parsed, function (key, value) {
+          return redactPrivateDiagnosticField.call(this, key, value);
+        });
         if (serialized !== undefined) {
           redacted = serialized;
         }
@@ -231,11 +258,15 @@ function redactPrivateDiagnosticText(detail: string): string {
     .replace(TOOL_OUTPUT_LINE_PATTERN, "[REDACTED_TOOL_OUTPUT_LINE]");
 }
 
+function isString(cause: unknown): cause is string {
+  return String(cause) === cause;
+}
+
 function redactPrivateDiagnosticField(
-  this: Record<string, unknown>,
+  this: Record<string, DiagnosticJsonValue>,
   key: string,
-  value: unknown,
-): unknown {
+  value: DiagnosticJsonValue,
+): DiagnosticJsonValue {
   if (TRANSCRIPT_FIELD_PATTERN.test(key)) {
     return REDACTED_TRANSCRIPT;
   }
@@ -243,19 +274,16 @@ function redactPrivateDiagnosticField(
     return REDACTED_TOOL_OUTPUT;
   }
 
-  const role =
-    typeof this.role === "string"
-      ? this.role
-      : typeof this.type === "string"
-        ? this.type
-        : undefined;
+  const thisRole = this.role;
+  const thisType = this.type;
+  const role = isString(thisRole) ? thisRole : isString(thisType) ? thisType : undefined;
   if (/^content$/i.test(key) && role && TRANSCRIPT_ROLE_PATTERN.test(role)) {
     return REDACTED_TRANSCRIPT;
   }
   if (/^content$/i.test(key) && role && TOOL_ROLE_PATTERN.test(role)) {
     return REDACTED_TOOL_OUTPUT;
   }
-  return typeof value === "string" ? redactPrivateDiagnosticText(value) : value;
+  return isString(value) ? redactPrivateDiagnosticText(value) : value;
 }
 
 function createRecoverySecretRedactor(
@@ -352,8 +380,10 @@ export class RecoveryStateTracker {
         status: "HEALTHY",
         restartCount: 0,
         crashTimestamps: [],
-        ...(current.lastFailure ? { lastFailure: { ...current.lastFailure } } : {}),
       };
+      if (current.lastFailure) {
+        state.lastFailure = { ...current.lastFailure };
+      }
       this.state = state;
       await this.persistState(state);
       return cloneRecoveryState(state);
@@ -377,51 +407,58 @@ export class RecoveryStateTracker {
       const category = isFailureCategory(input.category)
         ? input.category
         : categorizeRecoveryFailure(input.error);
-      const exitCode =
-        typeof input.exitCode === "number" && Number.isSafeInteger(input.exitCode)
-          ? input.exitCode
-          : undefined;
+      const exitCode = Number.isSafeInteger(input.exitCode) ? Number(input.exitCode) : undefined;
       const lastFailure: RecoveryFailureDiagnostic = {
         timestamp: now,
         category,
         remediation: RECOVERY_REMEDIATIONS[category],
-        ...(exitCode === undefined ? {} : { exitCode }),
       };
+      if (exitCode !== undefined) {
+        lastFailure.exitCode = exitCode;
+      }
       const nextState: RecoveryState = {
         version: RECOVERY_STATE_VERSION,
         status: shouldTrip ? "TRIPPED" : "DEGRADED",
         restartCount,
         crashTimestamps,
-        ...(shouldTrip ? { trippedAt: current.trippedAt ?? now } : {}),
         lastFailure,
       };
+      if (shouldTrip) {
+        nextState.trippedAt = current.trippedAt ?? now;
+      }
       const delayMs = shouldRestart
         ? calculateRestartDelayMs(restartCount, this.random)
         : undefined;
 
       this.state = nextState;
       await this.persistState(nextState);
-      await this.appendForensicCrash({
+      const forensicRecord: ForensicCrashRecord = {
         ...lastFailure,
         event: "runtime_crash",
         status: nextState.status,
         crashCount,
         restartScheduled: shouldRestart,
-        ...(delayMs === undefined ? {} : { delayMs }),
         environmentSignature: {
           platform: process.platform,
           architecture: process.arch,
           nodeVersion: process.version,
         },
         detail: sanitizeCrashDiagnostic(input.error, this.redactor),
-      });
+      };
+      if (delayMs !== undefined) {
+        forensicRecord.delayMs = delayMs;
+      }
+      await this.appendForensicCrash(forensicRecord);
 
-      return {
+      const decision: RestartDecision = {
         shouldRestart,
-        ...(delayMs === undefined ? {} : { delayMs }),
         crashCount,
         state: cloneRecoveryState(nextState),
       };
+      if (delayMs !== undefined) {
+        decision.delayMs = delayMs;
+      }
+      return decision;
     });
   }
 
@@ -490,7 +527,7 @@ export class RecoveryStateTracker {
       });
       await rename(temporaryPath, this.statePath);
     } finally {
-      await unlink(temporaryPath).catch((error: unknown) => {
+      await unlink(temporaryPath).catch((error: Error | { code?: string }) => {
         if (!hasErrorCode(error, "ENOENT")) {
           throw error;
         }
@@ -520,7 +557,7 @@ export class RecoveryStateTracker {
   private async rotateForensicLog(): Promise<void> {
     const backupPath = `${this.crashLogPath}${CRASH_RECOVERY_LOG_BACKUP_SUFFIX}`;
     if ((await getRegularFileSize(backupPath)) !== undefined) {
-      await unlink(backupPath).catch((error: unknown) => {
+      await unlink(backupPath).catch((error: Error | { code?: string }) => {
         if (!hasErrorCode(error, "ENOENT")) {
           throw error;
         }
@@ -601,10 +638,12 @@ function createFailClosedState(now: number): RecoveryState {
   };
 }
 
-function refreshRollingWindow(
-  state: RecoveryState,
-  now: number,
-): { state: RecoveryState; changed: boolean } {
+interface RollingWindowRefreshResult {
+  state: RecoveryState;
+  changed: boolean;
+}
+
+function refreshRollingWindow(state: RecoveryState, now: number): RollingWindowRefreshResult {
   const cutoff = now - CRASH_WINDOW_MS;
   const crashTimestamps = state.crashTimestamps.filter(
     (timestamp) => timestamp > cutoff && timestamp <= now,
@@ -655,52 +694,46 @@ function parsePersistedState(raw: string, now: number): RecoveryState | null {
   const exceedsCrashLimit = crashTimestamps.length > MAX_CRASHES_IN_WINDOW;
   const status: RecoveryStatus =
     persisted.status === "TRIPPED" || exceedsCrashLimit ? "TRIPPED" : persisted.status;
-  const lastFailure: RecoveryFailureDiagnostic | undefined = persisted.lastFailure
-    ? {
-        timestamp: persisted.lastFailure.timestamp,
-        category: persisted.lastFailure.category,
-        remediation: RECOVERY_REMEDIATIONS[persisted.lastFailure.category],
-        ...(persisted.lastFailure.exitCode === undefined
-          ? {}
-          : { exitCode: persisted.lastFailure.exitCode }),
-      }
-    : undefined;
-  const parsed: RecoveryState = {
-    version: RECOVERY_STATE_VERSION,
+  let lastFailure: RecoveryFailureDiagnostic | undefined;
+  if (persisted.lastFailure) {
+    lastFailure = {
+      timestamp: persisted.lastFailure.timestamp,
+      category: persisted.lastFailure.category,
+      remediation: RECOVERY_REMEDIATIONS[persisted.lastFailure.category],
+    };
+    if (persisted.lastFailure.exitCode !== undefined) {
+      lastFailure.exitCode = persisted.lastFailure.exitCode;
+    }
+  }
+
+  const parsedState: RecoveryState = {
+    version: persisted.version,
     status,
-    restartCount:
-      status === "TRIPPED"
-        ? Math.max(restartCount, Math.min(crashTimestamps.length, MAX_CRASHES_IN_WINDOW))
-        : Math.min(crashTimestamps.length, MAX_CRASHES_IN_WINDOW),
+    restartCount,
     crashTimestamps,
-    ...(status === "TRIPPED" ? { trippedAt: persisted.trippedAt ?? now } : {}),
-    ...(lastFailure ? { lastFailure } : {}),
   };
-
-  return parsed;
+  if (persisted.trippedAt !== undefined) {
+    parsedState.trippedAt = persisted.trippedAt;
+  }
+  if (lastFailure !== undefined) {
+    parsedState.lastFailure = lastFailure;
+  }
+  return parsedState;
 }
 
-function cloneRecoveryState(state: RecoveryState): RecoveryState {
-  return {
-    ...state,
-    crashTimestamps: [...state.crashTimestamps],
-    ...(state.lastFailure ? { lastFailure: { ...state.lastFailure } } : {}),
-  };
-}
-
-function extractErrorDetail(error: unknown): string {
-  if (error instanceof Error) {
-    return error.stack ?? error.message;
+function extractErrorDetail(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.stack ?? cause.message;
   }
-  if (typeof error === "string") {
-    return error;
+  if (isString(cause)) {
+    return cause;
   }
-  if (error === undefined || error === null) {
+  if (cause === undefined || cause === null) {
     return "";
   }
 
   try {
-    const serialized = JSON.stringify(error);
+    const serialized = JSON.stringify(cause);
     if (serialized !== undefined) {
       return serialized;
     }
@@ -709,16 +742,18 @@ function extractErrorDetail(error: unknown): string {
   }
 
   try {
-    return String(error);
+    return String(cause);
   } catch {
     return "Unserializable runtime failure";
   }
 }
 
-function isFailureCategory(value: unknown): value is RecoveryFailureCategory {
+function isFailureCategory(
+  value: RecoveryFailureCategory | string | undefined | null,
+): value is RecoveryFailureCategory {
   return RecoveryFailureCategorySchema.safeParse(value).success;
 }
 
-function hasErrorCode(error: unknown, code: string): error is { code: string } {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+function hasErrorCode(cause: unknown, code: string): boolean {
+  return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === code;
 }

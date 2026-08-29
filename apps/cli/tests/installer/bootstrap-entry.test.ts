@@ -29,7 +29,13 @@ import {
 import { canonicalJson } from "../../src/installer/channel-verifier.js";
 import { type PlatformInfo, UnsupportedPlatformError } from "../../src/platform/index.js";
 
-function sign(payload: unknown, privateKey: crypto.KeyObject): string {
+interface ReleaseSignatureItem {
+  keyId: string;
+  algorithm: string;
+  publicKeyHex: string;
+  signatureHex: string;
+}
+function sign(payload: Parameters<typeof canonicalJson>[0], privateKey: crypto.KeyObject): string {
   const json = canonicalJson(payload);
   return crypto.sign(null, Buffer.from(json, "utf8"), privateKey).toString("hex");
 }
@@ -54,8 +60,8 @@ function tarGz(files: Record<string, TarGzFixture> = {}): Buffer {
   const tarBuffers: Buffer[] = [];
 
   for (const [name, fixture] of defaultEntries) {
-    const content = typeof fixture === "string" ? fixture : fixture.content;
-    const mode = typeof fixture === "string" ? 0o755 : (fixture.mode ?? 0o755);
+    const content = String(fixture) === fixture ? fixture : fixture.content;
+    const mode = String(fixture) === fixture ? 0o755 : (fixture.mode ?? 0o755);
     const header = Buffer.alloc(512);
     header.write(name, 0, 100, "utf8");
     header.write(mode.toString(8).padStart(7, "0"), 100, 8, "utf8");
@@ -169,6 +175,7 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
   const releaseAssetSha256 = corruptManifestAssetSha256 ?? sha256Hex(releaseBytes);
   const releaseAssetSize = corruptManifestAssetSizeBytes ?? releaseBytes.length;
 
+  const manifestSignatures: ReleaseSignatureItem[] = [];
   const manifestDoc = {
     schemaVersion: "2.0.0",
     metadataVersion: 1,
@@ -210,12 +217,7 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
         sizeBytes: releaseAssetSize,
       },
     },
-    signatures: [] as Array<{
-      keyId: string;
-      algorithm: string;
-      publicKeyHex: string;
-      signatureHex: string;
-    }>,
+    signatures: manifestSignatures,
   };
 
   const manifestPayload = {
@@ -243,6 +245,7 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
   const manifestDigest = sha256Hex(manifestBytes);
 
   const nowIso = new Date().toISOString();
+  const channelSignatures: ReleaseSignatureItem[] = [];
   const channelDoc = {
     schemaVersion: "2.0.0",
     metadataVersion: 1,
@@ -259,12 +262,7 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
         isLatest: true,
       },
     },
-    signatures: [] as Array<{
-      keyId: string;
-      algorithm: string;
-      publicKeyHex: string;
-      signatureHex: string;
-    }>,
+    signatures: channelSignatures,
   };
 
   const channelPayload = {
@@ -464,7 +462,7 @@ describe("bootstrap-entry", () => {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
-      resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+      resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
     });
     const port = await listenPromise;
 
@@ -567,7 +565,7 @@ describe("bootstrap-entry", () => {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
-      resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+      resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
     });
     const port = await listenPromise;
 
@@ -679,7 +677,7 @@ describe("bootstrap-entry", () => {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
-      resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+      resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
     });
     const port = await listenPromise;
 
@@ -820,7 +818,7 @@ describe("bootstrap-entry", () => {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
-      resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+      resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
     });
     const port = await listenPromise;
 
@@ -992,7 +990,7 @@ describe("bootstrap-entry", () => {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
-      resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+      resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
     });
     const port = await listenPromise;
     const originalUmask = process.platform === "win32" ? undefined : process.umask();
@@ -1403,7 +1401,7 @@ describe("bootstrap-entry", () => {
       await new Promise<void>((resolve) => {
         server.listen(0, "127.0.0.1", () => {
           const addr = server.address();
-          serverPort = typeof addr === "object" && addr ? addr.port : 0;
+          serverPort = addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0;
           resolve();
         });
       });
@@ -1505,7 +1503,7 @@ describe("bootstrap-entry", () => {
       await new Promise<void>((resolve) => {
         server.listen(0, "127.0.0.1", () => {
           const addr = server.address();
-          serverPort = typeof addr === "object" && addr ? addr.port : 0;
+          serverPort = addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0;
           resolve();
         });
       });
@@ -1596,7 +1594,7 @@ describe("bootstrap-entry", () => {
       await new Promise<void>((resolve) => {
         server.listen(0, "127.0.0.1", () => {
           const addr = server.address();
-          serverPort = typeof addr === "object" && addr ? addr.port : 0;
+          serverPort = addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0;
           resolve();
         });
       });
@@ -1939,7 +1937,7 @@ describe("bootstrap-entry", () => {
       });
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
-        resolveListen(typeof addr === "object" && addr ? addr.port : 0);
+        resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
       });
       const serverPort = await listenPromise;
 

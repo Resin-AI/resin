@@ -17,6 +17,7 @@ import {
   CloudObservationClient,
   CloudRuntimeModule,
   type DaemonConfig,
+  DaemonConfigSchema,
   type DaemonPaths,
   type Logger,
   type ModuleContext,
@@ -25,12 +26,25 @@ import {
   type TrajectoryAttributionContextInput,
   TrajectoryCaptureCoordinator,
   type TrajectoryObservation,
+  resolvePaths,
 } from "../src/index.js";
 import { SourceCursorManager } from "../src/tailing/cursor-manager.js";
 import {
   TrajectoryCaptureRuntimeModule,
   resolveSessionAttribution,
 } from "../src/trajectory-capture-module.js";
+
+function mockCloudObservationClient(
+  obj: Partial<CloudObservationClient> & {
+    sendTrajectoryObservationBatch?: unknown;
+    submitTrajectoryObservation?: unknown;
+    sendObservationBatch?: unknown;
+  },
+): CloudObservationClient {
+  // SAFETY: Test mock inherits CloudObservationClient prototype and assigns test doubles.
+  const client = Object.create(CloudObservationClient.prototype) as CloudObservationClient;
+  return Object.assign(client, obj);
+}
 
 function createMockLogger(): Logger {
   return {
@@ -41,12 +55,25 @@ function createMockLogger(): Logger {
   };
 }
 
-function createMockModuleContext(modules: Record<string, unknown> = {}): ModuleContext {
+function createMockModuleContext(
+  modules: Record<
+    string,
+    | DaemonModule
+    | { readonly id?: string; readonly getObservationClient?: () => CloudObservationClient }
+  > = {},
+): ModuleContext {
+  const config = DaemonConfigSchema.parse({});
+  const paths = resolvePaths({ home: os.tmpdir() });
   return {
-    config: {} as DaemonConfig,
-    paths: {} as DaemonPaths,
+    config,
+    paths,
     logger: createMockLogger(),
-    getModule: <T>(id: string) => modules[id] as T | undefined,
+    getModule: <T>(id: string): T | undefined => {
+      const mod = modules[id];
+      if (mod === undefined) return undefined;
+      // SAFETY: Test module registry returns registered mock module instance.
+      return mod as T;
+    },
   };
 }
 
@@ -416,11 +443,11 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         rejectedCount: 0,
         errors: [],
       });
-      mockClient = {
+      mockClient = mockCloudObservationClient({
         sendTrajectoryObservationBatch: mockSubmit,
         submitTrajectoryObservation: mockSubmit,
         sendObservationBatch: mockSendObservationBatch,
-      } as unknown as CloudObservationClient;
+      });
     });
 
     it("processes and submits observation batch for ordinary sessions without attribution metadata", async () => {
@@ -574,6 +601,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       expect(ack).toHaveBeenCalled();
       expect(mockSubmit).toHaveBeenCalledTimes(1);
 
+      // SAFETY: mockSubmit spy receives ObservationBatchRequest containing observations array.
       const submittedBatch = mockSubmit.mock.calls[0][0] as {
         observations: TrajectoryObservation[];
       };
@@ -623,7 +651,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         });
 
         const pass1ReceivedObservations: unknown[] = [];
-        const mockClient1 = {
+        const mockClient1 = mockCloudObservationClient({
           sendTrajectoryObservationBatch: vi.fn().mockResolvedValue({
             acceptedCount: 0,
             rejectedCount: 0,
@@ -643,7 +671,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
                 errors: [],
               };
             }),
-        } as unknown as CloudObservationClient;
+        });
 
         const module1 = new TrajectoryCaptureRuntimeModule({
           cursorManager: cursorManager1,
@@ -691,7 +719,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         });
 
         const pass2ReceivedObservations: unknown[] = [];
-        const mockClient2 = {
+        const mockClient2 = mockCloudObservationClient({
           sendTrajectoryObservationBatch: vi.fn().mockResolvedValue({
             acceptedCount: 0,
             rejectedCount: 0,
@@ -711,7 +739,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
                 errors: [],
               };
             }),
-        } as unknown as CloudObservationClient;
+        });
 
         const module2 = new TrajectoryCaptureRuntimeModule({
           cursorManager: cursorManager2,

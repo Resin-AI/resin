@@ -79,7 +79,7 @@ export interface ListDirectoryParams {
  * regardless of workspace placement.
  */
 export function isCredentialOrSensitivePath(targetPath: string, workspaceRoot?: string): boolean {
-  if (!targetPath || typeof targetPath !== "string") {
+  if (!targetPath || String(targetPath) !== targetPath) {
     return false;
   }
 
@@ -173,7 +173,7 @@ export class FilesystemBroker extends BaseCapabilityBroker {
     context: BrokerContext,
     fsCap: FsCapability,
   ): string {
-    if (!rawPath || typeof rawPath !== "string") {
+    if (!rawPath || String(rawPath) !== rawPath) {
       throw new BrokerSecurityError("INVALID_PATH", "Path must be a non-empty string");
     }
 
@@ -430,7 +430,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "stat",
         context,
@@ -527,7 +530,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "readFile",
         context,
@@ -558,7 +564,7 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const targetPath = this.resolveAndAuthorizePath(params.path, "write", context, fsCap);
 
       const buffer =
-        typeof params.content === "string"
+        String(params.content) === params.content
           ? params.encoding === "base64"
             ? Buffer.from(params.content, "base64")
             : Buffer.from(params.content, "utf-8")
@@ -610,7 +616,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "writeFile",
         context,
@@ -641,7 +650,7 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const targetPath = this.resolveAndAuthorizePath(params.path, "write", context, fsCap);
 
       const buffer =
-        typeof params.content === "string"
+        String(params.content) === params.content
           ? params.encoding === "base64"
             ? Buffer.from(params.content, "base64")
             : Buffer.from(params.content, "utf-8")
@@ -679,7 +688,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "appendFile",
         context,
@@ -731,7 +743,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "rename",
         context,
@@ -782,7 +797,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "delete",
         context,
@@ -833,7 +851,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "createDirectory",
         context,
@@ -854,7 +875,7 @@ export class FilesystemBroker extends BaseCapabilityBroker {
   async listDirectory(params: ListDirectoryParams, context: BrokerContext): Promise<string[]> {
     const startTime = Date.now();
     const grant = this.validateGrant(context);
-    const fsCap = grant.capabilities.fs ?? {};
+    const fsCap: FsCapability = grant.capabilities.fs ?? {};
     const dirPath = params.path ?? ".";
 
     try {
@@ -879,7 +900,8 @@ export class FilesystemBroker extends BaseCapabilityBroker {
           const entryRel = relativePrefix ? `${relativePrefix}/${dirent.name}` : dirent.name;
           const fullEntryPath = normalizeSlashes(path.join(currentDir, dirent.name));
 
-          const isDenied = (fsCap.denyPaths ?? []).some(
+          const denyPaths: readonly string[] = fsCap.denyPaths ?? [];
+          const isDenied = denyPaths.some(
             (p) =>
               matchesPathPattern(fullEntryPath, p, workspaceRoot) ||
               matchesPathPattern(entryRel, p, workspaceRoot),
@@ -887,7 +909,8 @@ export class FilesystemBroker extends BaseCapabilityBroker {
           const isSensitive =
             isCredentialOrSensitivePath(fullEntryPath, workspaceRoot) ||
             isCredentialOrSensitivePath(entryRel, workspaceRoot);
-          const isExplicitAllowed = (fsCap.readPaths ?? []).some((p) =>
+          const readPaths: readonly string[] = fsCap.readPaths ?? [];
+          const isExplicitAllowed = readPaths.some((p) =>
             isExplicitNonWildcardMatch(p, fullEntryPath, workspaceRoot),
           );
 
@@ -920,7 +943,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const err =
         error instanceof BrokerSecurityError
           ? error
-          : new BrokerSecurityError("OPERATION_NOT_PERMITTED", (error as Error).message);
+          : new BrokerSecurityError(
+              "OPERATION_NOT_PERMITTED",
+              error instanceof Error ? error.message : String(error),
+            );
       this.recordAudit(
         "listDirectory",
         context,

@@ -179,6 +179,7 @@ describe("Snapshot Ingestion & Quarantine", () => {
       workspaceId: "ws-1",
       deviceId: "dev-1",
       baseUrl: "https://cloud.mock",
+      // SAFETY: Test fixture provides mock fetchFn matching fetch signature.
       fetchFn: customFetch as typeof fetch,
     });
     const registry = new ToolRegistry();

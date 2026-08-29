@@ -140,10 +140,20 @@ export function resolveClaudeExecutableCandidates(
 }
 
 /**
+ * Options for probing Claude Code installation.
+ */
+export interface ClaudeProbeInstallationOptions extends ProbeInstallationOptions {
+  customExecutablePath?: string;
+  customConfigPath?: string;
+  configPath?: string;
+  checkPermissions?: boolean;
+}
+
+/**
  * Probes the local environment for an active Claude Code installation.
  */
 export async function probeClaudeInstallation(
-  options?: ProbeInstallationOptions,
+  options?: ClaudeProbeInstallationOptions,
   fsBridge: ConfigFsBridge = defaultFsBridge,
   execFn?: ExecFunction,
 ): Promise<HarnessInstallation> {
@@ -152,7 +162,7 @@ export async function probeClaudeInstallation(
   const detectedAt = nowIso();
 
   // 1. Resolve Executable Path
-  let executablePath = options?.customExecutablePath;
+  let executablePath = options?.customExecutablePath ?? options?.executablePath;
   let rawVersionString: string | null = null;
   let status: InstallationStatus = "unknown";
   let isInstalled = false;
@@ -186,7 +196,7 @@ export async function probeClaudeInstallation(
   }
 
   // 2. Resolve Config & Home Paths
-  let configPath = options?.customConfigPath;
+  let configPath = options?.customConfigPath ?? options?.configPath;
   let homePath: string | undefined;
 
   const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir);
@@ -333,11 +343,11 @@ export async function detectClaudeWorkspaces(
 
   const homeCandidates = resolveClaudeHomeCandidates(detectPlatform(), homeDir);
   const projectsDirs: string[] = [];
-  const isInMemoryBridge =
-    "dump" in fsBridge && typeof (fsBridge as { dump: unknown }).dump === "function";
-  const dump = isInMemoryBridge
-    ? (fsBridge as { dump: () => Record<string, string> }).dump()
-    : null;
+  const dump: Record<string, string> | null =
+    "dump" in fsBridge && fsBridge.dump instanceof Function
+      ? // SAFETY: In-memory test filesystem bridges provide a dump method returning a path-to-content map.
+        (fsBridge.dump as () => Record<string, string>)()
+      : null;
 
   for (const home of homeCandidates) {
     const projectsDir = path.join(home, "projects");

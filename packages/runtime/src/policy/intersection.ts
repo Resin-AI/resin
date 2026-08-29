@@ -1,4 +1,5 @@
 import type {
+  CanonicalJsonValue,
   CapabilityEnvelope,
   CapabilityLimits,
   CapabilityManifest,
@@ -58,7 +59,7 @@ export interface PolicyViolation {
   message: string;
   requestedValue?: unknown;
   allowedValue?: unknown;
-  details?: Record<string, unknown>;
+  details?: Record<string, CanonicalJsonValue>;
 }
 
 export interface IntersectionOptions {

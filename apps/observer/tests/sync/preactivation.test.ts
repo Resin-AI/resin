@@ -534,12 +534,18 @@ describe("LocalPreactivationChecker", () => {
 
   describe("Runtime Engine & Non-Executing Inspection", () => {
     it("rejects unsupported runtime engines", async () => {
+      const baseRuntime: ToolManifest["runtime"] = {
+        runtime: "shell",
+        minRuntimeVersion: "3.0.0",
+        memoryLimitMb: 128,
+        timeoutMs: 30000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      };
       const manifest = createSampleToolManifest("unknown-engine-tool", "1.0.0", {
-        runtime: {
-          runtime: "shell",
+        runtime: Object.assign(baseRuntime, {
           engine: "ruby_mri_3",
-          minRuntimeVersion: "3.0.0",
-        } as unknown as ToolManifest["runtime"],
+        }),
       });
 
       const result = await checker.checkPreactivation({
@@ -1142,8 +1148,10 @@ describe("LocalPreactivationChecker", () => {
       expect(result.eligible).toBe(false);
       expect(result.outcome).toBe("blocked_by_capability");
       // Explicit verification: no proposal or pending approval state is created
-      expect((result as Record<string, unknown>).approvalRequired).toBeUndefined();
-      expect((result as Record<string, unknown>).pendingApproval).toBeUndefined();
+      // SAFETY: Checks absence of deprecated preactivation fields.
+      const rawResult = result as { approvalRequired?: unknown; pendingApproval?: unknown };
+      expect(rawResult.approvalRequired).toBeUndefined();
+      expect(rawResult.pendingApproval).toBeUndefined();
     });
 
     it("evaluates multiple tools independently so a failure on one does not block unrelated tools", async () => {
@@ -1211,14 +1219,15 @@ describe("LocalPreactivationChecker", () => {
     const checker = new LocalPreactivationChecker();
 
     it("rejects unknown capability keys in manifest capabilities", async () => {
+      const baseFs: ToolManifest["capabilities"]["fs"] = {
+        readPaths: ["src/**"],
+      };
+      const baseCaps: ToolManifest["capabilities"] = {
+        gpu: { requiredVram: 8192 },
+        fs: Object.assign(baseFs ?? {}, { dangerousKey: true }),
+      };
       const manifest = createSampleToolManifest("tool-unknown-caps", "1.0.0", {
-        capabilities: {
-          gpu: { requiredVram: 8192 },
-          fs: {
-            readPaths: ["src/**"],
-            dangerousKey: true,
-          },
-        } as unknown as ToolManifest["capabilities"],
+        capabilities: baseCaps,
       });
       const envelope = createSampleCapabilityEnvelope("ws-1");
 
@@ -1366,7 +1375,7 @@ describe("LocalPreactivationChecker", () => {
         workspaceId: "ws-1",
         certificate,
         targetDigest: "00".repeat(32),
-        ...({ accountId: "00000000-0000-0000-0000-000000000099" } as Record<string, unknown>),
+        accountId: "00000000-0000-0000-0000-000000000099",
       });
 
       expect(result.eligible).toBe(false);

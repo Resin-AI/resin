@@ -1,7 +1,12 @@
 import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
-import { type NetCapability, type SecretReference, isSecretReference } from "@resin/contracts";
+import {
+  type NetCapability,
+  type SecretReference,
+  SecretReferenceSchema,
+  isSecretReference,
+} from "@resin/contracts";
 import {
   canonicalizeHost,
   isPrivateOrReservedIp,
@@ -110,7 +115,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
     // 1. Protocol check
     const protocol = parsed.protocol.replace(":", "").toLowerCase();
     const allowedProtocols = netCap.allowedProtocols ?? ["https"];
-    if (!allowedProtocols.includes(protocol as "http" | "https" | "ws" | "wss")) {
+    if (!allowedProtocols.some((p) => p === protocol)) {
       throw new BrokerSecurityError(
         "DISALLOWED_PROTOCOL",
         `Protocol '${protocol}' is not permitted by capability policy (allowed: ${allowedProtocols.join(", ")})`,
@@ -215,7 +220,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
         // If hostname fails to resolve and is not an IP, reject as DNS failure
         throw new BrokerSecurityError(
           "DNS_RESOLUTION_FAILED",
-          `Failed to resolve DNS for host '${rawHostname}': ${(dnsErr as Error).message}`,
+          `Failed to resolve DNS for host '${rawHostname}': ${dnsErr instanceof Error ? dnsErr.message : String(dnsErr)}`,
           { host: rawHostname },
         );
       }
@@ -243,7 +248,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
       limits?.maxExecutionTimeMs ?? 30000,
     );
 
-    const secretBroker = this.secretBroker ?? (context.secretBroker as SecretBroker | undefined);
+    const secretBroker = this.secretBroker ?? context.secretBroker;
     const redactor = secretBroker?.getRedactor();
 
     let currentUrl = params.url;
@@ -253,19 +258,32 @@ export class NetworkBroker extends BaseCapabilityBroker {
       try {
         currentUrl = await secretBroker.mediateUrl(currentUrl, context, params.secretReferences);
       } catch (err) {
-        const errMsg = redactor ? redactor.redact((err as Error).message) : (err as Error).message;
+        const errMsg = redactor
+          ? redactor.redact(err instanceof Error ? err.message : String(err))
+          : err instanceof Error
+            ? err.message
+            : String(err);
         throw new BrokerSecurityError("MEDIATION_FAILED", `URL secret mediation failed: ${errMsg}`);
       }
     }
 
     // 2. Host-side header and auth mediation
     let outgoingHeaders: Record<string, string> = {};
-    const rawHeaders: Record<string, string | SecretReference> = { ...(params.headers ?? {}) };
+    const rawHeaders = { ...(params.headers ?? {}) } satisfies Record<
+      string,
+      string | SecretReference
+    >;
 
     if (params.auth) {
-      if (isSecretReference(params.auth) || typeof params.auth === "string") {
-        rawHeaders.Authorization = params.auth;
-      } else if (typeof params.auth === "object" && "bearer" in params.auth) {
+      const parsedRef = SecretReferenceSchema.safeParse(params.auth);
+      if (parsedRef.success) {
+        rawHeaders.Authorization = parsedRef.data;
+      } else if (
+        params.auth !== null &&
+        params.auth !== undefined &&
+        !Array.isArray(params.auth) &&
+        "bearer" in params.auth
+      ) {
         rawHeaders.Authorization = params.auth.bearer;
       }
     }
@@ -274,7 +292,11 @@ export class NetworkBroker extends BaseCapabilityBroker {
       try {
         outgoingHeaders = await secretBroker.mediateHeaders(rawHeaders, context);
       } catch (err) {
-        const errMsg = redactor ? redactor.redact((err as Error).message) : (err as Error).message;
+        const errMsg = redactor
+          ? redactor.redact(err instanceof Error ? err.message : String(err))
+          : err instanceof Error
+            ? err.message
+            : String(err);
         throw new BrokerSecurityError(
           "MEDIATION_FAILED",
           `Header secret mediation failed: ${errMsg}`,
@@ -282,7 +304,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
       }
     } else {
       for (const [k, v] of Object.entries(rawHeaders)) {
-        if (typeof v === "string") {
+        if (String(v) === v) {
           outgoingHeaders[k] = v;
         }
       }
@@ -299,7 +321,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
           url: parsedUrl,
           method,
           headers: outgoingHeaders,
-          body: typeof params.body === "string" ? params.body : undefined,
+          body: String(params.body) === params.body ? params.body : undefined,
           timeoutMs,
           maxResponseBytes,
         });
@@ -358,7 +380,7 @@ export class NetworkBroker extends BaseCapabilityBroker {
       } catch (err) {
         const isSecErr = err instanceof BrokerSecurityError;
         const errCode = isSecErr ? err.code : "NETWORK_ERROR";
-        const rawErrMsg = (err as Error).message;
+        const rawErrMsg = err instanceof Error ? err.message : String(err);
         const errMsg = redactor ? redactor.redact(rawErrMsg) : rawErrMsg;
         this.recordAudit(
           "request",

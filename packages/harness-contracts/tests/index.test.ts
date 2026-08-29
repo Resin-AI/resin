@@ -71,7 +71,7 @@ describe("harness-contracts root exports", () => {
   });
 
   it("does not export test fakes from production root", () => {
-    expect((HarnessContracts as Record<string, unknown>).FakeHarnessAdapter).toBeUndefined();
-    expect((HarnessContracts as Record<string, unknown>).FakeSessionEventSource).toBeUndefined();
+    expect("FakeHarnessAdapter" in HarnessContracts).toBe(false);
+    expect("FakeSessionEventSource" in HarnessContracts).toBe(false);
   });
 });

@@ -1,3 +1,7 @@
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
+
 import crypto from "node:crypto";
 import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
@@ -37,7 +41,14 @@ import {
   type VerificationReport,
   runVerificationSuite,
 } from "../service/verification.js";
-import { type UpdateChannel, type UpdatePolicy, mergeUpdatePolicy } from "./policy.js";
+import {
+  type PolicyValue,
+  type UpdateChannel,
+  type UpdatePolicy,
+  type UpdatePolicyPatch,
+  isUpdateChannel,
+  mergeUpdatePolicy,
+} from "./policy.js";
 import {
   type AcquireUpdateLockOptions,
   type UpdateLock,
@@ -179,7 +190,7 @@ export interface UpdateEngineOptions {
   readonly fsBridge?: ConfigFsBridge;
   readonly customFetch?: typeof fetch;
   readonly platformInfo?: PlatformInfo;
-  readonly policy?: unknown;
+  readonly policy?: PolicyValue | undefined;
   readonly channelUrl?: string;
   readonly env?: Record<string, string | undefined>;
   readonly currentVersionFallback?: string;
@@ -211,6 +222,15 @@ interface VersionMetadataState {
   readonly raw: string;
   readonly version: string;
   readonly previousVersion?: string;
+}
+
+interface VersionMetadataPayload {
+  version: string;
+  channel: UpdateChannel;
+  previousVersion?: string;
+  rolledBackAt?: string;
+  upgradedAt?: string;
+  provenance?: ResolvedProductionRelease["provenance"];
 }
 
 interface BackupState {
@@ -334,23 +354,21 @@ const UpdateRollbackSnapshotSchema = z
     reason: SnapshotTextSchema,
   })
   .strict();
-const UpdateStatusSnapshotSchema = z
-  .object({
-    schemaVersion: z.literal(UPDATE_STATUS_SNAPSHOT_VERSION),
-    channel: UpdateChannelSchema,
-    currentVersion: SnapshotTextSchema,
-    targetVersion: SnapshotTextSchema.nullable(),
-    pendingVersion: SnapshotTextSchema.nullable(),
-    lastCheckAt: SnapshotTextSchema.nullable(),
-    lastResult: UpdateRunStatusSchema.nullable(),
-    lastError: SnapshotTextSchema.nullable(),
-    lastRollback: UpdateRollbackSnapshotSchema.nullable(),
-    quarantine: z.array(UpdateQuarantineEntrySchema).max(64),
-  })
-  .strict();
+const UpdateStatusSnapshotSchema = z.object({
+  schemaVersion: z.literal(UPDATE_STATUS_SNAPSHOT_VERSION),
+  channel: UpdateChannelSchema,
+  currentVersion: SnapshotTextSchema,
+  targetVersion: SnapshotTextSchema.nullable(),
+  pendingVersion: SnapshotTextSchema.nullable(),
+  lastCheckAt: SnapshotTextSchema.nullable(),
+  lastResult: UpdateRunStatusSchema.nullable(),
+  lastError: SnapshotTextSchema.nullable(),
+  lastRollback: UpdateRollbackSnapshotSchema.nullable(),
+  quarantine: z.array(UpdateQuarantineEntrySchema).max(64),
+});
 const UpdateConfigEnvelopeSchema = z
   .object({
-    updates: z.unknown().optional(),
+    updates: z.custom<PolicyValue>().optional(),
   })
   .passthrough();
 const VersionMetadataSchema = z
@@ -403,26 +421,62 @@ const ReinstallRecoveryIntentSchema = z
   })
   .strict();
 
-function safeDiagnostic(error: unknown): string {
-  return sanitizeCrashDiagnostic(error)
+function isNumberValue(cause: unknown): cause is number {
+  return Object.prototype.toString.call(cause) === "[object Number]";
+}
+
+function isPositiveFiniteNumber(cause: unknown): cause is number {
+  return isNumberValue(cause) && Number.isFinite(cause) && cause > 0;
+}
+
+function isJsonObject(value: JsonValue | undefined): value is JsonObject {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+function safeDiagnostic(cause: unknown): string {
+  if (cause instanceof Error) {
+    return sanitizeCrashDiagnostic(cause)
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+      .slice(0, 500);
+  }
+  if (cause === null || cause === undefined) {
+    return "";
+  }
+  if (cause instanceof Object && "message" in cause && String(cause.message) === cause.message) {
+    return sanitizeCrashDiagnostic({ message: cause.message })
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+      .slice(0, 500);
+  }
+  return sanitizeCrashDiagnostic(String(cause))
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim()
     .slice(0, 500);
 }
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  if ("code" in error && error.code === code) return true;
-  if (!("cause" in error) || error.cause === error) return false;
-  return hasErrorCode(error.cause, code);
+function hasErrorCode(cause: unknown, code: string): boolean {
+  if (cause === null || cause === undefined || !(cause instanceof Object)) return false;
+  if ("code" in cause && cause.code === code) return true;
+  if (!("cause" in cause) || cause.cause === cause) return false;
+  return hasErrorCode(cause.cause, code);
 }
 
-function hasErrorName(error: unknown, name: string): boolean {
-  return typeof error === "object" && error !== null && "name" in error && error.name === name;
+function hasErrorName(cause: unknown, name: string): boolean {
+  if (cause === null || cause === undefined || !(cause instanceof Object)) return false;
+  if ("name" in cause && cause.name === name) return true;
+  if (!("cause" in cause) || cause.cause === cause) return false;
+  return hasErrorName(cause.cause, name);
 }
 
-function isOfflineError(error: unknown): boolean {
+function isOfflineError(cause: unknown): boolean {
   if (
     [
       "ENETDOWN",
@@ -432,22 +486,22 @@ function isOfflineError(error: unknown): boolean {
       "EAI_AGAIN",
       "ENOTFOUND",
       "ETIMEDOUT",
-    ].some((code) => hasErrorCode(error, code))
+    ].some((code) => hasErrorCode(cause, code))
   ) {
     return true;
   }
-  const message = safeDiagnostic(error).toLowerCase();
+  const message = safeDiagnostic(cause).toLowerCase();
   return (
     /\b(?:offline|network unavailable|network error|fetch failed|dns|timed? ?out|connection refused)\b/.test(
       message,
-    ) || hasErrorName(error, "AbortError")
+    ) || hasErrorName(cause, "AbortError")
   );
 }
 
-function isVerificationError(error: unknown): boolean {
-  if (error instanceof UpdateVerificationError) return true;
+function isVerificationError(cause: unknown): boolean {
+  if (cause instanceof UpdateVerificationError) return true;
   return /signature|checksum|sha-?256|digest|trust root|untrusted|revoked|authenticated release/i.test(
-    safeDiagnostic(error),
+    safeDiagnostic(cause),
   );
 }
 
@@ -500,7 +554,7 @@ export class UpdateEngine {
   private readonly fsBridge: ConfigFsBridge;
   private readonly customFetch?: typeof fetch;
   private readonly platformInfo: PlatformInfo;
-  private readonly policyLayer: unknown;
+  private readonly policyLayer: PolicyValue | undefined;
   private readonly channelUrl?: string;
   private readonly env: Record<string, string | undefined>;
   private readonly currentVersionFallback: string;
@@ -1441,7 +1495,7 @@ export class UpdateEngine {
         this.throwIfAborted(signal);
         const reported = await this.sessionActivity();
         const activity =
-          typeof reported === "boolean"
+          reported === true || reported === false
             ? {
                 state: reported ? ("active" as const) : ("inactive" as const),
                 activeCount: reported ? 1 : 0,
@@ -1554,7 +1608,7 @@ export class UpdateEngine {
         "inFlightRequests",
       ]) {
         const count = details[key];
-        if (typeof count === "number" && Number.isFinite(count) && count > 0) {
+        if (isPositiveFiniteNumber(count)) {
           activeCount += count;
         }
       }
@@ -1564,7 +1618,7 @@ export class UpdateEngine {
 
   private async resolvePolicy(request: UpdateEngineRunRequest): Promise<UpdatePolicy> {
     const raw = await this.fsBridge.readFile(this.configPath);
-    let configured: unknown;
+    let configured: PolicyValue | undefined;
     if (raw !== null) {
       let parsed: unknown;
       try {
@@ -1580,8 +1634,9 @@ export class UpdateEngine {
       }
       configured = envelope.data.updates;
     }
-    const requestLayer: Record<string, unknown> = {};
-    if (request.channel !== undefined) requestLayer.channel = request.channel;
+    const requestLayer: UpdatePolicyPatch = {};
+    if (request.channel !== undefined && isUpdateChannel(request.channel))
+      requestLayer.channel = request.channel;
     if (request.allowDowngrades !== undefined) {
       requestLayer.allowDowngrades = request.allowDowngrades;
     }
@@ -1654,32 +1709,43 @@ export class UpdateEngine {
       await this.writeStateFile(configBackupPath, sanitizedConfig, PRIVATE_FILE_MODE);
     }
 
-    return {
-      path: backupPath,
-      versionPath,
-      versionBackupPath,
-      versionRaw: metadata.raw,
-      configPath: this.configPath,
-      configHash: configRaw === null ? null : sha256Text(configRaw),
-      ...(sanitizedConfig === null ? {} : { configBackupPath }),
-    };
+    const backupResult: BackupState =
+      sanitizedConfig !== null
+        ? {
+            path: backupPath,
+            versionPath,
+            versionBackupPath,
+            versionRaw: metadata.raw,
+            configPath: this.configPath,
+            configHash: configRaw === null ? null : sha256Text(configRaw),
+            configBackupPath,
+          }
+        : {
+            path: backupPath,
+            versionPath,
+            versionBackupPath,
+            versionRaw: metadata.raw,
+            configPath: this.configPath,
+            configHash: configRaw === null ? null : sha256Text(configRaw),
+          };
+    return backupResult;
   }
-
   private sanitizeConfigBackup(raw: string | null): string | null {
     if (raw === null) return null;
-    let parsed: unknown;
+    let parsed: JsonValue;
     try {
-      parsed = JSON.parse(raw);
+      // SAFETY: JSON.parse returns a valid JsonValue tree.
+      parsed = JSON.parse(raw) as JsonValue;
     } catch {
       return null;
     }
-    if (typeof parsed !== "object" || parsed === null || !("updates" in parsed)) {
+    if (!isJsonObject(parsed) || !("updates" in parsed)) {
       return null;
     }
     const updates = parsed.updates;
-    if (typeof updates !== "object" || updates === null) return null;
+    if (!isJsonObject(updates)) return null;
     const allowed: Record<string, boolean | string> = {};
-    if ("autoUpdate" in updates && typeof updates.autoUpdate === "boolean") {
+    if ("autoUpdate" in updates && (updates.autoUpdate === true || updates.autoUpdate === false)) {
       allowed.autoUpdate = updates.autoUpdate;
     }
     if (
@@ -1688,7 +1754,10 @@ export class UpdateEngine {
     ) {
       allowed.channel = updates.channel;
     }
-    if ("allowDowngrades" in updates && typeof updates.allowDowngrades === "boolean") {
+    if (
+      "allowDowngrades" in updates &&
+      (updates.allowDowngrades === true || updates.allowDowngrades === false)
+    ) {
       allowed.allowDowngrades = updates.allowDowngrades;
     }
     return Object.keys(allowed).length === 0 ? null : JSON.stringify({ updates: allowed }, null, 2);
@@ -1720,20 +1789,24 @@ export class UpdateEngine {
     readonly provenance?: ResolvedProductionRelease["provenance"];
     readonly explicitRollback: boolean;
   }): Promise<void> {
+    const versionPayload: VersionMetadataPayload = {
+      version: options.targetVersion,
+      channel: options.channel,
+    };
+    if (options.previousVersion) {
+      versionPayload.previousVersion = options.previousVersion;
+    }
+    if (options.explicitRollback) {
+      versionPayload.rolledBackAt = this.nowIso();
+    } else {
+      versionPayload.upgradedAt = this.nowIso();
+      if (options.provenance !== undefined) {
+        versionPayload.provenance = options.provenance;
+      }
+    }
     await this.writeStateFile(
       path.join(this.resinHome, "version.json"),
-      JSON.stringify(
-        {
-          version: options.targetVersion,
-          ...(options.previousVersion ? { previousVersion: options.previousVersion } : {}),
-          channel: options.channel,
-          ...(options.explicitRollback
-            ? { rolledBackAt: this.nowIso() }
-            : { upgradedAt: this.nowIso(), provenance: options.provenance }),
-        },
-        null,
-        2,
-      ),
+      JSON.stringify(versionPayload, null, 2),
       PRIVATE_FILE_MODE,
     );
   }
@@ -2435,7 +2508,7 @@ export class UpdateEngine {
   private async recoverCorruptSnapshot(
     currentVersion: string,
     channel: UpdateChannel,
-    parseError: unknown,
+    cause: unknown,
   ): Promise<UpdateStatusSnapshot> {
     const journalPath = resolveUpdateJournalPath(this.resinHome);
     const raw = await this.fsBridge.readFile(journalPath);
@@ -2456,7 +2529,7 @@ export class UpdateEngine {
       ...this.createSnapshot(currentVersion, channel),
       lastCheckAt: this.nowIso(),
       lastResult: "failed",
-      lastError: `Recovered corrupt update journal: ${safeDiagnostic(parseError)}`,
+      lastError: `Recovered corrupt update journal: ${safeDiagnostic(cause)}`,
     };
     await this.persistSnapshot(recovered);
     return recovered;
@@ -2554,14 +2627,14 @@ export class UpdateEngine {
     snapshot: UpdateStatusSnapshot,
     version: string,
     channel: UpdateChannel,
-    error: unknown,
+    cause: unknown,
   ): UpdateStatusSnapshot {
     const normalized = normalizeVersion(version);
     const entry: UpdateQuarantineEntry = {
       version: normalized,
       channel,
       quarantinedAt: this.nowIso(),
-      reason: safeDiagnostic(error),
+      reason: safeDiagnostic(cause),
     };
     const quarantine = snapshot.quarantine
       .filter((item) => normalizeVersion(item.version) !== normalized)
@@ -2574,9 +2647,9 @@ export class UpdateEngine {
     snapshot: UpdateStatusSnapshot,
     version: string,
     channel: UpdateChannel,
-    error: unknown,
+    cause: unknown,
   ): Promise<UpdateStatusSnapshot> {
-    const next = this.withQuarantine(snapshot, version, channel, error);
+    const next = this.withQuarantine(snapshot, version, channel, cause);
     try {
       await this.persistSnapshot(next);
     } catch {}
@@ -2593,10 +2666,10 @@ export class UpdateEngine {
     snapshot: UpdateStatusSnapshot,
     currentVersion: string,
     targetVersion: string | undefined,
-    error: unknown,
+    cause: unknown,
     steps: string[],
   ): Promise<UpdateEngineResult> {
-    const message = safeDiagnostic(error);
+    const message = safeDiagnostic(cause);
     const next = await this.tryRecordSnapshot(snapshot, {
       targetVersion: targetVersion ?? snapshot.targetVersion,
       lastResult: "failed",

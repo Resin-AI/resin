@@ -81,6 +81,7 @@ describe("Platform Detection and Validation", () => {
 
   it("rejects other unsupported platforms (e.g. aix, freebsd)", () => {
     const info = detectPlatform({
+      // SAFETY: Testing unsupported platform rejection with mock platform value.
       platform: "freebsd" as NodeJS.Platform,
       env: {},
     });

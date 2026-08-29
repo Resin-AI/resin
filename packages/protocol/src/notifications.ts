@@ -1,4 +1,4 @@
-import { ISOTimestampSchema } from "@resin/contracts";
+import { ISOTimestampSchema, type V1MetadataPayloadValue } from "@resin/contracts";
 import { z } from "zod";
 
 export const MAX_NOTIFICATION_ID_LENGTH = 96;
@@ -114,25 +114,32 @@ export const ActionableNotificationSchema = z
   });
 
 export type ActionableNotification = z.infer<typeof ActionableNotificationSchema>;
+export type ActionableNotificationInput = z.input<typeof ActionableNotificationSchema>;
 
 export const ActionableNotificationArraySchema = z
   .array(ActionableNotificationSchema)
   .max(MAX_ACTIVE_NOTIFICATIONS);
 
-export function parseActionableNotification(value: unknown): ActionableNotification {
+export function parseActionableNotification(
+  value: ActionableNotificationInput | V1MetadataPayloadValue | null | undefined,
+): ActionableNotification {
   return ActionableNotificationSchema.parse(value);
 }
 
-export function parseActionableNotifications(value: unknown): ActionableNotification[] {
+export function parseActionableNotifications(
+  value: readonly ActionableNotificationInput[] | V1MetadataPayloadValue | null | undefined,
+): ActionableNotification[] {
   return ActionableNotificationArraySchema.parse(value);
 }
 
-export function isActionableNotification(value: unknown): value is ActionableNotification {
+export function isActionableNotification(
+  value: ActionableNotificationInput | V1MetadataPayloadValue | null | undefined,
+): value is ActionableNotification {
   return ActionableNotificationSchema.safeParse(value).success;
 }
 
 export function filterActionableNotifications(
-  values: readonly unknown[],
+  values: readonly (ActionableNotificationInput | V1MetadataPayloadValue | null | undefined)[],
 ): ActionableNotification[] {
   const notifications: ActionableNotification[] = [];
   for (const value of values) {
@@ -142,11 +149,11 @@ export function filterActionableNotifications(
   return notifications;
 }
 
-const SEVERITY_RANK: Record<NotificationSeverity, number> = {
+const SEVERITY_RANK = {
   warning: 0,
   error: 1,
   critical: 2,
-};
+} satisfies Record<NotificationSeverity, number>;
 
 /**
  * Collapses observations by stable id. The strongest observation wins while the
@@ -214,6 +221,7 @@ export const NotificationInboxStateSchema = z
   });
 
 export type NotificationInboxState = z.infer<typeof NotificationInboxStateSchema>;
+export type NotificationInboxStateInput = z.input<typeof NotificationInboxStateSchema>;
 
 export function createEmptyNotificationInboxState(): NotificationInboxState {
   return {
@@ -222,7 +230,9 @@ export function createEmptyNotificationInboxState(): NotificationInboxState {
   };
 }
 
-export function parseNotificationInboxState(value: unknown): NotificationInboxState {
+export function parseNotificationInboxState(
+  value: NotificationInboxStateInput,
+): NotificationInboxState {
   return NotificationInboxStateSchema.parse(value);
 }
 

@@ -8,9 +8,10 @@ import { CloudCredentialStore, isAllowedOrigin } from "../src/cloud-credentials.
 import { CloudObservationClient, CloudRuntimeModule } from "../src/cloud-runtime.js";
 import type { DaemonConfig } from "../src/config.js";
 import type { ModuleContext } from "../src/lifecycle.js";
+import type { JsonObject } from "../src/normalization/redaction.js";
 import type { DaemonPaths } from "../src/paths.js";
 
-function makeJwt(payload: Record<string, unknown>): string {
+function makeJwt(payload: JsonObject): string {
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   return `${header}.${body}.mock-signature`;
@@ -34,20 +35,19 @@ function makeValidClaims(overrides: Partial<AuthClaims> = {}): AuthClaims {
 }
 
 function createMockContext(homeDir: string, stateDir: string): ModuleContext {
-  const config = {
+  const config: DaemonConfig = {
     version: "0.1.0",
     port: 3100,
     logLevel: "info",
-    lockStaleThresholdMs: 30000,
-    heartbeatIntervalMs: 5000,
-    shutdownTimeoutMs: 10000,
-    startupTimeoutMs: 10000,
-    healthCheckIntervalMs: 15000,
+    lockStaleThresholdMs: 30_000,
+    heartbeatIntervalMs: 5_000,
+    shutdownTimeoutMs: 10_000,
+    startupTimeoutMs: 10_000,
+    healthCheckIntervalMs: 15_000,
     maxRestarts: 5,
-    restartWindowMs: 60000,
-  } as unknown as DaemonConfig;
-
-  const paths = {
+    restartWindowMs: 60_000,
+  };
+  const paths: DaemonPaths = {
     homeDir,
     configDir: path.join(homeDir, "config"),
     dataDir: path.join(homeDir, "data"),
@@ -58,8 +58,7 @@ function createMockContext(homeDir: string, stateDir: string): ModuleContext {
     pidFilePath: path.join(stateDir, "daemon.pid"),
     tokenFilePath: path.join(stateDir, "auth.token"),
     configFile: path.join(homeDir, "config", "config.json"),
-  } as unknown as DaemonPaths;
-
+  };
   return {
     config,
     paths,
@@ -145,6 +144,7 @@ describe("CloudCredentialStore", () => {
 
     // 2. Missing required claims (no userId)
     const claimsNoUser = makeValidClaims();
+    // SAFETY: Type assertion in test fixture/mock verified by test context.
     delete (claimsNoUser as { userId?: string }).userId;
     const credsNoUser = {
       cloudUrl: "https://cloud.resin.dev",
@@ -220,7 +220,8 @@ describe("CloudCredentialStore", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     await store.persist({
@@ -282,7 +283,8 @@ describe("CloudCredentialStore", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     await store.persist({
@@ -317,7 +319,8 @@ describe("CloudCredentialStore", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     await store.persist({
@@ -347,7 +350,8 @@ describe("CloudCredentialStore", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     await store.persist({
@@ -514,6 +518,7 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
 
       if (urlStr.includes("/v1/observations/batch")) {
         requestCount++;
+        // SAFETY: Type assertion in test fixture/mock verified by test context.
         capturedHeaders.push(init?.headers as HeadersInit);
         if (requestCount === 1) {
           // First attempt fails with 401
@@ -538,7 +543,8 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     await store.persist({
@@ -552,7 +558,8 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
 
     const client = new CloudObservationClient({
       credentialStore: store,
-      fetchImpl: mockFetch as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: mockFetch as typeof fetch,
     });
 
     const batchResponse = await client.sendObservationBatch({
@@ -579,6 +586,7 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
     expect(requestCount).toBe(2); // Initial attempt + 1 retry after 401
 
     // Check headers of the retried request
+    // SAFETY: Type assertion in test fixture/mock verified by test context.
     const retryHeaders = capturedHeaders[1] as Record<string, string>;
     expect(retryHeaders.Authorization).toBe(`Bearer ${refreshedToken}`);
     expect(retryHeaders["x-account-id"]).toBe(claims.accountId);

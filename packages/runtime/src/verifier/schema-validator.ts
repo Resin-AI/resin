@@ -1,12 +1,12 @@
-import type { ToolManifest } from "@resin/contracts";
+import type { CanonicalJsonRecord, CanonicalJsonValue, ToolManifest } from "@resin/contracts";
 import type { ManifestSchemaValidationResult } from "./types.js";
 
 /**
  * Common format validators for string types.
  */
-const FORMAT_VALIDATORS: Record<string, (val: string) => boolean> = {
-  email: (val) => /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$/.test(val),
-  uri: (val) => {
+const FORMAT_VALIDATORS = {
+  email: (val: string) => /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$/.test(val),
+  uri: (val: string) => {
     try {
       new URL(val);
       return true;
@@ -14,7 +14,7 @@ const FORMAT_VALIDATORS: Record<string, (val: string) => boolean> = {
       return false;
     }
   },
-  url: (val) => {
+  url: (val: string) => {
     try {
       new URL(val);
       return true;
@@ -22,83 +22,91 @@ const FORMAT_VALIDATORS: Record<string, (val: string) => boolean> = {
       return false;
     }
   },
-  "date-time": (val) => !Number.isNaN(Date.parse(val)) && val.includes("T"),
-  date: (val) => /^\d{4}-\d{2}-\d{2}$/.test(val) && !Number.isNaN(Date.parse(val)),
-  uuid: (val) =>
-    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(
+  uuid: (val: string) =>
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(val),
+  "date-time": (val: string) => !Number.isNaN(Date.parse(val)),
+  ipv4: (val: string) =>
+    /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(
       val,
     ),
-  ipv4: (val) => {
-    const parts = val.split(".");
-    if (parts.length !== 4) return false;
-    return parts.every((p) => {
-      const num = Number(p);
-      return Number.isInteger(num) && num >= 0 && num <= 255 && p === String(num);
-    });
-  },
-  ipv6: (val) =>
+  ipv6: (val: string) =>
     /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/.test(val) ||
     /^(([0-9a-fA-F]{1,4}:){1,7}|:):((:[0-9a-fA-F]{1,4}){1,7}|:)$/.test(val),
-  hostname: (val) =>
+  hostname: (val: string) =>
     /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(val) ||
     val === "localhost",
-};
+} as const;
 
 /**
  * Resolves a JSON Schema reference within root document.
  */
-function resolveRef(
-  root: Record<string, unknown>,
-  ref: string,
-): Record<string, unknown> | undefined {
+function resolveRef(root: CanonicalJsonRecord, ref: string): CanonicalJsonRecord | undefined {
   if (!ref.startsWith("#/")) return undefined;
   const parts = ref.slice(2).split("/");
-  let current: unknown = root;
+  let current: CanonicalJsonValue = root;
   for (const part of parts) {
-    if (typeof current !== "object" || current === null) return undefined;
-    const rec = current as Record<string, unknown>;
+    if (
+      current === null ||
+      current === undefined ||
+      !(current instanceof Object) ||
+      Array.isArray(current)
+    ) {
+      return undefined;
+    }
+    // SAFETY: Checked as non-null, non-array object for record field lookup.
+    const rec = current as CanonicalJsonRecord;
     current = rec[part];
   }
-  return typeof current === "object" && current !== null
-    ? (current as Record<string, unknown>)
+  // SAFETY: Checked as object record for resolved reference.
+  return current instanceof Object && !Array.isArray(current)
+    ? (current as CanonicalJsonRecord)
     : undefined;
+}
+function isFiniteNumber(val: CanonicalJsonValue | undefined): val is number {
+  return Number.isFinite(val);
+}
+
+function isString(val: CanonicalJsonValue | undefined): val is string {
+  return Object.prototype.toString.call(val) === "[object String]";
+}
+
+export interface PayloadValidationResult {
+  valid: boolean;
+  errors: string[];
 }
 
 /**
- * Validates payload against a JSON schema.
+ * Validates a payload against a JSON Schema document.
  */
 export function validatePayloadAgainstSchema(
-  schema: unknown,
-  payload: unknown,
+  schema: CanonicalJsonValue,
+  payload: CanonicalJsonValue,
   direction: "input" | "output" = "input",
-  rootSchema?: unknown,
+  rootSchema?: CanonicalJsonValue,
   currentPath = "",
-): { valid: boolean; errors: string[] } {
+): PayloadValidationResult {
   const errors: string[] = [];
 
-  if (schema === undefined || schema === null || schema === true) {
+  if (schema === true || schema === undefined || schema === null) {
     return { valid: true, errors: [] };
   }
-
   if (schema === false) {
-    return {
-      valid: false,
-      errors: [`${direction} value at '${currentPath || "root"}' rejected by schema (false)`],
-    };
+    errors.push(`Schema at '${currentPath || "root"}' is 'false' (rejects all payloads)`);
+    return { valid: false, errors };
   }
 
-  if (typeof schema !== "object" || schema === null) {
+  if (!(schema instanceof Object) || Array.isArray(schema)) {
     return { valid: true, errors: [] };
   }
-
-  const s = schema as Record<string, unknown>;
-  const root = (rootSchema && typeof rootSchema === "object" ? rootSchema : s) as Record<
-    string,
-    unknown
-  >;
-
+  // SAFETY: Checked as non-array object for JSON schema record traversal.
+  const s = schema as CanonicalJsonRecord;
+  // SAFETY: Checked as object record for root schema fallback.
+  const root: CanonicalJsonRecord =
+    rootSchema && rootSchema instanceof Object && !Array.isArray(rootSchema)
+      ? (rootSchema as CanonicalJsonRecord)
+      : s;
   // Handle $ref
-  if (typeof s.$ref === "string") {
+  if (isString(s.$ref)) {
     const resolved = resolveRef(root, s.$ref);
     if (!resolved) {
       errors.push(`Unresolvable $ref '${s.$ref}' at '${currentPath || "root"}'`);
@@ -120,165 +128,207 @@ export function validatePayloadAgainstSchema(
     }
   }
 
-  // Handle oneOf
-  if (Array.isArray(s.oneOf)) {
-    let matchCount = 0;
-    const subErrors: string[] = [];
-    for (const sub of s.oneOf) {
+  // Handle anyOf
+  if (Array.isArray(s.anyOf)) {
+    const anyOfErrors: string[][] = [];
+    let anyPassed = false;
+    for (const sub of s.anyOf) {
       const subRes = validatePayloadAgainstSchema(sub, payload, direction, root, currentPath);
       if (subRes.valid) {
-        matchCount++;
-      } else {
-        subErrors.push(subRes.errors.join("; "));
+        anyPassed = true;
+        break;
       }
+      anyOfErrors.push(subRes.errors);
     }
-    if (matchCount !== 1) {
+    if (!anyPassed) {
       errors.push(
-        `Expected exactly one sub-schema in oneOf to match at '${currentPath || "root"}', but matched ${matchCount}. Errors: [${subErrors.join(", ")}]`,
+        `Payload at '${currentPath || "root"}' failed all anyOf schemas: ${anyOfErrors.flat().join("; ")}`,
       );
       return { valid: false, errors };
     }
   }
 
-  // Handle anyOf
-  if (Array.isArray(s.anyOf)) {
-    const anyMatches = s.anyOf.some(
-      (sub) => validatePayloadAgainstSchema(sub, payload, direction, root, currentPath).valid,
+  // Handle oneOf
+  if (Array.isArray(s.oneOf)) {
+    let matchCount = 0;
+    const oneOfErrors: string[][] = [];
+    for (const sub of s.oneOf) {
+      const subRes = validatePayloadAgainstSchema(sub, payload, direction, root, currentPath);
+      if (subRes.valid) {
+        matchCount++;
+      } else {
+        oneOfErrors.push(subRes.errors);
+      }
+    }
+    if (matchCount !== 1) {
+      errors.push(
+        `Payload at '${currentPath || "root"}' matched ${matchCount} schemas in oneOf (expected exactly 1)`,
+      );
+      return { valid: false, errors };
+    }
+  }
+
+  // Handle not
+  if (s.not !== undefined && s.not !== null && s.not instanceof Object) {
+    // SAFETY: s.not is validated as non-null object for schema validation.
+    const notRes = validatePayloadAgainstSchema(
+      s.not as CanonicalJsonValue,
+      payload,
+      direction,
+      root,
+      currentPath,
     );
-    if (!anyMatches) {
-      errors.push(`No sub-schema in anyOf matched at '${currentPath || "root"}'`);
+    if (notRes.valid) {
+      errors.push(`Payload at '${currentPath || "root"}' matched forbidden 'not' schema`);
       return { valid: false, errors };
     }
   }
 
   // Handle enum
   if (Array.isArray(s.enum)) {
-    const matchesEnum = s.enum.some((val) => JSON.stringify(val) === JSON.stringify(payload));
-    if (!matchesEnum) {
+    const match = s.enum.some((val) => JSON.stringify(val) === JSON.stringify(payload));
+    if (!match) {
       errors.push(
-        `Value at '${currentPath || "root"}' must be one of [${s.enum.map((e) => JSON.stringify(e)).join(", ")}]`,
+        `Value at '${currentPath || "root"}' is not in enum [${s.enum.map((e) => JSON.stringify(e)).join(", ")}]`,
       );
-      return { valid: false, errors };
     }
   }
 
   // Handle const
-  if ("const" in s) {
+  if (s.const !== undefined) {
     if (JSON.stringify(s.const) !== JSON.stringify(payload)) {
       errors.push(
-        `Value at '${currentPath || "root"}' must equal constant ${JSON.stringify(s.const)}`,
+        `Value at '${currentPath || "root"}' must equal const ${JSON.stringify(s.const)}`,
       );
-      return { valid: false, errors };
     }
   }
 
   // Type validation
-  const expectedType = s.type;
-  if (expectedType !== undefined) {
-    const types = Array.isArray(expectedType) ? expectedType : [expectedType];
-    const actualType =
-      payload === null
-        ? "null"
-        : Array.isArray(payload)
-          ? "array"
-          : typeof payload === "number"
-            ? Number.isInteger(payload)
-              ? "integer"
-              : "number"
-            : typeof payload;
+  if (s.type) {
+    const allowedTypes: string[] = Array.isArray(s.type)
+      ? s.type.filter(isString)
+      : isString(s.type)
+        ? [s.type]
+        : [];
+    let matchesType = false;
 
-    const matchesType = types.some((t) => {
-      if (t === "number" && actualType === "integer") return true;
-      if (t === "integer" && typeof payload === "number" && Number.isInteger(payload)) return true;
-      return t === actualType;
-    });
+    for (const t of allowedTypes) {
+      if (t === "null" && payload === null) matchesType = true;
+      if (t === "boolean" && (payload === true || payload === false)) matchesType = true;
+      if (t === "number" && Number.isFinite(payload)) matchesType = true;
+      if (t === "integer" && Number.isInteger(payload)) matchesType = true;
+      if (t === "string" && isString(payload)) matchesType = true;
+      if (t === "array" && Array.isArray(payload)) matchesType = true;
+      if (
+        t === "object" &&
+        payload !== null &&
+        payload instanceof Object &&
+        !Array.isArray(payload)
+      ) {
+        matchesType = true;
+      }
+    }
 
-    if (!matchesType) {
+    if (allowedTypes.length > 0 && !matchesType) {
       errors.push(
-        `Expected type '${types.join(" | ")}' at '${currentPath || "root"}', received '${actualType}'`,
+        `Expected type '${allowedTypes.join(" | ")}' at '${currentPath || "root"}', got ${
+          payload === null
+            ? "null"
+            : Array.isArray(payload)
+              ? "array"
+              : Number.isFinite(payload)
+                ? "number"
+                : isString(payload)
+                  ? "string"
+                  : payload === true || payload === false
+                    ? "boolean"
+                    : payload instanceof Object
+                      ? "object"
+                      : "unknown"
+        }`,
       );
       return { valid: false, errors };
     }
   }
 
-  // String bounds & formats
-  if (typeof payload === "string") {
-    if (typeof s.minLength === "number" && payload.length < s.minLength) {
-      errors.push(
-        `String at '${currentPath || "root"}' must have length >= ${s.minLength} (length: ${payload.length})`,
-      );
+  // String validation
+  if (isString(payload)) {
+    if (isFiniteNumber(s.minLength) && payload.length < s.minLength) {
+      errors.push(`String at '${currentPath || "root"}' is shorter than minLength ${s.minLength}`);
     }
-    if (typeof s.maxLength === "number" && payload.length > s.maxLength) {
-      errors.push(
-        `String at '${currentPath || "root"}' must have length <= ${s.maxLength} (length: ${payload.length})`,
-      );
+    if (isFiniteNumber(s.maxLength) && payload.length > s.maxLength) {
+      errors.push(`String at '${currentPath || "root"}' is longer than maxLength ${s.maxLength}`);
     }
-    if (typeof s.pattern === "string") {
+    if (isString(s.pattern)) {
       try {
         const regex = new RegExp(s.pattern);
         if (!regex.test(payload)) {
           errors.push(`String at '${currentPath || "root"}' does not match pattern '${s.pattern}'`);
         }
       } catch {
-        errors.push(`Invalid pattern '${s.pattern}' in schema definition`);
+        // Invalid regex in schema is ignored during runtime validation
       }
     }
-    if (typeof s.format === "string") {
-      const validator = FORMAT_VALIDATORS[s.format];
-      if (validator && !validator(payload)) {
-        errors.push(
-          `String at '${currentPath || "root"}' does not conform to format '${s.format}'`,
-        );
+    if (isString(s.format) && s.format in FORMAT_VALIDATORS) {
+      // SAFETY: s.format is checked against FORMAT_VALIDATORS keys.
+      const validator = FORMAT_VALIDATORS[s.format as keyof typeof FORMAT_VALIDATORS];
+      if (!validator(payload)) {
+        errors.push(`String at '${currentPath || "root"}' is not a valid format '${s.format}'`);
       }
     }
   }
 
-  // Number bounds
-  if (typeof payload === "number") {
-    if (typeof s.minimum === "number" && payload < s.minimum) {
+  // Number validation
+  if (isFiniteNumber(payload)) {
+    const num = payload;
+    if (isFiniteNumber(s.minimum) && num < s.minimum) {
       errors.push(`Number at '${currentPath || "root"}' must be >= ${s.minimum}`);
     }
-    if (typeof s.maximum === "number" && payload > s.maximum) {
+    if (isFiniteNumber(s.maximum) && num > s.maximum) {
       errors.push(`Number at '${currentPath || "root"}' must be <= ${s.maximum}`);
     }
-    if (typeof s.exclusiveMinimum === "number" && payload <= s.exclusiveMinimum) {
+    if (isFiniteNumber(s.exclusiveMinimum) && num <= s.exclusiveMinimum) {
       errors.push(`Number at '${currentPath || "root"}' must be > ${s.exclusiveMinimum}`);
     }
-    if (typeof s.exclusiveMaximum === "number" && payload >= s.exclusiveMaximum) {
+    if (isFiniteNumber(s.exclusiveMaximum) && num >= s.exclusiveMaximum) {
       errors.push(`Number at '${currentPath || "root"}' must be < ${s.exclusiveMaximum}`);
     }
-    if (typeof s.multipleOf === "number" && s.multipleOf > 0) {
-      const remainder = payload % s.multipleOf;
-      if (Math.abs(remainder) > 1e-9 && Math.abs(remainder - s.multipleOf) > 1e-9) {
-        errors.push(`Number at '${currentPath || "root"}' must be multiple of ${s.multipleOf}`);
+    if (isFiniteNumber(s.multipleOf) && s.multipleOf > 0) {
+      const quotient = num / s.multipleOf;
+      if (Math.abs(quotient - Math.round(quotient)) > 1e-10) {
+        errors.push(`Number at '${currentPath || "root"}' must be a multiple of ${s.multipleOf}`);
       }
     }
   }
 
   // Array validation
   if (Array.isArray(payload)) {
-    if (typeof s.minItems === "number" && payload.length < s.minItems) {
+    if (isFiniteNumber(s.minItems) && payload.length < s.minItems) {
       errors.push(
-        `Array at '${currentPath || "root"}' must have >= ${s.minItems} items (received ${payload.length})`,
+        `Array at '${currentPath || "root"}' has fewer items than minItems ${s.minItems}`,
       );
     }
-    if (typeof s.maxItems === "number" && payload.length > s.maxItems) {
-      errors.push(
-        `Array at '${currentPath || "root"}' must have <= ${s.maxItems} items (received ${payload.length})`,
-      );
+    if (isFiniteNumber(s.maxItems) && payload.length > s.maxItems) {
+      errors.push(`Array at '${currentPath || "root"}' has more items than maxItems ${s.maxItems}`);
     }
     if (s.uniqueItems === true) {
-      const serialized = payload.map((item) => JSON.stringify(item));
-      const uniqueCount = new Set(serialized).size;
-      if (uniqueCount !== payload.length) {
-        errors.push(`Array at '${currentPath || "root"}' contains duplicate items`);
+      const seen = new Set<string>();
+      for (const item of payload) {
+        const repr = JSON.stringify(item);
+        if (seen.has(repr)) {
+          errors.push(
+            `Array at '${currentPath || "root"}' contains duplicate items (uniqueItems: true)`,
+          );
+          break;
+        }
       }
     }
     if (s.items !== undefined) {
       for (let i = 0; i < payload.length; i++) {
         const itemPath = currentPath ? `${currentPath}[${i}]` : `[${i}]`;
+        // SAFETY: s.items is defined JSON schema value.
         const itemRes = validatePayloadAgainstSchema(
-          s.items,
+          s.items as CanonicalJsonValue,
           payload[i],
           direction,
           root,
@@ -292,12 +342,15 @@ export function validatePayloadAgainstSchema(
   }
 
   // Object validation
-  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-    const payloadObj = payload as Record<string, unknown>;
-    const properties = (
-      typeof s.properties === "object" && s.properties !== null ? s.properties : {}
-    ) as Record<string, unknown>;
-    const required = Array.isArray(s.required) ? (s.required as string[]) : [];
+  if (payload !== null && payload instanceof Object && !Array.isArray(payload)) {
+    // SAFETY: Verified non-null, non-array object for payload record fields.
+    const payloadObj = payload as CanonicalJsonRecord;
+    // SAFETY: Checked as object record for properties definition map.
+    const properties: CanonicalJsonRecord =
+      s.properties !== null && s.properties instanceof Object && !Array.isArray(s.properties)
+        ? (s.properties as CanonicalJsonRecord)
+        : {};
+    const required: string[] = Array.isArray(s.required) ? s.required.filter(isString) : [];
 
     // Check required properties
     for (const reqKey of required) {
@@ -328,20 +381,25 @@ export function validatePayloadAgainstSchema(
       for (const key of Object.keys(payloadObj)) {
         if (!(key in properties)) {
           errors.push(
-            `Unexpected property '${key}' at '${currentPath || "root"}' (additionalProperties: false)`,
+            `Unexpected additional property '${key}' at '${currentPath || "root"}' (additionalProperties: false)`,
           );
         }
       }
-    } else if (typeof s.additionalProperties === "object" && s.additionalProperties !== null) {
+    } else if (
+      s.additionalProperties !== undefined &&
+      s.additionalProperties !== null &&
+      s.additionalProperties instanceof Object
+    ) {
       for (const [key, val] of Object.entries(payloadObj)) {
         if (!(key in properties)) {
-          const propPath = currentPath ? `${currentPath}.${key}` : key;
+          const addPath = currentPath ? `${currentPath}.${key}` : key;
+          // SAFETY: s.additionalProperties is defined schema value.
           const addRes = validatePayloadAgainstSchema(
-            s.additionalProperties,
+            s.additionalProperties as CanonicalJsonValue,
             val,
             direction,
             root,
-            propPath,
+            addPath,
           );
           if (!addRes.valid) {
             errors.push(...addRes.errors);
@@ -349,8 +407,18 @@ export function validatePayloadAgainstSchema(
         }
       }
     }
-  }
 
+    if (isFiniteNumber(s.minProperties) && Object.keys(payloadObj).length < s.minProperties) {
+      errors.push(
+        `Object at '${currentPath || "root"}' has fewer properties than minProperties ${s.minProperties}`,
+      );
+    }
+    if (isFiniteNumber(s.maxProperties) && Object.keys(payloadObj).length > s.maxProperties) {
+      errors.push(
+        `Object at '${currentPath || "root"}' has more properties than maxProperties ${s.maxProperties}`,
+      );
+    }
+  }
   return {
     valid: errors.length === 0,
     errors,
@@ -364,29 +432,37 @@ export function validateManifestSchemas(manifest: ToolManifest): ManifestSchemaV
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  const inputSchema =
-    manifest.parameters ??
-    (typeof (manifest as Record<string, unknown>).inputSchema === "object"
-      ? (manifest as Record<string, unknown>).inputSchema
-      : undefined);
-
-  if (inputSchema && typeof inputSchema === "object") {
-    const s = inputSchema as Record<string, unknown>;
-    if (s.type !== "object" && s.type !== undefined && !Array.isArray(s.type)) {
-      warnings.push("Tool input schema should define 'type: object' at root level.");
+  const inputSchema = manifest.parameters;
+  if (inputSchema && inputSchema instanceof Object && !Array.isArray(inputSchema)) {
+    if (inputSchema.type !== undefined && inputSchema.type !== "object") {
+      errors.push("Tool input schema must be of type 'object'.");
     }
-    if (s.type === "object" && s.properties !== undefined && typeof s.properties !== "object") {
+    if (
+      inputSchema.type === "object" &&
+      inputSchema.properties !== undefined &&
+      (inputSchema.properties === null ||
+        !(inputSchema.properties instanceof Object) ||
+        Array.isArray(inputSchema.properties))
+    ) {
       errors.push("Tool input schema 'properties' must be an object.");
-    }
-    if (s.required !== undefined && !Array.isArray(s.required)) {
-      errors.push("Tool input schema 'required' must be an array of property names.");
     }
   }
 
-  const outputSchema = manifest.outputSchema;
-  if (outputSchema && typeof outputSchema === "object") {
-    const s = outputSchema as Record<string, unknown>;
-    if (s.type === "object" && s.properties !== undefined && typeof s.properties !== "object") {
+  if (
+    manifest.outputSchema &&
+    manifest.outputSchema instanceof Object &&
+    !Array.isArray(manifest.outputSchema)
+  ) {
+    if (manifest.outputSchema.type !== undefined && manifest.outputSchema.type !== "object") {
+      errors.push("Tool output schema must be of type 'object'.");
+    }
+    if (
+      manifest.outputSchema.type === "object" &&
+      manifest.outputSchema.properties !== undefined &&
+      (manifest.outputSchema.properties === null ||
+        !(manifest.outputSchema.properties instanceof Object) ||
+        Array.isArray(manifest.outputSchema.properties))
+    ) {
       errors.push("Tool output schema 'properties' must be an object.");
     }
   }

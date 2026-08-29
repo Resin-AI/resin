@@ -35,11 +35,28 @@ export type CanonicalizationErrorCode =
   | "INTERPRETER_ESCAPE_DENIED"
   | "RESPONSE_FILE_DENIED";
 
+export type PolicyCanonicalizationValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly PolicyCanonicalizationValue[]
+  | PolicyCanonicalizationValue[]
+  | { [key: string]: PolicyCanonicalizationValue | undefined };
+
+export interface PolicyCanonicalizationDetails {
+  [key: string]: PolicyCanonicalizationValue | undefined;
+}
+
 export class PolicyCanonicalizationError extends Error {
   readonly code: CanonicalizationErrorCode;
-  readonly details?: Record<string, unknown>;
+  readonly details?: PolicyCanonicalizationDetails;
 
-  constructor(code: CanonicalizationErrorCode, message: string, details?: Record<string, unknown>) {
+  constructor(
+    code: CanonicalizationErrorCode,
+    message: string,
+    details?: PolicyCanonicalizationDetails,
+  ) {
     super(`[${code}] ${message}`);
     this.name = "PolicyCanonicalizationError";
     this.code = code;
@@ -223,7 +240,7 @@ export function isPathInsideRoot(targetPath: string, rootDir: string): boolean {
  * Checks for invalid characters (null bytes, control characters, unprintable chars, reserved DOS names).
  */
 export function validatePathCharacters(rawPath: string): void {
-  if (typeof rawPath !== "string" || rawPath.length === 0) {
+  if (String(rawPath) !== rawPath || rawPath.length === 0) {
     throw new PolicyCanonicalizationError("EMPTY_PATH", "Path must be a non-empty string");
   }
 
@@ -574,7 +591,7 @@ export type AllowedProtocol = (typeof ALLOWED_PROTOCOLS)[number];
  * Canonicalizes and validates a network scheme / protocol.
  */
 export function canonicalizeScheme(rawScheme: string): AllowedProtocol {
-  if (typeof rawScheme !== "string") {
+  if (String(rawScheme) !== rawScheme) {
     throw new PolicyCanonicalizationError("INVALID_SCHEME", "Scheme must be a string");
   }
   const clean = rawScheme
@@ -603,7 +620,7 @@ export function canonicalizePort(
     return 80;
   }
 
-  const num = typeof port === "string" ? Number.parseInt(port, 10) : port;
+  const num = Number(port);
   if (!Number.isInteger(num) || num < 1 || num > 65535) {
     throw new PolicyCanonicalizationError(
       "INVALID_PORT",
@@ -619,7 +636,7 @@ export function canonicalizePort(
  * Trims trailing dots, normalizes to lowercase, rejects invalid chars.
  */
 export function canonicalizeHost(rawHost: string): string {
-  if (typeof rawHost !== "string" || rawHost.trim().length === 0) {
+  if (String(rawHost) !== rawHost || rawHost.trim().length === 0) {
     throw new PolicyCanonicalizationError("INVALID_HOST", "Host must be a non-empty string");
   }
 
@@ -901,7 +918,7 @@ export interface CanonicalCommandCapability {
 /**
  * Known shell binaries that execute shell scripts and arbitrary commands.
  */
-export const SHELL_EXECUTABLES: Record<string, true> = {
+export const SHELL_EXECUTABLES = {
   sh: true,
   bash: true,
   zsh: true,
@@ -921,14 +938,14 @@ export const SHELL_EXECUTABLES: Record<string, true> = {
   "wscript.exe": true,
   cscript: true,
   "cscript.exe": true,
-};
+} as const satisfies Record<string, true>;
 
 /**
  * Checks whether an executable name or path refers to a shell executable.
  */
 export function isShellExecutable(cmd: string): boolean {
   const baseName = path.basename(cmd).toLowerCase();
-  return SHELL_EXECUTABLES[baseName] === true;
+  return Object.hasOwn(SHELL_EXECUTABLES, baseName);
 }
 
 /**
@@ -951,10 +968,14 @@ export function containsForbiddenArgMetacharacters(arg: string): boolean {
   return false;
 }
 
+export interface InterpreterEscapeFlags {
+  [binary: string]: readonly string[];
+}
+
 /**
  * Known interpreter escape flags that allow inline execution, code evaluation, or unapproved script loading.
  */
-export const INTERPRETER_ESCAPE_FLAGS: Record<string, string[]> = {
+export const INTERPRETER_ESCAPE_FLAGS: InterpreterEscapeFlags = {
   node: [
     "-e",
     "--eval",
@@ -1102,7 +1123,7 @@ export function isResponseFileEscape(
  * Dangerous environment variables known to facilitate dynamic library injection,
  * interpreter code hijacking, or unsafe process environment overrides.
  */
-export const DANGEROUS_ENV_VARS: Record<string, true> = {
+export const DANGEROUS_ENV_VARS = {
   LD_PRELOAD: true,
   LD_LIBRARY_PATH: true,
   LD_AUDIT: true,
@@ -1148,7 +1169,7 @@ export const DANGEROUS_ENV_VARS: Record<string, true> = {
   IFS: true,
   PS4: true,
   GLOBIGNORE: true,
-};
+} as const satisfies Record<string, true>;
 
 export const DANGEROUS_ENV_PREFIXES: string[] = [
   "LD_",
@@ -1170,9 +1191,9 @@ export const DANGEROUS_ENV_PREFIXES: string[] = [
  * Checks whether an environment variable name is dangerous.
  */
 export function isDangerousEnvVar(envName: string): boolean {
-  if (!envName || typeof envName !== "string") return true;
+  if (!envName || String(envName) !== envName) return true;
   const upper = envName.toUpperCase().trim();
-  if (DANGEROUS_ENV_VARS[upper] === true) {
+  if (Object.hasOwn(DANGEROUS_ENV_VARS, upper)) {
     return true;
   }
   for (const prefix of DANGEROUS_ENV_PREFIXES) {
@@ -1187,7 +1208,7 @@ export function isDangerousEnvVar(envName: string): boolean {
  * Validates whether an environment variable name is safe and valid.
  */
 export function canonicalizeEnvName(rawName: string): string {
-  if (typeof rawName !== "string" || rawName.trim().length === 0) {
+  if (String(rawName) !== rawName || rawName.trim().length === 0) {
     throw new PolicyCanonicalizationError("DANGEROUS_ENV_VAR", "Env var name must be non-empty");
   }
 
@@ -1232,7 +1253,7 @@ export function resolveCanonicalBinary(
   binary: string,
   options: ResolveBinaryOptions = {},
 ): CommandIdentity {
-  if (typeof binary !== "string" || binary.trim().length === 0) {
+  if (String(binary) !== binary || binary.trim().length === 0) {
     throw new PolicyCanonicalizationError("EMPTY_PATH", "Binary path must be a non-empty string");
   }
 
@@ -1335,7 +1356,7 @@ export function resolveCanonicalBinary(
   } catch (err) {
     throw new PolicyCanonicalizationError(
       "PATH_TRAVERSAL",
-      `Unable to stat executable binary '${realPath}': ${(err as Error).message}`,
+      `Unable to stat executable binary '${realPath}': ${err instanceof Error ? err.message : String(err)}`,
       { binary: clean, realPath },
     );
   }
@@ -1375,10 +1396,15 @@ export function resolveCanonicalBinary(
  * Re-verifies executable identity against previously recorded identity evidence.
  * Detects symlink swaps, binary replacements, inode modifications, and hash changes.
  */
+export interface ExecutableIdentityVerificationResult {
+  valid: boolean;
+  reason?: string;
+}
+
 export function verifyExecutableIdentity(
   expected: CommandIdentity,
   currentPath?: string,
-): { valid: boolean; reason?: string } {
+): ExecutableIdentityVerificationResult {
   const target = currentPath ?? expected.canonicalPath;
   if (!fs.existsSync(target)) {
     return { valid: false, reason: `Executable file does not exist: ${target}` };
@@ -1392,7 +1418,7 @@ export function verifyExecutableIdentity(
   } catch (err) {
     return {
       valid: false,
-      reason: `Failed to resolve realpath for '${target}': ${(err as Error).message}`,
+      reason: `Failed to resolve realpath for '${target}': ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 
@@ -1409,7 +1435,7 @@ export function verifyExecutableIdentity(
   } catch (err) {
     return {
       valid: false,
-      reason: `Failed to stat executable '${currentRealPath}': ${(err as Error).message}`,
+      reason: `Failed to stat executable '${currentRealPath}': ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 
@@ -1439,7 +1465,7 @@ export function verifyExecutableIdentity(
     } catch (err) {
       return {
         valid: false,
-        reason: `Failed to compute executable digest: ${(err as Error).message}`,
+        reason: `Failed to compute executable digest: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
@@ -1451,7 +1477,7 @@ export function verifyExecutableIdentity(
  * Canonicalizes a command / executable name.
  */
 export function canonicalizeCommand(cmd: string): string {
-  if (typeof cmd !== "string" || cmd.trim().length === 0) {
+  if (String(cmd) !== cmd || cmd.trim().length === 0) {
     throw new PolicyCanonicalizationError("EMPTY_PATH", "Command must be a non-empty string");
   }
 
@@ -1567,7 +1593,7 @@ export interface CanonicalSecretCapability {
  * Canonicalizes and validates a secret alias / name.
  */
 export function canonicalizeSecretName(secretName: string): string {
-  if (typeof secretName !== "string" || secretName.trim().length === 0) {
+  if (String(secretName) !== secretName || secretName.trim().length === 0) {
     throw new PolicyCanonicalizationError("INVALID_SECRET_NAME", "Secret name must be non-empty");
   }
 
@@ -1588,7 +1614,7 @@ export function canonicalizeSecretName(secretName: string): string {
  * Canonicalizes and validates a secret prefix.
  */
 export function canonicalizeSecretPrefix(prefix: string): string {
-  if (typeof prefix !== "string" || prefix.trim().length === 0) {
+  if (String(prefix) !== prefix || prefix.trim().length === 0) {
     throw new PolicyCanonicalizationError(
       "INVALID_SECRET_PREFIX",
       "Secret prefix must be non-empty",

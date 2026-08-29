@@ -21,7 +21,7 @@ import {
   ProtocolMessageEnvelopeSchema,
   StreamMessageSchema,
 } from "@resin/protocol";
-import type { z } from "zod";
+import { z } from "zod";
 import { type SchemaDescriptor, extractSchemaDescriptor } from "./schema-diff.js";
 
 /**
@@ -35,6 +35,44 @@ export interface DocGenOptions {
   includeExamples?: boolean;
   title?: string;
   description?: string;
+}
+
+export type JsonSchemaPrimitiveValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | JsonSchemaDocument
+  | JsonSchemaPrimitiveValue[];
+
+export interface JsonSchemaDocument {
+  $schema?: string;
+  $id?: string;
+  title?: string;
+  description?: string;
+  type?: string | string[];
+  properties?: Record<string, JsonSchemaDocument>;
+  required?: string[];
+  items?: JsonSchemaDocument | JsonSchemaDocument[];
+  enum?: JsonSchemaPrimitiveValue[];
+  default?: JsonSchemaPrimitiveValue;
+  examples?: JsonSchemaPrimitiveValue[];
+  additionalProperties?: boolean | JsonSchemaDocument;
+  [key: string]: JsonSchemaPrimitiveValue;
+}
+
+export type SchemaExampleValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SchemaExampleRecord
+  | SchemaExampleValue[];
+
+export interface SchemaExampleRecord {
+  [key: string]: SchemaExampleValue;
 }
 
 export interface JsonSchemaOptions {
@@ -57,14 +95,12 @@ export interface ExampleOptions {
 export function generateJsonSchema(
   schema: z.ZodTypeAny | SchemaDescriptor,
   options: JsonSchemaOptions = {},
-): Record<string, unknown> {
+): JsonSchemaDocument {
   const desc: SchemaDescriptor =
-    "type" in schema && typeof schema.type === "string"
-      ? (schema as SchemaDescriptor)
-      : extractSchemaDescriptor(schema as z.ZodTypeAny);
+    schema instanceof z.ZodType ? extractSchemaDescriptor(schema) : schema;
 
-  function descriptorToJsonSchema(d: SchemaDescriptor): Record<string, unknown> {
-    const json: Record<string, unknown> = {};
+  function descriptorToJsonSchema(d: SchemaDescriptor): JsonSchemaDocument {
+    const json: JsonSchemaDocument = {};
 
     if (d.description) {
       json.description = d.description;
@@ -122,7 +158,7 @@ export function generateJsonSchema(
 
       case "object": {
         json.type = d.isNullable ? ["object", "null"] : "object";
-        const props: Record<string, unknown> = {};
+        const props: Record<string, JsonSchemaDocument> = {};
         if (d.properties) {
           for (const [key, propDesc] of Object.entries(d.properties)) {
             props[key] = descriptorToJsonSchema(propDesc);
@@ -178,13 +214,11 @@ export function generateJsonSchema(
 export function generateSchemaExample(
   schema: z.ZodTypeAny | SchemaDescriptor,
   _options: ExampleOptions = {},
-): unknown {
+): SchemaExampleValue {
   const desc: SchemaDescriptor =
-    "type" in schema && typeof schema.type === "string"
-      ? (schema as SchemaDescriptor)
-      : extractSchemaDescriptor(schema as z.ZodTypeAny);
+    schema instanceof z.ZodType ? extractSchemaDescriptor(schema) : schema;
 
-  function makeExample(d: SchemaDescriptor, fieldName = ""): unknown {
+  function makeExample(d: SchemaDescriptor, fieldName = ""): SchemaExampleValue {
     if (d.defaultValue !== undefined) {
       return d.defaultValue;
     }
@@ -240,7 +274,7 @@ export function generateSchemaExample(
         return d.arrayItem ? [makeExample(d.arrayItem, fieldName)] : [];
 
       case "object": {
-        const obj: Record<string, unknown> = {};
+        const obj: Record<string, SchemaExampleValue> = {};
         if (d.properties) {
           for (const [key, propDesc] of Object.entries(d.properties)) {
             obj[key] = makeExample(propDesc, key);
@@ -354,7 +388,7 @@ export function generateMarkdownDocs(
  * Generate full catalog documentation for all core contracts across domain, protocol, and harness.
  */
 export function generateFullContractCatalogDoc(): string {
-  const allSchemas: Record<string, z.ZodTypeAny> = {
+  const allSchemas = {
     // Domain Schemas
     NormalizedSessionEvent: NormalizedSessionEventSchema,
     ToolManifest: ToolManifestSchema,
@@ -375,7 +409,7 @@ export function generateFullContractCatalogDoc(): string {
     ConfigMutationPlan: ConfigMutationPlanSchema,
     AdapterCapabilities: AdapterCapabilitiesSchema,
     RefreshResult: RefreshResultSchema,
-  };
+  } satisfies Record<string, z.ZodTypeAny>;
 
   return generateMarkdownDocs(allSchemas, {
     title: "Resin Core Schema & Contract Catalog",

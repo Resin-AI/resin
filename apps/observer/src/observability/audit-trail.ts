@@ -5,7 +5,8 @@ import {
   AuditRecordSchema,
   canonicalJson,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "@resin/db";
+import type { LocalDatabaseConnection, SQLBindValue } from "@resin/db";
+import type { JsonObject } from "../normalization/redaction.js";
 import { redactSecrets } from "./logger.js";
 
 export const GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -34,7 +35,7 @@ export interface AuditTrailEntryInput {
   resourceId: string;
   action: string;
   status: AuditStatus;
-  details?: Record<string, unknown>;
+  details?: JsonObject;
   clientIp?: string;
 }
 
@@ -49,7 +50,7 @@ export interface AuditTrailEntry {
   resourceId: string;
   action: string;
   status: AuditStatus;
-  details: Record<string, unknown>;
+  details: JsonObject;
   clientIp?: string;
   previousHash: string;
   hash: string;
@@ -156,8 +157,9 @@ export class AuditTrailManager {
 
     const timestamp = input.timestamp ?? new Date().toISOString();
     const auditId = input.auditId ?? `aud_${crypto.randomUUID()}`;
-    const redactedDetails = input.details
-      ? (redactSecrets(input.details) as Record<string, unknown>)
+    // SAFETY: redactSecrets cleans sensitive tokens while preserving JsonObject structure.
+    const redactedDetails: JsonObject = input.details
+      ? (redactSecrets(input.details) as JsonObject)
       : {};
 
     const nextSequence = this.currentSequence + 1;
@@ -262,7 +264,7 @@ export class AuditTrailManager {
 
     if (this.conn) {
       let sql = "SELECT * FROM audit_trail_chain WHERE 1=1";
-      const params: unknown[] = [];
+      const params: SQLBindValue[] = [];
 
       if (filter.eventType) {
         sql += " AND event_type = ?";
@@ -312,10 +314,10 @@ export class AuditTrailManager {
         event_type: string;
         actor_json: string;
         workspace_id: string | null;
-        resource_type: string;
+        resource_type: AuditResourceType;
         resource_id: string;
         action: string;
-        status: string;
+        status: AuditStatus;
         details_json: string;
         client_ip: string | null;
         previous_hash: string;
@@ -327,13 +329,15 @@ export class AuditTrailManager {
         auditId: row.audit_id,
         timestamp: row.timestamp,
         eventType: row.event_type,
+        // SAFETY: actor_json is validated AuditActor serialized on write.
         actor: JSON.parse(row.actor_json) as AuditActor,
         workspaceId: row.workspace_id ?? undefined,
-        resourceType: row.resource_type as AuditResourceType,
+        resourceType: row.resource_type,
         resourceId: row.resource_id,
         action: row.action,
-        status: row.status as AuditStatus,
-        details: JSON.parse(row.details_json || "{}") as Record<string, unknown>,
+        status: row.status,
+        // SAFETY: details_json is serialized JsonObject persisted during append.
+        details: JSON.parse(row.details_json || "{}") as JsonObject,
         clientIp: row.client_ip ?? undefined,
         previousHash: row.previous_hash,
         hash: row.hash,

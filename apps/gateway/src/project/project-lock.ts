@@ -3,9 +3,12 @@ import path from "node:path";
 import {
   type V1LockedToolEntry,
   V1LockedToolEntrySchema,
+  type V1MetadataPayloadValue,
   type V1ToolLock,
+  V1ToolLockSchema,
   V1_SCHEMA_KINDS,
   V1_SCHEMA_VERSION,
+  assertSafeCommittedMetadata,
   validateV1ToolLock,
 } from "@resin/contracts";
 import { atomicWriteJsonSync } from "./project-bootstrap.js";
@@ -13,10 +16,11 @@ import type { ProjectLockManagerOptions, ReconcileOutcome, ReconcileResult } fro
 
 export type { ProjectLockManagerOptions, ReconcileOutcome, ReconcileResult };
 
-function getErrorCode(err: unknown): string | undefined {
-  if (err && typeof err === "object" && "code" in err) {
-    const code = err.code;
-    return typeof code === "string" ? code : undefined;
+function getErrorCode(err: { code?: unknown } | Error | unknown): string | undefined {
+  if (err && err instanceof Object && "code" in err) {
+    // SAFETY: Verified err is an object containing 'code'.
+    const code = (err as { code?: unknown }).code;
+    return Object.prototype.toString.call(code) === "[object String]" ? String(code) : undefined;
   }
   return undefined;
 }
@@ -48,7 +52,7 @@ function assertNotSymlink(targetPath: string, label: string): void {
     if (lstat.isSymbolicLink()) {
       throw new Error(`Security violation: ${label} cannot be a symbolic link at '${targetPath}'`);
     }
-  } catch (err: unknown) {
+  } catch (err) {
     if (getErrorCode(err) !== "ENOENT") {
       throw err;
     }
@@ -87,6 +91,8 @@ export class ProjectLockManager {
   readonly staleLockThresholdMs: number;
   readonly readOnly: boolean;
 
+  constructor(options: ProjectLockManagerOptions);
+  constructor(lockPath: string, projectId?: string);
   constructor(optionsOrPath: ProjectLockManagerOptions | string, projectId?: string) {
     let resolvedLockPath: string;
     let resolvedProjectId: string | undefined;
@@ -94,15 +100,15 @@ export class ProjectLockManager {
     let staleLockThresholdMs: number | undefined;
     let readOnly = false;
 
-    if (typeof optionsOrPath === "string") {
-      resolvedLockPath = optionsOrPath;
-      resolvedProjectId = projectId;
-    } else {
+    if (optionsOrPath instanceof Object) {
       resolvedLockPath = optionsOrPath.lockPath;
       resolvedProjectId = optionsOrPath.projectId ?? projectId;
       lockTimeoutMs = optionsOrPath.lockTimeoutMs;
       staleLockThresholdMs = optionsOrPath.staleLockThresholdMs;
-      readOnly = optionsOrPath.readOnly === true;
+      readOnly = optionsOrPath.readOnly ?? false;
+    } else {
+      resolvedLockPath = optionsOrPath;
+      resolvedProjectId = projectId;
     }
 
     if (!resolvedProjectId) {
@@ -135,16 +141,10 @@ export class ProjectLockManager {
         }
       }
     }
-
-    if (
-      !resolvedProjectId ||
-      typeof resolvedProjectId !== "string" ||
-      !UUID_REGEX.test(resolvedProjectId)
-    ) {
+    if (resolvedProjectId && !UUID_REGEX.test(resolvedProjectId)) {
       throw new Error(`Invalid projectId: expected valid UUID, received '${resolvedProjectId}'`);
     }
-
-    this.projectId = resolvedProjectId;
+    this.projectId = resolvedProjectId ?? "";
     this.lockTimeoutMs = lockTimeoutMs ?? 5000;
     this.staleLockThresholdMs = staleLockThresholdMs ?? 10000;
     this.readOnly = readOnly;
@@ -160,6 +160,12 @@ export class ProjectLockManager {
       this.resinDir = path.join(normalizedPath, ".resin");
       this.lockPath = path.join(this.resinDir, "resin.lock");
     }
+  }
+  static resolveLockPath(lockPathOrOptions: ProjectLockManagerOptions | string): string {
+    if (lockPathOrOptions instanceof Object) {
+      return lockPathOrOptions.lockPath;
+    }
+    return lockPathOrOptions;
   }
 
   /**
@@ -207,11 +213,10 @@ export class ProjectLockManager {
             // Ignore unlock failure
           }
         };
-      } catch (err: unknown) {
+      } catch (err) {
         if (getErrorCode(err) !== "EEXIST") {
           throw err;
         }
-
         // Lock file exists -> check staleness
         try {
           const stat = fs.statSync(concurrencyLockPath);
@@ -222,14 +227,16 @@ export class ProjectLockManager {
           try {
             const raw = fs.readFileSync(concurrencyLockPath, "utf8");
             const parsed = JSON.parse(raw);
-            if (typeof parsed.pid === "number") {
-              lockPid = parsed.pid;
-            }
-            if (
-              typeof parsed.createdAt === "number" &&
-              Date.now() - parsed.createdAt > this.staleLockThresholdMs
-            ) {
-              isStale = true;
+            if (parsed && parsed instanceof Object) {
+              if (Number.isFinite(parsed.pid)) {
+                lockPid = parsed.pid;
+              }
+              if (
+                Number.isFinite(parsed.createdAt) &&
+                Date.now() - parsed.createdAt > this.staleLockThresholdMs
+              ) {
+                isStale = true;
+              }
             }
           } catch {
             // Parse error on lock payload
@@ -242,7 +249,7 @@ export class ProjectLockManager {
           if (lockPid !== undefined && lockPid !== process.pid) {
             try {
               process.kill(lockPid, 0);
-            } catch (killErr: unknown) {
+            } catch (killErr) {
               if (getErrorCode(killErr) === "ESRCH") {
                 isStale = true;
               }
@@ -292,18 +299,21 @@ export class ProjectLockManager {
     let raw: string;
     try {
       raw = fs.readFileSync(this.lockPath, "utf8");
-    } catch (err: unknown) {
+    } catch (err) {
       throw new Error(`Failed to read lockfile at '${this.lockPath}': ${String(err)}`);
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
-    } catch (err: unknown) {
+    } catch (err) {
       throw new Error(`Corrupt lockfile: Invalid JSON at '${this.lockPath}': ${String(err)}`);
     }
 
-    const lock = validateV1ToolLock(parsed);
+    // SAFETY: Parsed JSON payload is validated for safe committed metadata before schema parsing.
+    assertSafeCommittedMetadata(parsed as V1MetadataPayloadValue, "resin.lock");
+    const parsedLock = V1ToolLockSchema.parse(parsed);
+    const lock = validateV1ToolLock(parsedLock);
     if (lock.projectId !== this.projectId) {
       throw new Error(
         `Project ID mismatch: expected '${this.projectId}', but lockfile has '${lock.projectId}' at '${this.lockPath}'`,
@@ -573,22 +583,25 @@ export class ProjectLockManager {
           try {
             const raw = fs.readFileSync(this.lockPath, "utf8");
             const parsed = JSON.parse(raw);
-
-            if (parsed && typeof parsed === "object") {
-              const rawRecord = parsed as Record<string, unknown>;
+            if (parsed && parsed instanceof Object && !Array.isArray(parsed)) {
               if (
-                typeof rawRecord.projectId === "string" &&
-                UUID_REGEX.test(rawRecord.projectId) &&
-                rawRecord.projectId !== this.projectId
+                "projectId" in parsed &&
+                Object.prototype.toString.call(parsed.projectId) === "[object String]" &&
+                UUID_REGEX.test(String(parsed.projectId)) &&
+                parsed.projectId !== this.projectId
               ) {
                 throw new Error(
-                  `Project ID mismatch: cannot repair lockfile belonging to '${rawRecord.projectId}' for project '${this.projectId}'`,
+                  `Project ID mismatch: cannot repair lockfile belonging to '${String(parsed.projectId)}' for project '${this.projectId}'`,
                 );
               }
 
-              if (rawRecord.tools && typeof rawRecord.tools === "object") {
-                const toolsRecord = rawRecord.tools as Record<string, unknown>;
-                for (const [key, val] of Object.entries(toolsRecord)) {
+              if (
+                "tools" in parsed &&
+                parsed.tools &&
+                parsed.tools instanceof Object &&
+                !Array.isArray(parsed.tools)
+              ) {
+                for (const [key, val] of Object.entries(parsed.tools)) {
                   if (!(key in salvagedTools)) {
                     try {
                       const entry = V1LockedToolEntrySchema.parse(val);
@@ -598,7 +611,7 @@ export class ProjectLockManager {
                 }
               }
             }
-          } catch (err: unknown) {
+          } catch (err) {
             if (String(err).includes("Project ID mismatch")) {
               throw err;
             }

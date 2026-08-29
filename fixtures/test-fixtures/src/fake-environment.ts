@@ -19,7 +19,9 @@ export class FakeClock {
 
   constructor(initialTime: number | string | Date = "2026-08-17T12:00:00.000Z") {
     this.initialEpochMs =
-      typeof initialTime === "number" ? initialTime : new Date(initialTime).getTime();
+      Object.prototype.toString.call(initialTime) === "[object Number]"
+        ? Number(initialTime)
+        : new Date(initialTime).getTime();
     this.currentEpochMs = this.initialEpochMs;
   }
 
@@ -45,13 +47,17 @@ export class FakeClock {
   /** Set clock to a specific target time */
   set(targetTime: number | string | Date): number {
     this.currentEpochMs =
-      typeof targetTime === "number" ? targetTime : new Date(targetTime).getTime();
+      Object.prototype.toString.call(targetTime) === "[object Number]"
+        ? Number(targetTime)
+        : new Date(targetTime).getTime();
     return this.currentEpochMs;
   }
 
   /** Advance clock to a specific target time (fails if target is in the past) */
   advanceTo(targetTime: number | string | Date): number {
-    const targetMs = typeof targetTime === "number" ? targetTime : new Date(targetTime).getTime();
+    const targetMs = Number.isFinite(targetTime)
+      ? Number(targetTime)
+      : new Date(targetTime).getTime();
     if (targetMs < this.currentEpochMs) {
       throw new Error(
         `Target time ${new Date(targetMs).toISOString()} is behind current time ${this.iso()}`,
@@ -65,8 +71,8 @@ export class FakeClock {
   reset(time?: number | string | Date): void {
     this.currentEpochMs =
       time !== undefined
-        ? typeof time === "number"
-          ? time
+        ? Object.prototype.toString.call(time) === "[object Number]"
+          ? Number(time)
           : new Date(time).getTime()
         : this.initialEpochMs;
   }
@@ -151,10 +157,13 @@ export interface FileStat {
 }
 
 export type FsWatchCallback = (event: { eventType: "change" | "rename"; path: string }) => void;
+export interface DirectoryPresenceMap {
+  [dirPath: string]: true | undefined;
+}
 
 export class InMemoryFileSystem {
   private files: Record<string, Uint8Array> = {};
-  private directories: Record<string, true> = { "/": true };
+  private directories: DirectoryPresenceMap = { "/": true };
   private mtimes: Record<string, number> = {};
   private watchers: Array<{ pattern: string; callback: FsWatchCallback }> = [];
 
@@ -189,7 +198,7 @@ export class InMemoryFileSystem {
       this.mkdir(parentDir, { recursive: true });
     }
 
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    const bytes = content instanceof Uint8Array ? content : new TextEncoder().encode(content);
     this.files[norm] = bytes;
     this.mtimes[norm] = Date.now();
 
@@ -324,11 +333,30 @@ export class InMemoryFileSystem {
 // 4. In-Memory Content-Addressable Artifact Store
 // ============================================================================
 
+export type FakeEnvironmentMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | FakeEnvironmentMetadataRecord
+  | FakeEnvironmentMetadataValue[];
+
+export interface FakeEnvironmentMetadataRecord {
+  [key: string]: FakeEnvironmentMetadataValue;
+}
+
+export interface ListedArtifact {
+  digest: string;
+  size: number;
+  metadata?: FakeEnvironmentMetadataRecord;
+  createdAt: string;
+}
 export interface StoredArtifact {
   digest: string;
   size: number;
   content: Uint8Array;
-  metadata?: Record<string, unknown>;
+  metadata?: FakeEnvironmentMetadataRecord;
   createdAt: string;
 }
 
@@ -337,9 +365,9 @@ export class InMemoryArtifactStore {
 
   async put(
     content: string | Uint8Array,
-    metadata?: Record<string, unknown>,
+    metadata?: FakeEnvironmentMetadataRecord,
   ): Promise<{ digest: string; size: number }> {
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    const bytes = content instanceof Uint8Array ? content : new TextEncoder().encode(content);
     const digest = createHash("sha256").update(bytes).digest("hex");
     const size = bytes.length;
 
@@ -383,9 +411,7 @@ export class InMemoryArtifactStore {
     return actualDigest === digest;
   }
 
-  async list(): Promise<
-    Array<{ digest: string; size: number; metadata?: Record<string, unknown>; createdAt: string }>
-  > {
+  async list(): Promise<ListedArtifact[]> {
     return Object.values(this.artifacts).map((a) => ({
       digest: a.digest,
       size: a.size,
@@ -453,9 +479,11 @@ export class FakeControlStream {
       return message;
     }
 
+    // SAFETY: Stream message with generic payload is recorded in history.
     this.messageHistory.push(message as StreamMessage<unknown>);
 
     for (const listener of this.listeners) {
+      // SAFETY: Stream message with generic payload is broadcast to stream listeners.
       listener(message as StreamMessage<unknown>);
     }
 

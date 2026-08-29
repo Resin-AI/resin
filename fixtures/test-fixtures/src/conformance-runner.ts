@@ -134,7 +134,11 @@ export interface ConformanceSuiteOptions {
 }
 
 // Master schema registry
-export const CONTRACT_SCHEMA_REGISTRY: Record<string, z.ZodTypeAny> = {
+interface ContractSchemaRegistry {
+  [contractType: string]: z.ZodTypeAny;
+}
+
+export const CONTRACT_SCHEMA_REGISTRY: ContractSchemaRegistry = {
   // Domain - Events
   NormalizedSessionEvent: NormalizedSessionEventSchema,
   NormalizedMessageEvent: NormalizedMessageEventSchema,
@@ -223,6 +227,18 @@ export const CONTRACT_SCHEMA_REGISTRY: Record<string, z.ZodTypeAny> = {
   RefreshResult: RefreshResultSchema,
 };
 
+export type ConformancePayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | ConformancePayloadRecord
+  | ConformancePayloadValue[];
+
+export interface ConformancePayloadRecord {
+  [key: string]: ConformancePayloadValue;
+}
 // ============================================================================
 // Core Validation Functions
 // ============================================================================
@@ -239,10 +255,10 @@ function mapZodIssues(issues: ZodIssue[]): ValidationErrorDetail[] {
 /**
  * Validate any payload against a registered contract type name.
  */
-export function validateContractPayload<T = unknown>(
-  contractType: string,
-  payload: unknown,
-): ValidationResult<T> {
+export function validateContractPayload<
+  T = ConformancePayloadValue,
+  TPayload = ConformancePayloadValue,
+>(contractType: string, payload: TPayload): ValidationResult<T> {
   const schema = CONTRACT_SCHEMA_REGISTRY[contractType];
   if (!schema) {
     return {
@@ -263,6 +279,7 @@ export function validateContractPayload<T = unknown>(
     return {
       valid: true,
       contractType,
+      // SAFETY: Validated schema output is cast to expected contract type T.
       data: parseResult.data as T,
     };
   }
@@ -270,38 +287,38 @@ export function validateContractPayload<T = unknown>(
   return {
     valid: false,
     contractType,
-    errors: mapZodIssues((parseResult.error as ZodError).issues),
+    errors: mapZodIssues(parseResult.error.issues),
   };
 }
 
 /**
  * Validate a domain contract payload (TE-003).
  */
-export function validateDomainPayload<T = unknown>(
-  contractType: string,
-  payload: unknown,
-): ValidationResult<T> {
-  return validateContractPayload<T>(contractType, payload);
+export function validateDomainPayload<
+  T = ConformancePayloadValue,
+  TPayload = ConformancePayloadValue,
+>(contractType: string, payload: TPayload): ValidationResult<T> {
+  return validateContractPayload<T, TPayload>(contractType, payload);
 }
 
 /**
  * Validate a protocol HTTP or stream envelope payload (TE-004).
  */
-export function validateProtocolPayload<T = unknown>(
-  contractType: string,
-  payload: unknown,
-): ValidationResult<T> {
-  return validateContractPayload<T>(contractType, payload);
+export function validateProtocolPayload<
+  T = ConformancePayloadValue,
+  TPayload = ConformancePayloadValue,
+>(contractType: string, payload: TPayload): ValidationResult<T> {
+  return validateContractPayload<T, TPayload>(contractType, payload);
 }
 
 /**
  * Validate a harness adapter contract payload (TE-005).
  */
-export function validateHarnessPayload<T = unknown>(
-  contractType: string,
-  payload: unknown,
-): ValidationResult<T> {
-  return validateContractPayload<T>(contractType, payload);
+export function validateHarnessPayload<
+  T = ConformancePayloadValue,
+  TPayload = ConformancePayloadValue,
+>(contractType: string, payload: TPayload): ValidationResult<T> {
+  return validateContractPayload<T, TPayload>(contractType, payload);
 }
 
 // ============================================================================

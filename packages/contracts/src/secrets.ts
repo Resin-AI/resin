@@ -57,11 +57,24 @@ export const SecretReferenceSchema = z.object({
 });
 
 export type SecretReference = z.infer<typeof SecretReferenceSchema>;
-
+export type SecretReferenceInput = z.input<typeof SecretReferenceSchema>;
 /**
  * Alias for SecretReference emphasizing opacity and non-disclosure.
  */
 export type OpaqueSecretRef = SecretReference;
+
+export type SecretMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SecretMetadataRecord
+  | SecretMetadataValue[];
+
+export interface SecretMetadataRecord {
+  [key: string]: SecretMetadataValue;
+}
 
 /**
  * Options for creating an opaque secret reference.
@@ -76,7 +89,7 @@ export interface CreateSecretReferenceOptions {
   installationId?: string;
   grantId?: string;
   expiresAt?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: SecretMetadataRecord;
 }
 
 /**
@@ -116,18 +129,10 @@ export const createOpaqueSecretRef = createSecretReference;
 /**
  * Type guard to verify if an object is a valid SecretReference.
  */
-export function isSecretReference(value: unknown): value is SecretReference {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.kind === "secret_reference" &&
-    typeof candidate.name === "string" &&
-    candidate.name.length > 0 &&
-    typeof candidate.ref === "string" &&
-    candidate.ref.length > 0
-  );
+export function isSecretReference(
+  value: SecretReference | SecretReferenceInput | null | undefined,
+): value is SecretReference {
+  return SecretReferenceSchema.safeParse(value).success;
 }
 
 /**
@@ -271,6 +276,9 @@ export type SecretMediationResult = z.infer<typeof SecretMediationResultSchema>;
  * Formats a secret template string for network headers or URL parameters.
  */
 export function formatSecretTemplate(secretNameOrRef: string | SecretReference): string {
-  const name = typeof secretNameOrRef === "string" ? secretNameOrRef : secretNameOrRef.name;
-  return `{{secret:${name}}}`;
+  if (Object.prototype.toString.call(secretNameOrRef) === "[object String]") {
+    return `{{secret:${String(secretNameOrRef)}}}`;
+  }
+  // SAFETY: Object tag check confirms secretNameOrRef is a SecretReference object.
+  return `{{secret:${(secretNameOrRef as SecretReference).name}}}`;
 }

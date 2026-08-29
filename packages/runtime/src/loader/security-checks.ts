@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { CanonicalJsonRecord } from "@resin/contracts";
 import { type BundleLimits, DEFAULT_BUNDLE_LIMITS } from "../bundle/spec.js";
 export type BundleSecurityErrorCode =
   | "PATH_TRAVERSAL"
@@ -14,16 +15,21 @@ export type BundleSecurityErrorCode =
   | "INVALID_PATH_CHARACTERS"
   | "DIGEST_MISMATCH";
 
+export interface DecompressionStats {
+  fileCount: number;
+  totalDecompressedBytes: number;
+}
+
 export class BundleSecurityError extends Error {
   readonly code: BundleSecurityErrorCode;
   readonly targetPath?: string;
-  readonly details?: Record<string, unknown>;
+  readonly details?: CanonicalJsonRecord;
 
   constructor(
     code: BundleSecurityErrorCode,
     message: string,
     targetPath?: string,
-    details?: Record<string, unknown>,
+    details?: CanonicalJsonRecord,
   ) {
     super(message);
     this.name = "BundleSecurityError";
@@ -72,7 +78,7 @@ const WINDOWS_RESERVED_NAMES = new Set([
  * - No .git directory tampering
  */
 export function validateBundleEntryPath(entryPath: string): string {
-  if (!entryPath || typeof entryPath !== "string") {
+  if (!entryPath || Object.prototype.toString.call(entryPath) !== "[object String]") {
     throw new BundleSecurityError(
       "INVALID_PATH_CHARACTERS",
       "Bundle entry path must be a non-empty string",
@@ -251,7 +257,7 @@ export class BundleResourceTracker {
     this.fileCount++;
     this.totalDecompressedBytes += entrySizeBytes;
   }
-  getStats(): { fileCount: number; totalDecompressedBytes: number } {
+  getStats(): DecompressionStats {
     return {
       fileCount: this.fileCount,
       totalDecompressedBytes: this.totalDecompressedBytes,

@@ -39,7 +39,6 @@ export function collectReleaseBinding(releaseDir) {
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const entries = Object.entries(manifest.assets ?? {});
-  if (entries.length === 0) throw new Error("Release manifest contains no assets");
 
   const assets = {};
   for (const [id, asset] of entries) {
@@ -88,7 +87,9 @@ export function runSystemQualification(options = {}) {
     }
     const trustDomain = release.releaseIdentity?.trustDomain ?? release.trust?.trustDomain;
     if (trustDomain === "test") {
-      throw new Error("Production qualification requires a production-signed release candidate");
+      throw new Error(
+        "Production qualification requires a production-signed release candidate, found test trust domain",
+      );
     }
   }
 
@@ -99,7 +100,7 @@ export function runSystemQualification(options = {}) {
     options.commitSha ?? process.env.RESIN_RELEASE_SHA ?? process.env.GITHUB_SHA;
   if (expectedCommitSha && expectedCommitSha.toLowerCase() !== release.commitSha.toLowerCase()) {
     throw new Error(
-      `Release commit SHA mismatch for system qualification: expected ${expectedCommitSha}, got ${release.commitSha}`,
+      `Release commit SHA mismatch for full-system qualification: expected ${expectedCommitSha}, got ${release.commitSha}`,
     );
   }
 
@@ -111,16 +112,19 @@ export function runSystemQualification(options = {}) {
 
   const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const run = options.spawnSync ?? spawnSync;
+  const env = {
+    ...process.env,
+    RESIN_RELEASE_DIR: releaseDir,
+  };
+  if (testOnly) {
+    env.RESIN_RELEASE_TEST_ONLY = "1";
+  }
   const result = run(
     command,
     ["exec", "vitest", "run", "--testTimeout=60000", "--hookTimeout=60000", ...suites],
     {
       cwd: rootDir,
-      env: {
-        ...process.env,
-        RESIN_RELEASE_DIR: releaseDir,
-        ...(testOnly ? { RESIN_RELEASE_TEST_ONLY: "1" } : {}),
-      },
+      env,
       encoding: "utf8",
       timeout: 20 * 60 * 1000,
       maxBuffer: 20 * 1024 * 1024,

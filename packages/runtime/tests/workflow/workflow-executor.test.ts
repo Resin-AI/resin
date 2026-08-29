@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CanonicalJsonRecord } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import type { BrokerAuditEvent } from "../../src/brokers/index.js";
 import {
   BindingResolver,
   CapabilityBrokerManager,
@@ -10,6 +12,7 @@ import {
   WorkflowExecutor,
   type WorkflowProgressEvent,
 } from "../../src/index.js";
+import type { BrokerRequestHandlerFn } from "../../src/worker/sdk.js";
 
 describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
   const executor = new WorkflowExecutor();
@@ -20,12 +23,8 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
       const concurrentRunning: string[] = [];
       let maxObservedConcurrency = 0;
 
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
-        const stepId = String(payload.stepId);
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
+        const stepId = String(payload?.stepId ?? "");
         concurrentRunning.push(stepId);
         maxObservedConcurrency = Math.max(maxObservedConcurrency, concurrentRunning.length);
 
@@ -101,15 +100,11 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
 
   describe("Variable Binding Resolution & Interpolation", () => {
     it("should resolve dynamic workflow inputs and preceding step outputs into step inputs", async () => {
-      const receivedInputs: Record<string, Record<string, unknown>> = {};
+      const receivedInputs: Record<string, CanonicalJsonRecord> = {};
 
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
-        const stepId = String(payload._stepId);
-        receivedInputs[stepId] = payload;
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
+        const stepId = String(payload?._stepId ?? "");
+        if (payload) receivedInputs[stepId] = payload;
         if (stepId === "step_1") {
           return { dataId: "item_9876", count: 42 };
         }
@@ -220,7 +215,7 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
 
         expect(result.status).toBe("completed");
         expect(fs.existsSync(testFilePath)).toBe(true);
-
+        // SAFETY: Step 2 output is ReadFileResult object containing content string.
         const readResult = result.outputs.step_2 as { content: string };
         expect(readResult.content).toBe("Hello from WorkflowExecutor real broker!");
       } finally {
@@ -281,17 +276,13 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
       const rollbackLog: string[] = [];
       const progressEvents: WorkflowProgressEvent[] = [];
 
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
         if (action === "rollback") {
-          rollbackLog.push(String(payload.step));
+          rollbackLog.push(String(payload?.step ?? ""));
           return { rolledBack: true };
         }
 
-        const stepId = String(payload.step);
+        const stepId = String(payload?.step ?? "");
         if (stepId === "step_3") {
           throw new Error("Step 3 crashed unexpectedly!");
         }
@@ -361,12 +352,8 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
     it("should continue workflow execution when failureBehavior is set to 'continue'", async () => {
       const executedSteps: string[] = [];
 
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
-        const stepId = String(payload.step);
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
+        const stepId = String(payload?.step ?? "");
         executedSteps.push(stepId);
         if (stepId === "step_optional") {
           throw new Error("Optional telemetry step failed");
@@ -425,17 +412,13 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
       const rollbackLog: string[] = [];
       const abortController = new AbortController();
 
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
         if (action === "rollback") {
-          rollbackLog.push(String(payload.step));
+          rollbackLog.push(String(payload?.step ?? ""));
           return { rolledBack: true };
         }
 
-        const stepId = String(payload.step);
+        const stepId = String(payload?.step ?? "");
         if (stepId === "step_1") {
           return { data: "ready" };
         }
@@ -495,7 +478,7 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
 
   describe("Audit Events & Redaction", () => {
     it("should emit sanitized audit events for all step broker operations", async () => {
-      const auditEvents: Record<string, unknown>[] = [];
+      const auditEvents: BrokerAuditEvent[] = [];
 
       const mockBrokerHandler = async () => {
         return { status: "ok" };
@@ -535,13 +518,9 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
   describe("Repeated / Idempotent Invocation", () => {
     it("should produce deterministic consistent results across multiple repeated invocations", async () => {
       let callCount = 0;
-      const mockBrokerHandler = async (
-        service: string,
-        action: string,
-        payload: Record<string, unknown>,
-      ) => {
+      const mockBrokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
         callCount++;
-        return { query: payload.query, timestamp: "fixed_time", index: callCount };
+        return { query: payload?.query ?? "", timestamp: "fixed_time", index: callCount };
       };
 
       const workflow: WorkflowDefinition = {
@@ -571,8 +550,8 @@ describe("WorkflowExecutor Runtime Engine (AC 6 & AC 7)", () => {
 
       expect(run1.status).toBe("completed");
       expect(run2.status).toBe("completed");
-      expect((run1.outputs.step_1 as { query: string }).query).toBe("test_keyword");
-      expect((run2.outputs.step_1 as { query: string }).query).toBe("test_keyword");
+      expect(run1.outputs.step_1).toEqual(expect.objectContaining({ query: "test_keyword" }));
+      expect(run2.outputs.step_1).toEqual(expect.objectContaining({ query: "test_keyword" }));
     });
   });
 });

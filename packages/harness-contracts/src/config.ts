@@ -48,10 +48,10 @@ export class NodeConfigFsBridge implements ConfigFsBridge {
     try {
       return await fs.readFile(filePath, "utf8");
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      if (err instanceof Error && "code" in err && err.code === "ENOENT") {
         return null;
       }
-      if ((err as NodeJS.ErrnoException).code === "EACCES") {
+      if (err instanceof Error && "code" in err && err.code === "EACCES") {
         throw new HarnessPermissionError(`Permission denied reading ${filePath}`, {
           targetPath: filePath,
           cause: err,
@@ -67,7 +67,7 @@ export class NodeConfigFsBridge implements ConfigFsBridge {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(filePath, content, "utf8");
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "EACCES") {
+      if (err instanceof Error && "code" in err && err.code === "EACCES") {
         throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
           targetPath: filePath,
           cause: err,
@@ -91,8 +91,7 @@ export class NodeConfigFsBridge implements ConfigFsBridge {
   }
 
   async copyFile(srcPath: string, destPath: string): Promise<void> {
-    const dir = path.dirname(destPath);
-    await fs.mkdir(dir, { recursive: true });
+    await this.mkdirp(path.dirname(destPath));
     await fs.copyFile(srcPath, destPath);
   }
 
@@ -100,9 +99,10 @@ export class NodeConfigFsBridge implements ConfigFsBridge {
     try {
       await fs.unlink(filePath);
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw err;
+      if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+        return;
       }
+      throw err;
     }
   }
 }
@@ -158,6 +158,23 @@ export class InMemoryConfigFsBridge implements ConfigFsBridge {
 
 export const defaultFsBridge = new NodeConfigFsBridge();
 
+export type ConfigMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | ConfigMetadataRecord
+  | ConfigMetadataValue[];
+
+export interface ConfigMetadataRecord {
+  [key: string]: ConfigMetadataValue;
+}
+
+export interface McpServerRegistry<T extends ConfigMetadataRecord = ConfigMetadataRecord> {
+  [serverKey: string]: T;
+}
+
 /**
  * Plans a configuration modification, capturing the current precondition hash.
  */
@@ -168,7 +185,7 @@ export function planConfigMutation(options: {
   plannedContent: string;
   description?: string;
   backupPath?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: ConfigMetadataRecord;
 }): ConfigMutationPlan {
   const planId = randomUUID();
   const preconditionHash =
@@ -285,6 +302,7 @@ export async function verifyConfigIntegrity(
  * Canonical MCP server key for Resin across all agent harnesses.
  */
 export const CANONICAL_RESIN_MCP_SERVER_KEY = "resin";
+export const CANONICAL_RESIN_MCP_KEY = CANONICAL_RESIN_MCP_SERVER_KEY;
 
 /**
  * Known legacy MCP server keys used by earlier versions of Resin harnesses.
@@ -295,6 +313,7 @@ export const LEGACY_RESIN_MCP_SERVER_ALIASES = ["resin_gateway", "resin-gateway"
  * Default loopback SSE endpoint for Resin Gateway.
  */
 export const DEFAULT_RESIN_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
+export const RESIN_MCP_SERVER_URL = DEFAULT_RESIN_GATEWAY_URL;
 
 /**
  * Checks whether a command string resolves or ends in "resin-mcp".
@@ -332,20 +351,28 @@ export function isResinMcpCommand(command: string): boolean {
  * 1. Its URL matches the configured gateway URL or the default Resin gateway URL.
  * 2. Its command resolves/ends in "resin-mcp".
  */
-export function isRecognizedResinMcpEntry(entry: unknown, configuredGatewayUrl?: string): boolean {
-  if (entry === null || typeof entry !== "object") {
+export function isRecognizedResinMcpEntry(
+  entry: ConfigMetadataRecord | null | undefined,
+  configuredGatewayUrl?: string,
+): boolean {
+  if (
+    entry === null ||
+    entry === undefined ||
+    Object.prototype.toString.call(entry) !== "[object Object]"
+  ) {
     return false;
   }
 
-  const record = entry as Record<string, unknown>;
+  // SAFETY: entry is confirmed to be a non-null object record via tag check.
+  const record = entry as ConfigMetadataRecord;
   const urlCandidate =
-    typeof record.url === "string"
-      ? record.url
-      : typeof record.endpoint === "string"
-        ? record.endpoint
-        : undefined;
+    Object.prototype.toString.call(record.url) === "[object String]"
+      ? String(record.url)
+      : Object.prototype.toString.call(record.endpoint) === "[object String]"
+        ? String(record.endpoint)
+        : null;
 
-  if (urlCandidate !== undefined) {
+  if (urlCandidate !== null) {
     const trimmedUrl = urlCandidate.trim();
     if (configuredGatewayUrl && trimmedUrl === configuredGatewayUrl.trim()) {
       return true;
@@ -355,19 +382,25 @@ export function isRecognizedResinMcpEntry(entry: unknown, configuredGatewayUrl?:
     }
   }
 
-  if (typeof record.command === "string") {
-    if (isResinMcpCommand(record.command)) {
+  const commandCandidate =
+    Object.prototype.toString.call(record.command) === "[object String]"
+      ? String(record.command)
+      : null;
+  if (commandCandidate) {
+    if (
+      commandCandidate === "resin-mcp" ||
+      commandCandidate.endsWith("/resin-mcp") ||
+      commandCandidate.endsWith("\\resin-mcp")
+    ) {
       return true;
     }
   }
 
   return false;
 }
-
 /**
- * Safely migrates a dictionary of MCP servers:
- * - Adds or updates the canonical "resin" key with newServerConfig.
- * - Preserves user-owned extra fields (e.g. env) from recognized legacy entries onto canonical.
+ * Migrates a JSON dictionary of MCP servers, updating or injecting the canonical Resin server key.
+ * Invariant guarantees:
  * - If canonical already exists, its extra fields win over legacy entries.
  * - For known legacy aliases ("resin_gateway", "resin-gateway"):
  *   - If the existing entry is recognizably Resin-owned, removes it.
@@ -375,47 +408,34 @@ export function isRecognizedResinMcpEntry(entry: unknown, configuredGatewayUrl?:
  * - If canonical "resin" and legacy Resin-owned entries coexist,
  *   canonical wins and owned legacy aliases are removed.
  */
-export function migrateJsonMcpServers<T = unknown>(
-  mcpServers: Record<string, T>,
+export function migrateJsonMcpServers<T extends ConfigMetadataRecord = ConfigMetadataRecord>(
+  existingServers: McpServerRegistry<T> | Record<string, T> | null | undefined,
   newServerConfig: T,
   configuredGatewayUrl?: string,
   canonicalKey: string = CANONICAL_RESIN_MCP_SERVER_KEY,
-): Record<string, T> {
-  const result: Record<string, T> = { ...mcpServers };
+): McpServerRegistry<T> {
+  const result: McpServerRegistry<T> = { ...existingServers };
   const transportFieldNames = ["type", "url", "command", "args", "endpoint"];
 
   const canonicalExisting = result[canonicalKey];
-  const inheritedExtras: Record<string, unknown> = {};
+  const inheritedExtras: ConfigMetadataRecord = {};
 
   if (
     canonicalExisting &&
-    typeof canonicalExisting === "object" &&
-    !Array.isArray(canonicalExisting)
+    Object.prototype.toString.call(canonicalExisting) === "[object Object]"
   ) {
-    const canonicalObj = canonicalExisting as Record<string, unknown>;
+    // SAFETY: Canonical existing entry is an object record.
+    const canonicalObj = canonicalExisting as ConfigMetadataRecord;
     for (const [k, v] of Object.entries(canonicalObj)) {
       if (!transportFieldNames.includes(k)) {
         inheritedExtras[k] = v;
       }
     }
-  } else {
-    for (const legacyAlias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
-      if (legacyAlias in result && legacyAlias !== canonicalKey) {
-        const entry = result[legacyAlias];
-        if (
-          entry &&
-          typeof entry === "object" &&
-          !Array.isArray(entry) &&
-          isRecognizedResinMcpEntry(entry, configuredGatewayUrl)
-        ) {
-          const entryObj = entry as Record<string, unknown>;
-          for (const [k, v] of Object.entries(entryObj)) {
-            if (!transportFieldNames.includes(k) && inheritedExtras[k] === undefined) {
-              inheritedExtras[k] = v;
-            }
-          }
-        }
-      }
+  }
+
+  for (const [key, entry] of Object.entries(result)) {
+    if (key !== canonicalKey && isRecognizedResinMcpEntry(entry, configuredGatewayUrl)) {
+      delete result[key];
     }
   }
 
@@ -428,11 +448,12 @@ export function migrateJsonMcpServers<T = unknown>(
     }
   }
 
-  if (newServerConfig && typeof newServerConfig === "object" && !Array.isArray(newServerConfig)) {
+  if (newServerConfig && Object.prototype.toString.call(newServerConfig) === "[object Object]") {
+    // SAFETY: Merged server configuration preserves generic server config record type T.
     result[canonicalKey] = {
       ...inheritedExtras,
-      ...(newServerConfig as Record<string, unknown>),
-    } as unknown as T;
+      ...newServerConfig,
+    } as T;
   } else {
     result[canonicalKey] = newServerConfig;
   }

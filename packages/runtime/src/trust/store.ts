@@ -2,9 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
   RevocationFreshnessError,
   type V1ActivationCertificate,
+  type V1ActivationCertificateInput,
   type V1RevocationMetadata,
+  type V1RevocationMetadataInput,
   canonicalJson,
   normalizeSha256,
   projectSignableActivationCertificate,
@@ -40,7 +44,7 @@ export class TrustStoreVerificationError extends TrustStoreError {
   constructor(
     message: string,
     public readonly code: string,
-    public readonly details?: unknown,
+    public readonly details?: CanonicalJsonRecord,
   ) {
     super(`TrustStore verification failed (${code}): ${message}`);
     this.name = "TrustStoreVerificationError";
@@ -79,13 +83,13 @@ export interface ExpectedToolBinding {
   qualificationEvidenceDigest?: string;
 }
 
-export interface HighWaterState {
+export type HighWaterState = {
   lastKnownWallTime: string;
   highestRevocationSequence: number;
   highestCertificateCounters: Record<string, number>;
   seenNonces: Record<string, string>;
   seenCertificateIds: string[];
-}
+};
 
 export interface RuntimeTrustStoreOptions {
   dataDir: string;
@@ -272,7 +276,7 @@ export function signRevocationMetadata(
 // ============================================================================
 
 export function sanitizeUuidSegment(name: string, segment: string): string {
-  if (typeof segment !== "string" || !segment.trim()) {
+  if (Object.prototype.toString.call(segment) !== "[object String]" || !segment.trim()) {
     throw new TrustStoreSecurityError(`${name} must be a non-empty string`);
   }
   if (
@@ -293,7 +297,7 @@ export function sanitizeUuidSegment(name: string, segment: string): string {
 }
 
 export function sanitizeSemVerSegment(version: string): string {
-  if (typeof version !== "string" || !version.trim()) {
+  if (Object.prototype.toString.call(version) !== "[object String]" || !version.trim()) {
     throw new TrustStoreSecurityError("version must be a non-empty string");
   }
   if (
@@ -319,7 +323,10 @@ async function ensureDir0700(dirPath: string): Promise<void> {
   }
 }
 
-async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
+async function atomicWriteJson(
+  filePath: string,
+  data: CanonicalJsonValue | HighWaterState | V1ActivationCertificate | V1RevocationMetadata,
+): Promise<void> {
   const dir = path.dirname(filePath);
   await ensureDir0700(dir);
 
@@ -362,9 +369,10 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
     if (!content.trim()) {
       throw new TrustStoreCorruptStateError("Empty state file", filePath);
     }
+    // SAFETY: State file is loaded from disk and parsed to expected schema T.
     return JSON.parse(content) as T;
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+    if (err instanceof Object && "code" in err && err.code === "ENOENT") {
       return null;
     }
     if (err instanceof TrustStoreCorruptStateError) {
@@ -391,7 +399,7 @@ export class RuntimeTrustStore {
   private readonly nowProvider: () => Date | string | number;
 
   constructor(options: RuntimeTrustStoreOptions) {
-    if (!options.dataDir || typeof options.dataDir !== "string") {
+    if (!options.dataDir || Object.prototype.toString.call(options.dataDir) !== "[object String]") {
       throw new TrustStoreSecurityError("dataDir must be a non-empty string path");
     }
     if (!options.keyStore) {
@@ -467,11 +475,12 @@ export class RuntimeTrustStore {
     }
 
     if (
-      typeof loaded !== "object" ||
-      typeof loaded.lastKnownWallTime !== "string" ||
-      typeof loaded.highestRevocationSequence !== "number" ||
-      typeof loaded.highestCertificateCounters !== "object" ||
-      typeof loaded.seenNonces !== "object" ||
+      !loaded ||
+      Object.prototype.toString.call(loaded) !== "[object Object]" ||
+      Object.prototype.toString.call(loaded.lastKnownWallTime) !== "[object String]" ||
+      !Number.isFinite(loaded.highestRevocationSequence) ||
+      Object.prototype.toString.call(loaded.highestCertificateCounters) !== "[object Object]" ||
+      Object.prototype.toString.call(loaded.seenNonces) !== "[object Object]" ||
       !Array.isArray(loaded.seenCertificateIds)
     ) {
       throw new TrustStoreCorruptStateError("Invalid high-water state schema", statePath);
@@ -491,7 +500,7 @@ export class RuntimeTrustStore {
 
   public async recordRevocationMetadata(
     identity: TrustIdentity,
-    rawMetadata: V1RevocationMetadata | unknown,
+    rawMetadata: V1RevocationMetadataInput,
     options: VerifyTrustOptions = {},
   ): Promise<void> {
     const accountId = sanitizeUuidSegment("accountId", identity.accountId);
@@ -562,7 +571,10 @@ export class RuntimeTrustStore {
       });
     } catch (err) {
       if (err instanceof RevocationFreshnessError) {
-        throw new TrustStoreVerificationError(err.message, err.code, err);
+        throw new TrustStoreVerificationError(err.message, err.code, {
+          code: err.code,
+          message: err.message,
+        });
       }
       throw err;
     }
@@ -583,8 +595,10 @@ export class RuntimeTrustStore {
     identity: TrustIdentity,
   ): Promise<V1RevocationMetadata | null> {
     const revocationPath = this.getRevocationFilePath(identity);
-    const loaded = await readJsonFile<unknown>(revocationPath);
-    if (!loaded) return null;
+    const loaded = await readJsonFile<V1RevocationMetadataInput>(revocationPath);
+    if (loaded === null) {
+      return null;
+    }
 
     try {
       return validateV1RevocationMetadata(loaded);
@@ -603,7 +617,7 @@ export class RuntimeTrustStore {
 
   public async recordActivationCertificate(
     identity: TrustIdentity,
-    rawCert: V1ActivationCertificate | unknown,
+    rawCert: V1ActivationCertificateInput,
     options: VerifyTrustOptions = {},
   ): Promise<void> {
     const accountId = sanitizeUuidSegment("accountId", identity.accountId);
@@ -792,12 +806,12 @@ export class RuntimeTrustStore {
     version?: string,
   ): Promise<V1ActivationCertificate | null> {
     const certPath = this.getCertificateFilePath(identity, toolId, version);
-    const loaded = await readJsonFile<unknown>(certPath);
+    const loaded = await readJsonFile<V1ActivationCertificateInput>(certPath);
     if (!loaded) {
       // If requested with version and exact not found, check if latest matches version
       if (version) {
         const latestPath = this.getCertificateFilePath(identity, toolId);
-        const latest = await readJsonFile<unknown>(latestPath);
+        const latest = await readJsonFile<V1ActivationCertificateInput>(latestPath);
         if (latest) {
           try {
             const parsed = validateV1ActivationCertificate(latest);
@@ -841,7 +855,7 @@ export class RuntimeTrustStore {
       for (const file of files) {
         if (!file.endsWith(".json") || file.includes(".tmp")) continue;
         const filePath = path.join(certsDir, file);
-        const cert = await readJsonFile<unknown>(filePath);
+        const cert = await readJsonFile<V1ActivationCertificateInput>(filePath);
         if (!cert) continue;
         try {
           const parsed = validateV1ActivationCertificate(cert);
@@ -859,7 +873,7 @@ export class RuntimeTrustStore {
       }
       return results;
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      if (err instanceof Object && "code" in err && err.code === "ENOENT") {
         return [];
       }
       if (err instanceof TrustStoreCorruptStateError) throw err;
@@ -879,7 +893,7 @@ export class RuntimeTrustStore {
       await fs.promises.unlink(certPath);
       return true;
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      if (err instanceof Object && "code" in err && err.code === "ENOENT") {
         return false;
       }
       throw err;
@@ -891,7 +905,7 @@ export class RuntimeTrustStore {
     try {
       await fs.promises.rm(partitionDir, { recursive: true, force: true });
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (!err || !(err instanceof Object) || !("code" in err) || err.code !== "ENOENT") {
         throw err;
       }
     }

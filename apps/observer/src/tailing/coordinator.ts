@@ -179,7 +179,7 @@ export class ObserverCoordinator extends EventEmitter {
     for (const [adapterId, adapter] of this.adapters.entries()) {
       try {
         let workspaces: HarnessWorkspace[] = [];
-        if (typeof adapter.listWorkspaces === "function") {
+        if ("listWorkspaces" in adapter && adapter.listWorkspaces instanceof Function) {
           workspaces = await adapter.listWorkspaces();
         }
 
@@ -189,9 +189,12 @@ export class ObserverCoordinator extends EventEmitter {
           this.trackedWorkspaces.set(workspace.workspaceId, workspace);
 
           let sessions: HarnessSession[] = [];
-          if (typeof adapter.listSessions === "function") {
+          if ("listSessions" in adapter && adapter.listSessions instanceof Function) {
             sessions = await adapter.listSessions(workspace);
-          } else if (typeof adapter.resolveActiveSession === "function") {
+          } else if (
+            "resolveActiveSession" in adapter &&
+            adapter.resolveActiveSession instanceof Function
+          ) {
             const active = await adapter.resolveActiveSession(workspace);
             if (active) {
               sessions = [active];
@@ -209,7 +212,7 @@ export class ObserverCoordinator extends EventEmitter {
               if (!activeSessions.includes(session.sessionId)) {
                 // Open event source if supported by adapter
                 let source: SessionEventSource | undefined;
-                if (typeof adapter.openEventSource === "function") {
+                if ("openEventSource" in adapter && adapter.openEventSource instanceof Function) {
                   try {
                     const cursor = await this.tailer
                       .getCursorManager()

@@ -2,13 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import type {
-  HarnessSession,
-  RawHarnessRecord,
-  RecordType,
-  SessionEventSource,
-  SourceCursor,
+import {
+  type HarnessSession,
+  type RawHarnessRecord,
+  type RecordType,
+  RecordTypeSchema,
+  type SessionEventSource,
+  type SourceCursor,
 } from "@resin/harness-contracts";
+import { z } from "zod";
 import { AuthRecoveryError } from "../auth-recovery.js";
 import { getDaemonPaths } from "../paths.js";
 import { SourceCursorManager } from "./cursor-manager.js";
@@ -301,11 +303,9 @@ export class TranscriptTailer extends EventEmitter {
     watcher.onLines((lines: ParsedLineRecord[]) => {
       const rawRecords: RawHarnessRecord[] = lines.map((l) => {
         let recordType: RecordType = "transcript_line";
-        if (l.parsedJson && typeof l.parsedJson === "object" && "type" in l.parsedJson) {
-          const typeVal = l.parsedJson.type;
-          if (typeof typeVal === "string") {
-            recordType = typeVal as RecordType;
-          }
+        const parsedRecord = z.object({ type: RecordTypeSchema }).safeParse(l.parsedJson);
+        if (parsedRecord.success) {
+          recordType = parsedRecord.data.type;
         }
         return {
           recordId: randomUUID(),

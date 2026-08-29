@@ -5,7 +5,7 @@ import {
   InvocationRecordSchema,
   canonicalJson,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
 /**
  * Repository managing tool invocation logs and system audit trail records.
@@ -101,7 +101,7 @@ export class AuditRepository {
     limit?: number;
   }): Promise<InvocationRecord[]> {
     const conditions: string[] = [];
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
 
     if (options?.sessionId) {
       conditions.push("session_id = ?");
@@ -253,7 +253,7 @@ export class AuditRepository {
     limit?: number;
   }): Promise<AuditRecord[]> {
     const conditions: string[] = [];
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
 
     if (options?.eventType) {
       conditions.push("event_type = ?");

@@ -1,6 +1,7 @@
 import type {
   ArtifactDownloadMetadata,
   ArtifactDownloadRequest,
+  AuthClaims,
   CatalogSnapshotRequest,
   CatalogSnapshotResponse,
   DeploymentStatusReportRequest,
@@ -89,20 +90,16 @@ export const validDeviceTokenExchangeRequest: DeviceTokenExchangeRequest = {
   installationId: "inst_01JABCDEF",
 };
 
-const defaultAuthClaims = {
+const defaultAuthClaims: AuthClaims = {
   accountId: "acc_01JABCDEF",
   deviceId: "dev_01JABCDEF",
   installationId: "inst_01JABCDEF",
   workspaceId: FIXTURE_WORKSPACE_ID,
-  scopes: ["device:connect", "observations:write", "catalog:read"] as [
-    "device:connect",
-    "observations:write",
-    "catalog:read",
-  ],
+  scopes: ["device:connect", "observations:write", "catalog:read"],
   rawUploadConsent: false,
   issuedAt: FIXTURE_TIMESTAMP,
   expiresAt: "2026-08-17T13:00:00.000Z",
-  tokenType: "access" as const,
+  tokenType: "access",
 };
 
 export const validDeviceTokenExchangeResponse: DeviceTokenExchangeResponse = {

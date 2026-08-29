@@ -24,18 +24,18 @@ describe("@resin/test-fixtures package index", () => {
 
   it("exports conformance runner and master schema registry", () => {
     expect(CONTRACT_SCHEMA_REGISTRY).toBeDefined();
-    expect(typeof validateContractPayload).toBe("function");
-    expect(typeof runConformanceSuite).toBe("function");
+    expect(validateContractPayload).toBeTypeOf("function");
+    expect(runConformanceSuite).toBeTypeOf("function");
   });
 
   it("exports schema diffing and compatibility tools", () => {
-    expect(typeof assertCompatible).toBe("function");
-    expect(typeof generateCompatibilityManifest).toBe("function");
+    expect(assertCompatible).toBeTypeOf("function");
+    expect(generateCompatibilityManifest).toBeTypeOf("function");
   });
 
   it("exports sanitization engine", () => {
-    expect(typeof sanitizeFixture).toBe("function");
-    expect(typeof assertSanitized).toBe("function");
+    expect(sanitizeFixture).toBeTypeOf("function");
+    expect(assertSanitized).toBeTypeOf("function");
   });
 
   it("exports fake environment components", () => {
@@ -45,7 +45,7 @@ describe("@resin/test-fixtures package index", () => {
   });
 
   it("exports doc generator and golden fixtures", () => {
-    expect(typeof generateFullContractCatalogDoc).toBe("function");
+    expect(generateFullContractCatalogDoc).toBeTypeOf("function");
     expect(Array.isArray(allValidDomainEvents)).toBe(true);
   });
 });

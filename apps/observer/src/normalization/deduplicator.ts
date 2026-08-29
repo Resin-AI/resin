@@ -1,4 +1,5 @@
-import { canonicalJson, hashCanonical } from "@resin/contracts";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "@resin/contracts";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import type { LocalDatabaseConnection } from "@resin/db";
 
@@ -85,10 +86,15 @@ export class NormalizationDeduplicator {
         }
       : undefined;
 
-    return hashCanonical({
-      ...rest,
-      redaction: stableRedaction,
-    });
+    return createHash("sha256")
+      .update(
+        canonicalJson({
+          ...rest,
+          redaction: stableRedaction,
+        }),
+        "utf8",
+      )
+      .digest("hex");
   }
 
   /**

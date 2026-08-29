@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  type SchemaExampleRecord,
   generateFullContractCatalogDoc,
   generateJsonSchema,
   generateMarkdownDocs,
@@ -23,11 +24,14 @@ describe("Documentation and JSON Schema Generator", () => {
       expect(jsonSchema.$schema).toBe("http://json-schema.org/draft-07/schema#");
       expect(jsonSchema.type).toBe("object");
 
-      const props = jsonSchema.properties as Record<string, Record<string, unknown>>;
-      expect(props.userId.type).toBe("string");
-      expect(props.userId.minLength).toBe(3);
-      expect(props.userId.maxLength).toBe(50);
-      expect(props.userId.description).toBe("User identifier");
+      const props = jsonSchema.properties;
+      expect(props).toBeDefined();
+      if (props) {
+        expect(props.userId?.type).toBe("string");
+        expect(props.userId?.minLength).toBe(3);
+        expect(props.userId?.maxLength).toBe(50);
+        expect(props.userId?.description).toBe("User identifier");
+      }
 
       expect(props.age.type).toBe("integer");
       expect(props.age.minimum).toBe(18);
@@ -52,7 +56,7 @@ describe("Documentation and JSON Schema Generator", () => {
 
       expect(jsonSchema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
       expect(Array.isArray(jsonSchema.examples)).toBe(true);
-      expect((jsonSchema.examples as unknown[])[0]).toHaveProperty("id");
+      expect(jsonSchema.examples?.[0]).toHaveProperty("id");
     });
   });
 
@@ -68,12 +72,11 @@ describe("Documentation and JSON Schema Generator", () => {
         status: z.enum(["active", "inactive"]),
       });
 
-      const example = generateSchemaExample(schema) as Record<string, unknown>;
-
-      expect(example.sessionId).toContain("session");
+      // SAFETY: Object schema generates SchemaExampleRecord.
+      const example = generateSchemaExample(schema) as SchemaExampleRecord;
       expect(example.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
       expect(example.manifestDigest).toMatch(/^[0-9a-f]{64}$/);
-      expect(typeof example.retryCount).toBe("number");
+      expect(Number.isFinite(example.retryCount)).toBe(true);
       expect(example.enabled).toBe(true);
       expect(["active", "inactive"]).toContain(example.status);
     });

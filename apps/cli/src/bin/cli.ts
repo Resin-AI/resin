@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
+import { z } from "zod";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
 import { type InitCommandOptions, initCommand } from "../commands/init.js";
@@ -26,6 +27,10 @@ import {
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
 
+const PackageJsonSchema = z.object({
+  version: z.string().min(1),
+});
+
 function resolveVersion(): string {
   const candidates = [
     new URL("../../../../package.json", import.meta.url),
@@ -33,11 +38,11 @@ function resolveVersion(): string {
   ];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")) as {
-        version?: unknown;
-      };
-      if (typeof parsed.version === "string" && parsed.version.length > 0) {
-        return parsed.version;
+      const parsed = PackageJsonSchema.safeParse(
+        JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")),
+      );
+      if (parsed.success) {
+        return parsed.data.version;
       }
     } catch {
       // Continue to the next enclosing package candidate.
@@ -56,7 +61,7 @@ export interface InteractiveEnvironmentOptions {
 export interface ShouldOnboardOptions {
   env?: NodeJS.ProcessEnv;
   stdin?: { isTTY?: boolean };
-  stdout?: { isTTY?: boolean; write?: (chunk: string) => unknown };
+  stdout?: { isTTY?: boolean; write?: (chunk: string) => boolean | undefined };
   home?: string;
   cloudUrl?: string;
   customFetch?: typeof fetch;
@@ -92,11 +97,7 @@ export function isRootUser(
   if (env.RESIN_ALLOW_ROOT === "1" || env.RESIN_ALLOW_ROOT === "true") {
     return false;
   }
-  const uid = getuid
-    ? getuid()
-    : typeof process.getuid === "function"
-      ? process.getuid()
-      : undefined;
+  const uid = getuid ? getuid() : process.getuid instanceof Function ? process.getuid() : undefined;
   if (uid === 0) {
     return true;
   }
@@ -256,7 +257,9 @@ export async function shouldEnterFirstRunOnboarding(
   return !initialized;
 }
 
-function printGlobalHelp(outStream: { write: (chunk: string) => unknown } = process.stdout): void {
+function printGlobalHelp(
+  outStream: { write: (chunk: string) => boolean | undefined } = process.stdout,
+): void {
   const text = `
 Resin CLI (v${VERSION})
 
@@ -285,8 +288,8 @@ Run "resin <command> --help" for detailed information on a specific command.
 export interface MainOptions {
   env?: NodeJS.ProcessEnv;
   stdin?: { isTTY?: boolean };
-  stdout?: { isTTY?: boolean; write?: (chunk: string) => unknown };
-  stderr?: { write?: (chunk: string) => unknown };
+  stdout?: { isTTY?: boolean; write?: (chunk: string) => boolean | undefined };
+  stderr?: { write?: (chunk: string) => boolean | undefined };
   home?: string;
   cloudUrl?: string;
   customFetch?: typeof fetch;
@@ -470,8 +473,7 @@ export async function main(
 }
 
 export function isMainModule(metaUrl: string = import.meta.url, argv1?: string): boolean {
-  const targetPath =
-    argv1 ?? (typeof process !== "undefined" && process.argv ? process.argv[1] : undefined);
+  const targetPath = argv1 ?? (process?.argv ? process.argv[1] : undefined);
   if (!targetPath) return false;
   try {
     const resolvedPath = path.resolve(targetPath);
@@ -483,7 +485,7 @@ export function isMainModule(metaUrl: string = import.meta.url, argv1?: string):
 }
 
 if (
-  typeof process !== "undefined" &&
+  process?.argv &&
   process.argv &&
   process.argv[1] &&
   isMainModule(import.meta.url, process.argv[1])

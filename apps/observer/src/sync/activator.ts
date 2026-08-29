@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import {
+  type AuditActor,
   type CapabilityEnvelope,
   CapabilityEnvelopeSchema,
   type CatalogSnapshot,
@@ -19,6 +20,7 @@ import {
 } from "@resin/contracts";
 import { SecretRedactor } from "@resin/crypto";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
+import type { JsonObject } from "../normalization/redaction.js";
 import type { AuditTrailManager } from "../observability/audit-trail.js";
 import {
   ArtifactTransferClient,
@@ -32,13 +34,7 @@ import {
   UntrustedSigningKeyError,
 } from "./client.js";
 import { LocalPreactivationChecker } from "./preactivation.js";
-import type {
-  ArtifactInspectionResult,
-  CatalogChangeEvent,
-  LocalDeploymentState,
-  SigningKeyStore,
-  UserControls,
-} from "./types.js";
+import type { CatalogChangeEvent, SigningKeyStore, UserControls } from "./types.js";
 
 export interface QuarantineManagerLike {
   quarantineArtifact(options: {
@@ -46,8 +42,8 @@ export interface QuarantineManagerLike {
     version: string;
     reason: string;
     errorMessage?: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<unknown>;
+    metadata?: JsonObject;
+  }): Promise<undefined | boolean | JsonObject>;
 }
 
 /**
@@ -83,7 +79,7 @@ export interface ActivateDeploymentParams {
     type: "daemon" | "user" | "policy_engine" | "gateway" | "system";
     id: string;
   };
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
   artifactBuffer?: Buffer;
   requireSignature?: boolean;
   requireAttestation?: boolean;
@@ -303,6 +299,7 @@ export class DeploymentActivator {
       return {};
     }
     try {
+      // SAFETY: active_tools_json is valid JSON string dictionary of active tool versions.
       return JSON.parse(wsRow.active_tools_json) as Record<string, string>;
     } catch {
       return {};
@@ -454,7 +451,8 @@ export class DeploymentActivator {
             await this.quarantineManager.quarantineArtifact({
               toolId: params.toolId,
               version: params.version,
-              reason: qReason as any,
+              // SAFETY: qReason maps directly to recognized quarantine reason code.
+              reason: qReason as string,
               errorMessage: err instanceof Error ? err.message : String(err),
             });
           }
@@ -480,7 +478,8 @@ export class DeploymentActivator {
           await this.auditTrail.append({
             eventType: "quarantine_incident",
             actor: {
-              type: (actor.type === "gateway" ? "system" : actor.type) as any,
+              // SAFETY: Actor type mapping transforms gateway into system actor.
+              type: (actor.type === "gateway" ? "system" : actor.type) as AuditActor["type"],
               id: actor.id,
             },
             resourceType: "deployment",
@@ -584,10 +583,24 @@ export class DeploymentActivator {
         if (!precheck.eligible && precheck.violations.length > 0) {
           const violationMsg = precheck.violations.map((v) => v.message).join("; ");
           if (this.auditTrail) {
-            const auditActor = {
-              type: (actor.type === "gateway" ? "system" : actor.type) as any,
+            const auditActor: AuditActor = {
+              type: actor.type === "gateway" ? "system" : actor.type,
               id: actor.id,
             };
+            const violationRecords: JsonObject[] = precheck.violations.map((v) => {
+              const item: JsonObject = {
+                code: v.code,
+                subsystem: v.subsystem,
+                message: v.message,
+              };
+              if (v.field !== undefined) {
+                item.field = v.field;
+              }
+              if (v.requestedValue !== undefined) {
+                item.requestedValue = String(v.requestedValue);
+              }
+              return item;
+            });
             await this.auditTrail.append({
               eventType: "safety_gate_refusal",
               actor: auditActor,
@@ -599,7 +612,7 @@ export class DeploymentActivator {
                 refusalReason: violationMsg,
                 toolId: params.toolId,
                 version: params.version,
-                violations: precheck.violations,
+                violations: violationRecords,
               },
             });
           }
@@ -648,13 +661,8 @@ export class DeploymentActivator {
       const check = this.safetyGate.canExecuteTool(params.toolId, params.toolId, false);
       if (!check.allowed && check.refusal) {
         if (this.auditTrail) {
-          const auditActor = {
-            type: (actor.type === "gateway" ? "system" : actor.type) as
-              | "daemon"
-              | "user"
-              | "policy_engine"
-              | "system"
-              | "agent",
+          const auditActor: AuditActor = {
+            type: actor.type === "gateway" ? "system" : actor.type,
             id: actor.id,
           };
           await this.auditTrail.append({
@@ -679,13 +687,8 @@ export class DeploymentActivator {
       }
 
       if (this.safetyGate.isUnsafeOverrideActive?.() && this.auditTrail) {
-        const auditActor = {
-          type: (actor.type === "gateway" ? "system" : actor.type) as
-            | "daemon"
-            | "user"
-            | "policy_engine"
-            | "system"
-            | "agent",
+        const auditActor: AuditActor = {
+          type: actor.type === "gateway" ? "system" : actor.type,
           id: actor.id,
         };
         await this.auditTrail.append({
@@ -762,16 +765,16 @@ export class DeploymentActivator {
           [params.deploymentId],
         );
       }
-
       const deploymentId =
         depRow?.deployment_id ?? params.deploymentId ?? `dep_${crypto.randomUUID()}`;
       deploymentIdResult = deploymentId;
+      // SAFETY: Deployment state column matches DeploymentState union.
       const previousState = (depRow?.state as DeploymentState) ?? "drafted";
-      const history: DeploymentTransition[] = JSON.parse(depRow?.history_json || "[]");
 
       const transReason: DeploymentTransitionReason =
         params.transitionReason ?? (isCanary ? "canary_started" : "auto_promotion");
 
+      const history: DeploymentTransition[] = JSON.parse(depRow?.history_json || "[]");
       const transition: DeploymentTransition = {
         fromState: previousState,
         toState: targetState,
@@ -861,6 +864,7 @@ export class DeploymentActivator {
           manifestDigest:
             manifestRow?.digest ??
             crypto.createHash("sha256").update(`${tId}@${tVer}`).digest("hex"),
+          // SAFETY: Manifest scope column matches tool scope union.
           scope: (manifestRow?.scope as "workspace" | "user" | "global" | "session") ?? "workspace",
           status: "active",
         };
@@ -970,8 +974,9 @@ export class DeploymentActivator {
 
       // Record rolling_back and rolled_back transition
       history.push({
-        fromState: (depRow?.state as DeploymentState) ?? "promoted",
         toState: "rolled_back",
+        // SAFETY: Deployment state column matches DeploymentState union.
+        fromState: (depRow?.state as DeploymentState) ?? "promoted",
         timestamp,
         reason: "manual_rollback",
         actor,
@@ -1063,16 +1068,8 @@ export class DeploymentActivator {
             void this.quarantineManager.quarantineArtifact({
               toolId: params.toolId,
               version: cVer,
-              reason: qReason as
-                | "signature_mismatch"
-                | "digest_mismatch"
-                | "path_traversal"
-                | "decompression_bomb"
-                | "corrupted_archive"
-                | "manifest_invalid"
-                | "policy_violation"
-                | "symlink_escape"
-                | "resource_limit_exceeded",
+              // SAFETY: qReason maps directly to recognized quarantine reason code.
+              reason: qReason as string,
               errorMessage: params.reason ?? "Candidate rolled back and quarantined",
             });
           } catch {
@@ -1112,6 +1109,7 @@ export class DeploymentActivator {
           manifestDigest:
             manifestRow?.digest ??
             crypto.createHash("sha256").update(`${tId}@${tVer}`).digest("hex"),
+          // SAFETY: Manifest scope column matches tool scope union.
           scope: (manifestRow?.scope as "workspace" | "user" | "global" | "session") ?? "workspace",
           status: "active",
         };
@@ -1228,11 +1226,11 @@ export class DeploymentActivator {
           manifestDigest:
             manifestRow?.digest ??
             crypto.createHash("sha256").update(`${tId}@${tVer}`).digest("hex"),
+          // SAFETY: Manifest scope column matches tool scope union.
           scope: (manifestRow?.scope as "workspace" | "user" | "global" | "session") ?? "workspace",
           status: "active",
         };
       }
-
       const latestSnap = this.conn.get<{
         snapshot_id: string;
       }>(

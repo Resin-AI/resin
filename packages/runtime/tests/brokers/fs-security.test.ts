@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { FsCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrokerSecurityError, FilesystemBroker } from "../../src/brokers/index.js";
 import { createInvocationGrant } from "../../src/policy/grant.js";
@@ -24,7 +25,7 @@ describe("Filesystem Broker Security & Containment", () => {
     } catch {}
   });
 
-  const createGrant = (overrides: Record<string, unknown> = {}) => {
+  const createGrant = (overrides: Partial<FsCapability> = {}) => {
     return createInvocationGrant({
       grantId: "grant_fs_test",
       invocationId: "inv_fs_001",
@@ -97,9 +98,11 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threw = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect(["OUTSIDE_ALLOWED_ROOT", "PATH_TRAVERSAL", "HIDDEN_FILE_DENIED"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
+        if (err instanceof BrokerSecurityError) {
+          expect(["OUTSIDE_ALLOWED_ROOT", "PATH_TRAVERSAL", "HIDDEN_FILE_DENIED"]).toContain(
+            err.code,
+          );
+        }
       }
       expect(threw).toBe(true);
     }
@@ -135,15 +138,9 @@ describe("Filesystem Broker Security & Containment", () => {
     } catch {}
 
     // Reading through the symlink must be blocked
-    await expect(broker.readFile({ path: "malicious_symlink.txt" }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.readFile({ path: "malicious_symlink.txt" }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("SYMLINK_ESCAPE");
-    }
+    await expect(broker.readFile({ path: "malicious_symlink.txt" }, ctx)).rejects.toMatchObject({
+      code: "SYMLINK_ESCAPE",
+    });
   });
 
   it("blocks sensitive hidden files (.git, .env, .ssh) by default", async () => {
@@ -163,7 +160,9 @@ describe("Filesystem Broker Security & Containment", () => {
     } catch (err) {
       threwEnvDirect = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("HIDDEN_FILE_DENIED");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("HIDDEN_FILE_DENIED");
+      }
     }
     expect(threwEnvDirect).toBe(true);
   });
@@ -181,15 +180,9 @@ describe("Filesystem Broker Security & Containment", () => {
     fs.mkdirSync(deniedSubdir, { recursive: true });
     fs.writeFileSync(path.join(deniedSubdir, "data.txt"), "Denied Content");
 
-    await expect(broker.readFile({ path: "denied_dir/data.txt" }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.readFile({ path: "denied_dir/data.txt" }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("PATH_DENIED");
-    }
+    await expect(broker.readFile({ path: "denied_dir/data.txt" }, ctx)).rejects.toMatchObject({
+      code: "PATH_DENIED",
+    });
   });
 
   it("enforces maxFileSizeBytes limit on readFile and writeFile", async () => {
@@ -203,13 +196,9 @@ describe("Filesystem Broker Security & Containment", () => {
     // Write 200 bytes -> rejected
     await expect(
       broker.writeFile({ path: "oversized.txt", content: "X".repeat(200) }, ctx),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await broker.writeFile({ path: "oversized.txt", content: "X".repeat(200) }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("MAX_FILE_SIZE_EXCEEDED");
-    }
+    ).rejects.toMatchObject({
+      code: "MAX_FILE_SIZE_EXCEEDED",
+    });
 
     // Write small file directly on disk (150 bytes) and try reading via broker -> rejected
     fs.writeFileSync(path.join(tempWorkspace, "large_on_disk.txt"), "Y".repeat(150));
@@ -300,13 +289,6 @@ describe("Filesystem Broker Security & Containment", () => {
     await expect(broker.readFile({ path: "other_workspace.txt" }, ctx)).rejects.toThrow(
       BrokerSecurityError,
     );
-    try {
-      await broker.readFile({ path: "other_workspace.txt" }, ctx);
-    } catch (err) {
-      expect(["OPERATION_NOT_PERMITTED", "OUTSIDE_ALLOWED_ROOT"]).toContain(
-        (err as BrokerSecurityError).code,
-      );
-    }
     // Writing to non-explicit file fails
     await expect(
       broker.writeFile({ path: "other_workspace.txt", content: "New Content" }, ctx),
@@ -349,14 +331,15 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwRead = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect([
-          "SENSITIVE_PATH_DENIED",
-          "HIDDEN_FILE_DENIED",
-          "OUTSIDE_ALLOWED_ROOT",
-          "PATH_TRAVERSAL",
-          "OPERATION_NOT_PERMITTED",
-          "PATH_DENIED",
-        ]).toContain((err as BrokerSecurityError).code);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "HIDDEN_FILE_DENIED",
+            "OUTSIDE_ALLOWED_ROOT",
+            "PATH_TRAVERSAL",
+            "OPERATION_NOT_PERMITTED",
+            "PATH_DENIED",
+          ]).toContain(err.code);
+        }
       }
       expect(threwRead).toBe(true);
 
@@ -367,14 +350,15 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwWrite = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect([
-          "SENSITIVE_PATH_DENIED",
-          "HIDDEN_FILE_DENIED",
-          "OUTSIDE_ALLOWED_ROOT",
-          "PATH_TRAVERSAL",
-          "OPERATION_NOT_PERMITTED",
-          "PATH_DENIED",
-        ]).toContain((err as BrokerSecurityError).code);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "HIDDEN_FILE_DENIED",
+            "OUTSIDE_ALLOWED_ROOT",
+            "PATH_TRAVERSAL",
+            "OPERATION_NOT_PERMITTED",
+            "PATH_DENIED",
+          ]).toContain(err.code);
+        }
       }
       expect(threwWrite).toBe(true);
     }
@@ -403,9 +387,9 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwHop = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect(["SYMLINK_ESCAPE", "OUTSIDE_ALLOWED_ROOT"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
+        if (err instanceof BrokerSecurityError) {
+          expect(["SYMLINK_ESCAPE", "OUTSIDE_ALLOWED_ROOT"]).toContain(err.code);
+        }
       }
       expect(threwHop).toBe(true);
     } catch {
@@ -425,12 +409,14 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwLoop = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect([
-          "SYMLINK_ESCAPE",
-          "SYMLINK_RESOLUTION_FAILED",
-          "INVALID_PATH",
-          "OPERATION_NOT_PERMITTED",
-        ]).toContain((err as BrokerSecurityError).code);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "SYMLINK_ESCAPE",
+            "SYMLINK_RESOLUTION_FAILED",
+            "INVALID_PATH",
+            "OPERATION_NOT_PERMITTED",
+          ]).toContain(err.code);
+        }
       }
       expect(threwLoop).toBe(true);
     } catch {
@@ -450,9 +436,9 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwEnv = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect(["HIDDEN_FILE_DENIED", "SENSITIVE_PATH_DENIED"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
+        if (err instanceof BrokerSecurityError) {
+          expect(["HIDDEN_FILE_DENIED", "SENSITIVE_PATH_DENIED"]).toContain(err.code);
+        }
       }
       expect(threwEnv).toBe(true);
     } catch {
@@ -473,9 +459,9 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwTrav = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect(["SYMLINK_ESCAPE", "OUTSIDE_ALLOWED_ROOT", "PATH_TRAVERSAL"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
+        if (err instanceof BrokerSecurityError) {
+          expect(["SYMLINK_ESCAPE", "OUTSIDE_ALLOWED_ROOT", "PATH_TRAVERSAL"]).toContain(err.code);
+        }
       }
       expect(threwTrav).toBe(true);
     } catch {
@@ -503,12 +489,14 @@ describe("Filesystem Broker Security & Containment", () => {
       } catch (err) {
         threwAbs = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect([
-          "OUTSIDE_ALLOWED_ROOT",
-          "PATH_TRAVERSAL",
-          "SENSITIVE_PATH_DENIED",
-          "HIDDEN_FILE_DENIED",
-        ]).toContain((err as BrokerSecurityError).code);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "OUTSIDE_ALLOWED_ROOT",
+            "PATH_TRAVERSAL",
+            "SENSITIVE_PATH_DENIED",
+            "HIDDEN_FILE_DENIED",
+          ]).toContain(err.code);
+        }
       }
       expect(threwAbs).toBe(true);
     }

@@ -61,7 +61,7 @@ function createModuleContext(logger = createLogger()): ModuleContext {
 
 function createCaptureDoubles() {
   const unsubscribe = vi.fn();
-  const observer = {
+  const observer = mockObserverCoordinator({
     registerAdapter: vi.fn(),
     onRecords: vi.fn(() => unsubscribe),
     start: vi.fn(async () => undefined),
@@ -71,8 +71,8 @@ function createCaptureDoubles() {
     getTailer: vi.fn(() => ({
       getCursorManager: vi.fn(),
     })),
-  } as unknown as ObserverCoordinator;
-  const capture = {
+  });
+  const capture = mockCaptureCoordinator({
     handleRecords: vi.fn(async (_session, _records, ack: () => Promise<void>) => ack()),
     setTelemetryEnabled: vi.fn(),
     getActiveSessionCount: vi.fn(() => 0),
@@ -80,14 +80,14 @@ function createCaptureDoubles() {
     getUnattributedSessionCount: vi.fn(() => 0),
     getGenericSessionCount: vi.fn(() => 0),
     getDiagnostics: vi.fn(() => ({})),
-  } as unknown as TrajectoryCaptureCoordinator;
+  });
   return { observer, capture, unsubscribe };
 }
 
-function createRuntimeModule(telemetryEnabled: unknown) {
+function createRuntimeModule<T>(telemetryEnabled: T) {
   const doubles = createCaptureDoubles();
   const module = new TrajectoryCaptureRuntimeModule({
-    telemetryEnabled: telemetryEnabled as boolean,
+    telemetryEnabled: Boolean(telemetryEnabled),
     observerCoordinator: doubles.observer,
     captureCoordinator: doubles.capture,
     adapters: [],
@@ -118,13 +118,13 @@ function createTimestampedRecord(
       timestamp,
     },
     metadata: {},
-  } as RawHarnessRecord;
+  };
 }
 
 function createUploadingCaptureDoubles() {
   const processBatch = vi.fn(async (records: RawHarnessRecord[]) =>
     records.map((record) => ({
-      status: "success" as const,
+      status: "success",
       isDuplicate: false,
       event: {
         eventId: `event_${record.sessionId}_${record.sequenceNumber}`,
@@ -149,21 +149,21 @@ function createUploadingCaptureDoubles() {
     })),
   );
   const commitCloudAcknowledgedEvents = vi.fn(async () => undefined);
-  const pipeline = {
+  const pipeline = mockPipeline({
     processBatch,
     commitCloudAcknowledgedEvents,
-  } as unknown as NormalizationPipeline;
+  });
   const sendObservationBatch = vi.fn(async () => undefined);
-  const observationClient = {
+  const observationClient = mockCloudObservationClient({
     sendObservationBatch,
     sendTrajectoryObservationBatch: vi.fn(async () => undefined),
-  } as unknown as CloudObservationClient;
-  return {
+  });
+  return mockRawRecord({
     pipeline,
     observationClient,
     processBatch,
     sendObservationBatch,
-  };
+  });
 }
 
 function createPersistentModule(id: string) {
@@ -326,13 +326,13 @@ describe("observer telemetry gating", () => {
 
   it("preserves the authoritative cloud privacy transition timestamp", async () => {
     const updatedAt = "2026-08-28T12:34:56.789Z";
-    const credentialStore = {
+    const credentialStore: Parameters<typeof readCloudTelemetryConsent>[0]["credentialStore"] = {
       getRequestIdentity: vi.fn(async () => ({
         cloudUrl: "https://cloud.example.test",
         accessToken: "access-token",
       })),
-    } as unknown as Parameters<typeof readCloudTelemetryConsent>[0]["credentialStore"];
-    const fetchImpl = vi.fn(
+    };
+    const fetchImpl: typeof fetch = vi.fn(
       async () =>
         new Response(
           JSON.stringify({
@@ -344,8 +344,7 @@ describe("observer telemetry gating", () => {
             headers: { "content-type": "application/json" },
           },
         ),
-    ) as unknown as typeof fetch;
-
+    );
     await expect(readCloudTelemetryConsent({ credentialStore, fetchImpl })).resolves.toEqual({
       metadataTelemetryEnabled: true,
       updatedAt,
@@ -418,30 +417,30 @@ describe("observer telemetry gating", () => {
   it("makes zero normalization and telemetry network calls while disabled", async () => {
     const processBatch = vi.fn();
     const commitCloudAcknowledgedEvents = vi.fn();
-    const pipeline = {
+    const pipeline = mockPipeline({
       processBatch,
       commitCloudAcknowledgedEvents,
-    } as unknown as NormalizationPipeline;
+    });
     const sendTrajectoryObservationBatch = vi.fn();
     const sendObservationBatch = vi.fn();
-    const observationClient = {
+    const observationClient = mockCloudObservationClient({
       sendTrajectoryObservationBatch,
       sendObservationBatch,
-    } as unknown as CloudObservationClient;
+    });
     const coordinator = new TrajectoryCaptureCoordinator({
       pipeline,
       observationClient,
       isTelemetryEnabled: () => false,
     });
     const ack = vi.fn(async () => undefined);
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "disabled-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
+    });
 
-    await coordinator.handleRecords(session, [{} as RawHarnessRecord], ack);
+    await coordinator.handleRecords(session, [mockRawRecord()], ack);
 
     expect(ack).toHaveBeenCalledOnce();
     expect(processBatch).not.toHaveBeenCalled();
@@ -457,27 +456,27 @@ describe("observer telemetry gating", () => {
       pipelineStarted.resolve();
       return releasePipeline.promise;
     });
-    const pipeline = {
+    const pipeline = mockPipeline({
       processBatch,
       commitCloudAcknowledgedEvents: vi.fn(),
-    } as unknown as NormalizationPipeline;
+    });
     const sendObservationBatch = vi.fn();
     const coordinator = new TrajectoryCaptureCoordinator({
       pipeline,
-      observationClient: {
+      observationClient: mockCloudObservationClient({
         sendObservationBatch,
         sendTrajectoryObservationBatch: vi.fn(),
-      } as unknown as CloudObservationClient,
+      }),
     });
     const ack = vi.fn(async () => undefined);
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "in-flight-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
+    });
 
-    const handling = coordinator.handleRecords(session, [{} as RawHarnessRecord], ack);
+    const handling = coordinator.handleRecords(session, [mockRawRecord()], ack);
     await pipelineStarted.promise;
     coordinator.setTelemetryEnabled(false);
     releasePipeline.resolve([{ status: "success", isDuplicate: false, event: {} }]);
@@ -494,14 +493,14 @@ describe("observer telemetry gating", () => {
     let nowMs = 1_000;
     const processBatch = vi.fn();
     const sendObservationBatch = vi.fn();
-    const pipeline = {
+    const pipeline = mockPipeline({
       processBatch,
       commitCloudAcknowledgedEvents: vi.fn(),
-    } as unknown as NormalizationPipeline;
-    const observationClient = {
+    });
+    const observationClient = mockCloudObservationClient({
       sendObservationBatch,
       sendTrajectoryObservationBatch: vi.fn(),
-    } as unknown as CloudObservationClient;
+    });
 
     const firstModule = new TrajectoryCaptureRuntimeModule({
       observerCoordinator: createCaptureDoubles().observer,
@@ -516,15 +515,15 @@ describe("observer telemetry gating", () => {
     nowMs = 3_000;
     expect(firstModule.setTelemetryEnabled(true)).toBe(true);
 
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "privacy-cutoff-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
-    const optedOutRecord = {
+    });
+    const optedOutRecord = mockRawRecord({
       timestamp: new Date(2_000).toISOString(),
-    } as RawHarnessRecord;
+    });
     const firstAck = vi.fn(async () => undefined);
     await firstModule.getCaptureCoordinator().handleRecords(session, [optedOutRecord], firstAck);
 
@@ -548,9 +547,9 @@ describe("observer telemetry gating", () => {
       privacyCheckpointPath,
       now: () => nowMs,
     });
-    const restartIntervalRecord = {
+    const restartIntervalRecord = mockRawRecord({
       timestamp: new Date(3_500).toISOString(),
-    } as RawHarnessRecord;
+    });
     const restartAck = vi.fn(async () => undefined);
     await restartedModule
       .getCaptureCoordinator()
@@ -583,12 +582,12 @@ describe("observer telemetry gating", () => {
       privacyCheckpointPath,
       now: () => 1_000,
     });
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "remote-transition-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
+    });
 
     remoteConsent = {
       metadataTelemetryEnabled: false,
@@ -650,12 +649,12 @@ describe("observer telemetry gating", () => {
       privacyCheckpointPath,
       now: () => 1_000,
     });
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "remote-history-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
+    });
 
     remoteConsent = {
       metadataTelemetryEnabled: false,
@@ -705,12 +704,12 @@ describe("observer telemetry gating", () => {
       privacyCheckpointPath,
       now: () => 1_000,
     });
-    const session = {
+    const session = mockHarnessSession({
       sessionId: "remote-restart-session",
       workspaceId: "workspace",
       harnessId: "omp",
       status: "active",
-    } as HarnessSession;
+    });
 
     remoteConsent = {
       metadataTelemetryEnabled: false,
@@ -875,3 +874,55 @@ describe("observer telemetry gating", () => {
     }
   });
 });
+function mockObserverCoordinator(obj: Partial<ObserverCoordinator>): ObserverCoordinator {
+  // SAFETY: Test mock conforms to ObserverCoordinator contract for test execution.
+  return obj as ObserverCoordinator;
+}
+
+function mockCaptureCoordinator(
+  obj: Partial<TrajectoryCaptureCoordinator>,
+): TrajectoryCaptureCoordinator {
+  // SAFETY: Test mock conforms to TrajectoryCaptureCoordinator contract for test execution.
+  return obj as TrajectoryCaptureCoordinator;
+}
+
+function mockPipeline(obj: Partial<NormalizationPipeline>): NormalizationPipeline {
+  // SAFETY: Test mock conforms to NormalizationPipeline contract for test execution.
+  return obj as NormalizationPipeline;
+}
+
+function mockCloudObservationClient(obj: Partial<CloudObservationClient>): CloudObservationClient {
+  // SAFETY: Test mock conforms to CloudObservationClient contract for test execution.
+  return obj as CloudObservationClient;
+}
+
+function mockHarnessSession(obj: Partial<HarnessSession> = {}): HarnessSession {
+  const timestamp = new Date().toISOString();
+  return {
+    sessionId: "sess_test_1",
+    workspaceId: "ws_test_1",
+    harnessId: "omp",
+    transcriptPath: "/tmp/sess_test_1.jsonl",
+    status: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    metadata: {},
+    ...obj,
+  };
+}
+
+function mockRawRecord(obj: Partial<RawHarnessRecord> = {}): RawHarnessRecord {
+  const timestamp = new Date().toISOString();
+  return {
+    recordId: "rec_1",
+    sessionId: "sess_test_1",
+    harnessId: "omp",
+    sequenceNumber: 1,
+    timestamp,
+    recordType: "transcript_line",
+    rawPayload: {},
+    cursor: { offset: 0, line: 1, sequence: 1, timestamp },
+    metadata: {},
+    ...obj,
+  };
+}

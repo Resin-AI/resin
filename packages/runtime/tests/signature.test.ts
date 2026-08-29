@@ -146,11 +146,11 @@ describe("bundle signature and key store", () => {
       },
     ]);
 
-    const signedFiles: Record<string, string> = {
+    const signedFiles = {
       "manifest.json": "1".repeat(64),
       "src/index.ts": "2".repeat(64),
       "package.json": "3".repeat(64),
-    };
+    } satisfies Record<string, string>;
 
     const sigData = signBundlePayload("a".repeat(64), signedFiles, {
       keyId: keyPair.keyId,

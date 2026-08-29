@@ -94,6 +94,12 @@ export function isWslHostDrivePath(testPath: string, wslMountRoot = "/mnt"): boo
  * Canonicalizes a path securely across platforms, normalizing separators, relative segments,
  * checking against path traversal attacks, and normalizing WSL drive mount syntax.
  */
+export interface CanonicalizedPlatformPath {
+  canonicalPath: string;
+  isWindowsDrive: boolean;
+  isTraversalSafe: boolean;
+}
+
 export function canonicalizePlatformPath(
   rawPath: string,
   options: {
@@ -101,7 +107,7 @@ export function canonicalizePlatformPath(
     allowNonExistent?: boolean;
     wslMountRoot?: string;
   } = {},
-): { canonicalPath: string; isWindowsDrive: boolean; isTraversalSafe: boolean } {
+): CanonicalizedPlatformPath {
   if (!rawPath || rawPath.trim().length === 0) {
     throw new Error("Cannot canonicalize empty path.");
   }

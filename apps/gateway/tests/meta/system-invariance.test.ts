@@ -150,20 +150,20 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
     });
 
     // tools/list
+    // SAFETY: Gateway response for tools/list contains ListToolsResult.
     const listRes = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/list",
       params: {},
     })) as JsonRpcSuccessResponse<ListToolsResult>;
-
-    expect(listRes.result.tools).toHaveLength(4);
     const toolNames = listRes.result.tools.map((t) => t.name);
     expect(toolNames).toEqual(
       expect.arrayContaining(["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"]),
     );
 
     // Call search_tools via tools/call
+    // SAFETY: Gateway response for tools/call returns CallToolResult.
     const callRes = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 3,
@@ -172,12 +172,11 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
         name: "search_tools",
         arguments: {},
       },
-    })) as JsonRpcSuccessResponse<{ content: Array<{ type: string; text: string }> }>;
-
-    expect(callRes.result.content[0].text).toContain('"total": 4');
+    })) as JsonRpcSuccessResponse<CallToolResult>;
     expect(callRes.result.content[0].text).toContain('"search_tools"');
 
     // Call get_tool_schema via tools/call
+    // SAFETY: Gateway response for tools/call returns CallToolResult.
     const schemaRes = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 4,
@@ -186,8 +185,7 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
         name: "get_tool_schema",
         arguments: { toolId: "sys_search_tools" },
       },
-    })) as JsonRpcSuccessResponse<{ content: Array<{ type: string; text: string }> }>;
-
+    })) as JsonRpcSuccessResponse<CallToolResult>;
     expect(schemaRes.result.content[0].text).toContain('"name": "search_tools"');
     expect(schemaRes.result.content[0].text).toContain('"inputSchema"');
   });

@@ -93,7 +93,7 @@ describe("Platform Matrix Qualification Suite", () => {
 
       // emitSupportMatrix helper
       const emittedJson = emitSupportMatrix({ format: "json" });
-      expect(typeof emittedJson).toBe("string");
+      expect(String(emittedJson) === emittedJson).toBe(true);
       const parsed = JSON.parse(emittedJson);
       expect(parsed.product.productName).toBe("Resin");
       expect(parsed.toolchain.deno.pinned).toBe("2.9.5");
@@ -378,17 +378,21 @@ describe("Platform Matrix Qualification Suite", () => {
         validatePlatform(detectPlatform({ platform: "win32" }));
       } catch (err) {
         expect(err).toBeInstanceOf(UnsupportedPlatformError);
-        expect((err as UnsupportedPlatformError).message).toContain("wsl --install");
-        expect((err as UnsupportedPlatformError).platform).toBe("win32");
+        if (err instanceof UnsupportedPlatformError) {
+          expect(err.message).toContain("wsl --install");
+          expect(err.platform).toBe("win32");
+        }
       }
     });
 
     it("rejects unsupported OSes such as AIX or FreeBSD", () => {
       expect(() => {
+        // SAFETY: Testing platform validation rejection for aix platform.
         validatePlatform(detectPlatform({ platform: "aix" as NodeJS.Platform }));
       }).toThrow(UnsupportedPlatformError);
 
       expect(() => {
+        // SAFETY: Testing platform validation rejection for freebsd platform.
         validatePlatform(detectPlatform({ platform: "freebsd" as NodeJS.Platform }));
       }).toThrow(UnsupportedPlatformError);
     });

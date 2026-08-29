@@ -6,6 +6,8 @@ import {
   ProviderReportedUsageSchema,
 } from "@resin/contracts";
 import type {
+  DecoderMetadataRecord,
+  DecoderMetadataValue,
   HarnessRecordDecoder,
   IntermediateBranchForkEvent,
   IntermediateCommandExecEvent,
@@ -25,120 +27,138 @@ import type {
   RecordDecoderContext,
 } from "@resin/harness-contracts";
 
+export const OMP_PROVIDER = "omp";
+export const OMP_ACCOUNTING_VERSION = "omp-v1";
+
+export type OmpTranscriptValue = DecoderMetadataValue;
+
+export interface OmpTranscriptPayload extends DecoderMetadataRecord {
+  [key: string]: OmpTranscriptValue;
+}
+export interface CausalRefInput {
+  causalSequence: number;
+  parentId?: string | null;
+  rootId?: string | null;
+}
+
+export function asString(value: OmpTranscriptValue | undefined | null): string | undefined {
+  return value !== undefined && value !== null && String(value) === value ? value : undefined;
+}
+
+export function asNumber(value: OmpTranscriptValue | undefined | null): number | undefined {
+  return value !== undefined && value !== null && Number.isFinite(value)
+    ? Number(value)
+    : undefined;
+}
+
+function isOmpTranscriptPayload(
+  value: OmpTranscriptValue | undefined | null,
+): value is OmpTranscriptPayload {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+export function asObject(
+  value: OmpTranscriptValue | undefined | null,
+): OmpTranscriptPayload | undefined {
+  return isOmpTranscriptPayload(value) ? value : undefined;
+}
+
+export function asArray(
+  value: OmpTranscriptValue | undefined | null,
+): OmpTranscriptValue[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
 /**
- * Safely parses a non-negative integer from a number or numeric string.
+ * Safely parses a non-negative integer from string or number.
  */
-function parseNonNegativeInt(val: unknown): number | undefined {
-  if (typeof val === "number" && Number.isInteger(val) && val >= 0) {
-    return val;
+function parseNonNegativeInt(val: OmpTranscriptValue | undefined | null): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (Number.isInteger(val) && Number(val) >= 0) {
+    return Number(val);
   }
-  if (typeof val === "string" && /^\d+$/.test(val.trim())) {
-    const num = Number.parseInt(val.trim(), 10);
-    if (!Number.isNaN(num) && num >= 0) {
-      return num;
+  const str = asString(val);
+  if (str !== undefined) {
+    const trimmed = str.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const num = Number(trimmed);
+      if (Number.isSafeInteger(num) && num >= 0) {
+        return num;
+      }
     }
   }
   return undefined;
 }
 
 /**
- * Locates the raw usage record within an OMP event payload or metadata.
+ * Finds raw usage container within an OMP record or payload.
  */
 function findRawUsage(
-  obj: Record<string, unknown>,
-  metadata?: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  // 1. Explicit providerUsage / provider_usage
-  for (const key of ["providerUsage", "provider_usage"]) {
-    const val = obj[key];
-    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-      return val as Record<string, unknown>;
-    }
-  }
-
-  // 2. Standard usage containers
-  for (const key of [
+  rawPayload: OmpTranscriptPayload,
+  recordMetadata?: OmpTranscriptPayload,
+): OmpTranscriptPayload | undefined {
+  const usageKeys = [
     "usage",
-    "token_usage",
+    "providerUsage",
+    "provider_usage",
     "tokenUsage",
-    "usageMetadata",
-    "usage_metadata",
-    "modelUsage",
-    "model_usage",
-    "rawUsage",
-    "raw_usage",
-    "tokens",
-    "token_counts",
-    "tokenCounts",
-  ]) {
-    const val = obj[key];
-    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-      return val as Record<string, unknown>;
+    "token_usage",
+    "metrics",
+    "stats",
+  ];
+
+  for (const key of usageKeys) {
+    const val = asObject(rawPayload[key]);
+    if (val) return val;
+  }
+
+  const containerKeys = ["response", "result", "message", "step", "metadata"];
+  for (const parentKey of containerKeys) {
+    const parent = asObject(rawPayload[parentKey]);
+    if (parent) {
+      for (const key of usageKeys) {
+        const val = asObject(parent[key]);
+        if (val) return val;
+      }
     }
   }
 
-  // 3. Nested in metrics or response
-  if (typeof obj.metrics === "object" && obj.metrics !== null && !Array.isArray(obj.metrics)) {
-    const metrics = obj.metrics as Record<string, unknown>;
-    if (
-      typeof metrics.usage === "object" &&
-      metrics.usage !== null &&
-      !Array.isArray(metrics.usage)
-    ) {
-      return metrics.usage as Record<string, unknown>;
-    }
-    if (
-      "inputTokens" in metrics ||
-      "input_tokens" in metrics ||
-      "prompt_tokens" in metrics ||
-      "outputTokens" in metrics ||
-      "completion_tokens" in metrics ||
-      "totalTokens" in metrics ||
-      "total_tokens" in metrics
-    ) {
-      return metrics;
+  if (recordMetadata) {
+    for (const key of usageKeys) {
+      const val = asObject(recordMetadata[key]);
+      if (val) return val;
     }
   }
 
-  if (typeof obj.response === "object" && obj.response !== null && !Array.isArray(obj.response)) {
-    const resp = obj.response as Record<string, unknown>;
-    if (typeof resp.usage === "object" && resp.usage !== null && !Array.isArray(resp.usage)) {
-      return resp.usage as Record<string, unknown>;
-    }
-  }
+  const tokens = asObject(rawPayload.tokens);
+  if (tokens) return tokens;
 
-  // 4. Metadata usage
   if (
-    metadata &&
-    typeof metadata.usage === "object" &&
-    metadata.usage !== null &&
-    !Array.isArray(metadata.usage)
+    "tokens" in rawPayload ||
+    "inputTokens" in rawPayload ||
+    "promptTokens" in rawPayload ||
+    "prompt_tokens" in rawPayload ||
+    "outputTokens" in rawPayload ||
+    "output_tokens" in rawPayload ||
+    "completionTokens" in rawPayload ||
+    "completion_tokens" in rawPayload ||
+    "cachedInputTokens" in rawPayload ||
+    "cached_input_tokens" in rawPayload ||
+    "cachedTokens" in rawPayload ||
+    "cached_tokens" in rawPayload ||
+    "reasoningTokens" in rawPayload ||
+    "reasoning_tokens" in rawPayload ||
+    "thinkingTokens" in rawPayload ||
+    "thinking_tokens" in rawPayload ||
+    "totalTokens" in rawPayload ||
+    "total_tokens" in rawPayload
   ) {
-    return metadata.usage as Record<string, unknown>;
-  }
-
-  // 5. Check if obj itself has token fields at top level (excluding tokenCount which is reasoning-only)
-  if (
-    "tokens" in obj ||
-    "inputTokens" in obj ||
-    "promptTokens" in obj ||
-    "prompt_tokens" in obj ||
-    "outputTokens" in obj ||
-    "output_tokens" in obj ||
-    "completionTokens" in obj ||
-    "completion_tokens" in obj ||
-    "cachedInputTokens" in obj ||
-    "cached_input_tokens" in obj ||
-    "cachedTokens" in obj ||
-    "cached_tokens" in obj ||
-    "reasoningTokens" in obj ||
-    "reasoning_tokens" in obj ||
-    "thinkingTokens" in obj ||
-    "thinking_tokens" in obj ||
-    "totalTokens" in obj ||
-    "total_tokens" in obj
-  ) {
-    return obj;
+    return rawPayload;
   }
 
   return undefined;
@@ -153,90 +173,100 @@ interface ExtractedTokens {
   hasAnyMetrics: boolean;
 }
 
-function extractTokenComponents(raw: Record<string, unknown>): ExtractedTokens {
+/**
+ * Extracts and maps token count components from various OMP and upstream naming conventions.
+ */
+function extractTokenComponents(
+  rawUsage: OmpTranscriptPayload,
+  rawPayload: OmpTranscriptPayload,
+): ExtractedTokens {
   const promptDetails =
-    typeof raw.prompt_tokens_details === "object" && raw.prompt_tokens_details !== null
-      ? (raw.prompt_tokens_details as Record<string, unknown>)
-      : typeof raw.promptTokensDetails === "object" && raw.promptTokensDetails !== null
-        ? (raw.promptTokensDetails as Record<string, unknown>)
-        : undefined;
+    asObject(rawUsage.prompt_tokens_details) ??
+    asObject(rawUsage.promptTokensDetails) ??
+    asObject(rawUsage.input_tokens_details) ??
+    asObject(rawUsage.inputTokensDetails) ??
+    asObject(rawPayload.prompt_tokens_details) ??
+    asObject(rawPayload.promptTokensDetails);
 
   const completionDetails =
-    typeof raw.completion_tokens_details === "object" && raw.completion_tokens_details !== null
-      ? (raw.completion_tokens_details as Record<string, unknown>)
-      : typeof raw.completionTokensDetails === "object" && raw.completionTokensDetails !== null
-        ? (raw.completionTokensDetails as Record<string, unknown>)
-        : undefined;
+    asObject(rawUsage.completion_tokens_details) ??
+    asObject(rawUsage.completionTokensDetails) ??
+    asObject(rawUsage.output_tokens_details) ??
+    asObject(rawUsage.outputTokensDetails) ??
+    asObject(rawPayload.completion_tokens_details) ??
+    asObject(rawPayload.completionTokensDetails);
 
-  const tokensObj =
-    typeof raw.tokens === "object" && raw.tokens !== null
-      ? (raw.tokens as Record<string, unknown>)
-      : undefined;
+  const tokensObj = asObject(rawUsage.tokens) ?? asObject(rawPayload.tokens);
 
   const inputTokens =
-    parseNonNegativeInt(raw.input_tokens) ??
-    parseNonNegativeInt(raw.inputTokens) ??
-    parseNonNegativeInt(raw.prompt_tokens) ??
-    parseNonNegativeInt(raw.promptTokens) ??
-    parseNonNegativeInt(raw.input) ??
-    parseNonNegativeInt(raw.prompt) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.input) ?? parseNonNegativeInt(tokensObj.prompt))
-      : undefined);
+    parseNonNegativeInt(rawUsage.input_tokens) ??
+    parseNonNegativeInt(rawUsage.inputTokens) ??
+    parseNonNegativeInt(rawUsage.prompt_tokens) ??
+    parseNonNegativeInt(rawUsage.promptTokens) ??
+    parseNonNegativeInt(rawUsage.input) ??
+    parseNonNegativeInt(rawPayload.input_tokens) ??
+    parseNonNegativeInt(rawPayload.inputTokens) ??
+    parseNonNegativeInt(rawPayload.prompt_tokens) ??
+    parseNonNegativeInt(rawPayload.promptTokens) ??
+    parseNonNegativeInt(tokensObj?.input_tokens) ??
+    parseNonNegativeInt(tokensObj?.inputTokens) ??
+    parseNonNegativeInt(tokensObj?.prompt_tokens);
 
   const outputTokens =
-    parseNonNegativeInt(raw.output_tokens) ??
-    parseNonNegativeInt(raw.outputTokens) ??
-    parseNonNegativeInt(raw.completion_tokens) ??
-    parseNonNegativeInt(raw.completionTokens) ??
-    parseNonNegativeInt(raw.output) ??
-    parseNonNegativeInt(raw.completion) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.output) ?? parseNonNegativeInt(tokensObj.completion))
-      : undefined);
+    parseNonNegativeInt(rawUsage.output_tokens) ??
+    parseNonNegativeInt(rawUsage.outputTokens) ??
+    parseNonNegativeInt(rawUsage.completion_tokens) ??
+    parseNonNegativeInt(rawUsage.completionTokens) ??
+    parseNonNegativeInt(rawUsage.output) ??
+    parseNonNegativeInt(rawPayload.output_tokens) ??
+    parseNonNegativeInt(rawPayload.outputTokens) ??
+    parseNonNegativeInt(rawPayload.completion_tokens) ??
+    parseNonNegativeInt(rawPayload.completionTokens) ??
+    parseNonNegativeInt(tokensObj?.output_tokens) ??
+    parseNonNegativeInt(tokensObj?.outputTokens) ??
+    parseNonNegativeInt(tokensObj?.completion_tokens);
 
   const reasoningTokens =
-    (completionDetails
-      ? (parseNonNegativeInt(completionDetails.reasoning_tokens) ??
-        parseNonNegativeInt(completionDetails.reasoningTokens))
-      : undefined) ??
-    parseNonNegativeInt(raw.reasoning_tokens) ??
-    parseNonNegativeInt(raw.reasoningTokens) ??
-    parseNonNegativeInt(raw.thinking_tokens) ??
-    parseNonNegativeInt(raw.thinkingTokens) ??
-    parseNonNegativeInt(raw.reasoning) ??
-    parseNonNegativeInt(raw.thinking) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.reasoning) ?? parseNonNegativeInt(tokensObj.thinking))
-      : undefined);
+    parseNonNegativeInt(rawUsage.reasoning_tokens) ??
+    parseNonNegativeInt(rawUsage.reasoningTokens) ??
+    parseNonNegativeInt(rawUsage.thinking_tokens) ??
+    parseNonNegativeInt(rawUsage.thinkingTokens) ??
+    parseNonNegativeInt(rawUsage.reasoning) ??
+    parseNonNegativeInt(rawPayload.reasoning_tokens) ??
+    parseNonNegativeInt(rawPayload.reasoningTokens) ??
+    parseNonNegativeInt(rawPayload.thinking_tokens) ??
+    parseNonNegativeInt(completionDetails?.reasoning_tokens) ??
+    parseNonNegativeInt(completionDetails?.reasoningTokens) ??
+    parseNonNegativeInt(completionDetails?.thinking_tokens);
 
   const cachedInputTokens =
-    (promptDetails
-      ? (parseNonNegativeInt(promptDetails.cached_tokens) ??
-        parseNonNegativeInt(promptDetails.cachedTokens) ??
-        parseNonNegativeInt(promptDetails.cache_read_input_tokens))
-      : undefined) ??
-    parseNonNegativeInt(raw.cached_tokens) ??
-    parseNonNegativeInt(raw.cachedTokens) ??
-    parseNonNegativeInt(raw.cached_input_tokens) ??
-    parseNonNegativeInt(raw.cachedInputTokens) ??
-    parseNonNegativeInt(raw.cache_read_input_tokens) ??
-    parseNonNegativeInt(raw.cacheReadInputTokens) ??
-    parseNonNegativeInt(raw.cache_creation_input_tokens) ??
-    parseNonNegativeInt(raw.cacheCreationInputTokens) ??
-    parseNonNegativeInt(raw.cache_read_tokens) ??
-    parseNonNegativeInt(raw.cacheReadTokens) ??
-    parseNonNegativeInt(raw.cached) ??
-    parseNonNegativeInt(raw.cache_read) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.cached) ?? parseNonNegativeInt(tokensObj.cache_read))
-      : undefined);
+    parseNonNegativeInt(rawUsage.cached_input_tokens) ??
+    parseNonNegativeInt(rawUsage.cachedInputTokens) ??
+    parseNonNegativeInt(rawUsage.cache_read_input_tokens) ??
+    parseNonNegativeInt(rawUsage.cacheReadInputTokens) ??
+    parseNonNegativeInt(rawUsage.cached_tokens) ??
+    parseNonNegativeInt(rawUsage.cachedTokens) ??
+    parseNonNegativeInt(rawUsage.cache_read_tokens) ??
+    parseNonNegativeInt(rawUsage.cached) ??
+    parseNonNegativeInt(rawPayload.cached_input_tokens) ??
+    parseNonNegativeInt(rawPayload.cachedInputTokens) ??
+    parseNonNegativeInt(rawPayload.cached_tokens) ??
+    parseNonNegativeInt(promptDetails?.cached_tokens) ??
+    parseNonNegativeInt(promptDetails?.cachedTokens) ??
+    parseNonNegativeInt(promptDetails?.cache_read_input_tokens) ??
+    parseNonNegativeInt(promptDetails?.cache_read_tokens) ??
+    parseNonNegativeInt(promptDetails?.cached);
 
   const totalTokens =
-    parseNonNegativeInt(raw.total_tokens) ??
-    parseNonNegativeInt(raw.totalTokens) ??
-    parseNonNegativeInt(raw.total) ??
-    (tokensObj ? parseNonNegativeInt(tokensObj.total) : undefined);
+    parseNonNegativeInt(rawUsage.total_tokens) ??
+    parseNonNegativeInt(rawUsage.totalTokens) ??
+    parseNonNegativeInt(rawUsage.total) ??
+    parseNonNegativeInt(rawPayload.total_tokens) ??
+    parseNonNegativeInt(rawPayload.totalTokens) ??
+    parseNonNegativeInt(rawPayload.total) ??
+    parseNonNegativeInt(tokensObj?.total_tokens) ??
+    parseNonNegativeInt(tokensObj?.totalTokens);
+
   const hasAnyMetrics =
     inputTokens !== undefined ||
     outputTokens !== undefined ||
@@ -253,12 +283,26 @@ function extractTokenComponents(raw: Record<string, unknown>): ExtractedTokens {
     hasAnyMetrics,
   };
 }
+interface ExtractedCostAndDuration {
+  costMicroUsd?: number;
+  durationMs?: number;
+}
 
+interface ExtractedProviderAndModel {
+  provider: string;
+  model?: string;
+}
+
+/**
+ * Extracts and converts cost and duration to canonical schema units.
+ */
 function extractCostAndDuration(
-  rawUsage: Record<string, unknown>,
-  rawPayload: Record<string, unknown>,
-): { costMicroUsd?: number; durationMs?: number } {
-  let costMicroUsd =
+  rawUsage: OmpTranscriptPayload,
+  rawPayload: OmpTranscriptPayload,
+): ExtractedCostAndDuration {
+  let costMicroUsd: number | undefined;
+
+  const directMicro =
     parseNonNegativeInt(rawUsage.costMicroUsd) ??
     parseNonNegativeInt(rawUsage.cost_micro_usd) ??
     parseNonNegativeInt(rawUsage.costMicros) ??
@@ -268,155 +312,181 @@ function extractCostAndDuration(
     parseNonNegativeInt(rawPayload.costMicros) ??
     parseNonNegativeInt(rawPayload.cost_micros);
 
-  if (costMicroUsd === undefined) {
+  if (directMicro !== undefined) {
+    costMicroUsd = directMicro;
+  } else {
     const rawCostUsd =
-      typeof rawUsage.costUsd === "number" && rawUsage.costUsd >= 0
-        ? rawUsage.costUsd
-        : typeof rawUsage.cost_usd === "number" && rawUsage.cost_usd >= 0
-          ? rawUsage.cost_usd
-          : typeof rawPayload.costUsd === "number" && rawPayload.costUsd >= 0
-            ? rawPayload.costUsd
-            : typeof rawPayload.cost_usd === "number" && rawPayload.cost_usd >= 0
-              ? rawPayload.cost_usd
-              : undefined;
+      asNumber(rawUsage.cost_usd) ??
+      asNumber(rawUsage.costUsd) ??
+      asNumber(rawUsage.cost) ??
+      asNumber(rawPayload.cost_usd) ??
+      asNumber(rawPayload.costUsd) ??
+      asNumber(rawPayload.cost);
 
-    if (rawCostUsd !== undefined) {
+    if (rawCostUsd !== undefined && rawCostUsd >= 0) {
       costMicroUsd = Math.round(rawCostUsd * 1_000_000);
+    } else {
+      const rawCostStr =
+        asString(rawUsage.cost_usd) ??
+        asString(rawUsage.costUsd) ??
+        asString(rawUsage.cost) ??
+        asString(rawPayload.cost_usd) ??
+        asString(rawPayload.costUsd);
+
+      if (rawCostStr !== undefined) {
+        const trimmed = rawCostStr.trim().replace(/^\$/, "");
+        const num = Number(trimmed);
+        if (Number.isFinite(num) && num >= 0) {
+          costMicroUsd = Math.round(num * 1_000_000);
+        }
+      }
     }
   }
 
-  const durationMs =
-    parseNonNegativeInt(rawUsage.durationMs) ??
+  let durationMs: number | undefined;
+
+  const directMs =
     parseNonNegativeInt(rawUsage.duration_ms) ??
-    parseNonNegativeInt(rawUsage.latencyMs) ??
-    parseNonNegativeInt(rawUsage.latency_ms) ??
-    parseNonNegativeInt(rawUsage.elapsedMs) ??
-    parseNonNegativeInt(rawUsage.elapsed_ms) ??
-    (typeof rawUsage.duration === "number" && rawUsage.duration >= 0
-      ? Math.round(rawUsage.duration)
-      : undefined) ??
-    parseNonNegativeInt(rawPayload.durationMs) ??
+    parseNonNegativeInt(rawUsage.durationMs) ??
+    parseNonNegativeInt(rawUsage.executionDurationMs) ??
+    parseNonNegativeInt(rawUsage.execution_duration_ms) ??
     parseNonNegativeInt(rawPayload.duration_ms) ??
-    parseNonNegativeInt(rawPayload.latencyMs) ??
-    parseNonNegativeInt(rawPayload.latency_ms) ??
-    parseNonNegativeInt(rawPayload.elapsedMs) ??
-    parseNonNegativeInt(rawPayload.elapsed_ms);
+    parseNonNegativeInt(rawPayload.durationMs) ??
+    parseNonNegativeInt(rawPayload.executionDurationMs);
+
+  if (directMs !== undefined) {
+    durationMs = directMs;
+  } else {
+    const rawDurationSec =
+      asNumber(rawUsage.duration_seconds) ??
+      asNumber(rawUsage.durationSeconds) ??
+      asNumber(rawUsage.duration) ??
+      asNumber(rawPayload.duration_seconds) ??
+      asNumber(rawPayload.durationSeconds);
+
+    if (rawDurationSec !== undefined && rawDurationSec >= 0) {
+      durationMs = Math.round(rawDurationSec * 1000);
+    } else {
+      const rawDurStr =
+        asString(rawUsage.duration_seconds) ??
+        asString(rawUsage.durationSeconds) ??
+        asString(rawUsage.duration) ??
+        asString(rawPayload.duration_seconds);
+
+      if (rawDurStr !== undefined) {
+        const trimmed = rawDurStr.trim().replace(/s$/i, "");
+        const num = Number(trimmed);
+        if (Number.isFinite(num) && num >= 0) {
+          durationMs = Math.round(num * 1000);
+        }
+      }
+    }
+  }
 
   return { costMicroUsd, durationMs };
 }
 
+/**
+ * Resolves provider and model names from payload and usage metadata.
+ */
 function extractProviderAndModel(
-  rawUsage: Record<string, unknown>,
-  rawPayload: Record<string, unknown>,
+  rawUsage: OmpTranscriptPayload,
+  rawPayload: OmpTranscriptPayload,
+  fallbackProvider = OMP_PROVIDER,
   fallbackModel?: string,
-): { provider: string; model?: string } {
+): ExtractedProviderAndModel {
   const rawProvider =
-    (typeof rawUsage.provider === "string" && rawUsage.provider.trim()
-      ? rawUsage.provider.trim()
-      : undefined) ??
-    (typeof rawPayload.provider === "string" && rawPayload.provider.trim()
-      ? rawPayload.provider.trim()
-      : undefined) ??
-    (typeof rawUsage.model_provider === "string" && rawUsage.model_provider.trim()
-      ? rawUsage.model_provider.trim()
-      : undefined) ??
-    (typeof rawPayload.model_provider === "string" && rawPayload.model_provider.trim()
-      ? rawPayload.model_provider.trim()
-      : undefined) ??
-    (typeof rawUsage.modelProvider === "string" && rawUsage.modelProvider.trim()
-      ? rawUsage.modelProvider.trim()
-      : undefined) ??
-    (typeof rawPayload.modelProvider === "string" && rawPayload.modelProvider.trim()
-      ? rawPayload.modelProvider.trim()
-      : undefined);
-
-  const provider = rawProvider ?? "omp";
+    asString(rawUsage.provider)?.trim() ||
+    asString(rawPayload.provider)?.trim() ||
+    asString(rawUsage.provider_name)?.trim() ||
+    asString(rawPayload.provider_name)?.trim() ||
+    asString(rawUsage.providerName)?.trim() ||
+    asString(rawPayload.providerName)?.trim() ||
+    asString(rawUsage.vendor)?.trim() ||
+    asString(rawPayload.vendor)?.trim() ||
+    (fallbackProvider && fallbackProvider.trim() ? fallbackProvider.trim() : undefined);
+  const provider = rawProvider || OMP_PROVIDER;
 
   const rawModel =
-    (typeof rawUsage.model === "string" && rawUsage.model.trim()
-      ? rawUsage.model.trim()
-      : undefined) ??
-    (typeof rawPayload.model === "string" && rawPayload.model.trim()
-      ? rawPayload.model.trim()
-      : undefined) ??
-    (typeof rawUsage.model_id === "string" && rawUsage.model_id.trim()
-      ? rawUsage.model_id.trim()
-      : undefined) ??
-    (typeof rawPayload.model_id === "string" && rawPayload.model_id.trim()
-      ? rawPayload.model_id.trim()
-      : undefined) ??
-    (typeof rawUsage.modelId === "string" && rawUsage.modelId.trim()
-      ? rawUsage.modelId.trim()
-      : undefined) ??
-    (typeof rawPayload.modelId === "string" && rawPayload.modelId.trim()
-      ? rawPayload.modelId.trim()
-      : undefined) ??
-    (typeof rawUsage.model_name === "string" && rawUsage.model_name.trim()
-      ? rawUsage.model_name.trim()
-      : undefined) ??
-    (typeof rawPayload.model_name === "string" && rawPayload.model_name.trim()
-      ? rawPayload.model_name.trim()
-      : undefined) ??
-    (typeof rawUsage.modelName === "string" && rawUsage.modelName.trim()
-      ? rawUsage.modelName.trim()
-      : undefined) ??
-    (typeof rawPayload.modelName === "string" && rawPayload.modelName.trim()
-      ? rawPayload.modelName.trim()
-      : undefined) ??
+    asString(rawUsage.model)?.trim() ||
+    asString(rawPayload.model)?.trim() ||
+    asString(rawUsage.model_id)?.trim() ||
+    asString(rawPayload.model_id)?.trim() ||
+    asString(rawUsage.modelId)?.trim() ||
+    asString(rawPayload.modelId)?.trim() ||
+    asString(rawUsage.model_name)?.trim() ||
+    asString(rawPayload.model_name)?.trim() ||
+    asString(rawUsage.modelName)?.trim() ||
+    asString(rawPayload.modelName)?.trim() ||
     (fallbackModel && fallbackModel.trim() ? fallbackModel.trim() : undefined);
 
-  return { provider, model: rawModel };
+  const model = rawModel || undefined;
+
+  return { provider, model };
 }
 
+/**
+ * Resolves accounting version string.
+ */
 function extractAccountingVersion(
-  rawUsage: Record<string, unknown>,
-  rawPayload: Record<string, unknown>,
+  rawUsage: OmpTranscriptPayload,
+  rawPayload: OmpTranscriptPayload,
+  fallbackAccountingVersion = OMP_ACCOUNTING_VERSION,
 ): string {
   const version =
-    (typeof rawUsage.accountingVersion === "string" && rawUsage.accountingVersion.trim()
-      ? rawUsage.accountingVersion.trim()
-      : undefined) ??
-    (typeof rawUsage.accounting_version === "string" && rawUsage.accounting_version.trim()
-      ? rawUsage.accounting_version.trim()
-      : undefined) ??
-    (typeof rawPayload.accountingVersion === "string" && rawPayload.accountingVersion.trim()
-      ? rawPayload.accountingVersion.trim()
-      : undefined) ??
-    (typeof rawPayload.accounting_version === "string" && rawPayload.accounting_version.trim()
-      ? rawPayload.accounting_version.trim()
-      : undefined);
+    asString(rawUsage.accounting_version)?.trim() ||
+    asString(rawUsage.accountingVersion)?.trim() ||
+    asString(rawPayload.accounting_version)?.trim() ||
+    asString(rawPayload.accountingVersion)?.trim() ||
+    asString(rawUsage.schema_version)?.trim() ||
+    asString(rawUsage.schemaVersion)?.trim() ||
+    asString(rawPayload.schema_version)?.trim() ||
+    asString(rawPayload.schemaVersion)?.trim();
 
-  return version ?? "omp-v1";
+  return version || fallbackAccountingVersion;
 }
 
+/**
+ * Builds and validates canonical ProviderReportedUsage.
+ */
 function buildProviderUsage(
-  rawUsage: Record<string, unknown>,
-  rawPayload: Record<string, unknown>,
+  rawUsageCandidate: OmpTranscriptPayload | undefined,
+  rawPayload: OmpTranscriptPayload,
+  fallbackProvider = OMP_PROVIDER,
   fallbackModel?: string,
+  fallbackAccountingVersion = OMP_ACCOUNTING_VERSION,
 ): ProviderReportedUsage | undefined {
-  const { provider, model } = extractProviderAndModel(rawUsage, rawPayload, fallbackModel);
-  const accountingVersion = extractAccountingVersion(rawUsage, rawPayload);
-  const { costMicroUsd, durationMs } = extractCostAndDuration(rawUsage, rawPayload);
+  const rawUsage = rawUsageCandidate ?? {};
+
+  const { provider, model } = extractProviderAndModel(
+    rawUsage,
+    rawPayload,
+    fallbackProvider,
+    fallbackModel,
+  );
+  const accountingVersion = extractAccountingVersion(
+    rawUsage,
+    rawPayload,
+    fallbackAccountingVersion,
+  );
 
   const explicitAvailability =
-    typeof rawUsage.availability === "string"
-      ? rawUsage.availability.toLowerCase()
-      : typeof rawPayload.availability === "string"
-        ? rawPayload.availability.toLowerCase()
-        : undefined;
+    asString(rawUsage.availability) ??
+    asString(rawPayload.availability) ??
+    asString(rawUsage.provider_usage_availability) ??
+    asString(rawPayload.provider_usage_availability);
 
-  const isExplicitUnavailable =
+  if (
     explicitAvailability === "unavailable" ||
     rawUsage.unavailable === true ||
-    rawPayload.unavailable === true;
-
-  if (isExplicitUnavailable) {
-    const usageObj = {
+    rawPayload.unavailable === true
+  ) {
+    const usageObj: ProviderReportedUsage = {
       provider,
-      model,
       accountingVersion,
-      availability: "unavailable" as const,
+      availability: "unavailable",
     };
+    if (model) usageObj.model = model;
     const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
     return parsed.success ? parsed.data : undefined;
   }
@@ -427,31 +497,42 @@ function buildProviderUsage(
     reasoningTokens,
     cachedInputTokens,
     totalTokens,
-    hasAnyMetrics,
-  } = extractTokenComponents(rawUsage);
+    hasAnyMetrics: hasTokenMetrics,
+  } = extractTokenComponents(rawUsage, rawPayload);
 
-  const hasMetrics = hasAnyMetrics || costMicroUsd !== undefined || durationMs !== undefined;
+  const { costMicroUsd, durationMs } = extractCostAndDuration(rawUsage, rawPayload);
+
+  const hasMetrics = hasTokenMetrics || costMicroUsd !== undefined || durationMs !== undefined;
 
   if (!hasMetrics) {
+    if (explicitAvailability === "complete" || explicitAvailability === "partial") {
+      const usageObj: ProviderReportedUsage = {
+        provider,
+        accountingVersion,
+        availability: explicitAvailability,
+      };
+      if (model) usageObj.model = model;
+      const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
+      return parsed.success ? parsed.data : undefined;
+    }
     return undefined;
   }
 
-  let availability: "complete" | "partial" = "partial";
-  if (explicitAvailability === "complete") {
-    availability = totalTokens !== undefined ? "complete" : "partial";
-  } else if (explicitAvailability === "partial") {
-    availability = "partial";
-  } else {
-    availability = totalTokens !== undefined ? "complete" : "partial";
-  }
+  const availability: "complete" | "partial" =
+    explicitAvailability === "partial"
+      ? "partial"
+      : explicitAvailability === "complete" && totalTokens !== undefined
+        ? "complete"
+        : totalTokens !== undefined && !explicitAvailability
+          ? "complete"
+          : "partial";
 
-  const usageObj: Record<string, unknown> = {
+  const usageObj: ProviderReportedUsage = {
     provider,
-    model,
     accountingVersion,
     availability,
   };
-
+  if (model) usageObj.model = model;
   if (inputTokens !== undefined) usageObj.inputTokens = inputTokens;
   if (outputTokens !== undefined) usageObj.outputTokens = outputTokens;
   if (reasoningTokens !== undefined) usageObj.reasoningTokens = reasoningTokens;
@@ -461,58 +542,34 @@ function buildProviderUsage(
   if (durationMs !== undefined) usageObj.durationMs = durationMs;
 
   const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
-  if (parsed.success) {
-    return parsed.data;
-  }
-
-  return undefined;
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
- * Decoder mapping Oh My Pi raw records and JSONL log lines to typed intermediate session events.
+ * High-fidelity record decoder for Oh My Pi transcripts and structured records.
  */
 export class OmpRecordDecoder implements HarnessRecordDecoder {
   readonly harnessId = "omp";
   readonly decoderVersion = "1.0.0";
 
-  /**
-   * Extracts authoritative provider-reported usage from an OMP event payload or metadata.
-   */
-  extractProviderUsage(
-    obj: Record<string, unknown>,
-    fallbackModel?: string,
-  ): ProviderReportedUsage | undefined {
-    const rawUsage = findRawUsage(obj);
-    if (!rawUsage) {
-      if (obj.unavailable === true || obj.availability === "unavailable") {
-        return buildProviderUsage({}, obj, fallbackModel);
-      }
-      return undefined;
-    }
-    return buildProviderUsage(rawUsage, obj, fallbackModel);
-  }
-
   canDecode(record: RawHarnessRecord): boolean {
-    if (!record) {
-      return false;
-    }
+    if (!record) return false;
     if (record.harnessId === "omp" || record.harnessId === "*") {
       return true;
     }
 
-    // Try inspecting payload structure
     const payload = this.extractPayload(record);
-    if (!payload || typeof payload !== "object") {
+    const obj = asObject(payload);
+    if (!obj) {
       return false;
     }
 
-    const rec = payload as Record<string, unknown>;
     return (
-      rec.harness === "omp" ||
-      rec.harnessName === "omp" ||
-      typeof rec.type === "string" ||
-      typeof rec.event === "string" ||
-      typeof rec.role === "string"
+      obj.harness === "omp" ||
+      obj.harnessName === "omp" ||
+      asString(obj.type) !== undefined ||
+      asString(obj.event) !== undefined ||
+      asString(obj.role) !== undefined
     );
   }
 
@@ -525,562 +582,677 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     }
 
     const payload = this.extractPayload(record);
-    if (!payload || typeof payload !== "object") {
-      return null;
+    const obj = asObject(payload);
+    if (!obj) {
+      const rawText = asString(payload) ?? JSON.stringify(payload);
+      return {
+        sessionId: record.sessionId,
+        timestamp: record.timestamp,
+        schemaVersion: "1.0.0",
+        causalRef: {
+          causalSequence: record.sequenceNumber,
+          parentId: context?.parentEventId ?? null,
+        },
+        type: "unknown_passthrough",
+        rawEventType: "unparseable",
+        rawPayload: { text: rawText },
+      };
     }
 
-    const obj = payload as Record<string, unknown>;
-    const sessionId = String(
-      obj.sessionId ?? obj.session_id ?? record.sessionId ?? context?.sessionId ?? "omp-session",
-    );
-
-    const timestamp = String(
-      obj.timestamp ?? obj.time ?? obj.ts ?? record.timestamp ?? new Date().toISOString(),
-    );
-
-    const causalRef = {
-      parentEventId: (obj.parentEventId ?? obj.parent_event_id ?? context?.parentEventId) as
-        | string
-        | undefined,
-      causalSequence: (obj.causalSequence ?? obj.seq ?? context?.lastCausalSequence) as
-        | number
-        | undefined,
+    const sessionId = record.sessionId || asString(obj.sessionId) || "unknown-session";
+    const timestamp = record.timestamp || asString(obj.timestamp) || new Date().toISOString();
+    const causalSequence = record.sequenceNumber || 1;
+    const parentId = context?.parentEventId ?? null;
+    const causalRef: CausalRefInput = {
+      causalSequence,
+      parentId,
     };
+    // SAFETY: Record metadata is an arbitrary JSON dictionary normalized into an OmpTranscriptValue object.
+    const rawMeta = record.metadata as OmpTranscriptValue;
+    const metadata = asObject(rawMeta) ?? {};
 
-    const metadata: Record<string, unknown> = {
-      ...(typeof obj.metadata === "object" && obj.metadata !== null
-        ? (obj.metadata as Record<string, unknown>)
-        : {}),
-      ...(record.metadata ?? {}),
-      rawType: obj.type ?? obj.event ?? obj.kind,
-    };
+    const rawRole = asString(obj.role)?.toLowerCase();
+    const rawType = String(
+      asString(obj.type) ?? asString(obj.event) ?? asString(obj.kind) ?? asString(obj.action) ?? "",
+    ).toLowerCase();
 
-    const eventType = String(obj.type ?? obj.event ?? obj.kind ?? "").toLowerCase();
-
-    // 1. Messages (user, assistant, system, tool)
+    // 1. Session Lifecycle Events
     if (
-      eventType === "message" ||
-      eventType === "user_message" ||
-      eventType === "assistant_message" ||
-      eventType === "system_message" ||
-      (typeof obj.role === "string" && typeof obj.content !== "undefined")
+      rawType === "session_start" ||
+      rawType === "session_init" ||
+      rawType === "session_end" ||
+      rawType === "session_completed" ||
+      rawType === "session_terminate" ||
+      rawType === "session_lifecycle" ||
+      rawType === "lifecycle"
     ) {
-      return this.decodeMessage(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeLifecycle(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 2. Model Reasoning / Thoughts
+    // 2. User Message / Prompt Events
     if (
-      eventType === "model_reasoning" ||
-      eventType === "reasoning" ||
-      eventType === "thought" ||
-      eventType === "thinking"
+      rawRole === "user" ||
+      rawType === "prompt" ||
+      rawType === "user" ||
+      rawType === "user_message" ||
+      rawType === "query"
     ) {
-      return this.decodeReasoning(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeMessage(obj, "user", sessionId, timestamp, causalRef, metadata);
     }
 
-    // 3. Tool Calls
+    // 3. Model Reasoning / Thought Events
     if (
-      eventType === "tool_call" ||
-      eventType === "tool_use" ||
-      eventType === "tool_invocation" ||
-      eventType === "call" ||
-      (typeof obj.toolCall === "object" && obj.toolCall !== null) ||
-      (typeof obj.tool_call === "object" && obj.tool_call !== null)
+      rawType === "model_reasoning" ||
+      rawType === "thought" ||
+      rawType === "thinking" ||
+      rawType === "reasoning"
     ) {
-      return this.decodeToolCall(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeReasoning(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 4. Tool Results
+    // 4. Tool Discovery Events
     if (
-      eventType === "tool_result" ||
-      eventType === "tool_response" ||
-      eventType === "tool_output" ||
-      eventType === "result" ||
-      (typeof obj.toolResult === "object" && obj.toolResult !== null) ||
-      (typeof obj.tool_result === "object" && obj.tool_result !== null)
+      rawType === "tool_discovery" ||
+      rawType === "tools_discovered" ||
+      rawType === "tools_registered" ||
+      rawType === "mcp_tools" ||
+      (Array.isArray(obj.tools) && rawType === "tools")
     ) {
-      return this.decodeToolResult(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeToolDiscovery(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 5. Command Executions (bash / exec / command)
+    // 5. Tool Call Events
     if (
-      eventType === "command_exec" ||
-      eventType === "command" ||
-      eventType === "bash" ||
-      eventType === "exec" ||
-      eventType === "shell"
+      rawType === "tool_call" ||
+      rawType === "tool_use" ||
+      rawType === "tool_invocation" ||
+      rawType === "call" ||
+      rawType === "function_call" ||
+      rawRole === "tool_call" ||
+      asObject(obj.toolCall) !== undefined ||
+      asObject(obj.tool_call) !== undefined
     ) {
-      return this.decodeCommandExec(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeToolCall(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 6. File Edits (edit / patch / write / file_edit)
+    // 6. Tool Result Events
     if (
-      eventType === "file_edit" ||
-      eventType === "edit" ||
-      eventType === "file_write" ||
-      eventType === "write" ||
-      eventType === "patch"
+      rawType === "tool_result" ||
+      rawType === "tool_response" ||
+      rawType === "tool_output" ||
+      rawType === "result" ||
+      rawType === "function_result" ||
+      rawRole === "tool" ||
+      rawRole === "tool_result" ||
+      asObject(obj.toolResult) !== undefined ||
+      asObject(obj.tool_result) !== undefined
     ) {
-      return this.decodeFileEdit(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeToolResult(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 7. Subagent Lifecycle (spawn / delegate / settle / terminate)
+    // 7. Command Execution Events
     if (
-      eventType === "subagent_lifecycle" ||
-      eventType === "subagent" ||
-      eventType === "task" ||
-      eventType === "task_spawn" ||
-      eventType === "delegate" ||
-      eventType === "subagent_spawn"
+      rawType === "command_exec" ||
+      rawType === "bash" ||
+      rawType === "exec" ||
+      rawType === "sh"
     ) {
-      return this.decodeSubagentLifecycle(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeCommandExec(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 8. Context Compaction (compaction / summarize)
+    // 8. File Edit Events
     if (
-      eventType === "compaction" ||
-      eventType === "context_compaction" ||
-      eventType === "summarize" ||
-      eventType === "context_compact"
+      rawType === "file_edit" ||
+      rawType === "patch_applied" ||
+      rawType === "edit" ||
+      rawType === "write" ||
+      rawType === "file_write"
     ) {
-      return this.decodeCompaction(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeFileEdit(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 9. Branch Fork
+    // 9. Subagent Lifecycle Events
     if (
-      eventType === "branch_fork" ||
-      eventType === "branch" ||
-      eventType === "fork" ||
-      eventType === "session_fork"
+      rawType === "subagent_lifecycle" ||
+      rawType === "subagent" ||
+      rawType === "subagent_spawn" ||
+      rawType === "subagent_start" ||
+      rawType === "subagent_end" ||
+      rawType === "subagent_complete" ||
+      rawType === "subagent_settle"
     ) {
-      return this.decodeBranchFork(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeSubagent(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 10. Errors
+    // 10. Compaction Events
     if (
-      eventType === "error" ||
-      eventType === "exception" ||
-      eventType === "fault" ||
-      eventType === "crash"
+      rawType === "compaction" ||
+      rawType === "compact" ||
+      rawType === "context_compaction" ||
+      rawType === "prune"
     ) {
-      return this.decodeError(obj, sessionId, timestamp, causalRef, metadata);
+      return this.normalizeCompaction(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 11. Session Lifecycle
-    if (
-      eventType === "session_lifecycle" ||
-      eventType === "lifecycle" ||
-      eventType === "session_start" ||
-      eventType === "session_end"
-    ) {
-      return this.decodeSessionLifecycle(obj, sessionId, timestamp, causalRef, metadata);
+    // 11. Branch Fork Events
+    if (rawType === "branch_fork" || rawType === "fork" || rawType === "branch") {
+      return this.normalizeBranchFork(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 12. Tool Discovery
-    if (
-      eventType === "tool_discovery" ||
-      eventType === "discovery" ||
-      eventType === "tools_discovered"
-    ) {
-      return this.decodeToolDiscovery(obj, sessionId, timestamp, causalRef, metadata);
+    // 12. Error Events
+    if (rawType === "error" || rawType === "exception" || rawType === "crash") {
+      return this.normalizeError(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // Fallback passthrough
-    const providerUsage = this.extractProviderUsage(obj);
+    // 13. Assistant Message Events
+    if (
+      rawRole === "assistant" ||
+      rawType === "assistant" ||
+      rawType === "assistant_message" ||
+      rawType === "completion"
+    ) {
+      return this.normalizeMessage(obj, "assistant", sessionId, timestamp, causalRef, metadata);
+    }
+
+    // 14. System Message Events
+    if (rawRole === "system" || rawType === "system" || rawType === "system_message") {
+      return this.normalizeMessage(obj, "system", sessionId, timestamp, causalRef, metadata);
+    }
+
+    // Fallback: Pass through as unknown event
     const fallback: IntermediateUnknownPassthroughEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "unknown_passthrough",
-      rawEventType: eventType || "unknown",
+      rawEventType: rawType || "unknown",
       rawPayload: obj,
-      ...(providerUsage ? { providerUsage } : {}),
     };
     return fallback;
   }
 
-  private extractPayload(record: RawHarnessRecord): unknown {
-    if (typeof record.rawPayload === "string") {
+  private extractPayload(record: RawHarnessRecord): OmpTranscriptValue {
+    // SAFETY: Record rawPayload is decoded as an OmpTranscriptValue JSON value.
+    const raw = record.rawPayload as OmpTranscriptValue;
+    const str = asString(raw);
+    if (str !== undefined) {
       try {
-        return JSON.parse(record.rawPayload);
+        // SAFETY: Parsed JSON string produces an arbitrary OmpTranscriptValue before normalization.
+        const parsed = JSON.parse(str) as OmpTranscriptValue;
+        return asObject(parsed) ?? (Array.isArray(parsed) ? parsed : undefined) ?? { text: str };
       } catch {
-        return { text: record.rawPayload };
+        return { text: str };
       }
     }
-    return record.rawPayload;
+    return raw;
   }
 
-  private decodeMessage(
-    obj: Record<string, unknown>,
+  private extractProviderUsage(
+    obj: OmpTranscriptPayload,
+    recordMetadata?: OmpTranscriptPayload,
+    fallbackModel?: string,
+  ): ProviderReportedUsage | undefined {
+    const rawUsage = findRawUsage(obj, asObject(recordMetadata));
+    if (!rawUsage) {
+      if (obj.unavailable === true || obj.availability === "unavailable") {
+        return buildProviderUsage({}, obj, OMP_PROVIDER, fallbackModel, OMP_ACCOUNTING_VERSION);
+      }
+      return undefined;
+    }
+    return buildProviderUsage(rawUsage, obj, OMP_PROVIDER, fallbackModel, OMP_ACCOUNTING_VERSION);
+  }
+
+  private normalizeLifecycle(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
-  ): IntermediateMessageEvent {
-    let role: "user" | "assistant" | "system" | "tool" = "user";
-    const rawRole = String(obj.role ?? "").toLowerCase();
-    if (rawRole === "assistant" || rawRole === "model") {
-      role = "assistant";
-    } else if (rawRole === "system") {
-      role = "system";
-    } else if (rawRole === "tool" || rawRole === "tool_response") {
-      role = "tool";
-    }
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+  ): IntermediateSessionLifecycleEvent {
+    const rawAction = String(
+      asString(obj.lifecycleType) ??
+        asString(obj.action) ??
+        asString(obj.type) ??
+        asString(obj.event) ??
+        "",
+    ).toLowerCase();
 
+    const isStart =
+      rawAction === "start" ||
+      rawAction === "session_start" ||
+      rawAction === "session_init" ||
+      rawAction === "init";
+    const isSuspend = rawAction === "suspend" || rawAction === "pause";
+    const isResume = rawAction === "resume";
+
+    const lifecycleType: "start" | "end" | "pause" | "resume" = isStart
+      ? "start"
+      : isSuspend
+        ? "pause"
+        : isResume
+          ? "resume"
+          : "end";
+
+    const exitReason =
+      asString(obj.exitReason) ?? asString(obj.reason) ?? asString(obj.exit_reason);
+    const harnessName = asString(obj.harnessName) ?? asString(obj.harness) ?? "omp";
+    const workspaceId = asString(obj.workspaceId) ?? asString(obj.workspace);
+
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateSessionLifecycleEvent = {
+      sessionId,
+      timestamp,
+      schemaVersion: "1.0.0",
+      causalRef,
+      metadata,
+      type: "session_lifecycle",
+      lifecycleType,
+      exitReason,
+      harnessName,
+      workspaceId,
+    };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
+  }
+
+  private normalizeMessage(
+    obj: OmpTranscriptPayload,
+    role: "user" | "assistant" | "system",
+    sessionId: string,
+    timestamp: string,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+  ): IntermediateMessageEvent {
     let content = "";
     let contentParts: MessageContentPart[] | undefined;
 
-    if (typeof obj.content === "string") {
-      content = obj.content;
-    } else if (Array.isArray(obj.content)) {
-      contentParts = obj.content as MessageContentPart[];
-      content = obj.content
-        .map((part) =>
-          typeof part === "string" ? part : (part?.text ?? part?.content ?? JSON.stringify(part)),
-        )
-        .join("\n");
-    } else if (typeof obj.text === "string") {
-      content = obj.text;
-    } else if (typeof obj.message === "string") {
-      content = obj.message;
-    } else if (typeof obj.content !== "undefined") {
-      content = JSON.stringify(obj.content);
+    const strContent = asString(obj.content);
+    const strText = asString(obj.text);
+    const strPrompt = asString(obj.prompt);
+    const strMessage = asString(obj.message);
+
+    if (strContent !== undefined) {
+      content = strContent;
+    } else if (strText !== undefined) {
+      content = strText;
+    } else if (strPrompt !== undefined) {
+      content = strPrompt;
+    } else if (strMessage !== undefined) {
+      content = strMessage;
+    } else {
+      const partsArray = asArray(obj.content) ?? asArray(obj.parts);
+      if (partsArray) {
+        content = partsArray.map((part) => asString(asObject(part)?.text) ?? "").join("\n");
+      } else {
+        const msgObj = asObject(obj.message);
+        if (msgObj) {
+          content = asString(msgObj.content) ?? asString(msgObj.text) ?? JSON.stringify(msgObj);
+        }
+      }
     }
 
-    return {
+    const model = asString(obj.model) ?? asString(obj.modelId) ?? asString(obj.model_id);
+    const stopReason = asString(obj.stopReason) ?? asString(obj.stop_reason);
+    const providerUsage = this.extractProviderUsage(obj, metadata, model);
+    if (stopReason) {
+      metadata.stopReason = stopReason;
+    }
+
+    const evt: IntermediateMessageEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "message",
       role,
       content,
       contentParts,
-      model: typeof obj.model === "string" ? obj.model : undefined,
-      ...(this.extractProviderUsage(obj, typeof obj.model === "string" ? obj.model : undefined)
-        ? {
-            providerUsage: this.extractProviderUsage(
-              obj,
-              typeof obj.model === "string" ? obj.model : undefined,
-            ),
-          }
-        : {}),
+      model,
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeReasoning(
-    obj: Record<string, unknown>,
+  private normalizeReasoning(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateModelReasoningEvent {
-    const reasoningContent = String(
-      obj.reasoningContent ?? obj.reasoning_content ?? obj.thought ?? obj.text ?? obj.content ?? "",
-    );
-    const model = typeof obj.model === "string" ? obj.model : undefined;
-    const providerUsage = this.extractProviderUsage(obj, model);
+    const reasoningContent =
+      asString(obj.reasoningContent) ??
+      asString(obj.thought) ??
+      asString(obj.thinking) ??
+      asString(obj.content) ??
+      asString(obj.text) ??
+      "";
 
-    return {
+    const signature = asString(obj.signature);
+    const model = asString(obj.model);
+    const tokenCount =
+      asNumber(obj.tokenCount) ?? asNumber(obj.token_count) ?? asNumber(obj.tokens);
+    const durationMs = asNumber(obj.durationMs) ?? asNumber(obj.duration_ms);
+
+    const providerUsage = this.extractProviderUsage(obj, metadata, model);
+
+    const evt: IntermediateModelReasoningEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "model_reasoning",
       reasoningContent,
+      reasoningText: reasoningContent,
+      signature,
       model,
-      signature: typeof obj.signature === "string" ? obj.signature : undefined,
-      tokenCount:
-        typeof obj.tokenCount === "number"
-          ? obj.tokenCount
-          : (obj.token_count as number | undefined),
-      durationMs:
-        typeof obj.durationMs === "number"
-          ? obj.durationMs
-          : (obj.duration_ms as number | undefined),
-      ...(providerUsage ? { providerUsage } : {}),
+      tokenCount,
+      durationMs,
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeToolCall(
-    obj: Record<string, unknown>,
+  private normalizeToolCall(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateToolCallEvent {
-    const nested = (obj.toolCall ?? obj.tool_call ?? {}) as Record<string, unknown>;
-
+    const toolCallObj = asObject(obj.toolCall) ?? asObject(obj.tool_call) ?? obj;
     const toolName = String(
-      obj.toolName ??
-        obj.tool_name ??
-        obj.tool ??
-        obj.name ??
-        nested.name ??
-        nested.toolName ??
+      asString(toolCallObj.toolName) ??
+        asString(toolCallObj.tool_name) ??
+        asString(toolCallObj.name) ??
+        asString(toolCallObj.tool) ??
         "unknown_tool",
     );
 
     const callId = String(
-      obj.callId ??
-        obj.call_id ??
-        obj.id ??
-        nested.id ??
-        nested.callId ??
-        `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      asString(toolCallObj.callId) ??
+        asString(toolCallObj.call_id) ??
+        asString(toolCallObj.toolCallId) ??
+        asString(toolCallObj.tool_call_id) ??
+        asString(toolCallObj.id) ??
+        `call_${causalRef.causalSequence}`,
     );
 
-    let parameters: Record<string, unknown> = {};
     const rawParams =
-      obj.parameters ??
-      obj.params ??
-      obj.arguments ??
-      obj.args ??
-      obj.input ??
-      nested.parameters ??
-      nested.params ??
-      nested.arguments ??
-      nested.args ??
-      nested.input;
+      toolCallObj.parameters ??
+      toolCallObj.params ??
+      toolCallObj.input ??
+      toolCallObj.arguments ??
+      toolCallObj.args ??
+      {};
 
-    if (typeof rawParams === "string") {
-      try {
-        parameters = JSON.parse(rawParams) as Record<string, unknown>;
-      } catch {
-        parameters = { raw: rawParams };
-      }
-    } else if (typeof rawParams === "object" && rawParams !== null) {
-      parameters = rawParams as Record<string, unknown>;
-    }
-
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const rawParamsObj = asObject(rawParams) ?? {};
+    const parameters = rawParamsObj;
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+    const evt: IntermediateToolCallEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "tool_call",
       toolName,
       callId,
       parameters,
-      candidateRef: typeof obj.candidateRef === "string" ? obj.candidateRef : undefined,
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeToolResult(
-    obj: Record<string, unknown>,
+  private normalizeToolResult(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateToolResultEvent {
-    const nested = (obj.toolResult ?? obj.tool_result ?? {}) as Record<string, unknown>;
+    const toolResultObj = asObject(obj.toolResult) ?? asObject(obj.tool_result) ?? obj;
 
     const toolName = String(
-      obj.toolName ??
-        obj.tool_name ??
-        obj.tool ??
-        obj.name ??
-        nested.name ??
-        nested.toolName ??
+      asString(toolResultObj.toolName) ??
+        asString(toolResultObj.tool_name) ??
+        asString(toolResultObj.name) ??
+        asString(toolResultObj.tool) ??
         "unknown_tool",
     );
 
     const callId = String(
-      obj.callId ?? obj.call_id ?? obj.id ?? nested.id ?? nested.callId ?? `call_${Date.now()}`,
+      asString(toolResultObj.callId) ??
+        asString(toolResultObj.call_id) ??
+        asString(toolResultObj.toolCallId) ??
+        asString(toolResultObj.tool_call_id) ??
+        asString(toolResultObj.id) ??
+        `call_${causalRef.causalSequence}`,
     );
 
-    const result =
-      obj.result ??
-      obj.output ??
-      obj.response ??
-      obj.data ??
-      nested.result ??
-      nested.output ??
-      nested.data ??
-      null;
+    const rawResult =
+      toolResultObj.result ??
+      toolResultObj.output ??
+      toolResultObj.content ??
+      toolResultObj.data ??
+      toolResultObj.response;
 
     const isError = Boolean(
-      obj.isError ?? obj.is_error ?? obj.error ?? nested.isError ?? nested.is_error ?? nested.error,
+      toolResultObj.isError ||
+        toolResultObj.is_error ||
+        toolResultObj.error ||
+        asString(toolResultObj.status)?.toLowerCase() === "error",
     );
 
     const executionDurationMs =
-      typeof obj.executionDurationMs === "number"
-        ? obj.executionDurationMs
-        : typeof obj.duration_ms === "number"
-          ? obj.duration_ms
-          : typeof obj.durationMs === "number"
-            ? obj.durationMs
-            : 0;
+      asNumber(toolResultObj.executionDurationMs) ??
+      asNumber(toolResultObj.execution_duration_ms) ??
+      asNumber(toolResultObj.durationMs) ??
+      asNumber(toolResultObj.duration_ms);
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateToolResultEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "tool_result",
       toolName,
       callId,
-      result,
+      result: rawResult,
       isError,
+      error: isError
+        ? (asString(toolResultObj.error) ?? asString(toolResultObj.errorMessage) ?? undefined)
+        : undefined,
       executionDurationMs,
-      outputSizeBytes:
-        typeof obj.outputSizeBytes === "number"
-          ? obj.outputSizeBytes
-          : typeof result === "string"
-            ? Buffer.byteLength(result)
-            : undefined,
-      isShadow: Boolean(obj.isShadow ?? obj.is_shadow),
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeCommandExec(
-    obj: Record<string, unknown>,
+  private normalizeCommandExec(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateCommandExecEvent {
-    const command = String(obj.command ?? obj.cmd ?? "");
-    const args = Array.isArray(obj.args) ? (obj.args as string[]) : [];
-    const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
-    const exitCode =
-      typeof obj.exitCode === "number" ? obj.exitCode : ((obj.exit_code as number) ?? 0);
-    const stdout = typeof obj.stdout === "string" ? obj.stdout : undefined;
-    const stderr = typeof obj.stderr === "string" ? obj.stderr : undefined;
+    const command = String(asString(obj.command) ?? asString(obj.cmd) ?? "");
+    const argsArray = asArray(obj.args);
+    const args = argsArray ? argsArray.map((a) => asString(a) ?? String(a)) : undefined;
+    const workingDirectory = asString(obj.workingDirectory) ?? asString(obj.cwd);
+    const exitCode = asNumber(obj.exitCode) ?? asNumber(obj.exit_code) ?? 0;
+    const stdout = asString(obj.stdout) ?? asString(obj.output);
+    const stderr = asString(obj.stderr);
     const durationMs =
-      typeof obj.durationMs === "number"
-        ? obj.durationMs
-        : ((obj.duration_ms as number) ?? (obj.duration as number) ?? 0);
+      asNumber(obj.durationMs) ??
+      asNumber(obj.duration_ms) ??
+      asNumber(obj.executionDurationMs) ??
+      0;
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateCommandExecEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "command_exec",
       command,
       args,
-      cwd,
+      workingDirectory,
       exitCode,
       stdout,
       stderr,
       durationMs,
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeFileEdit(
-    obj: Record<string, unknown>,
+  private normalizeFileEdit(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateFileEditEvent {
     const filePath = String(
-      obj.filePath ?? obj.file_path ?? obj.path ?? obj.file ?? "unknown_file",
+      asString(obj.filePath) ??
+        asString(obj.file_path) ??
+        asString(obj.path) ??
+        asString(obj.file) ??
+        "",
     );
-    let operation: "create" | "update" | "delete" | "patch" = "update";
-    const rawOp = String(obj.operation ?? obj.action ?? obj.op ?? "").toLowerCase();
 
-    if (rawOp === "create" || rawOp === "add" || rawOp === "new") {
-      operation = "create";
-    } else if (rawOp === "delete" || rawOp === "remove" || rawOp === "rm") {
-      operation = "delete";
-    } else if (rawOp === "patch") {
-      operation = "patch";
-    }
+    const rawOp = String(asString(obj.operation) ?? asString(obj.op) ?? "patch").toLowerCase();
+    const operation: "create" | "update" | "delete" | "patch" | "read" =
+      rawOp === "create" || rawOp === "delete" || rawOp === "patch" || rawOp === "read"
+        ? rawOp
+        : rawOp === "modify" || rawOp === "update"
+          ? "update"
+          : "patch";
 
-    const patch = typeof obj.patch === "string" ? obj.patch : (obj.diff as string | undefined);
-    const beforeHash =
-      typeof obj.beforeHash === "string" ? obj.beforeHash : (obj.before_hash as string | undefined);
-    const afterHash =
-      typeof obj.afterHash === "string" ? obj.afterHash : (obj.after_hash as string | undefined);
-    const diffStats =
-      typeof obj.diffStats === "object" ? (obj.diffStats as FileDiffStats) : undefined;
+    const patch = asString(obj.patch) ?? asString(obj.diff);
+    const beforeHash = asString(obj.beforeHash) ?? asString(obj.before_hash);
+    const afterHash = asString(obj.afterHash) ?? asString(obj.after_hash);
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const rawDiffStats = asObject(obj.diffStats) ?? asObject(obj.diff_stats);
+    // SAFETY: Raw diff stats are preserved as FileDiffStats record on intermediate event.
+    const diffStats = rawDiffStats as FileDiffStats | undefined;
+
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateFileEditEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "file_edit",
       filePath,
       operation,
+      patch,
       beforeHash,
       afterHash,
-      patch,
       diffStats,
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeSubagentLifecycle(
-    obj: Record<string, unknown>,
+  private normalizeSubagent(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateSubagentLifecycleEvent {
     const subagentId = String(
-      obj.subagentId ??
-        obj.subagent_id ??
-        obj.taskId ??
-        obj.task_id ??
-        obj.id ??
-        `subagent-${Date.now()}`,
+      asString(obj.subagentId) ??
+        asString(obj.subagent_id) ??
+        asString(obj.id) ??
+        `subagent_${causalRef.causalSequence}`,
     );
 
-    let lifecycleType: "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" = "spawn";
-    const rawAction = String(
-      obj.lifecycleType ?? obj.lifecycle_type ?? obj.action ?? obj.state ?? obj.event ?? "spawn",
+    const rawLType = String(
+      asString(obj.lifecycleType) ??
+        asString(obj.action) ??
+        asString(obj.type) ??
+        asString(obj.event) ??
+        "spawn",
     ).toLowerCase();
 
-    if (rawAction === "spawn" || rawAction === "create" || rawAction === "delegated") {
-      lifecycleType = "spawn";
-    } else if (rawAction === "start" || rawAction === "running" || rawAction === "run") {
-      lifecycleType = "start";
-    } else if (rawAction === "pause" || rawAction === "park" || rawAction === "parked") {
-      lifecycleType = "pause";
-    } else if (rawAction === "resume" || rawAction === "wake") {
-      lifecycleType = "resume";
-    } else if (
-      rawAction === "terminate" ||
-      rawAction === "kill" ||
-      rawAction === "cancel" ||
-      rawAction === "aborted"
-    ) {
-      lifecycleType = "terminate";
-    } else if (
-      rawAction === "settle" ||
-      rawAction === "complete" ||
-      rawAction === "completed" ||
-      rawAction === "done"
-    ) {
-      lifecycleType = "settle";
-    }
+    const lifecycleType:
+      | "spawn"
+      | "start"
+      | "pause"
+      | "resume"
+      | "terminate"
+      | "settle"
+      | "end"
+      | "crash" =
+      rawLType === "spawn" || rawLType === "subagent_spawn"
+        ? "spawn"
+        : rawLType === "start" || rawLType === "subagent_start"
+          ? "start"
+          : rawLType === "settle" ||
+              rawLType === "subagent_settle" ||
+              rawLType === "complete" ||
+              rawLType === "subagent_complete"
+            ? "settle"
+            : rawLType === "pause" || rawLType === "subagent_pause"
+              ? "pause"
+              : rawLType === "resume" || rawLType === "subagent_resume"
+                ? "resume"
+                : rawLType === "crash" || rawLType === "subagent_crash"
+                  ? "crash"
+                  : rawLType === "terminate" ||
+                      rawLType === "subagent_terminate" ||
+                      rawLType === "subagent_end" ||
+                      rawLType === "end"
+                    ? "terminate"
+                    : "spawn";
 
     const parentId =
-      typeof obj.parentId === "string" ? obj.parentId : (obj.parent_id as string | undefined);
-    const role =
-      typeof obj.role === "string"
-        ? obj.role
-        : ((obj.agent ?? obj.agentType ?? obj.agent_type) as string | undefined);
-    const reason =
-      typeof obj.reason === "string"
-        ? obj.reason
-        : ((obj.prompt ?? obj.description) as string | undefined);
+      asString(obj.parentId) ??
+      asString(obj.parent_id) ??
+      asString(obj.parentSessionId) ??
+      asString(obj.parent_session_id) ??
+      sessionId;
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const role = asString(obj.role);
+    const reason =
+      asString(obj.reason) ?? asString(obj.resultSummary) ?? asString(obj.result_summary);
+
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateSubagentLifecycleEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "subagent_lifecycle",
@@ -1089,50 +1261,47 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       parentId,
       role,
       reason,
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeCompaction(
-    obj: Record<string, unknown>,
+  private normalizeCompaction(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateCompactionEvent {
-    let triggerReason: "context_limit" | "manual" | "scheduled" | "turn_threshold" =
-      "context_limit";
     const rawReason = String(
-      obj.triggerReason ?? obj.trigger_reason ?? obj.reason ?? "",
+      asString(obj.triggerReason) ?? asString(obj.reason) ?? "context_limit",
     ).toLowerCase();
-
-    if (rawReason === "manual") {
-      triggerReason = "manual";
-    } else if (rawReason === "scheduled") {
-      triggerReason = "scheduled";
-    } else if (rawReason === "turn_threshold" || rawReason === "turns") {
-      triggerReason = "turn_threshold";
-    }
+    const triggerReason: "context_limit" | "manual" | "scheduled" =
+      rawReason === "manual" || rawReason === "scheduled" ? rawReason : "context_limit";
 
     const tokensBefore =
-      typeof obj.tokensBefore === "number"
-        ? obj.tokensBefore
-        : ((obj.tokens_before as number) ?? (obj.before_tokens as number) ?? 0);
+      asNumber(obj.tokensBefore) ??
+      asNumber(obj.tokens_before) ??
+      asNumber(obj.originalTokenCount) ??
+      0;
 
     const tokensAfter =
-      typeof obj.tokensAfter === "number"
-        ? obj.tokensAfter
-        : ((obj.tokens_after as number) ?? (obj.after_tokens as number) ?? 0);
+      asNumber(obj.tokensAfter) ??
+      asNumber(obj.tokens_after) ??
+      asNumber(obj.compactedTokenCount) ??
+      0;
 
     const preservedContextSummary =
-      typeof obj.preservedContextSummary === "string"
-        ? obj.preservedContextSummary
-        : ((obj.summary ?? obj.preserved_summary) as string | undefined);
+      asString(obj.preservedContextSummary) ?? asString(obj.summary) ?? asString(obj.text);
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateCompactionEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "compaction",
@@ -1140,174 +1309,134 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       tokensBefore,
       tokensAfter,
       preservedContextSummary,
-      ...(providerUsage ? { providerUsage } : {}),
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeBranchFork(
-    obj: Record<string, unknown>,
+  private normalizeBranchFork(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateBranchForkEvent {
-    const sourceSessionId = String(
-      obj.sourceSessionId ??
-        obj.source_session_id ??
-        obj.parentSessionId ??
-        obj.parent_session_id ??
-        sessionId,
-    );
+    const sourceSessionId =
+      asString(obj.sourceSessionId) ?? asString(obj.source_session_id) ?? sessionId;
 
-    const branchPointEventId = String(
-      obj.branchPointEventId ??
-        obj.branch_point_event_id ??
-        obj.forkPoint ??
-        obj.fork_point ??
-        "event-0",
-    );
+    const branchName = asString(obj.branchName) ?? asString(obj.branch_name);
+    const branchPointEventId =
+      asString(obj.branchPointEventId) ?? asString(obj.branch_point_event_id);
 
-    const forkReason =
-      typeof obj.forkReason === "string" ? obj.forkReason : (obj.reason as string | undefined);
-    const branchName =
-      typeof obj.branchName === "string"
-        ? obj.branchName
-        : ((obj.name ?? obj.branch) as string | undefined);
+    const providerUsage = this.extractProviderUsage(obj, metadata);
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const evt: IntermediateBranchForkEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "branch_fork",
       sourceSessionId,
-      branchPointEventId,
-      forkReason,
       branchName,
-      ...(providerUsage ? { providerUsage } : {}),
+      branchPointEventId,
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 
-  private decodeError(
-    obj: Record<string, unknown>,
+  private normalizeError(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateErrorEvent {
     const errorType = String(
-      obj.errorType ??
-        obj.error_type ??
-        obj.name ??
-        obj.errorClass ??
-        obj.error_class ??
-        "UnknownError",
+      asString(obj.errorType) ??
+        asString(obj.error_type) ??
+        asString(obj.name) ??
+        asString(obj.errorCode) ??
+        "OmpRuntimeError",
     );
 
-    const message = String(obj.message ?? obj.error ?? obj.description ?? "An error occurred");
-    const stackTrace =
-      typeof obj.stackTrace === "string" ? obj.stackTrace : (obj.stack as string | undefined);
-    const recoverable = Boolean(obj.recoverable);
+    const message = String(
+      asString(obj.message) ??
+        asString(obj.errorMessage) ??
+        asString(obj.error) ??
+        "Unknown runtime error",
+    );
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const stack = asString(obj.stack);
+    const recoverable = Boolean(obj.recoverable ?? true);
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const evt: IntermediateErrorEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "error",
       errorType,
       message,
-      stackTrace,
+      stack,
       recoverable,
-      ...(providerUsage ? { providerUsage } : {}),
     };
-  }
-
-  private decodeSessionLifecycle(
-    obj: Record<string, unknown>,
-    sessionId: string,
-    timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
-  ): IntermediateSessionLifecycleEvent {
-    let lifecycleType: "start" | "pause" | "resume" | "end" | "crash" = "start";
-    const rawAction = String(
-      obj.lifecycleType ?? obj.lifecycle_type ?? obj.action ?? obj.state ?? obj.event ?? "start",
-    ).toLowerCase();
-
-    if (rawAction === "start" || rawAction === "init" || rawAction === "begin") {
-      lifecycleType = "start";
-    } else if (rawAction === "pause" || rawAction === "suspend") {
-      lifecycleType = "pause";
-    } else if (rawAction === "resume") {
-      lifecycleType = "resume";
-    } else if (
-      rawAction === "end" ||
-      rawAction === "finish" ||
-      rawAction === "completed" ||
-      rawAction === "close"
-    ) {
-      lifecycleType = "end";
-    } else if (rawAction === "crash" || rawAction === "error" || rawAction === "fatal") {
-      lifecycleType = "crash";
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
     }
-
-    const exitReason =
-      typeof obj.exitReason === "string" ? obj.exitReason : (obj.reason as string | undefined);
-    const harnessName = typeof obj.harnessName === "string" ? obj.harnessName : "omp";
-    const workspaceId =
-      typeof obj.workspaceId === "string"
-        ? obj.workspaceId
-        : (obj.workspace_id as string | undefined);
-
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
-      sessionId,
-      timestamp,
-      causalRef,
-      metadata,
-      type: "session_lifecycle",
-      lifecycleType,
-      exitReason,
-      harnessName,
-      workspaceId,
-      ...(providerUsage ? { providerUsage } : {}),
-    };
+    return evt;
   }
 
-  private decodeToolDiscovery(
-    obj: Record<string, unknown>,
+  private normalizeToolDiscovery(
+    obj: OmpTranscriptPayload,
     sessionId: string,
     timestamp: string,
-    causalRef: Record<string, unknown>,
-    metadata: Record<string, unknown>,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
   ): IntermediateToolDiscoveryEvent {
-    const rawTools = Array.isArray(obj.tools) ? (obj.tools as unknown[]) : [];
-    const tools: DiscoveredToolEntry[] = rawTools.map((t) => {
-      const toolObj = (typeof t === "object" && t !== null ? t : {}) as Record<string, unknown>;
+    const rawTools = asArray(obj.tools) ?? asArray(obj.tool_list) ?? [];
+    const tools: DiscoveredToolEntry[] = rawTools.map((t: OmpTranscriptValue) => {
+      const item = asObject(t) ?? {};
+      const paramsObj = asObject(item.parameters) ?? asObject(item.inputSchema) ?? {};
       return {
-        name: String(toolObj.name ?? toolObj.toolName ?? toolObj.tool ?? "unknown_tool"),
-        description: typeof toolObj.description === "string" ? toolObj.description : undefined,
-        inputSchema:
-          typeof toolObj.inputSchema === "object" && toolObj.inputSchema !== null
-            ? (toolObj.inputSchema as Record<string, unknown>)
-            : undefined,
+        name: String(asString(item.name) || asString(item.id) || "unknown_tool"),
+        description: asString(item.description),
+        inputSchema: paramsObj,
+        provider: asString(item.provider) || OMP_PROVIDER,
       };
     });
 
-    const providerUsage = this.extractProviderUsage(obj);
-    return {
+    const providerUsage = this.extractProviderUsage(obj, metadata);
+
+    const rawSource = asString(obj.source);
+    const source: "mcp" | "builtin" | "dynamic" | "harness" =
+      rawSource === "mcp" ||
+      rawSource === "builtin" ||
+      rawSource === "dynamic" ||
+      rawSource === "harness"
+        ? rawSource
+        : "harness";
+
+    const evt: IntermediateToolDiscoveryEvent = {
       sessionId,
       timestamp,
+      schemaVersion: "1.0.0",
       causalRef,
       metadata,
       type: "tool_discovery",
       tools,
-      provider: typeof obj.provider === "string" ? obj.provider : undefined,
-      source: (obj.source as "mcp" | "builtin" | "dynamic" | "harness") ?? "harness",
-      ...(providerUsage ? { providerUsage } : {}),
+      provider: asString(obj.provider),
+      source,
     };
+    if (providerUsage) {
+      evt.providerUsage = providerUsage;
+    }
+    return evt;
   }
 }

@@ -13,6 +13,7 @@ import {
   type ToolVersionStatus,
   type V1LockedToolEntry,
   type V1ToolLock,
+  V1ToolLockSchema,
   canonicalJson,
   normalizeSha256,
   validateV1ToolLock,
@@ -29,6 +30,12 @@ import {
   createSystemMetaTools,
   isSystemMetaTool,
 } from "../meta/index.js";
+import {
+  type CallToolResult,
+  type JsonRpcParamValue,
+  type JsonRpcParams,
+  JsonRpcParamsSchema,
+} from "../protocol/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CatalogCache } from "./cache.js";
@@ -39,8 +46,11 @@ import { buildCatalogSnapshot } from "./snapshot.js";
 import type {
   CatalogEntry,
   CatalogSnapshotRecord,
+  DbConnectionLike,
   RegistryTool,
+  StateStoreLike,
   ToolRegistryOptions,
+  ToolRepoLike,
   ToolScopeHierarchy,
   ValidationResult,
 } from "./types.js";
@@ -54,11 +64,15 @@ export function digestsMatch(a?: string, b?: string): boolean {
     return a.toLowerCase() === b.toLowerCase();
   }
 }
+export interface LockedToolValidationResult {
+  valid: boolean;
+  reason?: string;
+}
 
 export function validateLockedToolTuple(
   tool: RegistryTool,
   lockedEntry: V1LockedToolEntry,
-): { valid: boolean; reason?: string } {
+): LockedToolValidationResult {
   if (tool.toolId !== lockedEntry.toolId) {
     return {
       valid: false,
@@ -84,8 +98,8 @@ export function validateLockedToolTuple(
 
   if (
     lockedEntry.status === "disabled" ||
-    (lockedEntry.status as string) === "revoked" ||
-    (lockedEntry.status as string) === "blocked"
+    String(lockedEntry.status) === "revoked" ||
+    String(lockedEntry.status) === "blocked"
   ) {
     return {
       valid: false,
@@ -162,28 +176,6 @@ export interface ExecutionHandlerOptions {
   timeoutMs?: number;
 }
 
-export interface ToolRepoLike {
-  saveManifest?(manifest: ToolManifest): Promise<void>;
-  getManifest?(toolId: string, version?: string): Promise<ToolManifest | null>;
-  listManifests?(options?: { scope?: string }): Promise<ToolManifest[]>;
-  saveToolVersion?(version: ToolVersion): Promise<void>;
-  getToolVersion?(toolId: string, version: string): Promise<ToolVersion | null>;
-  listToolVersions?(toolId?: string): Promise<ToolVersion[]>;
-  saveCatalogSnapshot?(snapshot: CatalogSnapshot): Promise<void>;
-  getCatalogSnapshot?(snapshotId: string): Promise<CatalogSnapshot | null>;
-  listCatalogSnapshots?(workspaceId?: string): Promise<CatalogSnapshot[]>;
-  getLatestCatalogSnapshot?(workspaceId: string): Promise<CatalogSnapshot | null>;
-  listDeployments?(options?: { workspaceId?: string; toolId?: string; state?: string }): Promise<
-    unknown[]
-  >;
-  listInstallations?(workspaceId?: string): Promise<unknown[]>;
-}
-
-interface StateStoreLike {
-  getToolRepository?(): ToolRepoLike;
-  tools?: ToolRepoLike;
-}
-
 /**
  * Creates a tool execution handler for an evolved tool version.
  */
@@ -192,23 +184,19 @@ export function createEvolvedToolHandler(
     | ToolVersion
     | { manifest: ToolManifest; artifact?: ToolArtifact; status?: string; sourceCode?: string },
 ): ToolHandler {
-  return async (
-    context: WorkspaceContext,
-    params: Record<string, unknown>,
-    options?: ToolCallOptions,
-  ) => {
+  return async (context: WorkspaceContext, params: JsonRpcParams, options?: ToolCallOptions) => {
     const manifest = toolVersion.manifest;
     const artifact = "artifact" in toolVersion ? toolVersion.artifact : undefined;
     let sourceCode: string | undefined;
     if (
       "sourceCode" in toolVersion &&
-      typeof toolVersion.sourceCode === "string" &&
-      toolVersion.sourceCode.trim().length > 0
+      Object.prototype.toString.call(toolVersion.sourceCode) === "[object String]" &&
+      String(toolVersion.sourceCode).trim().length > 0
     ) {
       sourceCode = toolVersion.sourceCode;
     } else if (
       artifact?.sourceCode &&
-      typeof artifact.sourceCode === "string" &&
+      Object.prototype.toString.call(artifact.sourceCode) === "[object String]" &&
       artifact.sourceCode.trim().length > 0
     ) {
       sourceCode = artifact.sourceCode;
@@ -226,11 +214,7 @@ export function createEvolvedToolHandler(
     }
 
     let effectiveArtifactDigest = artifact?.artifactDigest;
-    if (
-      !effectiveArtifactDigest &&
-      "artifactDigest" in toolVersion &&
-      typeof toolVersion.artifactDigest === "string"
-    ) {
+    if (!effectiveArtifactDigest && "artifactDigest" in toolVersion && toolVersion.artifactDigest) {
       effectiveArtifactDigest = toolVersion.artifactDigest;
     }
     if (!bundlePathOrSource && effectiveArtifactDigest) {
@@ -261,7 +245,9 @@ export function createEvolvedToolHandler(
         );
         if (result.status === "success") {
           const textOutput =
-            typeof result.output === "string" ? result.output : JSON.stringify(result.output);
+            Object.prototype.toString.call(result.output) === "[object String]"
+              ? String(result.output)
+              : JSON.stringify(result.output);
           return {
             content: [
               {
@@ -286,7 +272,7 @@ export function createEvolvedToolHandler(
           content: [
             {
               type: "text",
-              text: (err as Error).message || "Tool execution error",
+              text: (err instanceof Error ? err.message : String(err)) || "Tool execution error",
             },
           ],
         };
@@ -309,7 +295,9 @@ export function createEvolvedToolHandler(
 
 export const createExecutionHandler = createEvolvedToolHandler;
 
-export function extractToolRepo(db: unknown): ToolRepoLike | null {
+export function extractToolRepo(
+  db: ToolRepoLike | StateStoreLike | LocalDatabaseConnection | DbConnectionLike | null | undefined,
+): ToolRepoLike | null {
   if (!db) {
     try {
       const paths = resolvePaths();
@@ -323,7 +311,7 @@ export function extractToolRepo(db: unknown): ToolRepoLike | null {
     }
     return null;
   }
-  if (typeof db !== "object") {
+  if (!(db instanceof Object)) {
     return null;
   }
   if (db instanceof ToolRepository) {
@@ -331,22 +319,102 @@ export function extractToolRepo(db: unknown): ToolRepoLike | null {
   }
   if (
     db instanceof LocalDatabaseConnection ||
-    ("run" in db && "get" in db && "all" in db && typeof db.run === "function")
+    ("run" in db && "get" in db && "all" in db && db.run instanceof Function)
   ) {
+    // SAFETY: db is confirmed to be LocalDatabaseConnection or duck-typed with query methods.
     return new ToolRepository(db as LocalDatabaseConnection);
   }
-  const store = db as StateStoreLike;
-  if (typeof store.getToolRepository === "function") {
-    return store.getToolRepository() ?? null;
+  if ("getToolRepository" in db && db.getToolRepository instanceof Function) {
+    return db.getToolRepository() ?? null;
   }
-  if (store.tools && typeof store.tools.saveToolVersion === "function") {
-    return store.tools;
+  if (
+    "tools" in db &&
+    db.tools &&
+    "saveToolVersion" in db.tools &&
+    db.tools.saveToolVersion instanceof Function
+  ) {
+    return db.tools;
   }
-  if ("saveManifest" in db && typeof (db as ToolRepoLike).saveManifest === "function") {
+  if ("saveManifest" in db && db.saveManifest instanceof Function) {
+    // SAFETY: db is an object containing saveManifest method satisfying ToolRepoLike.
     return db as ToolRepoLike;
   }
   return null;
 }
+
+function isToolRegistryOptions(
+  value:
+    | ToolRegistryOptions
+    | ToolRepoLike
+    | LocalDatabaseConnection
+    | StateStoreLike
+    | DbConnectionLike
+    | null
+    | undefined,
+): value is ToolRegistryOptions {
+  return Boolean(
+    value &&
+      value instanceof Object &&
+      !("run" in value) &&
+      !("getConnection" in value) &&
+      !("saveManifest" in value) &&
+      !("tools" in value),
+  );
+}
+
+function isRegistryDbConnection(
+  value:
+    | ToolRepoLike
+    | LocalDatabaseConnection
+    | StateStoreLike
+    | DbConnectionLike
+    | null
+    | undefined,
+): value is DbConnectionLike {
+  return Boolean(
+    value &&
+      !(value instanceof LocalDatabaseConnection) &&
+      value instanceof Object &&
+      "run" in value &&
+      value.run instanceof Function &&
+      "get" in value &&
+      value.get instanceof Function &&
+      "all" in value &&
+      value.all instanceof Function,
+  );
+}
+
+function toControlsDbConnection(
+  value:
+    | ToolRepoLike
+    | LocalDatabaseConnection
+    | StateStoreLike
+    | DbConnectionLike
+    | null
+    | undefined,
+): DbConnectionLike | undefined {
+  if (value instanceof LocalDatabaseConnection) {
+    return {
+      run(sql, params) {
+        return value.run(sql, params);
+      },
+      get<T = Record<string, string | number | boolean | null>>(
+        sql: string,
+        params?: (string | number | boolean | null)[],
+      ) {
+        return value.get<T>(sql, params) ?? undefined;
+      },
+      all<T = Record<string, string | number | boolean | null>>(
+        sql: string,
+        params?: (string | number | boolean | null)[],
+      ) {
+        return value.all<T>(sql, params);
+      },
+    };
+  }
+  return isRegistryDbConnection(value) ? value : undefined;
+}
+
 /**
  * Dynamic Tool Registry managing workspace-scoped tool visibility, pre-staging validation,
  * atomic version activation, rollback, user controls, and catalog snapshot caching.
@@ -382,30 +450,35 @@ export class ToolRegistry {
   private readonly snapshotHistory = new Map<string, CatalogSnapshotRecord[]>();
   private hydrated = false;
   private hydrationPromise?: Promise<number>;
-
-  constructor(options?: ToolRegistryOptions | unknown) {
-    const db =
-      options && typeof options === "object" && "db" in options
-        ? (options as ToolRegistryOptions).db
-        : options;
-    const opts = (
-      options &&
-      typeof options === "object" &&
-      !("run" in options) &&
-      !("getConnection" in options) &&
-      !("saveManifest" in options) &&
-      !("tools" in options)
-        ? options
-        : undefined
-    ) as ToolRegistryOptions | undefined;
+  constructor(
+    options?:
+      | ToolRegistryOptions
+      | ToolRepoLike
+      | LocalDatabaseConnection
+      | StateStoreLike
+      | DbConnectionLike
+      | null,
+  ) {
+    let opts: ToolRegistryOptions | undefined;
+    let db:
+      | ToolRepoLike
+      | LocalDatabaseConnection
+      | StateStoreLike
+      | DbConnectionLike
+      | null
+      | undefined;
+    if (isToolRegistryOptions(options)) {
+      opts = options;
+      db = options.db;
+    } else {
+      db = options;
+    }
 
     this.toolRepo = extractToolRepo(db);
     this.defaultEnvelope = opts?.defaultEnvelope;
     this.cache = new CatalogCache({ maxSize: opts?.cacheSize });
-    const userControlsOpts = opts as UserControlsManagerOptions | undefined;
-    const lockMgrOpt = userControlsOpts?.lockManager;
-    const lockMgrsOpt = userControlsOpts?.lockManagers;
-
+    const lockMgrOpt = opts?.lockManager;
+    const lockMgrsOpt = opts?.lockManagers;
     this.controls = new UserControlsManager(db, {
       lockManager: lockMgrOpt,
       lockManagers: lockMgrsOpt,
@@ -487,8 +560,12 @@ export class ToolRegistry {
    * Binds a validated V1ToolLock to a workspace.
    * Invalidates cached snapshots for the workspace.
    */
-  bindWorkspaceLock(workspaceId: string, lock: unknown): V1ToolLock {
-    const validatedLock = validateV1ToolLock(lock);
+  bindWorkspaceLock(
+    workspaceId: string,
+    lock: V1ToolLock | JsonRpcParams | null | undefined,
+  ): V1ToolLock {
+    const parsedLock = V1ToolLockSchema.parse(lock);
+    const validatedLock = validateV1ToolLock(parsedLock);
     this.workspaceLocks.set(workspaceId, validatedLock);
     this.cache.invalidateWorkspace(workspaceId);
     return validatedLock;
@@ -497,14 +574,17 @@ export class ToolRegistry {
   /**
    * Alias for bindWorkspaceLock.
    */
-  bindLock(workspaceId: string, lock: unknown): V1ToolLock {
+  bindLock(workspaceId: string, lock: V1ToolLock | JsonRpcParams | null | undefined): V1ToolLock {
     return this.bindWorkspaceLock(workspaceId, lock);
   }
 
   /**
    * Alias for bindWorkspaceLock.
    */
-  bindProjectLock(workspaceId: string, lock: unknown): V1ToolLock {
+  bindProjectLock(
+    workspaceId: string,
+    lock: V1ToolLock | JsonRpcParams | null | undefined,
+  ): V1ToolLock {
     return this.bindWorkspaceLock(workspaceId, lock);
   }
 
@@ -544,21 +624,18 @@ export class ToolRegistry {
     return this.workspaceLocks.has(workspaceId);
   }
 
-  /**
-   * Validates a tool against a locked entry tuple.
-   */
   validateLockedToolTuple(
     tool: RegistryTool,
     lockedEntry: V1LockedToolEntry,
-  ): { valid: boolean; reason?: string } {
+  ): LockedToolValidationResult {
     return validateLockedToolTuple(tool, lockedEntry);
   }
   /**
    * Pre-stages and validates a tool manifest and artifact against capability envelopes.
    */
   async stageToolVersion(
-    manifest: unknown,
-    artifact?: unknown,
+    manifest: ToolManifest | JsonRpcParams | null | undefined,
+    artifact?: ToolArtifact | JsonRpcParams | null | undefined,
     envelope?: CapabilityEnvelope,
   ): Promise<ValidationResult> {
     const targetEnvelope = envelope ?? this.defaultEnvelope;
@@ -571,32 +648,35 @@ export class ToolRegistry {
     if (!result.valid) {
       return result;
     }
-
     const validatedManifest = ToolManifestSchema.parse(manifest);
     const toolId = validatedManifest.id;
     let validatedArtifact: ToolArtifact | undefined;
+
     if (artifact !== undefined) {
       if (
-        typeof artifact === "object" &&
-        artifact !== null &&
+        artifact instanceof Object &&
         "artifactDigest" in artifact &&
         "bundleReference" in artifact
       ) {
         validatedArtifact = ToolArtifactSchema.parse(artifact);
       } else {
-        const rawArt = artifact as Record<string, unknown>;
+        const rawArt = artifact instanceof Object ? artifact : {};
         const code =
-          typeof rawArt.code === "string"
-            ? rawArt.code
-            : typeof rawArt.sourceCode === "string"
-              ? rawArt.sourceCode
+          "code" in rawArt && Object.prototype.toString.call(rawArt.code) === "[object String]"
+            ? String(rawArt.code)
+            : "sourceCode" in rawArt &&
+                Object.prototype.toString.call(rawArt.sourceCode) === "[object String]"
+              ? String(rawArt.sourceCode)
               : "";
         const digest =
-          typeof rawArt.digest === "string"
-            ? rawArt.digest
-            : typeof rawArt.artifactDigest === "string"
-              ? rawArt.artifactDigest
-              : computeSha256(code || `${toolId}@${validatedManifest.version}`);
+          "digest" in rawArt && Object.prototype.toString.call(rawArt.digest) === "[object String]"
+            ? String(rawArt.digest)
+            : computeSha256(code);
+        const entrypoint =
+          "entrypoint" in rawArt &&
+          Object.prototype.toString.call(rawArt.entrypoint) === "[object String]"
+            ? String(rawArt.entrypoint)
+            : "index.js";
         validatedArtifact = ToolArtifactSchema.parse({
           artifactDigest: digest,
           bundleReference: {
@@ -605,7 +685,7 @@ export class ToolRegistry {
             sizeBytes: Buffer.byteLength(code, "utf8"),
             format: "embedded",
           },
-          entrypoint: typeof rawArt.entrypoint === "string" ? rawArt.entrypoint : "index.js",
+          entrypoint,
           sourceCode: code,
           checksums: {},
         });
@@ -618,17 +698,26 @@ export class ToolRegistry {
       name: validatedManifest.name,
       version: validatedManifest.version,
       manifest: validatedManifest,
+      scope: validatedManifest.scope ?? "workspace",
       manifestDigest: result.manifestDigest,
       artifact: validatedArtifact,
       artifactDigest: result.artifactDigest,
       envelope: targetEnvelope,
       envelopeDigest: targetEnvelope ? computeSha256(canonicalJson(targetEnvelope)) : undefined,
-      scope: validatedManifest.scope as ToolScopeHierarchy,
       status: "active",
       description: validatedManifest.description,
-      parameters: validatedManifest.parameters,
-      outputSchema: validatedManifest.outputSchema,
-      metadata: validatedManifest.metadata,
+      parameters:
+        validatedManifest.parameters === undefined
+          ? undefined
+          : JsonRpcParamsSchema.parse(validatedManifest.parameters),
+      outputSchema:
+        validatedManifest.outputSchema === undefined
+          ? undefined
+          : JsonRpcParamsSchema.parse(validatedManifest.outputSchema),
+      metadata:
+        validatedManifest.metadata === undefined
+          ? undefined
+          : JsonRpcParamsSchema.parse(validatedManifest.metadata),
       createdAt: validatedManifest.createdAt,
       updatedAt: validatedManifest.updatedAt,
       sourceCode: validatedArtifact?.sourceCode,
@@ -664,18 +753,26 @@ export class ToolRegistry {
           await this.toolRepo.saveToolVersion(toolVersion);
         }
       } catch {
-        // Suppress DB persistence failure during staging if running in ephemeral mode
+        // Ignore DB save errors in staging
       }
     }
+
     return result;
   }
 
-  private getExistingVersionsForManifest(rawManifest: unknown): ToolVersion[] {
-    if (!rawManifest || typeof rawManifest !== "object") {
+  private getExistingVersionsForManifest(
+    rawManifest: ToolManifest | JsonRpcParams | null | undefined,
+  ): ToolVersion[] {
+    if (!rawManifest || !(rawManifest instanceof Object)) {
       return [];
     }
-    const raw = rawManifest as { id?: string; toolId?: string };
-    const toolId = raw.id ?? raw.toolId;
+    const toolId =
+      "id" in rawManifest && Object.prototype.toString.call(rawManifest.id) === "[object String]"
+        ? String(rawManifest.id)
+        : "toolId" in rawManifest &&
+            Object.prototype.toString.call(rawManifest.toolId) === "[object String]"
+          ? String(rawManifest.toolId)
+          : undefined;
     if (!toolId) {
       return [];
     }
@@ -700,10 +797,11 @@ export class ToolRegistry {
             deterministicBuildHash: tool.artifact.artifactDigest,
             environment: {},
           },
-          status: (tool.status === "disabled"
-            ? "deprecated"
-            : (tool.status ?? "active")) as ToolVersionStatus,
-          createdAt: tool.createdAt || new Date().toISOString(),
+          status:
+            tool.status === "draft" || tool.status === "deprecated" || tool.status === "revoked"
+              ? tool.status
+              : "active",
+          createdAt: tool.createdAt || tool.manifest.createdAt || new Date().toISOString(),
           createdBy: "gateway",
         });
       }
@@ -779,7 +877,7 @@ export class ToolRegistry {
     },
   ): Promise<RegistryTool> {
     if ("toolId" in tool && "manifest" in tool) {
-      const regTool = tool as RegistryTool;
+      const regTool = tool;
       if (options?.manifestDigest && !regTool.manifestDigest)
         regTool.manifestDigest = options.manifestDigest;
       if (options?.artifactDigest && !regTool.artifactDigest)
@@ -791,7 +889,7 @@ export class ToolRegistry {
       return regTool;
     }
 
-    const manifest = tool as ToolManifest;
+    const manifest = tool;
     await this.stageToolVersion(manifest, artifact, options?.envelope);
 
     const registered = this.registeredTools.get(manifest.id)?.get(manifest.version);
@@ -870,8 +968,8 @@ export class ToolRegistry {
         // Revoked/disabled/blocked statuses never resolve
         if (
           lockedEntry.status === "disabled" ||
-          (lockedEntry.status as string) === "revoked" ||
-          (lockedEntry.status as string) === "blocked"
+          String(lockedEntry.status) === "revoked" ||
+          String(lockedEntry.status) === "blocked"
         ) {
           continue;
         }
@@ -1073,10 +1171,20 @@ export class ToolRegistry {
         Boolean(controls.pinnedVersions[tool.name]) ||
         (tool.exposedName ? Boolean(controls.pinnedVersions[tool.exposedName]) : false);
 
+      const parametersValue = tool.parameters ?? tool.manifest.parameters;
+      const outputSchemaValue = tool.outputSchema ?? tool.manifest.outputSchema;
+      const parameters =
+        parametersValue === undefined ? undefined : JsonRpcParamsSchema.parse(parametersValue);
+      const outputSchema =
+        outputSchemaValue === undefined ? undefined : JsonRpcParamsSchema.parse(outputSchemaValue);
+      const metadata =
+        tool.metadata === undefined ? undefined : JsonRpcParamsSchema.parse(tool.metadata);
+
       const entry: CatalogEntry = {
         toolId: tool.toolId,
         name: tool.name,
         version: tool.version,
+        manifest: tool.manifest,
         manifestDigest:
           tool.manifestDigest || tool.manifest.digest || computeManifestDigest(tool.manifest),
         artifactDigest: tool.artifactDigest || tool.artifact?.artifactDigest,
@@ -1084,12 +1192,8 @@ export class ToolRegistry {
         scope,
         status: tool.status || "active",
         exposedName,
-        description: tool.description ?? tool.manifest.description,
-        parameters:
-          tool.parameters ?? (tool.manifest.parameters as Record<string, unknown> | undefined),
-        outputSchema:
-          tool.outputSchema ?? (tool.manifest.outputSchema as Record<string, unknown> | undefined),
-        manifest: tool.manifest,
+        parameters,
+        outputSchema,
         artifact: tool.artifact,
         handler: tool.handler,
         sourceCode: tool.sourceCode,
@@ -1097,7 +1201,7 @@ export class ToolRegistry {
         sessionId,
         isPinned,
         isDisabled: false,
-        metadata: tool.metadata,
+        metadata,
       };
       entries.push(entry);
     }
@@ -1182,8 +1286,8 @@ export class ToolRegistry {
 
         if (
           lockedEntry.status === "disabled" ||
-          (lockedEntry.status as string) === "revoked" ||
-          (lockedEntry.status as string) === "blocked"
+          String(lockedEntry.status) === "revoked" ||
+          String(lockedEntry.status) === "blocked"
         ) {
           return undefined;
         }
@@ -1222,21 +1326,19 @@ export class ToolRegistry {
       }
 
       const catalog = await this.resolveCatalog(workspaceId, sessionId);
-      const entry = Object.values(catalog.tools).find(
-        (t) =>
-          t.toolId === toolIdOrName ||
-          (t as CatalogToolSummary & { name?: string }).name === toolIdOrName,
+      const entry = Object.entries(catalog.tools).find(
+        ([exposedName, t]) => exposedName === toolIdOrName || t.toolId === toolIdOrName,
       );
-
       if (entry) {
-        const found = this.registeredTools.get(entry.toolId)?.get(entry.version);
+        const [, toolSummary] = entry;
+        const found = this.registeredTools.get(toolSummary.toolId)?.get(toolSummary.version);
         if (found) {
           return { ...found, isDisabled: false };
         }
       }
-
-      const record = catalog as CatalogSnapshotRecord;
-      if (record.entries) {
+      // SAFETY: 'entries' property indicates catalog conforms to CatalogSnapshotRecord structure.
+      const record = "entries" in catalog ? (catalog as CatalogSnapshotRecord) : undefined;
+      if (record && record.entries) {
         for (const e of Object.values(record.entries)) {
           if (
             e.exposedName === toolIdOrName ||
@@ -1313,8 +1415,8 @@ export class ToolRegistry {
         }
         if (
           lockedEntry.status === "disabled" ||
-          (lockedEntry.status as string) === "revoked" ||
-          (lockedEntry.status as string) === "blocked"
+          String(lockedEntry.status) === "revoked" ||
+          String(lockedEntry.status) === "blocked"
         ) {
           return undefined;
         }
@@ -1402,8 +1504,8 @@ export class ToolRegistry {
         }
         if (
           lockedEntry.status === "disabled" ||
-          (lockedEntry.status as string) === "revoked" ||
-          (lockedEntry.status as string) === "blocked"
+          String(lockedEntry.status) === "revoked" ||
+          String(lockedEntry.status) === "blocked"
         ) {
           throw new Error(
             `Cannot activate tool '${toolId}': tool is '${lockedEntry.status}' in lockfile`,
@@ -1542,6 +1644,22 @@ export class ToolRegistry {
     });
 
     return snapshot;
+  }
+
+  /**
+   * Sets active version of a tool in workspace or system scope.
+   */
+  setActiveVersion(toolId: string, version: string, workspaceId?: string): void {
+    if (workspaceId) {
+      let wsTools = this.workspaceActiveTools.get(workspaceId);
+      if (!wsTools) {
+        wsTools = new Map();
+        this.workspaceActiveTools.set(workspaceId, wsTools);
+      }
+      wsTools.set(toolId, version);
+    } else {
+      this.systemActiveTools.set(toolId, version);
+    }
   }
 
   /**
@@ -1740,12 +1858,11 @@ export class ToolRegistry {
   ): Promise<CatalogSnapshot> {
     const history = this.snapshotHistory.get(workspaceId) ?? [];
     let targetSnapshot: CatalogSnapshot | undefined;
-
-    if (typeof targetRevision === "number") {
+    if (Number.isFinite(targetRevision)) {
       targetSnapshot = history.find((s) => s.revision === targetRevision);
     } else {
       targetSnapshot = history.find(
-        (s) => s.snapshotId === targetRevision || String(s.revision) === targetRevision,
+        (s) => s.snapshotId === targetRevision || String(s.revision) === String(targetRevision),
       );
     }
 
@@ -1753,10 +1870,10 @@ export class ToolRegistry {
     if (
       !targetSnapshot &&
       this.toolRepo?.getCatalogSnapshot &&
-      typeof targetRevision === "string"
+      Object.prototype.toString.call(targetRevision) === "[object String]"
     ) {
       try {
-        const fromDb = await this.toolRepo.getCatalogSnapshot(targetRevision);
+        const fromDb = await this.toolRepo.getCatalogSnapshot(String(targetRevision));
         if (fromDb && fromDb.workspaceId === workspaceId) {
           targetSnapshot = fromDb;
         }
@@ -1868,12 +1985,12 @@ export class ToolRegistry {
     this.hydrationPromise = (async () => {
       let loadedCount = 0;
       try {
-        if (typeof repo.listManifests === "function") {
+        if ("listManifests" in repo && repo.listManifests instanceof Function) {
           const manifests = await repo.listManifests();
           for (const manifest of manifests) {
             const toolId = manifest.id;
             let versionObj: ToolVersion | null = null;
-            if (typeof repo.getToolVersion === "function") {
+            if ("getToolVersion" in repo && repo.getToolVersion instanceof Function) {
               try {
                 versionObj = await repo.getToolVersion(toolId, manifest.version);
               } catch {
@@ -1883,29 +2000,34 @@ export class ToolRegistry {
             if (versionObj) {
               if (
                 versionObj.status === "deprecated" ||
-                (versionObj.status as string) === "revoked" ||
-                (versionObj.status as string) === "quarantined"
+                String(versionObj.status) === "revoked" ||
+                String(versionObj.status) === "quarantined"
               ) {
                 continue;
               }
               const handler = createEvolvedToolHandler(versionObj);
+              // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+              const params =
+                manifest.parameters && manifest.parameters instanceof Object
+                  ? (manifest.parameters as JsonRpcParams)
+                  : { type: "object", properties: {} };
+              // SAFETY: Manifest output schema conforms to JSON-RPC parameter record structure.
+              const outputSchema =
+                manifest.outputSchema && manifest.outputSchema instanceof Object
+                  ? (manifest.outputSchema as JsonRpcParams)
+                  : undefined;
               const registryTool: RegistryTool = {
                 toolId,
                 name: manifest.name || toolId,
                 exposedName: manifest.name || toolId,
                 version: versionObj.version,
                 description: manifest.description || `Tool ${manifest.name || toolId}`,
-                scope: manifest.scope || "global",
+                // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
+                scope: (manifest.scope as ToolScopeHierarchy) || "global",
                 workspaceId: options?.workspaceId,
-                parameters:
-                  manifest.parameters && typeof manifest.parameters === "object"
-                    ? (manifest.parameters as Record<string, unknown>)
-                    : { type: "object", properties: {} },
+                parameters: params,
                 status: versionObj.status || "active",
-                outputSchema:
-                  manifest.outputSchema && typeof manifest.outputSchema === "object"
-                    ? (manifest.outputSchema as Record<string, unknown>)
-                    : undefined,
+                outputSchema,
                 manifest,
                 artifact: versionObj.artifact,
                 handler,
@@ -1917,23 +2039,28 @@ export class ToolRegistry {
               loadedCount++;
             } else {
               const handler = createEvolvedToolHandler({ manifest });
+              // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+              const params =
+                manifest.parameters && manifest.parameters instanceof Object
+                  ? (manifest.parameters as JsonRpcParams)
+                  : { type: "object", properties: {} };
+              // SAFETY: Manifest output schema conforms to JSON-RPC parameter record structure.
+              const outputSchema =
+                manifest.outputSchema && manifest.outputSchema instanceof Object
+                  ? (manifest.outputSchema as JsonRpcParams)
+                  : undefined;
               const registryTool: RegistryTool = {
                 toolId,
                 name: manifest.name || toolId,
                 exposedName: manifest.name || toolId,
                 version: manifest.version,
                 description: manifest.description || `Tool ${manifest.name || toolId}`,
-                scope: manifest.scope || "global",
+                // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
+                scope: (manifest.scope as ToolScopeHierarchy) || "global",
                 workspaceId: options?.workspaceId,
-                parameters:
-                  manifest.parameters && typeof manifest.parameters === "object"
-                    ? (manifest.parameters as Record<string, unknown>)
-                    : { type: "object", properties: {} },
+                parameters: params,
                 status: "active",
-                outputSchema:
-                  manifest.outputSchema && typeof manifest.outputSchema === "object"
-                    ? (manifest.outputSchema as Record<string, unknown>)
-                    : undefined,
+                outputSchema,
                 manifest,
                 handler,
               };
@@ -1946,30 +2073,27 @@ export class ToolRegistry {
           }
         }
 
-        if (options?.workspaceId && typeof repo.listDeployments === "function") {
+        if (
+          options?.workspaceId &&
+          "listDeployments" in repo &&
+          repo.listDeployments instanceof Function
+        ) {
           try {
             const deployments = await repo.listDeployments({ workspaceId: options.workspaceId });
             for (const dep of deployments) {
               if (
                 dep &&
-                typeof dep === "object" &&
+                dep instanceof Object &&
                 "workspaceId" in dep &&
                 "toolId" in dep &&
                 "version" in dep &&
-                "state" in dep &&
-                (dep.state === "promoted" || dep.state === "canary")
+                dep.workspaceId === options.workspaceId
               ) {
-                const wsId = String(dep.workspaceId);
-                let ws = this.workspaceActiveTools.get(wsId);
-                if (!ws) {
-                  ws = new Map();
-                  this.workspaceActiveTools.set(wsId, ws);
-                }
-                ws.set(String(dep.toolId), String(dep.version));
+                this.setActiveVersion(String(dep.toolId), String(dep.version), options.workspaceId);
               }
             }
           } catch {
-            // Ignore
+            // Ignore deployment hydration failure
           }
         }
 

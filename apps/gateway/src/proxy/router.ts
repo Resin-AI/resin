@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ToolInvocationRequest, ToolInvocationRouter } from "../meta/router-contract.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import type { CloudCatalogCache } from "./cache.js";
@@ -11,6 +11,7 @@ export interface TraceContext {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  sampled?: boolean;
 }
 
 export interface CloudInvocationContext {
@@ -22,10 +23,14 @@ export interface CloudInvocationContext {
   onProgress?: (progress: number, total?: number) => void;
 }
 
+export interface CloudInvocationHeaders {
+  [headerName: string]: string;
+}
+
 export interface CloudInvocationHandler {
   handleToolInvocation(
     toolIdOrName: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     context: CloudInvocationContext,
   ): Promise<CallToolResult>;
 }
@@ -41,7 +46,7 @@ export interface CloudInvocationRouterOptions {
   fetchFn?: typeof fetch;
   invocationForwarder?: (
     toolId: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     context: CloudInvocationContext,
   ) => Promise<CallToolResult>;
 }
@@ -55,10 +60,15 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
   private readonly identityProvider?: CloudIdentityProvider;
   private readonly defaultTimeoutMs: number;
   private readonly fetchFn: typeof fetch;
-  private isPaused = false;
   private readonly invocationForwarder?: (
     toolId: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
+    context: CloudInvocationContext,
+  ) => Promise<CallToolResult>;
+  private isPaused = false;
+  fallbackHandler?: (
+    toolIdOrName: string,
+    params: JsonRpcParams,
     context: CloudInvocationContext,
   ) => Promise<CallToolResult>;
 
@@ -98,11 +108,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
    * Factory returning a ToolHandler bound to this cloud router.
    */
   createToolHandler(toolIdOrName: string): ToolHandler {
-    return async (
-      context: WorkspaceContext,
-      params: Record<string, unknown>,
-      options?: ToolCallOptions,
-    ) => {
+    return async (context: WorkspaceContext, params: JsonRpcParams, options?: ToolCallOptions) => {
       return await this.forwardInvocation(toolIdOrName, params, context, options);
     };
   }
@@ -136,9 +142,9 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
    */
   async forwardInvocation(
     toolIdOrName: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     workspaceContext: WorkspaceContext,
-    options: ToolCallOptions = {},
+    options?: ToolCallOptions,
   ): Promise<CallToolResult> {
     if (this.isPaused) {
       throw new McpProtocolError(
@@ -172,7 +178,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     }
 
     // 3. Setup Deadline, Idempotency & Trace Context
-    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
+    const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
     const deadline = Date.now() + timeoutMs;
     const idempotencyKey = randomUUID();
     const traceContext: TraceContext = {
@@ -185,7 +191,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     let timeoutTimer: NodeJS.Timeout | undefined;
     let didTimeout = false;
 
-    if (options.signal) {
+    if (options?.signal) {
       if (options.signal.aborted) {
         throw new McpProtocolError(
           MCP_ERROR_CODES.CANCELLED,
@@ -208,7 +214,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
       deadline,
       traceContext,
       signal: abortController.signal,
-      onProgress: options.onProgress,
+      onProgress: options?.onProgress,
     };
 
     try {
@@ -219,23 +225,24 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
       this.circuitBreaker.recordSuccess();
       return result;
     } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
       // Handle cancellation vs timeout vs network failure
       if (didTimeout) {
-        this.circuitBreaker.recordFailure(error);
+        this.circuitBreaker.recordFailure(err);
         throw new McpProtocolError(
           MCP_ERROR_CODES.REQUEST_TIMEOUT,
           `Tool invocation for '${toolIdOrName}' timed out after ${timeoutMs}ms`,
         );
       }
 
-      if (options.signal?.aborted) {
+      if (options?.signal?.aborted) {
         // Client-side cancellation does not increment failure count on circuit breaker
         throw new McpProtocolError(MCP_ERROR_CODES.CANCELLED, "Tool invocation was cancelled");
       }
 
       // Record failure on circuit breaker for upstream / network issues
-      this.circuitBreaker.recordFailure(error);
-      throw this.translateError(error, toolIdOrName);
+      this.circuitBreaker.recordFailure(err);
+      throw this.translateError(err, toolIdOrName);
     } finally {
       clearTimeout(timeoutTimer);
     }
@@ -243,7 +250,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
 
   private async dispatch(
     toolIdOrName: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     context: CloudInvocationContext,
   ): Promise<CallToolResult> {
     // Strategy 1: Custom forwarder function
@@ -277,8 +284,8 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
       }
 
       const url = `${targetBaseUrl}/v1/tools/${encodeURIComponent(toolIdOrName)}/invoke`;
-      const buildHeaders = (id: CloudRequestIdentity | null) => {
-        const headers: Record<string, string> = {
+      const buildHeaders = (id: CloudRequestIdentity | null): CloudInvocationHeaders => {
+        const headers: CloudInvocationHeaders = {
           "Content-Type": "application/json",
           Accept: "application/json",
           "X-Idempotency-Key": context.idempotencyKey,
@@ -286,6 +293,9 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
           "X-Session-Id": context.workspaceContext.sessionId || "",
           "X-Trace-Id": context.traceContext?.traceId || "",
           "X-Span-Id": context.traceContext?.spanId || "",
+          "X-Parent-Span-Id": context.traceContext?.parentSpanId || "",
+          "X-Sampled": context.traceContext?.sampled ? "1" : "0",
+          "X-Deadline": String(context.deadline),
         };
         if (id) {
           headers.Authorization = `Bearer ${id.accessToken}`;
@@ -346,16 +356,16 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
         } catch {
           // ignore non-json error
         }
-
-        const msg =
-          (errorData &&
-          typeof errorData === "object" &&
+        const errorMsg =
+          errorData &&
+          errorData instanceof Object &&
           "message" in errorData &&
-          typeof errorData.message === "string"
-            ? errorData.message
-            : null) ||
+          Object.prototype.toString.call(errorData.message) === "[object String]"
+            ? String(errorData.message)
+            : null;
+        const msg =
+          errorMsg ||
           `Cloud invocation failed with HTTP ${response.status}: ${response.statusText}`;
-
         if (response.status === 401 || response.status === 403) {
           this.isPaused = true;
           throw new McpProtocolError(MCP_ERROR_CODES.UNAUTHORIZED, msg);
@@ -379,8 +389,8 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
         throw new McpProtocolError(JSON_RPC_ERROR_CODES.INTERNAL_ERROR, msg);
       }
 
-      const result = (await response.json()) as CallToolResult;
-      return result;
+      // SAFETY: Cloud server returns JSON conforming to CallToolResult.
+      return (await response.json()) as CallToolResult;
     }
 
     throw new McpProtocolError(
@@ -389,11 +399,21 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     );
   }
 
-  private translateError(error: unknown, toolName: string): Error {
+  private translateError(
+    error:
+      | Error
+      | McpProtocolError
+      | { code?: number; message?: string }
+      | string
+      | number
+      | boolean
+      | null
+      | undefined,
+    toolName: string,
+  ): McpProtocolError {
     if (error instanceof McpProtocolError) {
       return error;
     }
-
     const msg = error instanceof Error ? error.message : String(error ?? "Unknown error");
 
     if (msg.includes("not found") || msg.includes("404")) {

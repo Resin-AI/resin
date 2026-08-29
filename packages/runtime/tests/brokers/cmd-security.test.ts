@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CapabilityLimits, CommandCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BrokerAuditEmitter,
+  type BrokerAuditEvent,
   BrokerSecurityError,
   CommandBroker,
   SecretBroker,
@@ -29,7 +31,10 @@ describe("Command Broker Security & Isolation", () => {
     }
   });
 
-  const createGrant = (overrides: Record<string, unknown> = {}, limitOverrides = {}) => {
+  const createGrant = (
+    overrides: Partial<CommandCapability> = {},
+    limitOverrides: Partial<CapabilityLimits> = {},
+  ) => {
     return createInvocationGrant({
       invocationId: "inv_cmd_001",
       toolId: "test_cmd_tool",
@@ -91,7 +96,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threw = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_BINARY");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("UNAUTHORIZED_BINARY");
+      }
     }
     expect(threw).toBe(true);
   });
@@ -112,7 +119,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threwSh = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("SHELL_EXECUTION_DENIED");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("SHELL_EXECUTION_DENIED");
+      }
     }
     expect(threwSh).toBe(true);
 
@@ -122,7 +131,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threwBash = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("SHELL_EXECUTION_DENIED");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("SHELL_EXECUTION_DENIED");
+      }
     }
     expect(threwBash).toBe(true);
   });
@@ -147,7 +158,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threw = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("FORBIDDEN_PATTERN");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("FORBIDDEN_PATTERN");
+      }
     }
     expect(threw).toBe(true);
   });
@@ -191,7 +204,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threw = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_BINARY");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("UNAUTHORIZED_BINARY");
+      }
     }
     expect(threw).toBe(true);
   });
@@ -219,7 +234,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threw = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("WORKING_DIRECTORY_DENIED");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("WORKING_DIRECTORY_DENIED");
+      }
     }
     expect(threw).toBe(true);
   });
@@ -287,7 +304,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threwOutput = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("MAX_OUTPUT_EXCEEDED");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("MAX_OUTPUT_EXCEEDED");
+      }
     }
     expect(threwOutput).toBe(true);
   });
@@ -314,7 +333,9 @@ describe("Command Broker Security & Isolation", () => {
     } catch (err) {
       threwTimeout = true;
       expect(err).toBeInstanceOf(BrokerSecurityError);
-      expect((err as BrokerSecurityError).code).toBe("COMMAND_TIMEOUT");
+      if (err instanceof BrokerSecurityError) {
+        expect(err.code).toBe("COMMAND_TIMEOUT");
+      }
     }
     expect(threwTimeout).toBe(true);
   });
@@ -379,7 +400,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Should have rejected symlink cwd to outside workspace");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("WORKING_DIRECTORY_DENIED");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("WORKING_DIRECTORY_DENIED");
+        }
       } finally {
         try {
           fs.unlinkSync(linkPath);
@@ -423,7 +446,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Should have rejected symlink cwd pointing inside workspace");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("WORKING_DIRECTORY_DENIED");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("WORKING_DIRECTORY_DENIED");
+        }
       } finally {
         try {
           fs.unlinkSync(linkPath);
@@ -468,7 +493,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Should have rejected intermediate symlink component in cwd");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("WORKING_DIRECTORY_DENIED");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("WORKING_DIRECTORY_DENIED");
+        }
       } finally {
         try {
           fs.unlinkSync(symlinkParent);
@@ -507,7 +534,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Should have rejected non-existent cwd");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("FILE_NOT_FOUND");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("FILE_NOT_FOUND");
+        }
       }
 
       // File as cwd
@@ -523,7 +552,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Should have rejected regular file as cwd");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("FILE_NOT_FOUND");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("FILE_NOT_FOUND");
+        }
       }
     });
 
@@ -555,7 +586,9 @@ describe("Command Broker Security & Isolation", () => {
         expect.unreachable("Exact command authorization must not allow outside cwd");
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("WORKING_DIRECTORY_DENIED");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("WORKING_DIRECTORY_DENIED");
+        }
       } finally {
         try {
           fs.rmdirSync(outsideDir);
@@ -627,11 +660,13 @@ describe("Command Broker Security & Isolation", () => {
         } catch (err) {
           threw = true;
           expect(err).toBeInstanceOf(BrokerSecurityError);
-          expect([
-            "FORBIDDEN_ARGUMENT_PATTERN",
-            "SHELL_EXECUTION_DENIED",
-            "UNAUTHORIZED_BINARY",
-          ]).toContain((err as BrokerSecurityError).code);
+          if (err instanceof BrokerSecurityError) {
+            expect([
+              "FORBIDDEN_ARGUMENT_PATTERN",
+              "SHELL_EXECUTION_DENIED",
+              "UNAUTHORIZED_BINARY",
+            ]).toContain(err.code);
+          }
         }
         expect(threw).toBe(true);
       }
@@ -659,9 +694,9 @@ describe("Command Broker Security & Isolation", () => {
         } catch (err) {
           threwEnv = true;
           expect(err).toBeInstanceOf(BrokerSecurityError);
-          expect(["DANGEROUS_ENV_VAR", "UNAUTHORIZED_ENV_VAR"]).toContain(
-            (err as BrokerSecurityError).code,
-          );
+          if (err instanceof BrokerSecurityError) {
+            expect(["DANGEROUS_ENV_VAR", "UNAUTHORIZED_ENV_VAR"]).toContain(err.code);
+          }
         }
         expect(threwEnv).toBe(true);
       }
@@ -683,7 +718,6 @@ describe("Command Broker Security & Isolation", () => {
       expect(parsed.py).toBeUndefined();
       expect(parsed.custom).toBe("allowed_value");
     });
-
     it("prevents secret mediation leakage in command lines, arguments, audit logs, and error messages", async () => {
       const auditEmitter = new BrokerAuditEmitter();
       const secretBroker = new SecretBroker({ auditEmitter });
@@ -715,9 +749,9 @@ describe("Command Broker Security & Isolation", () => {
         "console.error('Failure with ' + process.env.SECRET_VAR); process.exit(1);",
       );
 
-      const capturedAuditEvents: Array<Record<string, unknown>> = [];
-      auditEmitter.on("event", (evt) => {
-        capturedAuditEvents.push(evt as unknown as Record<string, unknown>);
+      const capturedAuditEvents: BrokerAuditEvent[] = [];
+      auditEmitter.on("audit", (evt: BrokerAuditEvent) => {
+        capturedAuditEvents.push(evt);
       });
 
       const res = await brokerWithSecrets.execute(
@@ -760,7 +794,9 @@ describe("Command Broker Security & Isolation", () => {
       } catch (err) {
         threwMaxOut = true;
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("MAX_OUTPUT_EXCEEDED");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("MAX_OUTPUT_EXCEEDED");
+        }
       }
       expect(threwMaxOut).toBe(true);
     });

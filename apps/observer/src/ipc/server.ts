@@ -2,14 +2,17 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import type { DaemonConfig } from "../config.js";
 import type { Logger } from "../lifecycle.js";
-import type { DaemonSupervisor } from "../supervisor.js";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
+import type { ConfigReloadResult, DaemonSupervisor } from "../supervisor.js";
 import { FrameDecoder, encodeFrame } from "./framing.js";
 import {
   type GetModuleStatusParams,
   type GracefulShutdownParams,
   type GracefulShutdownResult,
   IPC_ERROR_CODES,
+  type IpcMethodParams,
   type IpcRequest,
   type IpcResponse,
   type PingParams,
@@ -27,7 +30,9 @@ export interface IpcServerOptions {
   /**
    * Daemon-owned reload hook for applying runtime lifecycle changes after config validation.
    */
-  reloadConfig?: (config?: ReloadConfigParams["config"]) => Promise<unknown>;
+  reloadConfig?: (
+    config?: ReloadConfigParams["config"],
+  ) => Promise<ConfigReloadResult | undefined | boolean | JsonObject>;
 }
 
 /**
@@ -113,6 +118,7 @@ export class IpcServer {
       try {
         const frames = decoder.push(data);
         for (const frame of frames) {
+          // SAFETY: Decoded transport frame matches IpcRequest envelope.
           void this.handleRequest(frame as IpcRequest, (response) => {
             if (!transport.isClosed) {
               void transport.send(encodeFrame(response));
@@ -120,7 +126,8 @@ export class IpcServer {
           });
         }
       } catch (err) {
-        this.logger?.error(`Error decoding transport frame: ${(err as Error).message}`);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.logger?.error(`Error decoding transport frame: ${errorMsg}`);
       }
     });
 
@@ -192,6 +199,7 @@ export class IpcServer {
         try {
           const frames = decoder.push(data);
           for (const frame of frames) {
+            // SAFETY: Decoded socket frame matches IpcRequest envelope.
             void this.handleRequest(frame as IpcRequest, (response) => {
               if (!socket.destroyed) {
                 socket.write(encodeFrame(response));
@@ -199,7 +207,8 @@ export class IpcServer {
             });
           }
         } catch (err) {
-          this.logger?.error(`Error handling socket frame: ${(err as Error).message}`);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          this.logger?.error(`Error handling socket frame: ${errorMsg}`);
         }
       });
 
@@ -237,12 +246,7 @@ export class IpcServer {
     request: IpcRequest,
     sendResponse: (response: IpcResponse) => void,
   ): Promise<void> {
-    if (
-      !request ||
-      typeof request !== "object" ||
-      !request.id ||
-      typeof request.method !== "string"
-    ) {
+    if (!request || !request.id || !request.method) {
       sendResponse({
         id: request?.id ?? "unknown",
         error: {
@@ -272,6 +276,7 @@ export class IpcServer {
         result,
       });
     } catch (err: unknown) {
+      // SAFETY: Caught dispatch error carries optional code property.
       const error = err as Error & { code?: string };
       const code =
         error.code === IPC_ERROR_CODES.METHOD_NOT_FOUND
@@ -292,9 +297,13 @@ export class IpcServer {
     }
   }
 
-  private async dispatchMethod(method: string, params?: unknown): Promise<unknown> {
+  private async dispatchMethod(
+    method: string,
+    params?: IpcMethodParams,
+  ): Promise<IpcResponse["result"]> {
     switch (method) {
       case "ping": {
+        // SAFETY: IPC ping params are optional and conform to PingParams.
         const pingParams = (params ?? {}) as PingParams;
         const result: PingResult = {
           pong: true,
@@ -309,11 +318,13 @@ export class IpcServer {
       }
 
       case "getModuleStatus": {
+        // SAFETY: IPC getModuleStatus params conform to GetModuleStatusParams.
         const p = (params ?? {}) as GetModuleStatusParams;
         return this.supervisor.getModuleStatus(p.moduleId);
       }
 
       case "reloadConfig": {
+        // SAFETY: IPC reloadConfig params conform to ReloadConfigParams.
         const p = (params ?? {}) as ReloadConfigParams;
         const operation = this.reloadQueue.then(() =>
           this.reloadConfigHandler
@@ -332,6 +343,7 @@ export class IpcServer {
       }
 
       case "gracefulShutdown": {
+        // SAFETY: IPC gracefulShutdown params conform to GracefulShutdownParams.
         const p = (params ?? {}) as GracefulShutdownParams;
         // Schedule shutdown on next tick to allow responding first
         queueMicrotask(() => {

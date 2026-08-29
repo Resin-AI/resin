@@ -394,6 +394,11 @@ export const V1_SUPPORT_MATRIX: V1SupportMatrix = Object.freeze({
 /**
  * Emits the canonical machine-readable V1 support matrix.
  */
+export function emitSupportMatrix(options: { format: "json" }): string;
+export function emitSupportMatrix(options?: { format?: "object" }): V1SupportMatrix;
+export function emitSupportMatrix(options?: { format?: "json" | "object" }):
+  | V1SupportMatrix
+  | string;
 export function emitSupportMatrix(
   options: { format?: "json" | "object" } = {},
 ): V1SupportMatrix | string {
@@ -511,10 +516,25 @@ export function getQualificationLane(info: PlatformInfo): PlatformQualificationL
 /**
  * Gets a human-readable display name for a platform lane or platform info.
  */
+export function isPlatformInfo(
+  value: PlatformQualificationLane | RequiredQualificationLane | PlatformInfo | string,
+): value is PlatformInfo {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+export function getPlatformDisplayName(
+  lane: PlatformQualificationLane | RequiredQualificationLane | string,
+): string;
+export function getPlatformDisplayName(info: PlatformInfo): string;
 export function getPlatformDisplayName(
   laneOrInfo: PlatformQualificationLane | RequiredQualificationLane | PlatformInfo | string,
 ): string {
-  if (typeof laneOrInfo !== "string") {
+  if (isPlatformInfo(laneOrInfo)) {
     if (laneOrInfo.isWsl) {
       return laneOrInfo.hasSystemd ? "WSL2 (systemd enabled)" : "WSL2 (supervisor fallback mode)";
     }

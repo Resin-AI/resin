@@ -60,6 +60,11 @@ import type {
   StreamMessage,
 } from "./stream.js";
 
+export interface MockArtifactDownloadResult {
+  bytes: Uint8Array;
+  metadata: ArtifactDownloadMetadata;
+}
+
 /**
  * Mock scenario modes supported by MockProtocolServer.
  */
@@ -434,10 +439,7 @@ export class MockProtocolServer {
     };
   }
 
-  handleArtifactDownload(request: ArtifactDownloadRequest): {
-    bytes: Uint8Array;
-    metadata: ArtifactDownloadMetadata;
-  } {
+  handleArtifactDownload(request: ArtifactDownloadRequest): MockArtifactDownloadResult {
     this.checkScenarioExceptions();
 
     if (this.scenario === "corrupt_artifact") {

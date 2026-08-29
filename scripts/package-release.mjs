@@ -352,8 +352,10 @@ export function fileSha256(filePath) {
 }
 
 export function canonicalJson(val) {
-  if (val === null || typeof val !== "object") return JSON.stringify(val);
-  if (Array.isArray(val)) return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
+  if (val === null || Object.prototype.toString.call(val) !== "[object Object]") {
+    if (Array.isArray(val)) return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
+    return JSON.stringify(val);
+  }
   const keys = Object.keys(val).sort();
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(val[key])}`).join(",")}}`;
 }
@@ -489,7 +491,7 @@ export const FORBIDDEN_RELEASE_PATTERNS = Object.freeze([
 ]);
 
 export function isForbiddenReleasePath(filePath, _options = {}) {
-  if (!filePath || typeof filePath !== "string") return false;
+  if (!filePath || Object.prototype.toString.call(filePath) !== "[object String]") return false;
   const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
 
   for (const pattern of FORBIDDEN_RELEASE_PATTERNS) {
@@ -515,7 +517,8 @@ export function isForbiddenReleasePath(filePath, _options = {}) {
 }
 
 export function isProductionDistFile(pkgDir, distRelPath) {
-  if (!distRelPath || typeof distRelPath !== "string") return false;
+  if (!distRelPath || Object.prototype.toString.call(distRelPath) !== "[object String]")
+    return false;
   const normalizedDist = distRelPath.replace(/\\/g, "/");
 
   // 1. Explicit forbidden check
@@ -625,7 +628,9 @@ export function assertNoForbiddenReleaseArtifacts(entries, context = "release pa
 
   for (const entry of entries) {
     const entryPath =
-      typeof entry === "string" ? entry : entry?.path || entry?.relPath || entry?.name || "";
+      Object.prototype.toString.call(entry) === "[object String]"
+        ? entry
+        : entry?.path || entry?.relPath || entry?.name || "";
     if (!entryPath) continue;
 
     if (isForbiddenReleasePath(entryPath)) {
@@ -865,7 +870,7 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
     {
       path: "resin/bin/resin",
       content:
-        "#!/usr/bin/env node\nimport { main } from '../apps/cli/dist/index.js';\nif (typeof main === 'function') {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (typeof exitCode === 'number' && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
+        "#!/usr/bin/env node\nimport { main } from '../apps/cli/dist/index.js';\nif (main instanceof Function) {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (Number.isFinite(exitCode) && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
       mode: 0o755,
     },
     {
@@ -1129,7 +1134,7 @@ export function collectProjectDependencies(rootDir, options = {}) {
       const isFixture = pkgJsonPath.includes("fixtures");
 
       const processDepSection = (deps, isRuntime = true) => {
-        if (!deps || typeof deps !== "object") return;
+        if (!deps || Object.prototype.toString.call(deps) !== "[object Object]") return;
         for (const [depName, specifier] of Object.entries(deps)) {
           if (depName.startsWith("@resin/") || workspacePackageNames.has(depName)) continue;
           if (isForbiddenReleasePath(depName)) continue;
@@ -1177,7 +1182,7 @@ export function collectProjectDependencies(rootDir, options = {}) {
           if (installedJson.description) resolvedDescription = installedJson.description;
           if (installedJson.license) {
             resolvedLicense =
-              typeof installedJson.license === "string"
+              Object.prototype.toString.call(installedJson.license) === "[object String]"
                 ? installedJson.license
                 : installedJson.license.type || resolvedLicense;
           }
@@ -1366,7 +1371,7 @@ export function resolveVulnerabilityScanEvidence(rootDir, releaseIdentity, optio
     );
   }
   if (
-    typeof evidence.source !== "string" ||
+    Object.prototype.toString.call(evidence.source) !== "[object String]" ||
     evidence.dependencyScan?.status !== "COMPLETED" ||
     !["COMPLETED", "NOT_APPLICABLE"].includes(evidence.containerScan?.status)
   ) {
@@ -1374,7 +1379,7 @@ export function resolveVulnerabilityScanEvidence(rootDir, releaseIdentity, optio
   }
   if (
     evidence.containerScan.status === "NOT_APPLICABLE" &&
-    typeof evidence.containerScan.reason !== "string"
+    Object.prototype.toString.call(evidence.containerScan.reason) !== "[object String]"
   ) {
     throw new Error("Container scan NOT_APPLICABLE status requires a reviewed reason.");
   }

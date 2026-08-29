@@ -152,7 +152,7 @@ describe("status command & collector", () => {
     const stdoutChunks: string[] = [];
     const originalStdoutWrite = process.stdout.write;
     process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
-      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdoutChunks.push(String(chunk));
       return true;
     });
 
@@ -224,7 +224,7 @@ describe("status command & collector", () => {
 
   it("retains valid status when credentials exist without proactive remote revocation network calls", async () => {
     const tokenPath = path.join(homeDir, ".resin", "state", "device-token.json");
-    const customFetch = vi.fn();
+    const customFetch: typeof fetch = vi.fn();
 
     const fsBridge = createMockFsBridge({
       [tokenPath]: JSON.stringify({
@@ -253,7 +253,7 @@ describe("status command & collector", () => {
     const summary = await collectStatus({
       home: homeDir,
       fsBridge,
-      customFetch: customFetch as unknown as typeof fetch,
+      customFetch,
     });
 
     expect(summary.cloud.status).toBe("valid");

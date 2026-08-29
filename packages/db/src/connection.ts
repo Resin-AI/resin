@@ -7,6 +7,30 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
  */
 export type SQLInputValue = null | number | bigint | string | NodeJS.ArrayBufferView;
 
+export type SQLBindScalar =
+  | null
+  | undefined
+  | number
+  | bigint
+  | string
+  | boolean
+  | NodeJS.ArrayBufferView;
+
+export interface SQLBindRecord {
+  [key: string]: SQLBindValue;
+}
+
+export type SQLBindValue = SQLBindScalar | SQLBindRecord | SQLBindValue[];
+
+export interface SQLNamedParams {
+  [param: string]: SQLBindValue;
+}
+
+export type SQLParams = SQLBindValue[] | SQLNamedParams;
+
+export interface SQLRow {
+  [column: string]: SQLInputValue;
+}
 /**
  * Options for configuring a LocalDatabaseConnection.
  */
@@ -52,20 +76,25 @@ export interface IntegrityCheckResult {
 /**
  * Normalizes any JavaScript value to a valid SQLite bind parameter.
  */
-export function toSQLInputValue(val: unknown): SQLInputValue {
+export function toSQLInputValue(val: SQLBindValue): SQLInputValue {
   if (val === undefined || val === null) {
     return null;
   }
-  if (typeof val === "boolean") {
+  if (Object.prototype.toString.call(val) === "[object Boolean]") {
     return val ? 1 : 0;
   }
-  if (typeof val === "number" || typeof val === "bigint" || typeof val === "string") {
-    return val;
+  if (
+    Object.prototype.toString.call(val) === "[object Number]" ||
+    Object.prototype.toString.call(val) === "[object BigInt]" ||
+    Object.prototype.toString.call(val) === "[object String]"
+  ) {
+    // SAFETY: val is verified to be a number, bigint, or string SQLite value.
+    return val as SQLInputValue;
   }
   if (ArrayBuffer.isView(val)) {
-    return val as NodeJS.ArrayBufferView;
+    return val;
   }
-  return String(val);
+  return JSON.stringify(val);
 }
 
 /**
@@ -199,7 +228,7 @@ export class LocalDatabaseConnection {
   /**
    * Runs a parameterized query and returns changes and lastInsertRowid.
    */
-  run(sql: string, params?: unknown[] | Record<string, unknown>): RunResult {
+  run(sql: string, params?: SQLParams): RunResult {
     const stmt = this.prepare(sql);
     const res = this.bindAndRun(stmt, params);
     return {
@@ -211,23 +240,22 @@ export class LocalDatabaseConnection {
   /**
    * Executes query and returns first matched row or null.
    */
-  get<T = Record<string, unknown>>(
-    sql: string,
-    params?: unknown[] | Record<string, unknown>,
-  ): T | null {
+  get<T = SQLRow>(sql: string, params?: SQLParams): T | null {
     const stmt = this.prepare(sql);
     const row = this.bindAndGet(stmt, params);
     if (!row) {
       return null;
     }
+    // SAFETY: Row is cast to caller-requested schema type T.
     return row as T;
   }
 
   /**
    * Executes query and returns all matching rows.
    */
-  all<T = Record<string, unknown>>(sql: string, params?: unknown[] | Record<string, unknown>): T[] {
+  all<T = SQLRow>(sql: string, params?: SQLParams): T[] {
     const stmt = this.prepare(sql);
+    // SAFETY: Rows array is cast to caller-requested schema rows T[].
     return this.bindAndAll(stmt, params) as T[];
   }
 
@@ -302,7 +330,7 @@ export class LocalDatabaseConnection {
 
   private bindAndRun(
     stmt: StatementSync,
-    params?: unknown[] | Record<string, unknown>,
+    params?: SQLParams,
   ): { changes: number | bigint; lastInsertRowid: number | bigint } {
     if (params === undefined || params === null) {
       return stmt.run();
@@ -320,37 +348,43 @@ export class LocalDatabaseConnection {
 
   private bindAndGet(
     stmt: StatementSync,
-    params?: unknown[] | Record<string, unknown>,
-  ): Record<string, unknown> | undefined {
+    params?: SQLParams,
+  ): Record<string, SQLInputValue> | undefined {
     if (params === undefined || params === null) {
-      return stmt.get();
+      // SAFETY: node:sqlite statement get returns row record or undefined.
+      return stmt.get() as Record<string, SQLInputValue> | undefined;
     }
     if (Array.isArray(params)) {
       const bound = params.map(toSQLInputValue);
-      return stmt.get(...bound);
+      // SAFETY: node:sqlite statement get returns row record or undefined.
+      return stmt.get(...bound) as Record<string, SQLInputValue> | undefined;
     }
     const bound: Record<string, SQLInputValue> = {};
     for (const [k, v] of Object.entries(params)) {
       bound[k] = toSQLInputValue(v);
     }
-    return stmt.get(bound);
+    // SAFETY: node:sqlite statement get returns row record or undefined.
+    return stmt.get(bound) as Record<string, SQLInputValue> | undefined;
   }
 
   private bindAndAll(
     stmt: StatementSync,
-    params?: unknown[] | Record<string, unknown>,
-  ): Record<string, unknown>[] {
+    params?: SQLParams,
+  ): Array<Record<string, SQLInputValue>> {
     if (params === undefined || params === null) {
-      return stmt.all();
+      // SAFETY: node:sqlite statement all returns row records array.
+      return stmt.all() as Array<Record<string, SQLInputValue>>;
     }
     if (Array.isArray(params)) {
       const bound = params.map(toSQLInputValue);
-      return stmt.all(...bound);
+      // SAFETY: node:sqlite statement all returns row records array.
+      return stmt.all(...bound) as Array<Record<string, SQLInputValue>>;
     }
     const bound: Record<string, SQLInputValue> = {};
     for (const [k, v] of Object.entries(params)) {
       bound[k] = toSQLInputValue(v);
     }
-    return stmt.all(bound);
+    // SAFETY: node:sqlite statement all returns row records array.
+    return stmt.all(bound) as Array<Record<string, SQLInputValue>>;
   }
 }

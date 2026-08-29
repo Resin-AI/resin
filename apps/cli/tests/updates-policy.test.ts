@@ -558,7 +558,7 @@ describe("cross-process update lock", () => {
     const ownerPid = 4_101;
     const contenderPid = 4_102;
     const bootStart = "Fri Aug 28 00:00:00 2026";
-    const processStarts: Record<string, string> = {
+    const processStarts = {
       "1": bootStart,
       [String(ownerPid)]: "Fri Aug 28 09:00:00 2026",
       [String(contenderPid)]: "Fri Aug 28 10:00:00 2026",
@@ -693,6 +693,7 @@ describe("cross-process update lock", () => {
     const lockPath = await createTemporaryLockPath();
     const lock = await acquireUpdateLock({ lockPath, timeoutMs: 0, label: "background" });
     const fileStats = await stat(lockPath);
+    // SAFETY: Update lock metadata format verified in test.
     const persisted = JSON.parse(await readFile(lockPath, "utf8")) as UpdateLockMetadata;
 
     expect(fileStats.mode & 0o777).toBe(0o600);

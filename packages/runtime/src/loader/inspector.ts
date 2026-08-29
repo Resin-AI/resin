@@ -24,6 +24,7 @@ import {
   BUNDLE_FILE_TESTS_JS,
   BUNDLE_FILE_TESTS_TS,
   type BundleFileEntry,
+  type ToolBundleSpec,
 } from "../bundle/spec.js";
 
 /**
@@ -40,7 +41,7 @@ export interface BundleInspectionResult {
   signatureVerification?: SignatureVerificationResult;
   capabilities: CapabilityManifest;
   runtime: ToolRuntimeRequirement;
-  packageJson?: Record<string, unknown>;
+  packageJson?: ToolBundleSpec["packageJson"];
 }
 
 export interface InspectBundleOptions {
@@ -56,10 +57,9 @@ export async function inspectBundleArchive(
   archiveBufferOrPath: Buffer | string,
   options: InspectBundleOptions = {},
 ): Promise<BundleInspectionResult> {
-  const archiveBuffer =
-    typeof archiveBufferOrPath === "string"
-      ? await fs.promises.readFile(archiveBufferOrPath)
-      : archiveBufferOrPath;
+  const archiveBuffer = Buffer.isBuffer(archiveBufferOrPath)
+    ? archiveBufferOrPath
+    : await fs.promises.readFile(archiveBufferOrPath);
 
   const bundleDigest = computeSha256(archiveBuffer);
   const rawEntries = parseTarArchive(archiveBuffer);
@@ -89,7 +89,7 @@ export async function inspectBundleArchive(
   const manifest = ToolManifestSchema.parse(manifestJson);
 
   // Read package.json if present
-  let packageJson: Record<string, unknown> | undefined;
+  let packageJson: ToolBundleSpec["packageJson"];
   const pkgBuf = fileMap.get(BUNDLE_FILE_PACKAGE);
   if (pkgBuf) {
     try {
@@ -193,7 +193,7 @@ export async function inspectBundleDirectory(
   files.sort((a, b) => a.path.localeCompare(b.path));
 
   // Read package.json if present
-  let packageJson: Record<string, unknown> | undefined;
+  let packageJson: ToolBundleSpec["packageJson"];
   const pkgPath = path.join(resolvedDir, BUNDLE_FILE_PACKAGE);
   if (fs.existsSync(pkgPath)) {
     try {
@@ -257,7 +257,7 @@ export async function inspectBundle(
   target: Buffer | string,
   options: InspectBundleOptions = {},
 ): Promise<BundleInspectionResult> {
-  if (typeof target === "string" && fs.existsSync(target)) {
+  if (!Buffer.isBuffer(target) && fs.existsSync(target)) {
     const stats = await fs.promises.stat(target);
     if (stats.isDirectory()) {
       return inspectBundleDirectory(target, options);

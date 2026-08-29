@@ -94,7 +94,7 @@ describe("bounded service recovery", () => {
     const records = rawLog
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
+      .map((line) => JSON.parse(line));
 
     expect(result).toMatchObject({
       reason: "TRIPPED",
@@ -232,9 +232,10 @@ describe("bounded service recovery", () => {
       "utf8",
     );
     const forensicLines = forensicLog.trim().split("\n");
+    // SAFETY: Forensic log entry contains serialized ForensicCrashRecord JSON.
     const tripRecord = JSON.parse(forensicLines[forensicLines.length - 1] ?? "{}") as Record<
       string,
-      unknown
+      StatusValue
     >;
     expect(tripRecord).toMatchObject({
       status: "TRIPPED",
@@ -324,9 +325,10 @@ describe("bounded service recovery", () => {
     const stableState = await tracker.getState();
     shutdown.abort();
     const result = await supervisorResult;
+    // SAFETY: Recovery state JSON matches serialized RecoveryState record.
     const persisted = JSON.parse(
       await fs.readFile(path.join(resinHome, "state", RECOVERY_STATE_FILE_NAME), "utf8"),
-    ) as Record<string, unknown>;
+    ) as Record<string, StatusValue>;
 
     expect(stableState).toMatchObject({
       status: "HEALTHY",
@@ -436,7 +438,7 @@ describe("bounded service recovery", () => {
     const records = rawLog
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
+      .map((line) => JSON.parse(line));
 
     expect(rawState).not.toContain("super-secret-token");
     expect(rawState).not.toContain("private transcript content");

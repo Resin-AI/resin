@@ -15,9 +15,28 @@ import {
   JobTimeoutError,
   PROTOCOL_VERSION,
   ProtocolError,
+  type ProtocolErrorDetailRecord,
+  type ProtocolErrorDetailValue,
   RateLimitedError,
 } from "@resin/protocol";
+import { z } from "zod";
 import { CloudCredentialStore, type CloudRequestIdentity } from "./cloud-credentials.js";
+
+const ProtocolErrorDetailValueSchema: z.ZodType<ProtocolErrorDetailValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.record(ProtocolErrorDetailValueSchema),
+    z.array(ProtocolErrorDetailValueSchema),
+  ]),
+);
+
+const ProtocolErrorDetailRecordSchema: z.ZodType<ProtocolErrorDetailRecord> = z.record(
+  ProtocolErrorDetailValueSchema,
+);
 
 /**
  * Default maximum size for artifact download: 50 MiB.
@@ -118,8 +137,11 @@ async function readBodyWithLimit(
       throw new ArtifactSizeExceededError(declaredSize, maxSizeBytes);
     }
   }
-
-  if (response.body && typeof response.body.getReader === "function") {
+  if (
+    response.body &&
+    "getReader" in response.body &&
+    response.body.getReader instanceof Function
+  ) {
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let receivedBytes = 0;
@@ -324,14 +346,21 @@ export class CloudJobClient {
     try {
       json = await response.json();
     } catch (err: unknown) {
-      throw new JobMalformedResponseError("Invalid JSON in job status response", { cause: err });
+      throw new JobMalformedResponseError("Invalid JSON in job status response", {
+        cause: err instanceof Error ? err.message : String(err),
+      });
     }
 
     const parsed = JobStatusResponseSchema.safeParse(json);
     if (!parsed.success) {
+      const rawString = z.string().safeParse(json);
+      const detailsParsed = ProtocolErrorDetailRecordSchema.safeParse({
+        issues: parsed.error.issues.map((issue) => issue.message),
+        rawJson: rawString.success ? rawString.data : JSON.stringify(json),
+      });
       throw new JobMalformedResponseError(
         `Job status schema validation failed: ${parsed.error.message}`,
-        { issues: parsed.error.issues, rawJson: json },
+        detailsParsed.success ? detailsParsed.data : undefined,
       );
     }
 
@@ -420,15 +449,18 @@ export class CloudJobClient {
           {
             failureReason: statusResponse.error,
             errorCode: statusResponse.errorCode,
-            details: statusResponse.details,
+            details: statusResponse.details
+              ? ProtocolErrorDetailRecordSchema.safeParse(statusResponse.details).data
+              : undefined,
           },
         );
       }
 
       // Status is "accepted" | "queued" | "running" -> calculate next interval
       let waitMs = currentInterval;
-      if (typeof retryAfterMs === "number" && retryAfterMs > 0) {
-        waitMs = retryAfterMs;
+      const retryAfter = z.number().positive().safeParse(retryAfterMs);
+      if (retryAfter.success) {
+        waitMs = retryAfter.data;
       } else {
         currentInterval = Math.min(Math.round(currentInterval * backoffFactor), maxIntervalMs);
       }

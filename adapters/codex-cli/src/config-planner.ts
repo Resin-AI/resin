@@ -2,6 +2,7 @@ import {
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
   type ConfigFsBridge,
+  type ConfigMetadataRecord,
   type ConfigMutationPlan,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   applyConfigMutation,
@@ -12,6 +13,18 @@ import {
   rollbackConfigMutation,
 } from "@resin/harness-contracts";
 import { CODEX_HARNESS_ID } from "./discovery.js";
+export interface CodexMcpServerConfig extends ConfigMetadataRecord {
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  type?: "sse" | "stdio" | "http" | "websocket";
+}
+
+export interface CodexJsonConfigDoc {
+  mcpServers?: Record<string, CodexMcpServerConfig>;
+  mcp_servers?: Record<string, CodexMcpServerConfig>;
+}
 
 export const DEFAULT_GATEWAY_SERVER_NAME = CANONICAL_RESIN_MCP_SERVER_KEY;
 /**
@@ -194,21 +207,24 @@ export function updateJsonMcpConfig(
   gatewayUrl: string,
 ): string {
   const trimmed = content.trim();
-  let parsed: Record<string, unknown> = {};
+  let parsed: CodexJsonConfigDoc = {};
 
   if (trimmed) {
     try {
-      parsed = JSON.parse(content) as Record<string, unknown>;
+      const doc = JSON.parse(content);
+      if (doc instanceof Object && !Array.isArray(doc)) {
+        // SAFETY: The parsed JSON document is an object preserving Codex configuration keys.
+        parsed = doc as CodexJsonConfigDoc;
+      }
     } catch {
       parsed = {};
     }
   }
 
   const serversKey = "mcp_servers" in parsed ? "mcp_servers" : "mcpServers";
-  const currentServers =
-    typeof parsed[serversKey] === "object" && parsed[serversKey] !== null
-      ? (parsed[serversKey] as Record<string, unknown>)
-      : {};
+  const rawServers = parsed[serversKey];
+  const currentServers: Record<string, CodexMcpServerConfig> =
+    rawServers instanceof Object && !Array.isArray(rawServers) ? { ...rawServers } : {};
 
   const updatedServers = migrateJsonMcpServers(
     currentServers,
@@ -216,7 +232,6 @@ export function updateJsonMcpConfig(
     gatewayUrl,
     serverName,
   );
-
   const updatedConfig = {
     ...parsed,
     [serversKey]: updatedServers,
@@ -291,24 +306,24 @@ export async function verifyCodexMcpConfig(
 
   if (targetPath.endsWith(".json")) {
     try {
-      const parsed = JSON.parse(content) as Record<string, unknown>;
-      const servers = (parsed.mcpServers ?? parsed.mcp_servers) as
-        | Record<string, unknown>
-        | undefined;
-      if (!servers || typeof servers !== "object") return false;
+      const doc = JSON.parse(content);
+      if (!(doc instanceof Object) || Array.isArray(doc)) return false;
+      // SAFETY: Parsed JSON represents a Codex configuration document.
+      const parsed = doc as CodexJsonConfigDoc;
+      const servers = parsed.mcpServers ?? parsed.mcp_servers;
+      if (!servers || !(servers instanceof Object) || Array.isArray(servers)) return false;
 
-      const server = servers[serverName] as Record<string, unknown> | undefined;
-      if (!server || typeof server !== "object") return false;
+      const server = servers[serverName];
+      if (!server || !(server instanceof Object) || Array.isArray(server)) return false;
 
       if (gatewayUrl) {
         return server.url === gatewayUrl;
       }
-      return typeof server.url === "string" && server.url.length > 0;
+      return Boolean(server.url && String(server.url) === server.url && server.url.length > 0);
     } catch {
       return false;
     }
   }
-
   // Check TOML
   const escapedName = escapeRegExp(serverName);
   const headerRegex = new RegExp(

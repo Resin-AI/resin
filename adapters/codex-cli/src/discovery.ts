@@ -102,13 +102,15 @@ export async function defaultPathLookup(
  */
 export async function findCodexExecutable(options?: {
   customExecutablePath?: string;
+  executablePath?: string;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   pathLookup?: PathLookupFn;
 }): Promise<string | null> {
-  if (options?.customExecutablePath) {
-    if (await fileExists(options.customExecutablePath)) {
-      return path.resolve(options.customExecutablePath);
+  const explicitPath = options?.executablePath ?? options?.customExecutablePath;
+  if (explicitPath) {
+    if (await fileExists(explicitPath)) {
+      return path.resolve(explicitPath);
     }
     return null;
   }
@@ -165,6 +167,7 @@ export const defaultCommandExecutor: CommandExecutor = async (file: string, args
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (err: unknown) {
+    // SAFETY: Node child_process execFile error objects contain stdout, stderr, code, and message properties.
     const error = err as { stdout?: string; stderr?: string; code?: number; message?: string };
     return {
       stdout: error.stdout ?? "",
@@ -271,16 +274,23 @@ export async function resolveCodexPaths(options?: {
 }
 
 /**
+ * Options for probing Codex CLI installation.
+ */
+export interface CodexProbeOptions extends ProbeInstallationOptions {
+  platform?: NodeJS.Platform;
+  executor?: CommandExecutor;
+  pathLookup?: PathLookupFn;
+  minSupportedVersion?: string;
+  customExecutablePath?: string;
+  customConfigPath?: string;
+  checkPermissions?: boolean;
+}
+
+/**
  * Probes the workstation environment for an installed Codex CLI harness.
  */
 export async function probeCodexInstallation(
-  options?: ProbeInstallationOptions & {
-    platform?: NodeJS.Platform;
-    env?: NodeJS.ProcessEnv;
-    executor?: CommandExecutor;
-    pathLookup?: PathLookupFn;
-    minSupportedVersion?: string;
-  },
+  options?: CodexProbeOptions,
 ): Promise<HarnessInstallation> {
   const detectedAt = new Date().toISOString();
   const minVersion = options?.minSupportedVersion ?? CODEX_MIN_SUPPORTED_VERSION;
@@ -291,6 +301,7 @@ export async function probeCodexInstallation(
   });
 
   const executablePath = await findCodexExecutable({
+    executablePath: options?.executablePath,
     customExecutablePath: options?.customExecutablePath,
     platform: options?.platform,
     env: options?.env,

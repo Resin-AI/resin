@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { main } from "../src/bin/cli.js";
 import {
   loginCommand,
@@ -20,70 +21,52 @@ const VERIFICATION_URI_COMPLETE = "https://auth.resin.sh/device?code=ABCD-9876";
 function successfulDeviceFetch() {
   let binding: { deviceId: string; installationId: string } | undefined;
   return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = String(input) === input ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/v1/auth/device/code")) {
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
-        deviceId: string;
-        installationId: string;
-      };
+      const DeviceBindingSchema = z.object({
+        deviceId: z.string(),
+        installationId: z.string(),
+      });
+      const body = DeviceBindingSchema.parse(JSON.parse(String(init?.body ?? "{}")));
       binding = { deviceId: body.deviceId, installationId: body.installationId };
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({
-          deviceCode: "device-code-sec-1234",
-          userCode: "ABCD-9876",
-          verificationUri: VERIFICATION_URI,
-          verificationUriComplete: VERIFICATION_URI_COMPLETE,
-          expiresIn: 900,
-          interval: 1,
-        }),
-      } as Response;
+      return Response.json({
+        deviceCode: "device-code-sec-1234",
+        userCode: "ABCD-9876",
+        verificationUri: VERIFICATION_URI,
+        verificationUriComplete: VERIFICATION_URI_COMPLETE,
+        expiresIn: 900,
+        interval: 1,
+      });
     }
 
     if (url.endsWith("/v1/auth/device/token")) {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({
-          accessToken: ACCESS_TOKEN,
-          refreshToken: REFRESH_TOKEN,
-          tokenType: "Bearer",
-          expiresIn: 3600,
-          scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
-          claims: {
-            accountId: "acc_live_01",
-            workspaceId: "ws_live_01",
-            deviceId: binding?.deviceId ?? "dev_live_01",
-            installationId: binding?.installationId ?? "inst_live_01",
-            scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
-            rawUploadConsent: false,
-            issuedAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-            tokenType: "access",
-            userId: "usr_alice",
-            subject: "usr_alice",
-          },
-        }),
-      } as Response;
-    }
-    if (url.endsWith("/v1/auth/logout")) {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({ success: true }),
-      } as Response;
+      return Response.json({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: REFRESH_TOKEN,
+        tokenType: "Bearer",
+        expiresIn: 3600,
+        scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
+        claims: {
+          accountId: "acc_live_01",
+          workspaceId: "ws_live_01",
+          deviceId: binding?.deviceId ?? "dev_live_01",
+          installationId: binding?.installationId ?? "inst_live_01",
+          scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+          rawUploadConsent: false,
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          tokenType: "access",
+          userId: "usr_alice",
+          subject: "usr_alice",
+        },
+      });
     }
 
-    return {
-      ok: false,
-      status: 404,
-      headers: new Headers({ "content-type": "application/json" }),
-      json: async () => ({ error: "not_found" }),
-    } as Response;
+    if (url.endsWith("/v1/auth/logout")) {
+      return Response.json({ success: true });
+    }
+
+    return Response.json({ error: "not_found" }, { status: 404 });
   });
 }
 
@@ -97,13 +80,15 @@ async function captureOutput(action: () => Promise<number>): Promise<{
   const originalStdoutWrite = process.stdout.write.bind(process.stdout);
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
-  process.stdout.write = ((chunk: unknown) => {
-    stdout += typeof chunk === "string" ? chunk : String(chunk);
+  // SAFETY: Mock stdout.write for testing terminal output.
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += String(chunk);
     return true;
   }) as typeof process.stdout.write;
 
-  process.stderr.write = ((chunk: unknown) => {
-    stderr += typeof chunk === "string" ? chunk : String(chunk);
+  // SAFETY: Mock stderr.write for testing terminal output.
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
     return true;
   }) as typeof process.stderr.write;
 
@@ -195,7 +180,8 @@ describe("login device flow & browser launch", () => {
 
     const result = await captureOutput(() =>
       loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       }),
     );
@@ -222,7 +208,8 @@ describe("login device flow & browser launch", () => {
 
     const result = await captureOutput(() =>
       loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       }),
     );
@@ -241,7 +228,8 @@ describe("login device flow & browser launch", () => {
 
     const result = await captureOutput(() =>
       loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh/"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       }),
     );
@@ -290,7 +278,8 @@ describe("login device flow & browser launch", () => {
 
     const result = await captureOutput(() =>
       loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
       }),
     );
 
@@ -347,7 +336,8 @@ describe("performPairing reuse and rollback", () => {
     const mutation = await performPairing({
       home,
       cloudUrl: "https://api.resin.sh",
-      customFetch: customFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: customFetch as typeof fetch,
     });
 
     expect(mutation.paired).toBe(true);
@@ -404,7 +394,8 @@ describe("performPairing reuse and rollback", () => {
       const mutation = await performPairing({
         home,
         cloudUrl: "https://api.resin.sh",
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       });
       expect(mutation.reused).toBe(false);
@@ -460,7 +451,8 @@ describe("performPairing reuse and rollback", () => {
       home,
       cloudUrl: "https://api.resin.sh",
       force: true,
-      customFetch: customFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: customFetch as typeof fetch,
     });
 
     expect(mutation.paired).toBe(true);
@@ -486,7 +478,8 @@ describe("performPairing reuse and rollback", () => {
     const mutation = await performPairing({
       home,
       cloudUrl: "https://api.resin.sh",
-      customFetch: customFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: customFetch as typeof fetch,
     });
 
     expect(mutation.paired).toBe(true);
@@ -512,7 +505,8 @@ describe("performPairing reuse and rollback", () => {
         home,
         json: true,
         cloudUrl: "https://api.resin.sh",
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       });
       return (await pairingPromise) ? 0 : 1;
@@ -566,7 +560,8 @@ describe("performPairing reuse and rollback", () => {
 
     const result = await captureOutput(() =>
       loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       }),
     );
@@ -616,7 +611,8 @@ describe("performPairing reuse and rollback", () => {
       return await loginCommand(
         ["--force", "--home", home, "--cloud-url", "https://api.resin.sh"],
         {
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch function implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -659,7 +655,8 @@ describe("performPairing reuse and rollback", () => {
 
     const result = await captureOutput(async () => {
       return await loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       });
     });
@@ -673,15 +670,10 @@ describe("performPairing reuse and rollback", () => {
     const logoutCalled = vi.fn();
     const baseFetch = successfulDeviceFetch();
     const customFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url = String(input) === input ? input : input instanceof URL ? input.href : input.url;
       if (url.endsWith("/v1/auth/logout")) {
         logoutCalled(url, init);
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ success: true }),
-        } as Response;
+        return Response.json({ success: true });
       }
       return baseFetch(input, init);
     });
@@ -690,7 +682,8 @@ describe("performPairing reuse and rollback", () => {
     const mutation = await performPairing({
       home,
       cloudUrl: "https://api.resin.sh",
-      customFetch: customFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: customFetch as typeof fetch,
     });
 
     expect(mutation.paired).toBe(true);
@@ -707,14 +700,9 @@ describe("performPairing reuse and rollback", () => {
   it("transient revocation failure during rollback still restores/purges local state safely without throwing", async () => {
     const baseFetch = successfulDeviceFetch();
     const customFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url = String(input) === input ? input : input instanceof URL ? input.href : input.url;
       if (url.endsWith("/v1/auth/logout")) {
-        return {
-          ok: false,
-          status: 500,
-          headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ error: "internal_error" }),
-        } as Response;
+        return Response.json({ error: "internal_error" }, { status: 500 });
       }
       return baseFetch(input, init);
     });
@@ -723,7 +711,8 @@ describe("performPairing reuse and rollback", () => {
     const mutation = await performPairing({
       home,
       cloudUrl: "https://api.resin.sh",
-      customFetch: customFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: customFetch as typeof fetch,
     });
 
     expect(mutation.paired).toBe(true);

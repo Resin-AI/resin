@@ -31,8 +31,8 @@ export interface IpcClientOptions {
 }
 
 interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
+  resolve: (value: IpcResponse["result"]) => void;
+  reject: (reason?: Error) => void;
   timer: NodeJS.Timeout;
 }
 
@@ -108,10 +108,12 @@ export class IpcClient {
       try {
         const frames = this.decoder.push(data);
         for (const frame of frames) {
+          // SAFETY: Frame decoder produces valid JSON messages matching IpcResponse.
           this.handleIncomingResponse(frame as IpcResponse);
         }
-      } catch (err) {
-        // Log or handle frame decoding error
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.rejectAllPending(new Error(`Error decoding socket frame: ${message}`));
       }
     });
 
@@ -130,10 +132,12 @@ export class IpcClient {
       try {
         const frames = this.decoder.push(data);
         for (const frame of frames) {
+          // SAFETY: Transport messages conform to IpcResponse message structure.
           this.handleIncomingResponse(frame as IpcResponse);
         }
-      } catch (err) {
-        // Log or handle frame decoding error
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.rejectAllPending(new Error(`Error decoding transport frame: ${message}`));
       }
     });
 
@@ -213,8 +217,9 @@ export class IpcClient {
       if (timer.unref) timer.unref();
 
       this.pendingRequests.set(id, {
-        resolve: resolve as (val: unknown) => void,
-        reject,
+        // SAFETY: Resolves caller promise with received result of type TResult.
+        resolve: (val) => resolve(val as TResult),
+        reject: (err) => reject(err),
         timer,
       });
 

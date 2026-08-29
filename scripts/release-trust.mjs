@@ -5,7 +5,9 @@ export const REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 export const DEFAULT_MANIFEST_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 function normalizePem(value) {
-  return typeof value === "string" ? value.replace(/\\n/g, "\n").trim() : "";
+  return Object.prototype.toString.call(value) === "[object String]"
+    ? value.replace(/\\n/g, "\n").trim()
+    : "";
 }
 
 function fingerprintPublicKey(publicKey) {
@@ -18,17 +20,19 @@ function rawEd25519PublicKeyHex(publicKey) {
   return der.subarray(-32).toString("hex");
 }
 export function isDigitOnlyKeyId(keyId) {
-  return typeof keyId === "string" && /^\d+$/.test(keyId);
+  return Object.prototype.toString.call(keyId) === "[object String]" && /^\d+$/.test(keyId);
 }
 
 export function isTestOnlyKey(keyId) {
   return (
-    typeof keyId === "string" && (keyId.startsWith("test-only-") || keyId.includes("test-only"))
+    Object.prototype.toString.call(keyId) === "[object String]" &&
+    (keyId.startsWith("test-only-") || keyId.includes("test-only"))
   );
 }
+export const isExplicitTestOnlyKeyId = isTestOnlyKey;
 
 export function assertProductionKey(key) {
-  if (!key || typeof key !== "object") {
+  if (!key || Object.prototype.toString.call(key) !== "[object Object]") {
     throw new Error("Invalid release key object.");
   }
   if (isDigitOnlyKeyId(key.keyId)) {
@@ -49,10 +53,13 @@ export function assertProductionKey(key) {
       `Release key '${key.keyId}' belongs to '${key.trustDomain}' trust domain, not 'production'.`,
     );
   }
+  return key;
 }
+export const validateLoadedReleaseKeyRecord = assertProductionKey;
 
 export function createReleaseSigningKey(input, options = {}) {
-  const keyId = typeof input?.keyId === "string" ? input.keyId.trim() : "";
+  const keyId =
+    Object.prototype.toString.call(input?.keyId) === "[object String]" ? input.keyId.trim() : "";
   const privateKeyPkcs8Pem = normalizePem(input?.privateKeyPkcs8Pem || input?.privateKeyPem);
   const publicKeyPemInput = normalizePem(input?.publicKeyPem);
   const allowTestOnly = options.allowTestOnly === true;
@@ -154,7 +161,10 @@ export function trustedKeysFromSigningKey(key) {
 }
 
 export function loadTrustedReleaseKeysFromEnv(env = process.env, options = {}) {
-  const keyId = typeof env.RESIN_RELEASE_KEY_ID === "string" ? env.RESIN_RELEASE_KEY_ID.trim() : "";
+  const keyId =
+    Object.prototype.toString.call(env.RESIN_RELEASE_KEY_ID) === "[object String]"
+      ? env.RESIN_RELEASE_KEY_ID.trim()
+      : "";
   const publicKeyPem = normalizePem(env.RESIN_RELEASE_PUBLIC_KEY_PEM);
   const allowTestOnly = options.allowTestOnly ?? env.RESIN_RELEASE_TEST_ONLY === "1";
 
@@ -207,10 +217,13 @@ export function loadTrustedReleaseKeysFromEnv(env = process.env, options = {}) {
     additionalEntries = options.additionalKeys;
   } else {
     const additionalRaw =
-      typeof options.additionalTrustedKeysJson === "string"
+      Object.prototype.toString.call(options.additionalTrustedKeysJson) === "[object String]"
         ? options.additionalTrustedKeysJson
         : env.RESIN_RELEASE_ADDITIONAL_TRUSTED_KEYS_JSON;
-    if (typeof additionalRaw === "string" && additionalRaw.trim().length > 0) {
+    if (
+      Object.prototype.toString.call(additionalRaw) === "[object String]" &&
+      additionalRaw.trim().length > 0
+    ) {
       try {
         additionalEntries = JSON.parse(additionalRaw);
       } catch (err) {
@@ -229,10 +242,15 @@ export function loadTrustedReleaseKeysFromEnv(env = process.env, options = {}) {
     }
     for (let i = 0; i < additionalEntries.length; i++) {
       const entry = additionalEntries[i];
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      if (
+        !entry ||
+        Array.isArray(entry) ||
+        Object.prototype.toString.call(entry) !== "[object Object]"
+      ) {
         throw new Error(`Invalid additional trusted key record at index ${i}: expected an object.`);
       }
-      const addKeyId = typeof entry.keyId === "string" ? entry.keyId.trim() : "";
+      const addKeyId =
+        Object.prototype.toString.call(entry.keyId) === "[object String]" ? entry.keyId.trim() : "";
       const addPem = normalizePem(entry.publicKeyPem);
       if (!addKeyId || !addPem) {
         throw new Error(
@@ -479,8 +497,10 @@ export function verifySignedRevocationNotice(notice, trustedKeys) {
 }
 
 export function canonicalJson(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value === null || Object.prototype.toString.call(value) !== "[object Object]") {
+    if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+    return JSON.stringify(value);
+  }
   const entries = Object.keys(value)
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`);

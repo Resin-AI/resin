@@ -74,6 +74,7 @@ describe("Privacy Redaction & Secret Scrubbing", () => {
     expect(result.isRedacted).toBe(true);
     expect(result.redactionStrategy).toBe("mask");
 
+    // SAFETY: RedactionResult preserves input payload type structure.
     const redactedData = result.data as typeof payload;
 
     // Check path aliasing
@@ -120,6 +121,7 @@ describe("Privacy Redaction & Secret Scrubbing", () => {
       longText: longString,
     });
 
+    // SAFETY: RedactionResult data matches expected input object shape.
     const data = result.data as { secret: string; longText: string };
 
     expect(data.secret).toContain("[REDACTED_HIGH_ENTROPY_SECRET:");

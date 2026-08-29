@@ -147,7 +147,16 @@ export class CloudCircuitBreaker {
   /**
    * Records a failed cloud operation.
    */
-  recordFailure(error?: unknown): void {
+  recordFailure(
+    error?:
+      | Error
+      | { code?: string | number; status?: number; message?: string }
+      | string
+      | number
+      | boolean
+      | null
+      | undefined,
+  ): void {
     const now = Date.now();
     this.lastFailureTime = now;
     this.failureCount++;
@@ -156,29 +165,27 @@ export class CloudCircuitBreaker {
     const errorMsg = error instanceof Error ? error.message : String(error ?? "Unknown error");
     this.lastErrorReason = errorMsg;
 
-    // Check for specific error types / status codes
+    const errorObj = error && error instanceof Object && !Array.isArray(error) ? error : undefined;
+    const hasUnauthorizedCode =
+      errorObj !== undefined && "code" in errorObj && String(errorObj.code) === "unauthorized";
+    const hasUnauthorizedStatus =
+      errorObj !== undefined && "status" in errorObj && errorObj.status === 401;
+
     const isUnauthorized =
-      (error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code: unknown }).code === "unauthorized") ||
-      (error &&
-        typeof error === "object" &&
-        "status" in error &&
-        (error as { status: unknown }).status === 401) ||
+      hasUnauthorizedCode ||
+      hasUnauthorizedStatus ||
       errorMsg.toLowerCase().includes("unauthorized") ||
       errorMsg.toLowerCase().includes("token expired") ||
       errorMsg.toLowerCase().includes("device revoked");
 
+    const hasUpgradeCode =
+      errorObj !== undefined && "code" in errorObj && String(errorObj.code) === "upgrade_required";
+    const hasUpgradeStatus =
+      errorObj !== undefined && "status" in errorObj && errorObj.status === 426;
+
     const isUpgradeRequired =
-      (error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code: unknown }).code === "upgrade_required") ||
-      (error &&
-        typeof error === "object" &&
-        "status" in error &&
-        (error as { status: unknown }).status === 426) ||
+      hasUpgradeCode ||
+      hasUpgradeStatus ||
       errorMsg.toLowerCase().includes("upgrade_required") ||
       errorMsg.toLowerCase().includes("upgrade required");
 

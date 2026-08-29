@@ -3,7 +3,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DaemonConfigSchema } from "../src/config.js";
+import { z } from "zod";
+import { type DaemonConfig, DaemonConfigSchema } from "../src/config.js";
 import { IpcClient } from "../src/ipc/client.js";
 import { FrameDecoder, MAX_FRAME_SIZE, encodeFrame } from "../src/ipc/framing.js";
 import { IPC_ERROR_CODES, type IpcRequest, type IpcResponse } from "../src/ipc/protocol.js";
@@ -412,15 +413,26 @@ describe("ipc", () => {
       const malformedPayload = Buffer.from("{ this is not valid json }");
       const malformedFrame = encodeFrame(malformedPayload);
 
+      const ipcResponseSchema = z.object({
+        id: z.string().default(""),
+        result: z.unknown().optional(),
+        error: z
+          .object({
+            code: z.string().default(""),
+            message: z.string().default(""),
+            details: z.unknown().optional(),
+          })
+          .optional(),
+      });
+
       const responseReceived = new Promise<IpcResponse>((resolve) => {
         const decoder = new FrameDecoder();
         netSocket.on("data", (chunk) => {
           const frames = decoder.push(chunk);
           for (const frame of frames) {
-            if (typeof frame === "string") {
-              resolve(JSON.parse(frame) as IpcResponse);
-            } else {
-              resolve(frame as IpcResponse);
+            const parsed = ipcResponseSchema.safeParse(frame);
+            if (parsed.success) {
+              resolve(parsed.data);
             }
           }
         });

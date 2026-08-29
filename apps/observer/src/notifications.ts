@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -12,9 +11,9 @@ import {
   selectDueNotifications,
 } from "@resin/protocol";
 import { z } from "zod";
+import type { JsonObject } from "./normalization/redaction.js";
 import { type DaemonPaths, type PathResolutionOptions, resolvePaths } from "./paths.js";
 import type { DaemonHealthReport } from "./supervisor.js";
-
 export const NOTIFICATION_INBOX_FILE_NAME = "notification-inbox.json";
 export const HARNESS_HEALTH_STATE_FILE_NAME = "harness-health.json";
 export const ACTIONABLE_NOTIFICATION_COOLDOWN_MS = 4 * 60 * 60 * 1_000;
@@ -83,8 +82,12 @@ export interface NotificationInboxOptions extends PathResolutionOptions {
   readonly managedIds?: readonly string[];
   readonly lockTimeoutMs?: number;
 }
+export interface FormattedTimestamp {
+  milliseconds: number;
+  iso: string;
+}
 
-function toTimestamp(value: Date | number | undefined): { milliseconds: number; iso: string } {
+function toTimestamp(value: Date | number | undefined): FormattedTimestamp {
   const milliseconds = value instanceof Date ? value.getTime() : (value ?? Date.now());
   if (!Number.isFinite(milliseconds) || milliseconds < 0) {
     throw new TypeError("Notification time must be a non-negative finite timestamp");
@@ -93,14 +96,14 @@ function toTimestamp(value: Date | number | undefined): { milliseconds: number; 
   return { milliseconds, iso };
 }
 
-function isNodeError(error: unknown, code: string): boolean {
+function isNodeError<E>(error: E, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+function asRecord<T>(value: T): JsonObject | undefined {
+  const parsed = z.record(z.unknown()).safeParse(value);
+  // SAFETY: z.record verifies value is a non-null object record dictionary.
+  return parsed.success ? (parsed.data as JsonObject) : undefined;
 }
 
 function getNotificationInboxPathFromOptions(options: NotificationInboxOptions): string {

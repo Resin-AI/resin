@@ -53,7 +53,7 @@ const VALID_INTENT_DIGEST = "31b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293
  * Creates a deterministic, strictly valid ObservedEffectProfile.
  */
 function createValidObservedEffectProfile(
-  overrides: Record<string, unknown> = {},
+  overrides: Partial<ObservedEffectProfile> = {},
 ): ObservedEffectProfile {
   const baseProfile = {
     filesRead: { observation: "complete" as const, paths: ["/tmp/input.txt"] },
@@ -84,8 +84,10 @@ function createValidObservedEffectProfile(
     ...overrides,
   };
 
+  // SAFETY: baseProfile fulfills all required ObservedEffectProfile fields before computing digest.
   const profileDigest = computeObservedEffectProfileDigest(baseProfile as ObservedEffectProfile);
   return {
+    // SAFETY: baseProfile combined with computed digest conforms to ObservedEffectProfile.
     ...(baseProfile as ObservedEffectProfile),
     profileDigest,
   };
@@ -1157,7 +1159,7 @@ describe("Hardened Qualification Contracts", () => {
           ...bundle.approval,
           signature: {
             ...bundle.approval.signature,
-            algorithm: "rsa-sha256" as unknown as "ed25519",
+            algorithm: "rsa-sha256" as const,
           },
         },
       };

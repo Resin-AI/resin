@@ -4,7 +4,14 @@ import type {
   V1ActivationCertificate,
   V1LockedToolEntry,
 } from "@resin/contracts";
+import {
+  V1ActivationCertificateSchema,
+  V1LockedToolEntrySchema,
+  V1RevocationMetadataSchema,
+} from "@resin/contracts";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { DeploymentActivator } from "./activator.js";
 import type { ArtifactTransferClient } from "./client.js";
 import type { LocalPreactivationChecker } from "./preactivation.js";
@@ -19,6 +26,28 @@ import {
   type ToolOverrideRecord,
   type TrustVerificationResult,
 } from "./types.js";
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema),
+  ]),
+);
+
+const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
+
+const TrustVerificationResultSchema = z.object({
+  trusted: z.boolean(),
+  certificate: V1ActivationCertificateSchema.optional(),
+  revocationMetadata: V1RevocationMetadataSchema.optional(),
+  reason: z.string().optional(),
+  errorCode: z.string().optional(),
+});
 
 /**
  * Interface for bidirectional control stream adapter.
@@ -170,7 +199,7 @@ export class DeploymentSyncCoordinator {
           if (!manifest && targetDigest) {
             const downloadRes = await this.client.downloadArtifact(targetDigest, {
               allowDevKeys: this.allowDevKeys,
-              metadata: command.metadata,
+              metadata: JsonObjectSchema.safeParse(command.metadata).data,
             });
             manifest = downloadRes.manifest;
             inspection = downloadRes.inspection;
@@ -265,28 +294,34 @@ export class DeploymentSyncCoordinator {
           }
 
           // 4. Run Preactivation Checks
+          const metaLockedEntry = command.metadata?.lockedEntry
+            ? V1LockedToolEntrySchema.safeParse(command.metadata.lockedEntry).data
+            : undefined;
+          const metaCertificate = command.metadata?.certificate
+            ? V1ActivationCertificateSchema.safeParse(command.metadata.certificate).data
+            : undefined;
+          const commandTrustVerification = command.trustVerification
+            ? TrustVerificationResultSchema.safeParse(command.trustVerification).data
+            : undefined;
+          const metaTrustVerification = command.metadata?.trustVerification
+            ? TrustVerificationResultSchema.safeParse(command.metadata.trustVerification).data
+            : undefined;
+
           const preactivationResult = await this.preactivation.checkPreactivation({
             manifest,
             workspaceId,
             projectId:
               command.projectId ??
-              (command.metadata?.projectId as string | undefined) ??
+              z.string().safeParse(command.metadata?.projectId).data ??
               workspaceId,
             envelope,
             overrides,
             inspection,
             targetVersion: version,
             targetDigest,
-            lockedEntry:
-              command.lockedEntry ??
-              (command.metadata?.lockedEntry as V1LockedToolEntry | undefined),
-            certificate:
-              command.certificate ??
-              (command.metadata?.certificate as V1ActivationCertificate | undefined),
-            trustVerification: (command.trustVerification ??
-              (command.metadata?.trustVerification as TrustVerificationResult | undefined)) as
-              | TrustVerificationResult
-              | undefined,
+            lockedEntry: command.lockedEntry ?? metaLockedEntry,
+            certificate: command.certificate ?? metaCertificate,
+            trustVerification: commandTrustVerification ?? metaTrustVerification,
           });
 
           if (!preactivationResult.eligible) {
@@ -328,7 +363,7 @@ export class DeploymentSyncCoordinator {
             isCanary,
             targetTrafficPercentage: canaryWeight,
             reason: reason ?? `Applied command ${commandId}`,
-            metadata: command.metadata,
+            metadata: JsonObjectSchema.safeParse(command.metadata).data,
           });
 
           return DeploymentSyncStatusReportSchema.parse({
@@ -457,7 +492,8 @@ export class DeploymentSyncCoordinator {
             status: "rejected",
             appliedAt: timestamp,
             errorCode: "UNKNOWN_COMMAND_TYPE",
-            errorMessage: `Unknown command type: ${(command as Record<string, unknown>).commandType}`,
+            // SAFETY: Dispatches unknown command payload to read its reported commandType.
+            errorMessage: `Unknown command type: ${String((command as { commandType?: unknown }).commandType)}`,
             details: {},
           });
         }

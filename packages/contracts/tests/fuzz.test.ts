@@ -3,15 +3,33 @@ import { canonicalJsonStringify, hashCanonical } from "../src/canonical.js";
 import { ISOTimestampSchema, IdentifierSchema } from "../src/common.js";
 
 describe("fuzz and boundary tests", () => {
+  type FuzzObjectValue =
+    | string
+    | number
+    | boolean
+    | null
+    | undefined
+    | FuzzObjectRecord
+    | FuzzObjectValue[];
+
+  interface FuzzObjectRecord {
+    [key: string]: FuzzObjectValue;
+  }
+
   // Helper to shuffle object keys
-  function shuffleKeys<T extends Record<string, unknown>>(obj: T): Record<string, unknown> {
+  function shuffleKeys(obj: FuzzObjectRecord): FuzzObjectRecord {
     const keys = Object.keys(obj);
-    const shuffled: Record<string, unknown> = {};
+    const shuffled: FuzzObjectRecord = {};
     const randomizedKeys = [...keys].sort(() => Math.random() - 0.5);
     for (const key of randomizedKeys) {
       const val = obj[key];
-      if (val !== null && typeof val === "object" && !Array.isArray(val)) {
-        shuffled[key] = shuffleKeys(val as Record<string, unknown>);
+      if (
+        val !== null &&
+        Object.prototype.toString.call(val) === "[object Object]" &&
+        !Array.isArray(val)
+      ) {
+        // SAFETY: Nested object is confirmed to be an object dictionary before recursion.
+        shuffled[key] = shuffleKeys(val as FuzzObjectRecord);
       } else {
         shuffled[key] = val;
       }

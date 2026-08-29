@@ -1,5 +1,5 @@
 import type { ToolManifest } from "@resin/contracts";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { ToolCallOptions } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -11,7 +11,7 @@ export interface ToolInvocationRequest {
   toolId: string;
   name: string;
   version: string;
-  parameters: Record<string, unknown>;
+  parameters: JsonRpcParams;
   context: WorkspaceContext;
   manifest?: ToolManifest;
   signal?: AbortSignal;

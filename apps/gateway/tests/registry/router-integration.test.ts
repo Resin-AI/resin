@@ -120,6 +120,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
 
     await registry.registerTool(manifest, undefined, { workspaceId: wsId });
 
+    // SAFETY: Gateway response is confirmed to be ListToolsResult.
     const listRes = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
@@ -180,6 +181,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       { workspaceId: wsId },
     );
 
+    // SAFETY: Gateway response is confirmed to be CallToolResult.
     const callRes = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
@@ -222,23 +224,35 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     await registry.registerTool(manifest, undefined, { workspaceId: wsId });
     await registry.disableTool("tool_secret", wsId);
 
-    const callDisabled = (await gateway.handleMessage(conn.connectionId, {
+    // Call missing tool
+    // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
+    const callMissing = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
-      params: { name: "secret_tool", arguments: {} },
+      params: {
+        name: "non_existent",
+        arguments: {},
+      },
     })) as JsonRpcErrorResponse;
 
-    expect(callDisabled.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
+    expect(callMissing.error).toBeDefined();
+    expect(callMissing.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
 
-    const callMissing = (await gateway.handleMessage(conn.connectionId, {
+    // Call disabled tool
+    // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
+    const callDisabled = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "non_existent_tool", arguments: {} },
+      params: {
+        name: "secret_tool",
+        arguments: {},
+      },
     })) as JsonRpcErrorResponse;
 
-    expect(callMissing.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
+    expect(callDisabled.error).toBeDefined();
+    expect(callDisabled.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
   });
 
   it("broadcasts notifications/tools/list_changed on registry catalog updates", async () => {
@@ -248,7 +262,8 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     const notifications: JsonRpcNotification[] = [];
     const conn = gateway.createConnection({
       sendMessage: (msg) => {
-        if (!("id" in msg)) {
+        if (!("id" in msg) || msg.id === undefined) {
+          // SAFETY: Message without an id property is a JSON-RPC notification.
           notifications.push(msg as JsonRpcNotification);
         }
       },
@@ -328,7 +343,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       workspaceId: wsId,
     });
     await registry.activateToolVersion("tool_no_art", "1.0.0", wsId);
-
+    // SAFETY: Gateway response is confirmed to be CallToolResult.
     const callResponse = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
@@ -410,19 +425,19 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     });
 
     registry.bindWorkspaceLock(wsId, lock);
-
+    // SAFETY: Gateway response is confirmed to be ListToolsResult.
     const listResponse = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/list",
       params: {},
     })) as JsonRpcSuccessResponse<ListToolsResult>;
-
     const toolNames = listResponse.result.tools.map((t) => t.name);
     expect(toolNames).toContain("locked_tool");
     expect(toolNames).toContain("system_status");
 
     // Call unlocked tool returns not found error
+    // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
     const callUnlocked = (await gateway.handleMessage(conn.connectionId, {
       jsonrpc: "2.0",
       id: 3,
@@ -432,7 +447,6 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         arguments: {},
       },
     })) as JsonRpcErrorResponse;
-
     expect(callUnlocked.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
   });
 });

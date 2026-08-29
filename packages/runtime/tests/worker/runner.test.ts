@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { type ToolContext, ToolRuntime, defineTool } from "../../src/worker/index.js";
+import {
+  type BrokerRequestHandlerFn,
+  type ToolContext,
+  ToolRuntime,
+  defineTool,
+} from "../../src/worker/index.js";
 
 describe("ToolRuntime and DeterministicWorkerSandbox", () => {
   const runtime = new ToolRuntime({ mode: "in-process" });
@@ -196,22 +201,18 @@ describe("ToolRuntime and DeterministicWorkerSandbox", () => {
     const fakeDb = new Map<string, string>();
     fakeDb.set("config.json", JSON.stringify({ mode: "production" }));
 
-    const brokerHandler = async (
-      service: string,
-      action: string,
-      payload: Record<string, unknown>,
-    ) => {
+    const brokerHandler: BrokerRequestHandlerFn = async (service, action, payload) => {
       if (service === "fs" && action === "readFile") {
-        const p = payload.path as string;
+        const p = String(payload?.path ?? "");
         if (!fakeDb.has(p)) throw new Error("File not found");
-        return { content: fakeDb.get(p), encoding: "utf-8" };
+        return { content: fakeDb.get(p) ?? "", encoding: "utf-8" };
       }
       throw new Error(`Unhandled ${service}.${action}`);
     };
 
     const handler = defineTool(async (ctx: ToolContext) => {
       const configStr = await ctx.broker.fs.readFile("config.json");
-      const config = JSON.parse(configStr as string);
+      const config = JSON.parse(String(configStr));
       const tokenRef = ctx.broker.secret.createReference("AUTH_TOKEN");
       return { mode: config.mode, tokenRef: tokenRef.name };
     });

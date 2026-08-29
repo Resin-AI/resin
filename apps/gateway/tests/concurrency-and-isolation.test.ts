@@ -55,6 +55,7 @@ describe("Multi-Client Concurrency & Workspace Isolation", () => {
       expect(connB.workspaceContext.canonicalRoot).toBe(connB.workspaceContext.projectRoot);
 
       // Call workspace_info tool on each
+      // SAFETY: Gateway returns success response for valid tools/call request.
       const resA = (await gateway.handleMessage(connA.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -62,6 +63,7 @@ describe("Multi-Client Concurrency & Workspace Isolation", () => {
         params: { name: "workspace_info" },
       })) as JsonRpcSuccessResponse<CallToolResult>;
 
+      // SAFETY: Gateway returns success response for valid tools/call request.
       const resB = (await gateway.handleMessage(connB.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -124,6 +126,7 @@ describe("Multi-Client Concurrency & Workspace Isolation", () => {
       );
 
       // Calling from A should succeed
+      // SAFETY: Gateway returns success response for valid tools/call request.
       const callA = (await gateway.handleMessage(connA.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -135,6 +138,7 @@ describe("Multi-Client Concurrency & Workspace Isolation", () => {
       expect(callA.result.content[0].text).toBe("alpha secret");
 
       // Calling from B should fail
+      // SAFETY: Gateway returns error response when tool not in workspace.
       const callB = (await gateway.handleMessage(connB.connectionId, {
         jsonrpc: "2.0",
         id: 3,
@@ -196,6 +200,7 @@ describe("Multi-Client Concurrency & Workspace Isolation", () => {
       expect(r3?.error).toBeUndefined();
 
       // 4th should be rate limited
+      // SAFETY: Gateway returns error response when rate limit exceeded.
       const r4 = (await gateway.handleMessage(conn.connectionId, {
         jsonrpc: "2.0",
         id: 5,

@@ -8,9 +8,20 @@ import {
 import { createInMemoryStateStore } from "@resin/db";
 import { describe, expect, it } from "vitest";
 import { createManageToolsHandler } from "../../src/meta/manage-tools.js";
+import type { CallToolResult, JsonRpcParams } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
+
+function parseContentJson<T = JsonRpcParams>(result: CallToolResult): T {
+  const first = result.content[0];
+  const text =
+    first && "text" in first && Object.prototype.toString.call(first.text) === "[object String]"
+      ? String(first.text)
+      : "{}";
+  // SAFETY: Test helper parses JSON text from CallToolResult into typed object.
+  return JSON.parse(text) as T;
+}
 
 function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
   const toolId = overrides?.id ?? "tool_manage";
@@ -73,7 +84,10 @@ describe("manage_tools Meta-Tool", () => {
       toolId: "tool_alpha",
     });
     expect(resSingle.isError).toBeFalsy();
-    const dataSingle = JSON.parse(resSingle.content[0].text as string);
+    const dataSingle = parseContentJson<{
+      toolId: string;
+      installedVersions: Array<{ version: string }>;
+    }>(resSingle);
     expect(dataSingle.toolId).toBe("tool_alpha");
     expect(dataSingle.installedVersions).toHaveLength(2);
     expect(dataSingle.installedVersions.map((v: { version: string }) => v.version)).toEqual([
@@ -84,7 +98,7 @@ describe("manage_tools Meta-Tool", () => {
     // List all workspace tools
     const resAll = await handler(context, { action: "list_versions" });
     expect(resAll.isError).toBeFalsy();
-    const dataAll = JSON.parse(resAll.content[0].text as string);
+    const dataAll = parseContentJson<Record<string, Array<{ version: string }>>>(resAll);
     expect(dataAll.tools.some((t: { toolId: string }) => t.toolId === "tool_alpha")).toBe(true);
     expect(dataAll.tools.some((t: { toolId: string }) => t.toolId === "tool_beta")).toBe(true);
   });
@@ -99,7 +113,12 @@ describe("manage_tools Meta-Tool", () => {
 
     const res = await handler(context, { action: "status", toolId: "tool_stat" });
     expect(res.isError).toBeFalsy();
-    const data = JSON.parse(res.content[0].text as string);
+    const data = parseContentJson<{
+      toolId: string;
+      activeVersion: string;
+      pinnedVersion?: string;
+      isDisabled: boolean;
+    }>(res);
     expect(data.toolId).toBe("tool_stat");
     expect(data.activeVersion).toBe("1.0.0");
     expect(data.pinnedVersion).toBeUndefined();
@@ -220,7 +239,10 @@ describe("manage_tools Meta-Tool", () => {
       action: "status",
       toolId: "tool_roll",
     });
-    const statusData = JSON.parse(statusRes.content[0].text as string);
+    const statusData = parseContentJson<{
+      activeVersion: string;
+      rollbacks: Array<{ restoredSnapshotId: string }>;
+    }>(statusRes);
     expect(statusData.activeVersion).toBe("1.0.0");
     expect(statusData.rollbacks).toHaveLength(1);
     expect(statusData.rollbacks[0].restoredSnapshotId).toBe("1.0.0");
@@ -240,10 +262,8 @@ describe("manage_tools Meta-Tool", () => {
     // Pin and disable
     await handler(context, { action: "pin", toolId: "tool_override", version: "1.0.0" });
     await handler(context, { action: "disable", toolId: "tool_override" });
-
-    const statusPre = JSON.parse(
-      (await handler(context, { action: "status", toolId: "tool_override" })).content[0]
-        .text as string,
+    const statusPre = parseContentJson<{ pinnedVersion?: string; isDisabled?: boolean }>(
+      await handler(context, { action: "status", toolId: "tool_override" }),
     );
     expect(statusPre.pinnedVersion).toBe("1.0.0");
     expect(statusPre.isDisabled).toBe(true);
@@ -251,11 +271,11 @@ describe("manage_tools Meta-Tool", () => {
     // Clear overrides
     const clearRes = await handler(context, { action: "clear_override", toolId: "tool_override" });
     expect(clearRes.isError).toBeFalsy();
-
-    const statusPost = JSON.parse(
-      (await handler(context, { action: "status", toolId: "tool_override" })).content[0]
-        .text as string,
-    );
+    const statusPost = parseContentJson<{
+      pinnedVersion?: string;
+      isDisabled?: boolean;
+      activeVersion?: string;
+    }>(await handler(context, { action: "status", toolId: "tool_override" }));
     expect(statusPost.pinnedVersion).toBeUndefined();
     expect(statusPost.isDisabled).toBe(false);
     expect(statusPost.activeVersion).toBe("2.0.0");

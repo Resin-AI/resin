@@ -9,6 +9,19 @@ import type {
 } from "@resin/contracts";
 import type { RawHarnessRecord } from "./types.js";
 
+export type DecoderMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | DecoderMetadataRecord
+  | DecoderMetadataValue[];
+
+export interface DecoderMetadataRecord {
+  [key: string]: DecoderMetadataValue;
+}
+
 /**
  * Base fields shared across all intermediate session events prior to final normalization.
  */
@@ -17,7 +30,7 @@ export interface BaseIntermediateEventFields {
   timestamp: string;
   schemaVersion?: string;
   causalRef?: Partial<CausalRef> & { causalSequence?: number };
-  metadata?: Record<string, unknown>;
+  metadata?: DecoderMetadataRecord;
   redaction?: Partial<RedactionMeta>;
   providerUsage?: ProviderReportedUsage;
   eventId?: string;
@@ -58,8 +71,8 @@ export interface IntermediateToolCallEvent extends BaseIntermediateEventFields {
   callId?: string;
   toolName: string;
   toolVersion?: string;
-  input?: Record<string, unknown>;
-  parameters?: Record<string, unknown>;
+  input?: DecoderMetadataRecord;
+  parameters?: DecoderMetadataRecord;
   rawInput?: string;
   candidateRef?: string;
   isShadow?: boolean;
@@ -167,7 +180,7 @@ export interface IntermediateSessionLifecycleEvent extends BaseIntermediateEvent
 export interface IntermediateUnknownPassthroughEvent extends BaseIntermediateEventFields {
   type: "unknown_passthrough";
   rawEventType: string;
-  rawPayload: Record<string, unknown>;
+  rawPayload: DecoderMetadataRecord;
 }
 
 /**
@@ -196,8 +209,8 @@ export interface RecordDecoderContext {
   harnessId?: string;
   lastCausalSequence?: number;
   parentEventId?: string;
-  metadata?: Record<string, unknown>;
-  [key: string]: unknown;
+  metadata?: DecoderMetadataRecord;
+  [key: string]: DecoderMetadataValue;
 }
 
 /**

@@ -9,12 +9,30 @@ import {
   type ChannelMetadata,
   type ManifestAsset,
   REVOKED_RELEASE_KEY_IDS,
+  type RuntimeAssetEntry,
   type SignedManifest,
   type TrustedReleaseKey,
   selectPlatformAsset,
   verifyChannelMetadata,
   verifyManifest,
 } from "./channel-verifier.js";
+
+export type ReleaseTrustJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly ReleaseTrustJsonValue[]
+  | { readonly [key: string]: ReleaseTrustJsonValue };
+
+interface DownloadFetchResponse {
+  status: number;
+  statusText: string;
+  ok: boolean;
+  headers: Headers;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  buffer?: Buffer;
+}
 
 export const DEFAULT_PRODUCTION_CHANNEL_URL = "https://dist.resin.sh/releases/v1/channels.json";
 export const PINNED_DENO_VERSION = "2.9.5";
@@ -91,6 +109,7 @@ export interface RuntimeDescriptor {
 export interface ReleaseManifestWithRuntimes extends SignedManifest {
   readonly runtimes?: {
     readonly deno?: RuntimeDescriptor;
+    readonly [name: string]: RuntimeAssetEntry | undefined;
   };
 }
 
@@ -624,11 +643,14 @@ async function nodePinnedFetch(
         method: "GET",
         maxHeaderSize,
         lookup: (_hostname, lookupOptions, callback) => {
-          const isAll =
-            typeof lookupOptions === "object" &&
-            lookupOptions !== null &&
-            Boolean((lookupOptions as { all?: boolean }).all);
+          const isAll = Boolean(
+            lookupOptions &&
+              lookupOptions instanceof Object &&
+              "all" in lookupOptions &&
+              lookupOptions.all,
+          );
           if (isAll) {
+            // SAFETY: dns.lookup callback with options.all receives an array of address objects.
             (
               callback as (
                 err: Error | null,
@@ -636,6 +658,7 @@ async function nodePinnedFetch(
               ) => void
             )(null, [{ address: pinnedAddress, family }]);
           } else {
+            // SAFETY: standard dns.lookup callback receives address string and family number.
             (callback as (err: Error | null, address: string, family: number) => void)(
               null,
               pinnedAddress,
@@ -803,7 +826,7 @@ export async function fetchBytes(
   let idleTimeoutMs: number | undefined;
   let connectTimeoutMs: number | undefined;
 
-  if (typeof fetchImplOrOptions === "function") {
+  if (fetchImplOrOptions instanceof Function) {
     fetchImpl = fetchImplOrOptions;
     allowInsecure = allowInsecureHttpForTestsArg ?? false;
     dnsLookup = extraOptions?.dnsLookup;
@@ -813,7 +836,7 @@ export async function fetchBytes(
     timeoutMs = extraOptions?.timeoutMs;
     idleTimeoutMs = extraOptions?.idleTimeoutMs;
     connectTimeoutMs = extraOptions?.connectTimeoutMs;
-  } else if (fetchImplOrOptions && typeof fetchImplOrOptions === "object") {
+  } else if (fetchImplOrOptions) {
     fetchImpl = fetchImplOrOptions.fetchImpl;
     allowInsecure = fetchImplOrOptions.allowInsecureHttpForTests ?? false;
     dnsLookup = fetchImplOrOptions.dnsLookup;
@@ -849,14 +872,7 @@ export async function fetchBytes(
       dnsLookup,
     });
 
-    let response: {
-      status: number;
-      statusText: string;
-      ok: boolean;
-      headers: Headers;
-      arrayBuffer(): Promise<ArrayBuffer>;
-      buffer?: Buffer;
-    };
+    let response: DownloadFetchResponse;
 
     if (fetchImpl) {
       const controller = new AbortController();
@@ -908,11 +924,8 @@ export async function fetchBytes(
         }
 
         let bodyBuf: Buffer;
-        if (
-          resp.body &&
-          typeof (resp.body as unknown as { getReader?: unknown }).getReader === "function"
-        ) {
-          const reader = (resp.body as unknown as ReadableStream<Uint8Array>).getReader();
+        if (resp.body && "getReader" in resp.body && resp.body.getReader instanceof Function) {
+          const reader = resp.body.getReader();
           const chunks: Uint8Array[] = [];
           let total = 0;
           try {
@@ -1050,6 +1063,7 @@ export async function fetchBytes(
 
 function parseJson<T>(bytes: Buffer, label: string): T {
   try {
+    // SAFETY: Generic JSON parser returning validated caller-expected T.
     return JSON.parse(bytes.toString("utf8")) as T;
   } catch (error) {
     throw new Error(
@@ -1058,25 +1072,32 @@ function parseJson<T>(bytes: Buffer, label: string): T {
   }
 }
 
-const BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS: Record<string, true> = {
+const BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS = {
   keyId: true,
   algorithm: true,
   trustDomain: true,
   publicKeyPem: true,
   publicKeyHex: true,
   publicKeyFingerprintSha256: true,
-};
+} as const;
 
-const OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS: Record<string, true> = {
+const OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS = {
   keyId: true,
   publicKeyHex: true,
-};
+} as const;
 
-export function parseBundledReleaseTrust(parsed: unknown): TrustedReleaseKey[] {
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+export function parseBundledReleaseTrust(
+  parsed: ReleaseTrustJsonValue | undefined,
+): TrustedReleaseKey[] {
+  if (
+    !parsed ||
+    Array.isArray(parsed) ||
+    Object.prototype.toString.call(parsed) !== "[object Object]"
+  ) {
     throw new Error("Bundled release trust root must be a JSON object.");
   }
-  const root = parsed as Record<string, unknown>;
+  // SAFETY: Parsed JSON root verified to be an object record.
+  const root = parsed as Record<string, ReleaseTrustJsonValue>;
 
   if (root.schemaVersion !== "2.0.0") {
     throw new Error(
@@ -1100,19 +1121,25 @@ export function parseBundledReleaseTrust(parsed: unknown): TrustedReleaseKey[] {
 
   for (let i = 0; i < root.trustedKeys.length; i++) {
     const entry = root.trustedKeys[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (
+      !entry ||
+      Array.isArray(entry) ||
+      Object.prototype.toString.call(entry) !== "[object Object]"
+    ) {
       throw new Error(`Bundled trustedKeys[${i}] must be a JSON object.`);
     }
 
-    const record = entry as Record<string, unknown>;
+    // SAFETY: Narrowed to object record.
+    // SAFETY: Entry verified to be an object record.
+    const record = entry as Record<string, ReleaseTrustJsonValue>;
     for (const key of Object.keys(record)) {
-      if (!BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS[key]) {
+      if (!(key in BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS)) {
         throw new Error(`Bundled trustedKeys[${i}] contains forbidden property '${key}'.`);
       }
     }
 
     const keyId = record.keyId;
-    if (typeof keyId !== "string" || !keyId.trim()) {
+    if (String(keyId) !== keyId || !keyId.trim()) {
       throw new Error(`Bundled trustedKeys[${i}] is missing a valid 'keyId'.`);
     }
     if (seenKeyIds.has(keyId)) {
@@ -1134,7 +1161,10 @@ export function parseBundledReleaseTrust(parsed: unknown): TrustedReleaseKey[] {
       );
     }
 
-    if (typeof record.publicKeyPem !== "string" || !record.publicKeyPem.trim()) {
+    if (
+      String(record.publicKeyPem) !== record.publicKeyPem ||
+      !String(record.publicKeyPem).trim()
+    ) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyPem'.`);
     }
 
@@ -1158,7 +1188,7 @@ export function parseBundledReleaseTrust(parsed: unknown): TrustedReleaseKey[] {
     const derivedHex = rawPublicKey.toString("hex").toLowerCase();
     const derivedFingerprint = crypto.createHash("sha256").update(der).digest("hex").toLowerCase();
 
-    if (typeof record.publicKeyHex !== "string") {
+    if (String(record.publicKeyHex) !== record.publicKeyHex) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyHex'.`);
     }
     const normalizedDeclaredHex = record.publicKeyHex.trim().toLowerCase();
@@ -1168,7 +1198,7 @@ export function parseBundledReleaseTrust(parsed: unknown): TrustedReleaseKey[] {
       );
     }
 
-    if (typeof record.publicKeyFingerprintSha256 !== "string") {
+    if (String(record.publicKeyFingerprintSha256) !== record.publicKeyFingerprintSha256) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyFingerprintSha256'.`);
     }
     const normalizedDeclaredFingerprint = record.publicKeyFingerprintSha256.trim().toLowerCase();
@@ -1212,14 +1242,19 @@ export function parseTrustedKeysJsonOverride(overrideJson: string): TrustedRelea
 
   for (let i = 0; i < parsed.length; i++) {
     const entry = parsed[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (
+      !entry ||
+      Array.isArray(entry) ||
+      Object.prototype.toString.call(entry) !== "[object Object]"
+    ) {
       throw new Error(
         `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] must be a JSON object with keyId and publicKeyHex.`,
       );
     }
-    const record = entry as Record<string, unknown>;
+    // SAFETY: Entry verified to be an object record.
+    const record = entry as Record<string, ReleaseTrustJsonValue>;
     for (const key of Object.keys(record)) {
-      if (!OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS[key]) {
+      if (!(key in OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS)) {
         throw new Error(
           `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] contains forbidden property '${key}'.`,
         );
@@ -1227,7 +1262,7 @@ export function parseTrustedKeysJsonOverride(overrideJson: string): TrustedRelea
     }
 
     const keyId = record.keyId;
-    if (typeof keyId !== "string" || !keyId.trim()) {
+    if (String(keyId) !== keyId || !keyId.trim()) {
       throw new Error(`RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] is missing a valid 'keyId'.`);
     }
     if (seenKeyIds.has(keyId)) {
@@ -1240,7 +1275,10 @@ export function parseTrustedKeysJsonOverride(overrideJson: string): TrustedRelea
     }
 
     const publicKeyHex = record.publicKeyHex;
-    if (typeof publicKeyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(publicKeyHex.trim())) {
+    if (
+      String(publicKeyHex) !== publicKeyHex ||
+      !/^[0-9a-fA-F]{64}$/.test(String(publicKeyHex).trim())
+    ) {
       throw new Error(
         `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] requires a 64-character hex publicKeyHex.`,
       );
@@ -1262,21 +1300,22 @@ export function parseTrustedKeysJsonOverride(overrideJson: string): TrustedRelea
 }
 
 export async function loadBundledTrustedReleaseKeys(
-  customTrustData?: unknown,
+  customTrustData?: ReleaseTrustJsonValue | string,
 ): Promise<TrustedReleaseKey[]> {
   if (customTrustData !== undefined) {
-    if (typeof customTrustData === "string") {
-      return parseTrustedKeysJsonOverride(customTrustData);
+    if (String(customTrustData) === customTrustData) {
+      return parseTrustedKeysJsonOverride(String(customTrustData));
     }
     if (
-      typeof customTrustData === "object" &&
-      customTrustData !== null &&
-      "RESIN_TRUSTED_RELEASE_PUBLIC_KEYS" in customTrustData
+      customTrustData &&
+      !Array.isArray(customTrustData) &&
+      Object.prototype.toString.call(customTrustData) === "[object Object]"
     ) {
-      const rawOverride = (customTrustData as Record<string, unknown>)
-        .RESIN_TRUSTED_RELEASE_PUBLIC_KEYS;
-      if (typeof rawOverride === "string") {
-        return parseTrustedKeysJsonOverride(rawOverride);
+      // SAFETY: customTrustData verified as object record above.
+      const customObj = customTrustData as Record<string, ReleaseTrustJsonValue>;
+      const rawOverride = customObj.RESIN_TRUSTED_RELEASE_PUBLIC_KEYS;
+      if (String(rawOverride) === rawOverride) {
+        return parseTrustedKeysJsonOverride(String(rawOverride));
       }
     }
     return parseBundledReleaseTrust(customTrustData);
@@ -1292,7 +1331,7 @@ export async function loadBundledTrustedReleaseKeys(
     );
   }
 
-  const parsed = parseJson<unknown>(rawBytes, "Bundled release trust");
+  const parsed = parseJson<ReleaseTrustJsonValue>(rawBytes, "Bundled release trust");
   return parseBundledReleaseTrust(parsed);
 }
 
@@ -1357,7 +1396,7 @@ function resolveDenoAsset(
   const pinnedRuntime =
     PINNED_DENO_RUNTIMES[key] ?? (linuxFallback ? PINNED_DENO_RUNTIMES[linuxFallback] : undefined);
   if (pinnedRuntime && !allowInsecureHttpForTests) {
-    if (typeof asset.sizeBytes === "number" && asset.sizeBytes !== pinnedRuntime.sizeBytes) {
+    if (Number.isFinite(asset.sizeBytes) && asset.sizeBytes !== pinnedRuntime.sizeBytes) {
       throw new Error(
         `Deno runtime asset size mismatch for '${key}': expected ${pinnedRuntime.sizeBytes} bytes, got ${asset.sizeBytes} bytes.`,
       );
@@ -1371,7 +1410,7 @@ function resolveDenoAsset(
   }
 
   const exactSize = asset.sizeBytes ?? pinnedRuntime?.sizeBytes;
-  if (typeof exactSize !== "number" || !Number.isSafeInteger(exactSize) || exactSize <= 0) {
+  if (!Number.isSafeInteger(exactSize) || Number(exactSize) <= 0) {
     throw new Error(`Deno runtime asset '${key}' is missing a valid positive sizeBytes.`);
   }
 
@@ -1479,11 +1518,7 @@ export async function resolveProductionRelease(
   }
 
   const releaseAsset = selectPlatformAsset(manifest, options.platform);
-  if (
-    typeof releaseAsset.sizeBytes !== "number" ||
-    !Number.isSafeInteger(releaseAsset.sizeBytes) ||
-    releaseAsset.sizeBytes <= 0
-  ) {
+  if (!Number.isSafeInteger(releaseAsset.sizeBytes) || releaseAsset.sizeBytes <= 0) {
     throw new Error(
       `Release manifest specified invalid sizeBytes for asset '${releaseAsset.filename}'.`,
     );
@@ -1517,11 +1552,14 @@ export async function resolveProductionRelease(
 
   const signingKeyIds = (manifest.signatures ?? [])
     .map((s) => s.keyId)
-    .filter((k): k is string => typeof k === "string" && k.length > 0);
+    .filter((k): k is string => String(k) === k && String(k).length > 0);
 
+  // SAFETY: manifest.releaseIdentity is an object record.
   const identity =
-    typeof manifest.releaseIdentity === "object" && manifest.releaseIdentity !== null
-      ? (manifest.releaseIdentity as Record<string, unknown>)
+    manifest.releaseIdentity &&
+    !Array.isArray(manifest.releaseIdentity) &&
+    Object.prototype.toString.call(manifest.releaseIdentity) === "[object Object]"
+      ? (manifest.releaseIdentity as Record<string, ReleaseTrustJsonValue>)
       : undefined;
 
   return {
@@ -1540,8 +1578,10 @@ export async function resolveProductionRelease(
       releaseAssetUrl,
       releaseAssetSha256: normalizeSha256(releaseAsset.sha256),
       releaseAssetSizeBytes: releaseAsset.sizeBytes,
-      repository: typeof identity?.repository === "string" ? identity.repository : undefined,
-      commitSha: typeof identity?.commitSha === "string" ? identity.commitSha : undefined,
+      repository:
+        String(identity?.repository) === identity?.repository ? identity.repository : undefined,
+      commitSha:
+        String(identity?.commitSha) === identity?.commitSha ? identity.commitSha : undefined,
       signingKeyIds,
       deno: {
         version: denoAsset.version,

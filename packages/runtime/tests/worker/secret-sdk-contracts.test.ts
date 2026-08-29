@@ -38,7 +38,7 @@ describe("Worker Secret SDK Contracts & Mediation Behavior", () => {
       });
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
-        if (typeof addr === "object" && addr) {
+        if (addr && "port" in addr) {
           serverPort = addr.port;
           serverUrl = `http://127.0.0.1:${serverPort}/api/test`;
         }
@@ -93,15 +93,14 @@ describe("Worker Secret SDK Contracts & Mediation Behavior", () => {
     it("exposes only non-disclosing reference and template builders", () => {
       const client = new DefaultToolBrokerClient(async () => ({}));
 
-      expect(typeof client.secret.createReference).toBe("function");
-      expect(typeof client.secret.bearerToken).toBe("function");
-      expect(typeof client.secret.template).toBe("function");
-      expect(typeof client.secret.envSecret).toBe("function");
-      expect(typeof client.secret.stdinSecret).toBe("function");
+      expect(client.secret.createReference).toBeInstanceOf(Function);
+      expect(client.secret.bearerToken).toBeInstanceOf(Function);
+      expect(client.secret.template).toBeInstanceOf(Function);
+      expect(client.secret.envSecret).toBeInstanceOf(Function);
+      expect(client.secret.stdinSecret).toBeInstanceOf(Function);
 
       // Verify getSecret does not exist on SDK client
       expect("getSecret" in client.secret).toBe(false);
-      expect((client.secret as Record<string, unknown>).getSecret).toBeUndefined();
       expect("read" in client.secret).toBe(false);
       expect("resolve" in client.secret).toBe(false);
       expect("add" in client.secret).toBe(false);
@@ -208,13 +207,12 @@ describe("Worker Secret SDK Contracts & Mediation Behavior", () => {
           workspaceId: "ws_sdk_test",
         },
       );
-
       expect(result.status).toBe("success");
       expect(result.output).toBeDefined();
+      // SAFETY: Output is authenticated result record with success and usedRef handle.
       const output = result.output as { success: boolean; usedRef: string };
       expect(output.success).toBe(true);
       expect(output.usedRef).toMatch(/^sec_ref_/);
-
       // Verify the server received the real mediated secret in Authorization header
       expect(receivedAuthHeader).toBe("Bearer ghp_mock_token_super_secret_4444");
 

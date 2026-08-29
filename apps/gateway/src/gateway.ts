@@ -12,15 +12,20 @@ import {
 import { McpFrameDecoder, encodeMcpMessage } from "./protocol/framing.js";
 import {
   CallToolParamsSchema,
+  type CallToolResult,
   CancelRequestParamsSchema,
   InitializeParamsSchema,
+  type InitializeResult,
   type JsonRpcErrorObject,
   type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcNotification,
+  type JsonRpcParamValue,
+  type JsonRpcParams,
   type JsonRpcRequest,
   type JsonRpcResponse,
   LATEST_PROTOCOL_VERSION,
+  type ListRootsResult,
   type ListToolsResult,
   type McpImplementationInfo,
   type McpTool,
@@ -35,6 +40,47 @@ import {
   createRegistryGatewayRouter,
 } from "./router.js";
 import { type WorkspaceContext, resolveWorkspaceContext } from "./workspace-resolver.js";
+export type GatewayLogMeta =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | Error
+  | readonly GatewayLogMeta[]
+  | { readonly [key: string]: string | number | boolean | null | undefined };
+
+export type GatewayCallParams = JsonRpcParams | undefined;
+
+export type GatewayErrorInput =
+  | Error
+  | McpProtocolError
+  | JsonRpcErrorObject
+  | string
+  | number
+  | boolean
+  | null
+  | undefined;
+
+export type GatewayMethodResult =
+  | InitializeResult
+  | ListToolsResult
+  | CallToolResult
+  | ListRootsResult
+  | Record<string, string | number | boolean | null | undefined>
+  | null
+  | undefined;
+
+function isNotificationMessage(msg: JsonRpcMessage): msg is JsonRpcNotification {
+  return !("id" in msg) || msg.id === undefined;
+}
+
+function isRequestMessage(msg: JsonRpcMessage): msg is JsonRpcRequest {
+  return "id" in msg && msg.id !== undefined && "method" in msg;
+}
+function isParamsObject(value: JsonRpcParamValue | undefined): value is JsonRpcParams {
+  return Boolean(value) && Object.prototype.toString.call(value) === "[object Object]";
+}
 
 export interface GatewayServerOptions {
   router?: GatewayRouter;
@@ -48,7 +94,7 @@ export interface GatewayServerOptions {
   rateLimitRps?: number;
   rateLimitBurst?: number;
   harnessDetector?: (clientInfo: McpImplementationInfo) => string;
-  logger?: (level: string, message: string, meta?: unknown) => void;
+  logger?: (level: string, message: string, meta?: GatewayLogMeta) => void;
   refreshCoordinator?: CatalogRefreshCoordinator;
   refreshCoordinatorOptions?: RefreshCoordinatorOptions;
   enableRefreshCoordinator?: boolean;
@@ -68,7 +114,7 @@ const SENSITIVE_PATTERN =
  * Redacts sensitive tokens, API keys, credentials, and user home paths from error messages or logs.
  */
 export function redactSensitiveText(text: string, workspaceRoot?: string): string {
-  if (!text || typeof text !== "string") {
+  if (!text || Object.prototype.toString.call(text) !== "[object String]") {
     return text;
   }
 
@@ -129,7 +175,7 @@ export class LocalMcpGateway {
   private readonly rateLimitRps: number;
   private readonly rateLimitBurst: number;
   private readonly harnessDetector: (clientInfo: McpImplementationInfo) => string;
-  private readonly logger?: (level: string, message: string, meta?: unknown) => void;
+  private readonly logger?: (level: string, message: string, meta?: GatewayLogMeta) => void;
   readonly refreshCoordinator?: CatalogRefreshCoordinator;
   private readonly ownRefreshCoordinator: boolean = false;
   private readonly onWorkspaceReady?: (
@@ -267,9 +313,9 @@ export class LocalMcpGateway {
     message: JsonRpcMessage,
   ): Promise<JsonRpcResponse | null> {
     const connection =
-      typeof connectionIdOrConnection === "string"
-        ? this.connections.get(connectionIdOrConnection)
-        : connectionIdOrConnection;
+      connectionIdOrConnection instanceof McpConnection
+        ? connectionIdOrConnection
+        : this.connections.get(connectionIdOrConnection);
     if (!connection || connection.isClosed) {
       return {
         jsonrpc: "2.0",
@@ -282,8 +328,8 @@ export class LocalMcpGateway {
     }
 
     // Case 1: Notifications (no id)
-    if (!("id" in message) || message.id === undefined) {
-      await this.handleNotification(connection, message as JsonRpcNotification);
+    if (isNotificationMessage(message)) {
+      await this.handleNotification(connection, message);
       return null;
     }
 
@@ -293,8 +339,10 @@ export class LocalMcpGateway {
     }
 
     // Case 3: Request from client
-    const request = message as JsonRpcRequest;
-    return this.handleRequest(connection, request);
+    if (isRequestMessage(message)) {
+      return this.handleRequest(connection, message);
+    }
+    return null;
   }
 
   /**
@@ -341,8 +389,7 @@ export class LocalMcpGateway {
     });
 
     try {
-      let result: unknown;
-
+      let result: GatewayMethodResult;
       switch (method) {
         case "initialize":
           result = await this.handleInitialize(connection, params);
@@ -382,10 +429,11 @@ export class LocalMcpGateway {
         result,
       };
     } catch (err) {
+      const errorInput: GatewayErrorInput = err instanceof Error ? err : new Error(String(err));
       return {
         jsonrpc: "2.0",
         id,
-        error: this.mapErrorToJsonRpcError(err, connection.workspaceContext.canonicalRoot),
+        error: this.mapErrorToJsonRpcError(errorInput, connection.workspaceContext.canonicalRoot),
       };
     } finally {
       connection.completeInFlightRequest(id);
@@ -438,7 +486,10 @@ export class LocalMcpGateway {
   /**
    * Handles `initialize` request.
    */
-  private async handleInitialize(connection: McpConnection, rawParams: unknown): Promise<unknown> {
+  private async handleInitialize(
+    connection: McpConnection,
+    rawParams: GatewayCallParams,
+  ): Promise<InitializeResult> {
     const parsed = InitializeParamsSchema.safeParse(rawParams);
     if (!parsed.success) {
       throw new McpProtocolError(
@@ -479,11 +530,21 @@ export class LocalMcpGateway {
   }
 
   /**
+   * Handles `notifications/initialized`.
+   */
+  private async handleInitialized(
+    connection: McpConnection,
+    _params: GatewayCallParams,
+  ): Promise<void> {
+    // Standard MCP initialized notification - state transition already completed during initialize
+  }
+
+  /**
    * Handles `tools/list` request.
    */
   private async handleToolsList(
     connection: McpConnection,
-    _params: unknown,
+    _params: GatewayCallParams,
   ): Promise<ListToolsResult> {
     if (!connection.isInitialized) {
       throw new McpProtocolError(
@@ -505,9 +566,9 @@ export class LocalMcpGateway {
   private async handleToolsCall(
     connection: McpConnection,
     requestId: JsonRpcId,
-    rawParams: unknown,
+    rawParams: GatewayCallParams,
     signal: AbortSignal,
-  ): Promise<unknown> {
+  ): Promise<CallToolResult> {
     if (!connection.isInitialized) {
       throw new McpProtocolError(
         JSON_RPC_ERROR_CODES.INVALID_REQUEST,
@@ -528,19 +589,29 @@ export class LocalMcpGateway {
 
     const onProgress = progressToken
       ? (progress: number, total?: number) => {
+          const progressParams =
+            total !== undefined
+              ? {
+                  progressToken,
+                  progress,
+                  total,
+                }
+              : {
+                  progressToken,
+                  progress,
+                };
           this.sendNotificationToConnection(connection.connectionId, {
             jsonrpc: "2.0",
             method: "notifications/progress",
-            params: {
-              progressToken,
-              progress,
-              ...(total !== undefined ? { total } : {}),
-            },
+            params: progressParams,
           });
         }
       : undefined;
 
-    return this.router.callTool(connection.workspaceContext, name, args ?? {}, {
+    const toolArgs: JsonRpcParams =
+      rawParams && isParamsObject(rawParams.arguments) ? rawParams.arguments : {};
+
+    return this.router.callTool(connection.workspaceContext, name, toolArgs, {
       signal,
       onProgress,
       timeoutMs: this.requestTimeoutMs,
@@ -574,22 +645,27 @@ export class LocalMcpGateway {
       } catch (err) {
         this.logger?.(
           "error",
-          `Failed to send notification to ${connectionId}: ${(err as Error).message}`,
+          `Failed to send notification to ${connectionId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
   }
-
   /**
    * Maps an arbitrary caught error to a sanitized JsonRpcErrorObject.
    */
-  private mapErrorToJsonRpcError(err: unknown, workspaceRoot?: string): JsonRpcErrorObject {
+  private mapErrorToJsonRpcError(
+    err: GatewayErrorInput,
+    workspaceRoot?: string,
+  ): JsonRpcErrorObject {
     if (isMcpProtocolError(err)) {
-      return {
+      const errObj: JsonRpcErrorObject = {
         code: err.code,
         message: redactSensitiveText(err.message, workspaceRoot),
-        ...(err.data !== undefined ? { data: err.data } : {}),
       };
+      if (err.data !== undefined) {
+        errObj.data = err.data;
+      }
+      return errObj;
     }
 
     const rawMessage = err instanceof Error ? err.message : String(err);
@@ -633,13 +709,14 @@ export class LocalMcpGateway {
       try {
         messages = decoder.push(chunk);
       } catch (err) {
-        if (isMcpProtocolError(err)) {
+        const errorInput: GatewayErrorInput = err instanceof Error ? err : new Error(String(err));
+        if (isMcpProtocolError(errorInput)) {
           sendMessage({
             jsonrpc: "2.0",
             id: null,
             error: {
-              code: err.code,
-              message: redactSensitiveText(err.message),
+              code: errorInput.code,
+              message: redactSensitiveText(errorInput.message),
             },
           });
         }
@@ -653,10 +730,14 @@ export class LocalMcpGateway {
             sendMessage(response);
           }
         } catch (err) {
+          const errorInput: GatewayErrorInput = err instanceof Error ? err : new Error(String(err));
           sendMessage({
             jsonrpc: "2.0",
             id: "id" in msg ? msg.id : null,
-            error: this.mapErrorToJsonRpcError(err, connection.workspaceContext.canonicalRoot),
+            error: this.mapErrorToJsonRpcError(
+              errorInput,
+              connection.workspaceContext.canonicalRoot,
+            ),
           });
         }
       }

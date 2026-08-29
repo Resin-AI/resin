@@ -9,8 +9,9 @@ import {
   type ToolVersion,
   hashCanonicalContent,
 } from "@resin/contracts";
+import type { JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ValidationResult } from "./types.js";
-const VALID_RUNTIMES: Record<string, true> = {
+const VALID_RUNTIMES = {
   node: true,
   deno: true,
   quickjs: true,
@@ -20,18 +21,30 @@ const VALID_RUNTIMES: Record<string, true> = {
   python: true,
   shell: true,
   builtin: true,
-};
-const DANGEROUS_COMMANDS: Record<string, true> = {
+} as const;
+
+type ValidRuntime = keyof typeof VALID_RUNTIMES;
+
+function isValidRuntime(runtime: string): runtime is ValidRuntime {
+  return Object.prototype.hasOwnProperty.call(VALID_RUNTIMES, runtime);
+}
+
+const DANGEROUS_COMMANDS = {
   "rm -rf /": true,
   sudo: true,
   su: true,
   mkfs: true,
   dd: true,
-  shutdown: true,
-  reboot: true,
   ":(){ :|:& };:": true,
-};
+  format: true,
+  fdisk: true,
+} as const;
 
+type DangerousCommand = keyof typeof DANGEROUS_COMMANDS;
+
+function isDangerousCommand(cmd: string): cmd is DangerousCommand {
+  return Object.prototype.hasOwnProperty.call(DANGEROUS_COMMANDS, cmd);
+}
 /**
  * Computes SHA-256 hex digest of string content.
  */
@@ -42,9 +55,11 @@ export function computeSha256(content: string): string {
 /**
  * Computes the canonical digest of a tool manifest.
  */
-export function computeManifestDigest(manifest: ToolManifest | Record<string, unknown>): string {
+export function computeManifestDigest(
+  manifest: ToolManifest | Record<string, JsonRpcParamValue>,
+): string {
   // Strip existing digest for deterministic computation
-  const { digest: _, ...rest } = manifest as Record<string, unknown>;
+  const { digest: _, ...rest } = manifest;
   const parsed = ToolManifestSchema.omit({ digest: true }).safeParse(rest);
   const normalized = parsed.success ? parsed.data : rest;
   return hashCanonicalContent(normalized);
@@ -53,8 +68,8 @@ export function computeManifestDigest(manifest: ToolManifest | Record<string, un
  * Validates a tool manifest, its artifact, and compliance with the workspace capability envelope.
  */
 export function validateToolStaging(
-  rawManifest: unknown,
-  rawArtifact?: unknown,
+  rawManifest: ToolManifest | JsonRpcParams | null | undefined,
+  rawArtifact?: ToolArtifact | JsonRpcParams | null | undefined,
   rawEnvelope?: CapabilityEnvelope,
   options?: {
     existingVersions?: ToolVersion[];
@@ -108,7 +123,7 @@ export function validateToolStaging(
   // 4. Runtime Validation
   if (manifest.runtime) {
     const runtime = manifest.runtime.runtime?.toLowerCase();
-    if (!runtime || !VALID_RUNTIMES[runtime]) {
+    if (!runtime || !isValidRuntime(runtime)) {
       errors.push(
         `Unsupported runtime engine '${manifest.runtime.runtime}'. Supported: node, deno, quickjs, docker, wasm, browser, python, shell, builtin`,
       );
@@ -242,7 +257,7 @@ export function validateToolStaging(
 
         if (manifestCmd.allowedCommands) {
           for (const cmd of manifestCmd.allowedCommands) {
-            if (DANGEROUS_COMMANDS[cmd]) {
+            if (isDangerousCommand(cmd)) {
               errors.push(`Dangerous system command '${cmd}' is prohibited`);
             }
             if (envCmd.forbiddenPatterns && envCmd.forbiddenPatterns.length > 0) {

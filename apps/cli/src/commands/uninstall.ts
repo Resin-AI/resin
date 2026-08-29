@@ -11,6 +11,51 @@ import {
 import { resolvePaths } from "@resin/observer";
 import { HarnessConfigOrchestrator } from "../installer/harness-config.js";
 import { createUserServiceManager } from "../service/manager.js";
+export type McpServerConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | McpServerConfigValue[]
+  | { [key: string]: McpServerConfigValue };
+
+export interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+  disabled?: boolean;
+  autoApprove?: string[];
+  [key: string]: McpServerConfigValue | undefined;
+}
+
+export type McpServersRecord = Record<string, McpServerConfig>;
+
+export interface HarnessJsonConfig {
+  mcpServers?: McpServersRecord;
+  mcp_servers?: McpServersRecord;
+  [key: string]: McpServersRecord | McpServerConfigValue | undefined;
+}
+
+export interface TomlRemovalResult {
+  content: string;
+  modified: boolean;
+}
+
+function cleanMcpContainer(mcp: McpServersRecord): boolean {
+  let modified = false;
+  if ("resin" in mcp) {
+    delete mcp.resin;
+    modified = true;
+  }
+  for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
+    if (alias in mcp && isRecognizedResinMcpEntry(mcp[alias])) {
+      delete mcp[alias];
+      modified = true;
+    }
+  }
+  return modified;
+}
 
 export interface UninstallCommandFlags {
   purgeData?: boolean;
@@ -100,20 +145,9 @@ export async function removeHarnessMcpConfigurations(options: {
     const content = await fsBridge.readFile(cPath);
     if (content) {
       try {
-        const parsed = JSON.parse(content) as Record<string, unknown>;
-        const mcp = parsed.mcpServers as Record<string, unknown> | undefined;
-        if (mcp && typeof mcp === "object") {
-          let modified = false;
-          if ("resin" in mcp) {
-            delete mcp.resin;
-            modified = true;
-          }
-          for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
-            if (alias in mcp && isRecognizedResinMcpEntry(mcp[alias])) {
-              delete mcp[alias];
-              modified = true;
-            }
-          }
+        const parsed: HarnessJsonConfig = JSON.parse(content);
+        if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
+          const modified = cleanMcpContainer(parsed.mcpServers);
           if (modified) {
             await fsBridge.writeFile(cPath, `${JSON.stringify(parsed, null, 2)}\n`);
             cleaned.push("Claude Code");
@@ -141,23 +175,13 @@ export async function removeHarnessMcpConfigurations(options: {
   const codexJsonContent = await fsBridge.readFile(codexJsonPath);
   if (codexJsonContent) {
     try {
-      const parsed = JSON.parse(codexJsonContent) as Record<string, unknown>;
-      const containerKeys = ["mcp_servers", "mcpServers"];
+      const parsed: HarnessJsonConfig = JSON.parse(codexJsonContent);
       let modified = false;
-      for (const key of containerKeys) {
-        const mcp = parsed[key] as Record<string, unknown> | undefined;
-        if (mcp && typeof mcp === "object") {
-          if ("resin" in mcp) {
-            delete mcp.resin;
-            modified = true;
-          }
-          for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
-            if (alias in mcp && isRecognizedResinMcpEntry(mcp[alias])) {
-              delete mcp[alias];
-              modified = true;
-            }
-          }
-        }
+      if (parsed.mcp_servers && !Array.isArray(parsed.mcp_servers)) {
+        if (cleanMcpContainer(parsed.mcp_servers)) modified = true;
+      }
+      if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
+        if (cleanMcpContainer(parsed.mcpServers)) modified = true;
       }
       if (modified) {
         await fsBridge.writeFile(codexJsonPath, `${JSON.stringify(parsed, null, 2)}\n`);
@@ -180,22 +204,11 @@ export async function removeHarnessMcpConfigurations(options: {
     const ompContent = await fsBridge.readFile(oPath);
     if (ompContent) {
       try {
-        const parsed = JSON.parse(ompContent) as Record<string, unknown>;
-        const mcp = parsed.mcpServers as Record<string, unknown> | undefined;
-        if (mcp && typeof mcp === "object") {
-          let modified = false;
-          if ("resin" in mcp) {
-            delete mcp.resin;
-            modified = true;
-          }
-          for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
-            if (alias in mcp && isRecognizedResinMcpEntry(mcp[alias])) {
-              delete mcp[alias];
-              modified = true;
-            }
-          }
-          if (modified) {
+        const parsed: HarnessJsonConfig = JSON.parse(ompContent);
+        if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
+          if (cleanMcpContainer(parsed.mcpServers)) {
             await fsBridge.writeFile(oPath, `${JSON.stringify(parsed, null, 2)}\n`);
+            cleaned.push(`Oh My Pi (${path.basename(oPath)})`);
             ompCleaned = true;
           }
         }
@@ -211,7 +224,7 @@ export async function removeHarnessMcpConfigurations(options: {
   return cleaned;
 }
 
-function removeResinFromCodexToml(content: string): { content: string; modified: boolean } {
+function removeResinFromCodexToml(content: string): TomlRemovalResult {
   let updated = content;
   let modified = false;
 

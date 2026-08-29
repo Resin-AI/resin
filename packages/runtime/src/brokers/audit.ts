@@ -6,6 +6,23 @@ import { EventEmitter } from "node:events";
  */
 export type BrokerAuditStatus = "allowed" | "denied" | "error" | "success";
 
+export type BrokerAuditValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly BrokerAuditValue[]
+  | BrokerAuditValue[]
+  | BrokerAuditSummary;
+
+export interface BrokerAuditSummary {
+  [key: string]: BrokerAuditValue | undefined;
+}
+
+export interface RedactedHeaderMap {
+  [header: string]: string;
+}
+
 /**
  * Structured, security-sanitized broker audit event.
  * Contains only non-sensitive summary metadata.
@@ -26,8 +43,8 @@ export interface BrokerAuditEvent {
     details?: unknown;
   };
   durationMs?: number;
-  summary: Record<string, unknown>;
-  effect?: Record<string, unknown>;
+  summary: BrokerAuditSummary;
+  effect?: BrokerAuditSummary;
   quarantineId?: string;
   drift?: boolean;
 }
@@ -35,7 +52,7 @@ export interface BrokerAuditEvent {
 /**
  * Sensitive HTTP header names that must always be redacted.
  */
-const SENSITIVE_HEADERS: Record<string, true> = {
+const SENSITIVE_HEADERS = {
   authorization: true,
   "proxy-authorization": true,
   cookie: true,
@@ -51,12 +68,12 @@ const SENSITIVE_HEADERS: Record<string, true> = {
   "private-key": true,
   "x-csrf-token": true,
   "x-xsrf-token": true,
-};
+} as const satisfies Record<string, true>;
 
 /**
  * Sensitive URL query parameter keys that must always be redacted.
  */
-const SENSITIVE_QUERY_PARAMS: Record<string, true> = {
+const SENSITIVE_QUERY_PARAMS = {
   token: true,
   key: true,
   api_key: true,
@@ -71,12 +88,12 @@ const SENSITIVE_QUERY_PARAMS: Record<string, true> = {
   code: true,
   client_secret: true,
   credential: true,
-};
+} as const satisfies Record<string, true>;
 
 /**
  * Blacklisted summary payload keys that must never be recorded in audit logs.
  */
-const FORBIDDEN_SUMMARY_KEYS: Record<string, true> = {
+const FORBIDDEN_SUMMARY_KEYS = {
   content: true,
   body: true,
   rawbody: true,
@@ -103,16 +120,15 @@ const FORBIDDEN_SUMMARY_KEYS: Record<string, true> = {
   credentials: true,
   data: true,
   payload: true,
-};
-
+} as const satisfies Record<string, true>;
 /**
  * Redacts sensitive HTTP headers by replacing their values with [REDACTED].
  */
 export function redactHeaders(
-  headers?: Record<string, string | string[] | undefined> | null,
-): Record<string, string> {
-  if (!headers || typeof headers !== "object") return {};
-  const redacted: Record<string, string> = {};
+  headers?: Record<string, string | string[] | undefined> | BrokerAuditSummary | null,
+): RedactedHeaderMap {
+  if (!headers || headers === null || Array.isArray(headers)) return {};
+  const redacted: RedactedHeaderMap = {};
 
   for (const [key, rawVal] of Object.entries(headers)) {
     if (rawVal === undefined || rawVal === null) continue;
@@ -120,7 +136,7 @@ export function redactHeaders(
     const strVal = Array.isArray(rawVal) ? rawVal.join(", ") : String(rawVal);
 
     if (
-      SENSITIVE_HEADERS[lowerKey] ||
+      Object.hasOwn(SENSITIVE_HEADERS, lowerKey) ||
       lowerKey.includes("secret") ||
       lowerKey.includes("auth") ||
       lowerKey.includes("key") ||
@@ -150,7 +166,7 @@ export function redactUrl(rawUrl: string): string {
     for (const [paramKey] of Array.from(parsed.searchParams.entries())) {
       const lowerParam = paramKey.toLowerCase();
       if (
-        SENSITIVE_QUERY_PARAMS[lowerParam] ||
+        Object.hasOwn(SENSITIVE_QUERY_PARAMS, lowerParam) ||
         lowerParam.includes("secret") ||
         lowerParam.includes("key") ||
         lowerParam.includes("token") ||
@@ -172,35 +188,53 @@ export function redactUrl(rawUrl: string): string {
  * Sanitizes an arbitrary summary object to ensure no file bodies, command outputs,
  * secret payloads, or sensitive headers/URLs leak into audit logs.
  */
-export function sanitizeAuditSummary(
-  summary?: Record<string, unknown> | null,
-): Record<string, unknown> {
-  if (!summary || typeof summary !== "object") return {};
-  const sanitized: Record<string, unknown> = {};
+export function sanitizeAuditSummary(summary?: BrokerAuditSummary | null): BrokerAuditSummary {
+  if (!summary || summary === null || Array.isArray(summary)) return {};
+  const sanitized: BrokerAuditSummary = {};
 
   for (const [key, value] of Object.entries(summary)) {
     const lowerKey = key.toLowerCase();
 
-    if (FORBIDDEN_SUMMARY_KEYS[lowerKey]) {
+    if (Object.hasOwn(FORBIDDEN_SUMMARY_KEYS, lowerKey)) {
       continue; // Strictly omit file contents, command stdout/stderr, and raw secrets
     }
 
-    if (lowerKey === "headers" && typeof value === "object" && value !== null) {
-      sanitized[key] = redactHeaders(value as Record<string, string>);
-    } else if (lowerKey === "url" && typeof value === "string") {
+    if (
+      lowerKey === "headers" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.prototype.toString.call(value) === "[object Object]"
+    ) {
+      // SAFETY: Checked as object record for header map parsing.
+      sanitized[key] = redactHeaders(value as BrokerAuditSummary);
+    } else if (lowerKey === "url" && String(value) === value) {
       sanitized[key] = redactUrl(value);
     } else if (
-      typeof value === "string" &&
+      String(value) === value &&
       (value.startsWith("http://") || value.startsWith("https://"))
     ) {
       sanitized[key] = redactUrl(value);
     } else if (Array.isArray(value)) {
       // Avoid large arrays or payload blobs in audit summaries
-      sanitized[key] = value.slice(0, 50);
-    } else if (typeof value === "object" && value !== null) {
-      sanitized[key] = sanitizeAuditSummary(value as Record<string, unknown>);
-    } else {
+      // SAFETY: Array slice keeps bounded array elements for audit summary.
+      sanitized[key] = value.slice(0, 50) as BrokerAuditValue[];
+    } else if (
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.prototype.toString.call(value) === "[object Object]"
+    ) {
+      // SAFETY: Checked as object record for recursive summary sanitization.
+      sanitized[key] = sanitizeAuditSummary(value as BrokerAuditSummary);
+    } else if (
+      value === null ||
+      String(value) === value ||
+      Number.isFinite(value) ||
+      value === true ||
+      value === false
+    ) {
       sanitized[key] = value;
+    } else {
+      sanitized[key] = String(value);
     }
   }
 

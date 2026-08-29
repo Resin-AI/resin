@@ -7,9 +7,9 @@ This document defines the naming, versioning, and compatibility matrix across al
 ## 1. Naming & Version Policy
 
 - **Product Identity**: The official product name is **Resin**.
-- **Public Package & Binary**: The public npm package name and CLI binary command are `resin` at `1.0.0`.
+- **Public CLI**: The CLI binary command is `resin` at `1.0.0`.
 - **Internal Implementation Namespaces**: Internal workspace packages use the `@resin/*` naming scope (e.g. `@resin/contracts`, `@resin/protocol`).
-- **Release Alignment**: All release distribution formats—npm package tarballs and standalone binary artifacts—for a given release are produced from the identical source commit SHA, share the exact same `1.0.0` version and cryptographic digests, and target identical supported platform/runtime lanes.
+- **Release Alignment**: All standalone release artifacts for a given release are produced from the same source commit SHA, share the same `1.0.0` version, and target the supported platform/runtime lanes.
 
 ---
 

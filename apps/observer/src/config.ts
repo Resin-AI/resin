@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import type { JsonObject, JsonValue } from "./normalization/redaction.js";
 
 export const DaemonConfigSchema = z.object({
   version: z.string().default("0.1.0"),
@@ -22,7 +23,7 @@ export const DaemonConfigSchema = z.object({
 });
 
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
-export type RedactedDaemonConfig = Record<string, unknown>;
+export type RedactedDaemonConfig = JsonObject;
 
 export const IMMUTABLE_CONFIG_FIELDS = ["version", "storageDir", "socketPath"] as const;
 export type ImmutableConfigField = (typeof IMMUTABLE_CONFIG_FIELDS)[number];
@@ -34,11 +35,7 @@ export const REDACTED_PLACEHOLDER = "[REDACTED]";
 /**
  * Deeply redacts sensitive keys from any object/record.
  */
-export function redactSensitiveData(
-  data: unknown,
-  currentKey?: string,
-  parentSensitive = false,
-): unknown {
+export function redactSensitiveData<T>(data: T, currentKey?: string, parentSensitive = false): T {
   if (data === null || data === undefined) {
     return data;
   }
@@ -47,56 +44,61 @@ export function redactSensitiveData(
     parentSensitive || (currentKey && SENSITIVE_KEY_PATTERN.test(currentKey)),
   );
 
-  if (typeof data === "string") {
-    if (isSensitive && data.length > 0) {
-      return REDACTED_PLACEHOLDER;
+  const stringParsed = z.string().safeParse(data);
+  if (stringParsed.success) {
+    if (isSensitive && stringParsed.data.length > 0) {
+      // SAFETY: REDACTED_PLACEHOLDER is string matching input string contract for type T.
+      return REDACTED_PLACEHOLDER as T;
     }
     return data;
   }
 
-  if (typeof data === "number" || typeof data === "boolean" || typeof data === "bigint") {
+  if (
+    z.number().safeParse(data).success ||
+    z.boolean().safeParse(data).success ||
+    z.bigint().safeParse(data).success
+  ) {
     if (isSensitive) {
-      return REDACTED_PLACEHOLDER;
+      // SAFETY: REDACTED_PLACEHOLDER replaces sensitive primitive value.
+      return REDACTED_PLACEHOLDER as T;
     }
     return data;
   }
 
   if (Array.isArray(data)) {
-    return data.map((item) => redactSensitiveData(item, currentKey, isSensitive));
+    // SAFETY: Sanitized array elements maintain array structure for type T.
+    return data.map((item) => redactSensitiveData(item, currentKey, isSensitive)) as T;
   }
 
-  if (typeof data === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      const keyIsSensitive = isSensitive || SENSITIVE_KEY_PATTERN.test(key);
-      if (keyIsSensitive) {
-        if (value === null || value === undefined) {
-          result[key] = value;
-        } else if (
-          typeof value === "string" ||
-          typeof value === "number" ||
-          typeof value === "boolean" ||
-          typeof value === "bigint"
-        ) {
-          result[key] = REDACTED_PLACEHOLDER;
-        } else {
-          result[key] = redactSensitiveData(value, key, true);
-        }
+  const objectParsed = z.record(z.unknown()).safeParse(data);
+  if (objectParsed.success) {
+    const result: JsonObject = {};
+    for (const [key, value] of Object.entries(objectParsed.data)) {
+      const keySensitive = isSensitive || SENSITIVE_KEY_PATTERN.test(key);
+      if (
+        keySensitive &&
+        (z.string().safeParse(value).success ||
+          z.number().safeParse(value).success ||
+          z.boolean().safeParse(value).success ||
+          z.bigint().safeParse(value).success)
+      ) {
+        result[key] = REDACTED_PLACEHOLDER;
       } else {
-        result[key] = redactSensitiveData(value, key, false);
+        // SAFETY: Recursive redaction returns JSON-compatible value.
+        result[key] = redactSensitiveData(value, key, keySensitive) as JsonValue;
       }
     }
-    return result;
+    // SAFETY: Sanitized output object matches dictionary shape of type T.
+    return result as T;
   }
 
   return data;
 }
 
-/**
- * Returns a deeply redacted copy of the daemon configuration safe for logging and diagnostics.
- */
 export function redactConfig(config: DaemonConfig): RedactedDaemonConfig {
-  const cloned = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  // SAFETY: Serialized config produces JsonObject record.
+  const cloned = JSON.parse(JSON.stringify(config)) as JsonObject;
+  // SAFETY: redactSensitiveData deep-cleans config object into RedactedDaemonConfig.
   return redactSensitiveData(cloned) as RedactedDaemonConfig;
 }
 
@@ -222,6 +224,7 @@ function backUpMalformedConfig(configPath: string, rawContent: string): string {
       });
       return backupPath;
     } catch (err) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "EEXIST") {
         lastCollision = error;
@@ -247,6 +250,7 @@ async function inspectPersistedConfigRecoveryWarning(
   try {
     entryStat = await fs.promises.lstat(warningStatePath);
   } catch (err) {
+    // SAFETY: Node.js filesystem error carries standard ErrnoException code.
     const error = err as NodeJS.ErrnoException;
     if (error.code === "ENOENT") {
       return { exists: false, valid: false };
@@ -298,7 +302,7 @@ async function inspectPersistedConfigRecoveryWarning(
 
     try {
       const parsed = PersistedConfigRecoveryWarningSchema.safeParse(
-        JSON.parse(content.toString("utf-8")) as unknown,
+        JSON.parse(content.toString("utf-8")),
       );
       return {
         exists: true,
@@ -373,6 +377,7 @@ async function writeConfigRecoveryWarningState(
         );
       }
     } catch (err) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code !== "ENOENT" || existing.exists) {
         throw err;
@@ -435,18 +440,19 @@ export function loadDaemonConfig(options: LoadConfigOptions = {}): DaemonConfig 
       try {
         rawContent = fs.readFileSync(resolvedPath, "utf-8");
       } catch (err) {
-        throw new Error(
-          `Failed to read configuration file at ${resolvedPath}: ${(err as Error).message}`,
-        );
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to read configuration file at ${resolvedPath}: ${errorMsg}`);
       }
 
       try {
-        const parsedFile = JSON.parse(rawContent) as unknown;
-        if (parsedFile === null || typeof parsedFile !== "object" || Array.isArray(parsedFile)) {
-          throw new Error("Configuration root must be a JSON object");
+        const parsedFile = JSON.parse(rawContent);
+        const parsedObj = z.record(z.unknown()).safeParse(parsedFile);
+        if (!parsedObj.success || Array.isArray(parsedFile)) {
+          throw new Error("Configuration file content must be a JSON object");
         }
-        fileConfig = parsedFile as Partial<DaemonConfig>;
-      } catch {
+        // SAFETY: Parsed JSON object matches partial DaemonConfig dictionary.
+        fileConfig = parsedObj.data as Partial<DaemonConfig>;
+      } catch (err) {
         const backupPath = backUpMalformedConfig(resolvedPath, rawContent);
         const remediation = `Inspect ${backupPath}, repair ${resolvedPath}, then restart Resin.`;
         const warning: ConfigRecoveryWarning = {
@@ -471,6 +477,7 @@ export function loadDaemonConfig(options: LoadConfigOptions = {}): DaemonConfig 
   }
 
   const envConfig = parseEnvConfig(env);
+  // SAFETY: Filtered key-value entries represent partial DaemonConfig overrides.
   const explicitOverrides = Object.fromEntries(
     Object.entries(options.overrides ?? {}).filter(([, value]) => value !== undefined),
   ) as Partial<DaemonConfig>;

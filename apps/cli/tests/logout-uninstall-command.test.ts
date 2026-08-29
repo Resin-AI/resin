@@ -67,21 +67,19 @@ describe("logout command", () => {
       storedAt: new Date().toISOString(),
     };
 
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ success: true }),
-    } as Response);
+    const mockFetch = vi.fn().mockResolvedValue(Response.json({ success: true }));
 
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;
     process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
-      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdoutChunks.push(String(chunk));
       return true;
     });
 
     try {
       const exitCode = await logoutCommand(["--json", "--home", homeDir], {
-        customFetch: mockFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch interface for testing.
+        customFetch: mockFetch as typeof fetch,
       });
 
       expect(exitCode).toBe(0);
@@ -231,7 +229,7 @@ url = "http://localhost:9400"
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;
     process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
-      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdoutChunks.push(String(chunk));
       return true;
     });
 
@@ -263,7 +261,7 @@ url = "http://localhost:9400"
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;
     process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
-      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdoutChunks.push(String(chunk));
       return true;
     });
 

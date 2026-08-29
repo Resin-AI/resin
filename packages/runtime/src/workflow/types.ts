@@ -1,4 +1,5 @@
 import type {
+  CanonicalJsonRecord,
   CapabilityEnvelope,
   CapabilityManifest,
   ToolOutputSchema,
@@ -13,7 +14,7 @@ import type { BrokerRequestHandlerFn, ToolContext } from "../worker/sdk.js";
  */
 export interface WorkflowStepCompensation {
   action: string;
-  inputs: Record<string, unknown>;
+  inputs: CanonicalJsonRecord;
   service?: "fs" | "net" | "cmd" | "secret" | "compute" | string;
   description?: string;
   deterministicInverse?: boolean;
@@ -38,8 +39,8 @@ export interface WorkflowStep {
   toolClass: string;
   action: string;
   service?: "fs" | "net" | "cmd" | "secret" | "compute";
-  inputs: Record<string, unknown>;
-  outputs?: Record<string, unknown> | string[];
+  inputs: CanonicalJsonRecord;
+  outputs?: CanonicalJsonRecord | string[];
   outputVar?: string;
   dependsOn: string[];
   capabilities?: CapabilityManifest;
@@ -62,8 +63,8 @@ export interface WorkflowDefinition {
   version?: string;
   description?: string;
   steps: WorkflowStep[];
-  inputSchema?: ToolParameterSchema | Record<string, unknown>;
-  outputSchema?: ToolOutputSchema | Record<string, unknown>;
+  inputSchema?: ToolParameterSchema | CanonicalJsonRecord;
+  outputSchema?: ToolOutputSchema | CanonicalJsonRecord;
   capabilities?: CapabilityManifest;
   maxConcurrency?: number;
   timeoutMs?: number;
@@ -71,7 +72,7 @@ export interface WorkflowDefinition {
     enabled: boolean;
     autoRollback: boolean;
   };
-  metadata?: Record<string, unknown>;
+  metadata?: CanonicalJsonRecord;
 }
 
 /**
@@ -98,7 +99,7 @@ export interface WorkflowProgressEvent {
   progress: number; // 0.0 to 1.0
   message: string;
   timestamp: string;
-  metadata?: Record<string, unknown>;
+  metadata?: CanonicalJsonRecord;
 }
 
 /**
@@ -132,19 +133,19 @@ export interface WorkflowCompensationResult {
 export interface WorkflowExecutionResult {
   workflowId: string;
   status: "completed" | "failed" | "cancelled";
-  outputs: Record<string, unknown>;
+  outputs: CanonicalJsonRecord;
   stepResults: Record<string, WorkflowStepResult>;
   compensationResults: WorkflowCompensationResult[];
   durationMs: number;
   error?: string;
-  auditEvents: Record<string, unknown>[];
+  auditEvents: CanonicalJsonRecord[];
 }
 
 /**
  * Options for workflow execution engine.
  */
 export interface WorkflowExecutionOptions {
-  inputs?: Record<string, unknown>;
+  inputs?: CanonicalJsonRecord;
   brokerManager?: CapabilityBrokerManager;
   brokerHandler?: BrokerRequestHandlerFn;
   maxConcurrency?: number;
@@ -154,7 +155,7 @@ export interface WorkflowExecutionOptions {
   workspaceRoot?: string;
   scratchDir?: string;
   onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
-  onAudit?: (event: Record<string, unknown>) => void;
+  onAudit?: (event: CanonicalJsonRecord) => void;
   autoRollbackOnFailure?: boolean;
   grant?: InvocationGrant;
   envelope?: CapabilityEnvelope;

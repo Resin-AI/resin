@@ -198,10 +198,14 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
  * @returns {boolean}
  */
 export function isForbiddenTarballPath(entryPath, boundary = null) {
-  if (!entryPath || typeof entryPath !== "string") return false;
+  if (!entryPath || Object.prototype.toString.call(entryPath) !== "[object String]") return false;
   const normalized = entryPath.replace(/\\/g, "/");
 
-  if (typeof isForbiddenReleasePath === "function" && isForbiddenReleasePath(normalized)) {
+  if (
+    (isForbiddenReleasePath instanceof Function ||
+      Object.prototype.toString.call(isForbiddenReleasePath) === "[object Function]") &&
+    isForbiddenReleasePath(normalized)
+  ) {
     return true;
   }
 
@@ -686,18 +690,22 @@ export function verifyManifestSignatures(manifest, options = {}) {
   const signature = manifest.signatures[0];
   const payload = {
     schemaVersion: manifest.schemaVersion,
-    ...(manifest.metadataVersion !== undefined
-      ? { metadataVersion: manifest.metadataVersion }
-      : {}),
-    ...(manifest.expiresAt !== undefined ? { expiresAt: manifest.expiresAt } : {}),
     version: manifest.version,
     releaseDate: manifest.releaseDate,
     releaseIdentity: manifest.releaseIdentity,
     packages: manifest.packages,
     assets: manifest.assets,
-    ...(manifest.runtimes ? { runtimes: manifest.runtimes } : {}),
     evidence: manifest.evidence,
   };
+  if (manifest.metadataVersion !== undefined) {
+    payload.metadataVersion = manifest.metadataVersion;
+  }
+  if (manifest.expiresAt !== undefined) {
+    payload.expiresAt = manifest.expiresAt;
+  }
+  if (manifest.runtimes) {
+    payload.runtimes = manifest.runtimes;
+  }
   const result = verifyReleasePayloadSignature(payload, signature, options.trustedKeys);
   if (!result.valid) {
     const rule =
@@ -724,7 +732,7 @@ export function verifyAssetDigests(releaseDir, manifest) {
   /** @type {Array<{ rule: string, file: string, message: string }>} */
   const violations = [];
 
-  if (!manifest.assets || typeof manifest.assets !== "object") {
+  if (!manifest.assets || Object.prototype.toString.call(manifest.assets) !== "[object Object]") {
     violations.push({
       rule: "INVALID_MANIFEST_ASSETS",
       file: "manifest.json",
@@ -776,7 +784,10 @@ export function verifyPackageDigests(manifest, options = {}) {
   const privatePackages = new Set(boundary.privatePackages || []);
   const expectedSet = new Set(expectedPackages);
 
-  if (!manifest.packages || typeof manifest.packages !== "object") {
+  if (
+    !manifest.packages ||
+    Object.prototype.toString.call(manifest.packages) !== "[object Object]"
+  ) {
     violations.push({
       rule: "INVALID_MANIFEST_PACKAGES",
       message: "Manifest missing 'packages' object.",
@@ -1023,7 +1034,7 @@ export function verifySbom(releaseDir, options = {}) {
     }
 
     if (
-      typeof sbom.serialNumber !== "string" ||
+      Object.prototype.toString.call(sbom.serialNumber) !== "[object String]" ||
       !/^urn:uuid:[0-9a-fA-F-]{36}$/.test(sbom.serialNumber)
     ) {
       violations.push({
@@ -1033,7 +1044,7 @@ export function verifySbom(releaseDir, options = {}) {
       });
     }
 
-    if (!sbom.metadata || typeof sbom.metadata !== "object") {
+    if (!sbom.metadata || Object.prototype.toString.call(sbom.metadata) !== "[object Object]") {
       violations.push({
         rule: "MISSING_SBOM_METADATA",
         file: "sbom.json",
@@ -1080,7 +1091,7 @@ export function verifySbom(releaseDir, options = {}) {
           message: `SBOM contains forbidden private package component '${component.name}'.`,
         });
       } else if (
-        typeof component.purl === "string" &&
+        Object.prototype.toString.call(component.purl) === "[object String]" &&
         (component.purl.includes("@resin/cloud") ||
           component.purl.includes("@resin/web") ||
           component.purl.includes("@resin/cloud-contracts") ||
@@ -1095,21 +1106,24 @@ export function verifySbom(releaseDir, options = {}) {
     }
 
     for (const component of sbom.components || []) {
-      if (!component.name || typeof component.name !== "string") {
+      if (!component.name || Object.prototype.toString.call(component.name) !== "[object String]") {
         violations.push({
           rule: "INVALID_COMPONENT_NAME",
           file: "sbom.json",
           message: "A component in sbom.json is missing a valid name.",
         });
       }
-      if (!component.version || typeof component.version !== "string") {
+      if (
+        !component.version ||
+        Object.prototype.toString.call(component.version) !== "[object String]"
+      ) {
         violations.push({
           rule: "INVALID_COMPONENT_VERSION",
           file: "sbom.json",
           message: `Component '${component.name}' is missing a valid version.`,
         });
       }
-      if (!component.purl || typeof component.purl !== "string") {
+      if (!component.purl || Object.prototype.toString.call(component.purl) !== "[object String]") {
         violations.push({
           rule: "INVALID_COMPONENT_PURL",
           file: "sbom.json",

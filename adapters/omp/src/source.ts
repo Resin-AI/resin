@@ -134,25 +134,39 @@ export class OmpSessionEventSource implements SessionEventSource {
 
       const trimmed = line.trim();
       if (trimmed.length > 0) {
+        const recordId = `${this.session.sessionId}-rec-${this.currentCursor.sequence}`;
         let parsedPayload: unknown = trimmed;
         let timestamp = new Date().toISOString();
         let recordType: RecordType = "transcript_line";
 
         try {
-          parsedPayload = JSON.parse(trimmed);
-          if (typeof parsedPayload === "object" && parsedPayload !== null) {
-            const obj = parsedPayload as Record<string, unknown>;
-            if (obj.timestamp || obj.time || obj.ts) {
-              timestamp = String(obj.timestamp ?? obj.time ?? obj.ts);
+          const parsed = JSON.parse(trimmed);
+          if (parsed instanceof Object && !Array.isArray(parsed)) {
+            // SAFETY: Parsed JSON represents a structured transcript record object.
+            const obj = parsed as {
+              timestamp?: string | number;
+              time?: string | number;
+              ts?: string | number;
+              role?: string;
+              type?: string;
+              event?: string;
+              kind?: string;
+              toolCall?: object;
+              tool_call?: object;
+              toolResult?: object;
+              tool_result?: object;
+            };
+            parsedPayload = parsed;
+            const ts = obj.timestamp ?? obj.time ?? obj.ts;
+            if (ts !== undefined) {
+              timestamp = String(ts);
             }
             recordType = this.classifyRecordType(obj);
           }
         } catch {
           parsedPayload = trimmed;
+          recordType = "transcript_line";
         }
-
-        const recordId = `${this.session.sessionId}:${this.currentCursor.line}:${this.currentCursor.sequence}`;
-
         records.push({
           recordId,
           sessionId: this.session.sessionId,
@@ -276,7 +290,16 @@ export class OmpSessionEventSource implements SessionEventSource {
     }
   }
 
-  private classifyRecordType(obj: Record<string, unknown>): RecordType {
+  private classifyRecordType(obj: {
+    role?: string;
+    type?: string;
+    event?: string;
+    kind?: string;
+    toolCall?: object;
+    tool_call?: object;
+    toolResult?: object;
+    tool_result?: object;
+  }): RecordType {
     const rawRole = String(obj.role ?? "").toLowerCase();
     const rawType = String(obj.type ?? obj.event ?? obj.kind ?? "").toLowerCase();
 
@@ -296,8 +319,8 @@ export class OmpSessionEventSource implements SessionEventSource {
       rawType === "tool_call" ||
       rawType === "tool_use" ||
       rawType === "tool_invocation" ||
-      typeof obj.toolCall === "object" ||
-      typeof obj.tool_call === "object"
+      (obj.toolCall !== undefined && obj.toolCall instanceof Object) ||
+      (obj.tool_call !== undefined && obj.tool_call instanceof Object)
     ) {
       return "tool_call";
     }
@@ -306,8 +329,8 @@ export class OmpSessionEventSource implements SessionEventSource {
       rawType === "tool_result" ||
       rawType === "tool_response" ||
       rawType === "tool_output" ||
-      typeof obj.toolResult === "object" ||
-      typeof obj.tool_result === "object"
+      (obj.toolResult !== undefined && obj.toolResult instanceof Object) ||
+      (obj.tool_result !== undefined && obj.tool_result instanceof Object)
     ) {
       return "tool_result";
     }

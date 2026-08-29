@@ -54,6 +54,18 @@ export interface HarnessConfigHealthCache {
   readonly mtimeMs: number | null;
 }
 
+export interface HarnessHealthConfigFiles {
+  readonly "claude-code": HarnessConfigHealthCache;
+  readonly "codex-cli": HarnessConfigHealthCache;
+  readonly omp: HarnessConfigHealthCache;
+}
+
+export interface HarnessHealthConfigFileCache {
+  "claude-code": HarnessConfigHealthCache;
+  "codex-cli": HarnessConfigHealthCache;
+  omp: HarnessConfigHealthCache;
+}
+
 export interface HarnessHealthHarnessSnapshot {
   readonly harnessId: SupportedHarnessId;
   readonly displayName: string;
@@ -83,7 +95,7 @@ export interface HarnessHealthSnapshot {
   readonly settingsDiagnostic?: HarnessHealthSettingsDiagnostic;
   readonly success: boolean;
   readonly hasDrift: boolean;
-  readonly configFiles: Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>>;
+  readonly configFiles: HarnessHealthConfigFiles;
   readonly harnesses: readonly HarnessHealthHarnessSnapshot[];
   readonly lastFailure?: HarnessHealthFailureSnapshot;
 }
@@ -254,11 +266,11 @@ const HarnessHealthSettingsSchema = z
   })
   .strict();
 
-const EMPTY_CONFIG_CACHE: Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>> = {
+const EMPTY_CONFIG_CACHE = {
   "claude-code": { present: false, mtimeMs: null },
   "codex-cli": { present: false, mtimeMs: null },
   omp: { present: false, mtimeMs: null },
-};
+} as const satisfies HarnessHealthConfigFiles;
 
 export function resolveHarnessHealthStatePath(home = os.homedir()): string {
   return path.join(path.resolve(home), ".resin", "state", HARNESS_HEALTH_STATE_FILENAME);
@@ -480,7 +492,7 @@ export async function loadHarnessHealthSettings(
 
   let decoded: unknown;
   try {
-    decoded = JSON.parse(source.content) as unknown;
+    decoded = JSON.parse(source.content);
   } catch {
     return failClosedHarnessHealthSettings("settings_invalid");
   }
@@ -572,9 +584,10 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
     this.harnesses = [...new Set(options.harnesses ?? SUPPORTED_HARNESS_IDS)];
     this.now = options.now ?? (() => new Date());
 
-    const bridgeStatFile = (
-      this.fsBridge as HarnessReconcileFsBridge & { statFile?: HarnessConfigStatReader }
-    ).statFile;
+    const bridgeStatFile =
+      "statFile" in this.fsBridge && this.fsBridge.statFile instanceof Function
+        ? this.fsBridge.statFile
+        : undefined;
     this.statFile = options.statFile ?? bridgeStatFile?.bind(this.fsBridge) ?? readNodeFileStat;
   }
 
@@ -602,7 +615,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
     const autoRepair = autoRepairOverride ?? settings.autoRepair;
     const settingsDiagnostic = settings.diagnostic;
     let previous: HarnessHealthSnapshot | null = null;
-    let configFiles = EMPTY_CONFIG_CACHE;
+    let configFiles: HarnessHealthConfigFiles = EMPTY_CONFIG_CACHE;
     let attemptedAt = new Date(0);
 
     try {
@@ -690,9 +703,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
     }
   }
 
-  private async captureConfigFiles(): Promise<
-    Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>>
-  > {
+  private async captureConfigFiles(): Promise<HarnessHealthConfigFiles> {
     const entries = await Promise.all(
       SUPPORTED_HARNESS_IDS.map(async (harnessId) => {
         const configPath = resolveHarnessConfigPath(harnessId, this.home);
@@ -713,7 +724,15 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
       }),
     );
 
-    return Object.fromEntries(entries) as Record<SupportedHarnessId, HarnessConfigHealthCache>;
+    const cacheRecord: HarnessHealthConfigFileCache = {
+      "claude-code": { present: false, mtimeMs: null },
+      "codex-cli": { present: false, mtimeMs: null },
+      omp: { present: false, mtimeMs: null },
+    };
+    for (const [id, cache] of entries) {
+      cacheRecord[id] = cache;
+    }
+    return cacheRecord;
   }
 
   private async persistSnapshot(snapshot: HarnessHealthSnapshot): Promise<void> {
@@ -877,7 +896,7 @@ function sanitizeHarnessResults(
       recentAction = { kind: "discovered", at: checkedAt };
     }
 
-    snapshots.push({
+    const snapshot: HarnessHealthHarnessSnapshot = {
       harnessId: result.harnessId,
       displayName: HARNESS_DISPLAY_NAMES[result.harnessId],
       installed: result.installed,
@@ -886,8 +905,9 @@ function sanitizeHarnessResults(
       condition: result.condition,
       changed: result.changed,
       checkedAt,
-      ...(recentAction ? { recentAction } : {}),
-    });
+      recentAction: recentAction ?? undefined,
+    };
+    snapshots.push(snapshot);
   }
 
   return snapshots;
@@ -916,8 +936,8 @@ function isHarnessHealthCheckDue(
 }
 
 function configFilesChanged(
-  previous: Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>>,
-  current: Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>>,
+  previous: HarnessHealthConfigFiles,
+  current: HarnessHealthConfigFiles,
 ): boolean {
   return SUPPORTED_HARNESS_IDS.some((harnessId) => {
     const before = previous[harnessId];
@@ -927,7 +947,7 @@ function configFilesChanged(
 }
 
 function isSupportedHarnessId(value: string): value is SupportedHarnessId {
-  return (SUPPORTED_HARNESS_IDS as readonly string[]).includes(value);
+  return value === "claude-code" || value === "codex-cli" || value === "omp";
 }
 
 async function readNodeFileStat(filePath: string): Promise<HarnessConfigFileStat | null> {
@@ -942,20 +962,23 @@ async function readNodeFileStat(filePath: string): Promise<HarnessConfigFileStat
   }
 }
 
-function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+function isMissingPathError(cause: unknown): cause is NodeJS.ErrnoException {
   return (
-    error instanceof Error &&
-    "code" in error &&
-    (error.code === "ENOENT" || error.code === "ENOTDIR")
+    Boolean(cause) &&
+    cause instanceof Object &&
+    "code" in cause &&
+    (cause.code === "ENOENT" || cause.code === "ENOTDIR")
   );
 }
 
-function isSymbolicLinkPathError(error: unknown): error is NodeJS.ErrnoException {
+function isSymbolicLinkPathError(cause: unknown): cause is NodeJS.ErrnoException {
   return (
-    error instanceof Error && "code" in error && (error.code === "ELOOP" || error.code === "EMLINK")
+    Boolean(cause) &&
+    cause instanceof Object &&
+    "code" in cause &&
+    (cause.code === "ELOOP" || cause.code === "EINVAL")
   );
 }
-
 function safeIsoTimestamp(value: Date, fallback: () => Date): string {
   try {
     return value.toISOString();

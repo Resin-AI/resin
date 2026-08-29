@@ -233,20 +233,21 @@ function createHarnessDiagnostics(result: HarnessHealthRunResult): DoctorDiagnos
         message = `${snapshot.displayName} Resin MCP registration has drifted.`;
       }
 
-      return {
+      const item: DoctorDiagnosticItem = {
         id: `harness_${snapshot.harnessId}`,
         name: `Harness MCP Integration (${snapshot.displayName})`,
-        category: "harness" as const,
+        category: "harness",
         status,
         message,
-        ...(!healthy
-          ? {
-              remediation: "Run `resin repair` to safely reconcile only the Resin-owned MCP entry.",
-            }
-          : {}),
         fixable: !healthy,
-        ...(recentlyReconciled ? { fixed: true } : {}),
       };
+      if (!healthy) {
+        item.remediation = "Run `resin repair` to safely reconcile only the Resin-owned MCP entry.";
+      }
+      if (recentlyReconciled) {
+        item.fixed = true;
+      }
+      return item;
     });
   return [...settingsDiagnostics, ...harnessDiagnostics];
 }

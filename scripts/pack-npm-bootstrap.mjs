@@ -29,7 +29,10 @@ function isMandatoryPackageMetadataFile(fileName) {
 }
 
 function isInternalPackageName(name) {
-  return typeof name === "string" && (name === "resin" || name.startsWith("@resin/"));
+  return (
+    Object.prototype.toString.call(name) === "[object String]" &&
+    (name === "resin" || name.startsWith("@resin/"))
+  );
 }
 
 function run(command, args, options) {
@@ -182,14 +185,18 @@ function normalizeInternalPackageEntrypoints(dependency, dependencyPath, depende
   if (fs.existsSync(distTypes)) dependencyManifest.types = "./dist/index.d.ts";
 
   const exportsField =
-    dependencyManifest.exports && typeof dependencyManifest.exports === "object"
+    dependencyManifest.exports &&
+    Object.prototype.toString.call(dependencyManifest.exports) === "[object Object]"
       ? dependencyManifest.exports
       : {};
-  exportsField["."] = {
-    ...(fs.existsSync(distTypes) ? { types: "./dist/index.d.ts" } : {}),
+  const dotExport = {
     import: "./dist/index.js",
     default: "./dist/index.js",
   };
+  if (fs.existsSync(distTypes)) {
+    dotExport.types = "./dist/index.d.ts";
+  }
+  exportsField["."] = dotExport;
   dependencyManifest.exports = exportsField;
   return dependencyManifest;
 }
@@ -250,7 +257,10 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
         `Resolved dependency identity mismatch for '${name}': received '${sourceManifest.name ?? "<missing>"}'.`,
       );
     }
-    if (typeof sourceManifest.version !== "string" || sourceManifest.version.length === 0) {
+    if (
+      Object.prototype.toString.call(sourceManifest.version) !== "[object String]" ||
+      sourceManifest.version.length === 0
+    ) {
       throw new Error(`Runtime dependency '${name}' has no concrete package version.`);
     }
 
@@ -286,7 +296,10 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     for (const [childName, specifier] of Object.entries(destinationManifest.dependencies ?? {})) {
       const childSourceDir = resolveDependencyDirectory(sourceDir, resolutionRoot, childName);
       const childManifest = readManifest(childSourceDir, `Runtime dependency '${childName}'`);
-      if (typeof specifier === "string" && specifier.startsWith("workspace:")) {
+      if (
+        Object.prototype.toString.call(specifier) === "[object String]" &&
+        specifier.startsWith("workspace:")
+      ) {
         destinationManifest.dependencies[childName] = childManifest.version;
       }
       queue.push({
@@ -306,7 +319,10 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     rootManifest.dependencies[dependency] = version;
   }
   for (const [name, specifier] of Object.entries(rootManifest.dependencies ?? {})) {
-    if (typeof specifier === "string" && specifier.startsWith("workspace:")) {
+    if (
+      Object.prototype.toString.call(specifier) === "[object String]" &&
+      specifier.startsWith("workspace:")
+    ) {
       const version = dependencyVersions.get(name);
       if (!version) {
         throw new Error(

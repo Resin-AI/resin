@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { JsonSchemaDocument, JsonSchemaPrimitiveValue } from "./doc-generator.js";
 
 /**
  * Semantic Schema Diff Tool
@@ -71,9 +72,9 @@ export interface SchemaDescriptor {
   isOptional?: boolean;
   isNullable?: boolean;
   hasDefault?: boolean;
-  defaultValue?: unknown;
+  defaultValue?: JsonSchemaPrimitiveValue;
   description?: string;
-  literalValue?: unknown;
+  literalValue?: JsonSchemaPrimitiveValue;
   properties?: Record<string, SchemaDescriptor>;
   required?: string[];
   enumValues?: string[];
@@ -106,6 +107,12 @@ export class IncompatibleSchemaError extends Error {
 // ============================================================================
 // Zod Schema Extraction
 // ============================================================================
+function getZodDefinitionMember<TDefinition, TKey extends keyof TDefinition>(
+  definition: TDefinition,
+  key: TKey,
+): TDefinition[TKey] {
+  return definition[key];
+}
 
 /**
  * Recursively extract a structural descriptor from a live Zod schema instance.
@@ -115,32 +122,31 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
   let isOptional = false;
   let isNullable = false;
   let hasDefault = false;
-  let defaultValue: unknown;
+  let defaultValue: JsonSchemaPrimitiveValue;
   let description = schema.description;
 
   // Unwrap wrapper types
   let unwrapping = true;
   while (unwrapping) {
-    const typeName = current._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodOptional) {
+    if (current instanceof z.ZodOptional) {
       isOptional = true;
-      current = (current as z.ZodOptional<z.ZodTypeAny>)._def.innerType;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodNullable) {
+      current = current._def.innerType;
+    } else if (current instanceof z.ZodNullable) {
       isNullable = true;
-      current = (current as z.ZodNullable<z.ZodTypeAny>)._def.innerType;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodDefault) {
+      current = current._def.innerType;
+    } else if (current instanceof z.ZodDefault) {
       hasDefault = true;
-      defaultValue = (current as z.ZodDefault<z.ZodTypeAny>)._def.defaultValue();
+      defaultValue = current._def.defaultValue();
       isOptional = true;
-      current = (current as z.ZodDefault<z.ZodTypeAny>)._def.innerType;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
-      current = (current as z.ZodEffects<z.ZodTypeAny>)._def.schema;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodCatch) {
-      current = (current as z.ZodCatch<z.ZodTypeAny>)._def.innerType;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodBranded) {
-      current = (current as z.ZodBranded<z.ZodTypeAny, string>)._def.type;
-    } else if (typeName === z.ZodFirstPartyTypeKind.ZodReadonly) {
-      current = (current as z.ZodReadonly<z.ZodTypeAny>)._def.innerType;
+      current = current._def.innerType;
+    } else if (current instanceof z.ZodEffects) {
+      current = current._def.schema;
+    } else if (current instanceof z.ZodCatch) {
+      current = current._def.innerType;
+    } else if (current instanceof z.ZodBranded) {
+      current = current._def.type;
+    } else if (current instanceof z.ZodReadonly) {
+      current = current._def.innerType;
     } else {
       unwrapping = false;
     }
@@ -162,6 +168,7 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
 
   switch (typeName) {
     case z.ZodFirstPartyTypeKind.ZodString: {
+      // SAFETY: typeName check confirms current is a ZodString instance.
       const strDef = current as z.ZodString;
       let min: number | undefined;
       let max: number | undefined;
@@ -183,6 +190,7 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
     }
 
     case z.ZodFirstPartyTypeKind.ZodNumber: {
+      // SAFETY: typeName check confirms current is a ZodNumber instance.
       const numDef = current as z.ZodNumber;
       let min: number | undefined;
       let max: number | undefined;
@@ -213,15 +221,19 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
       return { ...base, type: "undefined", isOptional: true };
 
     case z.ZodFirstPartyTypeKind.ZodLiteral: {
+      // SAFETY: typeName check confirms current is a ZodLiteral instance.
       const litDef = current as z.ZodLiteral<unknown>;
       return {
         ...base,
         type: "literal",
-        literalValue: litDef._def.value,
+        literalValue: z
+          .union([z.string(), z.number(), z.boolean(), z.null(), z.undefined()])
+          .parse(litDef._def.value),
       };
     }
 
     case z.ZodFirstPartyTypeKind.ZodEnum: {
+      // SAFETY: typeName check confirms current is a ZodEnum instance.
       const enumDef = current as z.ZodEnum<[string, ...string[]]>;
       return {
         ...base,
@@ -231,6 +243,7 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
     }
 
     case z.ZodFirstPartyTypeKind.ZodNativeEnum: {
+      // SAFETY: typeName check confirms current is a ZodNativeEnum instance.
       const nativeEnumDef = current as z.ZodNativeEnum<z.EnumLike>;
       const values = Object.values(nativeEnumDef._def.values).map(String);
       return {
@@ -241,6 +254,7 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
     }
 
     case z.ZodFirstPartyTypeKind.ZodArray: {
+      // SAFETY: typeName check confirms current is a ZodArray instance.
       const arrayDef = current as z.ZodArray<z.ZodTypeAny>;
       return {
         ...base,
@@ -252,12 +266,15 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
     }
 
     case z.ZodFirstPartyTypeKind.ZodObject: {
-      const objDef = current as z.ZodObject<z.ZodRawShape>;
-      const shape = objDef._def.shape();
+      // SAFETY: typeName check confirms current is a ZodObject instance.
+      const objDef = current as z.ZodObject<Record<string, z.ZodTypeAny>>;
+      const getPropertyDefinitions = getZodDefinitionMember(objDef._def, "shape");
+      const propertyDefinitions = getPropertyDefinitions();
       const properties: Record<string, SchemaDescriptor> = {};
       const required: string[] = [];
 
-      for (const [propName, propSchema] of Object.entries(shape)) {
+      for (const [propName, propSchema] of Object.entries(propertyDefinitions)) {
+        // SAFETY: Property entry is a valid ZodTypeAny member of object definition.
         const propDesc = extractSchemaDescriptor(propSchema as z.ZodTypeAny);
         properties[propName] = propDesc;
         if (!propDesc.isOptional && !propDesc.hasDefault) {
@@ -275,8 +292,8 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
 
     case z.ZodFirstPartyTypeKind.ZodRecord:
       return { ...base, type: "record" };
-
     case z.ZodFirstPartyTypeKind.ZodUnion: {
+      // SAFETY: typeName check confirms current is a ZodUnion instance.
       const unionDef = current as z.ZodUnion<[z.ZodTypeAny, ...z.ZodTypeAny[]]>;
       return {
         ...base,
@@ -286,7 +303,11 @@ export function extractSchemaDescriptor(schema: z.ZodTypeAny): SchemaDescriptor 
     }
 
     case z.ZodFirstPartyTypeKind.ZodDiscriminatedUnion: {
-      const discDef = current as z.ZodDiscriminatedUnion<string, z.ZodObject<z.ZodRawShape>[]>;
+      // SAFETY: typeName check confirms current is a ZodDiscriminatedUnion instance.
+      const discDef = current as z.ZodDiscriminatedUnion<
+        string,
+        z.ZodObject<Record<string, z.ZodTypeAny>>[]
+      >;
       return {
         ...base,
         type: "discriminated_union",
@@ -636,56 +657,87 @@ export function diffZodSchemas(
  * Compare two JSON schema objects and categorize the changes.
  */
 export function diffJsonSchemas(
-  oldJson: Record<string, unknown>,
-  newJson: Record<string, unknown>,
+  oldJson: JsonSchemaDocument,
+  newJson: JsonSchemaDocument,
   options?: SchemaDiffOptions,
 ): SchemaDiffResult {
-  function jsonToDescriptor(json: Record<string, unknown>): SchemaDescriptor {
+  function jsonToDescriptor(json: JsonSchemaDocument): SchemaDescriptor {
     const rawType = json.type;
     const typeStr = Array.isArray(rawType) ? rawType[0] : rawType;
 
     const properties: Record<string, SchemaDescriptor> = {};
-    const requiredList = Array.isArray(json.required) ? (json.required as string[]) : [];
+    const requiredList = Array.isArray(json.required) ? json.required : [];
     const requiredSet: Record<string, true> = {};
-    for (const r of requiredList) requiredSet[r] = true;
+    for (const r of requiredList) {
+      if (Object.prototype.toString.call(r) === "[object String]") {
+        requiredSet[r] = true;
+      }
+    }
 
-    if (json.properties && typeof json.properties === "object") {
-      for (const [k, v] of Object.entries(
-        json.properties as Record<string, Record<string, unknown>>,
-      )) {
-        const desc = jsonToDescriptor(v);
-        desc.isOptional = !requiredSet[k];
-        properties[k] = desc;
+    if (json.properties && Object.prototype.toString.call(json.properties) === "[object Object]") {
+      for (const [k, v] of Object.entries(json.properties)) {
+        if (v && Object.prototype.toString.call(v) === "[object Object]") {
+          const propDesc = jsonToDescriptor(v);
+          if (!requiredSet[k]) {
+            propDesc.isOptional = true;
+          }
+          properties[k] = propDesc;
+        }
       }
     }
 
     let arrayItem: SchemaDescriptor | undefined;
-    if (json.items && typeof json.items === "object") {
-      arrayItem = jsonToDescriptor(json.items as Record<string, unknown>);
+    if (
+      json.items &&
+      !Array.isArray(json.items) &&
+      Object.prototype.toString.call(json.items) === "[object Object]"
+    ) {
+      arrayItem = jsonToDescriptor(json.items);
     }
 
-    const enumValues = Array.isArray(json.enum) ? (json.enum as string[]).map(String) : undefined;
+    const enumValues = Array.isArray(json.enum) ? json.enum.map(String) : undefined;
+
+    const descriptorType: SchemaDescriptor["type"] =
+      typeStr === "string" ||
+      typeStr === "number" ||
+      typeStr === "integer" ||
+      typeStr === "boolean" ||
+      typeStr === "array" ||
+      typeStr === "object" ||
+      typeStr === "null" ||
+      typeStr === "enum"
+        ? typeStr === "integer"
+          ? "number"
+          : typeStr
+        : enumValues
+          ? "enum"
+          : "object";
 
     return {
-      type: (typeStr as SchemaDescriptor["type"]) || (enumValues ? "enum" : "object"),
-      description: typeof json.description === "string" ? json.description : undefined,
+      type: descriptorType,
+      description:
+        Object.prototype.toString.call(json.description) === "[object String]"
+          ? String(json.description)
+          : undefined,
       properties: Object.keys(properties).length > 0 ? properties : undefined,
-      required: requiredList,
-      enumValues,
+      required: requiredList.length > 0 ? requiredList : undefined,
       arrayItem,
-      min:
-        typeof json.minimum === "number"
-          ? json.minimum
-          : typeof json.minLength === "number"
-            ? json.minLength
-            : undefined,
-      max:
-        typeof json.maximum === "number"
-          ? json.maximum
-          : typeof json.maxLength === "number"
-            ? json.maxLength
-            : undefined,
-      pattern: typeof json.pattern === "string" ? json.pattern : undefined,
+      enumValues,
+      min: Number.isFinite(json.minimum)
+        ? Number(json.minimum)
+        : Number.isFinite(json.minLength)
+          ? Number(json.minLength)
+          : undefined,
+      max: Number.isFinite(json.maximum)
+        ? Number(json.maximum)
+        : Number.isFinite(json.maxLength)
+          ? Number(json.maxLength)
+          : undefined,
+      pattern:
+        Object.prototype.toString.call(json.pattern) === "[object String]"
+          ? String(json.pattern)
+          : undefined,
+      isNullable: Array.isArray(rawType) && rawType.includes("null") ? true : undefined,
     };
   }
 
@@ -703,14 +755,11 @@ export function assertCompatible(
   newSchema: z.ZodTypeAny | SchemaDescriptor,
   allowConditionallyCompatible = true,
 ): void {
-  const oldDesc =
-    "type" in oldSchema && typeof oldSchema.type === "string"
-      ? (oldSchema as SchemaDescriptor)
-      : extractSchemaDescriptor(oldSchema as z.ZodTypeAny);
-  const newDesc =
-    "type" in newSchema && typeof newSchema.type === "string"
-      ? (newSchema as SchemaDescriptor)
-      : extractSchemaDescriptor(newSchema as z.ZodTypeAny);
+  const oldDesc: SchemaDescriptor =
+    oldSchema instanceof z.ZodType ? extractSchemaDescriptor(oldSchema) : oldSchema;
+
+  const newDesc: SchemaDescriptor =
+    newSchema instanceof z.ZodType ? extractSchemaDescriptor(newSchema) : newSchema;
 
   const diff = diffSchemaDescriptors(oldDesc, newDesc);
   if (diff.isBreaking) {

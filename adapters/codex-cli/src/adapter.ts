@@ -19,6 +19,7 @@ import type {
   SourceCursor,
 } from "@resin/harness-contracts";
 import { createObservationFidelity, defaultFsBridge } from "@resin/harness-contracts";
+import { z } from "zod";
 import {
   DEFAULT_GATEWAY_SERVER_NAME,
   applyCodexMcpConfig,
@@ -60,7 +61,7 @@ export const CODEX_OBSERVATION_FIDELITY: ObservationFidelity = Object.freeze(
 export const CODEX_ADAPTER_CAPABILITIES: AdapterCapabilities = Object.freeze({
   fidelity: CODEX_OBSERVATION_FIDELITY,
   refresh: CODEX_DEFAULT_REFRESH_CAPABILITY,
-  supportedTransports: ["stdio", "sse"] as Array<"stdio" | "sse" | "websocket" | "http">,
+  supportedTransports: ["stdio", "sse"] satisfies AdapterCapabilities["supportedTransports"],
   supportsMultiWorkspace: true,
   supportsConcurrentSessions: true,
   features: {
@@ -112,11 +113,11 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       ...options?.capabilities,
       fidelity: {
         ...CODEX_OBSERVATION_FIDELITY,
-        ...(options?.capabilities?.fidelity as Partial<ObservationFidelity>),
+        ...options?.capabilities?.fidelity,
       },
       refresh: {
         ...CODEX_DEFAULT_REFRESH_CAPABILITY,
-        ...(options?.capabilities?.refresh as Partial<RefreshCapability>),
+        ...options?.capabilities?.refresh,
       },
     };
   }
@@ -126,11 +127,12 @@ export class CodexHarnessAdapter implements HarnessAdapter {
    */
   async probeInstallation(options?: ProbeInstallationOptions): Promise<HarnessInstallation> {
     return probeCodexInstallation({
-      customExecutablePath: options?.customExecutablePath ?? this.customExecutablePath,
-      customConfigPath: options?.customConfigPath ?? this.customConfigPath,
-      checkPermissions: options?.checkPermissions,
+      executablePath: options?.executablePath ?? this.customExecutablePath,
+      customExecutablePath: options?.executablePath ?? this.customExecutablePath,
+      customConfigPath: this.customConfigPath,
       executor: this.executor,
       pathLookup: this.pathLookup,
+      env: options?.env,
     });
   }
 
@@ -164,10 +166,10 @@ export class CodexHarnessAdapter implements HarnessAdapter {
    */
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
     const sessions: HarnessSession[] = [];
+    const metadataRoot = z.string().safeParse(workspace.metadata?.sessionRoot);
     const sessionDir =
-      (typeof workspace.metadata?.sessionRoot === "string"
-        ? workspace.metadata.sessionRoot
-        : null) ?? path.join(workspace.rootPath, "sessions");
+      (metadataRoot.success ? metadataRoot.data : null) ??
+      path.join(workspace.rootPath, "sessions");
     try {
       const maxDepth = 6;
       const collectFiles = async (dir: string, depth: number): Promise<string[]> => {

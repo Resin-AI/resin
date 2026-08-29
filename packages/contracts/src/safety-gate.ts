@@ -75,7 +75,7 @@ export const SYSTEM_ALLOWED_TOOLS = [
 export function isSafetyGateBypassTool(toolIdOrName: string): boolean {
   if (!toolIdOrName) return false;
   const normalized = toolIdOrName.trim();
-  if (SYSTEM_ALLOWED_TOOLS.includes(normalized as (typeof SYSTEM_ALLOWED_TOOLS)[number])) {
+  if (SYSTEM_ALLOWED_TOOLS.some((t) => t === normalized)) {
     return true;
   }
   return (

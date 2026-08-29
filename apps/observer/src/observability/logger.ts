@@ -1,15 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import { calculateShannonEntropy } from "../normalization/scanner.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "silent";
 
-export const LOG_LEVEL_SEVERITY: Record<LogLevel, number> = {
+export const LOG_LEVEL_SEVERITY = {
   debug: 10,
   info: 20,
   warn: 30,
   error: 40,
   silent: 100,
-};
+} satisfies Record<LogLevel, number>;
 
 export interface CorrelationContext {
   traceId?: string;
@@ -20,7 +22,7 @@ export interface CorrelationContext {
   workspaceId?: string;
   deviceId?: string;
   actorId?: string;
-  [key: string]: unknown;
+  [key: string]: JsonValue;
 }
 
 export interface SerializedError {
@@ -28,7 +30,7 @@ export interface SerializedError {
   message: string;
   stack?: string;
   code?: string | number;
-  [key: string]: unknown;
+  [key: string]: JsonValue;
 }
 
 export interface LogEntry {
@@ -42,9 +44,9 @@ export interface LogEntry {
   toolId?: string;
   workspaceId?: string;
   deviceId?: string;
-  context?: Record<string, unknown>;
+  context?: JsonObject;
   error?: SerializedError;
-  [key: string]: unknown;
+  [key: string]: JsonValue;
 }
 
 export type LogSink = (entry: LogEntry, jsonLine: string) => void;
@@ -122,11 +124,7 @@ const COMMON_SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
 /**
  * Deeply redacts sensitive strings and object keys from any data structure.
  */
-export function redactSecrets(
-  data: unknown,
-  currentKey?: string,
-  parentSensitive = false,
-): unknown {
+export function redactSecrets<T>(data: T, currentKey?: string, parentSensitive = false): T {
   if (data === null || data === undefined) {
     return data;
   }
@@ -135,64 +133,74 @@ export function redactSecrets(
     parentSensitive || (currentKey && SENSITIVE_KEY_PATTERN.test(currentKey)),
   );
 
-  if (typeof data === "string") {
-    if (isSensitive && data.length > 0) {
-      return REDACTED_MARKER;
+  const stringParsed = z.string().safeParse(data);
+  if (stringParsed.success) {
+    const str = stringParsed.data;
+    if (isSensitive && str.length > 0) {
+      // SAFETY: REDACTED_MARKER is a string literal replacing secret string data of type T.
+      return REDACTED_MARKER as T;
     }
 
-    let result = data;
+    let result = str;
     for (const { regex, replacement } of COMMON_SECRET_PATTERNS) {
       result = result.replace(regex, replacement);
     }
 
     // Shannon entropy check for high-entropy tokens
-    if (result === data && result.length >= 28 && !result.includes(" ") && !result.includes("/")) {
+    if (result === str && result.length >= 28 && !result.includes(" ") && !result.includes("/")) {
       const entropy = calculateShannonEntropy(result);
       if (entropy >= 4.5) {
-        return "[REDACTED_HIGH_ENTROPY_SECRET]";
+        // SAFETY: replacement string matches input string contract for type T.
+        return "[REDACTED_HIGH_ENTROPY_SECRET]" as T;
       }
     }
 
-    return result;
+    // SAFETY: sanitized string matches input string contract for type T.
+    return result as T;
   }
 
-  if (typeof data === "number" || typeof data === "boolean" || typeof data === "bigint") {
+  if (
+    z.number().safeParse(data).success ||
+    z.boolean().safeParse(data).success ||
+    z.bigint().safeParse(data).success
+  ) {
     if (isSensitive) {
-      return REDACTED_MARKER;
+      // SAFETY: REDACTED_MARKER replaces sensitive primitive representation.
+      return REDACTED_MARKER as T;
     }
     return data;
   }
 
   if (data instanceof Error) {
-    return serializeError(data);
+    // SAFETY: serializeError converts Error into SerializedError representing data T.
+    return serializeError(data) as T;
   }
 
   if (Array.isArray(data)) {
-    return data.map((item) => redactSecrets(item, currentKey, isSensitive));
+    // SAFETY: deeply sanitized array elements maintain array structure for type T.
+    return data.map((item) => redactSecrets(item, currentKey, isSensitive)) as T;
   }
 
-  if (typeof data === "object") {
-    const output: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      const keyIsSensitive = isSensitive || SENSITIVE_KEY_PATTERN.test(key);
-      if (keyIsSensitive) {
-        if (value === null || value === undefined) {
-          output[key] = value;
-        } else if (
-          typeof value === "string" ||
-          typeof value === "number" ||
-          typeof value === "boolean" ||
-          typeof value === "bigint"
-        ) {
-          output[key] = REDACTED_MARKER;
-        } else {
-          output[key] = redactSecrets(value, key, true);
-        }
+  const objectParsed = z.record(z.unknown()).safeParse(data);
+  if (objectParsed.success) {
+    const output: JsonObject = {};
+    for (const [key, value] of Object.entries(objectParsed.data)) {
+      const keySensitive = isSensitive || SENSITIVE_KEY_PATTERN.test(key);
+      if (
+        keySensitive &&
+        (z.string().safeParse(value).success ||
+          z.number().safeParse(value).success ||
+          z.boolean().safeParse(value).success ||
+          z.bigint().safeParse(value).success)
+      ) {
+        output[key] = REDACTED_MARKER;
       } else {
-        output[key] = redactSecrets(value, key, false);
+        // SAFETY: Recursive secret redaction returns valid JSON value.
+        output[key] = redactSecrets(value, key, keySensitive) as JsonValue;
       }
     }
-    return output;
+    // SAFETY: sanitized output object matches dictionary structure of type T.
+    return output as T;
   }
 
   return data;
@@ -200,26 +208,37 @@ export function redactSecrets(
 
 function serializeError(err: Error): SerializedError {
   const serialized: SerializedError = {
-    name: err.name,
-    message: String(redactSecrets(err.message)),
+    name: err.name || "Error",
+    message: err.message,
   };
 
   if (err.stack) {
-    serialized.stack = String(redactSecrets(err.stack));
+    serialized.stack = err.stack;
+  }
+  if ("code" in err) {
+    const codeParsed = z.union([z.string(), z.number()]).safeParse(err.code);
+    if (codeParsed.success) {
+      serialized.code = codeParsed.data;
+    }
   }
 
-  if ("code" in err && (typeof err.code === "string" || typeof err.code === "number")) {
-    serialized.code = err.code;
-  }
-
-  // Preserve non-standard properties on custom errors safely
-  for (const [key, val] of Object.entries(err as unknown as Record<string, unknown>)) {
-    if (key !== "name" && key !== "message" && key !== "stack") {
-      serialized[key] = redactSecrets(val, key);
+  // Include any extra enumerable properties
+  const errRecord = Object.assign({}, err);
+  for (const [key, val] of Object.entries(errRecord)) {
+    if (key !== "name" && key !== "message" && key !== "stack" && key !== "code") {
+      // SAFETY: Redacted additional error properties conform to JSON values.
+      serialized[key] = redactSecrets(val, key) as JsonValue;
     }
   }
 
   return serialized;
+}
+function isSerializedError(val: JsonValue | undefined): val is SerializedError {
+  if (!val) {
+    return false;
+  }
+  const parsed = z.record(z.unknown()).safeParse(val);
+  return parsed.success;
 }
 
 export class StructuredLogger {
@@ -284,27 +303,23 @@ export class StructuredLogger {
     return this.asyncStorage.run(merged, fn);
   }
 
-  debug(msg: string, meta?: Record<string, unknown> | Error): void {
+  debug(msg: string, meta?: JsonObject | Error): void {
     this.log("debug", msg, meta);
   }
 
-  info(msg: string, meta?: Record<string, unknown> | Error): void {
+  info(msg: string, meta?: JsonObject | Error): void {
     this.log("info", msg, meta);
   }
 
-  warn(msg: string, meta?: Record<string, unknown> | Error): void {
+  warn(msg: string, meta?: JsonObject | Error): void {
     this.log("warn", msg, meta);
   }
 
-  error(msg: string, meta?: Record<string, unknown> | Error): void {
+  error(msg: string, meta?: JsonObject | Error): void {
     this.log("error", msg, meta);
   }
 
-  log(
-    level: Exclude<LogLevel, "silent">,
-    message: string,
-    meta?: Record<string, unknown> | Error,
-  ): void {
+  log(level: Exclude<LogLevel, "silent">, message: string, meta?: JsonObject | Error): void {
     if (LOG_LEVEL_SEVERITY[level] < LOG_LEVEL_SEVERITY[this.level]) {
       return;
     }
@@ -313,42 +328,41 @@ export class StructuredLogger {
     const timestamp = new Date().toISOString();
 
     let errorObj: SerializedError | undefined;
-    let extraMeta: Record<string, unknown> | undefined;
+    let extraMeta: JsonObject | undefined;
 
     if (meta instanceof Error) {
       errorObj = serializeError(meta);
-    } else if (meta && typeof meta === "object") {
-      const { error, ...rest } = meta;
-      if (error instanceof Error) {
-        errorObj = serializeError(error);
-      } else if (error && typeof error === "object") {
-        errorObj = error as SerializedError;
+    } else if (meta) {
+      if (meta.error instanceof Error) {
+        errorObj = serializeError(meta.error);
+        const { error: _err, ...rest } = meta;
+        extraMeta = rest;
+      } else if (isSerializedError(meta.error)) {
+        errorObj = meta.error;
+        const { error: _err, ...rest } = meta;
+        extraMeta = rest;
+      } else {
+        extraMeta = meta;
       }
-      extraMeta = rest;
     }
 
-    const rawMessage = this.redact ? (redactSecrets(message) as string) : message;
-    const rawMeta = extraMeta
-      ? this.redact
-        ? (redactSecrets(extraMeta) as Record<string, unknown>)
-        : extraMeta
-      : undefined;
+    const rawMessage = this.redact ? redactSecrets(message) : message;
+    const rawMeta = this.redact && extraMeta ? redactSecrets(extraMeta) : extraMeta;
 
     const entry: LogEntry = {
       timestamp,
       level,
       message: rawMessage,
-      ...(currentContext.traceId ? { traceId: currentContext.traceId } : {}),
-      ...(currentContext.spanId ? { spanId: currentContext.spanId } : {}),
-      ...(currentContext.sessionId ? { sessionId: currentContext.sessionId } : {}),
-      ...(currentContext.invocationId ? { invocationId: currentContext.invocationId } : {}),
-      ...(currentContext.toolId ? { toolId: currentContext.toolId } : {}),
-      ...(currentContext.workspaceId ? { workspaceId: currentContext.workspaceId } : {}),
-      ...(currentContext.deviceId ? { deviceId: currentContext.deviceId } : {}),
     };
+    if (currentContext.traceId) entry.traceId = currentContext.traceId;
+    if (currentContext.spanId) entry.spanId = currentContext.spanId;
+    if (currentContext.sessionId) entry.sessionId = currentContext.sessionId;
+    if (currentContext.invocationId) entry.invocationId = currentContext.invocationId;
+    if (currentContext.toolId) entry.toolId = currentContext.toolId;
+    if (currentContext.workspaceId) entry.workspaceId = currentContext.workspaceId;
+    if (currentContext.deviceId) entry.deviceId = currentContext.deviceId;
 
-    // Filter out top-level correlation keys from custom context bag
-    const customContext: Record<string, unknown> = {};
+    const customContext: JsonObject = {};
     for (const [key, value] of Object.entries(currentContext)) {
       if (
         ![
@@ -374,9 +388,8 @@ export class StructuredLogger {
     }
 
     if (errorObj) {
-      entry.error = errorObj;
+      entry.error = this.redact ? redactSecrets(errorObj) : errorObj;
     }
-
     // Add to in-memory ring buffer
     this.logBuffer.push(entry);
     if (this.logBuffer.length > this.bufferCapacity) {

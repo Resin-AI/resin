@@ -191,8 +191,13 @@ export function createMockConnection(options: FakeConnectionOptions = {}) {
     },
     sendMessage(msg: JsonRpcMessage) {
       if (!("id" in msg) || msg.id === undefined) {
-        notificationsReceived.push(msg as JsonRpcNotification);
-        options.onNotification?.(msg as JsonRpcNotification);
+        const notif: JsonRpcNotification = {
+          jsonrpc: "2.0",
+          method: msg.method,
+          params: "params" in msg ? msg.params : undefined,
+        };
+        notificationsReceived.push(notif);
+        options.onNotification?.(notif);
       }
     },
     getActiveRequestCount() {
@@ -206,8 +211,9 @@ export function createMockConnection(options: FakeConnectionOptions = {}) {
     },
   };
 
+  // SAFETY: Test fixture implements mock McpConnection interface for testing.
   return {
-    connection: conn as unknown as McpConnection,
+    connection: conn as McpConnection,
     notificationsReceived,
   };
 }

@@ -35,11 +35,13 @@ function sha256(value: string | Buffer): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-export function generateSafetyAttestationKeyPair(): {
+export interface SafetyAttestationKeyPair {
   privateKeyPem: string;
   publicKeyPem: string;
   keyId: string;
-} {
+}
+
+export function generateSafetyAttestationKeyPair(): SafetyAttestationKeyPair {
   const keyPair = crypto.generateKeyPairSync("ed25519");
   const privateKeyPem = keyPair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const publicKeyPem = keyPair.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -50,7 +52,13 @@ export function generateSafetyAttestationKeyPair(): {
   };
 }
 
-function probeDeno(executable: string): { available: boolean; version: string; digest?: string } {
+interface DenoProbeResult {
+  available: boolean;
+  version: string;
+  digest?: string;
+}
+
+function probeDeno(executable: string): DenoProbeResult {
   const result = spawnSync(executable, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

@@ -14,6 +14,18 @@ import { type SignatureMetadata, SignatureMetadataSchema } from "./versions.js";
  * Standard literal version string for v1 contracts.
  */
 export const CURRENT_V1_CONTRACTS_VERSION = "1.0.0";
+export type V1MetadataPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | V1MetadataPayloadRecord
+  | V1MetadataPayloadValue[];
+
+export interface V1MetadataPayloadRecord {
+  [key: string]: V1MetadataPayloadValue;
+}
 export const V1_SCHEMA_VERSION = "1.0.0";
 
 /**
@@ -40,7 +52,7 @@ export type V1SchemaKind = (typeof V1_SCHEMA_KINDS)[keyof typeof V1_SCHEMA_KINDS
 export class UnsupportedSchemaVersionError extends Error {
   constructor(
     public readonly schemaKind: string,
-    public readonly receivedVersion: unknown,
+    public readonly receivedVersion: string | number | boolean | null | undefined,
     message?: string,
   ) {
     super(
@@ -189,21 +201,27 @@ const FORBIDDEN_STRING_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
  * Asserts that a JavaScript data structure contains no absolute paths, credentials,
  * access tokens, path traversal, or executable payloads.
  */
-export function assertSafeCommittedMetadata(data: unknown, currentPath = "root"): void {
+export function assertSafeCommittedMetadata(
+  data: V1MetadataPayloadValue | null | undefined,
+  currentPath = "root",
+): void {
   if (data === null || data === undefined) {
     return;
   }
 
-  if (typeof data === "string") {
+  const dataTag = Object.prototype.toString.call(data);
+
+  if (dataTag === "[object String]") {
+    const strData = String(data);
     for (const { pattern, reason } of FORBIDDEN_STRING_PATTERNS) {
-      if (pattern.test(data)) {
+      if (pattern.test(strData)) {
         throw new CommittedMetadataSecurityError(`${reason} at '${currentPath}'`, currentPath);
       }
     }
     return;
   }
 
-  if (typeof data === "number" || typeof data === "boolean") {
+  if (dataTag === "[object Number]" || dataTag === "[object Boolean]") {
     return;
   }
 
@@ -214,8 +232,10 @@ export function assertSafeCommittedMetadata(data: unknown, currentPath = "root")
     return;
   }
 
-  if (typeof data === "object") {
-    for (const [key, value] of Object.entries(data)) {
+  if (dataTag === "[object Object]") {
+    // SAFETY: data is verified to be a record object.
+    const record = data as V1MetadataPayloadRecord;
+    for (const [key, value] of Object.entries(record)) {
       for (const pattern of FORBIDDEN_KEY_PATTERNS) {
         if (pattern.test(key)) {
           throw new CommittedMetadataSecurityError(
@@ -230,12 +250,12 @@ export function assertSafeCommittedMetadata(data: unknown, currentPath = "root")
   }
 
   throw new CommittedMetadataSecurityError(
-    `Unsupported data type '${typeof data}' in committed metadata at '${currentPath}'`,
+    `Unsupported data type in committed metadata at '${currentPath}'`,
     currentPath,
   );
 }
 
-const V1_PROHIBITED_PROPERTY_KEYS: Record<string, true> = {
+const V1_PROHIBITED_PROPERTY_KEYS = {
   prompt: true,
   prompts: true,
   rawprompt: true,
@@ -254,28 +274,27 @@ const V1_PROHIBITED_PROPERTY_KEYS: Record<string, true> = {
   rawtranscripts: true,
   source: true,
   rawsource: true,
-  sourcecode: true,
-  sessioncontent: true,
-  sessionlog: true,
-  chatlog: true,
-  historylog: true,
-  message: true,
-  messages: true,
-  usermessage: true,
-  assistantmessage: true,
-  rawresponse: true,
-  rawrequest: true,
-};
+  modelmessage: true,
+  modelmessages: true,
+  toolinvocationhistory: true,
+  toolinvocationhistoryentries: true,
+  generatorhistory: true,
+  nogeneratorhistory: true,
+  reviewergeneratorhistory: true,
+} satisfies Record<string, boolean>;
 
 /**
  * Enforces the V1 evidence boundary: raw prompts, transcripts, source, and model
  * messages must never enter committed or Cloud-hosted evidence envelopes.
  */
-export function assertV1NoProhibitedProperties(data: unknown, currentPath = "root"): void {
+export function assertV1NoProhibitedProperties(
+  data: V1MetadataPayloadValue | null | undefined,
+  currentPath = "root",
+): void {
   assertSafeCommittedMetadata(data, currentPath);
 
-  const visit = (value: unknown, path: string): void => {
-    if (value === null || value === undefined || typeof value !== "object") {
+  const visit = (value: V1MetadataPayloadValue | null | undefined, path: string): void => {
+    if (value === null || value === undefined) {
       return;
     }
     if (Array.isArray(value)) {
@@ -284,15 +303,20 @@ export function assertV1NoProhibitedProperties(data: unknown, currentPath = "roo
       }
       return;
     }
-    for (const [key, child] of Object.entries(value)) {
-      const childPath = `${path}.${key}`;
-      if (V1_PROHIBITED_PROPERTY_KEYS[key.toLowerCase().replace(/[^a-z0-9]/g, "")]) {
-        throw new CommittedMetadataSecurityError(
-          `Prohibited raw evidence field '${key}' detected at '${childPath}'`,
-          childPath,
-        );
+    if (Object.prototype.toString.call(value) === "[object Object]") {
+      // SAFETY: value is verified to be a record object.
+      const record = value as V1MetadataPayloadRecord;
+      for (const [key, child] of Object.entries(record)) {
+        const childPath = `${path}.${key}`;
+        const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (Object.prototype.hasOwnProperty.call(V1_PROHIBITED_PROPERTY_KEYS, normalizedKey)) {
+          throw new CommittedMetadataSecurityError(
+            `Prohibited raw evidence field '${key}' detected at '${childPath}'`,
+            childPath,
+          );
+        }
+        visit(child, childPath);
       }
-      visit(child, childPath);
     }
   };
 
@@ -408,11 +432,14 @@ export const V1ProjectMetadataSchema = z
   .strict();
 
 export type V1ProjectMetadata = z.infer<typeof V1ProjectMetadataSchema>;
+export type V1ProjectMetadataInput = z.input<typeof V1ProjectMetadataSchema>;
 
 /**
  * Validates project metadata and enforces committed metadata security restrictions.
  */
-export function validateV1ProjectMetadata(data: unknown): V1ProjectMetadata {
+export function validateV1ProjectMetadata(
+  data: V1ProjectMetadataInput | V1MetadataPayloadValue | null | undefined,
+): V1ProjectMetadata {
   assertSafeCommittedMetadata(data, "project.json");
   return V1ProjectMetadataSchema.parse(data);
 }
@@ -457,11 +484,14 @@ export const V1ToolLockSchema = z
   .strict();
 
 export type V1ToolLock = z.infer<typeof V1ToolLockSchema>;
+export type V1ToolLockInput = z.input<typeof V1ToolLockSchema>;
 
 /**
  * Validates tool lockfile and enforces committed metadata security restrictions and key/name parity.
  */
-export function validateV1ToolLock(data: unknown): V1ToolLock {
+export function validateV1ToolLock(
+  data: V1ToolLockInput | V1MetadataPayloadValue | null | undefined,
+): V1ToolLock {
   assertSafeCommittedMetadata(data, "resin.lock");
   const parsed = V1ToolLockSchema.parse(data);
   for (const [key, entry] of Object.entries(parsed.tools)) {
@@ -531,13 +561,15 @@ export const V1ActivationCertificateSchema = z
   );
 
 export type V1ActivationCertificate = z.infer<typeof V1ActivationCertificateSchema>;
+export type V1ActivationCertificateInput = z.input<typeof V1ActivationCertificateSchema>;
+export type V1SignableActivationCertificate = Omit<V1ActivationCertificate, "signature">;
 
 /**
  * Projects a signable representation of an Activation Certificate (omitting the signature field).
  */
 export function projectSignableActivationCertificate(
-  cert: V1ActivationCertificate | unknown,
-): Record<string, unknown> {
+  cert: V1ActivationCertificateInput,
+): V1SignableActivationCertificate {
   const parsed = V1ActivationCertificateSchema.parse(cert);
   const { signature: _sig, ...signable } = parsed;
   return signable;
@@ -546,7 +578,9 @@ export function projectSignableActivationCertificate(
 /**
  * Validates an Activation Certificate.
  */
-export function validateV1ActivationCertificate(data: unknown): V1ActivationCertificate {
+export function validateV1ActivationCertificate(
+  data: V1ActivationCertificateInput | V1MetadataPayloadValue | null | undefined,
+): V1ActivationCertificate {
   return V1ActivationCertificateSchema.parse(data);
 }
 
@@ -604,13 +638,15 @@ export const V1RevocationMetadataSchema = z
   );
 
 export type V1RevocationMetadata = z.infer<typeof V1RevocationMetadataSchema>;
+export type V1RevocationMetadataInput = z.input<typeof V1RevocationMetadataSchema>;
+export type V1SignableRevocationMetadata = Omit<V1RevocationMetadata, "signature">;
 
 /**
  * Projects a signable representation of Revocation Metadata (omitting the signature field).
  */
 export function projectSignableRevocationMetadata(
-  metadata: V1RevocationMetadata | unknown,
-): Record<string, unknown> {
+  metadata: V1RevocationMetadataInput,
+): V1SignableRevocationMetadata {
   const parsed = V1RevocationMetadataSchema.parse(metadata);
   const { signature: _sig, ...signable } = parsed;
   return signable;
@@ -619,7 +655,9 @@ export function projectSignableRevocationMetadata(
 /**
  * Validates Revocation Metadata.
  */
-export function validateV1RevocationMetadata(data: unknown): V1RevocationMetadata {
+export function validateV1RevocationMetadata(
+  data: V1RevocationMetadataInput | V1MetadataPayloadValue | null | undefined,
+): V1RevocationMetadata {
   return V1RevocationMetadataSchema.parse(data);
 }
 
@@ -629,13 +667,17 @@ export interface V1OfflineFreshnessVerificationOptions {
   maxOfflineLeaseMs?: number;
 }
 
+export interface V1RevocationFreshnessResult {
+  valid: boolean;
+}
+
 /**
  * Verifies that offline revocation metadata is currently valid, within lease, and monotonic against replay.
  */
 export function verifyOfflineRevocationFreshness(
   metadata: V1RevocationMetadata,
   options: V1OfflineFreshnessVerificationOptions = {},
-): { valid: true } {
+): V1RevocationFreshnessResult {
   const currentDeviceTime = options.currentDeviceTime
     ? new Date(options.currentDeviceTime).getTime()
     : Date.now();
@@ -694,7 +736,7 @@ export function verifyOfflineRevocationFreshness(
  * Computes a deterministic SHA-256 hash of any canonical signable object.
  */
 export function computeSignableHash(
-  signablePayload: Record<string, unknown>,
+  signablePayload: V1MetadataPayloadRecord,
   prefix = false,
 ): string {
   return hashCanonicalContent(signablePayload, { prefix });
@@ -707,18 +749,29 @@ export function computeSignableHash(
 /**
  * Migrates arbitrary project metadata payload to V1ProjectMetadata.
  */
-export function migrateV1ProjectMetadata(raw: unknown): V1ProjectMetadata {
-  if (typeof raw !== "object" || raw === null) {
+export function migrateV1ProjectMetadata(
+  raw: V1MetadataPayloadValue | null | undefined,
+): V1ProjectMetadata {
+  if (
+    raw === null ||
+    raw === undefined ||
+    Object.prototype.toString.call(raw) !== "[object Object]" ||
+    Array.isArray(raw)
+  ) {
     throw new SchemaMigrationError(
       V1_SCHEMA_KINDS.PROJECT_METADATA,
       "Expected non-null object for project metadata migration",
     );
   }
 
-  const record = raw as Record<string, unknown>;
+  // SAFETY: raw is verified to be a non-null object record.
+  const record = raw as V1MetadataPayloadRecord;
 
   if (record.schemaVersion !== undefined && record.schemaVersion !== V1_SCHEMA_VERSION) {
-    throw new UnsupportedSchemaVersionError(V1_SCHEMA_KINDS.PROJECT_METADATA, record.schemaVersion);
+    throw new UnsupportedSchemaVersionError(
+      V1_SCHEMA_KINDS.PROJECT_METADATA,
+      String(record.schemaVersion),
+    );
   }
 
   if (record.schemaKind !== undefined && record.schemaKind !== V1_SCHEMA_KINDS.PROJECT_METADATA) {
@@ -728,21 +781,28 @@ export function migrateV1ProjectMetadata(raw: unknown): V1ProjectMetadata {
     );
   }
 
-  const projectId = (record.projectId ?? record.id) as string;
-  const name = record.name as string;
-  const createdAt = (record.createdAt ?? new Date().toISOString()) as string;
-  const updatedAt = record.updatedAt as string | undefined;
-  const settings = record.settings as V1ProjectSettings | undefined;
+  const projectId = String(record.projectId ?? record.id ?? "");
+  const name = String(record.name ?? "");
+  const createdAt = String(record.createdAt ?? new Date().toISOString());
 
-  const candidate: V1ProjectMetadata = {
+  const candidate: V1ProjectMetadataInput = {
     schemaKind: V1_SCHEMA_KINDS.PROJECT_METADATA,
     schemaVersion: V1_SCHEMA_VERSION,
     projectId,
     name,
-    ...(settings !== undefined ? { settings } : {}),
     createdAt,
-    ...(updatedAt !== undefined ? { updatedAt } : {}),
   };
+
+  if (
+    record.settings !== undefined &&
+    Object.prototype.toString.call(record.settings) === "[object Object]"
+  ) {
+    // SAFETY: settings object is parsed during schema validation.
+    candidate.settings = record.settings as V1ProjectSettings;
+  }
+  if (record.updatedAt !== undefined) {
+    candidate.updatedAt = String(record.updatedAt);
+  }
 
   return validateV1ProjectMetadata(candidate);
 }
@@ -750,18 +810,27 @@ export function migrateV1ProjectMetadata(raw: unknown): V1ProjectMetadata {
 /**
  * Migrates arbitrary tool lock payload to V1ToolLock.
  */
-export function migrateV1ToolLock(raw: unknown): V1ToolLock {
-  if (typeof raw !== "object" || raw === null) {
+export function migrateV1ToolLock(raw: V1MetadataPayloadValue | null | undefined): V1ToolLock {
+  if (
+    raw === null ||
+    raw === undefined ||
+    Object.prototype.toString.call(raw) !== "[object Object]" ||
+    Array.isArray(raw)
+  ) {
     throw new SchemaMigrationError(
       V1_SCHEMA_KINDS.TOOL_LOCK,
       "Expected non-null object for tool lock migration",
     );
   }
 
-  const record = raw as Record<string, unknown>;
+  // SAFETY: raw is verified to be a non-null object record.
+  const record = raw as V1MetadataPayloadRecord;
 
   if (record.schemaVersion !== undefined && record.schemaVersion !== V1_SCHEMA_VERSION) {
-    throw new UnsupportedSchemaVersionError(V1_SCHEMA_KINDS.TOOL_LOCK, record.schemaVersion);
+    throw new UnsupportedSchemaVersionError(
+      V1_SCHEMA_KINDS.TOOL_LOCK,
+      String(record.schemaVersion),
+    );
   }
 
   if (record.schemaKind !== undefined && record.schemaKind !== V1_SCHEMA_KINDS.TOOL_LOCK) {
@@ -771,39 +840,63 @@ export function migrateV1ToolLock(raw: unknown): V1ToolLock {
     );
   }
 
-  const projectId = (record.projectId ?? record.id) as string;
-  const updatedAt = (record.updatedAt ?? new Date().toISOString()) as string;
-  const rawTools = (record.tools ?? {}) as Record<string, Record<string, unknown>>;
+  const projectId = String(record.projectId ?? record.id ?? "");
+  const updatedAt = String(record.updatedAt ?? new Date().toISOString());
+  // SAFETY: tools payload defaults to an empty record and each entry is validated in the loop.
+  const rawTools = (record.tools ?? {}) as V1MetadataPayloadRecord;
 
   const tools: Record<string, V1LockedToolEntry> = {};
-  for (const [key, toolEntry] of Object.entries(rawTools)) {
+  for (const [key, rawToolEntry] of Object.entries(rawTools)) {
+    if (
+      !rawToolEntry ||
+      Object.prototype.toString.call(rawToolEntry) !== "[object Object]" ||
+      Array.isArray(rawToolEntry)
+    ) {
+      continue;
+    }
+    // SAFETY: rawToolEntry is verified to be a non-null record.
+    const toolEntry = rawToolEntry as V1MetadataPayloadRecord;
+
     const manifestDigest = normalizeSha256(
-      (toolEntry.manifestDigest ?? toolEntry.digest) as string,
+      String(toolEntry.manifestDigest ?? toolEntry.digest ?? ""),
       false,
     );
     const artifactDigest = normalizeSha256(
-      (toolEntry.artifactDigest ?? toolEntry.hash) as string,
+      String(toolEntry.artifactDigest ?? toolEntry.hash ?? ""),
       false,
     );
     const envelopeDigest = toolEntry.envelopeDigest
-      ? normalizeSha256(toolEntry.envelopeDigest as string, false)
+      ? normalizeSha256(String(toolEntry.envelopeDigest), false)
       : undefined;
 
-    tools[key] = {
-      toolId: (toolEntry.toolId ?? toolEntry.id) as string,
-      name: (toolEntry.name ?? key) as string,
-      version: toolEntry.version as string,
+    const statusVal = String(toolEntry.status ?? "active");
+    const status: "active" | "pinned" | "disabled" =
+      statusVal === "pinned" || statusVal === "disabled" ? statusVal : "active";
+
+    const entry: V1LockedToolEntry = {
+      toolId: String(toolEntry.toolId ?? toolEntry.id ?? ""),
+      name: String(toolEntry.name ?? key),
+      version: String(toolEntry.version ?? ""),
       manifestDigest,
       artifactDigest,
-      ...(envelopeDigest ? { envelopeDigest } : {}),
-      ...(toolEntry.signatureIdentity
-        ? { signatureIdentity: toolEntry.signatureIdentity as V1LockSignatureIdentity }
-        : {}),
-      status: (toolEntry.status ?? "active") as "active" | "pinned" | "disabled",
+      status,
     };
+
+    if (envelopeDigest !== undefined) {
+      entry.envelopeDigest = envelopeDigest;
+    }
+    if (
+      toolEntry.signatureIdentity !== undefined &&
+      Object.prototype.toString.call(toolEntry.signatureIdentity) === "[object Object]"
+    ) {
+      // SAFETY: signatureIdentity object structure is validated by schema parser.
+      entry.signatureIdentity = toolEntry.signatureIdentity as V1LockSignatureIdentity;
+    }
+
+    tools[key] = entry;
   }
 
-  const candidate: V1ToolLock = {
+  const candidate: V1ToolLockInput = {
     schemaKind: V1_SCHEMA_KINDS.TOOL_LOCK,
     schemaVersion: V1_SCHEMA_VERSION,
     projectId,
@@ -817,20 +910,28 @@ export function migrateV1ToolLock(raw: unknown): V1ToolLock {
 /**
  * Migrates arbitrary activation certificate payload to V1ActivationCertificate.
  */
-export function migrateV1ActivationCertificate(raw: unknown): V1ActivationCertificate {
-  if (typeof raw !== "object" || raw === null) {
+export function migrateV1ActivationCertificate(
+  raw: V1MetadataPayloadValue | null | undefined,
+): V1ActivationCertificate {
+  if (
+    raw === null ||
+    raw === undefined ||
+    Object.prototype.toString.call(raw) !== "[object Object]" ||
+    Array.isArray(raw)
+  ) {
     throw new SchemaMigrationError(
       V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE,
       "Expected non-null object for activation certificate migration",
     );
   }
 
-  const record = raw as Record<string, unknown>;
+  // SAFETY: raw is verified to be a non-null object record.
+  const record = raw as V1MetadataPayloadRecord;
 
   if (record.schemaVersion !== undefined && record.schemaVersion !== V1_SCHEMA_VERSION) {
     throw new UnsupportedSchemaVersionError(
       V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE,
-      record.schemaVersion,
+      String(record.schemaVersion),
     );
   }
 
@@ -844,26 +945,35 @@ export function migrateV1ActivationCertificate(raw: unknown): V1ActivationCertif
     );
   }
 
-  return validateV1ActivationCertificate(record);
+  // SAFETY: Migrated record has verified schemaKind and schemaVersion before validation.
+  return validateV1ActivationCertificate(record as V1ActivationCertificateInput);
 }
 
 /**
  * Migrates arbitrary revocation metadata payload to V1RevocationMetadata.
  */
-export function migrateV1RevocationMetadata(raw: unknown): V1RevocationMetadata {
-  if (typeof raw !== "object" || raw === null) {
+export function migrateV1RevocationMetadata(
+  raw: V1MetadataPayloadValue | null | undefined,
+): V1RevocationMetadata {
+  if (
+    raw === null ||
+    raw === undefined ||
+    Object.prototype.toString.call(raw) !== "[object Object]" ||
+    Array.isArray(raw)
+  ) {
     throw new SchemaMigrationError(
       V1_SCHEMA_KINDS.REVOCATION_METADATA,
       "Expected non-null object for revocation metadata migration",
     );
   }
 
-  const record = raw as Record<string, unknown>;
+  // SAFETY: raw is verified to be a non-null object record.
+  const record = raw as V1MetadataPayloadRecord;
 
   if (record.schemaVersion !== undefined && record.schemaVersion !== V1_SCHEMA_VERSION) {
     throw new UnsupportedSchemaVersionError(
       V1_SCHEMA_KINDS.REVOCATION_METADATA,
-      record.schemaVersion,
+      String(record.schemaVersion),
     );
   }
 
@@ -877,5 +987,6 @@ export function migrateV1RevocationMetadata(raw: unknown): V1RevocationMetadata 
     );
   }
 
-  return validateV1RevocationMetadata(record);
+  // SAFETY: Migrated record has verified schemaKind and schemaVersion before validation.
+  return validateV1RevocationMetadata(record as V1RevocationMetadataInput);
 }

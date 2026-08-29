@@ -65,7 +65,35 @@ export class SanitizationViolationError extends Error {
 // Detection & Redaction Rules
 // ============================================================================
 
-const DEFAULT_SECRET_KEYS: Record<string, true> = {
+export type SanitizationPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SanitizationPayloadRecord
+  | SanitizationPayloadValue[];
+export interface SanitizationPayloadRecord {
+  [key: string]: SanitizationPayloadValue;
+}
+
+function isString(val: SanitizationPayloadValue): val is string {
+  return Object.prototype.toString.call(val) === "[object String]";
+}
+
+function isRecord(val: SanitizationPayloadValue): val is SanitizationPayloadRecord {
+  return (
+    val !== null &&
+    val !== undefined &&
+    !Array.isArray(val) &&
+    Object.prototype.toString.call(val) === "[object Object]"
+  );
+}
+interface SecretKeyRegistry {
+  [normalizedKey: string]: boolean;
+}
+
+const DEFAULT_SECRET_KEYS: SecretKeyRegistry = {
   password: true,
   passwd: true,
   secret: true,
@@ -247,7 +275,7 @@ const PRIVATE_IP_PATTERNS: Array<{
  * Scan a text string or structured object for any sensitive information.
  */
 export function scanForSensitiveData(
-  target: unknown,
+  target: SanitizationPayloadValue,
   options: ScanOptions = {},
 ): SensitivityFinding[] {
   const findings: SensitivityFinding[] = [];
@@ -341,17 +369,20 @@ export function scanForSensitiveData(
     }
   }
 
-  function traverse(value: unknown, currentPath: string): void {
+  function traverse(value: SanitizationPayloadValue, currentPath: string): void {
     if (value === null || value === undefined) {
       return;
     }
 
-    if (typeof value === "string") {
+    if (isString(value)) {
       scanText(value, currentPath || "$");
       return;
     }
 
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (
+      Object.prototype.toString.call(value) === "[object Number]" ||
+      Object.prototype.toString.call(value) === "[object Boolean]"
+    ) {
       return;
     }
 
@@ -362,27 +393,27 @@ export function scanForSensitiveData(
       return;
     }
 
-    if (typeof value === "object") {
+    if (isRecord(value)) {
       for (const [k, v] of Object.entries(value)) {
         const subPath = currentPath ? `${currentPath}.${k}` : k;
         const lowerKey = k.toLowerCase();
 
         if (
           (DEFAULT_SECRET_KEYS[lowerKey] || customSecretKeys[lowerKey]) &&
-          typeof v === "string" &&
+          isString(v) &&
           v.length > 0 &&
           !v.startsWith("<REDACTED_")
         ) {
           findings.push({
             path: subPath,
             category: "secret",
-            rule: "sensitive_key_name",
-            match: v,
-            sample: v.length > 20 ? `${v.slice(0, 17)}...` : v,
+            rule: `secret_key_name (${k})`,
+            match: `<redacted value for key ${k}>`,
+            sample: `<redacted>`,
           });
+        } else {
+          traverse(v, subPath);
         }
-
-        traverse(v, subPath);
       }
     }
   }
@@ -447,16 +478,19 @@ export function sanitizeFixture<T>(target: T, options: SanitizationOptions = {})
     }
   }
 
-  function transform(value: unknown): unknown {
+  function transform(value: SanitizationPayloadValue): SanitizationPayloadValue {
     if (value === null || value === undefined) {
       return value;
     }
 
-    if (typeof value === "string") {
+    if (isString(value)) {
       return redactSensitiveText(value, options);
     }
 
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (
+      Object.prototype.toString.call(value) === "[object Number]" ||
+      Object.prototype.toString.call(value) === "[object Boolean]"
+    ) {
       return value;
     }
 
@@ -464,14 +498,11 @@ export function sanitizeFixture<T>(target: T, options: SanitizationOptions = {})
       return value.map((item) => transform(item));
     }
 
-    if (typeof value === "object") {
-      const result: Record<string, unknown> = {};
+    if (isRecord(value)) {
+      const result: SanitizationPayloadRecord = {};
       for (const [k, v] of Object.entries(value)) {
         const lowerKey = k.toLowerCase();
-        if (
-          (DEFAULT_SECRET_KEYS[lowerKey] || customSecretKeys[lowerKey]) &&
-          typeof v === "string"
-        ) {
+        if ((DEFAULT_SECRET_KEYS[lowerKey] || customSecretKeys[lowerKey]) && isString(v)) {
           result[k] = "<REDACTED_SECRET>";
         } else {
           result[k] = transform(v);
@@ -483,7 +514,8 @@ export function sanitizeFixture<T>(target: T, options: SanitizationOptions = {})
     return value;
   }
 
-  return transform(target) as T;
+  // SAFETY: Recursive sanitization clones and redacts the data while preserving the generic payload structure of T.
+  return transform(target as SanitizationPayloadValue) as T;
 }
 
 /**
@@ -491,7 +523,7 @@ export function sanitizeFixture<T>(target: T, options: SanitizationOptions = {})
  * Throws SanitizationViolationError if any sensitive data is discovered.
  */
 export function assertSanitized(
-  target: unknown,
+  target: SanitizationPayloadValue,
   fixtureName?: string,
   options: ScanOptions = {},
 ): void {

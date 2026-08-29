@@ -38,10 +38,9 @@ class AppliedWriteFailureBridge implements HarnessReconcileFsBridge {
     if (filePath === this.targetPath && this.failTargetWrite) {
       this.failTargetWrite = false;
       await this.delegate.writeFile(filePath, content);
-      const error = new Error(
-        `EACCES: permission denied writing ${filePath}`,
-      ) as NodeJS.ErrnoException;
-      error.code = "EACCES";
+      const error = Object.assign(new Error(`EACCES: permission denied writing ${filePath}`), {
+        code: "EACCES",
+      });
       throw error;
     }
     await this.delegate.writeFile(filePath, content);
@@ -1044,10 +1043,12 @@ describe("HarnessReconciler", () => {
       readonly lockPath: string;
       readonly releaseStarted?: boolean;
     };
-    const internals = bridge as unknown as {
+    interface ReconciliationFsBridgeInternals {
       readonly activeLocks: Map<string, ActiveLockForTest>;
       refreshLockLease(activeLock: ActiveLockForTest): Promise<void>;
-    };
+    }
+    // SAFETY: Access private activeLocks map and refreshLockLease method on ReconciliationNodeFsBridge instance in test.
+    const internals = bridge as ReconciliationNodeFsBridge & ReconciliationFsBridgeInternals;
     let claimPath: string | undefined;
     const originalRename = fs.rename;
     const rename = vi.spyOn(fs, "rename").mockImplementation(async (source, destination) => {

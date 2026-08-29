@@ -70,7 +70,7 @@ function sanitizeHexDigest(rawDigest: string | undefined, data?: Buffer | string
     }
   }
   if (data !== undefined) {
-    const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
     return crypto.createHash("sha256").update(buf).digest("hex").slice(0, 16);
   }
   return crypto.randomBytes(8).toString("hex");
@@ -191,14 +191,14 @@ export class QuarantineManager {
   async quarantinePayload(
     payload: Buffer | string,
     reason: QuarantineReason,
-    details: Record<string, unknown> = {},
+    details: QuarantineRecord["details"] = {},
     digest?: string,
     sourceIdentifier?: string,
   ): Promise<QuarantineRecord> {
     await this.ensureDirectory();
 
     const timestamp = new Date().toISOString();
-    const payloadBuffer = typeof payload === "string" ? Buffer.from(payload, "utf8") : payload;
+    const payloadBuffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
     const computedDigest = `sha256:${crypto.createHash("sha256").update(payloadBuffer).digest("hex")}`;
     const safeDigestHex = sanitizeHexDigest(digest, payloadBuffer);
     const safeUUID = crypto
@@ -247,7 +247,7 @@ export class QuarantineManager {
   async quarantineDirectory(
     sourceDir: string,
     reason: QuarantineReason,
-    details: Record<string, unknown> = {},
+    details: QuarantineRecord["details"] = {},
     digest?: string,
     sourceIdentifier?: string,
     options: QuarantineDirectoryOptions = {},
@@ -277,7 +277,7 @@ export class QuarantineManager {
     await fs.promises.mkdir(targetDir, { recursive: true, mode: 0o700 });
 
     let totalSize = 0;
-    let extraDetails: Record<string, unknown> = { ...details };
+    let extraDetails: QuarantineRecord["details"] = { ...details };
 
     try {
       const srcStat = await fs.promises.lstat(sourceDir).catch(() => null);

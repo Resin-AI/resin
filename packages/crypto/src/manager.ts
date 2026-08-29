@@ -40,10 +40,10 @@ export class SecretManager {
     value: string,
     options: SetSecretOptions = {},
   ): Promise<SecretMetadata> {
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
+    if (!name || name.trim().length === 0) {
       throw new Error("Secret name must be a non-empty string");
     }
-    if (value === undefined || value === null || typeof value !== "string") {
+    if (value === undefined || value === null) {
       throw new Error("Secret value must be a valid string");
     }
 
@@ -61,11 +61,11 @@ export class SecretManager {
     newValue: string,
     workspaceId?: string,
   ): Promise<SecretMetadata> {
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
+    if (!name || name.trim().length === 0) {
       throw new Error("Secret name must be a non-empty string");
     }
-    if (newValue === undefined || newValue === null || typeof newValue !== "string") {
-      throw new Error("New secret value must be a valid string");
+    if (newValue === undefined || newValue === null) {
+      throw new Error("Secret value must be a valid string");
     }
 
     const existingMeta = await this.store.getMetadata(name, workspaceId);

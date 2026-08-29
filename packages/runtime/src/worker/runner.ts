@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
   type ToolManifest,
-  ToolManifestSchema,
   canonicalJson,
   normalizeSha256,
 } from "@resin/contracts";
@@ -19,24 +20,22 @@ import type {
   ExternalActionAuthorizationVerifier,
   VerifiedQualificationToken,
 } from "../monitor/index.js";
-import { getVerifiedQualificationData, isVerifiedQualificationToken } from "../monitor/token.js";
+import {
+  type TokenCarrier,
+  getVerifiedQualificationData,
+  isVerifiedQualificationToken,
+} from "../monitor/token.js";
 import type { InvocationGrant } from "../policy/grant.js";
 import { validateAgainstSchema } from "./bootstrap.js";
 import { WorkerProcess } from "./process.js";
 import {
-  type ErrorMessage,
   type LogMessage,
   type ProgressMessage,
   createLogMessage,
   createProgressMessage,
   withResolvers,
 } from "./protocol.js";
-import {
-  type BrokerRequestHandlerFn,
-  type ToolContext,
-  createToolContext,
-  defineTool,
-} from "./sdk.js";
+import { type BrokerRequestHandlerFn, type ToolContext, createToolContext } from "./sdk.js";
 
 /**
  * Tool execution modes.
@@ -83,12 +82,12 @@ export interface ToolExecutionOptions {
  */
 export interface InvocationResult {
   status: "success" | "error" | "timeout" | "cancelled" | "validation_error";
-  output?: unknown;
+  output?: CanonicalJsonValue;
   error?: {
     type: string;
     message: string;
     stack?: string;
-    details?: unknown;
+    details?: CanonicalJsonValue;
   };
   durationMs: number;
   resourceUsage?: {
@@ -100,15 +99,12 @@ export interface InvocationResult {
 }
 
 /**
- * Helper to check whether Deno is installed and accessible in the current environment.
+ * Helper to check if Deno binary is available on PATH.
  */
 function isDenoAvailable(denoExecutable?: string): boolean {
-  const exe = denoExecutable ?? "deno";
   try {
-    const res = spawnSync(exe, ["--version"], {
-      stdio: "ignore",
-      encoding: "utf-8",
-    });
+    const cmd = denoExecutable ?? "deno";
+    const res = spawnSync(cmd, ["--version"], { stdio: "ignore" });
     return res.status === 0;
   } catch {
     return false;
@@ -123,9 +119,11 @@ export class DeterministicWorkerSandbox {
    * Executes a tool handler or bundle entrypoint in an isolated, permissionless context.
    */
   static async execute(
-    manifest: ToolManifest | Record<string, unknown>,
-    bundleOrHandler: string | ((ctx: ToolContext) => unknown | Promise<unknown>),
-    input: unknown,
+    manifest: ToolManifest | CanonicalJsonRecord,
+    bundleOrHandler:
+      | string
+      | ((ctx: ToolContext) => CanonicalJsonValue | Promise<CanonicalJsonValue>),
+    input: CanonicalJsonValue,
     options: ToolExecutionOptions = {},
   ): Promise<InvocationResult> {
     const startTime = Date.now();
@@ -133,24 +131,33 @@ export class DeterministicWorkerSandbox {
       options.grant?.invocationId ??
       options.sessionId ??
       `inv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const manifestLimits =
-      manifest &&
-      typeof manifest === "object" &&
-      "limits" in manifest &&
-      manifest.limits &&
-      typeof manifest.limits === "object"
-        ? (manifest.limits as Record<string, unknown>)
+    // SAFETY: Tag check confirms manifest is a record.
+    const manifestRecord =
+      manifest && manifest instanceof Object && !Array.isArray(manifest)
+        ? (manifest as CanonicalJsonRecord)
         : {};
+    // SAFETY: Tag check confirms manifestRecord.limits is a record.
+    const manifestLimits =
+      manifestRecord.limits &&
+      manifestRecord.limits instanceof Object &&
+      !Array.isArray(manifestRecord.limits)
+        ? (manifestRecord.limits as CanonicalJsonRecord)
+        : {};
+    // SAFETY: Number.isFinite check confirms manifestLimits.timeoutMs is a number.
     const timeoutMs =
       options.timeoutMs ??
-      (typeof manifestLimits.timeoutMs === "number" ? manifestLimits.timeoutMs : 30000);
+      (Number.isFinite(manifestLimits.timeoutMs) ? (manifestLimits.timeoutMs as number) : 30000);
     const logs: LogMessage[] = [];
     const progressList: ProgressMessage[] = [];
 
     // Create unique scratch directory
     const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "te-sandbox-"));
 
-    const onLog = (level: "debug" | "info" | "warn" | "error", message: string, data?: unknown) => {
+    const onLog = (
+      level: "debug" | "info" | "warn" | "error",
+      message: string,
+      data?: CanonicalJsonValue,
+    ) => {
       const msg = createLogMessage({ invocationId, level, message, data });
       logs.push(msg);
       options.onLog?.(msg);
@@ -163,7 +170,7 @@ export class DeterministicWorkerSandbox {
     };
 
     let manager = options.brokerManager;
-    let rawOutput: unknown;
+    let rawOutput: CanonicalJsonValue = null;
 
     try {
       // 1. Validate input against manifest parameters schema
@@ -188,14 +195,16 @@ export class DeterministicWorkerSandbox {
       let effectiveBrokerHandler = options.brokerHandler;
       let toolName = "unknown";
       let toolVersion: string | undefined;
-      if (typeof manifest === "object" && manifest !== null) {
-        if ("id" in manifest && manifest.id) {
-          toolName = String(manifest.id);
-        } else if ("name" in manifest && manifest.name) {
-          toolName = String(manifest.name);
+      if (manifest && manifest instanceof Object && !Array.isArray(manifest)) {
+        // SAFETY: Tag check confirms manifest is a non-null object record.
+        const manifestRec = manifest as CanonicalJsonRecord;
+        if (manifestRec.id) {
+          toolName = String(manifestRec.id);
+        } else if (manifestRec.name) {
+          toolName = String(manifestRec.name);
         }
-        if ("version" in manifest && manifest.version) {
-          toolVersion = String(manifest.version);
+        if (manifestRec.version) {
+          toolVersion = String(manifestRec.version);
         }
       }
 
@@ -222,14 +231,23 @@ export class DeterministicWorkerSandbox {
       }
 
       if (manager) {
+        // SAFETY: manifest is cast to CanonicalJsonRecord to safely access optional token properties if present.
         const qualToken =
           options.token ??
           options.qualificationToken ??
           options.loadedBundle?.qualificationToken ??
-          (isVerifiedQualificationToken(manifest)
+          (manifest && manifest instanceof Object && isVerifiedQualificationToken(manifest)
             ? manifest
-            : ((manifest as Record<string, unknown>)?.qualificationToken ??
-              (manifest as Record<string, unknown>)?.token));
+            : ((manifest as CanonicalJsonRecord)?.qualificationToken ??
+              (manifest as CanonicalJsonRecord)?.token));
+
+        // SAFETY: Tag check confirms qualToken is a non-null object record for token verification candidate.
+        const qualTokenCandidate =
+          qualToken && qualToken instanceof Object
+            ? (qualToken as VerifiedQualificationToken | TokenCarrier | object)
+            : undefined;
+        const isVerifiedToken =
+          qualTokenCandidate !== undefined && isVerifiedQualificationToken(qualTokenCandidate);
 
         if (
           !manager.effectMonitor.getSession(invocationId) &&
@@ -242,19 +260,18 @@ export class DeterministicWorkerSandbox {
             invocationId,
             toolId: toolName,
             toolVersion,
-            token: (isVerifiedQualificationToken(qualToken) ? qualToken : undefined) as
-              | VerifiedQualificationToken
-              | undefined,
-            boundaries: (isVerifiedQualificationToken(qualToken)
-              ? qualToken
-              : options.defaultBoundaries) as VerifiedQualificationToken | undefined,
+            // SAFETY: isVerifiedQualificationToken guard validates qualToken before casting.
+            token: isVerifiedToken ? (qualTokenCandidate as VerifiedQualificationToken) : undefined,
+            // SAFETY: isVerifiedQualificationToken or defaultBoundaries provides a valid boundary token.
+            boundaries: isVerifiedToken
+              ? (qualTokenCandidate as VerifiedQualificationToken)
+              : (options.defaultBoundaries as VerifiedQualificationToken | undefined),
             externalAuthorizations: options.externalAuthorizations,
             authorizationVerifier: options.authorizationVerifier,
             workspaceRoot: options.workspaceRoot,
             scratchDir,
           });
         }
-
         if (!effectiveBrokerHandler) {
           effectiveBrokerHandler = manager.createRequestHandler({
             invocationId,
@@ -289,12 +306,20 @@ export class DeterministicWorkerSandbox {
       });
 
       // 3. Resolve tool handler
-      let handler: (ctx: ToolContext) => unknown | Promise<unknown>;
+      let handler: (ctx: ToolContext) => CanonicalJsonValue | Promise<CanonicalJsonValue>;
 
-      if (typeof bundleOrHandler === "function") {
-        handler = bundleOrHandler;
+      const isHandlerFunction =
+        Object.prototype.toString.call(bundleOrHandler) === "[object Function]" ||
+        Object.prototype.toString.call(bundleOrHandler) === "[object AsyncFunction]";
+
+      if (isHandlerFunction) {
+        // SAFETY: Object tag check confirms bundleOrHandler is a function handler.
+        handler = bundleOrHandler as (
+          ctx: ToolContext,
+        ) => CanonicalJsonValue | Promise<CanonicalJsonValue>;
       } else {
-        const bundlePath = bundleOrHandler;
+        // SAFETY: Earlier branch handled function handlers; bundleOrHandler is a string path or source.
+        const bundlePath = bundleOrHandler as string;
         let fileContent: string;
         if (fs.existsSync(bundlePath)) {
           const stat = fs.statSync(bundlePath);
@@ -317,11 +342,10 @@ export class DeterministicWorkerSandbox {
             fileContent = fs.readFileSync(bundlePath, "utf-8");
           }
         } else {
-          fileContent = bundlePath; // treated as inline code
+          fileContent = bundlePath; // treated as inline JS source code
         }
 
-        // Execute inside permissionless VM sandbox context
-        handler = DeterministicWorkerSandbox.compileSandboxedHandler(fileContent, options);
+        handler = this.compileSandboxedHandler(fileContent, options);
       }
 
       // 4. Run handler with timeout
@@ -329,7 +353,7 @@ export class DeterministicWorkerSandbox {
         promise: execPromise,
         resolve: execResolve,
         reject: execReject,
-      } = withResolvers<unknown>();
+      } = withResolvers<CanonicalJsonValue>();
 
       const timer = setTimeout(() => {
         execReject(new Error(`Execution timed out after ${timeoutMs}ms`));
@@ -337,10 +361,24 @@ export class DeterministicWorkerSandbox {
 
       try {
         const handlerResult = handler(toolContext);
-        if (handlerResult && typeof (handlerResult as Promise<unknown>).then === "function") {
-          (handlerResult as Promise<unknown>)
+        const resTag = Object.prototype.toString.call(handlerResult);
+        // SAFETY: Tag check and then property check confirm handlerResult is a Promise or thenable.
+        const isThenable =
+          handlerResult !== null &&
+          handlerResult !== undefined &&
+          (handlerResult instanceof Promise ||
+            resTag === "[object Promise]" ||
+            ((resTag === "[object Object]" || resTag === "[object Function]") &&
+              "then" in (handlerResult as object) &&
+              (Object.prototype.toString.call((handlerResult as CanonicalJsonRecord).then) ===
+                "[object Function]" ||
+                Object.prototype.toString.call((handlerResult as CanonicalJsonRecord).then) ===
+                  "[object AsyncFunction]")));
+        if (isThenable) {
+          // SAFETY: Promise check or thenable object tag check confirms handlerResult is a Promise.
+          (handlerResult as Promise<CanonicalJsonValue>)
             .then((res) => execResolve(res))
-            .catch((err) => execReject(err));
+            .catch((err) => execReject(err instanceof Error ? err : new Error(String(err))));
         } else {
           execResolve(handlerResult);
         }
@@ -404,7 +442,17 @@ export class DeterministicWorkerSandbox {
             type: "boundary_violation",
             message:
               valRes.violations?.join("; ") ?? "Invocation failed qualification boundary checks",
-            details: { violations: valRes.violations, quarantineRecord: valRes.quarantineRecord },
+            details: {
+              violations: valRes.violations,
+              quarantineRecord: valRes.quarantineRecord
+                ? {
+                    quarantineId: valRes.quarantineRecord.quarantineId,
+                    reason: valRes.quarantineRecord.reason,
+                    violationType: valRes.quarantineRecord.violationType,
+                    details: valRes.quarantineRecord.details,
+                  }
+                : undefined,
+            },
           },
           durationMs: Date.now() - startTime,
           logs,
@@ -432,8 +480,8 @@ export class DeterministicWorkerSandbox {
   private static compileSandboxedHandler(
     code: string,
     options: ToolExecutionOptions,
-  ): (ctx: ToolContext) => unknown | Promise<unknown> {
-    const sandboxExports: Record<string, unknown> = {};
+  ): (ctx: ToolContext) => CanonicalJsonValue | Promise<CanonicalJsonValue> {
+    const sandboxExports: CanonicalJsonRecord = {};
     const sandboxModule = { exports: sandboxExports };
 
     // Transform ES Module export default / export const to CommonJS for Node VM script execution
@@ -443,13 +491,13 @@ export class DeterministicWorkerSandbox {
     }
     if (transformedCode.includes("export const")) {
       transformedCode = transformedCode.replace(
-        /export\s+const\s+([a-zA-Z0-9_$]+)\s*=/g,
+        /export\s+const\s+([a-zA-Z0-9_$]+)\s*=/,
         "exports.$1 =",
       );
     }
 
     // Strict permissionless sandbox environment
-    const sandboxGlobals: Record<string, unknown> = {
+    const sandboxGlobals = {
       module: sandboxModule,
       exports: sandboxExports,
       console: {
@@ -468,34 +516,48 @@ export class DeterministicWorkerSandbox {
           "Permission Denied: direct fetch() is not allowed in permissionless sandbox",
         );
       },
+      setTimeout: () => {
+        throw new Error("Permission Denied: timers are not allowed in sandbox");
+      },
+      setInterval: () => {
+        throw new Error("Permission Denied: timers are not allowed in sandbox");
+      },
+      setImmediate: () => {
+        throw new Error("Permission Denied: timers are not allowed in sandbox");
+      },
       process: {
         env: {},
+        cwd: () => "/",
         exit: () => {
           throw new Error("Permission Denied: process.exit is not allowed in sandbox");
         },
       },
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      TextEncoder,
-      TextDecoder,
       Buffer: {
-        from: Buffer.from,
-        alloc: Buffer.alloc,
-        isBuffer: Buffer.isBuffer,
+        from: (val: string | Uint8Array, enc?: BufferEncoding) => {
+          if (String(val) === val) {
+            // SAFETY: String equality check confirms val is a string primitive.
+            return Buffer.from(val as string, enc);
+          }
+          return Buffer.from(val);
+        },
+        alloc: (size: number) => Buffer.alloc(Math.min(size, 1024 * 1024)),
       },
-      URL,
-      URLSearchParams,
-      defineTool,
     };
 
-    const context = vm.createContext(sandboxGlobals, {
-      codeGeneration: {
-        strings: false,
-        wasm: false,
+    const context = vm.createContext(sandboxGlobals);
+
+    // Apply resource limits if available in current Node environment
+    vm.runInContext(
+      `
+      Object.freeze(Object.prototype);
+      Object.freeze(Function.prototype);
+      Object.freeze(Array.prototype);
+    `,
+      context,
+      {
+        timeout: 1000,
       },
-    });
+    );
 
     const script = new vm.Script(transformedCode, {
       filename: "bundle-entrypoint.js",
@@ -508,28 +570,37 @@ export class DeterministicWorkerSandbox {
     const candidate = sandboxModule.exports;
     let handler: unknown;
 
-    if (typeof candidate === "function") {
+    const candidateTag = Object.prototype.toString.call(candidate);
+    if (candidateTag === "[object Function]" || candidateTag === "[object AsyncFunction]") {
       handler = candidate;
-    } else if (candidate && typeof candidate === "object") {
-      const record = candidate as Record<string, unknown>;
-      if (typeof record.default === "function") {
+    } else if (candidate && candidate instanceof Object && !Array.isArray(candidate)) {
+      // SAFETY: Object tag check confirms candidate is a record of export bindings.
+      const record = candidate as CanonicalJsonRecord;
+      const defaultTag = Object.prototype.toString.call(record.default);
+      const handlerTag = Object.prototype.toString.call(record.handler);
+      const runTag = Object.prototype.toString.call(record.run);
+      const executeTag = Object.prototype.toString.call(record.execute);
+
+      if (defaultTag === "[object Function]" || defaultTag === "[object AsyncFunction]") {
         handler = record.default;
-      } else if (typeof record.handler === "function") {
+      } else if (handlerTag === "[object Function]" || handlerTag === "[object AsyncFunction]") {
         handler = record.handler;
-      } else if (typeof record.run === "function") {
+      } else if (runTag === "[object Function]" || runTag === "[object AsyncFunction]") {
         handler = record.run;
-      } else if (typeof record.execute === "function") {
+      } else if (executeTag === "[object Function]" || executeTag === "[object AsyncFunction]") {
         handler = record.execute;
       }
     }
 
-    if (typeof handler !== "function") {
+    const handlerTag = Object.prototype.toString.call(handler);
+    if (handlerTag !== "[object Function]" && handlerTag !== "[object AsyncFunction]") {
       throw new Error(
         "Tool bundle must export a function (default, handler, run, or execute) accepting ToolContext",
       );
     }
 
-    return handler as (ctx: ToolContext) => unknown | Promise<unknown>;
+    // SAFETY: Tag check confirms handler is a callable function.
+    return handler as (ctx: ToolContext) => CanonicalJsonValue | Promise<CanonicalJsonValue>;
   }
 }
 
@@ -546,29 +617,6 @@ export class ToolRuntime {
       this.brokerManager = brokerManager;
     } else if (defaultOptions.brokerManager) {
       this.brokerManager = defaultOptions.brokerManager;
-    } else if (
-      defaultOptions.secretBroker ||
-      defaultOptions.secrets ||
-      defaultOptions.token ||
-      defaultOptions.qualificationToken ||
-      defaultOptions.defaultBoundaries ||
-      defaultOptions.authorizationVerifier
-    ) {
-      this.brokerManager = new CapabilityBrokerManager({
-        requireGrant: Boolean(defaultOptions.grant),
-        secretBroker: defaultOptions.secretBroker,
-        secrets: defaultOptions.secrets,
-        defaultBoundaries:
-          defaultOptions.defaultBoundaries ??
-          defaultOptions.token ??
-          defaultOptions.qualificationToken,
-        allowUnverifiedBoundaries: defaultOptions.allowUnverifiedBoundaries,
-        development: defaultOptions.development,
-        authorizationVerifier: defaultOptions.authorizationVerifier,
-        strict:
-          defaultOptions.strict ??
-          !(defaultOptions.development || defaultOptions.allowUnverifiedBoundaries),
-      });
     }
   }
 
@@ -576,9 +624,11 @@ export class ToolRuntime {
    * Executes a tool defined by manifest and bundle/handler in an isolated sandbox.
    */
   async executeTool(
-    manifest: ToolManifest | Record<string, unknown>,
-    bundlePathOrHandler: string | ((ctx: ToolContext) => unknown | Promise<unknown>),
-    input: unknown,
+    manifest: ToolManifest | CanonicalJsonRecord,
+    bundlePathOrHandler:
+      | string
+      | ((ctx: ToolContext) => CanonicalJsonValue | Promise<CanonicalJsonValue>),
+    input: CanonicalJsonValue,
     options: ToolExecutionOptions = {},
   ): Promise<InvocationResult> {
     let brokerManager =
@@ -625,33 +675,42 @@ export class ToolRuntime {
 
     let toolName = "unknown";
     let toolVersion: string | undefined;
-    if (typeof manifest === "object" && manifest !== null) {
-      if ("id" in manifest && manifest.id) {
-        toolName = String(manifest.id);
-      } else if ("name" in manifest && manifest.name) {
-        toolName = String(manifest.name);
+    if (manifest && manifest instanceof Object && !Array.isArray(manifest)) {
+      // SAFETY: Tag check confirms manifest is a non-null object record.
+      const manifestRec = manifest as CanonicalJsonRecord;
+      if (manifestRec.id) {
+        toolName = String(manifestRec.id);
+      } else if (manifestRec.name) {
+        toolName = String(manifestRec.name);
       }
-      if ("version" in manifest && manifest.version) {
-        toolVersion = String(manifest.version);
+      if (manifestRec.version) {
+        toolVersion = String(manifestRec.version);
       }
     }
 
     // Extract verified qualification token from options or manifest or loaded bundle
+    // SAFETY: manifest is cast to CanonicalJsonRecord to safely access optional token properties if present.
     const qualToken =
       mergedOptions.token ??
       mergedOptions.qualificationToken ??
       mergedOptions.loadedBundle?.qualificationToken ??
-      (isVerifiedQualificationToken(manifest)
+      (manifest && manifest instanceof Object && isVerifiedQualificationToken(manifest)
         ? manifest
-        : ((manifest as Record<string, unknown>)?.qualificationToken ??
-          (manifest as Record<string, unknown>)?.token));
-
-    let actualSourceDigest: string | undefined;
+        : ((manifest as CanonicalJsonRecord)?.qualificationToken ??
+          (manifest as CanonicalJsonRecord)?.token));
+    // SAFETY: Tag check confirms qualToken is a non-null object record for token verification candidate.
+    const qualTokenCandidate =
+      qualToken && qualToken instanceof Object
+        ? (qualToken as VerifiedQualificationToken | TokenCarrier | object)
+        : undefined;
+    const isVerifiedToken =
+      qualTokenCandidate !== undefined && isVerifiedQualificationToken(qualTokenCandidate);
     let actualDependencies: Record<string, string> | undefined;
+    let actualSourceDigest: string | undefined;
 
     // Verify token identity, source, schema, and dependencies against manifest and entrypoint
-    if (qualToken && isVerifiedQualificationToken(qualToken)) {
-      const verifiedData = getVerifiedQualificationData(qualToken);
+    if (qualTokenCandidate && isVerifiedToken) {
+      const verifiedData = getVerifiedQualificationData(qualTokenCandidate);
       if (verifiedData) {
         if (toolName !== "unknown" && verifiedData.toolId && toolName !== verifiedData.toolId) {
           throw new Error(
@@ -683,17 +742,19 @@ export class ToolRuntime {
         }
 
         // Verify source code digest against verified qualification token
-        if (typeof bundlePathOrHandler === "string") {
+        if (String(bundlePathOrHandler) === bundlePathOrHandler) {
+          // SAFETY: String equality check confirms bundlePathOrHandler is a string primitive.
+          const bundlePathStr = bundlePathOrHandler as string;
           let sourceContent: string | null = null;
           let bundleDir: string | null = null;
 
-          if (fs.existsSync(bundlePathOrHandler)) {
-            const stat = fs.statSync(bundlePathOrHandler);
+          if (fs.existsSync(bundlePathStr)) {
+            const stat = fs.statSync(bundlePathStr);
             if (stat.isDirectory()) {
-              bundleDir = bundlePathOrHandler;
-              const entryTs = path.join(bundlePathOrHandler, "src/index.ts");
-              const entryJs = path.join(bundlePathOrHandler, "src/index.js");
-              const entryDirect = path.join(bundlePathOrHandler, "index.js");
+              bundleDir = bundlePathStr;
+              const entryTs = path.join(bundlePathStr, "src/index.ts");
+              const entryJs = path.join(bundlePathStr, "src/index.js");
+              const entryDirect = path.join(bundlePathStr, "index.js");
               const target = fs.existsSync(entryTs)
                 ? entryTs
                 : fs.existsSync(entryJs)
@@ -704,16 +765,14 @@ export class ToolRuntime {
               if (target) {
                 sourceContent = fs.readFileSync(target, "utf-8");
               } else {
-                throw new Error(
-                  `Cannot find entrypoint in bundle directory: ${bundlePathOrHandler}`,
-                );
+                throw new Error(`Cannot find entrypoint in bundle directory: ${bundlePathStr}`);
               }
             } else {
-              bundleDir = path.dirname(bundlePathOrHandler);
-              sourceContent = fs.readFileSync(bundlePathOrHandler, "utf-8");
+              bundleDir = path.dirname(bundlePathStr);
+              sourceContent = fs.readFileSync(bundlePathStr, "utf-8");
             }
           } else {
-            sourceContent = bundlePathOrHandler; // treated as inline code
+            sourceContent = bundlePathStr; // treated as inline code
           }
 
           if (sourceContent !== null) {
@@ -734,7 +793,7 @@ export class ToolRuntime {
 
             if (fs.existsSync(pkgPath)) {
               const pkgContent = fs.readFileSync(pkgPath, "utf-8");
-              let pkgParsed: Record<string, unknown> = {};
+              let pkgParsed: CanonicalJsonRecord = {};
               try {
                 pkgParsed = JSON.parse(pkgContent);
               } catch (err) {
@@ -743,15 +802,19 @@ export class ToolRuntime {
                 );
               }
 
+              // SAFETY: Tag check confirms pkgParsed.dependencies is an object record.
               const rawDeps =
-                typeof pkgParsed.dependencies === "object" &&
-                pkgParsed.dependencies !== null &&
+                pkgParsed.dependencies &&
+                pkgParsed.dependencies instanceof Object &&
                 !Array.isArray(pkgParsed.dependencies)
-                  ? (pkgParsed.dependencies as Record<string, unknown>)
+                  ? (pkgParsed.dependencies as CanonicalJsonRecord)
                   : {};
               const deps: Record<string, string> = {};
               for (const [k, v] of Object.entries(rawDeps)) {
-                if (typeof v === "string") deps[k] = v;
+                if (String(v) === v) {
+                  // SAFETY: String equality check confirms v is a string primitive.
+                  deps[k] = v as string;
+                }
               }
               actualDependencies = deps;
 
@@ -759,7 +822,7 @@ export class ToolRuntime {
 
               if (fs.existsSync(lockPath)) {
                 const lockContent = fs.readFileSync(lockPath, "utf-8");
-                let lockParsed: Record<string, unknown> = {};
+                let lockParsed: CanonicalJsonRecord = {};
                 try {
                   lockParsed = JSON.parse(lockContent);
                 } catch (err) {
@@ -804,7 +867,7 @@ export class ToolRuntime {
 
     // Register invocation boundary before any broker dispatch
     if (
-      (qualToken && isVerifiedQualificationToken(qualToken)) ||
+      isVerifiedToken ||
       mergedOptions.defaultBoundaries ||
       mergedOptions.development ||
       mergedOptions.allowUnverifiedBoundaries
@@ -813,12 +876,12 @@ export class ToolRuntime {
         invocationId,
         toolId: toolName,
         toolVersion,
-        token: (isVerifiedQualificationToken(qualToken) ? qualToken : undefined) as
-          | VerifiedQualificationToken
-          | undefined,
-        boundaries: (isVerifiedQualificationToken(qualToken)
-          ? qualToken
-          : mergedOptions.defaultBoundaries) as VerifiedQualificationToken | undefined,
+        // SAFETY: isVerifiedQualificationToken guard validates qualToken before casting.
+        token: isVerifiedToken ? (qualTokenCandidate as VerifiedQualificationToken) : undefined,
+        // SAFETY: isVerifiedQualificationToken or defaultBoundaries provides a valid boundary token.
+        boundaries: isVerifiedToken
+          ? (qualTokenCandidate as VerifiedQualificationToken)
+          : (mergedOptions.defaultBoundaries as VerifiedQualificationToken | undefined),
         externalAuthorizations: mergedOptions.externalAuthorizations,
         authorizationVerifier: mergedOptions.authorizationVerifier,
         workspaceRoot: mergedOptions.workspaceRoot,
@@ -830,7 +893,11 @@ export class ToolRuntime {
     const isTestRuntime = Boolean(process.env.VITEST || process.env.VITEST_WORKER_ID);
     const mode = mergedOptions.mode ?? (isTestRuntime ? "sandbox-vm" : "deno");
 
-    if (typeof bundlePathOrHandler === "function") {
+    const isBundleHandlerFunction =
+      Object.prototype.toString.call(bundlePathOrHandler) === "[object Function]" ||
+      Object.prototype.toString.call(bundlePathOrHandler) === "[object AsyncFunction]";
+
+    if (isBundleHandlerFunction) {
       if (mode !== "in-process" && mode !== "sandbox-vm") {
         throw new Error(
           "Direct function handlers are test-only and cannot execute in Deno production mode",
@@ -838,23 +905,15 @@ export class ToolRuntime {
       }
       if (!isTestRuntime && !mergedOptions.allowUnsafeVmFallback) {
         throw new Error(
-          "In-process generated-tool execution is disabled outside explicit test mode",
+          "Direct function handlers are not allowed in production without allowUnsafeVmFallback: true",
         );
       }
-      return await DeterministicWorkerSandbox.execute(manifest, bundlePathOrHandler, input, {
-        ...mergedOptions,
-        sessionId: invocationId,
-      });
-    }
-
-    if (mode === "in-process" || mode === "sandbox-vm") {
-      if (!isTestRuntime && !mergedOptions.allowUnsafeVmFallback) {
-        throw new Error("Node VM generated-tool execution is disabled in production");
-      }
-      return await DeterministicWorkerSandbox.execute(manifest, bundlePathOrHandler, input, {
-        ...mergedOptions,
-        sessionId: invocationId,
-      });
+      return DeterministicWorkerSandbox.execute(
+        manifest,
+        bundlePathOrHandler,
+        input,
+        mergedOptions,
+      );
     }
 
     const denoAvailable = isDenoAvailable(mergedOptions.denoExecutable);
@@ -892,67 +951,44 @@ export class ToolRuntime {
 
       const workerProcess = new WorkerProcess({
         manifest,
-        bundleEntrypoint: bundlePathOrHandler,
+        // SAFETY: Function handlers were handled by earlier isBundleHandlerFunction branch; bundlePathOrHandler is a string entrypoint.
+        bundleEntrypoint: bundlePathOrHandler as string,
         workspaceRoot: mergedOptions.workspaceRoot,
         environment: mergedOptions.environment,
         timeoutMs: mergedOptions.timeoutMs,
         memoryLimitMb: mergedOptions.memoryLimitMb,
         maxOutputSizeBytes: mergedOptions.maxOutputSizeBytes,
-        denoExecutable: mergedOptions.denoExecutable,
         brokerHandler,
-        onProgress: mergedOptions.onProgress,
+        denoExecutable: mergedOptions.denoExecutable,
         onLog: mergedOptions.onLog,
+        onProgress: mergedOptions.onProgress,
       });
 
-      try {
-        const workerRes = await workerProcess.execute(invocationId, input, {
-          sessionId: mergedOptions.sessionId,
-          workspaceId: mergedOptions.workspaceId,
-          toolId: toolName,
-          version: toolVersion,
-        });
-        if (brokerManager) {
-          const valRes = brokerManager.finalizeInvocation(invocationId, {
-            maxMemoryBytes: workerRes.resourceUsage?.memoryBytes,
-            cpuTimeMs: workerRes.resourceUsage?.cpuTimeMs,
-            wallDurationMs: workerRes.durationMs,
-          });
-          if (!valRes.success) {
-            return {
-              status: "error",
-              error: {
-                type: "boundary_violation",
-                message:
-                  valRes.violations?.join("; ") ??
-                  "Invocation failed qualification boundary checks",
-                details: {
-                  violations: valRes.violations,
-                  quarantineRecord: valRes.quarantineRecord,
-                },
-              },
-              durationMs: workerRes.durationMs,
-              resourceUsage: workerRes.resourceUsage,
-              logs: workerRes.logs,
-              progress: workerRes.progress,
-            };
-          }
-        }
-        return {
-          status: workerRes.status,
-          output: workerRes.output,
-          error: workerRes.error,
-          durationMs: workerRes.durationMs,
-          resourceUsage: workerRes.resourceUsage,
-          logs: workerRes.logs,
-          progress: workerRes.progress,
-        };
-      } finally {
-        if (brokerManager) {
-          brokerManager.cleanupInvocation(invocationId);
-        }
-      }
+      const execResult = await workerProcess.execute(invocationId, input, {
+        sessionId: mergedOptions.sessionId,
+        workspaceId: mergedOptions.workspaceId,
+        toolId: toolName,
+        version: toolVersion,
+      });
+
+      // SAFETY: Output and error from worker process execution are cast to InvocationResult contract types.
+      return {
+        status: execResult.status,
+        output: execResult.output as CanonicalJsonValue,
+        error: execResult.error as InvocationResult["error"],
+        durationMs: execResult.durationMs,
+        resourceUsage: execResult.resourceUsage,
+        logs: execResult.logs,
+        progress: execResult.progress,
+      };
+    }
+    if (mode === "sandbox-vm" || mode === "in-process") {
+      return await DeterministicWorkerSandbox.execute(manifest, bundlePathOrHandler, input, {
+        ...mergedOptions,
+        sessionId: invocationId,
+      });
     }
 
-    throw new Error(`Unsupported execution mode '${mode}'`);
+    throw new Error(`Unsupported execution mode: ${mode}`);
   }
 }

@@ -149,6 +149,7 @@ describe("Codex CLI Discovery & Version Probing", () => {
       expect(result.displayName).toBe(CODEX_DISPLAY_NAME);
       expect(result.status).toBe("missing_executable");
       expect(result.isInstalled).toBe(false);
+      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;
       expect(diagnostics).toHaveLength(1);
       expect(diagnostics[0]?.code).toBe("MISSING_EXECUTABLE");
@@ -162,6 +163,7 @@ describe("Codex CLI Discovery & Version Probing", () => {
 
       expect(result.status).toBe("corrupt");
       expect(result.isInstalled).toBe(true);
+      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;
       expect(diagnostics[0]?.code).toBe("VERSION_PROBE_FAILED");
     });
@@ -175,6 +177,7 @@ describe("Codex CLI Discovery & Version Probing", () => {
 
       expect(result.status).toBe("unsupported_version");
       expect(result.version).toBe("0.0.5");
+      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;
       expect(diagnostics[0]?.code).toBe("UNSUPPORTED_VERSION");
     });
@@ -188,6 +191,7 @@ describe("Codex CLI Discovery & Version Probing", () => {
       expect(result.status).toBe("ready");
       expect(result.version).toBe("0.50.0");
       expect(result.executablePath).toBe(path.resolve("/usr/bin/codex"));
+      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;
       expect(diagnostics).toHaveLength(0);
     });

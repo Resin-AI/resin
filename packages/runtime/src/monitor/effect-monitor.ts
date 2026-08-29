@@ -9,12 +9,16 @@ import { z } from "zod";
 import {
   type BrokerAuditEmitter,
   type BrokerAuditEvent,
+  type BrokerAuditSummary,
   defaultBrokerAuditEmitter,
   redactUrl,
   sanitizeAuditSummary,
 } from "../brokers/audit.js";
 import { type BrokerContext, type BrokerErrorCode, BrokerSecurityError } from "../brokers/base.js";
 import {
+  type QualificationHostTarget,
+  type TokenCarrier,
+  type TokenVerificationCandidate,
   type VerifiedQualificationData,
   type VerifiedQualificationToken,
   createVerifiedQualificationToken,
@@ -97,12 +101,35 @@ export interface EffectQuarantineRecord {
     | "dependency_drift"
     | "effect_drift"
     | "policy_violation";
-  effect?: Record<string, unknown>;
+  effect?: MonitorRecord;
   timestamp: string;
-  details?: Record<string, unknown>;
+  details?: MonitorRecord;
 }
 
 export type QuarantineRecord = EffectQuarantineRecord;
+
+export interface DependencyDriftDiff {
+  added?: string[];
+  removed?: string[];
+  typeMismatch?: boolean;
+  [key: string]: { expected?: string; actual?: string } | string[] | boolean | undefined;
+}
+
+export type MonitorValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Uint8Array
+  | ExternalActionAuthorizationRecord
+  | InvocationResultSummary
+  | DependencyDriftDiff
+  | readonly MonitorValue[]
+  | MonitorValue[]
+  | { [key: string]: MonitorValue | undefined };
+export interface MonitorRecord {
+  [key: string]: MonitorValue | undefined;
+}
 
 /**
  * Event payload emitted when source/dependency/effect drift triggers requalification.
@@ -113,7 +140,7 @@ export interface RequalificationEvent {
   reason: "source_drift" | "dependency_drift" | "effect_drift" | string;
   expectedDigest?: string;
   actualDigest?: string;
-  details?: Record<string, unknown>;
+  details?: MonitorRecord;
   timestamp: string;
 }
 
@@ -214,21 +241,21 @@ export interface EffectRequest {
   referenceId?: string;
   actionType?: string;
   target?: string;
-  payload?: unknown;
+  payload?: MonitorValue;
   payloadDigest?: string;
   authorization?: ExternalActionAuthorizationRecord;
   isCreate?: boolean;
   isModify?: boolean;
   size?: number;
-  details?: Record<string, unknown>;
-  [key: string]: unknown;
+  details?: MonitorRecord;
+  [key: string]: MonitorValue | undefined;
 }
 
 /**
- * Serializes an EffectRequest to a standard Record<string, unknown>.
+ * Serializes an EffectRequest to a standard MonitorRecord.
  */
-export function effectRequestToRecord(effect: EffectRequest): Record<string, unknown> {
-  const record: Record<string, unknown> = {
+export function effectRequestToRecord(effect: EffectRequest): MonitorRecord {
+  const record: MonitorRecord = {
     type: effect.type,
   };
   if (effect.path !== undefined) record.path = effect.path;
@@ -257,6 +284,57 @@ export function effectRequestToRecord(effect: EffectRequest): Record<string, unk
   }
   return record;
 }
+function isString(val: MonitorValue | null | undefined): val is string {
+  return z.string().safeParse(val).success;
+}
+
+function isStringRecord(
+  val: Readonly<Record<string, string>> | Record<string, string> | readonly string[] | string[],
+): val is Readonly<Record<string, string>> {
+  return !Array.isArray(val);
+}
+
+/**
+ * Sanitizes a MonitorRecord by redacting sensitive values like URLs.
+ */
+export function sanitizeMonitorRecord(record: MonitorRecord): MonitorRecord {
+  const sanitized: MonitorRecord = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) {
+      if (key.toLowerCase() === "url" && isString(value)) {
+        sanitized[key] = redactUrl(value);
+      } else {
+        sanitized[key] = value;
+      }
+    }
+  }
+  return sanitized;
+}
+
+/**
+ * Converts an EffectRequest to a sanitized BrokerAuditSummary.
+ */
+export function effectRequestToAuditSummary(effect: EffectRequest): BrokerAuditSummary {
+  const summary: BrokerAuditSummary = {
+    type: effect.type,
+  };
+  if (effect.path !== undefined) summary.path = effect.path;
+  if (effect.oldPath !== undefined) summary.oldPath = effect.oldPath;
+  if (effect.newPath !== undefined) summary.newPath = effect.newPath;
+  if (effect.command !== undefined) summary.command = effect.command;
+  if (effect.args !== undefined) summary.args = effect.args;
+  if (effect.url !== undefined) summary.url = effect.url;
+  if (effect.method !== undefined) summary.method = effect.method;
+  if (effect.name !== undefined) summary.name = effect.name;
+  if (effect.referenceId !== undefined) summary.referenceId = effect.referenceId;
+  if (effect.actionType !== undefined) summary.actionType = effect.actionType;
+  if (effect.target !== undefined) summary.target = effect.target;
+  if (effect.payloadDigest !== undefined) summary.payloadDigest = effect.payloadDigest;
+  if (effect.isCreate !== undefined) summary.isCreate = effect.isCreate;
+  if (effect.isModify !== undefined) summary.isModify = effect.isModify;
+  if (effect.size !== undefined) summary.size = effect.size;
+  return sanitizeAuditSummary(summary);
+}
 
 export interface EffectCheckResult {
   allowed: boolean;
@@ -264,7 +342,7 @@ export interface EffectCheckResult {
   violationType?: QuarantineRecord["violationType"];
   requiresRequalification?: boolean;
   driftReason?: string;
-  details?: Record<string, unknown>;
+  details?: MonitorRecord;
 }
 
 export interface InvocationRegistrationParams {
@@ -278,7 +356,7 @@ export interface InvocationRegistrationParams {
     | ApprovedEffectBoundaries
     | QualificationArtifactBundle
     | ObservedEffectProfile
-    | Record<string, unknown>;
+    | MonitorRecord;
   externalAuthorizations?:
     | readonly ExternalActionAuthorizationRecord[]
     | ExternalActionAuthorizationRecord[];
@@ -353,7 +431,7 @@ export interface InvocationResultSummary {
   wallDurationMs?: number;
   artifacts?: Array<{ name: string; digest: string }>;
   validationChecks?: Array<{ checkId: string; name: string; passed: boolean; details?: string }>;
-  details?: Record<string, unknown>;
+  details?: MonitorRecord;
 }
 
 export interface InvocationValidationResult {
@@ -366,8 +444,8 @@ export interface InvocationValidationResult {
 /**
  * Computes deterministic SHA-256 digest of arbitrary payload.
  */
-export function computePayloadDigest(payload: unknown): string {
-  if (typeof payload === "string") {
+export function computePayloadDigest(payload: MonitorValue | null | undefined): string {
+  if (isString(payload)) {
     return createHash("sha256").update(payload).digest("hex");
   }
   if (payload instanceof Uint8Array || Buffer.isBuffer(payload)) {
@@ -377,6 +455,12 @@ export function computePayloadDigest(payload: unknown): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
+export interface NormalizedRelativePath {
+  relativePath: string;
+  isScratch: boolean;
+  isAbsolute: boolean;
+}
+
 /**
  * Normalizes file path relative to workspaceRoot or scratchDir.
  */
@@ -384,7 +468,7 @@ export function normalizeRelativePath(
   filePath: string,
   workspaceRoot?: string,
   scratchDir?: string,
-): { relativePath: string; isScratch: boolean; isAbsolute: boolean } {
+): NormalizedRelativePath {
   let normalized = filePath.replace(/\\/g, "/").trim();
 
   // Check if inside scratchDir
@@ -566,9 +650,9 @@ export function computeExternalActionAuthorizationSigningPayload(
   const toolId = record.toolId ?? record.tool ?? "";
   const toolVersion = record.toolVersion ?? record.version ?? "";
   const expiryRaw = record.expiresAt ?? record.expiry;
-  const normalizedExpiry =
-    typeof expiryRaw === "number" ? new Date(expiryRaw).toISOString() : String(expiryRaw ?? "");
-
+  const normalizedExpiry = Number.isFinite(expiryRaw)
+    ? new Date(Number(expiryRaw)).toISOString()
+    : String(expiryRaw ?? "");
   const payloadToSign = {
     actionType: record.actionType,
     approver: record.approver,
@@ -588,6 +672,11 @@ export interface ValidateExternalActionAuthorizationOptions {
   verifier?: ExternalActionAuthorizationVerifier;
 }
 
+export interface ExternalActionAuthorizationValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
 /**
  * Validates an external action against explicit separate authorization record.
  * Requires nonempty signature/keyId and an injected trusted authorization verifier.
@@ -599,13 +688,13 @@ export function validateExternalActionAuthorization(
     toolVersion?: string;
     actionType: string;
     target: string;
-    payload?: unknown;
+    payload?: MonitorValue;
     payloadDigest?: string;
     method?: string;
   },
   options: ValidateExternalActionAuthorizationOptions = {},
-): { valid: boolean; reason?: string } {
-  if (!record.keyId || typeof record.keyId !== "string" || record.keyId.trim().length === 0) {
+): ExternalActionAuthorizationValidationResult {
+  if (!record.keyId || String(record.keyId) !== record.keyId || record.keyId.trim().length === 0) {
     return {
       valid: false,
       reason: "Authorization record missing required nonempty keyId",
@@ -614,7 +703,7 @@ export function validateExternalActionAuthorization(
 
   if (
     !record.signature ||
-    typeof record.signature !== "string" ||
+    String(record.signature) !== record.signature ||
     record.signature.trim().length === 0
   ) {
     return {
@@ -626,12 +715,11 @@ export function validateExternalActionAuthorization(
   const toolId = record.toolId ?? record.tool ?? "";
   const toolVersion = record.toolVersion ?? record.version ?? "";
   const expiryRaw = record.expiresAt ?? record.expiry;
-  const expiryTime =
-    typeof expiryRaw === "number"
-      ? expiryRaw
-      : typeof expiryRaw === "string"
-        ? Date.parse(expiryRaw)
-        : Number.NaN;
+  const expiryTime = Number.isFinite(expiryRaw)
+    ? Number(expiryRaw)
+    : String(expiryRaw) === expiryRaw
+      ? Date.parse(expiryRaw)
+      : Number.NaN;
 
   if (toolId && action.toolId && toolId !== action.toolId) {
     return {
@@ -763,7 +851,7 @@ export function validateExternalActionAuthorization(
 
   if (
     !record.approver ||
-    typeof record.approver !== "string" ||
+    String(record.approver) !== record.approver ||
     record.approver.trim().length === 0
   ) {
     return {
@@ -816,7 +904,9 @@ export function validateExternalActionAuthorization(
  * Derives approved boundary sets and limits exclusively from a verified qualification token's signed runs.
  * Rejects arbitrary profile/boundaries objects.
  */
-export function deriveApprovedBoundaries(input: unknown): ApprovedEffectBoundaries {
+export function deriveApprovedBoundaries(
+  input: TokenVerificationCandidate,
+): ApprovedEffectBoundaries {
   const verifiedData = getVerifiedQualificationData(input);
   if (!verifiedData) {
     throw new BrokerSecurityError(
@@ -873,10 +963,8 @@ export function deriveApprovedBoundaries(input: unknown): ApprovedEffectBoundari
 
   const profilesToProcess: ObservedEffectProfile[] = [];
   for (const run of verifiedData.runs ?? []) {
-    const rawRun = run as Record<string, unknown>;
-    const p = (rawRun.observedEffects ?? rawRun.observedEffectProfile) as
-      | ObservedEffectProfile
-      | undefined;
+    const rawRun = run;
+    const p = rawRun.observedEffectProfile;
     if (p) profilesToProcess.push(p);
   }
   if (verifiedData.effectProfile) {
@@ -956,12 +1044,16 @@ export function deriveApprovedBoundaries(input: unknown): ApprovedEffectBoundari
     }
   }
 
-  const rawBundle = verifiedData.rawBundle as Record<string, unknown> | undefined;
+  const rawBundle = verifiedData.rawBundle;
   const externalAuths: ExternalActionAuthorizationRecord[] = [];
-  if (Array.isArray(rawBundle?.externalAuthorizations)) {
-    externalAuths.push(
-      ...(rawBundle.externalAuthorizations as ExternalActionAuthorizationRecord[]),
-    );
+  const rawMetaAuths = rawBundle?.metadata?.externalAuthorizations;
+  if (Array.isArray(rawMetaAuths)) {
+    for (const item of rawMetaAuths) {
+      const parsed = ExternalActionAuthorizationRecordSchema.safeParse(item);
+      if (parsed.success) {
+        externalAuths.push(parsed.data);
+      }
+    }
   }
 
   return {
@@ -1091,6 +1183,7 @@ export class EffectMonitor {
       if (isVerifiedQualificationToken(rawDefaults)) {
         this.defaultBoundaries = deriveApprovedBoundaries(rawDefaults);
       } else if (options.allowUnverifiedBoundaries || options.development) {
+        // SAFETY: Caller explicitly allowed unverified boundaries or is in development mode.
         this.defaultBoundaries = rawDefaults as ApprovedEffectBoundaries;
       } else {
         throw new BrokerSecurityError(
@@ -1790,7 +1883,7 @@ export class EffectMonitor {
       // Revoke invocation session
       this.revokeInvocation(invocationId, checkResult.reason!, {
         violationType: checkResult.violationType,
-        effect: sanitizeAuditSummary(effectRequestToRecord(effect)),
+        effect: sanitizeMonitorRecord(effectRequestToRecord(effect)),
       });
 
       // Emit immutable denied audit event
@@ -1812,7 +1905,7 @@ export class EffectMonitor {
           violationType: checkResult.violationType,
           reason: checkResult.reason,
         },
-        effect: sanitizeAuditSummary(effectRequestToRecord(effect)),
+        effect: effectRequestToAuditSummary(effect),
       };
       this.auditEmitter.emitAudit(auditEvent);
 
@@ -1824,7 +1917,7 @@ export class EffectMonitor {
         invocationId,
         reason: checkResult.reason!,
         violationType: checkResult.violationType ?? "policy_violation",
-        effect: sanitizeAuditSummary(effectRequestToRecord(effect)),
+        effect: sanitizeMonitorRecord(effectRequestToRecord(effect)),
         timestamp: new Date().toISOString(),
         details: checkResult.details,
       };
@@ -2102,7 +2195,7 @@ export class EffectMonitor {
   /**
    * Revokes an invocation session and marks it as non-compliant.
    */
-  revokeInvocation(invocationId: string, reason: string, details?: Record<string, unknown>): void {
+  revokeInvocation(invocationId: string, reason: string, details?: MonitorRecord): void {
     const session = this.sessions.get(invocationId);
     if (session) {
       session.status = "revoked";
@@ -2153,7 +2246,7 @@ export class EffectMonitor {
       | Record<string, string>
       | readonly string[]
       | string[],
-  ): Record<string, unknown> | null {
+  ): DependencyDriftDiff | null {
     if (Array.isArray(expected) && Array.isArray(actual)) {
       const expSet = new Set<string>(expected);
       const actSet = new Set<string>(actual);
@@ -2166,20 +2259,19 @@ export class EffectMonitor {
     }
 
     if (
-      typeof expected === "object" &&
       expected !== null &&
-      !Array.isArray(expected) &&
-      typeof actual === "object" &&
       actual !== null &&
-      !Array.isArray(actual)
+      isStringRecord(expected) &&
+      isStringRecord(actual)
     ) {
-      const expRecord = expected as Readonly<Record<string, string>>;
-      const actRecord = actual as Readonly<Record<string, string>>;
-      const diff: Record<string, { expected?: string; actual?: string }> = {};
+      const expRecord: Readonly<Record<string, string>> = expected;
+      const actRecord: Readonly<Record<string, string>> = actual;
+      const diff: DependencyDriftDiff = {};
       let hasDiff = false;
       for (const [k, v] of Object.entries(expRecord)) {
-        if (actRecord[k] !== v) {
-          diff[k] = { expected: v, actual: actRecord[k] };
+        const actualVal = actRecord[k];
+        if (actualVal !== v) {
+          diff[k] = { expected: v, actual: actualVal };
           hasDiff = true;
         }
       }

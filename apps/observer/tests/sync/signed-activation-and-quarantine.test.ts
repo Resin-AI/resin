@@ -186,7 +186,8 @@ describe("Signed Version Activation, Envelope Enforcement & Quarantine Suite", (
     });
 
     // Set unsupported custom engine in manifest and recompute digest
-    (manifest.runtime as unknown as Record<string, unknown>).engine = "docker_unsupported";
+    // SAFETY: Mutates manifest runtime engine for negative test scenario.
+    (manifest.runtime as { engine?: string }).engine = "docker_unsupported";
     manifest.digest = crypto.createHash("sha256").update(canonicalJson(manifest)).digest("hex");
     const { archiveBuffer, digest } = createSignedTestBundle(manifest, testKey);
 

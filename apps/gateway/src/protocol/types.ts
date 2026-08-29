@@ -16,6 +16,28 @@ export type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number] | str
  */
 export const JsonRpcIdSchema = z.union([z.string(), z.number(), z.null()]);
 export type JsonRpcId = z.infer<typeof JsonRpcIdSchema>;
+export type JsonRpcParamValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | readonly JsonRpcParamValue[]
+  | { readonly [key: string]: JsonRpcParamValue };
+
+export type JsonRpcParams = Record<string, JsonRpcParamValue>;
+export const JsonRpcParamValueSchema: z.ZodType<JsonRpcParamValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(JsonRpcParamValueSchema),
+    z.record(JsonRpcParamValueSchema),
+  ]),
+);
+export const JsonRpcParamsSchema: z.ZodType<JsonRpcParams> = z.record(JsonRpcParamValueSchema);
 
 /**
  * JSON-RPC 2.0 Base Request.
@@ -26,7 +48,7 @@ export const JsonRpcRequestSchema = z.object({
   method: z.string().min(1),
   params: z.record(z.unknown()).optional(),
 });
-export type JsonRpcRequest<TParams = Record<string, unknown>> = {
+export type JsonRpcRequest<TParams = JsonRpcParams> = {
   jsonrpc: "2.0";
   id: JsonRpcId;
   method: string;
@@ -41,7 +63,7 @@ export const JsonRpcNotificationSchema = z.object({
   method: z.string().min(1),
   params: z.record(z.unknown()).optional(),
 });
-export type JsonRpcNotification<TParams = Record<string, unknown>> = {
+export type JsonRpcNotification<TParams = JsonRpcParams> = {
   jsonrpc: "2.0";
   method: string;
   params?: TParams;
@@ -214,7 +236,7 @@ export type CallToolParams = z.infer<typeof CallToolParamsSchema>;
 export interface CallToolResult {
   content: McpContent[];
   isError?: boolean;
-  _meta?: Record<string, unknown>;
+  _meta?: JsonRpcParams;
 }
 
 /**

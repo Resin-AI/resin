@@ -36,7 +36,8 @@ describe("CloudCatalogClient Project Registration", () => {
       workspaceId: "ws-gateway-1",
       baseUrl: "https://cloud.resin.local",
       authToken: "secret-token-123",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -46,10 +47,13 @@ describe("CloudCatalogClient Project Registration", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    // SAFETY: fetchMock was called once with [url, init] arguments.
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://cloud.resin.local/v1/projects");
     expect(init.method).toBe("POST");
+    // SAFETY: RequestInit headers passed as record in test fetch.
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer secret-token-123");
+    // SAFETY: RequestInit headers passed as record in test fetch.
     expect((init.headers as Record<string, string>)["x-workspace-id"]).toBe("ws-gateway-1");
   });
 
@@ -66,7 +70,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-gateway-1",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -87,7 +93,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-clone-1",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -101,7 +109,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-offline-1",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -113,14 +123,14 @@ describe("CloudCatalogClient Project Registration", () => {
 
   it("should map ECONNREFUSED socket errors to local_only", async () => {
     const networkError = new Error("connect ECONNREFUSED 127.0.0.1:443");
-    (networkError as { code?: string }).code = "ECONNREFUSED";
-
     const fetchMock = vi.fn().mockRejectedValue(networkError);
 
     const client = new CloudCatalogClient({
       workspaceId: "ws-offline-2",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -141,8 +151,10 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-cb-1",
       baseUrl: "https://cloud.resin.local",
+      authToken: "secret-token-123",
       circuitBreaker,
-      fetchFn: fetchMock as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     const response = await client.registerProject(validRequest);
@@ -171,7 +183,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-offline-later",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     // 1. Initial attempt while offline -> local_only
@@ -200,7 +214,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-mismatch",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     await expect(client.registerProject(validRequest)).rejects.toThrow(ProtocolError);
@@ -212,19 +228,24 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-invalid",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
-    // Invalid project without schemaKind / UUID
     const invalidRequest = {
-      project: { name: "Missing fields" },
+      projectMetadata: {
+        ...sampleProject,
+        projectId: "not-a-uuid",
+      },
       visibility: "workspace",
-    } as unknown as ProjectRegistrationRequest;
+    };
 
-    await expect(client.registerProject(invalidRequest)).rejects.toThrow();
+    // SAFETY: Intentionally pass invalid request structure to test runtime schema validation.
+    await expect(
+      client.registerProject(invalidRequest as ProjectRegistrationRequest),
+    ).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
   });
-
   it("should reject malformed cloud response schema", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -238,7 +259,9 @@ describe("CloudCatalogClient Project Registration", () => {
     const client = new CloudCatalogClient({
       workspaceId: "ws-malformed-res",
       baseUrl: "https://cloud.resin.local",
-      fetchFn: fetchMock as unknown as typeof fetch,
+      authToken: "secret-token-123",
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: fetchMock as typeof fetch,
     });
 
     await expect(client.registerProject(validRequest)).rejects.toThrow();

@@ -1,4 +1,12 @@
-import { type UpdateMaintenanceWindow, type UpdatePolicy, parseUpdatePolicy } from "./policy.js";
+import {
+  type PolicyValue,
+  type UpdateMaintenanceWindow,
+  type UpdatePolicy,
+  type UpdatePolicyPatch,
+  parseUpdatePolicy,
+} from "./policy.js";
+
+export type SchedulerTimerHandle = NodeJS.Timeout | number | { unref?: () => void };
 
 export const INITIAL_OFFLINE_UPDATE_BACKOFF_MS = 60_000;
 export const MAX_OFFLINE_UPDATE_BACKOFF_MS = 60 * 60_000;
@@ -44,18 +52,18 @@ export interface UpdateSchedulerCycleResult {
 }
 
 export interface UpdateSchedulerOptions {
-  readonly policy?: unknown;
+  readonly policy?: PolicyValue | undefined;
   readonly initialState?: UpdateSchedulerState;
   readonly onCheck: (
     decision: Extract<UpdateSchedulerDecision, { kind: "check" }>,
     signal: AbortSignal,
   ) => UpdateCheckOutcome | Promise<UpdateCheckOutcome>;
   readonly onDecision?: (decision: UpdateSchedulerDecision) => void;
-  readonly onError?: (error: unknown) => void;
+  readonly onError?: (cause: unknown) => void;
   readonly clock?: () => number;
   readonly random?: () => number;
-  readonly scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
-  readonly cancelTimer?: (handle: unknown) => void;
+  readonly scheduleTimer?: (callback: () => void, delayMs: number) => SchedulerTimerHandle;
+  readonly cancelTimer?: (handle: SchedulerTimerHandle) => void;
   readonly minimumTimerDelayMs?: number;
   readonly checkTimeoutMs?: number;
 }
@@ -410,7 +418,7 @@ export function recordOfflineUpdateCheck(
 }
 
 export function decideUpdateSchedule(
-  policyInput: unknown,
+  policyInput: UpdatePolicy | UpdatePolicyPatch | null | undefined,
   stateInput: UpdateSchedulerState,
   timestampMs: number = Date.now(),
 ): UpdateSchedulerDecision {
@@ -465,14 +473,13 @@ export function decideUpdateSchedule(
   };
 }
 
-function defaultScheduleTimer(callback: () => void, delayMs: number): unknown {
+function defaultScheduleTimer(callback: () => void, delayMs: number): SchedulerTimerHandle {
   return setTimeout(callback, delayMs);
 }
 
-function defaultCancelTimer(handle: unknown): void {
-  // The default scheduler always pairs this with Node's native setTimeout.
-  const nativeTimer = handle as NodeJS.Timeout;
-  clearTimeout(nativeTimer);
+function defaultCancelTimer(handle: SchedulerTimerHandle): void {
+  // SAFETY: Node/browser clearTimeout accepts timeout handles and numeric timer ids.
+  clearTimeout(handle as NodeJS.Timeout);
 }
 
 class SchedulerCycleCancelledError extends Error {
@@ -494,7 +501,7 @@ export class UpdateScheduler {
   private readonly cancelTimer: NonNullable<UpdateSchedulerOptions["cancelTimer"]>;
   private readonly minimumTimerDelayMs: number;
   private readonly checkTimeoutMs: number;
-  private timerHandle: unknown;
+  private timerHandle: SchedulerTimerHandle | undefined;
   private timerGeneration = 0;
   private lifecycleGeneration = 0;
   private started = false;
@@ -554,7 +561,7 @@ export class UpdateScheduler {
     return decideUpdateSchedule(this.currentPolicy, this.currentState, now);
   }
 
-  updatePolicy(policy: unknown): UpdatePolicy {
+  updatePolicy(policy: UpdatePolicy | UpdatePolicyPatch | null | undefined): UpdatePolicy {
     this.currentPolicy = parseUpdatePolicy(policy);
     if (this.started) {
       try {
@@ -621,9 +628,9 @@ export class UpdateScheduler {
     }
   }
 
-  private notifyError(error: unknown): void {
+  private notifyError(cause: unknown): void {
     try {
-      this.onError?.(error);
+      this.onError?.(cause);
     } catch {
       // Error reporting must not create a scheduler loop.
     }
@@ -636,7 +643,7 @@ export class UpdateScheduler {
     const { signal } = controller;
     this.activeCheckController = controller;
     const timeoutError = new UpdateCheckTimeoutError(this.checkTimeoutMs);
-    let rejectCancellation: ((error: unknown) => void) | null = null;
+    let rejectCancellation: ((error: Error) => void) | null = null;
     const cancellation = new Promise<never>((_resolve, reject) => {
       rejectCancellation = reject;
     });
@@ -697,13 +704,22 @@ export class UpdateScheduler {
     const nextDecision = this.decide(completedAtMs);
     this.notifyDecision(nextDecision);
 
-    return {
-      decision,
-      outcome,
-      ...(callbackError === undefined ? {} : { error: callbackError }),
-      state: this.state,
-      nextDecision,
-    };
+    const cycleResult: UpdateSchedulerCycleResult =
+      callbackError !== undefined
+        ? {
+            decision,
+            outcome,
+            error: callbackError,
+            state: this.state,
+            nextDecision,
+          }
+        : {
+            decision,
+            outcome,
+            state: this.state,
+            nextDecision,
+          };
+    return cycleResult;
   }
 
   private drive(): void {
@@ -730,10 +746,10 @@ export class UpdateScheduler {
           this.failScheduler(error);
         }
       },
-      (error: unknown) => {
+      (cause: unknown) => {
         this.driving = false;
         if (
-          error instanceof SchedulerCycleCancelledError &&
+          cause instanceof SchedulerCycleCancelledError &&
           generation !== this.lifecycleGeneration
         ) {
           if (this.started) {
@@ -741,12 +757,12 @@ export class UpdateScheduler {
           }
           return;
         }
-        this.failScheduler(error);
+        this.failScheduler(cause);
       },
     );
   }
 
-  private failScheduler(error: unknown): void {
+  private failScheduler(cause: unknown): void {
     this.started = false;
     this.lifecycleGeneration += 1;
     this.activeCheckController?.abort(new SchedulerCycleCancelledError());
@@ -755,7 +771,7 @@ export class UpdateScheduler {
     } catch (cancelError: unknown) {
       this.notifyError(cancelError);
     }
-    this.notifyError(error);
+    this.notifyError(cause);
   }
 
   private scheduleNextCycle(decision: UpdateSchedulerDecision): void {
@@ -785,12 +801,7 @@ export class UpdateScheduler {
     }, delayMs);
     this.timerHandle = handle;
 
-    if (
-      typeof handle === "object" &&
-      handle !== null &&
-      "unref" in handle &&
-      typeof handle.unref === "function"
-    ) {
+    if (handle instanceof Object && "unref" in handle && handle.unref instanceof Function) {
       handle.unref();
     }
   }

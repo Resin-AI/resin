@@ -41,7 +41,20 @@ export class UpdatePolicyValidationError extends TypeError {
   }
 }
 
-interface UpdatePolicyPatch {
+export type PolicyPrimitive = string | number | boolean | null;
+export type PolicyValue =
+  | PolicyPrimitive
+  | readonly PolicyValue[]
+  | { readonly [key: string]: PolicyValue | undefined }
+  | UpdatePolicy
+  | UpdatePolicyPatch
+  | UpdateMaintenanceWindow;
+export type PolicyRecord =
+  | { readonly [key: string]: PolicyValue | undefined }
+  | UpdatePolicy
+  | UpdatePolicyPatch
+  | UpdateMaintenanceWindow;
+export interface UpdatePolicyPatch {
   autoUpdate?: boolean;
   channel?: UpdateChannel;
   checkIntervalMinutes?: number;
@@ -49,26 +62,35 @@ interface UpdatePolicyPatch {
   allowDowngrades?: boolean;
 }
 
-const UPDATE_POLICY_KEYS: Readonly<Record<string, true>> = {
+const UPDATE_POLICY_KEYS = {
   autoUpdate: true,
   channel: true,
   checkIntervalMinutes: true,
   maintenanceWindow: true,
   allowDowngrades: true,
-};
-const MAINTENANCE_WINDOW_KEYS: Readonly<Record<string, true>> = {
+} as const satisfies Readonly<Record<string, true>>;
+const MAINTENANCE_WINDOW_KEYS = {
   start: true,
   end: true,
   timeZone: true,
-};
+} as const satisfies Readonly<Record<string, true>>;
 const CLOCK_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 function fail(path: string, message: string): never {
   throw new UpdatePolicyValidationError(path, message);
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+function isStringValue(value: PolicyValue | undefined): value is string {
+  return Object.prototype.toString.call(value) === "[object String]";
+}
+
+function isPlainRecord(value: PolicyValue | undefined | null): value is PolicyRecord {
+  if (
+    value === null ||
+    value === undefined ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  ) {
     return false;
   }
 
@@ -76,8 +98,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
+function isIntegerNumber(value: PolicyValue | undefined): value is number {
+  return Object.prototype.toString.call(value) === "[object Number]" && Number.isSafeInteger(value);
+}
+
 function rejectUnknownKeys(
-  value: Record<string, unknown>,
+  value: PolicyRecord,
   allowedKeys: Readonly<Record<string, true>>,
   path: string,
 ): void {
@@ -88,15 +114,15 @@ function rejectUnknownKeys(
   }
 }
 
-function parseClockTime(value: unknown, path: string): string {
-  if (typeof value !== "string" || !CLOCK_TIME_PATTERN.test(value)) {
+function parseClockTime(value: PolicyValue | undefined, path: string): string {
+  if (!isStringValue(value) || !CLOCK_TIME_PATTERN.test(value)) {
     fail(path, "expected a 24-hour time in HH:mm form");
   }
   return value;
 }
 
-function parseTimeZone(value: unknown, path: string): string {
-  if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
+function parseTimeZone(value: PolicyValue | undefined, path: string): string {
+  if (!isStringValue(value) || value.length === 0 || value.trim() !== value) {
     fail(path, "expected a non-empty IANA time-zone name");
   }
 
@@ -109,7 +135,10 @@ function parseTimeZone(value: unknown, path: string): string {
   return value;
 }
 
-function parseMaintenanceWindow(value: unknown, path: string): UpdateMaintenanceWindow | null {
+function parseMaintenanceWindow(
+  value: PolicyValue | undefined,
+  path: string,
+): UpdateMaintenanceWindow | null {
   if (value === null) {
     return null;
   }
@@ -142,11 +171,11 @@ function parseMaintenanceWindow(value: unknown, path: string): UpdateMaintenance
   return { start, end };
 }
 
-export function isUpdateChannel(value: unknown): value is UpdateChannel {
+export function isUpdateChannel(value: PolicyValue | undefined | string): value is UpdateChannel {
   return value === "stable" || value === "beta" || value === "nightly";
 }
 
-function parsePolicyPatch(value: unknown, path: string): UpdatePolicyPatch {
+function parsePolicyPatch(value: PolicyValue | undefined, path: string): UpdatePolicyPatch {
   if (value === undefined) {
     return {};
   }
@@ -158,7 +187,7 @@ function parsePolicyPatch(value: unknown, path: string): UpdatePolicyPatch {
   const patch: UpdatePolicyPatch = {};
 
   if ("autoUpdate" in value) {
-    if (typeof value.autoUpdate !== "boolean") {
+    if (value.autoUpdate !== true && value.autoUpdate !== false) {
       fail(`${path}.autoUpdate`, "expected a boolean");
     }
     patch.autoUpdate = value.autoUpdate;
@@ -173,7 +202,7 @@ function parsePolicyPatch(value: unknown, path: string): UpdatePolicyPatch {
 
   if ("checkIntervalMinutes" in value) {
     const interval = value.checkIntervalMinutes;
-    if (typeof interval !== "number" || !Number.isSafeInteger(interval)) {
+    if (!isIntegerNumber(interval)) {
       fail(`${path}.checkIntervalMinutes`, "expected a whole number of minutes");
     }
     if (
@@ -196,7 +225,7 @@ function parsePolicyPatch(value: unknown, path: string): UpdatePolicyPatch {
   }
 
   if ("allowDowngrades" in value) {
-    if (typeof value.allowDowngrades !== "boolean") {
+    if (value.allowDowngrades !== true && value.allowDowngrades !== false) {
       fail(`${path}.allowDowngrades`, "expected a boolean");
     }
     patch.allowDowngrades = value.allowDowngrades;
@@ -220,7 +249,7 @@ function cloneMaintenanceWindow(
  * Strictly parses an updates configuration object and fills omitted fields from
  * the safe defaults. Unknown properties and explicit undefined values fail.
  */
-export function parseUpdatePolicy(value: unknown = undefined): UpdatePolicy {
+export function parseUpdatePolicy(value: PolicyValue | undefined = undefined): UpdatePolicy {
   return mergeUpdatePolicy(value);
 }
 
@@ -228,7 +257,7 @@ export function parseUpdatePolicy(value: unknown = undefined): UpdatePolicy {
  * Applies policy layers from left to right. Every layer is independently
  * validated, so merging cannot hide an invalid or misspelled setting.
  */
-export function mergeUpdatePolicy(...layers: readonly unknown[]): UpdatePolicy {
+export function mergeUpdatePolicy(...layers: readonly (PolicyValue | undefined)[]): UpdatePolicy {
   let policy: UpdatePolicy = {
     ...DEFAULT_UPDATE_POLICY,
     maintenanceWindow: null,

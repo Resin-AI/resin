@@ -754,7 +754,7 @@ describe("Public Release Workflows Contract", () => {
         const steps = job.steps || [];
         for (let i = 0; i < steps.length; i++) {
           const step = steps[i];
-          if (typeof step.run === "string") {
+          if (Object.prototype.toString.call(step.run) === "[object String]") {
             expect(
               step.run,
               `Workflow '${workflowName}', job '${jobName}', step #${i} ('${step.name || step.id || "unnamed"}') must NOT interpolate \${{ inputs.* }} in run script`,
@@ -819,7 +819,7 @@ describe("Public Release Workflows Contract", () => {
     ];
 
     function isGitHubHostedRunner(runner) {
-      if (typeof runner !== "string") return false;
+      if (Object.prototype.toString.call(runner) !== "[object String]") return false;
       return GITHUB_HOSTED_RUNNER_PATTERNS.some((pattern) => pattern.test(runner));
     }
 
@@ -842,7 +842,7 @@ describe("Public Release Workflows Contract", () => {
     it("strictly prohibits pull_request_target on all public PR workflows", () => {
       for (const { name, data } of prWorkflows) {
         const triggers = data.doc.on;
-        if (typeof triggers === "object" && triggers !== null) {
+        if (triggers !== null && Object.prototype.toString.call(triggers) === "[object Object]") {
           expect(triggers, `${name} must not use pull_request_target trigger`).not.toHaveProperty(
             "pull_request_target",
           );
@@ -865,7 +865,10 @@ describe("Public Release Workflows Contract", () => {
 
         for (const [jobId, job] of Object.entries(data.doc.jobs || {})) {
           const runsOn = job["runs-on"];
-          if (typeof runsOn === "string" && !runsOn.startsWith("${{")) {
+          if (
+            Object.prototype.toString.call(runsOn) === "[object String]" &&
+            !runsOn.startsWith("${{")
+          ) {
             expect(
               isGitHubHostedRunner(runsOn),
               `Job ${jobId} in ${name} must run on a GitHub-hosted runner, got: ${runsOn}`,
@@ -923,14 +926,20 @@ describe("Public Release Workflows Contract", () => {
         }
 
         const topPermissions = data.doc.permissions;
-        if (typeof topPermissions === "object" && topPermissions !== null) {
+        if (
+          topPermissions !== null &&
+          Object.prototype.toString.call(topPermissions) === "[object Object]"
+        ) {
           for (const [scope, level] of Object.entries(topPermissions)) {
             expect(level, `Top-level permission '${scope}' in ${name} must be 'read'`).toBe("read");
           }
         }
 
         for (const [jobId, job] of Object.entries(data.doc.jobs || {})) {
-          if (job.permissions && typeof job.permissions === "object") {
+          if (
+            job.permissions &&
+            Object.prototype.toString.call(job.permissions) === "[object Object]"
+          ) {
             for (const [scope, level] of Object.entries(job.permissions)) {
               expect(level, `Job permission '${scope}' in ${jobId} (${name}) must be 'read'`).toBe(
                 "read",

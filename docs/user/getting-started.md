@@ -23,14 +23,16 @@ Before installing Resin, ensure your environment meets the following requirement
 
 ## 1. Single-Command Installation & Automatic Onboarding
 
-Install Resin using the standalone bootstrap script or npm package:
+Install Resin with the standalone bootstrap script:
 
 ```bash
-# Standalone curl installer (recommended)
 curl -fsSL https://resin.sh/install.sh | sh
+```
 
-# Or via npm
-npm install -g @resin/cli
+PowerShell:
+
+```powershell
+irm https://resin.sh/install.ps1 | iex
 ```
 
 During a fresh interactive installation, Resin automatically initiates **machine-level device linking** and completes global setup in a single step:

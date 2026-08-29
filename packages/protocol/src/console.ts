@@ -7,11 +7,40 @@ import {
   V1ActivationCertificateSchema,
   V1ExactSemVerSchema,
   V1LockedToolEntrySchema,
+  type V1MetadataPayloadValue,
   V1RevocationMetadataSchema,
   normalizeSha256,
 } from "@resin/contracts";
 import { z } from "zod";
-import { ProtocolError, ValidationError } from "./errors.js";
+import { ProtocolError, type ProtocolErrorDetailRecord, ValidationError } from "./errors.js";
+
+const ZodIssuePathSegmentSchema = z.union([z.string(), z.number()]);
+const ZodIssueDetailPrimitiveSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.undefined(),
+]);
+
+function serializeZodIssues(issues: readonly z.ZodIssue[]): ProtocolErrorDetailRecord[] {
+  return issues.map((issue) => {
+    const record: ProtocolErrorDetailRecord = {
+      code: issue.code,
+      message: issue.message,
+      path: issue.path.map((segment) => ZodIssuePathSegmentSchema.parse(segment)),
+    };
+    for (const [key, value] of Object.entries(issue)) {
+      if (key !== "code" && key !== "message" && key !== "path") {
+        const parsed = ZodIssueDetailPrimitiveSchema.safeParse(value);
+        if (parsed.success) {
+          record[key] = parsed.data;
+        }
+      }
+    }
+    return record;
+  });
+}
 import { type ProjectVisibility, ProjectVisibilitySchema } from "./projects.js";
 
 // ============================================================================
@@ -222,18 +251,21 @@ export const ConsoleControlRequestSchema = z
   });
 
 export type ConsoleControlRequest = z.infer<typeof ConsoleControlRequestSchema>;
+export type ConsoleControlRequestInput = z.input<typeof ConsoleControlRequestSchema>;
 
 /**
  * Validates a console control request and returns the validated object.
  * Throws a ValidationError if invalid.
  */
-export function validateConsoleControlRequest(raw: unknown): ConsoleControlRequest {
+export function validateConsoleControlRequest(
+  raw: ConsoleControlRequestInput | V1MetadataPayloadValue | null | undefined,
+): ConsoleControlRequest {
   const result = ConsoleControlRequestSchema.safeParse(raw);
   if (!result.success) {
     const errorMsg = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
     throw new ValidationError(`Invalid console control request: ${errorMsg}`, {
       details: {
-        errors: result.error.errors,
+        errors: serializeZodIssues(result.error.errors),
         actionableAdvice:
           "Ensure action matches valid controls, required fields (targetVersion for pin/update/rollback, reason for revoke) are provided, and expectedArtifactDigest is a valid SHA-256.",
         isTerminal: true,
@@ -299,16 +331,19 @@ export const ActivationCertificateIssueRequestSchema = z
 export type ActivationCertificateIssueRequest = z.infer<
   typeof ActivationCertificateIssueRequestSchema
 >;
+export type ActivationCertificateIssueRequestInput = z.input<
+  typeof ActivationCertificateIssueRequestSchema
+>;
 
 export function validateActivationCertificateIssueRequest(
-  raw: unknown,
+  raw: ActivationCertificateIssueRequestInput | V1MetadataPayloadValue | null | undefined,
 ): ActivationCertificateIssueRequest {
   const result = ActivationCertificateIssueRequestSchema.safeParse(raw);
   if (!result.success) {
     const errorMsg = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
     throw new ValidationError(`Invalid activation certificate issue request: ${errorMsg}`, {
       details: {
-        errors: result.error.errors,
+        errors: serializeZodIssues(result.error.errors),
         actionableAdvice:
           "Verify user/account/project/tool UUIDs, exact semver, and SHA-256 digests.",
         isTerminal: true,
@@ -386,15 +421,18 @@ export type ExactLockedArtifactResolutionResponse = z.infer<
  * 6. download.sha256 matches normalized certificate.artifactDigest / lockedEntry.artifactDigest
  * 7. Rejects if certificate or tool is marked revoked in revocationMetadata
  */
+export type ExactLockedArtifactResolutionResponseInput = z.input<
+  typeof ExactLockedArtifactResolutionResponseSchema
+>;
 export function validateExactLockedArtifactResolutionResponse(
-  raw: unknown,
+  raw: ExactLockedArtifactResolutionResponseInput | V1MetadataPayloadValue | null | undefined,
 ): ExactLockedArtifactResolutionResponse {
   const result = ExactLockedArtifactResolutionResponseSchema.safeParse(raw);
   if (!result.success) {
     const errorMsg = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ");
     throw new ValidationError(`Invalid exact locked artifact resolution response: ${errorMsg}`, {
       details: {
-        errors: result.error.errors,
+        errors: serializeZodIssues(result.error.errors),
         actionableAdvice:
           "Ensure lockedEntry, certificate, revocationMetadata, and download comply with strict wire schema.",
         isTerminal: true,

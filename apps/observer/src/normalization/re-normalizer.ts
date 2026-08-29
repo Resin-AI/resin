@@ -4,7 +4,6 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   canonicalJson,
-  hashCanonical,
   nowIso,
 } from "@resin/contracts";
 import type { LocalDatabaseConnection, SessionRepository } from "@resin/db";
@@ -218,8 +217,12 @@ export class ReNormalizer {
           // Calculate diff against existing historical event
           const seq = eventWithRevision.causalRef.causalSequence;
           const original = existingEventsBySeq.get(seq);
-          const newDigest = hashCanonical(eventWithRevision);
-          const originalDigest = original ? hashCanonical(original) : undefined;
+          const newDigest = createHash("sha256")
+            .update(canonicalJson(eventWithRevision), "utf8")
+            .digest("hex");
+          const originalDigest = original
+            ? createHash("sha256").update(canonicalJson(original), "utf8").digest("hex")
+            : undefined;
 
           const changedFields: string[] = [];
           let isRedactionChanged = false;

@@ -109,6 +109,7 @@ export class SourceRecoveryEngine {
     try {
       stat = await fs.promises.stat(filePath);
     } catch (err: unknown) {
+      // SAFETY: Filesystem call error exposes NodeJS.ErrnoException code property.
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
         return {
@@ -290,6 +291,7 @@ export class SourceRecoveryEngine {
         return await operation();
       } catch (err: unknown) {
         attempts++;
+        // SAFETY: Filesystem operation error exposes NodeJS.ErrnoException code property.
         const code = (err as NodeJS.ErrnoException).code;
         const isPermission = code === "EACCES" || code === "EPERM" || code === "EBUSY";
 

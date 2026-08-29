@@ -13,9 +13,9 @@ import {
 describe("paths", () => {
   describe("resolvePaths", () => {
     it("resolves paths for Linux with default XDG paths", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         HOME: "/home/testuser",
-      };
+      } satisfies Record<string, string>;
       const paths = resolvePaths({
         env: mockEnv,
         platform: "linux",
@@ -32,7 +32,7 @@ describe("paths", () => {
     });
 
     it("respects explicit XDG environment variables on Linux", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         HOME: "/home/testuser",
         XDG_CONFIG_HOME: "/custom/config",
         XDG_DATA_HOME: "/custom/data",
@@ -51,7 +51,7 @@ describe("paths", () => {
     });
 
     it("resolves paths for macOS (darwin)", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         HOME: "/Users/testuser",
       };
       const paths = resolvePaths({
@@ -68,7 +68,7 @@ describe("paths", () => {
     });
 
     it("resolves paths for Windows (win32)", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         USERPROFILE: "C:\\Users\\testuser",
         APPDATA: "C:\\Users\\testuser\\AppData\\Roaming",
         LOCALAPPDATA: "C:\\Users\\testuser\\AppData\\Local",
@@ -100,7 +100,7 @@ describe("paths", () => {
     });
 
     it("allows granular environment variable overrides", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         RESIN_CONFIG_DIR: "/override/config",
         RESIN_DATA_DIR: "/override/data",
         RESIN_STATE_DIR: "/override/state",

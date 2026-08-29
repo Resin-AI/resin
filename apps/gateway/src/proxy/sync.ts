@@ -304,16 +304,30 @@ export class CloudCatalogSyncCoordinator {
 
     if (snapshot.tools && snapshot.tools.length > 0) {
       for (const manifest of snapshot.tools) {
-        const toolMeta = manifest.metadata as Record<string, unknown> | undefined;
-        const manifestDigest =
-          (typeof toolMeta?.manifestDigest === "string" ? toolMeta.manifestDigest : undefined) ??
-          computeManifestDigest(manifest);
-        const artifactDigest =
-          (typeof toolMeta?.artifactDigest === "string" ? toolMeta.artifactDigest : undefined) ??
-          normalizeSha256(manifestDigest);
-        const envelopeDigest =
-          typeof toolMeta?.envelopeDigest === "string" ? toolMeta.envelopeDigest : undefined;
+        const toolMeta =
+          manifest.metadata && manifest.metadata instanceof Object ? manifest.metadata : undefined;
+        const metaManifestDigest =
+          toolMeta &&
+          "manifestDigest" in toolMeta &&
+          Object.prototype.toString.call(toolMeta.manifestDigest) === "[object String]"
+            ? String(toolMeta.manifestDigest)
+            : undefined;
+        const manifestDigest = metaManifestDigest ?? computeManifestDigest(manifest);
 
+        const metaArtifactDigest =
+          toolMeta &&
+          "artifactDigest" in toolMeta &&
+          Object.prototype.toString.call(toolMeta.artifactDigest) === "[object String]"
+            ? String(toolMeta.artifactDigest)
+            : undefined;
+        const artifactDigest = metaArtifactDigest ?? normalizeSha256(manifestDigest);
+
+        const envelopeDigest =
+          toolMeta &&
+          "envelopeDigest" in toolMeta &&
+          Object.prototype.toString.call(toolMeta.envelopeDigest) === "[object String]"
+            ? String(toolMeta.envelopeDigest)
+            : undefined;
         const candidateEntry: V1LockedToolEntry = {
           toolId: manifest.id,
           name: manifest.name,
@@ -376,10 +390,13 @@ export class CloudCatalogSyncCoordinator {
     if (!this.registry) {
       return;
     }
-    const workspaceId = workspaceScopeId(this.workspaceId);
-    if (typeof this.registry.bindWorkspaceLock === "function") {
+    const workspaceId = this.workspaceId ?? lock.projectId;
+    if (
+      "bindWorkspaceLock" in this.registry &&
+      this.registry.bindWorkspaceLock instanceof Function
+    ) {
       this.registry.bindWorkspaceLock(workspaceId, lock);
-    } else if (typeof this.registry.bindLock === "function") {
+    } else if ("bindLock" in this.registry && this.registry.bindLock instanceof Function) {
       this.registry.bindLock(workspaceId, lock);
     }
   }
@@ -725,12 +742,13 @@ export class CloudCatalogSyncCoordinator {
       if (this.registry?.events) {
         const workspaceId = workspaceScopeId(this.workspaceId);
         const currentSnapshot = await this.registry.resolveCatalog(workspaceId);
+        const revision =
+          "revision" in currentSnapshot && Number.isFinite(currentSnapshot.revision)
+            ? Number(currentSnapshot.revision)
+            : 1;
         this.registry.events.emit({
           workspaceId,
-          revision:
-            "revision" in currentSnapshot
-              ? ((currentSnapshot as { revision?: number }).revision ?? 1)
-              : 1,
+          revision,
           snapshot: currentSnapshot,
           changedToolIds: toolIds,
           timestamp: new Date().toISOString(),
@@ -751,11 +769,22 @@ export class CloudCatalogSyncCoordinator {
 
     const workspaceId = this.workspaceId;
     for (const tool of tools) {
-      const manifestDigest =
-        (tool.metadata?.manifestDigest as string | undefined) ?? computeManifestDigest(tool);
-      const artifactDigest =
-        (tool.metadata?.artifactDigest as string | undefined) ?? normalizeSha256(manifestDigest);
+      const meta = tool.metadata && tool.metadata instanceof Object ? tool.metadata : undefined;
+      const metaManifestDigest =
+        meta &&
+        "manifestDigest" in meta &&
+        Object.prototype.toString.call(meta.manifestDigest) === "[object String]"
+          ? String(meta.manifestDigest)
+          : undefined;
+      const manifestDigest = metaManifestDigest ?? computeManifestDigest(tool);
 
+      const metaArtifactDigest =
+        meta &&
+        "artifactDigest" in meta &&
+        Object.prototype.toString.call(meta.artifactDigest) === "[object String]"
+          ? String(meta.artifactDigest)
+          : undefined;
+      const artifactDigest = metaArtifactDigest ?? normalizeSha256(manifestDigest);
       const registryTool: RegistryTool = {
         toolId: tool.id,
         name: tool.name,
@@ -790,8 +819,8 @@ export class CloudCatalogSyncCoordinator {
     this.registry.events?.emit({
       workspaceId: workspaceScopeId(workspaceId),
       revision:
-        "revision" in resolvedSnapshot
-          ? ((resolvedSnapshot as { revision?: number }).revision ?? 1)
+        "revision" in resolvedSnapshot && Number.isFinite(resolvedSnapshot.revision)
+          ? Number(resolvedSnapshot.revision)
           : 1,
       snapshot: resolvedSnapshot,
       changedToolIds: tools.map((t) => t.id),

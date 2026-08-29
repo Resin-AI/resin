@@ -6,6 +6,7 @@ import type {
   ModuleHealth,
   ModuleLifecycleState,
 } from "../src/lifecycle.js";
+import type { JsonObject } from "../src/normalization/redaction.js";
 import { DaemonSupervisor, DefaultLogger } from "../src/supervisor.js";
 
 describe("supervisor", () => {
@@ -16,7 +17,7 @@ describe("supervisor", () => {
       critical?: boolean;
       shouldFailStart?: boolean;
       healthStatus?: "ready" | "degraded" | "failed" | "offline";
-      healthDetails?: Record<string, unknown>;
+      healthDetails?: JsonObject;
       onStart?: () => void;
       onStop?: () => void;
       onReload?: () => void;
@@ -260,7 +261,8 @@ describe("supervisor", () => {
       const diag = await supervisor.getDiagnostics();
       expect(diag.pid).toBe(process.pid);
       expect(diag.config.authToken).toBe("[REDACTED]");
-      expect((diag.config as Record<string, unknown>).cloudApiKey).toBeUndefined();
+      // SAFETY: Verifies sensitive key is omitted from redacted config.
+      expect((diag.config as JsonObject).cloudApiKey).toBeUndefined();
       expect(diag.modules.mod).toEqual({ customInfo: "diagnostics-for-mod" });
 
       await supervisor.stop();

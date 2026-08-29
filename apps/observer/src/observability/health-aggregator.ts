@@ -1,5 +1,6 @@
 import process from "node:process";
 import type { LocalDatabaseConnection } from "@resin/db";
+import type { JsonObject } from "../normalization/redaction.js";
 import type { KillSwitchManager, KillSwitchSnapshot } from "./kill-switches.js";
 
 export type SubsystemHealthStatus =
@@ -9,13 +10,13 @@ export type SubsystemHealthStatus =
   | "paused"
   | "upgrade_required";
 
-export const HEALTH_STATUS_PRECEDENCE: Record<SubsystemHealthStatus, number> = {
+export const HEALTH_STATUS_PRECEDENCE = {
   upgrade_required: 50,
   offline: 40,
   paused: 30,
   degraded: 20,
   ready: 10,
-};
+} satisfies Record<SubsystemHealthStatus, number>;
 
 export interface ComponentHealth {
   component: string;
@@ -24,7 +25,7 @@ export interface ComponentHealth {
   message?: string;
   reasonCode?: string;
   remediationHint?: string;
-  details?: Record<string, unknown>;
+  details?: JsonObject;
   checkedAt: string;
   latencyMs?: number;
 }
@@ -49,7 +50,7 @@ export interface HealthCheckRegistration {
   check: HealthCheckFn;
 }
 
-export const KNOWN_REMEDIATION_HINTS: Record<string, string> = {
+export const KNOWN_REMEDIATION_HINTS = {
   DB_BUSY_TIMEOUT:
     "SQLite busy timeout exceeded. Check for concurrent writers or long-running transactions.",
   DB_INTEGRITY_FAIL: "Database integrity check failed. Run repair or restore state from backup.",
@@ -73,7 +74,7 @@ export const KNOWN_REMEDIATION_HINTS: Record<string, string> = {
   OBSERVER_MEMORY_PRESSURE:
     "Observer heap memory usage exceeded threshold. Inspect active tailers or restart daemon.",
   GATEWAY_UNREACHABLE: "Gateway IPC socket or HTTP port is unreachable.",
-};
+} as const;
 
 export class HealthAggregator {
   private registrations = new Map<string, HealthCheckRegistration>();
@@ -206,17 +207,16 @@ export class HealthAggregator {
         clearTimeout(timer);
 
         const latencyMs = Math.round(performance.now() - startTime);
+        const knownRemediationHint = Object.entries(KNOWN_REMEDIATION_HINTS).find(
+          ([reasonCode]) => reasonCode === partialResult.reasonCode,
+        )?.[1];
         const compHealth: ComponentHealth = {
           component: reg.name,
           status: partialResult.status ?? "ready",
           critical: partialResult.critical ?? reg.critical,
           message: partialResult.message,
           reasonCode: partialResult.reasonCode,
-          remediationHint:
-            partialResult.remediationHint ??
-            (partialResult.reasonCode
-              ? KNOWN_REMEDIATION_HINTS[partialResult.reasonCode]
-              : undefined),
+          remediationHint: partialResult.remediationHint ?? knownRemediationHint,
           details: partialResult.details,
           checkedAt,
           latencyMs,

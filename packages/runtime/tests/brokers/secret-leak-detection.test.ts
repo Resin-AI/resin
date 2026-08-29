@@ -7,13 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BrokerAuditEmitter,
   type BrokerAuditEvent,
-  type BrokerSecurityError,
+  BrokerSecurityError,
   CapabilityBrokerManager,
   CommandBroker,
   NetworkBroker,
   SecretBroker,
 } from "../../src/brokers/index.js";
-import { createInvocationGrant } from "../../src/policy/grant.js";
+import { type CreateInvocationGrantParams, createInvocationGrant } from "../../src/policy/grant.js";
 
 describe("Secret Canary Leak Detection & Full Output Redaction", () => {
   let server: http.Server;
@@ -37,13 +37,8 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
 
   const allCapturedArtifacts: string[] = [];
 
-  function recordArtifact(data: unknown): void {
-    if (data === null || data === undefined) return;
-    if (typeof data === "string") {
-      allCapturedArtifacts.push(data);
-    } else {
-      allCapturedArtifacts.push(JSON.stringify(data));
-    }
+  function recordArtifact(data: string): void {
+    allCapturedArtifacts.push(data);
   }
 
   beforeAll(async () => {
@@ -75,7 +70,7 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
-        serverPort = typeof addr === "object" && addr ? addr.port : 0;
+        serverPort = addr && "port" in addr ? addr.port : 0;
         serverUrl = `http://127.0.0.1:${serverPort}`;
         resolve();
       });
@@ -141,7 +136,7 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
 
   const createCanaryGrant = (
     invocationId = "inv_canary_001",
-    overrides: Record<string, unknown> = {},
+    overrides: Partial<CreateInvocationGrantParams> = {},
   ) => {
     return createInvocationGrant({
       grantId: `grant_${invocationId}`,
@@ -206,7 +201,7 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
       },
       ctx,
     );
-    recordArtifact(authResponse);
+    recordArtifact(JSON.stringify(authResponse));
 
     // 2. Brokered request with URL query parameter template
     const queryResponse = await netBroker.request(
@@ -215,7 +210,7 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
       },
       ctx,
     );
-    recordArtifact(queryResponse);
+    recordArtifact(JSON.stringify(queryResponse));
 
     // Verify response objects do NOT contain canaries
     const serializedAuth = JSON.stringify(authResponse);
@@ -264,7 +259,7 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
         ctx,
       );
 
-      recordArtifact(result);
+      recordArtifact(JSON.stringify(result));
 
       // The redactor automatically intercepts stdout and stderr, replacing registered secrets
       expect(result.stdout).not.toContain(CANARIES.STDIN_DATA);
@@ -296,9 +291,16 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
         ctx,
       );
     } catch (err) {
-      recordArtifact((err as Error).message);
-      recordArtifact((err as BrokerSecurityError).details);
-      expect((err as Error).message).not.toContain(CANARIES.ERROR_TRIGGER);
+      if (err instanceof BrokerSecurityError) {
+        recordArtifact(err.message);
+        if (err.details) {
+          recordArtifact(JSON.stringify(err.details));
+        }
+        expect(err.message).not.toContain(CANARIES.ERROR_TRIGGER);
+      } else if (err instanceof Error) {
+        recordArtifact(err.message);
+        expect(err.message).not.toContain(CANARIES.ERROR_TRIGGER);
+      }
       expect(JSON.stringify(err)).not.toContain(CANARIES.ERROR_TRIGGER);
     }
 
@@ -309,8 +311,10 @@ describe("Secret Canary Leak Detection & Full Output Redaction", () => {
         isWorker: true,
       });
     } catch (err) {
-      recordArtifact((err as Error).message);
-      expect((err as Error).message).not.toContain(CANARIES.ERROR_TRIGGER);
+      if (err instanceof Error) {
+        recordArtifact(err.message);
+        expect(err.message).not.toContain(CANARIES.ERROR_TRIGGER);
+      }
     }
   });
 

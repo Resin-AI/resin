@@ -145,12 +145,7 @@ describe("loader security checks", () => {
         );
       } catch (symlinkErr) {
         // On systems without symlink permission, test graceful handling
-        if (
-          symlinkErr &&
-          typeof symlinkErr === "object" &&
-          "code" in symlinkErr &&
-          symlinkErr.code !== "EPERM"
-        ) {
+        if (symlinkErr instanceof Object && "code" in symlinkErr && symlinkErr.code !== "EPERM") {
           throw symlinkErr;
         }
       }

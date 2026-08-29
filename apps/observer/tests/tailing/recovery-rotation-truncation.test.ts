@@ -130,6 +130,7 @@ describe("Recovery Engine, Rotation, Truncation, and Lineage", () => {
       async () => {
         attempts++;
         if (attempts < 3) {
+          // SAFETY: Simulated permission error carries ErrnoException code.
           const err = new Error("Permission denied") as NodeJS.ErrnoException;
           err.code = "EACCES";
           throw err;

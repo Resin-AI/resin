@@ -69,7 +69,7 @@ export class KillSwitchManager {
 
       const rows = this.conn.all<{
         switch_key: string;
-        switch_type: string;
+        switch_type: KillSwitchType;
         target_id: string | null;
         enabled: number;
         reason: string | null;
@@ -81,7 +81,7 @@ export class KillSwitchManager {
       for (const row of rows) {
         const entry: KillSwitchEntry = {
           switchKey: row.switch_key,
-          switchType: row.switch_type as KillSwitchType,
+          switchType: row.switch_type,
           targetId: row.target_id ?? undefined,
           enabled: row.enabled === 1,
           reason: row.reason ?? undefined,

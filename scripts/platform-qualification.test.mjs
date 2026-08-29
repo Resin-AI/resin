@@ -129,7 +129,7 @@ describe("real host platform qualification", () => {
 
     // emitSupportMatrix helper
     const jsonString = emitSupportMatrix({ format: "json" });
-    expect(typeof jsonString).toBe("string");
+    expect(jsonString).toEqual(expect.any(String));
     const parsed = JSON.parse(jsonString);
     expect(parsed.product.productName).toBe("Resin");
     expect(parsed.product.binaryName).toBe("resin");

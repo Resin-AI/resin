@@ -45,20 +45,22 @@ export class RefreshVerifier {
       attemptId: attempt.attemptId,
       connectionId: attempt.connectionId,
       workspaceId: attempt.workspaceId,
-      ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
       revision: attempt.revision,
       status: "pending",
       notifiedAt: now,
       observedVia: "none",
       timeoutMs: effectiveTimeoutMs,
     };
+    if (attempt.sessionId !== undefined) {
+      verification.sessionId = attempt.sessionId;
+    }
 
     const timer = setTimeout(() => {
       this.handleTimeout(verificationId);
     }, effectiveTimeoutMs);
 
     // Prevent Node process from staying alive solely for verification timeouts
-    if (typeof timer.unref === "function") {
+    if ("unref" in timer && timer.unref instanceof Function) {
       timer.unref();
     }
 

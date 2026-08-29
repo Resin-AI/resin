@@ -90,24 +90,28 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(decodedEvents.length).toBe(14);
 
     // 0: session_lifecycle (start)
+    // SAFETY: Decoded event is an IntermediateSessionLifecycleEvent from fixture.
     const ev0 = decodedEvents[0] as IntermediateSessionLifecycleEvent;
     expect(ev0.type).toBe("session_lifecycle");
     expect(ev0.lifecycleType).toBe("start");
     expect(ev0.harnessName).toBe("omp");
 
     // 1: message (user)
+    // SAFETY: Decoded event is an IntermediateMessageEvent from fixture.
     const ev1 = decodedEvents[1] as IntermediateMessageEvent;
     expect(ev1.type).toBe("message");
     expect(ev1.role).toBe("user");
     expect(ev1.content).toContain("Inspect the repository");
 
     // 2: model_reasoning
+    // SAFETY: Decoded event is an IntermediateModelReasoningEvent from fixture.
     const ev2 = decodedEvents[2] as IntermediateModelReasoningEvent;
     expect(ev2.type).toBe("model_reasoning");
     expect(ev2.reasoningContent).toContain("I will start by checking");
     expect(ev2.model).toBe("gemini-3.7-flash");
 
     // 3: tool_call
+    // SAFETY: Decoded event is an IntermediateToolCallEvent from fixture.
     const ev3 = decodedEvents[3] as IntermediateToolCallEvent;
     expect(ev3.type).toBe("tool_call");
     expect(ev3.toolName).toBe("read");
@@ -115,6 +119,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev3.parameters).toEqual({ path: "src/auth.ts" });
 
     // 4: tool_result
+    // SAFETY: Decoded event is an IntermediateToolResultEvent from fixture.
     const ev4 = decodedEvents[4] as IntermediateToolResultEvent;
     expect(ev4.type).toBe("tool_result");
     expect(ev4.toolName).toBe("read");
@@ -123,6 +128,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev4.executionDurationMs).toBe(15);
 
     // 5: command_exec
+    // SAFETY: Decoded event is an IntermediateCommandExecEvent from fixture.
     const ev5 = decodedEvents[5] as IntermediateCommandExecEvent;
     expect(ev5.type).toBe("command_exec");
     expect(ev5.command).toBe("pnpm test");
@@ -131,6 +137,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev5.stdout).toContain("PASS src/auth.test.ts");
 
     // 6: file_edit
+    // SAFETY: Decoded event is an IntermediateFileEditEvent from fixture.
     const ev6 = decodedEvents[6] as IntermediateFileEditEvent;
     expect(ev6.type).toBe("file_edit");
     expect(ev6.filePath).toBe("src/auth.ts");
@@ -138,6 +145,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev6.diffStats).toEqual({ additions: 1, deletions: 1, modifications: 0 });
 
     // 7: subagent_lifecycle (spawn)
+    // SAFETY: Decoded event is an IntermediateSubagentLifecycleEvent from fixture.
     const ev7 = decodedEvents[7] as IntermediateSubagentLifecycleEvent;
     expect(ev7.type).toBe("subagent_lifecycle");
     expect(ev7.subagentId).toBe("subagent-scout-99");
@@ -146,12 +154,14 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev7.role).toBe("scout");
 
     // 8: subagent_lifecycle (settle)
+    // SAFETY: Decoded event is an IntermediateSubagentLifecycleEvent from fixture.
     const ev8 = decodedEvents[8] as IntermediateSubagentLifecycleEvent;
     expect(ev8.type).toBe("subagent_lifecycle");
     expect(ev8.subagentId).toBe("subagent-scout-99");
     expect(ev8.lifecycleType).toBe("settle");
 
     // 9: compaction
+    // SAFETY: Decoded event is an IntermediateCompactionEvent from fixture.
     const ev9 = decodedEvents[9] as IntermediateCompactionEvent;
     expect(ev9.type).toBe("compaction");
     expect(ev9.triggerReason).toBe("context_limit");
@@ -160,12 +170,14 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev9.preservedContextSummary).toContain("Summarized initial inspection");
 
     // 10: branch_fork
+    // SAFETY: Decoded event is an IntermediateBranchForkEvent from fixture.
     const ev10 = decodedEvents[10] as IntermediateBranchForkEvent;
     expect(ev10.type).toBe("branch_fork");
     expect(ev10.sourceSessionId).toBe("session-golden-1");
     expect(ev10.branchName).toBe("alt-auth-branch");
 
     // 11: error
+    // SAFETY: Decoded event is an IntermediateErrorEvent from fixture.
     const ev11 = decodedEvents[11] as IntermediateErrorEvent;
     expect(ev11.type).toBe("error");
     expect(ev11.errorType).toBe("ValidationError");
@@ -173,12 +185,14 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     expect(ev11.recoverable).toBe(true);
 
     // 12: message (assistant)
+    // SAFETY: Decoded event is an IntermediateMessageEvent from fixture.
     const ev12 = decodedEvents[12] as IntermediateMessageEvent;
     expect(ev12.type).toBe("message");
     expect(ev12.role).toBe("assistant");
     expect(ev12.content).toContain("Successfully refactored authenticate");
 
     // 13: session_lifecycle (end)
+    // SAFETY: Decoded event is an IntermediateSessionLifecycleEvent from fixture.
     const ev13 = decodedEvents[13] as IntermediateSessionLifecycleEvent;
     expect(ev13.type).toBe("session_lifecycle");
     expect(ev13.lifecycleType).toBe("end");
@@ -287,6 +301,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       metadata: {},
     };
 
+    // SAFETY: Decoded event is an IntermediateToolCallEvent.
     const decoded = decoder.decode(toolCallRecord) as IntermediateToolCallEvent;
     expect(decoded.type).toBe("tool_call");
     expect(decoded.toolName).toBe("custom_grep");
@@ -348,6 +363,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.type).toBe("message");
       expect(decoded.providerUsage).toBeDefined();
@@ -391,6 +407,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage).toBeDefined();
       const usage = decoded.providerUsage!;
@@ -429,6 +446,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage).toBeDefined();
       const usage = decoded.providerUsage!;
@@ -464,6 +482,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage).toBeDefined();
       const usage = decoded.providerUsage!;
@@ -494,6 +513,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage).toBeDefined();
       const usage = decoded.providerUsage!;
@@ -523,6 +543,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.type).toBe("message");
       expect(decoded.providerUsage).toBeUndefined();
@@ -550,6 +571,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage).toBeDefined();
       const usage = decoded.providerUsage!;
@@ -607,7 +629,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           const decoded = decoder.decode(record);
           expect(decoded).toBeDefined();
           // Malformed usage should safely yield undefined providerUsage without throwing
-          expect((decoded as IntermediateMessageEvent)?.providerUsage).toBeUndefined();
+          expect(decoded.type === "message" ? decoded.providerUsage : undefined).toBeUndefined();
         }).not.toThrow();
       }
     });
@@ -631,6 +653,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateModelReasoningEvent.
       const decoded = decoder.decode(record) as IntermediateModelReasoningEvent;
       expect(decoded.type).toBe("model_reasoning");
       expect(decoded.reasoningContent).toBe("Thinking through the auth algorithm...");
@@ -668,6 +691,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         metadata: {},
       };
 
+      // SAFETY: Decoded event is an IntermediateModelReasoningEvent.
       const decoded = decoder.decode(record) as IntermediateModelReasoningEvent;
       expect(decoded.type).toBe("model_reasoning");
       expect(decoded.tokenCount).toBe(180);
@@ -702,6 +726,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateToolCallEvent.
       const decodedToolCall = decoder.decode(toolCallRecord) as IntermediateToolCallEvent;
       expect(decodedToolCall.type).toBe("tool_call");
       expect(decodedToolCall.providerUsage?.totalTokens).toBe(120);
@@ -724,6 +749,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateCompactionEvent.
       const decodedCompact = decoder.decode(compactionRecord) as IntermediateCompactionEvent;
       expect(decodedCompact.type).toBe("compaction");
       expect(decodedCompact.providerUsage?.totalTokens).toBe(122000);
@@ -745,6 +771,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateErrorEvent.
       const decodedError = decoder.decode(errorRecord) as IntermediateErrorEvent;
       expect(decodedError.type).toBe("error");
       expect(decodedError.providerUsage?.availability).toBe("partial");
@@ -775,6 +802,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decodedTokensObj = decoder.decode(tokensObjRecord) as IntermediateMessageEvent;
       expect(decodedTokensObj.providerUsage).toBeDefined();
       expect(decodedTokensObj.providerUsage?.inputTokens).toBe(80);
@@ -805,6 +833,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decodedCostUsd = decoder.decode(costUsdRecord) as IntermediateMessageEvent;
       expect(decodedCostUsd.providerUsage?.costMicroUsd).toBe(3500);
 
@@ -827,6 +856,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decodedTopLevel = decoder.decode(topLevelRecord) as IntermediateMessageEvent;
       expect(decodedTopLevel.providerUsage?.inputTokens).toBe(500);
       expect(decodedTopLevel.providerUsage?.outputTokens).toBe(250);
@@ -855,6 +885,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
         metadata: {},
       };
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
       expect(decoded.providerUsage?.accountingVersion).toBe("omp-v2-experimental");
     });

@@ -32,11 +32,12 @@ async function setupTestDb(): Promise<{
   const toolRepo = new ToolRepository(conn);
   return { conn, toolRepo };
 }
+interface EvolvedToolFixture {
+  manifest: ToolManifest;
+  toolVersion: ToolVersion;
+}
 
-function makeEvolvedTool(
-  name: string,
-  version = "1.0.0",
-): { manifest: ToolManifest; toolVersion: ToolVersion } {
+function makeEvolvedTool(name: string, version = "1.0.0"): EvolvedToolFixture {
   const digest = crypto.createHash("sha256").update(`${name}@${version}`).digest("hex");
   const cache = new ArtifactCache();
   cache.ensureDirectoriesSync();
@@ -144,7 +145,7 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
         },
       });
 
-      // 3. Verify tools/list contains the evolved tool
+      // SAFETY: Gateway response is confirmed to be ListToolsResult.
       const listRes = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -162,7 +163,7 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
       expect(fastGit?.inputSchema.type).toBe("object");
       expect(fastGit?.inputSchema.properties).toHaveProperty("query");
 
-      // 4. Verify tools/call executes the evolved tool
+      // SAFETY: Gateway response is confirmed to be CallToolResult.
       const callRes = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 3,
@@ -172,7 +173,6 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
           arguments: { query: "status --short" },
         },
       })) as JsonRpcSuccessResponse<CallToolResult>;
-
       expect(callRes.error).toBeUndefined();
       expect(callRes.result.content).toHaveLength(1);
       expect(callRes.result.content[0].type).toBe("text");
@@ -202,7 +202,8 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
       const connInstance = gateway.createConnection({
         cwd: tmpDir,
         sendMessage: (msg) => {
-          if (!("id" in msg)) {
+          if (!("id" in msg) || msg.id === undefined) {
+            // SAFETY: Notification message has no id.
             notifications.push(msg as JsonRpcNotification);
           }
         },
@@ -215,11 +216,11 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
         params: {
           protocolVersion: "2024-11-05",
           clientInfo: { name: "test-client", version: "1.0.0" },
-          capabilities: {},
-          rootUri: pathToFileURL(tmpDir).href,
+          capabilities: { tools: { listChanged: true } },
         },
       });
 
+      // SAFETY: Gateway response is confirmed to be ListToolsResult.
       const initialList = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -238,18 +239,19 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
       expect(loaded).toBeGreaterThanOrEqual(2);
 
       // tools/list now includes both tools
-      const updatedList = (await gateway.handleMessage(connInstance.connectionId, {
+      // SAFETY: Gateway response is confirmed to be ListToolsResult.
+      const listRes2 = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 3,
         method: "tools/list",
         params: {},
       })) as JsonRpcSuccessResponse<ListToolsResult>;
-
-      const toolNames = updatedList.result.tools.map((t) => t.name);
+      const toolNames = listRes2.result.tools.map((t) => t.name);
       expect(toolNames).toContain("initial_tool");
       expect(toolNames).toContain("csv_processor");
 
       // Calling the newly refreshed tool succeeds
+      // SAFETY: Gateway response is confirmed to be CallToolResult.
       const callRes = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 4,
@@ -259,7 +261,6 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
           arguments: { query: "parse.csv", limit: 50 },
         },
       })) as JsonRpcSuccessResponse<CallToolResult>;
-
       expect(callRes.error).toBeUndefined();
       const output = JSON.parse(callRes.result.content[0].text);
       expect(output.status).toBe("executed");
@@ -295,7 +296,7 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
           rootUri: pathToFileURL(tmpDir).href,
         },
       });
-
+      // SAFETY: Gateway response is confirmed to be ListToolsResult.
       const listRes = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -307,7 +308,7 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
       expect(toolNames).toContain("echo");
       expect(toolNames).toContain("workspace_info");
       expect(toolNames).toContain("regex_matcher");
-
+      // SAFETY: Gateway response is confirmed to be CallToolResult.
       const callRes = (await gateway.handleMessage(connInstance.connectionId, {
         jsonrpc: "2.0",
         id: 3,
@@ -317,7 +318,6 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
           arguments: { query: "\\d+" },
         },
       })) as JsonRpcSuccessResponse<CallToolResult>;
-
       expect(callRes.error).toBeUndefined();
       const output = JSON.parse(callRes.result.content[0].text);
       expect(output.status).toBe("executed");

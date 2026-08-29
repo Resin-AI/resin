@@ -37,21 +37,26 @@ describe("deployments contracts and state machine", () => {
   });
 
   describe("validateDeploymentTransition & State Machine", () => {
-    // Test all valid transitions
-    for (const [currentState, allowedTargets] of Object.entries(VALID_DEPLOYMENT_TRANSITIONS)) {
+    const stateKeys: readonly DeploymentState[] = [
+      "drafted",
+      "validating",
+      "replaying",
+      "eligible",
+      "canary",
+      "promoted",
+      "suspended",
+      "rolling_back",
+      "rolled_back",
+      "rejected",
+      "retired",
+    ];
+    for (const currentState of stateKeys) {
+      const allowedTargets = VALID_DEPLOYMENT_TRANSITIONS[currentState];
       for (const targetState of allowedTargets) {
         it(`permits valid transition: ${currentState} -> ${targetState}`, () => {
-          const result = validateDeploymentTransition(
-            currentState as DeploymentState,
-            targetState as DeploymentState,
-          );
+          const result = validateDeploymentTransition(currentState, targetState);
           expect(result.valid).toBe(true);
-          expect(() =>
-            assertValidDeploymentTransition(
-              currentState as DeploymentState,
-              targetState as DeploymentState,
-            ),
-          ).not.toThrow();
+          expect(() => assertValidDeploymentTransition(currentState, targetState)).not.toThrow();
         });
       }
     }

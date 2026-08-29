@@ -8,7 +8,7 @@ const VALID_NAME_CHARACTERS = /[^a-zA-Z0-9_-]/g;
  * MCP tool names must consist only of alphanumeric characters, underscores, and hyphens.
  */
 export function sanitizeToolName(rawName: string): string {
-  if (!rawName || typeof rawName !== "string") {
+  if (!rawName || Object.prototype.toString.call(rawName) !== "[object String]") {
     return "unnamed_tool";
   }
 
@@ -76,14 +76,19 @@ export interface CandidateToolForNaming {
   isSystem?: boolean;
 }
 
-const SCOPE_RANK: Record<string, number> = {
+const SCOPE_RANK = {
   session: 4,
   workspace: 3,
   account: 2,
   user: 2,
   system: 1,
   global: 1,
-};
+} as const;
+
+function getScopeRank(scope?: ToolScopeHierarchy | string): number {
+  const normalizedScope = scope ?? "workspace";
+  return Object.entries(SCOPE_RANK).find(([key]) => key === normalizedScope)?.[1] ?? 0;
+}
 
 /**
  * Resolves naming collisions across multiple candidate tools in a deterministic,
@@ -104,8 +109,8 @@ export function resolveNameCollision(tools: CandidateToolForNaming[]): Map<strin
     if (a.isSystem && !b.isSystem) return -1;
     if (!a.isSystem && b.isSystem) return 1;
 
-    const rankA = SCOPE_RANK[a.scope ?? "workspace"] ?? 0;
-    const rankB = SCOPE_RANK[b.scope ?? "workspace"] ?? 0;
+    const rankA = getScopeRank(a.scope);
+    const rankB = getScopeRank(b.scope);
     if (rankB !== rankA) {
       return rankB - rankA;
     }

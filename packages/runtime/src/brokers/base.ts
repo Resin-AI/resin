@@ -4,8 +4,11 @@ import {
   type BrokerAuditEmitter,
   type BrokerAuditEvent,
   type BrokerAuditStatus,
+  type BrokerAuditSummary,
+  type BrokerAuditValue,
   defaultBrokerAuditEmitter,
 } from "./audit.js";
+import type { SecretBroker } from "./secret-broker.js";
 
 /**
  * Standard broker security and operational error codes.
@@ -83,9 +86,9 @@ export type BrokerErrorCode =
  */
 export class BrokerSecurityError extends Error {
   readonly code: BrokerErrorCode;
-  readonly details?: Record<string, unknown>;
+  readonly details?: BrokerAuditSummary;
 
-  constructor(code: BrokerErrorCode, message: string, details?: Record<string, unknown>) {
+  constructor(code: BrokerErrorCode, message: string, details?: BrokerAuditSummary) {
     super(`[${code}] ${message}`);
     this.name = "BrokerSecurityError";
     this.code = code;
@@ -93,6 +96,15 @@ export class BrokerSecurityError extends Error {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
+
+export type BrokerContextValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly BrokerContextValue[]
+  | BrokerContextValue[]
+  | { [key: string]: BrokerContextValue | undefined };
 
 /**
  * Execution context passed to capability broker operations.
@@ -106,8 +118,13 @@ export interface BrokerContext {
   toolVersion?: string;
   workspaceId?: string;
   envelopeId?: string;
+  accountId?: string;
+  installationId?: string;
   currentTimestamp?: number;
-  [key: string]: unknown;
+  isWorker?: boolean;
+  source?: string;
+  secretBroker?: SecretBroker;
+  [key: string]: BrokerContextValue | InvocationGrant | SecretBroker | undefined;
 }
 
 /**
@@ -187,7 +204,7 @@ export abstract class BaseCapabilityBroker {
     });
 
     if (!verification.valid) {
-      const codeMap: Record<string, BrokerErrorCode> = {
+      const codeMap = {
         SCHEMA_INVALID: "GRANT_INVALID",
         TAMPERED_DIGEST: "GRANT_INVALID",
         EXPIRED: "GRANT_EXPIRED",
@@ -195,7 +212,7 @@ export abstract class BaseCapabilityBroker {
         TOOL_MISMATCH: "TOOL_MISMATCH",
         WORKSPACE_MISMATCH: "WORKSPACE_MISMATCH",
         ENVELOPE_MISMATCH: "ENVELOPE_MISMATCH",
-      };
+      } as const satisfies Record<string, BrokerErrorCode>;
       const mappedCode = verification.errorCode
         ? (codeMap[verification.errorCode] ?? "GRANT_INVALID")
         : "GRANT_INVALID";
@@ -262,7 +279,7 @@ export abstract class BaseCapabilityBroker {
     action: string,
     context: BrokerContext,
     status: BrokerAuditStatus,
-    summary: Record<string, unknown>,
+    summary: BrokerAuditSummary,
     options: {
       error?: { code: string; message: string; details?: unknown };
       durationMs?: number;

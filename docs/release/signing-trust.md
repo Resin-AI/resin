@@ -6,7 +6,7 @@ This runbook defines the authoritative operational procedures, cryptographic arc
 
 ## 1. Threat Boundary & Trust Architecture
 
-Resin releases use an Ed25519 cryptographic signature model to guarantee authenticity, integrity, and non-repudiation of distributed binaries, npm packages, and release metadata without exposing private signing material.
+Resin releases use Ed25519 signatures to verify distributed binaries and release metadata without exposing private signing material.
 
 ### 1.1 Architectural Trust Boundaries
 
@@ -321,14 +321,8 @@ If a private signing key is compromised or suspected of exposure, execute this p
    gh release upload v1.0.0 dist/incident-freeze-plan.json dist/key-revocation-notice.json -R Resin-AI/resin --clobber
    ```
 
-### 5.3 Step 3: Package Registry & Release Deprecation (T+30m - T+1h)
-
-1. **npm Registry**:
-   - Deprecate compromised versions immediately:
-     ```bash
-     npm deprecate resin@1.0.0 "CRITICAL: Release signing key compromised. Do not use. Downgrade to 0.1.0 or upgrade to emergency patch."
-     ```
-2. **GitHub Releases**:
+### 5.3 Step 3: Release Deprecation (T+30m - T+1h)
+1. **GitHub Releases**:
    - Update release notes and tag advisory:
      ```bash
      gh release edit v1.0.0 -R Resin-AI/resin --title "[REVOKED - DO NOT USE] Release v1.0.0" --notes "CRITICAL SECURITY ADVISORY: The release signing key for this version has been revoked. Do not download or execute these artifacts."

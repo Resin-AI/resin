@@ -1,4 +1,4 @@
-import { UUIDSchema, V1ProjectMetadataSchema } from "@resin/contracts";
+import { UUIDSchema, type V1MetadataPayloadValue, V1ProjectMetadataSchema } from "@resin/contracts";
 import { z } from "zod";
 import { PermissionDeniedError, type ProtocolError, ValidationError } from "./errors.js";
 
@@ -35,6 +35,7 @@ export const ProjectRegistrationRequestSchema = z
   .strict();
 
 export type ProjectRegistrationRequest = z.infer<typeof ProjectRegistrationRequestSchema>;
+export type ProjectRegistrationRequestInput = z.input<typeof ProjectRegistrationRequestSchema>;
 
 /**
  * Strict wire response schema for project registration.
@@ -47,6 +48,7 @@ export const ProjectRegistrationResponseSchema = z
   .strict();
 
 export type ProjectRegistrationResponse = z.infer<typeof ProjectRegistrationResponseSchema>;
+export type ProjectRegistrationResponseInput = z.input<typeof ProjectRegistrationResponseSchema>;
 
 /**
  * Non-enumerating error helper for project registration / project operations.
@@ -68,10 +70,9 @@ export function createNonEnumeratingProjectError(
   });
 }
 
-/**
- * Validates that a project registration request is structurally and semantically valid.
- */
-export function validateProjectRegistrationRequest(data: unknown): ProjectRegistrationRequest {
+export function validateProjectRegistrationRequest(
+  data: ProjectRegistrationRequestInput | V1MetadataPayloadValue | null | undefined,
+): ProjectRegistrationRequest {
   return ProjectRegistrationRequestSchema.parse(data);
 }
 
@@ -80,7 +81,7 @@ export function validateProjectRegistrationRequest(data: unknown): ProjectRegist
  * matches the expected request projectId.
  */
 export function validateProjectRegistrationResponse(
-  data: unknown,
+  data: ProjectRegistrationResponseInput | V1MetadataPayloadValue | null | undefined,
   expectedProjectId?: string,
 ): ProjectRegistrationResponse {
   const parsed = ProjectRegistrationResponseSchema.parse(data);

@@ -21,23 +21,93 @@ import type {
   ProviderReportedUsage,
   RedactionMeta,
 } from "@resin/contracts";
-import { ProviderReportedUsageSchema } from "@resin/contracts";
-import type {
-  HarnessRecordDecoder,
-  IntermediateSessionEvent,
-  RawHarnessRecord,
-  RecordDecoderContext,
+import { NormalizedSessionEventSchema, ProviderReportedUsageSchema } from "@resin/contracts";
+import {
+  type HarnessRecordDecoder,
+  type IntermediateSessionEvent,
+  type RawHarnessRecord,
+  RawHarnessRecordSchema,
+  type RecordDecoderContext,
 } from "@resin/harness-contracts";
+import { z } from "zod";
+
 export const DEFAULT_SCHEMA_VERSION = "1.0.0";
 
+export const CodexTranscriptValueSchema: z.ZodType<CodexTranscriptValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(CodexTranscriptValueSchema),
+    z.record(CodexTranscriptValueSchema),
+  ]),
+);
+
+export type CodexTranscriptValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | CodexTranscriptValue[]
+  | { [key: string]: CodexTranscriptValue };
+
+export interface CodexTranscriptPayload {
+  [key: string]: CodexTranscriptValue;
+}
+
+export const CodexTranscriptPayloadSchema: z.ZodType<CodexTranscriptPayload> = z.record(
+  CodexTranscriptValueSchema,
+);
+export function asString(value: CodexTranscriptValue | undefined | null): string | undefined {
+  return value !== undefined && value !== null && String(value) === value ? value : undefined;
+}
+
+export function asNumber(value: CodexTranscriptValue | undefined | null): number | undefined {
+  return value !== undefined && value !== null && Number.isFinite(value)
+    ? Number(value)
+    : undefined;
+}
+
+export function isCodexTranscriptPayload(
+  value: CodexTranscriptValue | undefined | null,
+): value is CodexTranscriptPayload {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+export function asObject(
+  value: CodexTranscriptValue | undefined | null,
+): CodexTranscriptPayload | undefined {
+  return isCodexTranscriptPayload(value) ? value : undefined;
+}
+
+export function asArray(
+  value: CodexTranscriptValue | undefined | null,
+): CodexTranscriptValue[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
 /**
  * Options for configuring the Codex session decoder.
  */
 export interface CodexDecoderOptions {
   sessionId?: string;
   initialSequence?: number;
+  lastCausalSequence?: number;
   workspaceId?: string;
 }
+const CodexDecoderOptionsSchema: z.ZodType<CodexDecoderOptions> = z.object({
+  sessionId: z.string().optional(),
+  initialSequence: z.number().optional(),
+  lastCausalSequence: z.number().optional(),
+  workspaceId: z.string().optional(),
+});
 
 /**
  * Helper to generate unique event IDs.
@@ -49,38 +119,47 @@ function generateEventId(prefix = "evt"): string {
 /**
  * Parses and normalizes timestamps into strict ISO 8601 UTC strings.
  */
-function parseTimestamp(rawTs?: unknown): string {
-  if (typeof rawTs === "string") {
-    const d = new Date(rawTs);
+function parseTimestamp(rawTs?: CodexTranscriptValue): string {
+  const str = asString(rawTs);
+  if (str !== undefined) {
+    const d = new Date(str);
     if (!Number.isNaN(d.getTime())) {
       return d.toISOString();
     }
-  } else if (typeof rawTs === "number") {
-    // Check if seconds vs milliseconds
-    const ms = rawTs < 1e11 ? rawTs * 1000 : rawTs;
-    const d = new Date(ms);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toISOString();
+  } else {
+    const num = asNumber(rawTs);
+    if (num !== undefined) {
+      // Check if seconds vs milliseconds
+      const ms = num < 1e11 ? num * 1000 : num;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toISOString();
+      }
     }
   }
   return new Date().toISOString();
 }
-
 /**
- * Normalizes tool call parameters to Record<string, unknown>.
+ * Normalizes tool call parameters to CodexTranscriptPayload.
  */
-function parseToolParameters(rawParams: unknown): Record<string, unknown> {
-  if (typeof rawParams === "object" && rawParams !== null && !Array.isArray(rawParams)) {
-    return rawParams as Record<string, unknown>;
+function parseToolParameters(
+  rawParams: CodexTranscriptValue | undefined | null,
+): CodexTranscriptPayload {
+  const obj = asObject(rawParams);
+  if (obj !== undefined) {
+    return obj;
   }
-  if (typeof rawParams === "string") {
+  const str = asString(rawParams);
+  if (str !== undefined) {
     try {
-      const parsed = JSON.parse(rawParams);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
+      // SAFETY: JSON.parse output is an arbitrary JSON value matching the CodexTranscriptValue union before asObject validation.
+      const parsed = JSON.parse(str) as CodexTranscriptValue;
+      const parsedObj = asObject(parsed);
+      if (parsedObj !== undefined) {
+        return parsedObj;
       }
     } catch {
-      return { raw: rawParams };
+      return { raw: rawParams ?? null };
     }
   }
   return {};
@@ -89,15 +168,14 @@ function parseToolParameters(rawParams: unknown): Record<string, unknown> {
 /**
  * Parses a non-negative integer or returns undefined.
  */
-function parseNonNegativeInt(val: unknown): number | undefined {
-  if (typeof val === "number") {
-    if (Number.isFinite(val) && Number.isInteger(val) && val >= 0) {
-      return val;
-    }
-    return undefined;
+function parseNonNegativeInt(val: CodexTranscriptValue | undefined | null): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (Number.isInteger(val) && Number(val) >= 0) {
+    return Number(val);
   }
-  if (typeof val === "string") {
-    const trimmed = val.trim();
+  const str = asString(val);
+  if (str !== undefined) {
+    const trimmed = str.trim();
     if (/^\d+$/.test(trimmed)) {
       const num = Number(trimmed);
       if (Number.isSafeInteger(num) && num >= 0) {
@@ -109,130 +187,132 @@ function parseNonNegativeInt(val: unknown): number | undefined {
 }
 
 /**
- * Parses cost into micro USD (integer >= 0) or returns undefined.
+ * Normalizes cost strings or numbers into integer micro-USD ($0.000001 = 1 micro-USD).
  */
-function parseCostMicroUsd(raw: Record<string, unknown>): number | undefined {
-  const directMicro = raw.costMicroUsd ?? raw.cost_micro_usd;
-  const parsedMicro = parseNonNegativeInt(directMicro);
-  if (parsedMicro !== undefined) {
-    return parsedMicro;
+function parseCostMicroUsd(raw: CodexTranscriptPayload): number | undefined {
+  const directMicro = parseNonNegativeInt(raw.cost_micro_usd ?? raw.costMicroUsd);
+  if (directMicro !== undefined) {
+    return directMicro;
   }
 
   const directUsd = raw.costUsd ?? raw.cost_usd ?? raw.cost;
-  if (typeof directUsd === "number" && Number.isFinite(directUsd) && directUsd >= 0) {
-    return Math.round(directUsd * 1_000_000);
+  const numUsd = asNumber(directUsd);
+  if (numUsd !== undefined && numUsd >= 0) {
+    return Math.round(numUsd * 1_000_000);
   }
-  if (typeof directUsd === "string") {
-    const trimmed = directUsd.trim();
-    if (/^\d+(\.\d+)?$/.test(trimmed)) {
-      const num = Number(trimmed);
-      if (Number.isFinite(num) && num >= 0) {
-        return Math.round(num * 1_000_000);
-      }
+  const strUsd = asString(directUsd);
+  if (strUsd !== undefined) {
+    const trimmed = strUsd.trim().replace(/^\$/, "");
+    const num = Number(trimmed);
+    if (Number.isFinite(num) && num >= 0) {
+      return Math.round(num * 1_000_000);
     }
   }
 
-  const directCents = raw.costCents ?? raw.cost_cents;
-  if (typeof directCents === "number" && Number.isFinite(directCents) && directCents >= 0) {
-    return Math.round(directCents * 10_000);
+  const directCents = raw.cost_cents ?? raw.costCents;
+  const numCents = asNumber(directCents);
+  if (numCents !== undefined && numCents >= 0) {
+    return Math.round(numCents * 10_000);
   }
 
   return undefined;
 }
 
 /**
- * Parses duration in milliseconds or returns undefined.
+ * Normalizes duration strings or numbers into integer milliseconds.
  */
-function parseDurationMs(raw: Record<string, unknown>): number | undefined {
-  const directMs = raw.durationMs ?? raw.duration_ms;
-  return parseNonNegativeInt(directMs);
-}
+function parseDurationMs(raw: CodexTranscriptPayload): number | undefined {
+  const directMs = parseNonNegativeInt(
+    raw.duration_ms ?? raw.durationMs ?? raw.executionDurationMs ?? raw.execution_duration_ms,
+  );
+  if (directMs !== undefined) {
+    return directMs;
+  }
 
-/**
- * Extracts exact token components without inference or substitution.
- */
-function extractTokenComponents(raw: Record<string, unknown>): {
+  const directSeconds = raw.duration_seconds ?? raw.durationSeconds ?? raw.duration;
+  const numSec = asNumber(directSeconds);
+  if (numSec !== undefined && numSec >= 0) {
+    return Math.round(numSec * 1000);
+  }
+  const strSec = asString(directSeconds);
+  if (strSec !== undefined) {
+    const trimmed = strSec.trim().replace(/s$/i, "");
+    const num = Number(trimmed);
+    if (Number.isFinite(num) && num >= 0) {
+      return Math.round(num * 1000);
+    }
+  }
+
+  return undefined;
+}
+interface CodexExtractedTokens {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
   cachedInputTokens?: number;
   totalTokens?: number;
   hasAnyMetrics: boolean;
-} {
+}
+
+/**
+ * Extracts and maps token count components from various Codex naming conventions.
+ */
+function extractTokenComponents(raw: CodexTranscriptPayload): CodexExtractedTokens {
   const promptDetails =
-    typeof raw.prompt_tokens_details === "object" && raw.prompt_tokens_details !== null
-      ? (raw.prompt_tokens_details as Record<string, unknown>)
-      : typeof raw.promptTokensDetails === "object" && raw.promptTokensDetails !== null
-        ? (raw.promptTokensDetails as Record<string, unknown>)
-        : typeof raw.input_tokens_details === "object" && raw.input_tokens_details !== null
-          ? (raw.input_tokens_details as Record<string, unknown>)
-          : typeof raw.inputTokensDetails === "object" && raw.inputTokensDetails !== null
-            ? (raw.inputTokensDetails as Record<string, unknown>)
-            : undefined;
+    asObject(raw.prompt_tokens_details) ??
+    asObject(raw.promptTokensDetails) ??
+    asObject(raw.input_tokens_details) ??
+    asObject(raw.inputTokensDetails);
 
   const completionDetails =
-    typeof raw.completion_tokens_details === "object" && raw.completion_tokens_details !== null
-      ? (raw.completion_tokens_details as Record<string, unknown>)
-      : typeof raw.completionTokensDetails === "object" && raw.completionTokensDetails !== null
-        ? (raw.completionTokensDetails as Record<string, unknown>)
-        : typeof raw.output_tokens_details === "object" && raw.output_tokens_details !== null
-          ? (raw.output_tokens_details as Record<string, unknown>)
-          : typeof raw.outputTokensDetails === "object" && raw.outputTokensDetails !== null
-            ? (raw.outputTokensDetails as Record<string, unknown>)
-            : undefined;
+    asObject(raw.completion_tokens_details) ??
+    asObject(raw.completionTokensDetails) ??
+    asObject(raw.output_tokens_details) ??
+    asObject(raw.outputTokensDetails);
 
-  const tokensObj =
-    typeof raw.tokens === "object" && raw.tokens !== null
-      ? (raw.tokens as Record<string, unknown>)
-      : undefined;
+  const tokensObj = asObject(raw.tokens);
 
   const inputTokens =
-    parseNonNegativeInt(raw.prompt_tokens) ??
-    parseNonNegativeInt(raw.promptTokens) ??
     parseNonNegativeInt(raw.input_tokens) ??
     parseNonNegativeInt(raw.inputTokens) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.prompt) ?? parseNonNegativeInt(tokensObj.input))
-      : undefined);
+    parseNonNegativeInt(raw.prompt_tokens) ??
+    parseNonNegativeInt(raw.promptTokens) ??
+    parseNonNegativeInt(raw.input) ??
+    parseNonNegativeInt(tokensObj?.input_tokens) ??
+    parseNonNegativeInt(tokensObj?.prompt_tokens);
 
   const outputTokens =
-    parseNonNegativeInt(raw.completion_tokens) ??
-    parseNonNegativeInt(raw.completionTokens) ??
     parseNonNegativeInt(raw.output_tokens) ??
     parseNonNegativeInt(raw.outputTokens) ??
-    (tokensObj
-      ? (parseNonNegativeInt(tokensObj.completion) ?? parseNonNegativeInt(tokensObj.output))
-      : undefined);
+    parseNonNegativeInt(raw.completion_tokens) ??
+    parseNonNegativeInt(raw.completionTokens) ??
+    parseNonNegativeInt(raw.output) ??
+    parseNonNegativeInt(tokensObj?.output_tokens) ??
+    parseNonNegativeInt(tokensObj?.completion_tokens);
 
   const reasoningTokens =
-    (completionDetails
-      ? (parseNonNegativeInt(completionDetails.reasoning_tokens) ??
-        parseNonNegativeInt(completionDetails.reasoningTokens))
-      : undefined) ??
     parseNonNegativeInt(raw.reasoning_tokens) ??
     parseNonNegativeInt(raw.reasoningTokens) ??
-    parseNonNegativeInt(raw.thinking_tokens) ??
-    parseNonNegativeInt(raw.thinkingTokens) ??
-    (tokensObj ? parseNonNegativeInt(tokensObj.reasoning) : undefined);
+    parseNonNegativeInt(raw.reasoning) ??
+    parseNonNegativeInt(completionDetails?.reasoning_tokens) ??
+    parseNonNegativeInt(completionDetails?.reasoningTokens) ??
+    parseNonNegativeInt(completionDetails?.reasoning);
 
   const cachedInputTokens =
-    (promptDetails
-      ? (parseNonNegativeInt(promptDetails.cached_tokens) ??
-        parseNonNegativeInt(promptDetails.cachedTokens) ??
-        parseNonNegativeInt(promptDetails.cache_read_input_tokens))
-      : undefined) ??
-    parseNonNegativeInt(raw.cached_tokens) ??
-    parseNonNegativeInt(raw.cachedTokens) ??
     parseNonNegativeInt(raw.cached_input_tokens) ??
     parseNonNegativeInt(raw.cachedInputTokens) ??
-    parseNonNegativeInt(raw.cache_read_input_tokens) ??
-    parseNonNegativeInt(raw.cacheReadInputTokens) ??
-    (tokensObj ? parseNonNegativeInt(tokensObj.cached) : undefined);
+    parseNonNegativeInt(raw.cached_tokens) ??
+    parseNonNegativeInt(raw.cachedTokens) ??
+    parseNonNegativeInt(raw.cached) ??
+    parseNonNegativeInt(promptDetails?.cached_tokens) ??
+    parseNonNegativeInt(promptDetails?.cachedTokens) ??
+    parseNonNegativeInt(promptDetails?.cached);
 
   const totalTokens =
     parseNonNegativeInt(raw.total_tokens) ??
     parseNonNegativeInt(raw.totalTokens) ??
-    (tokensObj ? parseNonNegativeInt(tokensObj.total) : undefined);
+    parseNonNegativeInt(raw.total) ??
+    parseNonNegativeInt(tokensObj?.total_tokens);
 
   const hasAnyMetrics =
     inputTokens !== undefined ||
@@ -252,143 +332,76 @@ function extractTokenComponents(raw: Record<string, unknown>): {
 }
 
 /**
- * Checks whether an object or record represents a cumulative session total.
+ * Checks if a payload or usage record explicitly claims to be cumulative.
  */
-function isCumulativeObject(obj: unknown): boolean {
-  if (typeof obj !== "object" || obj === null) return false;
-  const rec = obj as Record<string, unknown>;
-  if (rec.is_cumulative === true || rec.isCumulative === true || rec.cumulative === true)
-    return true;
-  if (rec.scope === "session" || rec.scope === "cumulative" || rec.scope === "total") return true;
-  if (rec.accounting === "cumulative") return true;
+function isCumulativeObject(obj: CodexTranscriptValue | undefined | null): boolean {
+  const rec = asObject(obj);
+  if (!rec) return false;
   if (
-    rec.type === "session_usage" ||
+    rec.is_cumulative === true ||
+    rec.isCumulative === true ||
     rec.type === "cumulative_usage" ||
-    rec.type === "session_total"
-  )
+    rec.type === "cumulative" ||
+    rec.kind === "cumulative" ||
+    rec.accounting_mode === "cumulative" ||
+    rec.mode === "cumulative"
+  ) {
     return true;
+  }
   return false;
 }
 
 /**
  * Finds per-turn / last-token usage in a raw payload.
  */
-function getTurnUsageRecord(p: Record<string, unknown>): Record<string, unknown> | undefined {
+function getTurnUsageRecord(p: CodexTranscriptPayload): CodexTranscriptPayload | undefined {
   // 1. Explicit turn / delta usage fields
-  if (typeof p.turn_usage === "object" && p.turn_usage !== null && !Array.isArray(p.turn_usage)) {
-    return p.turn_usage as Record<string, unknown>;
-  }
-  if (typeof p.turnUsage === "object" && p.turnUsage !== null && !Array.isArray(p.turnUsage)) {
-    return p.turnUsage as Record<string, unknown>;
-  }
-  if (
-    typeof p.last_turn_usage === "object" &&
-    p.last_turn_usage !== null &&
-    !Array.isArray(p.last_turn_usage)
-  ) {
-    return p.last_turn_usage as Record<string, unknown>;
-  }
-  if (
-    typeof p.lastTurnUsage === "object" &&
-    p.lastTurnUsage !== null &&
-    !Array.isArray(p.lastTurnUsage)
-  ) {
-    return p.lastTurnUsage as Record<string, unknown>;
-  }
-  if (typeof p.last_turn === "object" && p.last_turn !== null && !Array.isArray(p.last_turn)) {
-    return p.last_turn as Record<string, unknown>;
-  }
+  const turnUsage = asObject(p.turn_usage) ?? asObject(p.turnUsage);
+  if (turnUsage) return turnUsage;
 
-  // If payload itself is marked cumulative, it is not a per-turn record
-  if (isCumulativeObject(p)) {
-    return undefined;
-  }
+  const lastTurnUsage = asObject(p.last_turn_usage) ?? asObject(p.lastTurnUsage);
+  if (lastTurnUsage && !isCumulativeObject(lastTurnUsage)) return lastTurnUsage;
 
-  // 2. usage / token_usage / provider_usage / usage_metadata if NOT cumulative
-  for (const key of [
+  const lastTurn = asObject(p.last_turn);
+  if (lastTurn && !isCumulativeObject(lastTurn)) return lastTurn;
+
+  // 2. Direct usage fields (only if not cumulative)
+  const candidateKeys = [
     "usage",
     "token_usage",
     "tokenUsage",
+    "response_usage",
+    "responseUsage",
     "provider_usage",
     "providerUsage",
-    "usage_metadata",
-    "usageMetadata",
-  ]) {
-    const val = p[key];
-    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-      if (!isCumulativeObject(val)) {
-        return val as Record<string, unknown>;
-      }
+    "metrics",
+  ];
+
+  for (const key of candidateKeys) {
+    const val = asObject(p[key]);
+    if (val && !isCumulativeObject(val)) {
+      return val;
     }
   }
 
-  // 3. Nested in response / message / raw
-  for (const parentKey of ["response", "message", "raw"]) {
-    const parent = p[parentKey];
-    if (typeof parent === "object" && parent !== null && !Array.isArray(parent)) {
-      const parentRec = parent as Record<string, unknown>;
-      for (const key of ["usage", "token_usage", "tokenUsage", "provider_usage", "providerUsage"]) {
-        const val = parentRec[key];
-        if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-          if (!isCumulativeObject(val)) {
-            return val as Record<string, unknown>;
-          }
+  // 3. Nested container objects
+  const parentKeys = ["response", "result", "payload", "data", "message", "step"];
+  for (const parentKey of parentKeys) {
+    const parent = asObject(p[parentKey]);
+    if (parent) {
+      for (const key of candidateKeys) {
+        const val = asObject(parent[key]);
+        if (val && !isCumulativeObject(val)) {
+          return val;
         }
       }
     }
   }
 
-  // 4. Top-level on p itself if p has prompt_tokens / input_tokens / completion_tokens etc. and is not cumulative
-  const { hasAnyMetrics } = extractTokenComponents(p);
-  if (hasAnyMetrics) {
-    return p;
-  }
-
-  return undefined;
-}
-
-/**
- * Finds cumulative session usage in a raw payload.
- */
-function getCumulativeUsageRecord(p: Record<string, unknown>): Record<string, unknown> | undefined {
-  // 1. Explicit cumulative / session usage fields
-  for (const key of [
-    "cumulative_usage",
-    "cumulativeUsage",
-    "session_usage",
-    "sessionUsage",
-    "total_usage",
-    "totalUsage",
-    "session_total_usage",
-  ]) {
-    const val = p[key];
-    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-      return val as Record<string, unknown>;
-    }
-  }
-
-  // 2. usage / token_usage that is flagged cumulative
-  for (const key of [
-    "usage",
-    "token_usage",
-    "tokenUsage",
-    "provider_usage",
-    "providerUsage",
-    "usage_metadata",
-    "usageMetadata",
-  ]) {
-    const val = p[key];
-    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-      if (isCumulativeObject(val)) {
-        return val as Record<string, unknown>;
-      }
-    }
-  }
-
-  // 3. Payload itself is marked cumulative
-  if (isCumulativeObject(p)) {
-    const { hasAnyMetrics } = extractTokenComponents(p);
-    if (hasAnyMetrics) {
+  // 4. If payload itself has token fields and is not cumulative
+  if (!isCumulativeObject(p)) {
+    const components = extractTokenComponents(p);
+    if (components.hasAnyMetrics) {
       return p;
     }
   }
@@ -397,67 +410,84 @@ function getCumulativeUsageRecord(p: Record<string, unknown>): Record<string, un
 }
 
 /**
- * Builds and validates ProviderReportedUsage without inferring missing totals.
+ * Finds cumulative / session-wide usage in a raw payload.
+ */
+function getCumulativeUsageRecord(p: CodexTranscriptPayload): CodexTranscriptPayload | undefined {
+  const candidateKeys = [
+    "cumulative_usage",
+    "cumulativeUsage",
+    "total_usage",
+    "totalUsage",
+    "session_usage",
+    "sessionUsage",
+    "aggregate_usage",
+    "aggregateUsage",
+  ];
+
+  for (const key of candidateKeys) {
+    const val = asObject(p[key]);
+    if (val) {
+      return val;
+    }
+  }
+
+  // Check if standard usage fields are explicitly flagged as cumulative
+  const standardKeys = ["usage", "token_usage", "tokenUsage", "provider_usage", "providerUsage"];
+  for (const key of standardKeys) {
+    const val = asObject(p[key]);
+    if (val && isCumulativeObject(val)) {
+      return val;
+    }
+  }
+
+  // If payload itself is explicitly cumulative
+  if (isCumulativeObject(p)) {
+    return p;
+  }
+
+  return undefined;
+}
+
+/**
+ * Constructs an authoritative ProviderReportedUsage object.
  */
 function buildProviderUsage(
-  rawUsage: Record<string, unknown>,
-  rawPayload: Record<string, unknown>,
-  accountingVersion: string,
+  rawUsage: CodexTranscriptPayload,
+  rawPayload: CodexTranscriptPayload,
+  accountingVersion = "codex-cli-transcript-v1",
 ): ProviderReportedUsage | undefined {
-  // Provider: explicit raw provider when present, otherwise adapter-known "openai"
-  const rawProvider =
-    (typeof rawPayload.provider === "string" && rawPayload.provider.trim()
-      ? rawPayload.provider.trim()
-      : undefined) ??
-    (typeof rawUsage.provider === "string" && rawUsage.provider.trim()
-      ? rawUsage.provider.trim()
-      : undefined);
-  const provider = rawProvider ?? "openai";
+  const rawProvider = asString(rawPayload.provider)?.trim() || asString(rawUsage.provider)?.trim();
+  const provider = rawProvider || "openai";
 
-  // Model: raw model only when present (never infer/fabricate)
   const rawModel =
-    (typeof rawPayload.model === "string" && rawPayload.model.trim()
-      ? rawPayload.model.trim()
-      : undefined) ??
-    (typeof rawUsage.model === "string" && rawUsage.model.trim()
-      ? rawUsage.model.trim()
-      : undefined) ??
-    (typeof rawPayload.model_id === "string" && rawPayload.model_id.trim()
-      ? rawPayload.model_id.trim()
-      : undefined) ??
-    (typeof rawPayload.modelId === "string" && rawPayload.modelId.trim()
-      ? rawPayload.modelId.trim()
-      : undefined) ??
-    (typeof rawUsage.model_id === "string" && rawUsage.model_id.trim()
-      ? rawUsage.model_id.trim()
-      : undefined) ??
-    (typeof rawUsage.modelId === "string" && rawUsage.modelId.trim()
-      ? rawUsage.modelId.trim()
-      : undefined);
-  const model = rawModel ?? undefined;
+    asString(rawPayload.model)?.trim() ||
+    asString(rawUsage.model)?.trim() ||
+    asString(rawPayload.model_id)?.trim() ||
+    asString(rawPayload.modelId)?.trim() ||
+    asString(rawUsage.model_id)?.trim() ||
+    asString(rawUsage.modelId)?.trim();
+  const model = rawModel || undefined;
 
   const costMicroUsd = parseCostMicroUsd(rawUsage) ?? parseCostMicroUsd(rawPayload);
   const durationMs = parseDurationMs(rawUsage) ?? parseDurationMs(rawPayload);
 
-  // Check explicit availability
   const explicitAvailability =
-    typeof rawUsage.availability === "string"
-      ? rawUsage.availability
-      : typeof rawPayload.availability === "string"
-        ? rawPayload.availability
-        : undefined;
+    asString(rawUsage.availability) ??
+    asString(rawPayload.availability) ??
+    asString(rawUsage.provider_usage_availability) ??
+    asString(rawPayload.provider_usage_availability);
 
   if (
     explicitAvailability === "unavailable" ||
     rawUsage.unavailable === true ||
     rawPayload.unavailable === true
   ) {
-    const usageObj = {
+    const usageObj: ProviderReportedUsage = {
       provider,
-      model,
       accountingVersion,
-      availability: "unavailable" as const,
+      availability: "unavailable",
     };
+    if (model) usageObj.model = model;
     const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
     return parsed.success ? parsed.data : undefined;
   }
@@ -471,235 +501,270 @@ function buildProviderUsage(
     hasAnyMetrics,
   } = extractTokenComponents(rawUsage);
 
-  const hasMetrics = hasAnyMetrics || costMicroUsd !== undefined || durationMs !== undefined;
+  const payloadTokens = extractTokenComponents(rawPayload);
+
+  const finalInputTokens = inputTokens ?? payloadTokens.inputTokens;
+  const finalOutputTokens = outputTokens ?? payloadTokens.outputTokens;
+  const finalReasoningTokens = reasoningTokens ?? payloadTokens.reasoningTokens;
+  const finalCachedInputTokens = cachedInputTokens ?? payloadTokens.cachedInputTokens;
+  const finalTotalTokens = totalTokens ?? payloadTokens.totalTokens;
+
+  const hasMetrics =
+    hasAnyMetrics ||
+    payloadTokens.hasAnyMetrics ||
+    costMicroUsd !== undefined ||
+    durationMs !== undefined;
 
   if (!hasMetrics) {
-    if (explicitAvailability === "unavailable") {
-      const usageObj = {
+    if (explicitAvailability === "complete" || explicitAvailability === "partial") {
+      const usageObj: ProviderReportedUsage = {
         provider,
-        model,
         accountingVersion,
-        availability: "unavailable" as const,
+        availability: explicitAvailability,
       };
+      if (model) usageObj.model = model;
       const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
       return parsed.success ? parsed.data : undefined;
     }
     return undefined;
   }
 
-  let availability: "complete" | "partial" = "partial";
-  if (explicitAvailability === "complete") {
-    availability = totalTokens !== undefined ? "complete" : "partial";
-  } else if (explicitAvailability === "partial") {
-    availability = "partial";
-  } else {
-    // Explicit totalTokens presence defines completeness
-    availability = totalTokens !== undefined ? "complete" : "partial";
-  }
+  const availability: "complete" | "partial" =
+    explicitAvailability === "partial"
+      ? "partial"
+      : explicitAvailability === "complete" || finalTotalTokens !== undefined
+        ? "complete"
+        : "partial";
 
-  const usageObj: Record<string, unknown> = {
+  const usageObj: ProviderReportedUsage = {
     provider,
-    model,
     accountingVersion,
     availability,
   };
-
-  if (inputTokens !== undefined) usageObj.inputTokens = inputTokens;
-  if (outputTokens !== undefined) usageObj.outputTokens = outputTokens;
-  if (reasoningTokens !== undefined) usageObj.reasoningTokens = reasoningTokens;
-  if (cachedInputTokens !== undefined) usageObj.cachedInputTokens = cachedInputTokens;
-  if (totalTokens !== undefined) usageObj.totalTokens = totalTokens;
+  if (model) usageObj.model = model;
+  if (finalInputTokens !== undefined) usageObj.inputTokens = finalInputTokens;
+  if (finalOutputTokens !== undefined) usageObj.outputTokens = finalOutputTokens;
+  if (finalReasoningTokens !== undefined) usageObj.reasoningTokens = finalReasoningTokens;
+  if (finalCachedInputTokens !== undefined) usageObj.cachedInputTokens = finalCachedInputTokens;
+  if (finalTotalTokens !== undefined) usageObj.totalTokens = finalTotalTokens;
   if (costMicroUsd !== undefined) usageObj.costMicroUsd = costMicroUsd;
   if (durationMs !== undefined) usageObj.durationMs = durationMs;
 
   const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
-  if (parsed.success) {
-    return parsed.data;
-  }
-  return undefined;
+  return parsed.success ? parsed.data : undefined;
+}
+
+export interface BaseNormalizedEventHeader {
+  eventId: string;
+  sessionId: string;
+  timestamp: string;
+  schemaVersion: string;
+  harnessId: string;
+  workspaceId: string;
+  causalRef: CausalRef;
+  redaction: RedactionMeta;
+  metadata?: CodexTranscriptPayload;
 }
 
 /**
- * State-preserving decoder for Codex CLI session rollouts and JSONL transcripts.
+ * Stateful session-level decoder for Codex CLI transcript events.
  */
 export class CodexSessionDecoder {
-  private sessionId: string;
-  private sequence: number;
-  private lastEventId?: string;
-  private readonly callMap = new Map<string, { toolName: string; timestamp: string }>();
-  private readonly workspaceId?: string;
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  private sequenceCounter: number;
+  private lastEventId: string | null = null;
+  private toolCallSeq = 0;
+  private callMap = new Map<string, { toolName: string; toolCallId: string; eventId: string }>();
   private hasEmittedTurnUsage = false;
   private lastCumulativeUsage?: {
-    rawUsage: Record<string, unknown>;
-    rawPayload: Record<string, unknown>;
+    rawUsage: CodexTranscriptPayload;
+    rawPayload: CodexTranscriptPayload;
   };
-  private currentMetadata?: Record<string, unknown>;
+  private currentMetadata?: CodexTranscriptPayload;
 
-  constructor(options?: CodexDecoderOptions) {
-    this.sessionId = options?.sessionId ?? `sess_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-    this.sequence = options?.initialSequence ?? 1;
-    this.workspaceId = options?.workspaceId;
+  constructor(options: CodexDecoderOptions = {}) {
+    this.sessionId = options.sessionId || generateEventId("sess");
+    this.workspaceId = options.workspaceId || "default";
+    this.sequenceCounter =
+      options.initialSequence !== undefined
+        ? options.initialSequence - 1
+        : (options.lastCausalSequence ?? 0);
   }
 
-  /**
-   * Resets the decoder sequence and session state.
-   */
-  reset(sessionId?: string): void {
-    if (sessionId) {
-      this.sessionId = sessionId;
-    }
-    this.sequence = 1;
-    this.lastEventId = undefined;
-    this.callMap.clear();
-    this.hasEmittedTurnUsage = false;
-    this.lastCumulativeUsage = undefined;
-    this.currentMetadata = undefined;
+  private buildCausalRef(eventId: string): CausalRef {
+    const causalSequence = ++this.sequenceCounter;
+    const parentId = this.lastEventId;
+    this.lastEventId = eventId;
+    return {
+      parentId,
+      causalSequence,
+    };
   }
 
-  private nextHeader(
-    timestamp?: unknown,
-    rawEventId?: unknown,
-    metadataOverride?: Record<string, unknown>,
-  ): {
-    eventId: string;
-    schemaVersion: "1.0.0";
-    sessionId: string;
-    timestamp: string;
-    causalRef: CausalRef;
-    redaction: RedactionMeta;
-    metadata?: Record<string, unknown>;
-  } {
-    const eventId = typeof rawEventId === "string" ? rawEventId : generateEventId("evt");
+  private emitHeader(
+    type: NormalizedSessionEvent["type"],
+    timestamp?: string,
+    rawEventId?: string,
+    metadataOverride?: CodexTranscriptPayload,
+  ): BaseNormalizedEventHeader {
+    const eventId = asString(rawEventId) ?? generateEventId("evt");
     const ts = parseTimestamp(timestamp);
-    const causalSequence = this.sequence++;
     const meta = metadataOverride ?? this.currentMetadata;
-    const header = {
+    const header: BaseNormalizedEventHeader = {
       eventId,
-      schemaVersion: "1.0.0" as const,
       sessionId: this.sessionId,
       timestamp: ts,
-      causalRef: {
-        parentId: this.lastEventId ?? null,
-        causalSequence,
-      },
+      schemaVersion: DEFAULT_SCHEMA_VERSION,
+      harnessId: "codex-cli",
+      workspaceId: this.workspaceId,
+      causalRef: this.buildCausalRef(eventId),
       redaction: {
         isRedacted: false,
         redactedFields: [],
-        redactionStrategy: "none" as const,
+        redactionStrategy: "none",
         scrubbedPatterns: [],
       },
-      ...(meta && Object.keys(meta).length > 0 ? { metadata: meta } : {}),
     };
-    this.lastEventId = eventId;
+    if (meta && Object.keys(meta).length > 0) {
+      header.metadata = meta;
+    }
     return header;
   }
 
-  /**
-   * Decodes a single raw record (string line or parsed object) into zero or more NormalizedSessionEvents.
-   */
-  decodeRecord(raw: string | Record<string, unknown>): NormalizedSessionEvent[] {
-    if (!raw) {
-      return [];
-    }
+  private nextHeader(timestamp?: string, rawEventId?: string): BaseNormalizedEventHeader {
+    return this.emitHeader("message", timestamp, rawEventId);
+  }
 
-    let payload: Record<string, unknown>;
-    if (typeof raw === "string") {
-      const trimmed = raw.trim();
-      if (!trimmed) {
-        return [];
-      }
+  decodeRecord(raw: string | CodexTranscriptPayload): NormalizedSessionEvent[] {
+    let payload: CodexTranscriptPayload;
+    const rawStr = asString(raw);
+    if (rawStr !== undefined) {
+      const trimmed = rawStr.trim();
+      if (!trimmed) return [];
       try {
-        payload = JSON.parse(trimmed);
+        const parsed = JSON.parse(trimmed);
+        const obj = asObject(parsed);
+        if (!obj) return [];
+        payload = obj;
       } catch {
-        const header = this.nextHeader();
-        const unk: NormalizedUnknownPassthroughEvent = {
-          ...header,
-          type: "unknown_passthrough",
-          rawEventType: "unparseable_string",
-          rawPayload: { raw: trimmed },
-        };
-        return [unk];
+        return [
+          {
+            ...this.emitHeader("unknown_passthrough"),
+            type: "unknown_passthrough",
+            rawEventType: "unparseable_json",
+            rawPayload: { unparseable: trimmed },
+          },
+        ];
       }
     } else {
-      payload = raw;
+      const obj = asObject(raw);
+      if (!obj) {
+        return [
+          {
+            ...this.emitHeader("unknown_passthrough"),
+            type: "unknown_passthrough",
+            rawEventType: "invalid_payload_shape",
+            rawPayload: { rawPayload: JSON.stringify(raw) },
+          },
+        ];
+      }
+      payload = obj;
     }
-
-    if (typeof payload !== "object" || payload === null) {
-      return [];
-    }
-
     return this.normalizePayload(payload);
   }
 
-  /**
-   * Decodes a full multi-line transcript or array of records.
-   */
   decodeTranscript(
-    transcript: string | Array<string | Record<string, unknown>>,
+    transcript: string | Array<string | CodexTranscriptPayload>,
   ): NormalizedSessionEvent[] {
-    const events: NormalizedSessionEvent[] = [];
-
-    if (typeof transcript === "string") {
-      const lines = transcript.split(/\r?\n/);
+    const str = asString(transcript);
+    if (str !== undefined) {
+      const lines = str.split(/\r?\n/);
+      const events: NormalizedSessionEvent[] = [];
       for (const line of lines) {
-        events.push(...this.decodeRecord(line));
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        events.push(...this.decodeRecord(trimmed));
       }
-    } else if (Array.isArray(transcript)) {
+      return events;
+    }
+
+    if (Array.isArray(transcript)) {
+      const events: NormalizedSessionEvent[] = [];
       for (const item of transcript) {
         events.push(...this.decodeRecord(item));
       }
+      return events;
     }
 
-    return events;
+    return [];
   }
 
-  private normalizePayload(p: Record<string, unknown>): NormalizedSessionEvent[] {
-    const rawType = String(p.type || p.event || p.role || "").toLowerCase();
-    const timestamp = p.timestamp || p.created_at || p.createdAt || p.time;
-    const rawEventId = p.eventId || p.event_id || p.id;
-    this.currentMetadata =
-      typeof p.metadata === "object" && p.metadata !== null
-        ? (p.metadata as Record<string, unknown>)
-        : undefined;
-    // Detect session ID override if embedded
-    if (typeof p.sessionId === "string") {
-      this.sessionId = p.sessionId;
-    } else if (typeof p.session_id === "string") {
-      this.sessionId = p.session_id;
+  private normalizePayload(p: CodexTranscriptPayload): NormalizedSessionEvent[] {
+    const events: NormalizedSessionEvent[] = [];
+
+    const metaObj = asObject(p.metadata);
+    if (metaObj) {
+      this.currentMetadata = metaObj;
     }
+
+    const rawSessionId = asString(p.sessionId) ?? asString(p.session_id);
+
+    const timestamp =
+      asString(p.timestamp) ?? asString(p.created_at) ?? asString(p.time) ?? asString(p.datetime);
+
+    const rawEventId = asString(p.eventId) ?? asString(p.event_id) ?? asString(p.id);
+
+    const rawType = String(
+      asString(p.type) ??
+        asString(p.event) ??
+        asString(p.role) ??
+        asString(p.item_type) ??
+        asString(p.kind) ??
+        "",
+    ).toLowerCase();
 
     const turnUsageRec = getTurnUsageRecord(p);
     const cumUsageRec = getCumulativeUsageRecord(p);
 
-    // 1. Session Lifecycle
+    // 1. Session Lifecycle Events
     if (
-      rawType === "session_lifecycle" ||
       rawType === "session_start" ||
+      rawType === "session_init" ||
+      rawType === "session_started" ||
       rawType === "session_end" ||
-      rawType === "session_pause" ||
-      rawType === "session_resume" ||
-      rawType === "session_crash"
+      rawType === "session_completed" ||
+      rawType === "session_terminated" ||
+      rawType === "session_stop" ||
+      rawType === "session_crash" ||
+      rawType === "session_lifecycle"
     ) {
-      const lifecycleType = (p.lifecycleType ||
-        (rawType === "session_start"
-          ? "start"
-          : rawType === "session_end"
-            ? "end"
-            : rawType === "session_pause"
-              ? "pause"
-              : rawType === "session_resume"
-                ? "resume"
-                : rawType === "session_crash"
-                  ? "crash"
-                  : "start")) as "start" | "pause" | "resume" | "end" | "crash";
-
+      const rawLType = (asString(p.lifecycleType) ?? asString(p.lifecycle_type))?.toLowerCase();
+      const isStart =
+        rawType === "session_start" ||
+        rawType === "session_init" ||
+        rawType === "session_started" ||
+        rawLType === "start";
+      const isCrash = rawType === "session_crash" || rawLType === "crash";
+      const lifecycleType: "start" | "pause" | "resume" | "end" | "crash" =
+        rawLType === "start" ||
+        rawLType === "pause" ||
+        rawLType === "resume" ||
+        rawLType === "end" ||
+        rawLType === "crash"
+          ? rawLType
+          : isStart
+            ? "start"
+            : isCrash
+              ? "crash"
+              : "end";
       let lifecycleUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
         lifecycleUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
         if (lifecycleUsage) {
           this.hasEmittedTurnUsage = true;
         }
-      } else if (lifecycleType === "end" || lifecycleType === "crash") {
+      } else if (!isStart) {
         if (!this.hasEmittedTurnUsage) {
           const cumRec = cumUsageRec ?? this.lastCumulativeUsage?.rawUsage;
           const cumPayload = cumUsageRec ? p : (this.lastCumulativeUsage?.rawPayload ?? p);
@@ -711,30 +776,34 @@ export class CodexSessionDecoder {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const header = this.nextHeader(timestamp, rawEventId);
+      const header = this.emitHeader("session_lifecycle", timestamp, rawEventId);
+      const exitReason = asString(p.exitReason) ?? asString(p.reason);
+      const harnessName = asString(p.harnessName) ?? "codex-cli";
+      const workspaceId = asString(p.workspaceId) ?? this.workspaceId;
+
       const evt: NormalizedSessionLifecycleEvent = {
         ...header,
         type: "session_lifecycle",
         lifecycleType,
-        exitReason:
-          typeof p.exitReason === "string"
-            ? p.exitReason
-            : typeof p.reason === "string"
-              ? p.reason
-              : undefined,
-        harnessName: typeof p.harnessName === "string" ? p.harnessName : "codex-cli",
-        workspaceId: typeof p.workspaceId === "string" ? p.workspaceId : this.workspaceId,
-        providerUsage: lifecycleUsage,
+        harnessName,
+        workspaceId,
       };
-      return [evt];
+      if (exitReason !== undefined) {
+        evt.exitReason = exitReason;
+      }
+      if (lifecycleUsage) {
+        evt.providerUsage = lifecycleUsage;
+      }
+      events.push(evt);
+      return events;
     }
 
-    // 2. Model Reasoning / Thought
+    // 2. Model Reasoning / Thought Events
     if (
-      rawType === "model_reasoning" ||
       rawType === "reasoning" ||
+      rawType === "thinking" ||
       rawType === "thought" ||
-      rawType === "chain_of_thought"
+      rawType === "model_reasoning"
     ) {
       let reasoningUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
@@ -746,82 +815,96 @@ export class CodexSessionDecoder {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const content =
-        typeof p.reasoningContent === "string"
-          ? p.reasoningContent
-          : typeof p.content === "string"
-            ? p.content
-            : typeof p.text === "string"
-              ? p.text
-              : typeof p.thought === "string"
-                ? p.thought
-                : "";
+      const thought =
+        asString(p.reasoningContent) ??
+        asString(p.reasoning_content) ??
+        asString(p.content) ??
+        asString(p.text) ??
+        asString(p.thought) ??
+        "";
+
+      const header = this.emitHeader("model_reasoning", timestamp, rawEventId);
+      const signature = asString(p.signature);
+      const model = asString(p.model);
       const evt: NormalizedModelReasoningEvent = {
         ...header,
         type: "model_reasoning",
-        reasoningContent: content,
-        model: typeof p.model === "string" ? p.model : undefined,
-        providerUsage: reasoningUsage,
+        reasoningContent: thought,
       };
-      return [evt];
-    }
-    // 3. User Message
-    if (rawType === "user_message" || rawType === "user" || rawType === "user_turn") {
-      let userUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        userUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (userUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
+      if (signature) {
+        evt.signature = signature;
       }
+      if (model) {
+        evt.model = model;
+      }
+      if (reasoningUsage) {
+        evt.providerUsage = reasoningUsage;
+      }
+      events.push(evt);
+      return events;
+    }
 
-      const header = this.nextHeader(timestamp, rawEventId);
+    // 3. User Message / Prompt Events
+    if (
+      rawType === "user_message" ||
+      rawType === "user" ||
+      rawType === "prompt" ||
+      rawType === "query"
+    ) {
       let content = "";
       let contentParts: MessageContentPart[] | undefined;
 
-      if (typeof p.content === "string") {
-        content = p.content;
-      } else if (typeof p.text === "string") {
-        content = p.text;
-      } else if (typeof p.prompt === "string") {
-        content = p.prompt;
-      } else if (typeof p.query === "string") {
-        content = p.query;
-      } else if (typeof p.input === "string") {
-        content = p.input;
-      } else if (Array.isArray(p.content)) {
-        contentParts = p.content as MessageContentPart[];
-        content = (p.content as Array<{ text?: string }>).map((part) => part.text ?? "").join("\n");
-      } else if (typeof p.message === "object" && p.message !== null) {
-        const msg = p.message as Record<string, unknown>;
-        content =
-          typeof msg.content === "string"
-            ? msg.content
-            : typeof msg.text === "string"
-              ? msg.text
-              : typeof msg.prompt === "string"
-                ? msg.prompt
-                : JSON.stringify(msg);
+      const strContent = asString(p.content);
+      const strText = asString(p.text);
+      const strPrompt = asString(p.prompt);
+      const strQuery = asString(p.query);
+      const strInput = asString(p.input);
+
+      if (strContent !== undefined) {
+        content = strContent;
+      } else if (strText !== undefined) {
+        content = strText;
+      } else if (strPrompt !== undefined) {
+        content = strPrompt;
+      } else if (strQuery !== undefined) {
+        content = strQuery;
+      } else if (strInput !== undefined) {
+        content = strInput;
+      } else {
+        const partsArray = asArray(p.content);
+        if (partsArray) {
+          content = partsArray.map((part) => asString(asObject(part)?.text) ?? "").join("\n");
+        } else {
+          const msgObj = asObject(p.message);
+          if (msgObj) {
+            content =
+              asString(msgObj.content) ??
+              asString(msgObj.text) ??
+              asString(msgObj.prompt) ??
+              JSON.stringify(msgObj);
+          }
+        }
       }
 
-      const evt: NormalizedMessageEvent = {
+      const header = this.nextHeader(timestamp, rawEventId);
+      const userModel = asString(p.model);
+      const userEvt: NormalizedMessageEvent = {
         ...header,
         type: "message",
         role: "user",
         content,
-        contentParts,
-        providerUsage: userUsage,
       };
-      return [evt];
+      if (contentParts) {
+        userEvt.contentParts = contentParts;
+      }
+      if (userModel) {
+        userEvt.model = userModel;
+      }
+      events.push(userEvt);
+      return events;
     }
-
-    // 4. Assistant Message
+    // 4. Assistant Message / Completion Events
     if (rawType === "assistant_message" || rawType === "assistant" || rawType === "agent_turn") {
-      const events: NormalizedSessionEvent[] = [];
-
       let assistantUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
         assistantUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
@@ -835,165 +918,184 @@ export class CodexSessionDecoder {
       let content = "";
       let contentParts: MessageContentPart[] | undefined;
 
-      if (typeof p.content === "string") {
-        content = p.content;
-      } else if (typeof p.text === "string") {
-        content = p.text;
-      } else if (Array.isArray(p.content)) {
-        contentParts = p.content as MessageContentPart[];
-        content = (p.content as Array<{ text?: string }>).map((part) => part.text ?? "").join("\n");
-      } else if (typeof p.message === "object" && p.message !== null) {
-        const msg = p.message as Record<string, unknown>;
-        content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg);
+      const strContent = asString(p.content);
+      const strText = asString(p.text);
+
+      if (strContent !== undefined) {
+        content = strContent;
+      } else if (strText !== undefined) {
+        content = strText;
+      } else {
+        const partsArray = asArray(p.content);
+        if (partsArray) {
+          content = partsArray.map((part) => asString(asObject(part)?.text) ?? "").join("\n");
+        } else {
+          const msgObj = asObject(p.message);
+          if (msgObj) {
+            content = asString(msgObj.content) ?? JSON.stringify(msgObj);
+          }
+        }
       }
 
       // Check for inline tool_calls array
-      const toolCalls = Array.isArray(p.tool_calls)
-        ? p.tool_calls
-        : Array.isArray(p.toolCalls)
-          ? p.toolCalls
-          : undefined;
+      const toolCalls = asArray(p.tool_calls) ?? asArray(p.toolCalls);
 
       if (content || !toolCalls || toolCalls.length === 0) {
         const header = this.nextHeader(timestamp, rawEventId);
-        events.push({
+        const assistantModel = asString(p.model);
+        const msgEvt: NormalizedMessageEvent = {
           ...header,
           type: "message",
           role: "assistant",
           content,
-          contentParts,
-          model: typeof p.model === "string" ? p.model : undefined,
-          providerUsage: assistantUsage,
-        });
-        assistantUsage = undefined;
+        };
+        if (contentParts) {
+          msgEvt.contentParts = contentParts;
+        }
+        if (assistantModel) {
+          msgEvt.model = assistantModel;
+        }
+        if (assistantUsage) {
+          msgEvt.providerUsage = assistantUsage;
+        }
+        events.push(msgEvt);
       }
 
       if (toolCalls && toolCalls.length > 0) {
-        for (const tc of toolCalls as Array<Record<string, unknown>>) {
-          const callId = String(tc.id || tc.call_id || generateEventId("call"));
-          const fn = (
-            typeof tc.function === "object" && tc.function !== null ? tc.function : tc
-          ) as Record<string, unknown>;
-          const toolName = String(fn.name || fn.tool_name || fn.tool || "unknown_tool");
-          const parameters = parseToolParameters(fn.arguments || fn.parameters || fn.params);
+        let isFirstEventInTurn = !content;
+        for (const tc of toolCalls) {
+          const tcObj = asObject(tc);
+          if (!tcObj) continue;
+          const fnObj = asObject(tcObj.function) ?? tcObj;
 
-          this.callMap.set(callId, {
+          const toolName = String(
+            asString(fnObj.name) ??
+              asString(tcObj.name) ??
+              asString(tcObj.toolName) ??
+              "unknown_tool",
+          );
+          const toolCallId = String(
+            asString(tcObj.id) ??
+              asString(tcObj.tool_call_id) ??
+              asString(tcObj.call_id) ??
+              generateEventId("call"),
+          );
+          const rawArgs = fnObj.arguments ?? fnObj.params ?? tcObj.input ?? {};
+          const parameters = parseToolParameters(rawArgs);
+
+          const header = this.emitHeader("tool_call", timestamp);
+          this.callMap.set(toolCallId, {
             toolName,
-            timestamp: parseTimestamp(timestamp),
+            toolCallId,
+            eventId: header.eventId,
           });
 
-          const callHeader = this.nextHeader(timestamp);
-          events.push({
-            ...callHeader,
+          const candidateRef = asString(tcObj.candidateRef);
+          const toolCallEvt: NormalizedToolCallEvent = {
+            ...header,
             type: "tool_call",
-            callId,
+            callId: toolCallId,
             toolName,
             parameters,
-            candidateRef: typeof tc.candidateRef === "string" ? tc.candidateRef : undefined,
-            isShadow: Boolean(tc.isShadow ?? tc.is_shadow ?? false),
-            providerUsage: assistantUsage,
-          });
-          assistantUsage = undefined;
+            isShadow: false,
+          };
+          if (candidateRef) {
+            toolCallEvt.candidateRef = candidateRef;
+          }
+          if (isFirstEventInTurn && assistantUsage) {
+            toolCallEvt.providerUsage = assistantUsage;
+          }
+          events.push(toolCallEvt);
+          isFirstEventInTurn = false;
         }
       }
 
       return events;
     }
 
-    // 5. Generic Message
-    if (rawType === "message") {
-      let msgUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        msgUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (msgUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
-      }
-
-      const role = (
-        p.role === "user" || p.role === "assistant" || p.role === "system" || p.role === "tool"
-          ? p.role
-          : "assistant"
-      ) as "user" | "assistant" | "system" | "tool";
+    // 5. System Message Events
+    if (rawType === "system_message" || rawType === "system" || rawType === "developer_message") {
+      const rawRole = asString(p.role)?.toLowerCase();
+      const role: "system" | "user" | "assistant" =
+        rawRole === "user" || rawRole === "assistant" ? rawRole : "system";
 
       let content = "";
       let contentParts: MessageContentPart[] | undefined;
-      if (typeof p.content === "string") {
-        content = p.content;
-      } else if (Array.isArray(p.content)) {
-        contentParts = p.content as MessageContentPart[];
-        content = (p.content as Array<{ text?: string }>).map((part) => part.text ?? "").join("\n");
+
+      const strContent = asString(p.content);
+      if (strContent !== undefined) {
+        content = strContent;
+      } else {
+        const partsArray = asArray(p.content);
+        if (partsArray) {
+          content = partsArray.map((part) => asString(asObject(part)?.text) ?? "").join("\n");
+        } else {
+          const msgObj = asObject(p.message);
+          if (msgObj) {
+            content = asString(msgObj.content) ?? JSON.stringify(msgObj);
+          }
+        }
       }
 
       const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedMessageEvent = {
+      const sysModel = asString(p.model);
+      const sysEvt: NormalizedMessageEvent = {
         ...header,
         type: "message",
         role,
         content,
-        contentParts,
-        model: typeof p.model === "string" ? p.model : undefined,
-        providerUsage: msgUsage,
       };
-      return [evt];
+      if (contentParts) {
+        sysEvt.contentParts = contentParts;
+      }
+      if (sysModel) {
+        sysEvt.model = sysModel;
+      }
+      events.push(sysEvt);
+      return events;
     }
 
-    // 6. Tool Discovery
+    // 6. Tool Discovery Events
     if (
       rawType === "tool_discovery" ||
       rawType === "tools_discovered" ||
       rawType === "tools_registered" ||
-      rawType === "tool_manifest"
+      rawType === "mcp_tools" ||
+      (Array.isArray(p.tools) && rawType === "tools")
     ) {
-      let discUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        discUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (discUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
-      }
-
-      const rawTools = Array.isArray(p.tools)
-        ? p.tools
-        : Array.isArray(p.toolList)
-          ? p.toolList
-          : [];
-      const tools: DiscoveredToolEntry[] = rawTools.map((t: unknown) => {
-        const item = (typeof t === "object" && t !== null ? t : {}) as Record<string, unknown>;
+      const rawTools = asArray(p.tools) ?? asArray(p.tool_list) ?? [];
+      const tools: DiscoveredToolEntry[] = rawTools.map((t: CodexTranscriptValue) => {
+        const item = asObject(t) ?? {};
+        const paramsObj = asObject(item.parameters) ?? asObject(item.inputSchema) ?? {};
         return {
-          name: String(item.name || "unnamed_tool"),
-          description: typeof item.description === "string" ? item.description : undefined,
-          inputSchema:
-            typeof item.parameters === "object" && item.parameters !== null
-              ? (item.parameters as Record<string, unknown>)
-              : typeof item.inputSchema === "object" && item.inputSchema !== null
-                ? (item.inputSchema as Record<string, unknown>)
-                : undefined,
-          provider: typeof item.provider === "string" ? item.provider : "codex-cli",
+          name: String(asString(item.name) || asString(item.id) || "unknown_tool"),
+          inputSchema: paramsObj,
+          provider: asString(item.provider) || "codex-cli",
         };
       });
-
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedToolDiscoveryEvent = {
+      const header = this.emitHeader("tool_discovery", timestamp, rawEventId);
+      const provider = asString(p.provider) || "codex-cli";
+      const rawSource = asString(p.source);
+      const source: "mcp" | "builtin" | "dynamic" | "harness" =
+        rawSource === "builtin" || rawSource === "dynamic" || rawSource === "harness"
+          ? rawSource
+          : "mcp";
+      events.push({
         ...header,
         type: "tool_discovery",
         tools,
-        source: "mcp",
-        providerUsage: discUsage,
-      };
-      return [evt];
+        provider,
+        source,
+      });
+      return events;
     }
 
-    // 7. Tool Call
+    // 7. Tool Call Events (standalone)
     if (
       rawType === "tool_call" ||
-      rawType === "call_tool" ||
       rawType === "function_call" ||
-      rawType === "action"
+      rawType === "action_call" ||
+      rawType === "call"
     ) {
       let callUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
@@ -1005,41 +1107,58 @@ export class CodexSessionDecoder {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const callId = String(p.callId || p.call_id || p.id || generateEventId("call"));
+      const fnObj = asObject(p.function) ?? p;
       const toolName = String(
-        p.toolName || p.tool_name || p.name || p.tool || p.function || "unknown_tool",
+        asString(fnObj.name) ??
+          asString(p.name) ??
+          asString(p.toolName) ??
+          asString(p.tool_name) ??
+          "unknown_tool",
       );
-      const parameters = parseToolParameters(
-        p.parameters || p.params || p.args || p.arguments || p.input,
+      const toolCallId = String(
+        asString(p.callId) ??
+          asString(p.call_id) ??
+          asString(p.tool_call_id) ??
+          asString(p.id) ??
+          generateEventId("call"),
       );
+      const rawArgs = fnObj.arguments ?? fnObj.params ?? p.input ?? p.args ?? {};
+      const parameters = parseToolParameters(rawArgs);
 
-      this.callMap.set(callId, {
+      const header = this.emitHeader("tool_call", timestamp, rawEventId);
+      this.callMap.set(toolCallId, {
         toolName,
-        timestamp: parseTimestamp(timestamp),
+        toolCallId,
+        eventId: header.eventId,
       });
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedToolCallEvent = {
+      const candidateRef = asString(p.candidateRef);
+      const callEvt: NormalizedToolCallEvent = {
         ...header,
         type: "tool_call",
-        callId,
+        callId: toolCallId,
         toolName,
         parameters,
-        candidateRef: typeof p.candidateRef === "string" ? p.candidateRef : undefined,
-        isShadow: Boolean(p.isShadow ?? p.is_shadow ?? false),
-        providerUsage: callUsage,
+        isShadow: false,
       };
-      return [evt];
+      if (candidateRef) {
+        callEvt.candidateRef = candidateRef;
+      }
+      if (callUsage) {
+        callEvt.providerUsage = callUsage;
+      }
+      events.push(callEvt);
+      return events;
     }
 
-    // 8. Tool Result
+    // 8. Tool Result Events
     if (
       rawType === "tool_result" ||
-      rawType === "tool_response" ||
-      rawType === "function_call_result" ||
+      rawType === "function_result" ||
       rawType === "action_result" ||
-      rawType === "observation" ||
-      rawType === "tool"
+      rawType === "tool_response" ||
+      rawType === "result" ||
+      rawType === "tool_error"
     ) {
       let resUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
@@ -1052,55 +1171,43 @@ export class CodexSessionDecoder {
       }
 
       const callId = String(
-        p.callId || p.call_id || p.tool_call_id || p.id || generateEventId("call"),
+        asString(p.callId) ??
+          asString(p.call_id) ??
+          asString(p.tool_call_id) ??
+          asString(p.id) ??
+          generateEventId("call"),
       );
       const cached = this.callMap.get(callId);
       const toolName = String(
-        p.toolName || p.tool_name || p.name || cached?.toolName || "unknown_tool",
+        asString(p.toolName) ??
+          asString(p.tool_name) ??
+          asString(p.name) ??
+          cached?.toolName ??
+          "unknown_tool",
       );
 
-      const result =
-        p.result !== undefined
-          ? p.result
-          : p.output !== undefined
-            ? p.output
-            : p.content !== undefined
-              ? p.content
-              : null;
-      const isError = Boolean(p.isError || p.is_error || p.error);
+      const rawResult = p.result ?? p.output ?? p.content ?? p.data ?? p.response;
+      const isError = Boolean(p.is_error || p.isError || p.error || rawType === "tool_error");
       const durationMs =
-        typeof p.executionDurationMs === "number"
-          ? p.executionDurationMs
-          : typeof p.durationMs === "number"
-            ? p.durationMs
-            : typeof p.duration_ms === "number"
-              ? p.duration_ms
-              : 0;
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedToolResultEvent = {
+        asNumber(p.executionDurationMs) ?? asNumber(p.durationMs) ?? asNumber(p.duration_ms) ?? 0;
+
+      const header = this.emitHeader("tool_result", timestamp, rawEventId);
+      events.push({
         ...header,
         type: "tool_result",
         callId,
         toolName,
-        result,
+        result: rawResult ?? {},
         isError,
         executionDurationMs: durationMs,
-        isShadow: Boolean(p.isShadow ?? p.is_shadow ?? false),
+        isShadow: false,
         providerUsage: resUsage,
-      };
-      return [evt];
+      });
+      return events;
     }
 
-    // 9. Command Execution
-    if (
-      rawType === "command_exec" ||
-      rawType === "command" ||
-      rawType === "exec" ||
-      rawType === "bash" ||
-      rawType === "shell" ||
-      rawType === "terminal" ||
-      rawType === "run_command"
-    ) {
+    // 9. Command Execution Events
+    if (rawType === "command_exec" || rawType === "command" || rawType === "exec") {
       let cmdUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
         cmdUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
@@ -1111,51 +1218,37 @@ export class CodexSessionDecoder {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const command = String(p.command || p.cmd || p.exec || "");
-      const args = Array.isArray(p.args) ? (p.args as string[]) : [];
-      const exitCode =
-        typeof p.exitCode === "number"
-          ? p.exitCode
-          : typeof p.exit_code === "number"
-            ? p.exit_code
-            : 0;
-      const stdout =
-        typeof p.stdout === "string"
-          ? p.stdout
-          : typeof p.output === "string"
-            ? p.output
-            : undefined;
-      const stderr = typeof p.stderr === "string" ? p.stderr : undefined;
-      const durationMs =
-        typeof p.durationMs === "number"
-          ? p.durationMs
-          : typeof p.duration_ms === "number"
-            ? p.duration_ms
-            : 0;
+      const command = String(asString(p.command) ?? asString(p.cmd) ?? "");
+      const argsArray = asArray(p.args);
+      const args = argsArray ? argsArray.map((a) => asString(a) ?? String(a)) : [];
+      const exitCode = asNumber(p.exitCode) ?? asNumber(p.exit_code) ?? 0;
+      const stdout = asString(p.stdout) ?? asString(p.output);
+      const stderr = asString(p.stderr);
+      const durationMs = asNumber(p.durationMs) ?? asNumber(p.duration_ms) ?? 0;
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedCommandExecEvent = {
+      const header = this.emitHeader("command_exec", timestamp, rawEventId);
+      events.push({
         ...header,
         type: "command_exec",
         command,
         args,
-        cwd: typeof p.cwd === "string" ? p.cwd : undefined,
+        cwd: asString(p.cwd),
         exitCode,
         stdout,
         stderr,
         durationMs,
         providerUsage: cmdUsage,
-      };
-      return [evt];
+      });
+      return events;
     }
 
-    // 10. File Edit
+    // 10. File Edit Events
     if (
       rawType === "file_edit" ||
-      rawType === "edit_file" ||
-      rawType === "write_file" ||
-      rawType === "patch_file" ||
-      rawType === "file_change"
+      rawType === "patch_applied" ||
+      rawType === "file_write" ||
+      rawType === "file_created" ||
+      rawType === "file_deleted"
     ) {
       let editUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
@@ -1167,135 +1260,132 @@ export class CodexSessionDecoder {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const filePath = String(p.filePath || p.file_path || p.file || p.path || "unknown_file");
-      const operation = (
-        p.operation === "create" ||
-        p.operation === "update" ||
-        p.operation === "delete" ||
-        p.operation === "patch"
-          ? p.operation
-          : "update"
-      ) as "create" | "update" | "delete" | "patch";
-      const patch = typeof p.patch === "string" ? p.patch : undefined;
-      const diffStats: FileDiffStats | undefined =
-        typeof p.diffStats === "object" && p.diffStats !== null
-          ? (p.diffStats as FileDiffStats)
-          : typeof p.diff_stats === "object" && p.diff_stats !== null
-            ? (p.diff_stats as FileDiffStats)
-            : undefined;
+      const filePath = String(
+        asString(p.filePath) ?? asString(p.file_path) ?? asString(p.path) ?? asString(p.file) ?? "",
+      );
+      const rawOp = String(
+        asString(p.operation) ?? asString(p.op) ?? asString(p.editType) ?? "update",
+      ).toLowerCase();
+      const operation: "create" | "update" | "delete" | "patch" =
+        rawOp === "create" || rawOp === "delete" || rawOp === "patch" ? rawOp : "update";
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedFileEditEvent = {
+      const patch = asString(p.patch) ?? asString(p.diff);
+      const beforeHash = asString(p.beforeHash) ?? asString(p.before_hash);
+      const afterHash = asString(p.afterHash) ?? asString(p.after_hash);
+      const statsObj = asObject(p.diffStats) ?? asObject(p.diff_stats);
+      const diffStats =
+        statsObj &&
+        asNumber(statsObj.linesAdded) !== undefined &&
+        asNumber(statsObj.linesRemoved) !== undefined
+          ? {
+              linesAdded: asNumber(statsObj.linesAdded) || 0,
+              linesRemoved: asNumber(statsObj.linesRemoved) || 0,
+            }
+          : undefined;
+
+      const header = this.emitHeader("file_edit", timestamp, rawEventId);
+      const editEvt: NormalizedFileEditEvent = {
         ...header,
         type: "file_edit",
         filePath,
         operation,
-        patch,
-        diffStats,
-        providerUsage: editUsage,
       };
-      return [evt];
+      if (patch) {
+        editEvt.patch = patch;
+      }
+      if (beforeHash) {
+        editEvt.beforeHash = beforeHash;
+      }
+      if (afterHash) {
+        editEvt.afterHash = afterHash;
+      }
+      if (diffStats) {
+        editEvt.diffStats = diffStats;
+      }
+      if (editUsage) {
+        editEvt.providerUsage = editUsage;
+      }
+      events.push(editEvt);
+      return events;
     }
 
-    // 11. Error
-    if (
-      rawType === "error" ||
-      rawType === "exception" ||
-      rawType === "failure" ||
-      rawType === "warning"
-    ) {
-      let errUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        errUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (errUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
-      }
+    if (rawType === "error" || rawType === "exception" || rawType === "runtime_error") {
+      const errorType = String(
+        asString(p.errorType) ??
+          asString(p.error_type) ??
+          asString(p.errorCode) ??
+          asString(p.error_code) ??
+          asString(p.code) ??
+          "RUNTIME_ERROR",
+      );
+      const message = String(
+        asString(p.errorMessage) ??
+          asString(p.error_message) ??
+          asString(p.message) ??
+          asString(p.error) ??
+          "Unknown error",
+      );
+      const recoverable = Boolean(p.recoverable ?? (p.fatal !== undefined ? !p.fatal : false));
+      const stack = asString(p.stack);
+      const details = asObject(p.details);
 
-      const message = String(p.message || p.msg || p.error || "Unknown error");
-      const errorType = String(p.errorType || p.error_type || p.name || "CodexCliError");
-      const stack = typeof p.stack === "string" ? p.stack : undefined;
-      const recoverable = Boolean(p.recoverable ?? false);
-
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedErrorEvent = {
+      const header = this.emitHeader("error", timestamp, rawEventId);
+      const errEvt: NormalizedErrorEvent = {
         ...header,
         type: "error",
         errorType,
         message,
-        stack,
         recoverable,
-        providerUsage: errUsage,
       };
-      return [evt];
+      if (stack) {
+        errEvt.stack = stack;
+      }
+      if (details) {
+        errEvt.details = details;
+      }
+      events.push(errEvt);
+      return events;
     }
 
-    // 12. Compaction / Context Prune
-    if (
-      rawType === "compaction" ||
-      rawType === "context_pruning" ||
-      rawType === "context_compact" ||
-      rawType === "prune_context"
-    ) {
-      let compUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        compUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (compUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
-      }
-
-      const triggerReason = (
-        p.triggerReason === "manual" ||
-        p.triggerReason === "scheduled" ||
-        p.triggerReason === "turn_threshold"
-          ? p.triggerReason
-          : "context_limit"
-      ) as "context_limit" | "manual" | "scheduled" | "turn_threshold";
+    if (rawType === "compaction" || rawType === "context_compaction" || rawType === "prune") {
+      const rawReason =
+        asString(p.triggerReason) ?? asString(p.trigger_reason) ?? asString(p.reason);
+      const triggerReason: "context_limit" | "manual" | "scheduled" | "turn_threshold" =
+        rawReason === "manual" || rawReason === "scheduled" || rawReason === "turn_threshold"
+          ? rawReason
+          : "context_limit";
 
       const tokensBefore =
-        typeof p.tokensBefore === "number"
-          ? p.tokensBefore
-          : typeof p.tokens_before === "number"
-            ? p.tokens_before
-            : 0;
+        asNumber(p.tokensBefore) ??
+        asNumber(p.tokens_before) ??
+        asNumber(p.originalTokenCount) ??
+        0;
       const tokensAfter =
-        typeof p.tokensAfter === "number"
-          ? p.tokensAfter
-          : typeof p.tokens_after === "number"
-            ? p.tokens_after
-            : 0;
-      const preservedContextSummary =
-        typeof p.preservedContextSummary === "string"
-          ? p.preservedContextSummary
-          : typeof p.summary === "string"
-            ? p.summary
-            : undefined;
+        asNumber(p.tokensAfter) ?? asNumber(p.tokens_after) ?? asNumber(p.compactedTokenCount) ?? 0;
+      const preservedContextSummary = asString(p.preservedContextSummary) ?? asString(p.summary);
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedCompactionEvent = {
+      const header = this.emitHeader("compaction", timestamp, rawEventId);
+      const compEvt: NormalizedCompactionEvent = {
         ...header,
         type: "compaction",
         triggerReason,
         tokensBefore,
         tokensAfter,
-        preservedContextSummary,
-        providerUsage: compUsage,
       };
-      return [evt];
+      if (preservedContextSummary) {
+        compEvt.preservedContextSummary = preservedContextSummary;
+      }
+      events.push(compEvt);
+      return events;
     }
 
-    // 13. Subagent Lifecycle & Branch Fork
+    // 13. Subagent Lifecycle Events
     if (
       rawType === "subagent_lifecycle" ||
       rawType === "subagent_spawn" ||
+      rawType === "subagent_start" ||
       rawType === "subagent_end" ||
-      rawType === "subagent_crash" ||
-      rawType === "subagent"
+      rawType === "subagent_complete"
     ) {
       let subUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
@@ -1308,336 +1398,347 @@ export class CodexSessionDecoder {
       }
 
       const subagentId = String(
-        p.subagentId || p.subagent_id || p.agentId || generateEventId("sub"),
+        asString(p.subagentId) ??
+          asString(p.subagent_id) ??
+          asString(p.agentId) ??
+          generateEventId("subagent"),
       );
-      const lifecycleType = (
-        p.lifecycleType === "spawn" ||
-        p.lifecycleType === "start" ||
-        p.lifecycleType === "pause" ||
-        p.lifecycleType === "resume" ||
-        p.lifecycleType === "terminate" ||
-        p.lifecycleType === "settle"
-          ? p.lifecycleType
-          : rawType === "subagent_spawn"
-            ? "spawn"
-            : rawType === "subagent_end" || rawType === "subagent_crash"
-              ? "terminate"
-              : "start"
-      ) as "spawn" | "start" | "pause" | "resume" | "terminate" | "settle";
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedSubagentLifecycleEvent = {
+      const rawLType = String(
+        asString(p.lifecycleType) ??
+          asString(p.lifecycle_type) ??
+          asString(p.action) ??
+          (rawType.includes("spawn") ? "spawn" : rawType.includes("start") ? "start" : "settle"),
+      ).toLowerCase();
+
+      const lifecycleType: "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" =
+        rawLType === "start" ||
+        rawLType === "pause" ||
+        rawLType === "resume" ||
+        rawLType === "terminate" ||
+        rawLType === "settle" ||
+        rawLType === "spawn"
+          ? rawLType
+          : rawLType === "completed"
+            ? "settle"
+            : rawLType === "spawned"
+              ? "spawn"
+              : rawLType === "terminated" || rawLType === "failed"
+                ? "terminate"
+                : "spawn";
+
+      const parentId =
+        asString(p.parentId) ??
+        asString(p.parent_id) ??
+        asString(p.parentSessionId) ??
+        asString(p.parent_session_id) ??
+        this.sessionId;
+
+      const header = this.emitHeader("subagent_lifecycle", timestamp, rawEventId);
+      const subRole = asString(p.role);
+      const subReason = asString(p.reason);
+      const subEvt: NormalizedSubagentLifecycleEvent = {
         ...header,
         type: "subagent_lifecycle",
         subagentId,
         lifecycleType,
-        parentId:
-          typeof p.parentId === "string"
-            ? p.parentId
-            : typeof p.parentEventId === "string"
-              ? p.parentEventId
-              : undefined,
-        role: typeof p.role === "string" ? p.role : undefined,
-        reason:
-          typeof p.reason === "string" ? p.reason : typeof p.goal === "string" ? p.goal : undefined,
-        providerUsage: subUsage,
       };
-      return [evt];
+      if (parentId) {
+        subEvt.parentId = parentId;
+      }
+      if (subRole) {
+        subEvt.role = subRole;
+      }
+      if (subReason) {
+        subEvt.reason = subReason;
+      }
+      if (subUsage) {
+        subEvt.providerUsage = subUsage;
+      }
+      events.push(subEvt);
+      return events;
     }
 
+    // 14. Branch Fork Events
     if (rawType === "branch_fork" || rawType === "fork" || rawType === "branch") {
-      let forkUsage: ProviderReportedUsage | undefined;
-      if (turnUsageRec) {
-        forkUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (forkUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
-      } else if (cumUsageRec) {
-        this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
-      }
-
-      const sourceSessionId = String(
-        p.sourceSessionId || p.source_session_id || p.sessionId || this.sessionId,
-      );
       const branchPointEventId = String(
-        p.branchPointEventId ||
-          p.branch_point_event_id ||
-          this.lastEventId ||
-          generateEventId("evt"),
+        asString(p.branchPointEventId) ??
+          asString(p.branch_point_event_id) ??
+          this.lastEventId ??
+          "root",
       );
+      const sourceSessionId = String(
+        asString(p.sourceSessionId) ??
+          asString(p.source_session_id) ??
+          asString(p.branchSessionId) ??
+          asString(p.branch_session_id) ??
+          this.sessionId,
+      );
+      const forkReason = asString(p.forkReason) ?? asString(p.fork_reason);
+      const branchName = asString(p.branchName) ?? asString(p.branch_name);
 
-      const header = this.nextHeader(timestamp, rawEventId);
-      const evt: NormalizedBranchForkEvent = {
+      const header = this.emitHeader("branch_fork", timestamp, rawEventId);
+      const forkEvt: NormalizedBranchForkEvent = {
         ...header,
         type: "branch_fork",
-        sourceSessionId,
         branchPointEventId,
-        forkReason: typeof p.forkReason === "string" ? p.forkReason : undefined,
-        branchName: typeof p.branchName === "string" ? p.branchName : undefined,
-        providerUsage: forkUsage,
+        sourceSessionId,
       };
-      return [evt];
-    }
-
-    // 14. Unknown Passthrough Fallback / Generic Record
-    let passthroughUsage: ProviderReportedUsage | undefined;
-    if (turnUsageRec) {
-      passthroughUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-      if (passthroughUsage) {
-        this.hasEmittedTurnUsage = true;
+      if (forkReason) {
+        forkEvt.forkReason = forkReason;
       }
-    } else if (cumUsageRec) {
-      this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
+      if (branchName) {
+        forkEvt.branchName = branchName;
+      }
+      events.push(forkEvt);
+      return events;
     }
 
-    const header = this.nextHeader(timestamp, rawEventId);
-    const unknownEvt: NormalizedUnknownPassthroughEvent = {
+    // 15. Fallback: Unknown Passthrough Event
+    const header = this.emitHeader("unknown_passthrough", timestamp, rawEventId);
+    events.push({
       ...header,
       type: "unknown_passthrough",
-      rawEventType: rawType || "unknown",
+      rawEventType: rawType || "unknown_event",
       rawPayload: p,
-      providerUsage: passthroughUsage,
-    };
-    return [unknownEvt];
+    });
+    return events;
   }
 }
 
 /**
- * Convenience function to decode a single Codex record.
- */
-export function decodeCodexRecord(
-  raw: string | Record<string, unknown>,
-  options?: CodexDecoderOptions,
-): NormalizedSessionEvent[] {
-  const decoder = new CodexSessionDecoder(options);
-  return decoder.decodeRecord(raw);
-}
-
-/**
- * Convenience function to decode an entire transcript or file content.
- */
-export function decodeCodexTranscript(
-  transcript: string | Array<string | Record<string, unknown>>,
-  options?: CodexDecoderOptions,
-): NormalizedSessionEvent[] {
-  const decoder = new CodexSessionDecoder(options);
-  return decoder.decodeTranscript(transcript);
-}
-
-/**
- * HarnessRecordDecoder implementation for Codex CLI rollouts and streaming records.
+ * High-level record decoder implementing the unified HarnessRecordDecoder contract.
  */
 export class CodexRecordDecoder implements HarnessRecordDecoder {
   readonly harnessId = "codex-cli";
   readonly decoderVersion = "1.0.0";
-  private readonly sessions = new Map<string, CodexSessionDecoder>();
+  private sessionDecoders = new Map<string, CodexSessionDecoder>();
 
-  /**
-   * Returns true if this decoder can handle the given raw harness record.
-   */
   canDecode(record: RawHarnessRecord): boolean {
-    if (!record) {
+    if (!record || !(record instanceof Object) || Array.isArray(record)) {
       return false;
     }
-    if (
-      record.harnessId === "codex-cli" ||
-      record.harnessId === "codex" ||
-      record.harnessId === "*"
-    ) {
+    const harnessId = asString(record.harnessId)?.toLowerCase();
+    if (harnessId === "codex-cli" || harnessId === "codex" || harnessId === "*") {
       return true;
     }
-
-    // Try inspecting payload structure
-    let payload: unknown = record.rawPayload;
-    if (typeof payload === "string") {
-      const trimmed = payload.trim();
-      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-        try {
-          payload = JSON.parse(trimmed);
-        } catch {
-          return false;
-        }
-      } else {
-        return false;
-      }
+    if (harnessId && harnessId !== "generic" && harnessId !== "unknown") {
+      return false;
     }
 
-    if (payload && typeof payload === "object") {
-      const rec = payload as Record<string, unknown>;
+    const rawParsed = CodexTranscriptValueSchema.safeParse(record.rawPayload);
+    const rawPayload = rawParsed.success ? rawParsed.data : undefined;
+    let obj: CodexTranscriptPayload | undefined;
+    const strPayload = asString(rawPayload);
+    if (strPayload !== undefined) {
+      try {
+        const parsedJson = JSON.parse(strPayload);
+        const parsedObj = CodexTranscriptPayloadSchema.safeParse(parsedJson);
+        obj = parsedObj.success ? parsedObj.data : undefined;
+      } catch {
+        return false;
+      }
+    } else {
+      obj = asObject(rawPayload);
+    }
+    if (obj) {
+      const payloadHarness =
+        asString(obj.harness) ?? asString(obj.harnessName) ?? asString(obj.harness_name);
       if (
-        rec.harness === "codex-cli" ||
-        rec.harness === "codex" ||
-        rec.harnessName === "codex-cli" ||
-        rec.harnessName === "codex" ||
-        rec.harnessId === "codex-cli" ||
-        rec.harnessId === "codex"
+        payloadHarness &&
+        (payloadHarness.toLowerCase() === "codex-cli" || payloadHarness.toLowerCase() === "codex")
       ) {
         return true;
       }
-
-      // If harnessId is explicitly set to another specific harness, do not claim it
-      if (
-        record.harnessId &&
-        record.harnessId !== "codex-cli" &&
-        record.harnessId !== "codex" &&
-        record.harnessId !== "*" &&
-        record.harnessId !== "generic" &&
-        record.harnessId !== "unknown"
-      ) {
-        return false;
+      if (!harnessId) {
+        return (
+          asString(obj.type) !== undefined ||
+          asString(obj.event) !== undefined ||
+          asString(obj.role) !== undefined ||
+          asString(obj.item_type) !== undefined ||
+          asString(obj.call_id) !== undefined ||
+          asString(obj.tool_name) !== undefined ||
+          asString(obj.response_id) !== undefined
+        );
       }
-
-      return (
-        typeof rec.type === "string" ||
-        typeof rec.event === "string" ||
-        typeof rec.role === "string"
-      );
     }
-
     return false;
   }
-  /**
-   * Extracts authoritative provider-reported usage from a Codex event payload or metadata.
-   */
-  extractProviderUsage(
-    obj: Record<string, unknown>,
-    fallbackModel?: string,
-  ): ProviderReportedUsage | undefined {
-    const turnUsage = getTurnUsageRecord(obj);
-    if (turnUsage) {
-      return buildProviderUsage(turnUsage, obj, fallbackModel ?? "codex-cli-transcript-v1");
-    }
-    const cumUsage = getCumulativeUsageRecord(obj);
-    if (cumUsage) {
-      return buildProviderUsage(cumUsage, obj, fallbackModel ?? "codex-cli-cumulative-v1");
-    }
-    return undefined;
-  }
 
-  /**
-   * Resets or clears the decoder session state for a given sessionId, or all sessions.
-   */
-  resetSession(sessionId?: string): void {
-    if (sessionId) {
-      this.sessions.delete(sessionId);
-    } else {
-      this.sessions.clear();
-    }
-  }
-
-  /**
-   * Decodes a single RawHarnessRecord into zero or more IntermediateSessionEvents.
-   */
   decode(record: RawHarnessRecord, context?: RecordDecoderContext): IntermediateSessionEvent[] {
-    if (!record) {
+    if (!this.canDecode(record)) {
       return [];
     }
 
-    let payload: Record<string, unknown>;
-    if (typeof record.rawPayload === "string") {
-      const trimmed = record.rawPayload.trim();
-      if (!trimmed) {
-        return [];
-      }
+    const rawParsed = CodexTranscriptValueSchema.safeParse(record.rawPayload);
+    const rawPayload = rawParsed.success ? rawParsed.data : undefined;
+    const metaParsed = CodexTranscriptPayloadSchema.safeParse(record.metadata);
+    const recordMetadata = metaParsed.success ? metaParsed.data : undefined;
+
+    let payload: CodexTranscriptPayload;
+    const rawStr = asString(rawPayload);
+    if (rawStr !== undefined) {
+      const trimmed = rawStr.trim();
+      if (!trimmed) return [];
       try {
-        payload = JSON.parse(trimmed);
+        const parsed = JSON.parse(trimmed);
+        const parsedObj = CodexTranscriptPayloadSchema.safeParse(parsed);
+        const obj = parsedObj.success ? parsedObj.data : undefined;
+        if (!obj) return [];
+        payload = obj;
       } catch {
-        const sessionId = record.sessionId || context?.sessionId || "session-1";
-        const sequenceNumber = record.sequenceNumber ?? record.cursor?.sequence ?? 1;
-        const timestamp = record.timestamp || new Date().toISOString();
+        const sessionId =
+          asString(record.sessionId) ?? asString(context?.sessionId) ?? generateEventId("sess");
+        const workspaceId =
+          asString(recordMetadata?.workspaceId) ??
+          asString(recordMetadata?.workspace_id) ??
+          asString(context?.workspaceId) ??
+          asString(context?.metadata?.workspaceId) ??
+          "default";
+        const header: BaseNormalizedEventHeader = {
+          eventId: generateEventId("evt"),
+          sessionId,
+          timestamp: parseTimestamp(record.timestamp),
+          schemaVersion: DEFAULT_SCHEMA_VERSION,
+          harnessId: "codex-cli",
+          workspaceId,
+          causalRef: {
+            parentId: asString(context?.parentEventId) ?? null,
+            causalSequence: 1,
+          },
+          redaction: {
+            isRedacted: false,
+            redactedFields: [],
+            redactionStrategy: "none",
+            scrubbedPatterns: [],
+          },
+        };
         return [
           {
-            schemaVersion: DEFAULT_SCHEMA_VERSION,
-            sessionId,
-            timestamp,
-            causalRef: {
-              parentId: (context?.parentEventId as string | undefined) ?? null,
-              causalSequence: sequenceNumber,
-            },
-            redaction: {
-              isRedacted: false,
-              redactedFields: [],
-              redactionStrategy: "none",
-              scrubbedPatterns: [],
-            },
+            ...header,
             type: "unknown_passthrough",
-            rawEventType: "unparseable_string",
-            rawPayload: { raw: trimmed },
+            rawEventType: "unparseable_json",
+            rawPayload: { unparseable: trimmed },
           },
         ];
       }
-    } else if (typeof record.rawPayload === "object" && record.rawPayload !== null) {
-      payload = record.rawPayload as Record<string, unknown>;
     } else {
-      return [];
+      const obj = asObject(rawPayload);
+      if (!obj) {
+        return [];
+      }
+      payload = obj;
     }
 
     const sessionId =
-      (typeof payload.sessionId === "string"
-        ? payload.sessionId
-        : typeof payload.session_id === "string"
-          ? payload.session_id
-          : undefined) ??
-      record.sessionId ??
-      context?.sessionId ??
-      "session-1";
+      asString(payload.sessionId) ??
+      asString(payload.session_id) ??
+      asString(record.sessionId) ??
+      asString(context?.sessionId) ??
+      generateEventId("sess");
 
     const workspaceId =
-      (typeof payload.workspaceId === "string"
-        ? payload.workspaceId
-        : typeof payload.workspace_id === "string"
-          ? payload.workspace_id
-          : undefined) ??
-      (typeof record.metadata?.workspaceId === "string"
-        ? (record.metadata.workspaceId as string)
-        : typeof record.metadata?.workspace_id === "string"
-          ? (record.metadata.workspace_id as string)
-          : undefined) ??
-      (typeof context?.workspaceId === "string"
-        ? (context.workspaceId as string)
-        : typeof context?.metadata?.workspaceId === "string"
-          ? (context.metadata.workspaceId as string)
-          : undefined);
+      asString(payload.workspaceId) ??
+      asString(payload.workspace_id) ??
+      asString(recordMetadata?.workspaceId) ??
+      asString(recordMetadata?.workspace_id) ??
+      asString(context?.workspaceId) ??
+      asString(context?.metadata?.workspaceId);
 
-    let sessionDecoder = this.sessions.get(sessionId);
+    let sessionDecoder = this.sessionDecoders.get(sessionId);
     if (!sessionDecoder) {
       sessionDecoder = new CodexSessionDecoder({
         sessionId,
         workspaceId,
-        initialSequence:
-          record.sequenceNumber !== undefined && record.sequenceNumber > 0
-            ? record.sequenceNumber
-            : context?.lastCausalSequence !== undefined
-              ? context.lastCausalSequence + 1
-              : 1,
+        lastCausalSequence: asNumber(context?.lastCausalSequence) ?? 0,
       });
-      this.sessions.set(sessionId, sessionDecoder);
+      this.sessionDecoders.set(sessionId, sessionDecoder);
     }
 
-    // Set fallback timestamp and metadata on payload if not present
     const timestamp =
-      payload.timestamp ||
-      payload.created_at ||
-      payload.createdAt ||
-      payload.time ||
-      record.timestamp;
+      asString(record.timestamp) ?? asString(payload.timestamp) ?? new Date().toISOString();
 
-    const mergedMetadata: Record<string, unknown> = {
-      ...(typeof payload.metadata === "object" && payload.metadata !== null
-        ? (payload.metadata as Record<string, unknown>)
-        : {}),
-      ...(record.metadata ?? {}),
-      ...(context?.metadata ?? {}),
-    };
+    const mergedMetadata: CodexTranscriptPayload = {};
+    const payloadMeta = asObject(payload.metadata);
+    if (payloadMeta) {
+      Object.assign(mergedMetadata, payloadMeta);
+    }
+    if (recordMetadata) {
+      Object.assign(mergedMetadata, recordMetadata);
+    }
+    const contextMeta = asObject(context?.metadata);
+    if (contextMeta) {
+      Object.assign(mergedMetadata, contextMeta);
+    }
 
-    const effectivePayload: Record<string, unknown> = {
+    const effectivePayload: CodexTranscriptPayload = {
       ...payload,
-      ...(timestamp && !payload.timestamp ? { timestamp } : {}),
-      ...(Object.keys(mergedMetadata).length > 0 ? { metadata: mergedMetadata } : {}),
-      ...(workspaceId && !payload.workspaceId ? { workspaceId } : {}),
     };
+    if (timestamp && !payload.timestamp) {
+      effectivePayload.timestamp = timestamp;
+    }
+    if (Object.keys(mergedMetadata).length > 0) {
+      effectivePayload.metadata = mergedMetadata;
+    }
+    if (workspaceId && !payload.workspaceId) {
+      effectivePayload.workspaceId = workspaceId;
+    }
 
     const events = sessionDecoder.decodeRecord(effectivePayload);
+    // SAFETY: NormalizedSessionEvent matches IntermediateSessionEvent structurally for decoder output.
     return events as IntermediateSessionEvent[];
   }
+}
+
+function isRawHarnessRecord(
+  raw: string | RawHarnessRecord | CodexTranscriptPayload,
+): raw is RawHarnessRecord {
+  return RawHarnessRecordSchema.safeParse(raw).success;
+}
+
+function isCodexDecoderOptions(
+  options: string | CodexDecoderOptions | undefined,
+): options is CodexDecoderOptions {
+  return CodexDecoderOptionsSchema.safeParse(options).success;
+}
+
+/**
+ * Decodes a raw Codex record or payload into normalized session events.
+ */
+export function decodeCodexRecord(
+  raw: string | RawHarnessRecord | CodexTranscriptPayload,
+  context?: RecordDecoderContext,
+): NormalizedSessionEvent[] {
+  if (!isRawHarnessRecord(raw)) {
+    const sessionId = asString(context?.sessionId) ?? generateEventId("sess");
+    const workspaceId = asString(context?.workspaceId) ?? "default";
+    const decoder = new CodexSessionDecoder({
+      sessionId,
+      workspaceId,
+      lastCausalSequence: asNumber(context?.lastCausalSequence),
+    });
+    return decoder.decodeRecord(raw);
+  }
+  const recordDecoder = new CodexRecordDecoder();
+  const res = recordDecoder.decode(raw, context);
+  if (!res) return [];
+  const events = Array.isArray(res) ? res : [res];
+  return events.map((event) => NormalizedSessionEventSchema.parse(event));
+}
+
+/**
+ * Decodes an entire Codex transcript or JSONL content into normalized session events.
+ */
+export function decodeCodexTranscript(
+  transcript: string | Array<string | CodexTranscriptPayload>,
+  options?: string | CodexDecoderOptions,
+): NormalizedSessionEvent[] {
+  let decoderOptions: CodexDecoderOptions = {};
+  if (isCodexDecoderOptions(options)) {
+    decoderOptions = options;
+  } else if (options !== undefined) {
+    decoderOptions = { sessionId: options };
+  }
+  const decoder = new CodexSessionDecoder(decoderOptions);
+  return decoder.decodeTranscript(transcript);
 }

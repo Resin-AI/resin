@@ -982,7 +982,7 @@ describe("publish-public-release", () => {
       const smokeEvidence = result.smokeEvidence;
       expect(smokeEvidence.schemaVersion).toBe("1.0.0");
       expect(smokeEvidence.releaseVersion).toBe(RELEASE_VERSION);
-      expect(typeof smokeEvidence.sourceCommit).toBe("string");
+      expect(smokeEvidence.sourceCommit).toEqual(expect.any(String));
       expect(smokeEvidence.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(smokeEvidence.distributionBaseUrl).toBe(PRODUCTION_BASE_URL);
       expect(smokeEvidence.distributionId).toBe("EDIST123");

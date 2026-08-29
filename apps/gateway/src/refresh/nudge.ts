@@ -17,7 +17,7 @@ const SAFE_TOOL_ID_REGEX = /^[a-zA-Z0-9_.:-]+$/;
  * Disallowed characters are replaced with underscores.
  */
 export function sanitizeToolId(rawId: string): string {
-  if (typeof rawId !== "string") {
+  if (!rawId || Object.prototype.toString.call(rawId) !== "[object String]") {
     return "unknown_tool";
   }
   const trimmed = rawId.trim();
@@ -77,13 +77,19 @@ export function buildSafeNudgePayload(options: BuildNudgePayloadOptions): NudgeP
     `Reminder: ${metaToolsReminder}`,
   ].join("\n");
 
+  const scope: NudgeScope = {
+    workspaceId: options.scope.workspaceId,
+  };
+  if (options.scope.sessionId !== undefined) {
+    scope.sessionId = options.scope.sessionId;
+  }
+  if (options.scope.accountRoot !== undefined) {
+    scope.accountRoot = options.scope.accountRoot;
+  }
+
   return {
     catalogRevision,
-    scope: {
-      workspaceId: options.scope.workspaceId,
-      ...(options.scope.sessionId ? { sessionId: options.scope.sessionId } : {}),
-      ...(options.scope.accountRoot ? { accountRoot: options.scope.accountRoot } : {}),
-    },
+    scope,
     addedToolIds: added,
     updatedToolIds: updated,
     removedToolIds: removed,
@@ -92,7 +98,6 @@ export function buildSafeNudgePayload(options: BuildNudgePayloadOptions): NudgeP
     timestamp,
   };
 }
-
 export interface NudgeDeduplicatorOptions {
   /**
    * Maximum allowed nudges per minute per scope before rate limiting kicks in.

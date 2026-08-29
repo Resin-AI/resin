@@ -17,6 +17,12 @@ import {
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
+export interface RiskAssessment {
+  riskLevel: RiskLevel;
+  riskFactors: string[];
+  warnings: string[];
+}
+
 export interface PolicyInspectionResult {
   status: "APPROVED" | "EXPANSION_REQUIRED" | "DENIED";
   riskLevel: RiskLevel;
@@ -28,7 +34,6 @@ export interface PolicyInspectionResult {
   violations: PolicyViolation[];
   remediationCommands: string[];
 }
-
 export interface PolicyInspectOptions {
   workspaceRoot?: string;
 }
@@ -39,9 +44,9 @@ export interface PolicyInspectOptions {
 export function assessRiskLevel(
   manifest: CapabilityManifest,
   violations: PolicyViolation[] = [],
-): { riskLevel: RiskLevel; riskFactors: string[]; warnings: string[] } {
-  const riskFactors: string[] = [];
+): RiskAssessment {
   const warnings: string[] = [];
+  const riskFactors: string[] = [];
 
   const cmd: CommandCapability = manifest.command ?? {};
   const fs: FsCapability = manifest.fs ?? {};
@@ -130,7 +135,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
       case "NET_DOMAIN_EXPANSION":
       case "NET_HOST_EXPANSION":
         if (
-          typeof violation.requestedValue === "string" &&
+          String(violation.requestedValue) === violation.requestedValue &&
           !addedDomains.has(violation.requestedValue)
         ) {
           addedDomains.add(violation.requestedValue);
@@ -142,7 +147,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
         break;
       case "FS_PATH_EXPANSION":
         if (
-          typeof violation.requestedValue === "string" &&
+          String(violation.requestedValue) === violation.requestedValue &&
           !addedReadPaths.has(violation.requestedValue)
         ) {
           addedReadPaths.add(violation.requestedValue);
@@ -151,7 +156,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
         break;
       case "FS_WRITE_PATH_EXPANSION":
         if (
-          typeof violation.requestedValue === "string" &&
+          String(violation.requestedValue) === violation.requestedValue &&
           !addedWritePaths.has(violation.requestedValue)
         ) {
           addedWritePaths.add(violation.requestedValue);
@@ -164,7 +169,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
       case "CMD_COMMAND_EXPANSION":
       case "CMD_BINARY_EXPANSION":
         if (
-          typeof violation.requestedValue === "string" &&
+          String(violation.requestedValue) === violation.requestedValue &&
           !addedCommands.has(violation.requestedValue)
         ) {
           addedCommands.add(violation.requestedValue);
@@ -173,7 +178,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
         break;
       case "SECRET_NAME_EXPANSION":
         if (
-          typeof violation.requestedValue === "string" &&
+          String(violation.requestedValue) === violation.requestedValue &&
           !addedSecrets.has(violation.requestedValue)
         ) {
           addedSecrets.add(violation.requestedValue);
@@ -181,7 +186,7 @@ export function generateRemediationCommands(violations: PolicyViolation[]): stri
         }
         break;
       case "SECRET_PREFIX_EXPANSION":
-        if (typeof violation.requestedValue === "string") {
+        if (String(violation.requestedValue) === violation.requestedValue) {
           commands.push(`resin envelope expand --add-secret-prefix ${violation.requestedValue}`);
         }
         break;
@@ -202,9 +207,7 @@ export function inspectPolicy(
   options: PolicyInspectOptions = {},
 ): PolicyInspectionResult {
   const requestedCapabilities: CapabilityManifest =
-    "capabilities" in (manifestOrTool as Record<string, unknown>)
-      ? (manifestOrTool as ToolManifest).capabilities
-      : (manifestOrTool as CapabilityManifest);
+    "capabilities" in manifestOrTool ? manifestOrTool.capabilities : manifestOrTool;
 
   const intersection = intersectCapabilities(requestedCapabilities, envelope, {
     workspaceRoot: options.workspaceRoot,

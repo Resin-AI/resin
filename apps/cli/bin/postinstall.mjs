@@ -19,7 +19,7 @@ export function isGlobalLifecycleInstall(env = process.env) {
 
 export function postinstallSuppressionReason(
   env = process.env,
-  getuid = typeof process.getuid === "function" ? () => process.getuid() : () => undefined,
+  getuid = process.getuid instanceof Function ? () => process.getuid() : () => undefined,
 ) {
   if (
     isEnabled(env.RESIN_NO_ONBOARD) ||
@@ -41,7 +41,7 @@ export function postinstallSuppressionReason(
   if (
     ciVariables.some(
       (value) =>
-        typeof value === "string" &&
+        String(value) === value &&
         value.length > 0 &&
         value !== "0" &&
         value.toLowerCase() !== "false",
@@ -77,7 +77,7 @@ export async function runPostinstall(options = {}) {
   }
 
   const cli = options.loadCli ? await options.loadCli() : await import(pathToFileURL(target).href);
-  if (typeof cli.initCommand !== "function") {
+  if (!(cli.initCommand instanceof Function)) {
     throw new Error("Installed Resin CLI does not expose the onboarding transaction");
   }
 

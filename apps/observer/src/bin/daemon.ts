@@ -30,6 +30,7 @@ import { IpcClient } from "../ipc/client.js";
 import { IpcServer } from "../ipc/server.js";
 import type { DaemonModule, Logger, ModuleContext } from "../lifecycle.js";
 import { DaemonLock } from "../lock.js";
+import type { JsonObject } from "../normalization/redaction.js";
 import {
   ACTIONABLE_NOTIFICATION_OBSERVATION_INTERVAL_MS,
   reconcileObservedNotifications,
@@ -55,11 +56,10 @@ function resolveVersion(): string {
   ];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")) as {
-        version?: unknown;
-      };
-      if (typeof parsed.version === "string" && parsed.version.length > 0) {
-        return parsed.version;
+      const parsed = JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8"));
+      const parsedObj = z.object({ version: z.string().min(1) }).safeParse(parsed);
+      if (parsedObj.success) {
+        return parsedObj.data.version;
       }
     } catch {
       // Continue to the next enclosing package candidate.
@@ -247,7 +247,7 @@ const DaemonStartupMessageSchema = z.discriminatedUnion("type", [
 ]);
 type DaemonStartupMessage = z.infer<typeof DaemonStartupMessageSchema>;
 
-const FAILURE_REMEDIATIONS: Record<RecoveryFailureCategory, string> = {
+const FAILURE_REMEDIATIONS = {
   AUTHENTICATION: "Run `resin login` to restore cloud access.",
   CONFIGURATION: "Run `resin doctor`, then `resin repair` if the problem persists.",
   PORT_CONFLICT: "Free the configured Resin port, then restart the service.",
@@ -255,7 +255,7 @@ const FAILURE_REMEDIATIONS: Record<RecoveryFailureCategory, string> = {
   NETWORK: "Check network connectivity; local-only MCP operation remains available.",
   RUNTIME: "Run `resin doctor` and inspect the crash recovery log.",
   UNKNOWN: "Run `resin doctor` and inspect the crash recovery log.",
-};
+} satisfies Record<RecoveryFailureCategory, string>;
 
 function getAuthRecoveryStatus(health: DaemonHealthReport): AuthRecoveryStatus {
   const authRecovery = AuthRecoveryDetailsSchema.safeParse(
@@ -269,7 +269,7 @@ function getAuthRecoveryStatus(health: DaemonHealthReport): AuthRecoveryStatus {
 
 const MAX_RECOVERY_STATE_BYTES = 64 * 1024;
 
-async function readBoundedRecoveryState(recoveryStatePath: string): Promise<unknown> {
+async function readBoundedRecoveryState(recoveryStatePath: string): Promise<JsonObject | null> {
   const entryStat = await fs.promises.lstat(recoveryStatePath);
   if (!entryStat.isFile()) {
     throw new Error(`Recovery state is not a regular file: ${recoveryStatePath}`);
@@ -302,7 +302,9 @@ async function readBoundedRecoveryState(recoveryStatePath: string): Promise<unkn
     if (offset !== content.length) {
       throw new Error("Recovery state changed while it was being read");
     }
-    return JSON.parse(content.toString("utf-8")) as unknown;
+    const parsed = JSON.parse(content.toString("utf-8"));
+    // SAFETY: Parsed recovery state JSON is an object matching JsonObject.
+    return z.record(z.unknown()).safeParse(parsed).success ? (parsed as JsonObject) : null;
   } finally {
     await handle.close();
   }
@@ -328,6 +330,7 @@ export async function getRecoverySnapshot(
   try {
     persisted = await readBoundedRecoveryState(recoveryStatePath);
   } catch (err) {
+    // SAFETY: Node.js filesystem error carries standard ErrnoException code.
     const error = err as NodeJS.ErrnoException;
     if (error.code === "ENOENT") {
       snapshot = {
@@ -496,7 +499,7 @@ export interface TelemetryCaptureControllerOptions {
   refreshCloudConsentEnabled?: () => Promise<boolean | null | undefined>;
 }
 
-export function resolveDeviceTelemetryEnabled(value: unknown, failClosed = false): boolean {
+export function resolveDeviceTelemetryEnabled<T>(value: T, failClosed = false): boolean {
   if (failClosed) {
     return false;
   }
@@ -539,7 +542,7 @@ export class TelemetryCaptureController {
     }
     try {
       const consent = this.getCloudConsentEnabled();
-      this.cloudConsentEnabled = typeof consent === "boolean" ? consent : null;
+      this.cloudConsentEnabled = z.boolean().safeParse(consent).data ?? null;
     } catch {
       this.cloudConsentEnabled = null;
     }
@@ -553,7 +556,7 @@ export class TelemetryCaptureController {
     }
     try {
       const consent = await this.refreshCloudConsentEnabled();
-      this.cloudConsentEnabled = typeof consent === "boolean" ? consent : null;
+      this.cloudConsentEnabled = z.boolean().safeParse(consent).data ?? null;
     } catch {
       this.cloudConsentEnabled = null;
     }
@@ -584,8 +587,8 @@ export class TelemetryCaptureController {
     }
   }
 
-  async setDeviceTelemetryEnabled(
-    enabled: unknown,
+  async setDeviceTelemetryEnabled<T>(
+    enabled: T,
     options: { failClosed?: boolean } = {},
   ): Promise<void> {
     // Close both emitter and subscription gates before any asynchronous work so withdrawal wins.
@@ -808,6 +811,7 @@ export async function handleIpcCommand(
 
     switch (command) {
       case "status": {
+        // SAFETY: Daemon health response contains DaemonHealthReport and optional recovery metadata.
         const health = (await client.getHealth()) as DaemonHealthReport & {
           recovery?: RecoverySnapshot;
         };
@@ -830,6 +834,7 @@ export async function handleIpcCommand(
       }
       case "diagnostics": {
         const diagnostics = await client.getDiagnostics();
+        // SAFETY: Support bundle health property matches DaemonHealthReport and optional recovery metadata.
         const health = diagnostics.health as DaemonHealthReport & {
           recovery?: RecoverySnapshot;
         };
@@ -867,7 +872,8 @@ export async function handleIpcCommand(
         ),
       );
     }
-    console.error(`Failed to connect or execute command on daemon: ${(err as Error).message}`);
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`Failed to connect or execute command on daemon: ${errorMsg}`);
     return 1;
   }
 }
@@ -881,7 +887,7 @@ function sendStartupMessage(message: DaemonStartupMessage): void {
   }
 }
 
-function sanitizeStartupError(error: unknown): string {
+function sanitizeStartupError<T>(error: T): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
   return rawMessage
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
@@ -1125,7 +1131,13 @@ async function runForeground(options: {
         client: controlPlaneClient,
         deviceId: controlCredentials.credentials.deviceId,
         applyAdapter: new FileControlPlaneApplyAdapter({
-          reloadConfig: () => reloadConfig(),
+          reloadConfig: async () => {
+            const result = await reloadConfig();
+            const json: JsonObject = {
+              success: result.success,
+            };
+            return json;
+          },
         }),
       }),
     );
@@ -1218,7 +1230,7 @@ export async function awaitBackgroundDaemonStartup(
   const timeoutMs = Math.min(60_000, Math.max(1, options.timeoutMs ?? 15_000));
   const { promise, resolve, reject } = Promise.withResolvers<number>();
 
-  const onMessage = (message: unknown): void => {
+  const onMessage = <M>(message: M): void => {
     const parsed = DaemonStartupMessageSchema.safeParse(message);
     if (!parsed.success) return;
     if (parsed.data.type === "config-recovery-warning") {

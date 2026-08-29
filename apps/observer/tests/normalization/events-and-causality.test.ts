@@ -5,6 +5,7 @@ import {
   NormalizationPipeline,
   generateDeterministicEventId,
 } from "../../src/normalization/index.js";
+import type { JsonObject } from "../../src/normalization/redaction.js";
 
 describe("Deterministic Normalized Event IDs & Causal Lineage", () => {
   const sessionId = "01J5XYZ7890ABCDEFGHJKMNPQR";
@@ -33,7 +34,7 @@ describe("Deterministic Normalized Event IDs & Causal Lineage", () => {
   it("normalizes and establishes causal lineage across all 13 event variants", async () => {
     const pipeline = new NormalizationPipeline();
 
-    const variants: Array<{ type: SessionEventType; payload: Record<string, unknown> }> = [
+    const variants: Array<{ type: SessionEventType; payload: JsonObject }> = [
       // 1. message
       {
         type: "message",

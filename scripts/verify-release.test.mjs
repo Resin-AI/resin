@@ -727,9 +727,9 @@ describe("Release Packaging & Verification Suite", () => {
       expect(key.algorithm).toBe("Ed25519");
       expect(key.trustDomain).toBe("production");
       expect(key.isTestOnly).toBe(false);
-      expect(typeof key.publicKeyHex).toBe("string");
+      expect(key.publicKeyHex).toEqual(expect.any(String));
       expect(key.publicKeyHex).toHaveLength(64);
-      expect(typeof key.publicKeyFingerprintSha256).toBe("string");
+      expect(key.publicKeyFingerprintSha256).toEqual(expect.any(String));
       expect(key.publicKeyFingerprintSha256).toHaveLength(64);
 
       const payload = { version: "1.0.0", timestamp: Date.now() };

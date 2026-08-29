@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import {
-  type CloudObservationClient,
+  CloudObservationClient,
   NormalizationPipeline,
   type TrajectoryAttributionContextInput,
   type TrajectoryAttributionResolver,
@@ -157,12 +157,24 @@ function createLifecycleRecord(
   };
 }
 
+function createMockObservationClient(
+  mock: Partial<CloudObservationClient> & {
+    sendTrajectoryObservationBatch?: unknown;
+    submitTrajectoryObservation?: unknown;
+    sendObservationBatch?: unknown;
+  },
+): CloudObservationClient {
+  // SAFETY: Test mock conforms to CloudObservationClient contract required by TrajectoryCaptureCoordinator.
+  const client = Object.create(CloudObservationClient.prototype) as CloudObservationClient;
+  return Object.assign(client, mock);
+}
+
 describe("TrajectoryCaptureCoordinator", () => {
   it("end-to-end: raw records -> normalized -> emitter -> cloud submission -> ack -> cleanup", async () => {
     const pipeline = new NormalizationPipeline();
     const submittedObservations: TrajectoryObservation[] = [];
 
-    const mockObservationClient = {
+    const mockObservationClient = createMockObservationClient({
       sendTrajectoryObservationBatch: vi.fn(
         async (input: { observations: TrajectoryObservation[] }) => {
           submittedObservations.push(...input.observations);
@@ -174,7 +186,7 @@ describe("TrajectoryCaptureCoordinator", () => {
           };
         },
       ),
-    } as unknown as CloudObservationClient;
+    });
 
     const session = createMockHarnessSession();
     const attributionResolver: TrajectoryAttributionResolver = vi.fn(async (sess) => {
@@ -253,14 +265,14 @@ describe("TrajectoryCaptureCoordinator", () => {
     const pipeline = new NormalizationPipeline();
     const submittedObservations: TrajectoryObservation[] = [];
 
-    const mockObservationClient = {
+    const mockObservationClient = createMockObservationClient({
       sendTrajectoryObservationBatch: vi.fn(
         async (input: { observations: TrajectoryObservation[] }) => {
           submittedObservations.push(...input.observations);
           return { batchId: "batch_test_2", accepted: 1, rejected: 0, errors: [] };
         },
       ),
-    } as unknown as CloudObservationClient;
+    });
 
     const session = createMockHarnessSession("sess_failed_test", "failed");
     const attributionResolver = vi.fn(async (sess: { sessionId: string }) =>
@@ -292,7 +304,7 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("normalizes and submits observation batch when resolver returns null (generic session)", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: unknown[] = [];
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => {
           submittedObservations.push(...input.observations);
@@ -304,7 +316,7 @@ describe("TrajectoryCaptureCoordinator", () => {
             errors: [],
           };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_unattributed_1");
       const attributionResolver = vi.fn(async () => null);
@@ -346,7 +358,7 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("falls back to generic observation submission when resolver returns invalid attribution schema", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: unknown[] = [];
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => {
           submittedObservations.push(...input.observations);
@@ -358,13 +370,26 @@ describe("TrajectoryCaptureCoordinator", () => {
             errors: [],
           };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_invalid_attr_1");
       const attributionResolver = vi.fn(async () => {
-        return {
+        const baseContext: TrajectoryAttributionContextInput = {
+          accountId: "acc_1",
+          workspaceId: "ws_1",
+          ownerUserId: "usr_1",
+          projectId: "proj_1",
+          candidateId: "cand_1",
+          toolId: "tool_1",
+          toolVersion: "1.0.0",
+          workloadId: "wl_1",
+          trajectoryId: "traj_1",
+          runtimeVersion: "1.0.0",
+          role: "primary",
+        };
+        return Object.assign({}, baseContext, {
           invalidField: "not-a-valid-attribution-context",
-        } as unknown as TrajectoryAttributionContextInput;
+        });
       });
 
       const coordinator = new TrajectoryCaptureCoordinator({
@@ -389,10 +414,10 @@ describe("TrajectoryCaptureCoordinator", () => {
 
     it("does NOT ack and rethrows when attribution resolver throws an unexpected error", async () => {
       const pipeline = new NormalizationPipeline();
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_resolver_error_1");
       const attributionResolver = vi.fn(async () => {
@@ -424,7 +449,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       let ackCalled = false;
       let sendObsResolvedBeforeAck = false;
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => {
           sendObservationBatchCalled = true;
@@ -438,7 +463,7 @@ describe("TrajectoryCaptureCoordinator", () => {
             errors: [],
           };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_metadata_free_1", "completed");
       session.metadata = undefined;
@@ -470,7 +495,7 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("projects generic events to metadata-only with isRedacted true, drop strategy, and zero content/secret leaks before calling sendObservationBatch", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: unknown[] = [];
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => {
           submittedObservations.push(...input.observations);
@@ -482,7 +507,7 @@ describe("TrajectoryCaptureCoordinator", () => {
             errors: [],
           };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_privacy_check_1", "active");
       const coordinator = new TrajectoryCaptureCoordinator({
@@ -509,9 +534,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       const serialized = JSON.stringify(submittedObservations);
       expect(serialized).not.toContain(secretMarker);
 
-      for (const obs of submittedObservations as Array<{
-        redaction: { isRedacted: boolean; redactionStrategy: string };
-      }>) {
+      for (const obs of submittedObservations) {
         expect(obs.redaction.isRedacted).toBe(true);
         expect(obs.redaction.redactionStrategy).toBe("drop");
       }
@@ -520,7 +543,7 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("generic session: does NOT ack and does not mark finalized when sendObservationBatch fails, enabling retry", async () => {
       const pipeline = new NormalizationPipeline();
       let shouldFail = true;
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => {
           if (shouldFail) {
@@ -534,7 +557,7 @@ describe("TrajectoryCaptureCoordinator", () => {
             errors: [],
           };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_generic_retry_1", "completed");
       const coordinator = new TrajectoryCaptureCoordinator({
@@ -564,10 +587,10 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("generic terminal session: finalizes an empty normalized batch without consent or cloud calls", async () => {
       const pipeline = new NormalizationPipeline();
       const authorizeTelemetryEmission = vi.fn(async () => undefined);
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_generic_empty_1", "completed");
       const coordinator = new TrajectoryCaptureCoordinator({
@@ -589,10 +612,10 @@ describe("TrajectoryCaptureCoordinator", () => {
     it("generic session: fails closed for a nonempty normalized batch when consent is unknown", async () => {
       const pipeline = new NormalizationPipeline();
       const authorizeTelemetryEmission = vi.fn(async () => undefined);
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(),
         sendObservationBatch: vi.fn(),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_generic_unknown_consent_1", "completed");
       const coordinator = new TrajectoryCaptureCoordinator({
@@ -617,14 +640,14 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: TrajectoryObservation[] = [];
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(
           async (input: { observations: TrajectoryObservation[] }) => {
             submittedObservations.push(...input.observations);
             return { batchId: "batch_dup", accepted: 1, rejected: 0, errors: [] };
           },
         ),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_dedup_test");
       const attributionResolver = vi.fn(async (sess: { sessionId: string }) =>
@@ -685,14 +708,14 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       let shouldFail = true;
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(async () => {
           if (shouldFail) {
             throw new Error("Cloud service 503 Service Unavailable");
           }
           return { batchId: "batch_retry_ok", accepted: 1, rejected: 0, errors: [] };
         }),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_retry_test", "completed");
       const attributionResolver = vi.fn(async (sess: { sessionId: string }) =>
@@ -735,7 +758,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: TrajectoryObservation[] = [];
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(
           async (input: { observations: TrajectoryObservation[] }) => {
             submittedObservations.push(...input.observations);
@@ -747,7 +770,7 @@ describe("TrajectoryCaptureCoordinator", () => {
             };
           },
         ),
-      } as unknown as CloudObservationClient;
+      });
 
       const sessionA = createMockHarnessSession("sess_concurrent_A", "completed");
       const sessionB = createMockHarnessSession("sess_concurrent_B", "completed");
@@ -816,14 +839,14 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: TrajectoryObservation[] = [];
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(
           async (input: { observations: TrajectoryObservation[] }) => {
             submittedObservations.push(...input.observations);
             return { batchId: "batch_same_sess", accepted: 1, rejected: 0, errors: [] };
           },
         ),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_serial_lock");
       let resolverCallCount = 0;
@@ -870,14 +893,14 @@ describe("TrajectoryCaptureCoordinator", () => {
   describe("terminal cleanup & repeated terminal records", () => {
     it("removes finalized session state and does not resubmit on repeated terminal records", async () => {
       const pipeline = new NormalizationPipeline();
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(async () => ({
           batchId: "batch_term_repeat",
           accepted: 1,
           rejected: 0,
           errors: [],
         })),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_repeat_term", "completed");
       const attributionResolver = vi.fn(async (sess: { sessionId: string }) =>
@@ -928,14 +951,14 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       let sentObservation: TrajectoryObservation | null = null;
 
-      const mockObservationClient = {
+      const mockObservationClient = createMockObservationClient({
         sendTrajectoryObservationBatch: vi.fn(
           async (input: { observations: TrajectoryObservation[] }) => {
             sentObservation = input.observations[0];
             return { batchId: "batch_privacy", accepted: 1, rejected: 0, errors: [] };
           },
         ),
-      } as unknown as CloudObservationClient;
+      });
 
       const session = createMockHarnessSession("sess_privacy_test", "completed");
       const attributionResolver = vi.fn(async (sess: { sessionId: string }) =>

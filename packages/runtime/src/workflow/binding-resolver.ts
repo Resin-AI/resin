@@ -1,3 +1,5 @@
+import type { CanonicalJsonRecord, CanonicalJsonValue } from "@resin/contracts";
+
 /**
  * Evaluates and resolves variable bindings in workflow steps and compensation actions.
  * Enforces schema bounds, prevents code injection, and prevents directory traversal attacks.
@@ -7,14 +9,14 @@ export class BindingResolver {
    * Resolves all variable expressions in an inputs object against the given execution context.
    */
   resolveInputs(
-    inputs: Record<string, unknown>,
+    inputs: CanonicalJsonRecord,
     context: {
-      workflowInputs: Record<string, unknown>;
-      stepResults: Record<string, unknown>;
+      workflowInputs: CanonicalJsonRecord;
+      stepResults: CanonicalJsonRecord;
       secrets?: Record<string, string>;
     },
-  ): Record<string, unknown> {
-    const resolved: Record<string, unknown> = {};
+  ): CanonicalJsonRecord {
+    const resolved: CanonicalJsonRecord = {};
     for (const [key, val] of Object.entries(inputs)) {
       resolved[key] = this.resolveValue(val, context, `input.${key}`);
     }
@@ -25,82 +27,80 @@ export class BindingResolver {
    * Recursively resolves an individual value or data structure.
    */
   resolveValue(
-    val: unknown,
+    val: CanonicalJsonValue,
     context: {
-      workflowInputs: Record<string, unknown>;
-      stepResults: Record<string, unknown>;
+      workflowInputs: CanonicalJsonRecord;
+      stepResults: CanonicalJsonRecord;
       secrets?: Record<string, string>;
     },
     location: string,
-  ): unknown {
+  ): CanonicalJsonValue {
     if (val === null || val === undefined) {
       return val;
     }
 
-    if (typeof val === "string") {
-      this.validateBindingSafety(val, location);
+    if (Object.prototype.toString.call(val) === "[object String]") {
+      // SAFETY: Object tag check confirms val is a string.
+      const strVal = val as string;
+      this.validateBindingSafety(strVal, location);
 
       // Exact single reference matching: ${input.foo} or $input.foo
-      if ((val.startsWith("${input.") && val.endsWith("}")) || val.startsWith("$input.")) {
-        const varPath = val.startsWith("${") ? val.slice(8, -1) : val.slice(7);
-        return this.getNestedProperty(context.workflowInputs, varPath);
+      if ((strVal.startsWith("${input.") && strVal.endsWith("}")) || strVal.startsWith("$input.")) {
+        const pathStr = strVal.startsWith("${") ? strVal.slice(8, -1) : strVal.slice(7);
+        return this.getNestedProperty(context.workflowInputs, pathStr);
       }
-
-      // Exact single step reference: ${step.id.output} or $step.id.output
-      if ((val.startsWith("${step.") && val.endsWith("}")) || val.startsWith("$step.")) {
-        const fullPath = val.startsWith("${") ? val.slice(7, -1) : val.slice(6);
-        const parts = fullPath.split(".");
+      if ((strVal.startsWith("${step.") && strVal.endsWith("}")) || strVal.startsWith("$step.")) {
+        const pathStr = strVal.startsWith("${") ? strVal.slice(7, -1) : strVal.slice(6);
+        const parts = pathStr.split(".");
         const stepId = parts[0];
-        const propertyPath = parts.slice(1).join(".");
-        const stepResult = context.stepResults[stepId];
-        if (propertyPath.length === 0) {
-          return stepResult;
+        const subPath = parts.slice(1).join(".");
+        const stepOutput = context.stepResults[stepId];
+        return this.getNestedProperty(stepOutput, subPath);
+      }
+      if ((strVal.startsWith("${env.") && strVal.endsWith("}")) || strVal.startsWith("$env.")) {
+        const envVar = strVal.startsWith("${") ? strVal.slice(6, -1) : strVal.slice(5);
+        if (context.secrets && envVar in context.secrets) {
+          return context.secrets[envVar];
         }
-        return this.getNestedProperty(stepResult, propertyPath);
+        return process.env[envVar] ?? "";
       }
 
-      // Exact secret reference: ${env.SECRET} or $env.SECRET
-      if ((val.startsWith("${env.") && val.endsWith("}")) || val.startsWith("$env.")) {
-        const secretName = val.startsWith("${") ? val.slice(6, -1) : val.slice(5);
-        return context.secrets?.[secretName] ?? `\${env.${secretName}}`;
-      }
-
-      // String template interpolation: "prefix_${input.name}_suffix"
-      if (val.includes("${input.") || val.includes("${step.") || val.includes("${env.")) {
-        return val.replace(/\$\{(input|step|env)\.([a-zA-Z0-9_.-]+)\}/g, (_, type, pathStr) => {
+      // Template string interpolation: "prefix_${input.foo}_suffix"
+      if (strVal.includes("${input.") || strVal.includes("${step.") || strVal.includes("${env.")) {
+        return strVal.replace(/\$\{(input|step|env)\.([a-zA-Z0-9_.-]+)\}/g, (_, type, pathStr) => {
           if (type === "input") {
             const resolvedProp = this.getNestedProperty(context.workflowInputs, pathStr);
-            return resolvedProp !== undefined ? String(resolvedProp) : "";
+            return resolvedProp !== undefined && resolvedProp !== null ? String(resolvedProp) : "";
           }
           if (type === "step") {
             const parts = pathStr.split(".");
             const stepId = parts[0];
-            const propertyPath = parts.slice(1).join(".");
-            const stepResult = context.stepResults[stepId];
-            const resolvedProp =
-              propertyPath.length > 0
-                ? this.getNestedProperty(stepResult, propertyPath)
-                : stepResult;
-            return resolvedProp !== undefined ? String(resolvedProp) : "";
+            const subPath = parts.slice(1).join(".");
+            const stepOutput = context.stepResults[stepId];
+            const resolvedProp = this.getNestedProperty(stepOutput, subPath);
+            return resolvedProp !== undefined && resolvedProp !== null ? String(resolvedProp) : "";
           }
           if (type === "env") {
-            const secretVal = context.secrets?.[pathStr];
-            return secretVal !== undefined ? secretVal : "";
+            if (context.secrets && pathStr in context.secrets) {
+              return context.secrets[pathStr];
+            }
+            return process.env[pathStr] ?? "";
           }
           return "";
         });
       }
 
-      return val;
+      return strVal;
     }
 
     if (Array.isArray(val)) {
       return val.map((item, idx) => this.resolveValue(item, context, `${location}[${idx}]`));
     }
 
-    if (typeof val === "object") {
-      const resolvedObj: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+    if (Object.prototype.toString.call(val) === "[object Object]") {
+      const resolvedObj: CanonicalJsonRecord = {};
+      // SAFETY: Object tag check confirms val is a record.
+      for (const [k, v] of Object.entries(val as CanonicalJsonRecord)) {
         resolvedObj[k] = this.resolveValue(v, context, `${location}.${k}`);
       }
       return resolvedObj;
@@ -143,19 +143,25 @@ export class BindingResolver {
   /**
    * Safely retrieves a nested property using dot-notation path without prototype pollution.
    */
-  private getNestedProperty(obj: unknown, path: string): unknown {
+  private getNestedProperty(obj: CanonicalJsonValue, path: string): CanonicalJsonValue {
     if (obj === null || obj === undefined) return undefined;
     if (path.length === 0) return obj;
 
     const parts = path.split(".");
-    let current: unknown = obj;
+    let current: CanonicalJsonValue = obj;
 
     for (const part of parts) {
       if (part === "__proto__" || part === "prototype" || part === "constructor") {
         return undefined;
       }
-      if (current && typeof current === "object" && part in current) {
-        current = (current as Record<string, unknown>)[part];
+      if (current && Object.prototype.toString.call(current) === "[object Object]") {
+        // SAFETY: Tag check confirms current is a JSON object record.
+        const rec = current as CanonicalJsonRecord;
+        if (part in rec) {
+          current = rec[part];
+        } else {
+          return undefined;
+        }
       } else {
         return undefined;
       }

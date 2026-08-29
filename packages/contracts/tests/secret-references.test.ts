@@ -283,8 +283,8 @@ describe("Secret Reference and Broker Mediation Contracts", () => {
       expect(res.secretName).toBe("API_KEY");
       expect(res.referenceId).toBe("sec_ref_123");
       // Result schema does NOT have any secret or value field
-      expect((res as Record<string, unknown>).value).toBeUndefined();
-      expect((res as Record<string, unknown>).secretValue).toBeUndefined();
+      expect("value" in res).toBe(false);
+      expect("secretValue" in res).toBe(false);
     });
   });
 

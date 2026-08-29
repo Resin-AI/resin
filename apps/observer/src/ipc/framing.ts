@@ -4,7 +4,7 @@ const HEADER_SIZE = 4;
 /**
  * Encodes a JSON-serializable message into a length-prefixed binary frame.
  */
-export function encodeFrame(message: unknown): Buffer {
+export function encodeFrame<T>(message: T): Buffer {
   const jsonString = JSON.stringify(message);
   const payload = Buffer.from(jsonString, "utf-8");
 
@@ -57,8 +57,9 @@ export class FrameDecoder {
         const jsonStr = payloadBuffer.toString("utf-8");
         const parsed = JSON.parse(jsonStr);
         frames.push(parsed);
-      } catch (err) {
-        throw new Error(`Failed to decode JSON frame: ${(err as Error).message}`);
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to decode JSON frame: ${errorMsg}`);
       }
     }
 

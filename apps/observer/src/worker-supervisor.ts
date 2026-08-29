@@ -11,6 +11,9 @@ export interface DenoWorkerPermissionOptions {
   allowReadPaths?: string[];
   workspaceRoot?: string;
 }
+export interface SanitizedEnvironment {
+  [key: string]: string;
+}
 
 /**
  * Builds Deno command line permission flags for isolated worker processes.
@@ -44,7 +47,6 @@ export function buildDenoWorkerPermissions(options: DenoWorkerPermissionOptions)
       allowRead.add(resolved);
     }
   }
-
   return [
     "--no-prompt",
     `--allow-read=${Array.from(allowRead).join(",")}`,
@@ -113,8 +115,8 @@ const SENSITIVE_ENV_KEYS = [
 export function buildSanitizedEnv(
   customEnv: Record<string, string | undefined> = {},
   inherit = false,
-): Record<string, string> {
-  const result: Record<string, string> = {};
+): SanitizedEnvironment {
+  const result: SanitizedEnvironment = {};
 
   const isBlocked = (k: string): boolean =>
     SENSITIVE_ENV_KEYS.includes(k) || k.startsWith(UNSAFE_ENV_PREFIX);
@@ -224,6 +226,7 @@ export class WorkerSupervisor {
         });
       } catch (err) {
         const durationMs = Date.now() - startedAt;
+        const errorMsg = err instanceof Error ? err.message : String(err);
         resolve({
           status: "spawn_failed",
           exitCode: null,
@@ -231,7 +234,7 @@ export class WorkerSupervisor {
           stdout: "",
           stderr: "",
           durationMs,
-          error: (err as Error).message,
+          error: errorMsg,
         });
         return;
       }
@@ -327,8 +330,7 @@ export class WorkerSupervisor {
         finish("spawn_failed", null, null, err.message);
       });
 
-      child.on("exit", (code, sig) => {
-        const signal = sig as NodeJS.Signals | null;
+      child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
         if (isTimedOut) {
           finish("timed_out", code, signal, `Worker timed out after ${timeoutMs}ms`);
         } else if (code === 0 && !signal) {

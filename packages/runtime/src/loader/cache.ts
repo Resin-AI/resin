@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  type CanonicalJsonRecord,
   type ToolManifest,
   ToolManifestSchema,
   type V1LockedToolEntry,
@@ -30,7 +31,7 @@ export interface ArtifactReference {
   toolId?: string;
   version?: string;
   createdAt?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: CanonicalJsonRecord;
 }
 
 /**
@@ -71,7 +72,7 @@ export interface InstallLockedArtifactOptions {
   reference?: {
     refId: string;
     refType?: "active" | "canary" | "pinned" | "rollback" | "session" | "deployment";
-    metadata?: Record<string, unknown>;
+    metadata?: CanonicalJsonRecord;
   };
   keyStore?: KeyStore;
   allowDevKeys?: boolean;
@@ -722,16 +723,23 @@ export class ArtifactCache {
                   });
                 }
               }
-            } else if (typeof source === "string") {
-              const srcStat = await fs.promises.stat(source);
+            } else if (Object.prototype.toString.call(source) === "[object String]") {
+              // SAFETY: Object tag check confirms source is a filesystem path string.
+              const sourcePath = source as string;
+              const srcStat = await fs.promises.stat(sourcePath);
               if (srcStat.isDirectory()) {
-                await this.copyDirectorySafe(source, stagingPath);
+                await this.copyDirectorySafe(sourcePath, stagingPath);
               } else {
-                const fileBuf = await fs.promises.readFile(source);
+                const fileBuf = await fs.promises.readFile(sourcePath);
                 return this.installLockedArtifact(entry, fileBuf, options);
               }
-            } else if (typeof source === "function") {
-              await source(stagingPath);
+            } else if (
+              Object.prototype.toString.call(source) === "[object Function]" ||
+              Object.prototype.toString.call(source) === "[object AsyncFunction]"
+            ) {
+              // SAFETY: Function type confirms source is a custom install function.
+              const sourceFn = source as (path: string) => Promise<void>;
+              await sourceFn(stagingPath);
             }
 
             // 4. Verify staged content against V1LockedToolEntry

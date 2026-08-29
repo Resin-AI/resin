@@ -17,6 +17,10 @@ export interface ServiceGeneratorOptions {
   restartSec?: number;
   enableHardening?: boolean;
 }
+export interface ServiceValidationResult {
+  valid: boolean;
+  errors: string[];
+}
 
 /**
  * Escapes strings for XML attributes/nodes.
@@ -122,18 +126,23 @@ export function generateLaunchdPlist(options: ServiceGeneratorOptions = {}): str
 
   const programArguments = [nodePath, daemonPath, ...(options.args ?? [])];
 
-  const envDict: Record<string, string> = {
-    NODE_ENV: "production",
-    RESIN_HOME: resinHome,
-    ...((options.env as Record<string, string>) ?? {}),
-  };
+  const envEntries: [string, string][] = [
+    ["NODE_ENV", "production"],
+    ["RESIN_HOME", resinHome],
+  ];
+  if (options.env) {
+    for (const [k, v] of Object.entries(options.env)) {
+      if (v !== undefined) {
+        envEntries.push([k, v]);
+      }
+    }
+  }
 
   const programArgsXml = programArguments
     .map((arg) => `      <string>${escapeXml(arg)}</string>`)
     .join("\n");
 
-  const envXml = Object.entries(envDict)
-    .filter(([, v]) => v !== undefined)
+  const envXml = envEntries
     .map(
       ([k, v]) =>
         `      <key>${escapeXml(k)}</key>\n      <string>${escapeXml(String(v))}</string>`,
@@ -316,7 +325,7 @@ esac
 export function validateServiceDefinition(
   type: ServiceManagerKind,
   content: string,
-): { valid: boolean; errors: string[] } {
+): ServiceValidationResult {
   const errors: string[] = [];
 
   if (!content || content.trim().length === 0) {

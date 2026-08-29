@@ -11,6 +11,7 @@ import {
   redactSensitiveData,
   validateConfigUpdate,
 } from "../src/config.js";
+import type { JsonObject } from "../src/normalization/redaction.js";
 
 describe("config", () => {
   describe("DaemonConfigSchema defaults and validation", () => {
@@ -41,7 +42,7 @@ describe("config", () => {
 
   describe("parseEnvConfig", () => {
     it("parses and maps RESIN_* environment variables", () => {
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         RESIN_LOG_LEVEL: "debug",
         RESIN_HOST: "0.0.0.0",
         RESIN_PORT: "8080",
@@ -83,7 +84,7 @@ describe("config", () => {
       };
       await fs.promises.writeFile(configPath, JSON.stringify(fileData), "utf-8");
 
-      const mockEnv: Record<string, string> = {
+      const mockEnv = {
         RESIN_LOG_LEVEL: "error", // Env overrides file
       };
 
@@ -124,14 +125,13 @@ describe("config", () => {
       expect(redacted.port).toBe(9400);
       expect(redacted.cloudUrl).toBe("https://api.resin.sh");
 
-      const dbModule = (redacted.moduleConfigs as Record<string, unknown>).database as Record<
-        string,
-        unknown
-      >;
+      // SAFETY: Redacted config moduleConfigs carries database properties.
+      const dbModule = (redacted.moduleConfigs as { database?: JsonObject })?.database;
       expect(dbModule.password).toBe("[REDACTED]");
       expect(dbModule.host).toBe("localhost");
 
-      const customObj = redacted.custom as Record<string, unknown>;
+      // SAFETY: Redacted config custom property is a JsonObject.
+      const customObj = redacted.custom as JsonObject;
       expect(customObj.apiKey).toBe("[REDACTED]");
       expect(customObj.normalField).toBe("public-value");
 
@@ -176,6 +176,7 @@ describe("config", () => {
         safeDiagnostic: "diagnosable-health-metric",
       };
 
+      // SAFETY: Redacted payload maintains structure of input sensitivePayload.
       const redacted = redactSensitiveData(sensitivePayload) as typeof sensitivePayload;
       const json = JSON.stringify(redacted);
 
@@ -251,10 +252,13 @@ describe("config", () => {
 
     it("does not accept removed cloudSyncEnabled or cloudApiKey in updates", () => {
       const current = DaemonConfigSchema.parse({});
-      const update = {
+      const baseUpdate: Partial<DaemonConfig> = {
+        port: 9000,
+      };
+      const update = Object.assign(baseUpdate, {
         cloudSyncEnabled: true,
         cloudApiKey: "obsolete-key",
-      } as unknown as Partial<DaemonConfig>;
+      });
 
       const result = validateConfigUpdate(current, update);
       expect(result.valid).toBe(true);

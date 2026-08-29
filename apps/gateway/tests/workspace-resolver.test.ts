@@ -49,7 +49,7 @@ describe("Workspace Resolver & Project Bootstrap", () => {
       } catch {
         // Symlinks might require elevated privileges on some platforms
         const canonicalLink = canonicalizePath(linkDir);
-        expect(typeof canonicalLink).toBe("string");
+        expect(Object.prototype.toString.call(canonicalLink)).toBe("[object String]");
       } finally {
         fs.rmSync(baseDir, { recursive: true, force: true });
       }
@@ -639,6 +639,7 @@ describe("Workspace Resolver & Project Bootstrap", () => {
           },
         };
 
+        // SAFETY: Gateway response is confirmed to be InitializeResult success response.
         const resp = (await gateway.handleMessage(
           conn.connectionId,
           initReq,
@@ -674,6 +675,7 @@ describe("Workspace Resolver & Project Bootstrap", () => {
         },
       };
 
+      // SAFETY: Gateway response is confirmed to be InitializeResult success response.
       const resp = (await gateway.handleMessage(
         conn.connectionId,
         initReq,
@@ -709,6 +711,7 @@ describe("Workspace Resolver & Project Bootstrap", () => {
           },
         };
 
+        // SAFETY: Gateway response is confirmed to be InitializeResult success response.
         const resp = (await gateway.handleMessage(
           conn.connectionId,
           initReq,

@@ -5,19 +5,36 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ChannelMetadata, SignedManifest } from "../../src/installer/channel-verifier.js";
 import { ResinInstaller } from "../../src/installer/installer.js";
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const obj = value as Record<string, unknown>;
+type CanonicalValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CanonicalValue[]
+  | { [key: string]: CanonicalValue };
+
+function canonical(value: CanonicalValue | undefined): string {
+  if (
+    value === null ||
+    value === undefined ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  ) {
+    if (Array.isArray(value)) return `[${value.map((item) => canonical(item)).join(",")}]`;
+    return JSON.stringify(value);
+  }
+  // SAFETY: Value narrowed to record object.
+  const obj = value as Record<string, CanonicalValue>;
   return `{${Object.keys(obj)
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonical(obj[key])}`)
     .join(",")}}`;
 }
 
-function sign(payload: unknown, privateKey: crypto.KeyObject): string {
+function sign(payload: CanonicalValue | undefined, privateKey: crypto.KeyObject): string {
   return crypto.sign(null, Buffer.from(canonical(payload)), privateKey).toString("hex");
 }
 
@@ -142,8 +159,8 @@ describe("production signed release transaction", () => {
         },
       },
     };
-    let manifest: Record<string, unknown> = {};
-    let channel: Record<string, unknown> = {};
+    let manifest: SignedManifest | null = null;
+    let channel: ChannelMetadata | null = null;
 
     const server = http.createServer((req, res) => {
       if (req.url === "/channels.json") return void res.end(JSON.stringify(channel));
@@ -155,7 +172,7 @@ describe("production signed release transaction", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
-    if (!address || typeof address === "string") throw new Error("missing fixture address");
+    if (!address || String(address) === address) throw new Error("missing fixture address");
     base = `http://127.0.0.1:${address.port}`;
     const fixedManifestPayload = JSON.parse(
       JSON.stringify(manifestPayload).replace("__DENO__", `${base}/deno.zip`),

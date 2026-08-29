@@ -4,6 +4,7 @@ import {
   IdentifierSchema,
   type NormalizedSessionEvent,
   type ProviderReportedUsage,
+  Sha256DigestSchema,
   hashCanonicalContent,
 } from "@resin/contracts";
 import { z } from "zod";
@@ -17,6 +18,20 @@ import {
   type TrajectoryUsage,
   TrajectoryUsageSchema,
 } from "../cloud-runtime.js";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema),
+  ]),
+);
+const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
+
 export const TrajectoryAttributionContextSchema = z
   .object({
     observationId: IdentifierSchema.optional(),
@@ -39,7 +54,7 @@ export const TrajectoryAttributionContextSchema = z
     isEquivalent: z.boolean().optional().default(false),
     catalogExposureTokens: z.number().int().nonnegative().optional().default(0),
     observedAt: ISOTimestampSchema.optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: JsonObjectSchema.optional(),
   })
   .strict();
 
@@ -84,11 +99,11 @@ export function computeTrajectoryObservationDigest(
     | TrajectoryObservation
     | {
         digest?: string;
-        canonicalPayload?: Record<string, unknown>;
+        canonicalPayload?: JsonObject;
         createdAt?: string;
       },
 ): string {
-  if (observation.canonicalPayload && typeof observation.canonicalPayload === "object") {
+  if (observation.canonicalPayload) {
     return hashCanonicalContent(observation.canonicalPayload);
   }
   const {
@@ -340,7 +355,7 @@ export class TrajectoryEmitter {
 
     const availability: ProviderUsageAvailability = isPartial ? "partial" : "complete";
 
-    const usageObj: Record<string, unknown> = {
+    const usageObj: TrajectoryUsage = {
       availability,
       inputTokens: this.metrics.inputTokens.hasValue ? this.metrics.inputTokens.sum : null,
       outputTokens: this.metrics.outputTokens.hasValue ? this.metrics.outputTokens.sum : null,
@@ -396,8 +411,7 @@ export class TrajectoryEmitter {
 
     const usage = this.computeUsage();
 
-    // Construct canonical privacy-safe payload (strictly excludes prompts, commands, file paths, transcript content)
-    const canonicalPayload: Record<string, unknown> = {
+    const canonicalPayload: JsonObject = {
       observationId,
       accountId: this.context.accountId,
       workspaceId: this.context.workspaceId,
@@ -408,31 +422,30 @@ export class TrajectoryEmitter {
       toolVersion: this.context.toolVersion,
       workloadId: this.context.workloadId,
       trajectoryId: this.context.trajectoryId,
-      parentTrajectoryId: this.context.parentTrajectoryId ?? null,
       provider: this.resolvedProvider,
       model: this.resolvedModel,
-      ...(this.resolvedAccountingVersion
-        ? { accountingVersion: this.resolvedAccountingVersion }
-        : {}),
       runtimeVersion: this.context.runtimeVersion,
       role: this.context.role,
       status: this.currentStatus,
-      isEquivalent: this.context.isEquivalent ?? false,
-      catalogExposureTokens: this.context.catalogExposureTokens ?? 0,
-      usage: {
-        availability: usage.availability,
-        inputTokens: usage.inputTokens ?? null,
-        outputTokens: usage.outputTokens ?? null,
-        reasoningTokens: usage.reasoningTokens ?? null,
-        cachedInputTokens: usage.cachedInputTokens ?? null,
-        totalTokens: usage.totalTokens ?? null,
-        costMicroUsd: usage.costMicroUsd ?? null,
-        durationMs: usage.durationMs ?? null,
-      },
-      observedAt,
+      isEquivalent: this.context.isEquivalent,
+      catalogExposureTokens: this.context.catalogExposureTokens,
+      usage,
     };
+    if (this.context.parentTrajectoryId !== undefined) {
+      canonicalPayload.parentTrajectoryId = this.context.parentTrajectoryId;
+    }
+    if (this.resolvedAccountingVersion) {
+      canonicalPayload.accountingVersion = this.resolvedAccountingVersion;
+    }
 
-    const digest = hashCanonicalContent(canonicalPayload);
+    const metadata: JsonObject = {
+      ...this.context.metadata,
+    };
+    if (this.resolvedAccountingVersion) {
+      metadata.accountingVersion = this.resolvedAccountingVersion;
+    }
+
+    const digest = computeTrajectoryObservationDigest({ canonicalPayload });
 
     const observation: TrajectoryObservation = {
       observationId,
@@ -451,20 +464,14 @@ export class TrajectoryEmitter {
       runtimeVersion: this.context.runtimeVersion,
       role: this.context.role,
       status: this.currentStatus,
-      isEquivalent: this.context.isEquivalent ?? false,
-      catalogExposureTokens: this.context.catalogExposureTokens ?? 0,
+      isEquivalent: this.context.isEquivalent,
+      catalogExposureTokens: this.context.catalogExposureTokens,
       usage,
       canonicalPayload,
-      metadata: {
-        ...(this.context.metadata ?? {}),
-        ...(this.resolvedAccountingVersion
-          ? { accountingVersion: this.resolvedAccountingVersion }
-          : {}),
-      },
+      metadata,
       observedAt,
       digest,
     };
-
     const parsed = TrajectoryObservationSchema.parse(observation);
     this.finalized = true;
     this.finalizedObservation = parsed;

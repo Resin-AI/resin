@@ -35,7 +35,7 @@ const TEST_KEYPAIR = {
   privateKey: generatedTestKeyPair.privateKey,
 };
 
-function signPayload(payload: unknown): string {
+function signPayload(payload: Parameters<typeof canonicalJson>[0]): string {
   const canonical = canonicalJson(payload);
   const sig = crypto.sign(null, Buffer.from(canonical, "utf8"), TEST_KEYPAIR.privateKey);
   return sig.toString("hex");
@@ -1100,7 +1100,7 @@ describe("Anonymous Public Release Distribution", () => {
       expect(result.provenance.channelUrl).toBe(`${baseUrl}/airgapped-channels.json`);
 
       // Unvetted ambient env override is ignored/rejected without programmatic pinning
-      const envOverride: Record<string, string> = {
+      const envOverride = {
         RESIN_RELEASE_CHANNEL_URL: `${baseUrl}/airgapped-channels.json`,
         RESIN_TRUSTED_RELEASE_PUBLIC_KEYS: JSON.stringify([
           { keyId: airgappedKeyId, publicKeyHex: TEST_KEYPAIR.publicKeyHex },
@@ -1932,7 +1932,7 @@ describe("Anonymous Public Release Distribution", () => {
 
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
       const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
+      const port = address && !Array.isArray(address) && "port" in address ? address.port : 0;
 
       try {
         const fetched = await fetchBytes(`http://127.0.0.1:${port}/payload.bin`, {

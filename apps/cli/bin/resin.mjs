@@ -17,10 +17,10 @@ if (!fs.existsSync(target)) {
 }
 
 const { main } = await import(pathToFileURL(target).href);
-if (typeof main === "function") {
+if (main instanceof Function) {
   try {
     const exitCode = await main(process.argv.slice(2));
-    if (typeof exitCode === "number" && exitCode !== 0) {
+    if (Number.isInteger(exitCode) && exitCode !== 0) {
       process.exit(exitCode);
     }
   } catch (err) {

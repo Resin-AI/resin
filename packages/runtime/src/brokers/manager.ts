@@ -1,15 +1,25 @@
-import type { SecretCapability, SecretReference } from "@resin/contracts";
+import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
+  type SecretCapability,
+  type SecretReference,
+  SecretReferenceSchema,
+} from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
+import { z } from "zod";
 import {
   type ApprovedEffectBoundaries,
   EffectMonitor,
   type EffectRequest,
   type ExternalActionAuthorizationRecord,
+  ExternalActionAuthorizationRecordSchema,
   type ExternalActionAuthorizationVerifier,
   type InvocationRegistrationParams,
   type InvocationResultSummary,
   type InvocationSessionState,
   type InvocationValidationResult,
+  type MonitorRecord,
+  type MonitorValue,
   type QuarantineRecord,
   type RequalificationEvent,
   type VerifiedQualificationToken,
@@ -20,6 +30,8 @@ import {
 import type { BrokerRequestHandlerFn } from "../worker/sdk.js";
 import {
   type BrokerAuditEmitter,
+  type BrokerAuditSummary,
+  type BrokerAuditValue,
   defaultBrokerAuditEmitter,
   sanitizeAuditSummary,
 } from "./audit.js";
@@ -28,10 +40,205 @@ import {
   type BrokerContext,
   BrokerSecurityError,
 } from "./base.js";
-import { CommandBroker } from "./cmd-broker.js";
-import { FilesystemBroker } from "./fs-broker.js";
-import { type NetRequestParams, NetworkBroker } from "./net-broker.js";
-import { SecretBroker } from "./secret-broker.js";
+import { CommandBroker, type CommandExecuteResult } from "./cmd-broker.js";
+import { type FileStatResult, FilesystemBroker, type ReadFileResult } from "./fs-broker.js";
+import { type NetRequestParams, type NetResponseResult, NetworkBroker } from "./net-broker.js";
+import {
+  BrokerSecretRequestPayloadSchema,
+  type BrokerSecretResult,
+  SecretBroker,
+} from "./secret-broker.js";
+
+export type BrokerRequestPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Uint8Array
+  | SecretReference
+  | ExternalActionAuthorizationRecord
+  | readonly BrokerRequestPayloadValue[]
+  | BrokerRequestPayloadValue[]
+  | { [key: string]: BrokerRequestPayloadValue | undefined };
+
+export interface BrokerRequestPayload {
+  [key: string]: BrokerRequestPayloadValue | undefined;
+}
+
+export interface ExternalActionResult {
+  success: boolean;
+  actionType: string;
+  target: string;
+  payloadDigest?: string;
+  executedAt: string;
+  invocationId?: string;
+}
+
+export type BrokerExecutionResult =
+  | { content: string | Buffer; bytesRead: number }
+  | { bytesWritten: number }
+  | { success: boolean }
+  | ReadFileResult
+  | { exists: boolean }
+  | FileStatResult
+  | NetResponseResult
+  | CommandExecuteResult
+  | BrokerSecretResult
+  | ExternalActionResult
+  | Record<string, string | number | boolean | null | undefined>
+  | string[]
+  | boolean
+  | null
+  // biome-ignore lint/suspicious/noConfusingVoidType: Filesystem actions resolve without a result value.
+  | void
+  | undefined;
+
+function toMonitorValue(val: BrokerRequestPayloadValue | undefined): MonitorValue | undefined {
+  if (val === undefined || val === null) return val;
+  if (
+    String(val) === val ||
+    Number.isFinite(val) ||
+    val === true ||
+    val === false ||
+    val instanceof Uint8Array
+  ) {
+    return val;
+  }
+  if (Array.isArray(val)) {
+    const arr: MonitorValue[] = [];
+    for (const item of val) {
+      const converted = toMonitorValue(item);
+      if (converted !== undefined) {
+        arr.push(converted);
+      }
+    }
+    return arr;
+  }
+  const obj: { [key: string]: MonitorValue | undefined } = {};
+  for (const [k, v] of Object.entries(val)) {
+    obj[k] = toMonitorValue(v);
+  }
+  return obj;
+}
+
+type BrokerGuardValue = MonitorValue | BrokerRequestPayloadValue | null | undefined;
+
+function isString(val: BrokerGuardValue): val is string {
+  return z.string().safeParse(val).success;
+}
+
+function isNumber(val: BrokerGuardValue): val is number {
+  return z.number().finite().safeParse(val).success;
+}
+
+function isBoolean(val: BrokerGuardValue): val is boolean {
+  return z.boolean().safeParse(val).success;
+}
+
+function isMonitorRecord(val: MonitorValue | null | undefined): val is MonitorRecord {
+  return (
+    val !== null &&
+    !Array.isArray(val) &&
+    !(val instanceof Uint8Array) &&
+    Object.prototype.toString.call(val) === "[object Object]"
+  );
+}
+
+function toAuditSummary(record: MonitorRecord | undefined | null): BrokerAuditSummary {
+  if (!record || Array.isArray(record)) return {};
+  const summary: BrokerAuditSummary = {};
+  for (const [k, v] of Object.entries(record)) {
+    if (v === undefined) continue;
+    if (isString(v) || isNumber(v) || isBoolean(v) || v === null) {
+      summary[k] = v;
+    } else if (Array.isArray(v)) {
+      const arr: BrokerAuditValue[] = [];
+      for (const item of v) {
+        if (item === undefined) continue;
+        if (isString(item) || isNumber(item) || isBoolean(item) || item === null) {
+          arr.push(item);
+        }
+      }
+      summary[k] = arr;
+    } else if (isMonitorRecord(v)) {
+      summary[k] = toAuditSummary(v);
+    }
+  }
+  return summary;
+}
+
+function parseExternalAuth(
+  val: BrokerRequestPayloadValue | undefined,
+): ExternalActionAuthorizationRecord | undefined {
+  const result = ExternalActionAuthorizationRecordSchema.safeParse(val);
+  return result.success ? result.data : undefined;
+}
+
+function parseHeaders(
+  val: BrokerRequestPayloadValue | undefined,
+): Record<string, string | SecretReference> | undefined {
+  if (val !== null && val !== undefined && !Array.isArray(val) && !(val instanceof Uint8Array)) {
+    const result: Record<string, string | SecretReference> = {};
+    for (const [k, v] of Object.entries(val)) {
+      const parsedRef = SecretReferenceSchema.safeParse(v);
+      if (parsedRef.success) {
+        result[k] = parsedRef.data;
+      } else if (String(v) === v) {
+        result[k] = v;
+      }
+    }
+    return result;
+  }
+  return undefined;
+}
+
+function parseSecretReferences(
+  val: BrokerRequestPayloadValue | undefined,
+): Record<string, SecretReference> | undefined {
+  if (val !== null && val !== undefined && !Array.isArray(val) && !(val instanceof Uint8Array)) {
+    const result: Record<string, SecretReference> = {};
+    for (const [k, v] of Object.entries(val)) {
+      const parsed = SecretReferenceSchema.safeParse(v);
+      if (parsed.success) {
+        result[k] = parsed.data;
+      }
+    }
+    return result;
+  }
+  return undefined;
+}
+
+function parseEnvMap(
+  val: BrokerRequestPayloadValue | undefined,
+): Record<string, string | SecretReference> | undefined {
+  if (val !== null && val !== undefined && !Array.isArray(val) && !(val instanceof Uint8Array)) {
+    const result: Record<string, string | SecretReference> = {};
+    for (const [k, v] of Object.entries(val)) {
+      const parsed = SecretReferenceSchema.safeParse(v);
+      if (parsed.success) {
+        result[k] = parsed.data;
+      } else if (String(v) === v) {
+        result[k] = v;
+      }
+    }
+    return result;
+  }
+  return undefined;
+}
+
+const BrokerAuthSchema = z.union([
+  SecretReferenceSchema,
+  z
+    .object({
+      bearer: z.union([z.string(), SecretReferenceSchema]),
+    })
+    .strict(),
+]);
+
+function parseAuth(val: BrokerRequestPayloadValue | undefined): NetRequestParams["auth"] {
+  const parsedAuth = BrokerAuthSchema.safeParse(val);
+  return parsedAuth.success ? parsedAuth.data : undefined;
+}
 
 export interface CapabilityBrokerManagerOptions extends BaseCapabilityBrokerOptions {
   fsBroker?: FilesystemBroker;
@@ -130,9 +337,9 @@ export class CapabilityBrokerManager {
   async handleRequest(
     service: "fs" | "net" | "cmd" | "secret" | "external" | "consequential" | string,
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     const invocationId = context.invocationId || "";
     if (invocationId && this.effectMonitor.isInvocationRevoked(invocationId)) {
       throw new BrokerSecurityError(
@@ -154,13 +361,13 @@ export class CapabilityBrokerManager {
             code: "POLICY_VIOLATION",
             violationType: check.violationType,
             invocationId,
-            effect: sanitizeAuditSummary(effectRequestToRecord(effectRequest)),
+            effect: sanitizeAuditSummary(toAuditSummary(effectRequestToRecord(effectRequest))),
           },
         );
       }
     }
 
-    let result: unknown;
+    let result: BrokerExecutionResult;
     switch (service) {
       case "fs":
         result = await this.handleFsRequest(action, payload, context);
@@ -216,12 +423,12 @@ export class CapabilityBrokerManager {
     params: {
       actionType: string;
       target: string;
-      payload?: unknown;
+      payload?: BrokerRequestPayloadValue;
       payloadDigest?: string;
       authorization?: ExternalActionAuthorizationRecord;
     },
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     return this.handleRequest(
       "external",
       params.actionType,
@@ -239,7 +446,7 @@ export class CapabilityBrokerManager {
   private mapRequestToEffect(
     service: string,
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
   ): EffectRequest | null {
     switch (service) {
       case "fs": {
@@ -256,8 +463,10 @@ export class CapabilityBrokerManager {
             return {
               type: "file_write",
               path: String(payload.path ?? ""),
-              isCreate: payload.isCreate as boolean | undefined,
-              isModify: payload.isModify as boolean | undefined,
+              isCreate:
+                payload.isCreate === true ? true : payload.isCreate === false ? false : undefined,
+              isModify:
+                payload.isModify === true ? true : payload.isModify === false ? false : undefined,
             };
           case "appendFile":
             return { type: "file_modify", path: String(payload.path ?? ""), isModify: true };
@@ -278,23 +487,29 @@ export class CapabilityBrokerManager {
         }
       }
       case "net": {
+        const payloadVal = toMonitorValue(payload.body ?? payload.payload);
         return {
           type: "network_request",
           url: String(payload.url ?? ""),
           method: String(payload.method ?? "GET"),
-          payload: payload.body ?? payload.payload,
-          body: payload.body ?? payload.payload,
-          payloadDigest: payload.payloadDigest as string | undefined,
-          authorization: (payload.authorization ?? payload.externalAuthorization) as
-            | ExternalActionAuthorizationRecord
-            | undefined,
+          payload: payloadVal,
+          body: payloadVal,
+          payloadDigest:
+            String(payload.payloadDigest) === payload.payloadDigest
+              ? payload.payloadDigest
+              : undefined,
+          authorization:
+            parseExternalAuth(payload.authorization) ??
+            parseExternalAuth(payload.externalAuthorization),
         };
       }
       case "cmd": {
         return {
           type: "process_spawn",
           command: String(payload.command ?? ""),
-          args: Array.isArray(payload.args) ? (payload.args as string[]) : [],
+          args: Array.isArray(payload.args)
+            ? payload.args.filter((a): a is string => String(a) === a)
+            : [],
         };
       }
       case "secret": {
@@ -310,9 +525,12 @@ export class CapabilityBrokerManager {
           type: "external_action",
           actionType: String(payload.actionType ?? action),
           target: String(payload.target ?? ""),
-          payload: payload.payload,
-          payloadDigest: payload.payloadDigest as string | undefined,
-          authorization: payload.authorization as ExternalActionAuthorizationRecord | undefined,
+          payload: toMonitorValue(payload.payload),
+          payloadDigest:
+            String(payload.payloadDigest) === payload.payloadDigest
+              ? payload.payloadDigest
+              : undefined,
+          authorization: parseExternalAuth(payload.authorization),
         };
       }
       default:
@@ -322,18 +540,23 @@ export class CapabilityBrokerManager {
 
   private async handleExternalActionRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<ExternalActionResult> {
     const actionType = String(payload.actionType ?? action);
     const target = String(payload.target ?? "");
+    const rawDigest = payload.payloadDigest;
+    const payloadDigest =
+      String(rawDigest) === rawDigest
+        ? rawDigest
+        : payload.payload !== undefined
+          ? computePayloadDigest(toMonitorValue(payload.payload))
+          : undefined;
     return {
       success: true,
       actionType,
       target,
-      payloadDigest:
-        payload.payloadDigest ??
-        (payload.payload ? computePayloadDigest(payload.payload) : undefined),
+      payloadDigest,
       executedAt: new Date().toISOString(),
       invocationId: context.invocationId,
     };
@@ -342,15 +565,22 @@ export class CapabilityBrokerManager {
     return async (
       service: "fs" | "net" | "cmd" | "secret",
       action: string,
-      payload: Record<string, unknown> = {},
-    ) => {
+      payload?: CanonicalJsonRecord,
+    ): Promise<CanonicalJsonValue> => {
       const enrichedContext: BrokerContext = {
         ...context,
         secretBroker: this.secret,
         isWorker: true,
         source: "worker",
       };
-      return this.handleRequest(service, action, payload, enrichedContext);
+      // SAFETY: CanonicalJsonRecord payload conforms to BrokerRequestPayload structure.
+      const brokerPayload = (payload ?? {}) as BrokerRequestPayload;
+      const res = await this.handleRequest(service, action, brokerPayload, enrichedContext);
+      if (res === undefined) {
+        return null;
+      }
+      // SAFETY: BrokerExecutionResult conforms to CanonicalJsonValue.
+      return res as CanonicalJsonValue;
     };
   }
   /**
@@ -365,15 +595,20 @@ export class CapabilityBrokerManager {
 
   private async handleFsRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     switch (action) {
       case "readFile":
         return this.fs.readFile(
           {
             path: String(payload.path ?? ""),
-            encoding: payload.encoding as "utf-8" | "base64" | "buffer" | undefined,
+            encoding:
+              payload.encoding === "utf-8" ||
+              payload.encoding === "base64" ||
+              payload.encoding === "buffer"
+                ? payload.encoding
+                : undefined,
           },
           context,
         );
@@ -381,9 +616,15 @@ export class CapabilityBrokerManager {
         return this.fs.writeFile(
           {
             path: String(payload.path ?? ""),
-            content: payload.content as string | Uint8Array,
-            encoding: payload.encoding as "utf-8" | "base64" | undefined,
-            atomic: payload.atomic as boolean | undefined,
+            content:
+              payload.content instanceof Uint8Array
+                ? payload.content
+                : String(payload.content ?? ""),
+            encoding:
+              payload.encoding === "utf-8" || payload.encoding === "base64"
+                ? payload.encoding
+                : undefined,
+            atomic: payload.atomic === true ? true : payload.atomic === false ? false : undefined,
           },
           context,
         );
@@ -391,8 +632,14 @@ export class CapabilityBrokerManager {
         return this.fs.appendFile(
           {
             path: String(payload.path ?? ""),
-            content: payload.content as string | Uint8Array,
-            encoding: payload.encoding as "utf-8" | "base64" | undefined,
+            content:
+              payload.content instanceof Uint8Array
+                ? payload.content
+                : String(payload.content ?? ""),
+            encoding:
+              payload.encoding === "utf-8" || payload.encoding === "base64"
+                ? payload.encoding
+                : undefined,
           },
           context,
         );
@@ -409,7 +656,8 @@ export class CapabilityBrokerManager {
         return this.fs.delete(
           {
             path: String(payload.path ?? ""),
-            recursive: payload.recursive as boolean | undefined,
+            recursive:
+              payload.recursive === true ? true : payload.recursive === false ? false : undefined,
           },
           context,
         );
@@ -418,7 +666,8 @@ export class CapabilityBrokerManager {
         return this.fs.createDirectory(
           {
             path: String(payload.path ?? ""),
-            recursive: payload.recursive as boolean | undefined,
+            recursive:
+              payload.recursive === true ? true : payload.recursive === false ? false : undefined,
           },
           context,
         );
@@ -427,7 +676,8 @@ export class CapabilityBrokerManager {
         return this.fs.listDirectory(
           {
             path: payload.path !== undefined ? String(payload.path) : undefined,
-            recursive: payload.recursive as boolean | undefined,
+            recursive:
+              payload.recursive === true ? true : payload.recursive === false ? false : undefined,
           },
           context,
         );
@@ -455,23 +705,35 @@ export class CapabilityBrokerManager {
 
   private async handleNetRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     switch (action) {
       case "fetch":
       case "request": {
         return this.net.request(
           {
             url: String(payload.url ?? ""),
-            method: payload.method as string | undefined,
-            headers: payload.headers as Record<string, string> | undefined,
-            body: payload.body as string | Uint8Array | undefined,
-            auth: payload.auth as NetRequestParams["auth"],
-            secretReferences: payload.secretReferences as NetRequestParams["secretReferences"],
-            timeoutMs: payload.timeoutMs as number | undefined,
-            redirect: payload.redirect as "follow" | "error" | "manual" | undefined,
-            maxRedirects: payload.maxRedirects as number | undefined,
+            method: String(payload.method) === payload.method ? payload.method : undefined,
+            headers: parseHeaders(payload.headers),
+            body:
+              payload.body instanceof Uint8Array
+                ? payload.body
+                : String(payload.body) === payload.body
+                  ? payload.body
+                  : undefined,
+            auth: parseAuth(payload.auth),
+            secretReferences: parseSecretReferences(payload.secretReferences),
+            timeoutMs: Number.isFinite(payload.timeoutMs) ? Number(payload.timeoutMs) : undefined,
+            redirect:
+              payload.redirect === "follow" ||
+              payload.redirect === "error" ||
+              payload.redirect === "manual"
+                ? payload.redirect
+                : undefined,
+            maxRedirects: Number.isFinite(payload.maxRedirects)
+              ? Number(payload.maxRedirects)
+              : undefined,
           },
           context,
         );
@@ -486,19 +748,17 @@ export class CapabilityBrokerManager {
 
   private async handleCmdRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     switch (action) {
       case "execute":
       case "exec": {
         let secretEnv: Record<string, string> | undefined;
-        let stdin = payload.stdin as string | undefined;
-        if (payload.env) {
-          secretEnv = await this.secret.mediateCommandEnv(
-            payload.env as Record<string, string>,
-            context,
-          );
+        let stdin = String(payload.stdin) === payload.stdin ? payload.stdin : undefined;
+        const cmdEnv = parseEnvMap(payload.env);
+        if (cmdEnv) {
+          secretEnv = await this.secret.mediateCommandEnv(cmdEnv, context);
         } else if (context.grant?.capabilities?.secrets?.injectAsEnv) {
           secretEnv = await this.secret.mediateCommandEnv({}, context);
         }
@@ -509,15 +769,20 @@ export class CapabilityBrokerManager {
 
         return this.cmd.execute(
           {
-            command: payload.command as string | undefined,
-            executable: payload.executable as string | undefined,
-            args: payload.args as string[] | undefined,
-            cwd: payload.cwd as string | undefined,
-            env: payload.env as Record<string, string | SecretReference> | undefined,
+            command: String(payload.command) === payload.command ? payload.command : undefined,
+            executable:
+              String(payload.executable) === payload.executable ? payload.executable : undefined,
+            args: Array.isArray(payload.args)
+              ? payload.args.filter((a): a is string => String(a) === a)
+              : undefined,
+            cwd: String(payload.cwd) === payload.cwd ? payload.cwd : undefined,
+            env: cmdEnv,
             secretEnv,
             stdin,
-            timeoutMs: payload.timeoutMs as number | undefined,
-            maxOutputSizeBytes: payload.maxOutputSizeBytes as number | undefined,
+            timeoutMs: Number.isFinite(payload.timeoutMs) ? Number(payload.timeoutMs) : undefined,
+            maxOutputSizeBytes: Number.isFinite(payload.maxOutputSizeBytes)
+              ? Number(payload.maxOutputSizeBytes)
+              : undefined,
           },
           context,
         );
@@ -532,14 +797,15 @@ export class CapabilityBrokerManager {
 
   private async handleSecretRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerExecutionResult> {
     const workerContext: BrokerContext = {
       ...context,
       isWorker: true,
       source: "worker",
     };
-    return this.secret.handleRequest(action, payload, workerContext);
+    const secretPayload = BrokerSecretRequestPayloadSchema.parse(payload);
+    return this.secret.handleRequest(action, secretPayload, workerContext);
   }
 }

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CommandCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BrokerAuditEmitter,
@@ -64,7 +65,7 @@ describe("Command Child Environment Sanitization & Isolation", () => {
     }
   });
 
-  const createGrant = (cmdOverrides: Record<string, unknown> = {}) => {
+  const createGrant = (cmdOverrides: Partial<CommandCapability> = {}) => {
     return createInvocationGrant({
       invocationId: "inv_cmd_env_001",
       toolId: "cmd_env_tool",
@@ -204,20 +205,9 @@ describe("Command Child Environment Sanitization & Isolation", () => {
             },
             ctx,
           ),
-        ).rejects.toThrow(BrokerSecurityError);
-
-        try {
-          await broker.execute(
-            {
-              executable: "node",
-              args: ["test.js"],
-              env: { [dangerousVar]: "/tmp/malicious.so" },
-            },
-            ctx,
-          );
-        } catch (err) {
-          expect((err as BrokerSecurityError).code).toBe("DANGEROUS_ENV_VAR");
-        }
+        ).rejects.toMatchObject({
+          code: "DANGEROUS_ENV_VAR",
+        });
       }
     });
 
@@ -247,20 +237,9 @@ describe("Command Child Environment Sanitization & Isolation", () => {
             },
             ctx,
           ),
-        ).rejects.toThrow(BrokerSecurityError);
-
-        try {
-          await broker.execute(
-            {
-              executable: "node",
-              args: ["test.js"],
-              env: { [dyldVar]: "/tmp/malicious.dylib" },
-            },
-            ctx,
-          );
-        } catch (err) {
-          expect((err as BrokerSecurityError).code).toBe("DANGEROUS_ENV_VAR");
-        }
+        ).rejects.toMatchObject({
+          code: "DANGEROUS_ENV_VAR",
+        });
       }
     });
 
@@ -300,7 +279,9 @@ describe("Command Child Environment Sanitization & Isolation", () => {
           .catch((cause: unknown) => cause);
 
         expect(error).toBeInstanceOf(BrokerSecurityError);
-        expect((error as BrokerSecurityError).code).toBe("DANGEROUS_ENV_VAR");
+        if (error instanceof BrokerSecurityError) {
+          expect(error.code).toBe("DANGEROUS_ENV_VAR");
+        }
       }
     });
 
@@ -326,22 +307,9 @@ describe("Command Child Environment Sanitization & Isolation", () => {
           },
           ctx,
         ),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.execute(
-          {
-            executable: "node",
-            args: ["test.js"],
-            env: {
-              UNAUTHORIZED_CUSTOM_KEY: "arbitrary_value",
-            },
-          },
-          ctx,
-        );
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_ENV_VAR");
-      }
+      ).rejects.toMatchObject({
+        code: "UNAUTHORIZED_ENV_VAR",
+      });
     });
   });
 

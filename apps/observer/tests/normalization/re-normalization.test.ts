@@ -1,6 +1,7 @@
 import { createInMemoryStateStore } from "@resin/db";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   type HarnessRecordDecoder,
   NormalizationPipeline,
@@ -82,16 +83,16 @@ describe("Re-Normalization & Versioned Revision Engine", () => {
       canDecode: () => true,
       decode: (record) => {
         const payload = record.rawPayload;
+        const parsedPayload = z.record(z.unknown()).safeParse(payload);
         if (
           record.recordType === "transcript_line" &&
-          payload &&
-          typeof payload === "object" &&
-          "content" in payload
+          parsedPayload.success &&
+          "content" in parsedPayload.data
         ) {
           return {
             type: "message",
             role: "user",
-            content: String(payload.content),
+            content: String(parsedPayload.data.content),
             model: "claude-3-7-sonnet",
             sessionId: record.sessionId,
             timestamp: record.timestamp,
@@ -100,15 +101,11 @@ describe("Re-Normalization & Versioned Revision Engine", () => {
         }
         if (
           record.recordType === "tool_call" &&
-          payload &&
-          typeof payload === "object" &&
-          "parameters" in payload
+          parsedPayload.success &&
+          "parameters" in parsedPayload.data
         ) {
-          const rawParams = payload.parameters;
           const safeParams =
-            typeof rawParams === "object" && rawParams !== null
-              ? (rawParams as Record<string, unknown>)
-              : {};
+            z.record(z.unknown()).safeParse(parsedPayload.data.parameters).data ?? {};
           return {
             type: "tool_call",
             toolName: "bash_runner",
@@ -166,16 +163,11 @@ describe("Re-Normalization & Versioned Revision Engine", () => {
     const revEvent2 = executeResult.events[1];
 
     // Verify revision metadata attached
-    expect(revEvent1.metadata?.revision).toBeDefined();
-    const revMeta = revEvent1.metadata?.revision as {
-      revisionNumber: number;
-      decoderVersion: string;
-      reason: string;
-    };
-    expect(revMeta.revisionNumber).toBe(2);
-    expect(revMeta.decoderVersion).toBe("2.0.0");
-    expect(revMeta.reason).toContain("Upgraded bash tool mapping");
-
+    expect(revEvent1.metadata?.revision).toMatchObject({
+      revisionNumber: 2,
+      decoderVersion: "2.0.0",
+      reason: expect.stringContaining("Upgraded bash tool mapping"),
+    });
     // Verify upgraded redaction applied
     if (revEvent1.type === "message") {
       expect(revEvent1.content).toContain("$REPO_ROOT");

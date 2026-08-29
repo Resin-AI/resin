@@ -118,11 +118,17 @@ describe("syncOmpCatalogInstructions", () => {
       const target = path.join(tmpDir, "APPEND_SYSTEM.md");
       const markdown = "## Evolved Tools\n\n### `git_operation_helper`\n- **Description**: d";
       const calls: Array<{ url: string; headers: Record<string, string> }> = [];
-      const fetchFn = (async (url: unknown, init?: { headers?: Record<string, string> }) => {
-        calls.push({ url: String(url), headers: init?.headers ?? {} });
+      const fetchFn: typeof fetch = async (url: string | URL | Request, init?: RequestInit) => {
+        const headersObj: Record<string, string> = {};
+        if (init?.headers) {
+          const parsedHeaders = new Headers(init.headers);
+          parsedHeaders.forEach((value, key) => {
+            headersObj[key] = value;
+          });
+        }
+        calls.push({ url: String(url), headers: headersObj });
         return new Response(JSON.stringify({ markdown }), { status: 200 });
-      }) as typeof fetch;
-
+      };
       const result = await syncOmpCatalogInstructions({
         cloudUrl: "http://127.0.0.1:8080",
         workspaceId: "ws-1",
@@ -143,7 +149,9 @@ describe("syncOmpCatalogInstructions", () => {
   });
 
   it("throws on non-200 responses", async () => {
-    const fetchFn = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+    const fetchFn: typeof fetch = async () =>
+      new Response("Internal Server Error", { status: 500 });
+
     await expect(
       syncOmpCatalogInstructions({
         cloudUrl: "http://127.0.0.1:8080",

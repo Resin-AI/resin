@@ -36,14 +36,12 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
       interval: 1,
     };
 
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => mockBootstrapResponse,
-    } as Response);
+    const mockFetch = vi.fn().mockResolvedValue(Response.json(mockBootstrapResponse));
 
     const client = new DeviceAuthClient({
       cloudUrl: "https://mock-cloud.resin.sh",
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -148,50 +146,48 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     const mockFetch = vi.fn(async (input: string | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/v1/auth/device/code")) {
-        return {
-          ok: true,
-          json: async () => ({
-            deviceCode: "device_code_privacy_delete_step_up",
-            userCode: "DELE-1234",
-            verificationUri: "https://auth.resin.sh/device",
-            verificationUriComplete:
-              "https://auth.resin.sh/device?user_code=DELE-1234&approval_nonce=nonce",
-            expiresIn: 900,
-            interval: 1,
-          }),
-        } as Response;
+        return Response.json({
+          deviceCode: "device_code_privacy_delete_step_up",
+          userCode: "DELE-1234",
+          verificationUri: "https://auth.resin.sh/device",
+          verificationUriComplete:
+            "https://auth.resin.sh/device?user_code=DELE-1234&approval_nonce=nonce",
+          expiresIn: 900,
+          interval: 1,
+        });
       }
       if (url.endsWith("/v1/auth/device/token")) {
         const issuedAt = new Date(Date.now()).toISOString();
-        return {
-          ok: true,
-          json: async () => ({
-            accessToken: elevatedAccessToken,
-            refreshToken: elevatedRefreshToken,
-            tokenType: "Bearer",
-            expiresIn: 3600,
-            claims: {
-              accountId: "acc_privacy_test",
-              deviceId: "dev_privacy_test",
-              installationId: "inst_privacy_test",
-              workspaceId: "ws_privacy_test",
-              scopes: ["privacy:delete"],
-              rawUploadConsent: false,
-              issuedAt,
-              expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-              tokenType: "access",
-            },
-          }),
-        } as Response;
+        return Response.json({
+          accessToken: elevatedAccessToken,
+          refreshToken: elevatedRefreshToken,
+          tokenType: "Bearer",
+          expiresIn: 3600,
+          claims: {
+            accountId: "acc_privacy_test",
+            deviceId: "dev_privacy_test",
+            installationId: "inst_privacy_test",
+            workspaceId: "ws_privacy_test",
+            scopes: ["privacy:delete"],
+            rawUploadConsent: false,
+            issuedAt,
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+            tokenType: "access",
+            userId: "usr_privacy_test",
+            subject: "usr_privacy_test",
+          },
+        });
       }
       if (url.endsWith("/v1/auth/logout")) {
+        // SAFETY: Mock Response object for test.
         return { ok: true } as Response;
       }
       throw new Error(`Unexpected request: ${url}`);
     });
     const client = new DeviceAuthClient({
       cloudUrl: "https://mock-cloud.resin.sh",
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -260,20 +256,15 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     const mockFetch = vi.fn().mockImplementation(async () => {
       pollCount++;
       if (pollCount === 1) {
-        return {
-          ok: false,
-          json: async () => ({ error: "authorization_pending" }),
-        } as Response;
+        return Response.json({ error: "authorization_pending" }, { status: 400 });
       }
-      return {
-        ok: true,
-        json: async () => mockTokenResponse,
-      } as Response;
+      return Response.json(mockTokenResponse);
     });
 
     const client = new DeviceAuthClient({
       cloudUrl: "https://mock-cloud.resin.sh",
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -290,6 +281,7 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     expect(tokenResult.claims.workspaceId).toBe("ws_test_1");
     expect(pollCount).toBe(2);
     for (const [, init] of mockFetch.mock.calls) {
+      // SAFETY: RequestInit body string JSON parsing in test assertion.
       expect(JSON.parse((init as RequestInit).body as string).installationId).toBe(
         "inst_dev_mock_test",
       );
@@ -300,7 +292,8 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     vi.useFakeTimers();
     const mockFetch = vi.fn();
     const client = new DeviceAuthClient({
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -314,7 +307,7 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
         timeoutMs: 30_000,
         abortSignal: controller.signal,
       });
-      const outcome = pending.catch((error: unknown) => error);
+      const outcome = pending.catch((error: Error | string | { message?: string }) => error);
       controller.abort();
 
       expect(await outcome).toMatchObject({ message: "Device authorization was cancelled" });
@@ -328,7 +321,8 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     vi.useFakeTimers();
     const mockFetch = vi.fn();
     const client = new DeviceAuthClient({
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -340,7 +334,7 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
         interval: 5,
         timeoutMs: 500,
       });
-      const outcome = pending.catch((error: unknown) => error);
+      const outcome = pending.catch((error: Error | string | { message?: string }) => error);
       await vi.advanceTimersByTimeAsync(500);
 
       expect(await outcome).toMatchObject({
@@ -354,9 +348,8 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
 
   it("rejects token responses that are bound to another installation", async () => {
     vi.useFakeTimers();
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    const mockFetch = vi.fn().mockResolvedValue(
+      Response.json({
         accessToken: "atk_mismatched_device_binding_token_12345",
         refreshToken: "rtk_mismatched_device_binding_token_12345",
         tokenType: "Bearer",
@@ -364,20 +357,21 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
         claims: {
           accountId: "acc_test_user",
           deviceId: "dev_expected",
-          installationId: "inst_other",
-          workspaceId: "ws_test",
-          scopes: ["device:connect"],
+          installationId: "inst_wrong_foreign_device",
+          workspaceId: "ws_test_user",
+          scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
           rawUploadConsent: false,
           issuedAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          expiresAt: new Date(Date.now() + 3600000).toISOString(),
           tokenType: "access",
           userId: "usr_test_user",
           subject: "usr_test_user",
         },
       }),
-    } as Response);
+    );
     const client = new DeviceAuthClient({
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -389,7 +383,7 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
         installationId: "inst_expected",
         interval: 1,
       });
-      const outcome = poll.catch((error: unknown) => error);
+      const outcome = poll.catch((error: Error | string | { message?: string }) => error);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(await outcome).toMatchObject({
         message: expect.stringMatching(/mismatched device binding/),
@@ -400,13 +394,13 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
   });
 
   it("handles authorization errors: expired_token and access_denied", async () => {
-    const mockExpiredFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      json: async () => ({ error: "expired_token" }),
-    } as Response);
+    const mockExpiredFetch = vi
+      .fn()
+      .mockResolvedValue(Response.json({ error: "expired_token" }, { status: 400 }));
 
     const client1 = new DeviceAuthClient({
-      customFetch: mockExpiredFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockExpiredFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -419,13 +413,13 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
       }),
     ).rejects.toThrow("Device code has expired");
 
-    const mockDeniedFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      json: async () => ({ error: "access_denied" }),
-    } as Response);
+    const mockDeniedFetch = vi
+      .fn()
+      .mockResolvedValue(Response.json({ error: "access_denied" }, { status: 400 }));
 
     const client2 = new DeviceAuthClient({
-      customFetch: mockDeniedFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockDeniedFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });
@@ -461,13 +455,15 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
       },
     };
 
+    // SAFETY: Mock Response for test.
     const mockFetch = vi.fn().mockResolvedValue({ ok: true } as Response);
 
     const client = new DeviceAuthClient({
       tokenFilePath,
       vaultPath,
       passphrase: "test-passphrase-1234",
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
     });
 
     // 1. Store credentials
@@ -544,10 +540,12 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     });
     await issuerClient.storeCredentials(tokenResponse, "dev_origin", "ws_origin");
 
+    // SAFETY: Mock Response for test.
     const mockFetch = vi.fn().mockResolvedValue({ ok: true } as Response);
     const logoutClient = new DeviceAuthClient({
       tokenFilePath,
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
     });
 
     await expect(logoutClient.revokeToken()).resolves.toBe(true);
@@ -590,10 +588,12 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
       }),
       { mode: 0o600 },
     );
+    // SAFETY: Mock Response for test.
     const mockFetch = vi.fn().mockResolvedValue({ ok: true } as Response);
     const client = new DeviceAuthClient({
       tokenFilePath,
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
     });
 
     await expect(client.loadCredentials()).resolves.toMatchObject({
@@ -790,24 +790,25 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
         subject: "usr_bootstrap",
       },
     };
-    const devicePayloads: Array<Record<string, unknown>> = [];
+    const devicePayloads: Array<{ readonly installationId?: string }> = [];
 
     const mockFetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
       if (init?.body) {
-        devicePayloads.push(JSON.parse(init.body as string) as Record<string, unknown>);
+        devicePayloads.push(JSON.parse(String(init.body)));
       }
       if (url.includes("/v1/auth/device/code")) {
-        return { ok: true, json: async () => mockBootstrapResponse } as Response;
+        return Response.json(mockBootstrapResponse);
       }
       if (url.includes("/v1/auth/device/token")) {
-        return { ok: true, json: async () => mockTokenResponse } as Response;
+        return Response.json(mockTokenResponse);
       }
-      return { ok: false, status: 404 } as Response;
+      return new Response(null, { status: 404 });
     });
 
     const client = new DeviceAuthClient({
       cloudUrl: "https://auth-cloud.resin.sh",
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
       tokenFilePath,
       vaultPath,
     });

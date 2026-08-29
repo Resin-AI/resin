@@ -136,7 +136,9 @@ export function loadBoundaryConfig(rootDir = process.cwd()) {
 export function sha256Hex(data) {
   const buf = Buffer.isBuffer(data)
     ? data
-    : Buffer.from(typeof data === "string" ? data : JSON.stringify(data));
+    : Buffer.from(
+        Object.prototype.toString.call(data) === "[object String]" ? data : JSON.stringify(data),
+      );
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
@@ -373,13 +375,17 @@ export function auditManifest(
   const buf = Buffer.isBuffer(manifestInput)
     ? manifestInput
     : Buffer.from(
-        typeof manifestInput === "string" ? manifestInput : JSON.stringify(manifestInput),
+        Object.prototype.toString.call(manifestInput) === "[object String]"
+          ? manifestInput
+          : JSON.stringify(manifestInput),
       );
   const digest = sha256Hex(buf);
   let parsed;
   try {
     parsed =
-      typeof manifestInput === "object" && !Buffer.isBuffer(manifestInput)
+      manifestInput !== null &&
+      !Buffer.isBuffer(manifestInput) &&
+      Object.prototype.toString.call(manifestInput) === "[object Object]"
         ? manifestInput
         : JSON.parse(buf.toString("utf8"));
   } catch (err) {
@@ -438,12 +444,18 @@ export function auditSbom(
 ) {
   const buf = Buffer.isBuffer(sbomInput)
     ? sbomInput
-    : Buffer.from(typeof sbomInput === "string" ? sbomInput : JSON.stringify(sbomInput));
+    : Buffer.from(
+        Object.prototype.toString.call(sbomInput) === "[object String]"
+          ? sbomInput
+          : JSON.stringify(sbomInput),
+      );
   const digest = sha256Hex(buf);
   let parsed;
   try {
     parsed =
-      typeof sbomInput === "object" && !Buffer.isBuffer(sbomInput)
+      sbomInput !== null &&
+      !Buffer.isBuffer(sbomInput) &&
+      Object.prototype.toString.call(sbomInput) === "[object Object]"
         ? sbomInput
         : JSON.parse(buf.toString("utf8"));
   } catch (err) {
@@ -503,13 +515,17 @@ export function auditChannels(channelsInput, filename = "channels.json") {
   const buf = Buffer.isBuffer(channelsInput)
     ? channelsInput
     : Buffer.from(
-        typeof channelsInput === "string" ? channelsInput : JSON.stringify(channelsInput),
+        Object.prototype.toString.call(channelsInput) === "[object String]"
+          ? channelsInput
+          : JSON.stringify(channelsInput),
       );
   const digest = sha256Hex(buf);
   let parsed;
   try {
     parsed =
-      typeof channelsInput === "object" && !Buffer.isBuffer(channelsInput)
+      channelsInput !== null &&
+      !Buffer.isBuffer(channelsInput) &&
+      Object.prototype.toString.call(channelsInput) === "[object Object]"
         ? channelsInput
         : JSON.parse(buf.toString("utf8"));
   } catch (err) {

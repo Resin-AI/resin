@@ -199,7 +199,9 @@ describe("Zero Silent Queuing Invariant", () => {
       expect.unreachable("Call should have timed out");
     } catch (err) {
       expect(err).toBeInstanceOf(McpProtocolError);
-      expect((err as McpProtocolError).code).toBe(MCP_ERROR_CODES.REQUEST_TIMEOUT);
+      if (err instanceof McpProtocolError) {
+        expect(err.code).toBe(MCP_ERROR_CODES.REQUEST_TIMEOUT);
+      }
     }
 
     mockService.clearFaults();

@@ -402,7 +402,7 @@ export async function detectOnboardingSkipReason(
   if (
     ciVariables.some(
       (value) =>
-        typeof value === "string" &&
+        String(value) === value &&
         value.length > 0 &&
         value !== "0" &&
         value.toLowerCase() !== "false",
@@ -423,7 +423,7 @@ export async function detectOnboardingSkipReason(
     options.isRoot ??
     (options.getuid !== undefined
       ? options.getuid() === 0
-      : typeof process.getuid === "function"
+      : process.getuid instanceof Function
         ? process.getuid() === 0
         : false);
   if (isRoot && !allowRoot) {
@@ -717,10 +717,12 @@ async function rollbackBootstrapActivation(options: {
 /**
  * Resolves candidate shell profile filenames and default profile based on shell name.
  */
-export function resolveCandidateProfiles(shellName?: string): {
+export interface CandidateProfilesResult {
   candidates: readonly string[];
   defaultProfile: string;
-} {
+}
+
+export function resolveCandidateProfiles(shellName?: string): CandidateProfilesResult {
   const normShell = (shellName || "").toLowerCase();
   if (normShell === "zsh") {
     return {
@@ -914,15 +916,21 @@ export async function bootstrapInstall(
   if (
     options.platform &&
     "isSupported" in options.platform &&
-    typeof options.platform.isSupported === "boolean"
+    (options.platform.isSupported === true || options.platform.isSupported === false)
   ) {
     platformInfo = options.platform;
   } else if (options.platform) {
     const p = options.platform;
     const normalizedArch = p.arch === "x86_64" ? "x64" : p.arch === "aarch64" ? "arm64" : p.arch;
     const isWslRequested = Boolean(p.isWsl) || p.os === "wsl";
+    const targetPlatform: NodeJS.Platform =
+      p.os === "wsl"
+        ? "linux"
+        : p.os === "darwin" || p.os === "linux" || p.os === "win32"
+          ? p.os
+          : "linux";
     platformInfo = detectPlatform({
-      platform: (p.os === "wsl" ? "linux" : p.os) as NodeJS.Platform,
+      platform: targetPlatform,
       arch: normalizedArch,
       env: options.env
         ? {
@@ -1253,8 +1261,7 @@ export async function bootstrapInstall(
  * Uses canonical pathToFileURL comparison to correctly handle spaces, unicode, and URL-escaped paths.
  */
 export function isMainModule(metaUrl: string = import.meta.url, argv1?: string): boolean {
-  const targetPath =
-    argv1 ?? (typeof process !== "undefined" && process.argv ? process.argv[1] : undefined);
+  const targetPath = argv1 ?? (process?.argv ? process.argv[1] : undefined);
   if (!targetPath) return false;
   try {
     const resolvedPath = path.resolve(targetPath);
@@ -1383,12 +1390,7 @@ Options:
   }
 }
 
-if (
-  typeof process !== "undefined" &&
-  process.argv &&
-  process.argv[1] &&
-  isMainModule(import.meta.url, process.argv[1])
-) {
+if (process?.argv?.[1] && isMainModule(import.meta.url, process.argv[1])) {
   runCli().catch((err) => {
     process.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}\n`,

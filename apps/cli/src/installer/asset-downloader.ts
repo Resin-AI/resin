@@ -82,6 +82,20 @@ export interface VersionRollbackResult {
   readonly activePath: string;
 }
 
+export interface InstalledVersionJson {
+  version?: string;
+  denoRuntime?: { version?: string; sha256?: string };
+  provenance?: ReleaseProvenance;
+  [key: string]:
+    | string
+    | number
+    | boolean
+    | null
+    | undefined
+    | ReleaseProvenance
+    | { version?: string; sha256?: string };
+}
+
 export interface VersionStateRecord {
   activeVersion: string;
   previousVersion: string | null;
@@ -106,7 +120,7 @@ const EXACT_RELEASE_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
 function normalizeReleaseVersion(version: string): string {
-  if (typeof version !== "string" || version.length === 0 || version !== version.trim()) {
+  if (!version || String(version) !== version || version !== version.trim()) {
     throw new Error(
       "Security violation: release version must be a non-empty exact SemVer segment.",
     );
@@ -187,7 +201,10 @@ function lstatIfExists(filePath: string, fsSync: typeof fs): fs.Stats | null {
     if (
       error instanceof Error &&
       "code" in error &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
+      Boolean(error) &&
+      error instanceof Object &&
+      "code" in error &&
+      error.code === "ENOENT"
     ) {
       return null;
     }
@@ -260,10 +277,12 @@ function validateTarHeaderChecksum(headerBlock: Buffer, headerOffset: number): v
   }
 }
 
-function validateTarMemberPath(fullName: string): {
+interface ValidatedTarMemberPath {
   relativePath: string;
   directoryHint: boolean;
-} {
+}
+
+function validateTarMemberPath(fullName: string): ValidatedTarMemberPath {
   const directoryHint = fullName.endsWith("/");
   const pathWithoutTrailingSlash = directoryHint ? fullName.slice(0, -1) : fullName;
   if (
@@ -482,7 +501,10 @@ function ensureSafeDirectoryPath(
           !(
             error instanceof Error &&
             "code" in error &&
-            (error as NodeJS.ErrnoException).code === "EEXIST"
+            Boolean(error) &&
+            error instanceof Object &&
+            "code" in error &&
+            error.code === "EEXIST"
           )
         ) {
           throw error;
@@ -541,11 +563,17 @@ function writeExclusiveRegularFile(
  * Avoids any external CLI `tar` dependencies, prevents directory traversal attacks,
  * and rejects dangerous or unsupported tar entry types (symlinks, hardlinks, devices, fifos).
  */
+export interface ExtractedTarArchiveResult {
+  extractedFiles: string[];
+  extractedDirs: string[];
+  executableFiles: string[];
+}
+
 export function extractTarArchive(
   tarData: Buffer,
   destinationDir: string,
   fsSync = fs,
-): { extractedFiles: string[]; extractedDirs: string[]; executableFiles: string[] } {
+): ExtractedTarArchiveResult {
   // Validate the complete archive before touching the destination so a malformed later
   // header cannot leave a partially extracted tree behind.
   const entries = parseTarEntries(tarData);
@@ -1027,7 +1055,7 @@ function verifyInstalledVersionTree(
     }
 
     if (relPath === "version.json") {
-      let parsedTarget: Record<string, unknown>;
+      let parsedTarget: InstalledVersionJson;
       try {
         parsedTarget = JSON.parse(fs.readFileSync(targetPath, "utf8"));
       } catch (parseErr) {
@@ -1059,9 +1087,7 @@ function verifyInstalledVersionTree(
       }
 
       if (expectedDenoRuntime) {
-        const targetDeno = parsedTarget.denoRuntime as
-          | { version?: string; sha256?: string }
-          | undefined;
+        const targetDeno = parsedTarget.denoRuntime;
         if (!targetDeno || targetDeno.version !== expectedDenoRuntime.version) {
           throw new Error(
             `Integrity violation: version.json denoRuntime version mismatch: expected '${expectedDenoRuntime.version}', got '${targetDeno?.version}'`,
@@ -1219,7 +1245,7 @@ export async function installReleaseVersion(
     if (!fs.existsSync(expectedCli)) {
       await fsPromises.writeFile(
         expectedCli,
-        `#!/usr/bin/env node\nimport path from "node:path";\nimport process from "node:process";\nimport { fileURLToPath } from "node:url";\nconst __dirname = path.dirname(fileURLToPath(import.meta.url));\nconst { main } = await import(path.resolve(__dirname, "../apps/cli/dist/bin/cli.js"));\nif (typeof main === "function") {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (typeof exitCode === "number" && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(\`Fatal error: \${err instanceof Error ? err.message : String(err)}\\n\`);\n    process.exit(1);\n  }\n}\n`,
+        `#!/usr/bin/env node\nimport path from "node:path";\nimport process from "node:process";\nimport { fileURLToPath } from "node:url";\nconst __dirname = path.dirname(fileURLToPath(import.meta.url));\nconst { main } = await import(path.resolve(__dirname, "../apps/cli/dist/bin/cli.js"));\nif (main instanceof Function) {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (Number.isInteger(exitCode) && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(\`Fatal error: \${err instanceof Error ? err.message : String(err)}\\n\`);\n    process.exit(1);\n  }\n}\n`,
         { mode: 0o755 },
       );
       await fsPromises.chmod(expectedCli, 0o755);
@@ -1571,17 +1597,21 @@ export async function switchActiveVersion(
           .map((d) => d.replace(/^v/, ""))
       : [cleanTarget];
 
-    let existingProvenance: Record<string, ReleaseProvenance> = {};
+    let existingProvenance: NonNullable<VersionStateRecord["provenanceByVersion"]> = {};
     if (priorVersionStateRaw) {
       try {
+        // SAFETY: Prior version state parsed from valid version-state.json structure.
         const state = JSON.parse(priorVersionStateRaw) as VersionStateRecord;
-        existingProvenance = { ...(state.provenanceByVersion ?? {}) };
+        if (state.provenanceByVersion) {
+          existingProvenance = { ...state.provenanceByVersion };
+        }
       } catch {}
     }
     try {
-      const versionMetadata = JSON.parse(fs.readFileSync(targetVersionJson, "utf8")) as {
-        provenance?: ReleaseProvenance;
-      };
+      // SAFETY: JSON parsed from version.json metadata adhering to InstalledVersionJson structure.
+      const versionMetadata = JSON.parse(
+        fs.readFileSync(targetVersionJson, "utf8"),
+      ) as InstalledVersionJson;
       if (versionMetadata.provenance) existingProvenance[cleanTarget] = versionMetadata.provenance;
     } catch {}
 
@@ -1796,6 +1826,7 @@ export async function rollbackActiveVersion(
 
   if (!targetRollbackVersion && fs.existsSync(versionStatePath)) {
     try {
+      // SAFETY: Prior version state parsed from valid version-state.json structure.
       const state = JSON.parse(fs.readFileSync(versionStatePath, "utf8")) as VersionStateRecord;
       targetRollbackVersion = state.previousVersion || undefined;
     } catch {}
@@ -1862,6 +1893,7 @@ export function getActiveVersion(resinHome: string): string | null {
   const versionStatePath = path.join(resinHome, "version-state.json");
   if (fs.existsSync(versionStatePath)) {
     try {
+      // SAFETY: Prior version state parsed from valid version-state.json structure.
       const state = JSON.parse(fs.readFileSync(versionStatePath, "utf8")) as VersionStateRecord;
       return state.activeVersion || null;
     } catch {}

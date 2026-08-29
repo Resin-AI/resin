@@ -11,18 +11,31 @@ import {
   ToolVersionSchema,
   canonicalJson,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
 /**
  * Harness plugin installation record.
  */
+export type HarnessPluginMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | HarnessPluginMetadataRecord
+  | HarnessPluginMetadataValue[];
+
+export interface HarnessPluginMetadataRecord {
+  [key: string]: HarnessPluginMetadataValue;
+}
+
 export interface HarnessInstallationRecord {
   harnessId: string;
   pluginId: string;
   version: string;
   installedAt: string;
   state: "active" | "disabled" | "degraded" | "uninstalled";
-  metadata: Record<string, unknown>;
+  metadata: HarnessPluginMetadataRecord;
 }
 
 /**
@@ -118,7 +131,7 @@ export class ToolRepository {
 
   async listManifests(options?: { scope?: string }): Promise<ToolManifest[]> {
     let sql = "SELECT * FROM tool_manifests";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (options?.scope) {
       sql += " WHERE scope = ?";
       params.push(options.scope);
@@ -420,7 +433,7 @@ export class ToolRepository {
     toolVersion?: string,
   ): Promise<DeploymentRecord | null> {
     let sql = "SELECT * FROM deployment_records WHERE workspace_id = ? AND tool_id = ?";
-    const params: unknown[] = [workspaceId, toolId];
+    const params: SQLBindValue[] = [workspaceId, toolId];
     if (toolVersion) {
       sql += " AND tool_version = ?";
       params.push(toolVersion);
@@ -475,7 +488,7 @@ export class ToolRepository {
     state?: string;
   }): Promise<DeploymentRecord[]> {
     const conditions: string[] = [];
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
 
     if (options?.workspaceId) {
       conditions.push("workspace_id = ?");
@@ -601,7 +614,7 @@ export class ToolRepository {
 
   async listInstallations(workspaceId?: string): Promise<InstallationRecord[]> {
     let sql = "SELECT * FROM installations";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (workspaceId) {
       sql += " WHERE workspace_id = ?";
       params.push(workspaceId);
@@ -690,7 +703,7 @@ export class ToolRepository {
 
   async listHarnessInstallations(harnessId?: string): Promise<HarnessInstallationRecord[]> {
     let sql = "SELECT * FROM harness_installations";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (harnessId) {
       sql += " WHERE harness_id = ?";
       params.push(harnessId);

@@ -84,17 +84,18 @@ export async function syncOmpCatalogInstructions(
 ): Promise<ApplyOmpCatalogInstructionsResult> {
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const url = new URL("/v1/evolution/catalog/instructions", options.cloudUrl);
-  const headers: Record<string, string> = {
-    "x-workspace-id": options.workspaceId,
-    ...(options.accountId ? { "x-account-id": options.accountId } : {}),
-    ...options.headers,
-  };
+  const headers = new Headers(options.headers);
+  headers.set("x-workspace-id", options.workspaceId);
+  if (options.accountId) {
+    headers.set("x-account-id", options.accountId);
+  }
   const response = await fetchFn(url, { headers });
   if (!response.ok) {
     throw new Error(`Catalog instructions fetch failed: HTTP ${response.status}`);
   }
+  // SAFETY: Evolution catalog instructions endpoint returns a JSON payload with an optional markdown string.
   const body = (await response.json()) as { markdown?: string };
-  const markdown = typeof body.markdown === "string" ? body.markdown : "";
+  const markdown = body.markdown && String(body.markdown) === body.markdown ? body.markdown : "";
   const toolNames = parseCatalogInstructionToolNames(markdown);
   return applyOmpCatalogInstructions({
     markdown,

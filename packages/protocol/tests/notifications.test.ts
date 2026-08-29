@@ -21,6 +21,21 @@ const OCCURRED_AT = "2026-08-28T12:00:00.000Z";
 const NOW = Date.parse("2026-08-28T12:05:00.000Z");
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1_000;
 
+function rawNotification(
+  overrides: Record<string, string | number | boolean | null | undefined> = {},
+) {
+  return {
+    id: "auth.session-expired",
+    severity: "warning",
+    source: "auth",
+    title: "Authentication needs attention",
+    remediationCommand: "resin login",
+    timestamp: OCCURRED_AT,
+    cooldownMs: FOUR_HOURS_MS,
+    ...overrides,
+  };
+}
+
 function notification(overrides: Partial<ActionableNotification> = {}): ActionableNotification {
   return {
     id: "auth.session-expired",
@@ -60,11 +75,10 @@ describe("ActionableNotification protocol", () => {
     }
 
     expect(
-      ActionableNotificationSchema.safeParse(notification({ severity: "info" as "warning" }))
-        .success,
+      ActionableNotificationSchema.safeParse(rawNotification({ severity: "info" })).success,
     ).toBe(false);
     expect(
-      ActionableNotificationSchema.safeParse(notification({ source: "billing" as "auth" })).success,
+      ActionableNotificationSchema.safeParse(rawNotification({ source: "billing" })).success,
     ).toBe(false);
   });
 

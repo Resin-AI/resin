@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
+import { z } from "zod";
 import type { CloudObservationClient, TrajectoryObservation } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
-import type {
+import {
   NormalizationPipeline,
-  PipelineProcessContext,
-  PipelineProcessResult,
+  type PipelineProcessContext,
+  type PipelineProcessResult,
 } from "../normalization/pipeline.js";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { projectEventToMetadataOnly } from "./metadata-projection.js";
 import {
@@ -18,6 +20,20 @@ import {
   type TrajectoryEmitter,
   createTrajectoryEmitter,
 } from "./trajectory-emitter.js";
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema),
+  ]),
+);
+
+const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
 
 /**
  * Function signature for resolving trajectory attribution context from a harness session.
@@ -43,6 +59,11 @@ export interface TrajectoryAttributionResolverObject {
 export type TrajectoryAttributionResolver =
   | TrajectoryAttributionResolverFn
   | TrajectoryAttributionResolverObject;
+
+export interface PrivacyCutoffRecordsResult {
+  records: RawHarnessRecord[];
+  timestampMs: number[];
+}
 
 /**
  * Options for configuring TrajectoryCaptureCoordinator.
@@ -85,9 +106,9 @@ export class TrajectoryCaptureCoordinator {
   private readonly authorizeTelemetryEmissionFn?: (
     recordTimestampMs: readonly number[],
   ) => Promise<boolean | null | undefined>;
+  private minimumRecordTimestampMs: number;
   private telemetryEnabled = true;
   private telemetryGeneration = 0;
-  private minimumRecordTimestampMs = 0;
 
   private readonly activeSessions = new Map<string, TrajectoryEmitter>();
   private readonly activeGenericSessions = new Set<string>();
@@ -108,28 +129,27 @@ export class TrajectoryCaptureCoordinator {
     attributionResolver?: TrajectoryAttributionResolver,
     options?: { logger?: Logger },
   ) {
-    if (
-      typeof pipelineOrOptions === "object" &&
-      pipelineOrOptions !== null &&
-      "pipeline" in pipelineOrOptions
-    ) {
+    if (pipelineOrOptions instanceof NormalizationPipeline) {
+      this.pipeline = pipelineOrOptions;
+      this.observationClient = observationClient!;
+      this.attributionResolver = attributionResolver;
+      this.logger = options?.logger;
+      this.isTelemetryEnabledFn = undefined;
+      this.minimumRecordTimestampMs = 0;
+    } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
         pipelineOrOptions.observationClient ?? pipelineOrOptions.cloudClient!;
       this.attributionResolver = pipelineOrOptions.attributionResolver;
       this.logger = pipelineOrOptions.logger;
       this.isTelemetryEnabledFn = pipelineOrOptions.isTelemetryEnabled;
-      this.authorizeTelemetryEmissionFn = pipelineOrOptions.authorizeTelemetryEmission;
       this.minimumRecordTimestampMs =
-        typeof pipelineOrOptions.minimumRecordTimestampMs === "number"
-          ? Math.max(0, Math.trunc(pipelineOrOptions.minimumRecordTimestampMs))
-          : 0;
-    } else {
-      this.pipeline = pipelineOrOptions as NormalizationPipeline;
-      this.observationClient = observationClient!;
-      this.attributionResolver = attributionResolver;
-      this.logger = options?.logger;
+        z.number().safeParse(pipelineOrOptions.minimumRecordTimestampMs).data ?? 0;
     }
+
+    this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
+      ? pipelineOrOptions.authorizeTelemetryEmission
+      : undefined;
   }
 
   private isTelemetryAllowed(generation = this.telemetryGeneration): boolean {
@@ -164,10 +184,7 @@ export class TrajectoryCaptureCoordinator {
     }
   }
 
-  private recordsAfterPrivacyCutoff(records: RawHarnessRecord[]): {
-    records: RawHarnessRecord[];
-    timestampMs: number[];
-  } {
+  private recordsAfterPrivacyCutoff(records: RawHarnessRecord[]): PrivacyCutoffRecordsResult {
     if (this.minimumRecordTimestampMs <= 0 && !this.authorizeTelemetryEmissionFn) {
       return { records, timestampMs: [] };
     }
@@ -297,12 +314,9 @@ export class TrajectoryCaptureCoordinator {
         // Resolve attribution once per session if not yet classified
         let rawContext: TrajectoryAttributionContextInput | null | undefined;
         try {
-          if (typeof this.attributionResolver === "function") {
+          if (this.attributionResolver instanceof Function) {
             rawContext = await this.attributionResolver(session);
-          } else if (
-            this.attributionResolver &&
-            typeof this.attributionResolver.resolveAttribution === "function"
-          ) {
+          } else if (this.attributionResolver && "resolveAttribution" in this.attributionResolver) {
             rawContext = await this.attributionResolver.resolveAttribution(session);
           } else {
             rawContext = null;
@@ -333,7 +347,7 @@ export class TrajectoryCaptureCoordinator {
           } else {
             this.logger?.info(
               `Session ${sessionId} has invalid attribution context; falling back to generic observation submission`,
-              { errors: parsedContext.error.errors },
+              { errors: parsedContext.error.issues.map((issue) => issue.message) },
             );
             isGeneric = true;
             this.genericSessions.add(sessionId);
@@ -353,11 +367,12 @@ export class TrajectoryCaptureCoordinator {
       if (emitter) {
         // ATTRIBUTED SESSION PATH
         if (telemetryRecords.length > 0) {
+          const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
           const pipelineContext: PipelineProcessContext = {
             sessionId: session.sessionId,
             harnessId: session.harnessId,
             workspaceId: session.workspaceId,
-            customMetadata: session.metadata,
+            customMetadata,
           };
 
           let pipelineResults: PipelineProcessResult[];
@@ -434,11 +449,12 @@ export class TrajectoryCaptureCoordinator {
         const validEvents: NormalizedSessionEvent[] = [];
 
         if (telemetryRecords.length > 0) {
+          const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
           const pipelineContext: PipelineProcessContext = {
             sessionId: session.sessionId,
             harnessId: session.harnessId,
             workspaceId: session.workspaceId,
-            customMetadata: session.metadata,
+            customMetadata,
             deferCommitUntilCloudAck: true,
           };
 

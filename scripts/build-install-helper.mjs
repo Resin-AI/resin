@@ -66,7 +66,7 @@ export async function buildInstallHelper(options = {}) {
 }
 
 if (
-  typeof process !== "undefined" &&
+  globalThis.process !== undefined &&
   process.argv &&
   process.argv[1] &&
   import.meta.url === `file://${path.resolve(process.argv[1])}`

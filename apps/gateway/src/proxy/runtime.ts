@@ -169,7 +169,10 @@ export async function createProductionProxyRuntime(
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
         // 1. Hydrate registry with locked tools before any cloud operations
         if (workspace.lock && options.registry) {
-          if (typeof options.registry.bindWorkspaceLock === "function") {
+          if (
+            "bindWorkspaceLock" in options.registry &&
+            options.registry.bindWorkspaceLock instanceof Function
+          ) {
             options.registry.bindWorkspaceLock(workspace.workspaceId, workspace.lock);
           }
         }
@@ -246,7 +249,10 @@ export async function createProductionProxyRuntime(
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
       // Hydrate registry with locked tools locally
       if (workspace.lock && options.registry) {
-        if (typeof options.registry.bindWorkspaceLock === "function") {
+        if (
+          "bindWorkspaceLock" in options.registry &&
+          options.registry.bindWorkspaceLock instanceof Function
+        ) {
           options.registry.bindWorkspaceLock(workspace.workspaceId, workspace.lock);
         }
       }

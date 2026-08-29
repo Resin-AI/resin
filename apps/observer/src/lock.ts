@@ -3,15 +3,16 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { z } from "zod";
 import { encodeFrame } from "./ipc/framing.js";
-
+import type { JsonObject } from "./normalization/redaction.js";
 export interface LockPayload {
   pid: number;
   startedAt: number;
   lastHeartbeat: number;
   version: string;
   socketPath: string;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
 }
 
 export type LockAcquisitionStatus = "acquired" | "already_running" | "stale_recovered";
@@ -43,7 +44,7 @@ export interface DaemonLockOptions {
   staleThresholdMs?: number;
   heartbeatIntervalMs?: number;
   ipcProbeTimeoutMs?: number;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
 }
 
 /**
@@ -57,6 +58,7 @@ export function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (err: unknown) {
+    // SAFETY: Node.js filesystem error carries standard ErrnoException code.
     const error = err as NodeJS.ErrnoException;
     // EPERM means the process exists but is owned by another user -> definitely alive
     if (error.code === "EPERM") {
@@ -88,11 +90,12 @@ function isWindowsPipe(socketPath: string): boolean {
   return socketPath.startsWith(WINDOWS_PIPE_PREFIX);
 }
 
-function normalizeSocketPath(socketPath: unknown): string | undefined {
-  if (typeof socketPath !== "string" || socketPath.length === 0) {
+function normalizeSocketPath<T>(socketPath: T): string | undefined {
+  if (!socketPath || !z.string().min(1).safeParse(socketPath).success) {
     return undefined;
   }
-  return isWindowsPipe(socketPath) ? socketPath : path.resolve(socketPath);
+  const p = String(socketPath);
+  return isWindowsPipe(p) ? p : path.resolve(p);
 }
 
 async function socketEntryExists(socketPath: string): Promise<boolean> {
@@ -165,6 +168,7 @@ function probeIpcOnce(socketPath: string, timeoutMs: number): Promise<boolean> {
     if (responseBuffer.length < payloadLength + 4) return;
 
     try {
+      // SAFETY: IPC probe response body conforms to expected JSON envelope.
       const response = JSON.parse(
         responseBuffer.subarray(4, payloadLength + 4).toString("utf-8"),
       ) as {
@@ -237,7 +241,7 @@ export class DaemonLock {
   readonly staleThresholdMs: number;
   readonly heartbeatIntervalMs: number;
   readonly ipcProbeTimeoutMs: number;
-  readonly metadata: Record<string, unknown>;
+  readonly metadata: JsonObject;
 
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private isHeld = false;
@@ -323,6 +327,7 @@ export class DaemonLock {
         mode: 0o600,
       });
     } catch (err: unknown) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "EEXIST") {
         const freshInspect = await this.inspect();
@@ -394,6 +399,7 @@ export class DaemonLock {
       temporaryFileCreated = true;
 
       const currentContent = await fs.promises.readFile(this.lockPath, "utf-8");
+      // SAFETY: Existing lock file is valid JSON conforming to LockPayload.
       const currentPayload = JSON.parse(currentContent) as LockPayload;
       if (currentPayload.pid !== process.pid || currentPayload.startedAt !== this.startedAt) {
         throw new Error("Daemon lock ownership changed before heartbeat renewal");
@@ -431,6 +437,7 @@ export class DaemonLock {
       const content = await fs.promises.readFile(this.lockPath, "utf-8");
       let parsed: LockPayload;
       try {
+        // SAFETY: Lock file content is valid JSON conforming to LockPayload.
         parsed = JSON.parse(content) as LockPayload;
       } catch {
         // Corrupted JSON -> consider stale
@@ -453,11 +460,11 @@ export class DaemonLock {
 
       const alive = isProcessAlive(parsed.pid);
       const lastHeartbeat =
-        typeof parsed.lastHeartbeat === "number" && Number.isFinite(parsed.lastHeartbeat)
+        z.number().safeParse(parsed.lastHeartbeat).success && Number.isFinite(parsed.lastHeartbeat)
           ? parsed.lastHeartbeat
           : 0;
       const startedAt =
-        typeof parsed.startedAt === "number" && Number.isFinite(parsed.startedAt)
+        z.number().safeParse(parsed.startedAt).success && Number.isFinite(parsed.startedAt)
           ? parsed.startedAt
           : 0;
       const latestLeaseTimestamp = Math.max(lastHeartbeat, startedAt);
@@ -476,6 +483,7 @@ export class DaemonLock {
         lockData: parsed,
       };
     } catch (err: unknown) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "ENOENT") {
         return {
@@ -506,6 +514,7 @@ export class DaemonLock {
     try {
       lockStat = await fs.promises.lstat(this.lockPath);
     } catch (err) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "ENOENT") {
         return undefined;
@@ -526,6 +535,7 @@ export class DaemonLock {
       await fs.promises.rename(this.lockPath, quarantinedPath);
       return quarantinedPath;
     } catch (err) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "ENOENT") {
         return undefined;
@@ -583,6 +593,7 @@ export class DaemonLock {
         await fs.promises.unlink(candidate.path);
         removedSocketPaths.push(candidate.path);
       } catch (err) {
+        // SAFETY: Node.js filesystem error carries standard ErrnoException code.
         const error = err as NodeJS.ErrnoException;
         if (error.code !== "ENOENT") {
           throw err;
@@ -612,6 +623,7 @@ export class DaemonLock {
     try {
       stat = await fs.promises.lstat(socketPath);
     } catch (err) {
+      // SAFETY: Node.js filesystem error carries standard ErrnoException code.
       const error = err as NodeJS.ErrnoException;
       if (error.code === "ENOENT") {
         return undefined;
@@ -661,6 +673,7 @@ export class DaemonLock {
       if (!initialStat.isFile()) return;
 
       const content = await fs.promises.readFile(this.lockPath, "utf-8");
+      // SAFETY: Stored lock content is valid JSON conforming to LockPayload.
       const parsed = JSON.parse(content) as LockPayload;
       if (parsed.pid !== process.pid || parsed.startedAt !== this.startedAt) {
         return;

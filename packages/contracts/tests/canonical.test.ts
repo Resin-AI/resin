@@ -81,7 +81,8 @@ describe("canonical serialization and hashing", () => {
     });
 
     it("throws TypeError on cyclic references", () => {
-      const cyclic: Record<string, unknown> = { a: 1 };
+      type CyclicPayload = { a: number; self?: CyclicPayload };
+      const cyclic: CyclicPayload = { a: 1 };
       cyclic.self = cyclic;
       expect(() => canonicalJsonStringify(cyclic)).toThrow(TypeError);
     });

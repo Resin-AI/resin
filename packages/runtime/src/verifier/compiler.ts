@@ -304,10 +304,16 @@ export function compileAndTypeCheck(
 
   const compilerOptions: ts.CompilerOptions = {
     ...STRICT_COMPILER_OPTIONS,
-    ...(options.target !== undefined ? { target: options.target } : {}),
-    ...(options.module !== undefined ? { module: options.module } : {}),
-    ...(options.strict !== undefined ? { strict: options.strict } : {}),
   };
+  if (options.target !== undefined) {
+    compilerOptions.target = options.target;
+  }
+  if (options.module !== undefined) {
+    compilerOptions.module = options.module;
+  }
+  if (options.strict !== undefined) {
+    compilerOptions.strict = options.strict;
+  }
 
   const outputs = new Map<string, string>();
 

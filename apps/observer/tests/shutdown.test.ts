@@ -19,7 +19,7 @@ function createSlowModule(
     name: `SlowModule ${id}`,
     dependencies,
     stopCalled: false,
-    state: "uninitialized" as ModuleLifecycleState,
+    state: "uninitialized",
     getState: () => mod.state,
     start: async () => {
       mod.state = "ready";

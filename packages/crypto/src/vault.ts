@@ -146,7 +146,7 @@ export class EncryptedVaultSecretStore implements SecretStore {
           }
         };
       } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        if (err instanceof Error && "code" in err && err.code === "EEXIST") {
           // Lock held, wait with jitter
           await delay(20 + Math.random() * 30);
         } else {
@@ -234,11 +234,7 @@ export class EncryptedVaultSecretStore implements SecretStore {
   /**
    * Encrypts plaintext string using AES-256-GCM.
    */
-  private encryptValue(plaintext: string): {
-    ciphertextHex: string;
-    ivHex: string;
-    tagHex: string;
-  } {
+  private encryptValue(plaintext: string) {
     const iv = randomBytes(12); // 96-bit IV for AES-GCM
     const cipher = createCipheriv("aes-256-gcm", this.derivedKey, iv);
 
@@ -308,7 +304,8 @@ export class EncryptedVaultSecretStore implements SecretStore {
       try {
         return this.decryptValue(record.encryptedValue, record.iv, record.tag);
       } catch (err) {
-        throw new Error(`Failed to decrypt secret '${nameOrAlias}': ${(err as Error).message}`);
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to decrypt secret '${nameOrAlias}': ${message}`);
       }
     });
   }
@@ -318,7 +315,7 @@ export class EncryptedVaultSecretStore implements SecretStore {
     value: string,
     options: SetSecretOptions = {},
   ): Promise<SecretMetadata> {
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
+    if (!name || name.trim().length === 0) {
       throw new Error("Secret name must be a non-empty string");
     }
 

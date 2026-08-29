@@ -14,12 +14,14 @@ import {
   PROTOCOL_VERSION,
   type ProjectRegistrationRequest,
   type ProjectRegistrationResponse,
+  ProjectRegistrationResponseSchema,
   type ProtocolClient,
   ProtocolError,
   ValidationError,
   validateProjectRegistrationRequest,
   validateProjectRegistrationResponse,
 } from "@resin/protocol";
+import { z } from "zod";
 import { computeManifestDigest } from "../registry/validator.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 
@@ -58,21 +60,46 @@ export interface CloudCatalogClientOptions {
 }
 
 interface ProjectRegistrarCarrier {
-  registerProject(req: ProjectRegistrationRequest, signal?: AbortSignal): Promise<unknown>;
+  registerProject(
+    req: ProjectRegistrationRequest,
+    signal?: AbortSignal,
+  ): Promise<ProjectRegistrationResponse>;
 }
 
-function isProjectRegistrarCarrier(client: unknown): client is ProjectRegistrarCarrier {
-  if (!client || typeof client !== "object") return false;
-  return (
-    "registerProject" in client &&
-    typeof (client as { registerProject: unknown }).registerProject === "function"
-  );
+function isProjectRegistrarCarrier(
+  client: ProtocolClient | null | undefined,
+): client is ProtocolClient & ProjectRegistrarCarrier {
+  if (!client || !(client instanceof Object)) return false;
+  return "registerProject" in client && client.registerProject instanceof Function;
 }
-function toErrorDetails(value: unknown): Record<string, unknown> | undefined {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+
+const RawErrorPayloadSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
+type RawErrorPayload = z.infer<typeof RawErrorPayloadSchema>;
+
+function toErrorDetails(
+  value?: RawErrorPayload | Error | string | number | boolean | null,
+): Record<string, string | number | boolean | null | undefined> | undefined {
+  if (
+    !value ||
+    Object.prototype.toString.call(value) !== "[object Object]" ||
+    value instanceof Error
+  ) {
+    return undefined;
   }
-  return undefined;
+  const details: Record<string, string | number | boolean | null | undefined> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (
+      v === null ||
+      v === undefined ||
+      v === true ||
+      v === false ||
+      Object.prototype.toString.call(v) === "[object String]" ||
+      Object.prototype.toString.call(v) === "[object Number]"
+    ) {
+      details[k] = v;
+    }
+  }
+  return details;
 }
 
 export class CloudCatalogClient {
@@ -151,7 +178,20 @@ export class CloudCatalogClient {
       throw new ProtocolError(
         "retryable",
         `Cloud catalog service is currently offline/unavailable (circuit state: ${health.circuitState}, status: ${health.status})`,
-        { status: 503, details: { health } },
+        {
+          status: 503,
+          details: {
+            status: health.status,
+            circuitState: health.circuitState,
+            failureCount: health.failureCount,
+            consecutiveSuccesses: health.consecutiveSuccesses,
+            lastStateChange: health.lastStateChange,
+            lastFailureTime: health.lastFailureTime,
+            lastSuccessTime: health.lastSuccessTime,
+            lastErrorReason: health.lastErrorReason,
+            nextRetryAllowedAt: health.nextRetryAllowedAt,
+          },
+        },
       );
     }
 
@@ -181,7 +221,13 @@ export class CloudCatalogClient {
       const parsed = CatalogSnapshotResponseSchema.safeParse(rawResponse);
       if (!parsed.success) {
         throw new ValidationError("Invalid catalog snapshot response schema from cloud", {
-          details: { issues: parsed.error.issues },
+          details: {
+            issues: parsed.error.issues.map((i) => ({
+              code: i.code,
+              message: i.message,
+              path: i.path.map((p) => String(p)),
+            })),
+          },
         });
       }
       const response = parsed.data;
@@ -211,7 +257,14 @@ export class CloudCatalogClient {
           throw new ValidationError(
             `Invalid tool manifest schema for tool '${tool.id || tool.name}'`,
             {
-              details: { issues: manifestResult.error.issues, toolId: tool.id },
+              details: {
+                issues: manifestResult.error.issues.map((i) => ({
+                  code: i.code,
+                  message: i.message,
+                  path: i.path.map((p) => String(p)),
+                })),
+                toolId: tool.id,
+              },
             },
           );
         }
@@ -237,7 +290,7 @@ export class CloudCatalogClient {
       return response;
     } catch (error) {
       // Record failure in circuit breaker
-      this.circuitBreaker.recordFailure(error);
+      this.circuitBreaker.recordFailure(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
@@ -245,7 +298,7 @@ export class CloudCatalogClient {
   private async executeFetch(
     request: CatalogSnapshotRequest,
     signal?: AbortSignal,
-  ): Promise<unknown> {
+  ): Promise<CatalogSnapshotResponse> {
     if (this.isPaused) {
       throw new ProtocolError(
         "terminal",
@@ -297,10 +350,9 @@ export class CloudCatalogClient {
       }
 
       const buildHeaders = (id: CloudRequestIdentity | null) => {
-        const headers: Record<string, string> = {
-          Accept: "application/json",
-          "x-protocol-version": PROTOCOL_VERSION,
-        };
+        const headers: Record<string, string> = {};
+        headers.Accept = "application/json";
+        headers["x-protocol-version"] = PROTOCOL_VERSION;
         if (id) {
           headers.Authorization = `Bearer ${id.accessToken}`;
           headers["x-account-id"] = id.accountId;
@@ -358,20 +410,28 @@ export class CloudCatalogClient {
       }
 
       if (!response.ok) {
-        let parsedError: unknown;
+        let parsedPayload: RawErrorPayload | undefined;
         try {
-          parsedError = await response.json();
+          const raw = await response.json();
+          const parsed = RawErrorPayloadSchema.safeParse(raw);
+          if (parsed.success) {
+            parsedPayload = parsed.data;
+          }
         } catch {
           // ignore non-json response body
         }
 
+        const errMessage =
+          parsedPayload &&
+          "message" in parsedPayload &&
+          Object.prototype.toString.call(parsedPayload.message) === "[object String]"
+            ? String(parsedPayload.message)
+            : null;
         const message =
-          (parsedError && typeof (parsedError as { message?: string }).message === "string"
-            ? (parsedError as { message: string }).message
-            : null) ||
+          errMessage ||
           `Cloud catalog snapshot failed with HTTP ${response.status}: ${response.statusText}`;
 
-        const errorDetails = toErrorDetails(parsedError);
+        const errorDetails = toErrorDetails(parsedPayload);
         if (response.status === 401 || response.status === 403) {
           this.isPaused = true;
           throw new ProtocolError("terminal", message, {
@@ -399,7 +459,7 @@ export class CloudCatalogClient {
         });
       }
 
-      return await response.json();
+      return CatalogSnapshotResponseSchema.parse(await response.json());
     }
 
     throw new Error(
@@ -443,28 +503,19 @@ export class CloudCatalogClient {
       );
 
       // 4. Strict validation of response schema and projectId match
-      const validatedResponse = validateProjectRegistrationResponse(rawResponse);
-      if (validatedResponse.projectId !== validatedRequest.project.projectId) {
-        throw new ValidationError(
-          `Cloud project registration substituted project ID: expected '${validatedRequest.project.projectId}', received '${validatedResponse.projectId}'`,
-          {
-            details: {
-              actionableAdvice:
-                "Verify the cloud response corresponds to the requested project identity.",
-              isTerminal: true,
-            },
-          },
-        );
-      }
-
+      const validatedResponse = validateProjectRegistrationResponse(
+        rawResponse,
+        validatedRequest.project.projectId,
+      );
       // 5. Record success in circuit breaker
       this.circuitBreaker.recordSuccess();
 
       return validatedResponse;
     } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
       // If error is network absence or offline state, map to local_only
-      if (this.isOfflineOrNetworkError(error)) {
-        this.circuitBreaker.recordFailure(error);
+      if (this.isOfflineOrNetworkError(err)) {
+        this.circuitBreaker.recordFailure(err);
         return {
           outcome: "local_only",
           projectId: validatedRequest.project.projectId,
@@ -472,40 +523,59 @@ export class CloudCatalogClient {
       }
 
       // Record other failures and rethrow
-      this.circuitBreaker.recordFailure(error);
+      this.circuitBreaker.recordFailure(err);
       throw error;
     }
   }
 
-  private isOfflineOrNetworkError(error: unknown): boolean {
+  private isOfflineOrNetworkError(
+    error:
+      | Error
+      | { code?: string; name?: string; message?: string; status?: number }
+      | string
+      | number
+      | boolean
+      | null
+      | undefined,
+  ): boolean {
     if (!error) return false;
     if (error instanceof TypeError) {
       return true;
     }
-    const err = error as { code?: string; name?: string; message?: string; status?: number };
-    if (err.name === "FetchError" || err.name === "AbortError") {
+    const err = error instanceof Object ? error : undefined;
+    if (!err) return false;
+    if ("name" in err && (err.name === "FetchError" || err.name === "AbortError")) {
       return true;
     }
-    const code = err.code ?? "";
+    const code =
+      "code" in err && Object.prototype.toString.call(err.code) === "[object String]"
+        ? String(err.code)
+        : "";
     if (
       code === "ECONNREFUSED" ||
       code === "ENOTFOUND" ||
       code === "EAI_AGAIN" ||
       code === "ETIMEDOUT" ||
       code === "ECONNRESET" ||
-      code === "UND_ERR_CONNECT_TIMEOUT"
+      code === "UND_ERR_CONNECT_TIMEOUT" ||
+      code === "UND_ERR_SOCKET"
     ) {
       return true;
     }
-    const msg = (err.message ?? "").toLowerCase();
+    const msg =
+      "message" in err && Object.prototype.toString.call(err.message) === "[object String]"
+        ? String(err.message).toLowerCase()
+        : "";
     if (
       msg.includes("fetch failed") ||
       msg.includes("failed to fetch") ||
+      msg.includes("network error") ||
       msg.includes("econnrefused") ||
       msg.includes("enotfound") ||
-      msg.includes("network error") ||
       msg.includes("offline") ||
       msg.includes("eai_again") ||
+      msg.includes("socket hang up") ||
+      msg.includes("timed out") ||
       msg.includes("no transport configured")
     ) {
       return true;
@@ -516,7 +586,7 @@ export class CloudCatalogClient {
   private async executeProjectRegistrationFetch(
     request: ProjectRegistrationRequest,
     signal?: AbortSignal,
-  ): Promise<unknown> {
+  ): Promise<ProjectRegistrationResponse> {
     if (this.isPaused) {
       throw new ProtocolError(
         "terminal",
@@ -528,10 +598,26 @@ export class CloudCatalogClient {
     if (this.projectRegistrar) {
       return await this.projectRegistrar(request, signal);
     }
+    // Path 2: ProtocolClient instance
+    if (isProjectRegistrarCarrier(this.protocolClient)) {
+      return await this.protocolClient.registerProject(request, signal);
+    }
 
-    // Path 2: Identity-driven or direct HTTP REST fetch
+    // Path 3: Identity-driven or direct HTTP REST fetch
     if (this.identityProvider || this.baseUrl) {
-      let identity = this.identityProvider ? await this.identityProvider() : null;
+      let identity: CloudRequestIdentity | null = null;
+      if (this.identityProvider) {
+        try {
+          identity = await this.identityProvider();
+        } catch (err) {
+          this.isPaused = true;
+          throw new ProtocolError(
+            "terminal",
+            `Identity provider failed: ${err instanceof Error ? err.message : String(err)}`,
+            { status: 401 },
+          );
+        }
+      }
       if (this.identityProvider && !identity) {
         this.isPaused = true;
         throw new ProtocolError(
@@ -556,10 +642,10 @@ export class CloudCatalogClient {
       const url = new URL(`${targetBaseUrl}/v1/projects`);
 
       const buildRegHeaders = (id: CloudRequestIdentity | null) => {
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "x-protocol-version": PROTOCOL_VERSION,
-        };
+        const headers: Record<string, string> = {};
+        headers["Content-Type"] = "application/json";
+        headers.Accept = "application/json";
+        headers["x-protocol-version"] = PROTOCOL_VERSION;
         if (id) {
           headers.Authorization = `Bearer ${id.accessToken}`;
           headers["x-account-id"] = id.accountId;
@@ -621,20 +707,28 @@ export class CloudCatalogClient {
       }
 
       if (!response.ok) {
-        let parsedError: unknown;
+        let parsedPayload: RawErrorPayload | undefined;
         try {
-          parsedError = await response.json();
+          const raw = await response.json();
+          const parsed = RawErrorPayloadSchema.safeParse(raw);
+          if (parsed.success) {
+            parsedPayload = parsed.data;
+          }
         } catch {
           // ignore non-json error body
         }
 
+        const errMessage =
+          parsedPayload &&
+          "message" in parsedPayload &&
+          Object.prototype.toString.call(parsedPayload.message) === "[object String]"
+            ? String(parsedPayload.message)
+            : null;
         const message =
-          (parsedError && typeof (parsedError as { message?: string }).message === "string"
-            ? (parsedError as { message: string }).message
-            : null) ||
+          errMessage ||
           `Project registration failed with HTTP ${response.status}: ${response.statusText}`;
 
-        const errorDetails = toErrorDetails(parsedError);
+        const errorDetails = toErrorDetails(parsedPayload);
         if (response.status === 401 || response.status === 403) {
           this.isPaused = true;
           throw new ProtocolError("terminal", message, {
@@ -662,12 +756,11 @@ export class CloudCatalogClient {
         });
       }
 
-      return await response.json();
-    }
-
-    // Path 3: ProtocolClient instance
-    if (isProjectRegistrarCarrier(this.protocolClient)) {
-      return await this.protocolClient.registerProject(request, signal);
+      const json = await response.json();
+      return validateProjectRegistrationResponse(
+        ProjectRegistrationResponseSchema.parse(json),
+        request.project.projectId,
+      );
     }
     throw new Error(
       "No transport configured for CloudCatalogClient project registration (provide baseUrl or projectRegistrar)",

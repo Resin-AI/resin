@@ -1,6 +1,5 @@
 import process from "node:process";
 import {
-  type ConfigUpdateValidationResult,
   type DaemonConfig,
   type RedactedDaemonConfig,
   loadDaemonConfig,
@@ -18,6 +17,7 @@ import {
   computeStartupOrder,
   withTimeout,
 } from "./lifecycle.js";
+import type { JsonObject } from "./normalization/redaction.js";
 import { type DaemonPaths, resolvePaths } from "./paths.js";
 
 export type DaemonHealthStatus =
@@ -68,7 +68,7 @@ export interface DaemonDiagnosticsReport {
   health: DaemonHealthReport;
   config: RedactedDaemonConfig;
   paths: DaemonPaths;
-  modules: Record<string, unknown>;
+  modules: JsonObject;
 }
 
 export interface DaemonSupervisorOptions {
@@ -90,25 +90,25 @@ export class DefaultLogger implements Logger {
     this.logLevel = level;
   }
 
-  debug(msg: string, meta?: Record<string, unknown>): void {
+  debug(msg: string, meta?: JsonObject): void {
     if (this.logLevel === "debug") {
       console.debug(`[DEBUG] ${msg}`, meta ?? "");
     }
   }
 
-  info(msg: string, meta?: Record<string, unknown>): void {
+  info(msg: string, meta?: JsonObject): void {
     if (this.logLevel === "debug" || this.logLevel === "info") {
       console.info(`[INFO] ${msg}`, meta ?? "");
     }
   }
 
-  warn(msg: string, meta?: Record<string, unknown>): void {
+  warn(msg: string, meta?: JsonObject): void {
     if (this.logLevel !== "silent" && this.logLevel !== "error") {
       console.warn(`[WARN] ${msg}`, meta ?? "");
     }
   }
 
-  error(msg: string, meta?: Record<string, unknown>): void {
+  error(msg: string, meta?: JsonObject): void {
     if (this.logLevel !== "silent") {
       console.error(`[ERROR] ${msg}`, meta ?? "");
     }
@@ -166,6 +166,7 @@ export class DaemonSupervisor {
   }
 
   getModule<T extends DaemonModule>(id: string): T | undefined {
+    // SAFETY: Module registry stores DaemonModule implementations by ID.
     return this.modules.get(id) as T | undefined;
   }
 
@@ -213,8 +214,8 @@ export class DaemonSupervisor {
         startedModuleIds.push(moduleId);
         this.logger.debug(`Module '${moduleId}' started in state '${mod.getState()}'`);
       } catch (err: unknown) {
-        const error = err as Error;
-        this.logger.error(`Failed to start module '${moduleId}': ${error.message}`, { error });
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Failed to start module '${moduleId}': ${errorMsg}`);
         this.moduleStates.set(moduleId, "failed");
 
         if (mod.critical) {
@@ -228,17 +229,16 @@ export class DaemonSupervisor {
                 this.moduleStates.set(rollbackId, "stopped");
               }
             } catch (rollbackErr) {
-              this.logger.error(
-                `Error rolling back module '${rollbackId}': ${(rollbackErr as Error).message}`,
-              );
+              const rollbackMsg =
+                rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+              this.logger.error(`Error rolling back module '${rollbackId}': ${rollbackMsg}`);
             }
           }
-          throw new Error(`Critical module '${moduleId}' failed to start: ${error.message}`);
+          throw new Error(`Critical module '${moduleId}' failed to start: ${errorMsg}`);
         }
         this.moduleStates.set(moduleId, "degraded");
       }
     }
-
     // Determine final supervisor state
     const hasDegraded = Array.from(this.moduleStates.values()).some(
       (s) => s === "degraded" || s === "failed",
@@ -293,7 +293,8 @@ export class DaemonSupervisor {
             await withTimeout(mod.stop(context), 5000, `stop:${moduleId}`);
             this.moduleStates.set(moduleId, "stopped");
           } catch (err: unknown) {
-            this.logger.error(`Error stopping module '${moduleId}': ${(err as Error).message}`);
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            this.logger.error(`Error stopping module '${moduleId}': ${errorMsg}`);
             this.moduleStates.set(moduleId, "failed");
           }
         }
@@ -303,9 +304,8 @@ export class DaemonSupervisor {
     try {
       await withTimeout(shutdownOperation(), timeoutMs, "daemon-shutdown");
     } catch (err: unknown) {
-      this.logger.error(
-        `Daemon shutdown timed out or encountered errors: ${(err as Error).message}`,
-      );
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Daemon shutdown timed out or encountered errors: ${errorMsg}`);
     } finally {
       this.state = "stopped";
       this.logger.info("Daemon supervisor stopped");
@@ -330,9 +330,10 @@ export class DaemonSupervisor {
         try {
           health = await mod.healthCheck();
         } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
           health = {
             status: "failed",
-            message: (err as Error).message,
+            message: errorMsg,
             lastCheckTime: Date.now(),
           };
         }
@@ -453,7 +454,8 @@ export class DaemonSupervisor {
         }
         this.config = validation.updatedConfig;
       } catch (err) {
-        errors.push((err as Error).message);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        errors.push(errorMsg);
         return {
           success: false,
           reloadedModules: [],
@@ -469,7 +471,8 @@ export class DaemonSupervisor {
           await mod.reloadConfig(this.config);
           reloadedModules.push(id);
         } catch (err) {
-          errors.push(`Module '${id}' failed to reload config: ${(err as Error).message}`);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          errors.push(`Module '${id}' failed to reload config: ${errorMsg}`);
         }
       }
     }
@@ -487,14 +490,14 @@ export class DaemonSupervisor {
    */
   async getDiagnostics(): Promise<DaemonDiagnosticsReport> {
     const health = await this.getHealth();
-    const moduleDiagnostics: Record<string, unknown> = {};
-
+    const moduleDiagnostics: JsonObject = {};
     for (const [id, mod] of this.modules.entries()) {
       if (mod.getDiagnostics) {
         try {
           moduleDiagnostics[id] = await mod.getDiagnostics();
         } catch (err) {
-          moduleDiagnostics[id] = { error: (err as Error).message };
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          moduleDiagnostics[id] = { error: errorMsg };
         }
       }
     }

@@ -121,7 +121,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
   });
 
   describe("Immutable Action Pins: 40-Character Hex SHAs with Version Comments", () => {
-    const shaPattern = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+@[0-9a-f]{40}$/;
+    const shaPattern = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+@[0-9a-f]{40}$/;
 
     it("pins all third-party Action references across all privileged workflows to exact 40-hex commit SHAs", () => {
       for (const [filePath, { doc }] of Object.entries(allWorkflows)) {
@@ -193,6 +193,37 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
         }
       }
     });
+    it("publishes the web image on the private runner's native ARM64 architecture", () => {
+      const workflowEntry = allWorkflows[".github/workflows/web-deploy.yml"];
+      if (!workflowEntry) {
+        expect(fs.existsSync(path.join(ROOT_DIR, "apps/web"))).toBe(false);
+        return;
+      }
+      const workflow = workflowEntry.doc;
+      const publishJob = workflow.jobs.publish;
+      const imageStep = publishJob.steps.find((step) =>
+        step.uses?.startsWith("docker/build-push-action@"),
+      );
+
+      expect(workflow.env.IMAGE_NAME).toBe("ghcr.io/resin-ai/resin-cloud-web");
+      expect(publishJob["runs-on"]).toBe("resin-vm-linux-arm64");
+      expect(imageStep.with.platforms).toBe("linux/arm64");
+      expect(
+        publishJob.steps.some((step) => step.uses?.startsWith("docker/setup-qemu-action@")),
+      ).toBe(false);
+      const dockerfile = fs.readFileSync(path.join(ROOT_DIR, "apps/web/Dockerfile"), "utf8");
+      for (const requiredInput of [
+        "COPY apps/cloud/package.json ./apps/cloud/package.json",
+        "COPY packages/cloud-contracts/package.json ./packages/cloud-contracts/package.json",
+        "COPY apps/cloud ./apps/cloud",
+        "COPY packages/cloud-contracts ./packages/cloud-contracts",
+      ]) {
+        expect(dockerfile).toContain(requiredInput);
+      }
+      expect(dockerfile.indexOf("pnpm --filter @resin/cloud build")).toBeLessThan(
+        dockerfile.indexOf("pnpm --filter @resin/web build"),
+      );
+    });
   });
 
   describe("Least Privilege Permissions", () => {
@@ -212,7 +243,10 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
 
     it("verifies contents permission is strictly read-only across all privileged workflows", () => {
       for (const [filePath, { doc }] of Object.entries(allWorkflows)) {
-        if (doc.permissions && typeof doc.permissions === "object") {
+        if (
+          doc.permissions &&
+          Object.prototype.toString.call(doc.permissions) === "[object Object]"
+        ) {
           if (doc.permissions.contents) {
             expect(
               doc.permissions.contents,
@@ -221,7 +255,10 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
           }
         }
         for (const [jobId, job] of Object.entries(doc.jobs || {})) {
-          if (job.permissions && typeof job.permissions === "object") {
+          if (
+            job.permissions &&
+            Object.prototype.toString.call(job.permissions) === "[object Object]"
+          ) {
             if (job.permissions.contents) {
               expect(
                 job.permissions.contents,
@@ -238,7 +275,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
 
       for (const [filePath, { doc }] of Object.entries(allWorkflows)) {
         const checkPerms = (perms, context) => {
-          if (!perms || typeof perms !== "object") return;
+          if (!perms || Object.prototype.toString.call(perms) !== "[object Object]") return;
           for (const [scope, level] of Object.entries(perms)) {
             if (level === "write") {
               expect(
@@ -369,7 +406,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
 
   describe("Negative Regression Checks: Security Rules Catch Vulnerabilities", () => {
     it("rejects mutable action tags or branch names when evaluated against the sha pattern", () => {
-      const shaPattern = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+@[0-9a-f]{40}$/;
+      const shaPattern = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+@[0-9a-f]{40}$/;
       const badActions = [
         "actions/checkout@v4",
         "actions/setup-node@main",
