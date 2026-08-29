@@ -135,10 +135,10 @@ In the event that a published tool candidate contains a severe security vulnerab
 
 ## Related Documentation
 
-- [Deployment Architecture](../operator/deployment.md)
-- [Backup & Disaster Recovery Guide](../operator/backup-and-restore.md)
-- [ADR 0011: AWS Serverless Cloud Platform and Storage Architecture](../adr/0011-aws-serverless-cloud-platform.md)
+- [Getting Started Guide](../user/getting-started.md)
+- [Troubleshooting Guide](../user/troubleshooting.md)
+- [ADR 0007: Capability Envelope and Security](../adr/0007-capability-envelope-and-security.md)
 - [Release Notes](v1.0.3-release-notes.md)
 - [Compatibility Matrix](compatibility-matrix.md)
 - [Release Evidence Trace](release-evidence.md)
-- [Operational Runbooks](../operator/runbooks.md)
+- [Doctor & Repair Guide](../user/doctor-and-repair.md)

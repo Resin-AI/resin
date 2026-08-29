@@ -1047,28 +1047,23 @@ describe("Public Release Workflows Contract", () => {
       expect(checkAll).toContain("pnpm run release:verify:test");
     });
 
-    it("exposes named CI jobs for privacy boundary, hostile cloud, and runtime security in ci.yml", () => {
-      const jobs = ci.doc.jobs;
-      expect(jobs["check-privacy-boundary"]).toBeDefined();
-      expect(jobs["check-privacy-boundary"]["runs-on"]).toBe("ubuntu-latest");
-      const privacyRun = jobs["check-privacy-boundary"].steps.find((s) =>
-        s.run?.includes("check:privacy-boundary"),
-      );
-      expect(privacyRun).toBeDefined();
+    it("builds workspace packages before the privacy, hostile-cloud, and runtime-security checks", () => {
+      const jobCommands = {
+        "check-privacy-boundary": "check:privacy-boundary",
+        "check-hostile-cloud": "check:hostile-cloud",
+        "check-runtime-security": "check:runtime-security",
+      };
 
-      expect(jobs["check-hostile-cloud"]).toBeDefined();
-      expect(jobs["check-hostile-cloud"]["runs-on"]).toBe("ubuntu-latest");
-      const hostileRun = jobs["check-hostile-cloud"].steps.find((s) =>
-        s.run?.includes("check:hostile-cloud"),
-      );
-      expect(hostileRun).toBeDefined();
+      for (const [jobName, command] of Object.entries(jobCommands)) {
+        const job = ci.doc.jobs[jobName];
+        expect(job).toBeDefined();
+        expect(job["runs-on"]).toBe("ubuntu-latest");
 
-      expect(jobs["check-runtime-security"]).toBeDefined();
-      expect(jobs["check-runtime-security"]["runs-on"]).toBe("ubuntu-latest");
-      const runtimeRun = jobs["check-runtime-security"].steps.find((s) =>
-        s.run?.includes("check:runtime-security"),
-      );
-      expect(runtimeRun).toBeDefined();
+        const buildIndex = job.steps.findIndex((step) => step.run === "pnpm build");
+        const checkIndex = job.steps.findIndex((step) => step.run?.includes(command));
+        expect(buildIndex, `${jobName} must build clean workspace outputs`).toBeGreaterThan(-1);
+        expect(checkIndex, `${jobName} must execute ${command}`).toBeGreaterThan(buildIndex);
+      }
     });
 
     it("requires ci-gate in ci.yml to enforce all 13 checks including privacy, hostile cloud, and runtime security gates", () => {
