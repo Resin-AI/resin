@@ -13,6 +13,7 @@ import {
   formatReleaseEvidenceMarkdown,
   generateReleaseEvidence,
   getGitCommitSha,
+  resolveReleaseMilestones,
   writeReleaseEvidence,
 } from "./generate-release-evidence.mjs";
 import { PLATFORMS, packageRelease } from "./package-release.mjs";
@@ -20,6 +21,7 @@ import { verifyRelease, verifyReleaseEvidence, verifyReleaseFiles } from "./veri
 
 describe("Release Evidence & Publication Suite (REM-020)", () => {
   const rootDir = process.cwd();
+  const releaseMilestones = resolveReleaseMilestones(rootDir);
   let tempReleaseDir;
 
   beforeAll(() => {
@@ -53,33 +55,29 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       }
     });
 
-    it("verifies 100% of all artifact and suite paths exist on disk without placeholder paths", () => {
-      for (const m of V1_MILESTONES_SPEC) {
-        expect(m.artifacts.length).toBeGreaterThan(0);
-        expect(m.suites.length).toBeGreaterThan(0);
+    it("verifies all repository-scoped artifact and suite paths exist on disk", () => {
+      for (const milestone of releaseMilestones) {
+        expect(milestone.artifacts.length).toBeGreaterThan(0);
+        expect(milestone.suites.length).toBeGreaterThan(0);
 
-        for (const artifact of m.artifacts) {
-          const fullPath = path.resolve(rootDir, artifact);
-          expect(fs.existsSync(fullPath)).toBe(true);
+        for (const artifact of milestone.artifacts) {
+          expect(fs.existsSync(path.resolve(rootDir, artifact))).toBe(true);
         }
 
-        for (const suite of m.suites) {
-          const fullPath = path.resolve(rootDir, suite);
-          expect(fs.existsSync(fullPath)).toBe(true);
+        for (const suite of milestone.suites) {
+          expect(fs.existsSync(path.resolve(rootDir, suite))).toBe(true);
         }
       }
     });
-
-    it("generates evidence where all 21 milestones are verified and files exist on disk", () => {
+    it("generates evidence where all repository-scoped milestones are verified", () => {
       const evidence = generateReleaseEvidence({ rootDir, testOnly: true });
 
       expect(evidence.schemaVersion).toBe("2.0.0");
       expect(evidence.release).toBe(RELEASE_VERSION);
       expect(evidence.status).toBe("TEST_ONLY");
-      expect(evidence.parentEpic).toBe(PARENT_EPIC_ID);
-      expect(evidence.summary.totalMilestones).toBe(21);
-      expect(evidence.summary.verifiedMilestones).toBe(21);
-      expect(evidence.milestones).toHaveLength(21);
+      expect(evidence.summary.totalMilestones).toBe(releaseMilestones.length);
+      expect(evidence.summary.verifiedMilestones).toBe(releaseMilestones.length);
+      expect(evidence.milestones).toHaveLength(releaseMilestones.length);
 
       for (const m of evidence.milestones) {
         expect(m.status).toBe("TEST_ONLY");
@@ -190,8 +188,8 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       expect(parsed.schemaVersion).toBe("2.0.0");
       expect(parsed.release).toBe(RELEASE_VERSION);
       expect(parsed.parentEpic).toBe("#22");
-      expect(parsed.summary.totalMilestones).toBe(21);
-      expect(parsed.summary.verifiedMilestones).toBe(21);
+      expect(parsed.summary.totalMilestones).toBe(releaseMilestones.length);
+      expect(parsed.summary.verifiedMilestones).toBe(releaseMilestones.length);
 
       const mdContent = fs.readFileSync(out.markdownPath, "utf8");
       expect(mdContent).toContain("# Comprehensive Release Evidence Trace");

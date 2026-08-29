@@ -92,5 +92,5 @@ This authoritative release evidence reference document defines the specification
 - [Release Notes](v1.0.3-release-notes.md)
 - [Cross-Component Compatibility Matrix](compatibility-matrix.md)
 - [Client & Cloud Rollback Procedures](rollback-procedure.md)
-- [Operator Deployment Runbook](../operator/deployment.md)
+- [Configuration Guide](../user/configuration.md)
 - [Support Policy](../security/support-policy.md)

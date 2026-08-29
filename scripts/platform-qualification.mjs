@@ -210,7 +210,12 @@ const REQUIRED_ARTIFACT_FILES = Object.freeze([
   "bin/resin",
   "bin/resin-daemon",
   "bin/resin-mcp",
-  "apps/cloud/dist/bin/api.js",
+]);
+
+const PROPRIETARY_ARTIFACT_PATHS = Object.freeze([
+  "apps/cloud",
+  "apps/web",
+  "packages/cloud-contracts",
 ]);
 
 function validateArtifactLayout(installedRoot) {
@@ -221,9 +226,18 @@ function validateArtifactLayout(installedRoot) {
   if (missingFiles.length > 0) {
     throw new Error(`Release artifact is missing required files: ${missingFiles.join(", ")}`);
   }
+  const proprietaryArtifacts = PROPRIETARY_ARTIFACT_PATHS.filter((relativePath) =>
+    fs.existsSync(path.join(installedRoot, relativePath)),
+  );
+  if (proprietaryArtifacts.length > 0) {
+    throw new Error(
+      `Release artifact contains proprietary cloud paths: ${proprietaryArtifacts.join(", ")}`,
+    );
+  }
   return {
     requiredFiles: [...REQUIRED_ARTIFACT_FILES],
     verifiedFiles: REQUIRED_ARTIFACT_FILES.length,
+    proprietaryArtifactsAbsent: true,
   };
 }
 
@@ -480,68 +494,6 @@ async function reservePort() {
   });
 }
 
-async function qualifyCloud(installedRoot, sandboxDir) {
-  const apiEntrypoint = path.join(installedRoot, "apps", "cloud", "dist", "bin", "api.js");
-  const port = await reservePort();
-  const env = {
-    ...process.env,
-    NODE_ENV: "test",
-    RESIN_ENV: "test",
-    DATABASE_URL: "memory://platform-qualification",
-    STORAGE_PROVIDER: "memory",
-    QUEUE_PROVIDER: "memory",
-    MODEL_PROVIDER: "disabled",
-    BENCHMARK_ATTESTATION_ISSUER: "resin-platform-qualification",
-    BENCHMARK_ATTESTATION_KEY_ID: "qualification-key-v1",
-    BENCHMARK_ATTESTATION_SECRET: ["qualification", "benchmark", "attestation", "secret"].join("-"),
-    HOST: "127.0.0.1",
-    PORT: String(port),
-    LOG_LEVEL: "error",
-  };
-  delete env.NODE_PATH;
-  const child = spawn(process.execPath, [apiEntrypoint], {
-    cwd: sandboxDir,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString("utf8");
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
-  });
-  try {
-    const live = await waitFor(
-      async () => {
-        const response = await fetch(`http://127.0.0.1:${port}/health/live`);
-        if (!response.ok) return false;
-        return await response.json();
-      },
-      { timeoutMs: 15_000, intervalMs: 200 },
-    );
-    const readyResponse = await fetch(`http://127.0.0.1:${port}/health/ready`);
-    const ready = await readyResponse.json();
-    if (!readyResponse.ok || ready.status !== "ok") {
-      throw new Error(`Cloud readiness failed: ${JSON.stringify(ready)}`);
-    }
-    return {
-      started: true,
-      live: live.status === "ok",
-      ready: true,
-      checks: ready.checks ?? null,
-    };
-  } catch (error) {
-    throw new Error(
-      `${error instanceof Error ? error.message : String(error)}; cloud stdout=${stdout}; stderr=${stderr}`,
-    );
-  } finally {
-    terminateProcess(child);
-    await waitForExit(child, 3000);
-  }
-}
-
 async function probeHarnesses(installedRoot) {
   const probes = Object.values(V1_SUPPORT_MATRIX.harnesses).map((harness) => ({
     id: harness.id,
@@ -664,7 +616,6 @@ export async function qualifyPlatformLane(lane, options = {}) {
       const cli = qualifyCli(installedRoot, sandboxDir, manifest);
       const daemon = await qualifyDaemon(installedRoot, sandboxDir);
       const mcp = await qualifyMcp(installedRoot, sandboxDir);
-      const cloud = await qualifyCloud(installedRoot, sandboxDir);
       harnesses = await probeHarnesses(installedRoot);
       status = "QUALIFIED";
       checks = {
@@ -672,7 +623,6 @@ export async function qualifyPlatformLane(lane, options = {}) {
         packagedCli: cli,
         daemon,
         mcp,
-        cloud,
       };
     }
 
