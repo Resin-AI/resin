@@ -209,6 +209,12 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.24.0
+          run_install: false
+
 
       - name: Extract candidate tools and release bundle
         shell: bash
@@ -265,6 +271,29 @@ jobs:
             echo "::error::Candidate archive missing required installer assets"
             exit 1
           fi
+      - name: Package public fallback package tarballs
+        id: package_fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging_dir="${RUNNER_TEMP:-/tmp}/resin-release-packages"
+          mkdir -p "$staging_dir"
+          TAG="$RELEASE_TAG"
+          pnpm run release:packages -- \
+            --artifact-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" \
+            --output-dir "$staging_dir"
+
+      - name: Upload fallback package tarballs and manifest to GitHub release
+        id: upload_github_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging_dir="${RUNNER_TEMP:-/tmp}/resin-release-packages"
+          gh release upload "$RELEASE_TAG" \
+            "$staging_dir"/*.tgz \
+            "$staging_dir/packages-manifest.json" \
+            --clobber
+
 
       - name: Assume AWS release publication role
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4

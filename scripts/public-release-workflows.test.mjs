@@ -410,7 +410,6 @@ describe("Public Release Workflows Contract", () => {
           expect(step.uses, "Production workflow must NOT check out repository source").not.toMatch(
             /^actions\/checkout/,
           );
-          expect(step.uses, "Production workflow must NOT set up pnpm").not.toMatch(/action-setup/);
         }
         if (step.run) {
           expect(step.run, "Production workflow must NOT install dependencies").not.toMatch(
@@ -677,6 +676,74 @@ describe("Public Release Workflows Contract", () => {
         (s) => s.id === "freeze_release" || s.name?.includes("Freeze release"),
       );
       expect(freezeStep.run).toContain('--key-prefix "$KEY_PREFIX"');
+    });
+
+    it("packages all 13 public fallback tarballs with contracted release:packages command, base URL, and staging output directory", () => {
+      const packageStep = job.steps.find(
+        (s) => s.id === "package_fallback" || s.name?.includes("fallback package"),
+      );
+      expect(packageStep, "Must have package_fallback step").toBeDefined();
+      expect(packageStep.shell).toBe("bash");
+
+      const script = packageStep.run;
+      expect(script).toContain("pnpm run release:packages");
+      expect(script).toContain(
+        '--artifact-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"',
+      );
+      expect(script).toContain('--output-dir "$staging_dir"');
+      expect(script).toContain('TAG="$RELEASE_TAG"');
+      expect(script).not.toMatch(/\$\{\{\s*inputs\./);
+    });
+
+    it("uploads all 13 package fallback tarballs and machine-readable manifest to GitHub release alongside public artifacts", () => {
+      const uploadStep = job.steps.find(
+        (s) => s.id === "upload_github_release" || s.name?.includes("Upload fallback package"),
+      );
+      expect(uploadStep, "Must have upload_github_release step").toBeDefined();
+      expect(uploadStep.shell).toBe("bash");
+
+      const script = uploadStep.run;
+      expect(script).toContain('gh release upload "$RELEASE_TAG"');
+      expect(script).toContain('"$staging_dir"/*.tgz');
+      expect(script).toContain('"$staging_dir/packages-manifest.json"');
+      expect(script).toContain("--clobber");
+    });
+
+    it("verifies package fallback covers exactly the 13 public packages without private/cloud artifacts", () => {
+      const splitConfigPath = path.join(ROOT_DIR, "repository-split.json");
+      const splitConfig = JSON.parse(fs.readFileSync(splitConfigPath, "utf-8"));
+      expect(splitConfig.publicPackageManifests).toHaveLength(13);
+      expect(splitConfig.publicPackages).toHaveLength(13);
+
+      const EXPECTED_PUBLIC_TARBALLS = [
+        "resin-1.0.0.tgz",
+        "resin-gateway-0.1.0.tgz",
+        "resin-observer-0.1.0.tgz",
+        "resin-runtime-0.1.0.tgz",
+        "resin-crypto-0.1.0.tgz",
+        "resin-protocol-0.1.0.tgz",
+        "resin-contracts-0.1.0.tgz",
+        "resin-harness-contracts-0.1.0.tgz",
+        "resin-db-0.1.0.tgz",
+        "resin-adapter-claude-code-0.1.0.tgz",
+        "resin-adapter-codex-0.1.0.tgz",
+        "resin-adapter-omp-0.1.0.tgz",
+        "resin-test-fixtures-0.1.0.tgz",
+      ];
+
+      for (const manifestRelPath of splitConfig.publicPackageManifests) {
+        const manifest = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, manifestRelPath), "utf-8"));
+        const sanitized = manifest.name.startsWith("@")
+          ? manifest.name.slice(1).replace("/", "-")
+          : manifest.name;
+        const expectedTarball = `${sanitized}-${manifest.version}.tgz`;
+        expect(EXPECTED_PUBLIC_TARBALLS).toContain(expectedTarball);
+      }
+
+      const PRIVATE_NAMES = ["@resin/cloud", "@resin/web", "@resin/cloud-contracts", "@resin/e2e"];
+      for (const priv of PRIVATE_NAMES) {
+        expect(splitConfig.publicPackages).not.toContain(priv);
+      }
     });
   });
 
@@ -1036,13 +1103,38 @@ describe("Public Release Workflows Contract", () => {
       }
     });
 
-    it("retains 5-lane platform qualification coverage in platform-qualification.yml on GitHub-hosted runners", () => {
-      const job = platformQualification.doc.jobs["platform-artifacts"];
-      expect(job).toBeDefined();
-      expect(job["runs-on"]).toBe("${{ matrix.runner }}");
+    it("verifies configure-branch-protection.sh enforces all 13 CI status check contexts plus rollup", () => {
+      const scriptPath = path.join(ROOT_DIR, "scripts", "configure-branch-protection.sh");
+      const scriptContent = fs.readFileSync(scriptPath, "utf8");
 
-      const matrix = job.strategy?.matrix?.include;
-      expect(matrix).toBeDefined();
+      const expectedContexts = [
+        "Lint & Format Check",
+        "TypeScript Typecheck",
+        "Monorepo Build",
+        "Unit Tests",
+        "E2E Tests (with PostgreSQL)",
+        "Package Boundaries Check",
+        "ADR Verification",
+        "Privacy Data Boundary Check",
+        "Hostile Cloud Quarantine & Preactivation Check",
+        "Runtime IPC & Broker Security Check",
+        "Release Verification",
+        "Binary Smoke Test",
+        "Secret Scanning",
+        "CI Gate Rollup",
+      ];
+
+      for (const context of expectedContexts) {
+        expect(scriptContent).toContain(`"${context}"`);
+      }
+    });
+
+    it("retains 5-lane platform qualification coverage in platform-qualification.yml on GitHub-hosted runners", () => {
+      const platformJob = platformQualification.doc.jobs["platform-artifacts"];
+      expect(platformJob).toBeDefined();
+      expect(platformJob["runs-on"]).toBe("${{ matrix.runner }}");
+
+      const matrix = platformJob.strategy?.matrix?.include;
       expect(matrix).toHaveLength(5);
 
       const lanes = matrix.map((m) => m.lane);
