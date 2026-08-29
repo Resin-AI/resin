@@ -1,0 +1,88 @@
+name: Platform Qualification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform-artifacts:
+    name: ${{ matrix.check_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: linux-x64
+            check_name: Qualify linux-x64
+            mode: native
+            runner: ubuntu-latest
+          - lane: linux-arm64
+            check_name: Qualify linux-arm64
+            mode: native
+            runner: ubuntu-24.04-arm
+          - lane: darwin-x64
+            check_name: Validate darwin-x64 artifact
+            mode: artifact
+            runner: ubuntu-latest
+          - lane: darwin-arm64
+            check_name: Validate darwin-arm64 artifact
+            mode: artifact
+            runner: ubuntu-latest
+          - lane: wsl
+            check_name: Validate wsl artifact
+            mode: artifact
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RESIN_RELEASE_TEST_ONLY: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build exact candidate
+        run: pnpm build
+
+      - name: Package signed test-domain release candidate
+        run: pnpm release:package
+
+      - name: Validate artifact or exercise native packaged stack on GitHub-hosted Linux
+        run: >-
+          node scripts/platform-qualification.mjs
+          --lane=${{ matrix.lane }}
+          --mode=${{ matrix.mode }}
+          --release-dir=dist/release/v1.0.3
+          --output-dir=dist/qualification
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-qualification-${{ matrix.lane }}
+          path: dist/qualification/${{ matrix.lane }}.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/.next
+**/.turbo
+**/dist
+**/coverage
+**/playwright-report
+**/test-results
+**/tsconfig.tsbuildinfo
+.env*
+!.env*.example

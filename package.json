@@ -1,0 +1,56 @@
+{
+  "name": "resin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.24.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/platform-qualification.test.mjs --exclude scripts/release-evidence.test.mjs --exclude scripts/standalone-release-artifact.test.mjs",
+    "test:e2e": "vitest run apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "typecheck": "turbo run typecheck",
+    "check": "pnpm run check:all",
+    "check:all": "pnpm run check:adrs && pnpm run check:boundaries && pnpm run check:secrets && pnpm run check:privacy-boundary && pnpm run check:hostile-cloud && pnpm run check:runtime-security && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run release:test && pnpm run test:e2e && pnpm run check:smoke && pnpm run release:package:test && pnpm run release:verify:test",
+    "check:adrs": "node scripts/verify-adrs.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:repo-boundary": "node scripts/check-boundaries.mjs",
+    "check:privacy-boundary": "vitest run apps/observer/tests/sync/privacy-boundary.test.ts",
+    "check:hostile-cloud": "vitest run packages/runtime/tests/security.test.ts apps/observer/tests/sync/preactivation.test.ts apps/observer/tests/sync/signed-activation-and-quarantine.test.ts",
+    "check:runtime-security": "vitest run packages/runtime/tests/brokers/fs-security.test.ts packages/runtime/tests/brokers/net-security.test.ts packages/runtime/tests/brokers/cmd-security.test.ts apps/observer/tests/ipc.test.ts apps/cli/tests/installer/asset-downloader-security.test.ts",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:smoke": "node scripts/verify-binaries.mjs",
+    "check:public-artifact": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/standalone-release-artifact.test.mjs",
+    "release:package": "node scripts/package-release.mjs",
+    "release:evidence": "node scripts/generate-release-evidence.mjs",
+    "release:publish": "node scripts/publish-public-release.mjs",
+    "release:verify": "node scripts/verify-release-cli.mjs",
+    "release:package:test": "node scripts/package-release.mjs --test-only",
+    "release:verify:test": "node scripts/verify-release-cli.mjs --test-only",
+    "savings:proof": "node scripts/generate-savings-proof.mjs",
+    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/node": "^22.13.4",
+    "esbuild": "0.28.2",
+    "turbo": "^2.4.4",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "yaml": "2.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"],
+    "overrides": {
+      "yaml": "2.8.3"
+    }
+  }
+}

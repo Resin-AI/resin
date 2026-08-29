@@ -1,0 +1,4 @@
+{"type":"session_start","sessionId":"session-golden-1","harness":"claude-code","workspaceId":"workspace-test-1","timestamp":"2026-08-17T12:00:00.000Z"}
+{"type":"subagent_spawn","sessionId":"session-golden-1","subagentId":"subagent-researcher","parentId":"session-golden-1","role":"researcher","timestamp":"2026-08-17T12:00:01.000Z"}
+{"type":"branch_fork","sessionId":"session-golden-1","sourceSessionId":"session-golden-1","branchPointEventId":"event-100","branchName":"feature/test-branch","forkReason":"exploring alternative implementation","timestamp":"2026-08-17T12:00:02.000Z"}
+{"type":"session_end","sessionId":"session-golden-1","exitReason":"user_completed","timestamp":"2026-08-17T12:00:03.000Z"}

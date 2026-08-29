@@ -1,0 +1,17 @@
+[allowlist]
+description = "Allowlist for unit test fixtures, mock data, and deterministic testing keypairs"
+paths = [
+  '''^.*\.test\.[tj]sx?$''',
+  '''^.*\.spec\.[tj]sx?$''',
+  '''^tests/.*$''',
+  '''^fixtures/.*$''',
+  '''^apps/.*/tests/.*$''',
+  '''^packages/.*/tests/.*$''',
+  '''^scripts/check-secrets\..*$''',
+  '''^scripts/verify-release\..*$''',
+]
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''MC4CAQAwBQYDK2VwBCIEIKHrfxWS03wRJJBHc6iyHjaoz93NxyMnlkCPd0XkQJcC''',
+  '''a4b9318ac386c0e21c30aba1e211c54883ceb53a39689980f2e27387c6c5ea95''',
+]

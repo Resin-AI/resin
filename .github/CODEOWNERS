@@ -1,0 +1,95 @@
+# Resin Code Owners & Governance Policy
+# Each specified area requires independent review and approval from designated Resin code owners.
+# Self-approvals are prohibited; changes to protected paths require at least 1 non-author approval.
+
+# Default global fallback ownership
+* @Dvitash @Chrrxs
+
+# 1. Runtime & Core Services
+/packages/runtime/ @Dvitash @Chrrxs
+/apps/observer/ @Dvitash @Chrrxs
+/apps/gateway/ @Dvitash @Chrrxs
+
+# 2. Wire Protocol, Contracts, Brokers & Adapters
+/packages/protocol/ @Dvitash @Chrrxs
+/packages/contracts/ @Dvitash @Chrrxs
+/packages/harness-contracts/ @Dvitash @Chrrxs
+/adapters/ @Dvitash @Chrrxs
+/apps/gateway/src/ @Dvitash @Chrrxs
+/apps/observer/src/ipc/ @Dvitash @Chrrxs
+
+# 3. Authentication, Cryptography & Secure Vault
+/packages/crypto/ @Dvitash @Chrrxs
+/docs/security/ @Dvitash @Chrrxs
+/SECURITY.md @Dvitash @Chrrxs
+/apps/cli/src/commands/init.ts @Dvitash @Chrrxs
+/apps/cli/src/commands/logout.ts @Dvitash @Chrrxs
+
+# 4. Cloud Contracts Boundary, Boundary Manifest & Boundary Checkers
+/packages/cloud-contracts/ @Dvitash @Chrrxs
+/resin-boundary.json @Dvitash @Chrrxs
+/scripts/check-boundaries.mjs @Dvitash @Chrrxs
+/scripts/check-boundaries.test.mjs @Dvitash @Chrrxs
+/docs/architecture/boundaries.md @Dvitash @Chrrxs
+/docs/adr/0005-privacy-data-boundaries.md @Dvitash @Chrrxs
+/docs/security/privacy-inventory.md @Dvitash @Chrrxs
+
+# 5. Cryptographic Signing, Release Packaging, Audit & Verification Scripts
+/scripts/package-release.mjs @Dvitash @Chrrxs
+/scripts/verify-release.mjs @Dvitash @Chrrxs
+/scripts/verify-release.test.mjs @Dvitash @Chrrxs
+/scripts/verify-binaries.mjs @Dvitash @Chrrxs
+/scripts/verify-binaries.test.mjs @Dvitash @Chrrxs
+/scripts/verify-release-cli.mjs @Dvitash @Chrrxs
+/scripts/publish-public-release.mjs @Dvitash @Chrrxs
+/scripts/publish-public-release.test.mjs @Dvitash @Chrrxs
+/scripts/audit-public-releases.mjs @Dvitash @Chrrxs
+/scripts/audit-public-releases.test.mjs @Dvitash @Chrrxs
+/scripts/release-trust.mjs @Dvitash @Chrrxs
+/scripts/release-evidence.test.mjs @Dvitash @Chrrxs
+/scripts/release-packaging-hygiene.test.mjs @Dvitash @Chrrxs
+/scripts/standalone-release-artifact.test.mjs @Dvitash @Chrrxs
+/scripts/generate-release-evidence.mjs @Dvitash @Chrrxs
+/scripts/embed-cli-release-trust.mjs @Dvitash @Chrrxs
+/scripts/migrate-signing-key.mjs @Dvitash @Chrrxs
+/scripts/migrate-signing-key.test.mjs @Dvitash @Chrrxs
+/docs/release/ @Dvitash @Chrrxs
+/docs/operator/key-rotation.md @Dvitash @Chrrxs
+
+# 6. Installation Scripts, Install Helpers & Postinstall Assets
+/scripts/build-install-helper.mjs @Dvitash @Chrrxs
+/scripts/build-install-helper.test.mjs @Dvitash @Chrrxs
+/scripts/install-assets-web.test.mjs @Dvitash @Chrrxs
+/scripts/install-ps1.test.mjs @Dvitash @Chrrxs
+/scripts/install-sh.test.mjs @Dvitash @Chrrxs
+/apps/cli/install/install.sh @Dvitash @Chrrxs
+/apps/cli/install/install.ps1 @Dvitash @Chrrxs
+/apps/cli/install/install-helper-v1.mjs @Dvitash @Chrrxs
+/apps/cli/src/installer/ @Dvitash @Chrrxs
+/apps/cli/bin/postinstall.mjs @Dvitash @Chrrxs
+
+# 7. GitHub Workflows, Automation, Branch Protection & PR Templates
+/.github/ @Dvitash @Chrrxs
+/.github/workflows/ @Dvitash @Chrrxs
+/.github/CODEOWNERS @Dvitash @Chrrxs
+/.github/pull_request_template.md @Dvitash @Chrrxs
+/scripts/configure-branch-protection.sh @Dvitash @Chrrxs
+
+# 8. Root Monorepo Configuration, Manifests & Lockfiles
+/package.json @Dvitash @Chrrxs
+/pnpm-lock.yaml @Dvitash @Chrrxs
+/pnpm-workspace.yaml @Dvitash @Chrrxs
+
+# 9. CLI, Cloud Services, Web Apps & Database
+/apps/cli/ @Dvitash @Chrrxs
+/apps/cloud/ @Dvitash @Chrrxs
+/apps/web/ @Dvitash @Chrrxs
+/packages/db/ @Dvitash @Chrrxs
+
+# 10. Architecture Decision Records (ADRs) & System Architecture
+/docs/adr/ @Dvitash @Chrrxs
+/docs/architecture/ @Dvitash @Chrrxs
+/docs/operator/ @Dvitash @Chrrxs
+/scripts/verify-adrs.mjs @Dvitash @Chrrxs
+/scripts/verify-adrs.test.mjs @Dvitash @Chrrxs
+/CONTRIBUTING.md @Dvitash @Chrrxs

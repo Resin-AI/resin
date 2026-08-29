@@ -1,0 +1,45 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "composite": true,
+    "tsBuildInfoFile": "./.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/crypto"
+    },
+    {
+      "path": "../../packages/db"
+    },
+    {
+      "path": "../../packages/runtime"
+    },
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/harness-contracts"
+    },
+    {
+      "path": "../../apps/observer"
+    },
+    {
+      "path": "../../apps/gateway"
+    },
+    {
+      "path": "../../adapters/claude-code"
+    },
+    {
+      "path": "../../adapters/codex-cli"
+    },
+    {
+      "path": "../../adapters/omp"
+    }
+  ]
+}

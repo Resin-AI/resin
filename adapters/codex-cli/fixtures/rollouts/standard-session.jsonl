@@ -1,0 +1,10 @@
+{"type":"session_lifecycle","lifecycleType":"start","harnessName":"codex-cli","workspaceId":"ws_codex_01","timestamp":"2026-08-17T12:00:00.000Z","sessionId":"sess_golden_01"}
+{"type":"user_message","content":"Please check git status and read src/index.ts","timestamp":"2026-08-17T12:00:01.000Z"}
+{"type":"reasoning","content":"I need to execute git status and read the source file index.ts to fulfill the user request.","timestamp":"2026-08-17T12:00:02.000Z"}
+{"type":"command_exec","command":"git status","args":["status"],"exitCode":0,"stdout":"On branch main\nnothing to commit, working tree clean","durationMs":120,"timestamp":"2026-08-17T12:00:03.000Z"}
+{"type":"tool_call","callId":"call_read_01","toolName":"read_file","parameters":{"path":"src/index.ts"},"timestamp":"2026-08-17T12:00:04.000Z"}
+{"type":"tool_result","callId":"call_read_01","toolName":"read_file","result":"export const version = '1.0.0';\n","isError":false,"durationMs":45,"timestamp":"2026-08-17T12:00:05.000Z"}
+{"type":"file_edit","filePath":"src/index.ts","operation":"update","patch":"@@ -1,1 +1,2 @@\n export const version = '1.0.0';\n+export const ready = true;\n","diffStats":{"linesAdded":1,"linesRemoved":0,"filesChanged":1},"timestamp":"2026-08-17T12:00:06.000Z"}
+{"type":"compaction","triggerReason":"context_limit","tokensBefore":95000,"tokensAfter":12000,"preservedContextSummary":"Verified git status clean and read version from src/index.ts","timestamp":"2026-08-17T12:00:07.000Z"}
+{"type":"assistant_message","content":"I have verified git status and updated src/index.ts with ready flag.","timestamp":"2026-08-17T12:00:08.000Z"}
+{"type":"session_lifecycle","lifecycleType":"end","exitReason":"completed","timestamp":"2026-08-17T12:00:09.000Z"}

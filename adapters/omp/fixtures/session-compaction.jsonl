@@ -1,0 +1,7 @@
+{"type":"session_lifecycle","lifecycleType":"start","sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:00.000Z"}
+{"type":"message","role":"user","content":"Analyze massive log file","sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:01.000Z"}
+{"type":"tool_call","toolName":"read","callId":"call_201","parameters":{"path":"big.log"},"sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:02.000Z"}
+{"type":"tool_result","toolName":"read","callId":"call_201","result":"10000 lines of log data...","isError":false,"executionDurationMs":250,"sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:03.000Z"}
+{"type":"compaction","triggerReason":"context_limit","tokensBefore":195000,"tokensAfter":15000,"preservedContextSummary":"Log contained 4 error lines and 9996 informational lines.","sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:04.000Z"}
+{"type":"message","role":"assistant","content":"I extracted the 4 error lines from the log.","sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:05.000Z"}
+{"type":"session_lifecycle","lifecycleType":"end","sessionId":"session-compaction-1","timestamp":"2026-08-17T12:00:06.000Z"}

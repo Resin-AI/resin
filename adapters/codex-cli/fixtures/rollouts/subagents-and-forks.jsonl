@@ -1,0 +1,7 @@
+{"type":"session_start","sessionId":"sess_root_01","timestamp":"2026-08-17T14:00:00.000Z"}
+{"type":"subagent_spawn","subagentId":"sub_scout_01","role":"code_explorer","timestamp":"2026-08-17T14:00:01.000Z"}
+{"type":"tool_call","callId":"call_sub_01","toolName":"read_file","parameters":{"path":"src/routes.ts"},"timestamp":"2026-08-17T14:00:02.000Z"}
+{"type":"tool_result","callId":"call_sub_01","result":"export const routes = [];","durationMs":20,"timestamp":"2026-08-17T14:00:03.000Z"}
+{"type":"subagent_terminate","subagentId":"sub_scout_01","reason":"exploration_complete","timestamp":"2026-08-17T14:00:04.000Z"}
+{"type":"branch_fork","sourceSessionId":"sess_root_01","branchPointEventId":"evt_sub_01","branchName":"experiment_branch","forkReason":"evaluating alternate architecture","timestamp":"2026-08-17T14:00:05.000Z"}
+{"type":"session_end","exitReason":"branch_completed","timestamp":"2026-08-17T14:00:06.000Z"}

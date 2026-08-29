@@ -1,0 +1,630 @@
+name: Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact qualified main commit SHA to promote (must match candidate artifact SHA)
+        required: true
+        type: string
+      release_tag:
+        description: Exact protected release tag (e.g. v1.0.3)
+        required: false
+        default: "v1.0.3"
+        type: string
+      confirm_promotion:
+        description: Type 'PROMOTE_PRODUCTION' for production or 'PROMOTE_STAGING' for staging
+        required: true
+        type: string
+      candidate_run_id:
+        description: GitHub Actions run ID of release-candidate workflow for this exact commit_sha
+        required: true
+        type: string
+      environment:
+        description: Target distribution environment (staging or production)
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - staging
+          - production
+      reset_partial_release:
+        description: Delete the exact immutable release prefix before retrying a confirmed partial publication
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Public Release Publication
+    runs-on: resin-vm-linux-arm64
+    environment:
+      name: ${{ inputs.environment || 'production' }}
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+      id-token: write
+    env:
+      RELEASE_SHA: ${{ inputs.commit_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.3' }}
+      TARGET_ENV: ${{ inputs.environment || 'production' }}
+      CONFIRM_PROMOTION: ${{ inputs.confirm_promotion }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      KEY_PREFIX: ${{ (inputs.environment || 'production') == 'staging' && format('dry-runs/{0}', github.run_id) || '' }}
+      RESIN_RELEASE_ROLE_ARN: ${{ vars.RESIN_RELEASE_ROLE_ARN }}
+      RESIN_DISTRIBUTION_BUCKET: ${{ vars.RESIN_DISTRIBUTION_BUCKET }}
+      RESIN_DISTRIBUTION_ID: ${{ vars.RESIN_DISTRIBUTION_ID }}
+      RESIN_DISTRIBUTION_BASE_URL: ${{ vars.RESIN_DISTRIBUTION_BASE_URL }}
+      RESIN_RELEASE_KEY_ID: ${{ vars.RESIN_RELEASE_KEY_ID }}
+      RESIN_RELEASE_PUBLIC_KEY_PEM: ${{ vars.RESIN_RELEASE_PUBLIC_KEY_PEM }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate manual promotion confirmation and distribution environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid commit SHA format: $RELEASE_SHA"
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag format: $RELEASE_TAG"
+            exit 1
+          fi
+
+          if [[ ! "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid candidate_run_id format: $CANDIDATE_RUN_ID (must be digits only)"
+            exit 1
+          fi
+
+          if [ "$TARGET_ENV" = "production" ]; then
+            if [ "$CONFIRM_PROMOTION" != "PROMOTE_PRODUCTION" ]; then
+              echo "::error::Production promotion aborted: confirm_promotion input must be 'PROMOTE_PRODUCTION' (got '$CONFIRM_PROMOTION')"
+              exit 1
+            fi
+            if [ "${RESIN_DISTRIBUTION_BASE_URL:-}" != "https://dist.resin.sh" ]; then
+              echo "::error::Production release requires RESIN_DISTRIBUTION_BASE_URL='https://dist.resin.sh' (got '$RESIN_DISTRIBUTION_BASE_URL')"
+              exit 1
+            fi
+            key_prefix=""
+          elif [ "$TARGET_ENV" = "staging" ]; then
+            if [ "$CONFIRM_PROMOTION" != "PROMOTE_STAGING" ]; then
+              echo "::error::Staging promotion aborted: confirm_promotion input must be 'PROMOTE_STAGING' (got '$CONFIRM_PROMOTION')"
+              exit 1
+            fi
+            key_prefix="dry-runs/${GITHUB_RUN_ID}"
+          else
+            echo "::error::Invalid target environment '$TARGET_ENV': must be 'production' or 'staging'"
+            exit 1
+          fi
+          echo "KEY_PREFIX=$key_prefix" >> "$GITHUB_ENV"
+          if [ -z "${RESIN_RELEASE_ROLE_ARN:-}" ] || [ -z "${RESIN_DISTRIBUTION_BUCKET:-}" ] || [ -z "${RESIN_DISTRIBUTION_ID:-}" ]; then
+            echo "::error::Missing required AWS distribution configuration (RESIN_RELEASE_ROLE_ARN, RESIN_DISTRIBUTION_BUCKET, RESIN_DISTRIBUTION_ID)"
+            exit 1
+          fi
+          echo "Manual confirmation validated for target environment: $TARGET_ENV"
+
+      - name: Verify release-candidate qualification run identity and status
+        id: candidate_gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_run_id="$CANDIDATE_RUN_ID"
+
+          echo "Verifying candidate run $candidate_run_id from GitHub Actions API..."
+          run_info="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id")"
+          run_repo="$(echo "$run_info" | jq -r '.head_repository.full_name // (.head_repository_owner.login + "/" + .head_repository.name)')"
+          run_path="$(echo "$run_info" | jq -r '.path')"
+          run_sha="$(echo "$run_info" | jq -r '.head_sha')"
+          run_status="$(echo "$run_info" | jq -r '.status')"
+          run_conclusion="$(echo "$run_info" | jq -r '.conclusion')"
+
+          if [ "$run_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::Candidate run repository ($run_repo) does not match expected ($GITHUB_REPOSITORY)"
+            exit 1
+          fi
+
+          if [ "$run_path" != ".github/workflows/release-candidate.yml" ]; then
+            echo "::error::Candidate run workflow ($run_path) is not .github/workflows/release-candidate.yml"
+            exit 1
+          fi
+
+          if [ "$run_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Candidate run head SHA ($run_sha) does not match promotion SHA ($RELEASE_SHA)"
+            exit 1
+          fi
+
+          if [ "$run_status" != "completed" ]; then
+            echo "::error::Candidate run status is $run_status (must be completed)"
+            exit 1
+          fi
+
+          if [ "$run_conclusion" != "success" ]; then
+            echo "::error::Candidate run conclusion is $run_conclusion (must be success)"
+            exit 1
+          fi
+
+          echo "candidate_run_id=$candidate_run_id" >> "$GITHUB_OUTPUT"
+          echo "Validated release candidate run: $candidate_run_id"
+      - name: Download candidate release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_run_id="$CANDIDATE_RUN_ID"
+          artifact_name="resin-release-candidate-${RELEASE_SHA}"
+
+          echo "Fetching artifact metadata from GitHub Actions API..."
+          artifacts_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts")"
+
+          matched_count="$(echo "$artifacts_json" | jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | length')"
+          if [ "$matched_count" -ne 1 ]; then
+            echo "::error::Expected exactly 1 active artifact named '$artifact_name' in run $candidate_run_id, found $matched_count"
+            exit 1
+          fi
+
+          artifact_id="$(echo "$artifacts_json" | jq -r --arg name "$artifact_name" '.artifacts[] | select(.name == $name and .expired == false) | .id')"
+          api_digest="$(echo "$artifacts_json" | jq -r --arg name "$artifact_name" '.artifacts[] | select(.name == $name and .expired == false) | .digest // empty')"
+
+          if [[ ! "$api_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Artifact '$artifact_name' missing valid sha256:<64hex> digest in GitHub Actions API record: '$api_digest'"
+            exit 1
+          fi
+
+          raw_api_digest="${api_digest#sha256:}"
+          zip_file="${artifact_name}.zip"
+
+          echo "Downloading artifact $artifact_name (id: $artifact_id) via Actions API..."
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$zip_file"
+
+          echo "Verifying downloaded artifact ZIP digest against Actions API digest..."
+          local_zip_digest="$(sha256sum "$zip_file" | awk '{print $1}')"
+          if [ "$local_zip_digest" != "$raw_api_digest" ]; then
+            echo "::error::Downloaded artifact ZIP digest mismatch: calculated $local_zip_digest, expected $raw_api_digest"
+            exit 1
+          fi
+          echo "Artifact ZIP digest verified against Actions API: $raw_api_digest"
+
+          echo "Extracting candidate artifact ZIP..."
+          unzip -q -o "$zip_file"
+
+          if [ ! -f "resin-release-candidate.tar.gz" ] || [ ! -f "resin-release-candidate.tar.gz.sha256" ]; then
+            echo "::error::Downloaded candidate artifact missing resin-release-candidate.tar.gz or checksum file"
+            exit 1
+          fi
+
+      - name: Verify candidate checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Verifying SHA256 checksum of candidate archive..."
+          sha256sum -c resin-release-candidate.tar.gz.sha256
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Extract candidate tools and release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Validating archive entries before extraction..."
+          node --input-type=module -e '
+            import { execFileSync } from "node:child_process";
+            const output = execFileSync("tar", ["-tzvf", "resin-release-candidate.tar.gz"], { encoding: "utf8" });
+            const lines = output.split("\n").filter(Boolean);
+            if (lines.length === 0) {
+              console.error("::error::Empty candidate archive");
+              process.exit(1);
+            }
+            const seen = new Set();
+            for (const line of lines) {
+              const type = line.charAt(0);
+              if (type !== "-" && type !== "d") {
+                console.error("::error::Illegal archive entry type (" + type + "): " + line);
+                process.exit(1);
+              }
+              const parts = line.trim().split(/\s+/);
+              const pathName = parts[parts.length - 1];
+              if (!pathName || pathName.startsWith("/") || pathName.startsWith("\\") || pathName.includes("../") || pathName.includes("..\\") || pathName === "..") {
+                console.error("::error::Illegal entry path: " + pathName);
+                process.exit(1);
+              }
+              if (seen.has(pathName)) {
+                console.error("::error::Duplicate entry path in archive: " + pathName);
+                process.exit(1);
+              }
+              seen.add(pathName);
+            }
+            console.log("Candidate archive entries safely validated: " + seen.size + " unique entries");
+          '
+          tar -xzf resin-release-candidate.tar.gz
+
+          if [ ! -f "tools/publish-public-release.mjs" ]; then
+            echo "::error::Candidate archive missing tools/publish-public-release.mjs"
+            exit 1
+          fi
+
+          if [ ! -f "tools/release-trust.mjs" ]; then
+            echo "::error::Candidate archive missing tools/release-trust.mjs"
+            exit 1
+          fi
+
+          if [ ! -d "release" ] || [ ! -d "qualification" ]; then
+            echo "::error::Candidate archive missing release or qualification directories"
+            exit 1
+          fi
+
+          if [ ! -d "installers" ] || [ ! -f "installers/install.sh" ] || [ ! -f "installers/install.ps1" ] || [ ! -f "installers/install-helper-v1.mjs" ]; then
+            echo "::error::Candidate archive missing required installer assets"
+            exit 1
+          fi
+
+      - name: Assume AWS release publication role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.RESIN_RELEASE_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Delete confirmed partial immutable release prefix
+        if: ${{ inputs.reset_partial_release && inputs.environment == 'production' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="releases/v1/artifacts/${RELEASE_TAG}/"
+          echo "Deleting confirmed partial prefix s3://${RESIN_DISTRIBUTION_BUCKET}/${prefix}"
+          aws s3 rm "s3://${RESIN_DISTRIBUTION_BUCKET}/${prefix}" --recursive
+
+      - name: Publish immutable release assets to S3
+        id: publish_immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+          mkdir -p "$receipt_dir"
+          node tools/publish-public-release.mjs publish-immutable \
+            --dist-dir "release/${RELEASE_TAG}" \
+            --bucket "$RESIN_DISTRIBUTION_BUCKET" \
+            --distribution-id "$RESIN_DISTRIBUTION_ID" \
+            --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
+            --key-prefix "$KEY_PREFIX" \
+            --receipt-dir "$receipt_dir"
+
+      - name: Verify public CDN immutable objects anonymously
+        id: verify_public
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+          node tools/publish-public-release.mjs verify-public \
+            --dist-dir "release/${RELEASE_TAG}" \
+            --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
+            --key-prefix "$KEY_PREFIX" \
+            --receipt-dir "$receipt_dir"
+
+      - name: Install pinned PowerShell for installer smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwsh_dir="${RUNNER_TEMP:-/tmp}/powershell-7.6.5"
+          archive="${RUNNER_TEMP:-/tmp}/powershell-7.6.5-linux-arm64.tar.gz"
+          mkdir -p "$pwsh_dir"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/powershell-7.6.5-linux-arm64.tar.gz
+          echo "ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$pwsh_dir"
+          chmod +x "$pwsh_dir/pwsh"
+          echo "$pwsh_dir" >> "$GITHUB_PATH"
+
+      - name: Run pre-promotion installer smoke verification
+        id: prepromotion_smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+
+          candidate_channel_url=$(node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            const receiptDir = process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP, "resin-release-receipts") : "/tmp/resin-release-receipts";
+            const receiptPath = path.join(receiptDir, "verify-public-receipt.json");
+            if (!fs.existsSync(receiptPath)) {
+              console.error(`::error::verify-public receipt not found at ${receiptPath}`);
+              process.exit(1);
+            }
+            const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+            const obj = receipt.verifiedObjects?.find((o) => o.key?.endsWith("channels.json") || o.url?.endsWith("channels.json"));
+            if (!obj || !obj.url) {
+              console.error("::error::Candidate channel URL not found in verify-public receipt");
+              process.exit(1);
+            }
+            process.stdout.write(obj.url);
+          ')
+          helper_ready="$(mktemp)"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import http from "node:http";
+            const [helperPath, readyPath] = process.argv.slice(1);
+            const server = http.createServer((request, response) => {
+              if (request.url !== "/install-helper-v1.mjs") {
+                response.statusCode = 404;
+                response.end();
+                return;
+              }
+              response.setHeader("Content-Type", "text/javascript");
+              fs.createReadStream(helperPath).pipe(response);
+            });
+            server.listen(18765, "127.0.0.1", () => fs.writeFileSync(readyPath, "ready"));
+          ' "$PWD/installers/install-helper-v1.mjs" "$helper_ready" &
+          helper_server_pid=$!
+          trap 'kill "$helper_server_pid" 2>/dev/null || true; rm -f "$helper_ready"' EXIT
+          for _ in {1..50}; do
+            [ -s "$helper_ready" ] && break
+            sleep 0.1
+          done
+          test -s "$helper_ready"
+          candidate_helper_url="http://127.0.0.1:18765/install-helper-v1.mjs"
+
+          echo "Pre-promotion smoke testing against candidate channel URL: $candidate_channel_url"
+
+          expected_version="${RELEASE_TAG#v}"
+
+          # 1. POSIX shell installer in clean home
+          sh_home="$(mktemp -d)"
+          echo "Running bundled POSIX installer in clean home..."
+          RESIN_INSTALL_TEST_ONLY=1 RESIN_INSTALL_HELPER_URL="$candidate_helper_url" HOME="$sh_home" sh installers/install.sh --channel-url "$candidate_channel_url" --resin-home "$sh_home/.resin"
+
+          sh_version_out=$("$sh_home/.resin/bin/resin" version | tr -d '\r\n')
+          sh_version=$(echo "$sh_version_out" | sed -E 's/^(resin )?v?//')
+          if [ "$sh_version" != "$expected_version" ]; then
+            echo "::error::Pre-promotion POSIX installed version ($sh_version) does not match expected release version ($expected_version)"
+            rm -rf "$sh_home"
+            exit 1
+          fi
+          rm -rf "$sh_home"
+          echo "Pre-promotion POSIX installer verified (version: $sh_version)."
+
+          # 2. PowerShell installer in clean home
+          pwsh_home="$(mktemp -d)"
+          echo "Running bundled PowerShell installer in clean home..."
+          RESIN_INSTALL_TEST_ONLY=1 RESIN_INSTALL_HELPER_URL="$candidate_helper_url" HOME="$pwsh_home" pwsh installers/install.ps1 -ChannelUrl "$candidate_channel_url" -ResinHome "$pwsh_home/.resin" -Force
+
+          pwsh_version_out=$("$pwsh_home/.resin/bin/resin" version | tr -d '\r\n')
+          pwsh_version=$(echo "$pwsh_version_out" | sed -E 's/^(resin )?v?//')
+          if [ "$pwsh_version" != "$expected_version" ]; then
+            echo "::error::Pre-promotion PowerShell installed version ($pwsh_version) does not match expected release version ($expected_version)"
+            rm -rf "$pwsh_home"
+            exit 1
+          fi
+          rm -rf "$pwsh_home"
+          echo "Pre-promotion PowerShell installer verified (version: $pwsh_version)."
+
+          echo "Pre-promotion installer smoke passed: both POSIX and PowerShell successfully installed $expected_version."
+
+      - name: Promote release channels transaction
+        id: promote
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+          node tools/publish-public-release.mjs promote \
+            --dist-dir "release/${RELEASE_TAG}" \
+            --bucket "$RESIN_DISTRIBUTION_BUCKET" \
+            --distribution-id "$RESIN_DISTRIBUTION_ID" \
+            --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
+            --key-prefix "$KEY_PREFIX" \
+            --environment "$TARGET_ENV" \
+            --receipt-dir "$receipt_dir"
+
+      - name: Run post-promotion public artifact smoke verification
+        id: public_smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+
+          installer_results_path="$smoke_dir/installer-results.json"
+
+          node --input-type=module -e '
+            import { execFile } from "node:child_process";
+            import { promisify } from "node:util";
+            import crypto from "node:crypto";
+            import fs from "node:fs";
+            import os from "node:os";
+            import path from "node:path";
+
+            const execFileAsync = promisify(execFile);
+            const releaseTag = process.env.RELEASE_TAG || "v1.0.3";
+            const releaseVersion = releaseTag.replace(/^v/, "");
+            const smokeDir = process.argv[1];
+            const installerResultsPath = process.argv[2];
+
+            const canonicalAssets = [
+              { name: "install.sh", url: "https://resin.sh/install.sh", candidatePath: "installers/install.sh" },
+              { name: "install.ps1", url: "https://resin.sh/install.ps1", candidatePath: "installers/install.ps1" },
+              { name: "install-helper-v1.mjs", url: "https://resin.sh/install-helper-v1.mjs", candidatePath: "installers/install-helper-v1.mjs" },
+            ];
+
+            async function fetchAnonymousNoRedirect(url) {
+              const resp = await fetch(url, { method: "GET", redirect: "manual" });
+              if (resp.status !== 200) {
+                throw new Error(`Anonymous fetch of ${url} failed with HTTP ${resp.status} (expected 200 without redirect)`);
+              }
+              const ab = await resp.arrayBuffer();
+              return Buffer.from(ab);
+            }
+
+            const downloaded = {};
+            let byteParityError = null;
+
+            for (const asset of canonicalAssets) {
+              const dest = path.join(smokeDir, asset.name);
+              try {
+                const buf = await fetchAnonymousNoRedirect(asset.url);
+                fs.writeFileSync(dest, buf);
+                downloaded[asset.name] = dest;
+
+                const candidateBuf = fs.readFileSync(asset.candidatePath);
+                if (!buf.equals(candidateBuf)) {
+                  const errMsg = `Byte parity mismatch for canonical asset ${asset.name}: downloaded size ${buf.length} bytes vs candidate size ${candidateBuf.length} bytes`;
+                  console.error(`::error::${errMsg}`);
+                  if (!byteParityError) byteParityError = errMsg;
+                }
+              } catch (err) {
+                const errMsg = `Failed to download canonical asset ${asset.name} from ${asset.url}: ${err.message}`;
+                console.error(`::error::${errMsg}`);
+                if (!byteParityError) byteParityError = errMsg;
+              }
+            }
+
+            const results = [];
+
+            // 1. POSIX installer test in clean home against stable with no overrides
+            {
+              const installer = "posix";
+              const entrypointUrl = "https://resin.sh/install.sh";
+              const cleanHome = fs.mkdtempSync(path.join(os.tmpdir(), "resin-sh-smoke-"));
+              const t0 = Date.now();
+              let status = "FAILED";
+              let installedVersion = null;
+              let error = byteParityError;
+
+              if (!error && downloaded["install.sh"]) {
+                try {
+                  await execFileAsync("sh", [downloaded["install.sh"]], {
+                    env: { ...process.env, HOME: cleanHome },
+                    timeout: 120000,
+                  });
+                  const binaryPath = path.join(cleanHome, ".resin", "bin", "resin");
+                  if (!fs.existsSync(binaryPath)) {
+                    throw new Error(`Resin binary not found at ${binaryPath}`);
+                  }
+                  const { stdout } = await execFileAsync(binaryPath, ["version"], {
+                    env: { ...process.env, HOME: cleanHome },
+                    timeout: 15000,
+                  });
+                  const rawVersion = stdout.trim();
+                  const versionMatch = rawVersion.replace(/^(resin\s+)?v?/, "");
+                  installedVersion = versionMatch;
+                  if (versionMatch !== releaseVersion) {
+                    throw new Error(`Installed version ${versionMatch} does not match expected release version ${releaseVersion}`);
+                  }
+                  status = "PASSED";
+                  error = null;
+                } catch (err) {
+                  status = "FAILED";
+                  error = err.message || String(err);
+                } finally {
+                  try { fs.rmSync(cleanHome, { recursive: true, force: true }); } catch {}
+                }
+              }
+
+              const durationMs = Math.max(0, Date.now() - t0);
+              results.push({
+                installer,
+                status,
+                installedVersion,
+                entrypointUrl,
+                durationMs,
+                error,
+              });
+            }
+
+            // 2. PowerShell installer test in clean home against stable with no overrides
+            {
+              const installer = "powershell";
+              const entrypointUrl = "https://resin.sh/install.ps1";
+              const cleanHome = fs.mkdtempSync(path.join(os.tmpdir(), "resin-pwsh-smoke-"));
+              const t0 = Date.now();
+              let status = "FAILED";
+              let installedVersion = null;
+              let error = byteParityError;
+
+              if (!error && downloaded["install.ps1"]) {
+                try {
+                  const resinHome = path.join(cleanHome, ".resin");
+                  await execFileAsync("pwsh", [downloaded["install.ps1"], "-ResinHome", resinHome, "-Force"], {
+                    env: { ...process.env, HOME: cleanHome },
+                    timeout: 120000,
+                  });
+                  const binaryPath = path.join(resinHome, "bin", "resin");
+                  if (!fs.existsSync(binaryPath)) {
+                    throw new Error(`Resin binary not found at ${binaryPath}`);
+                  }
+                  const { stdout } = await execFileAsync(binaryPath, ["version"], {
+                    env: { ...process.env, HOME: cleanHome },
+                    timeout: 15000,
+                  });
+                  const rawVersion = stdout.trim();
+                  const versionMatch = rawVersion.replace(/^(resin\s+)?v?/, "");
+                  installedVersion = versionMatch;
+                  if (versionMatch !== releaseVersion) {
+                    throw new Error(`Installed version ${versionMatch} does not match expected release version ${releaseVersion}`);
+                  }
+                  status = "PASSED";
+                  error = null;
+                } catch (err) {
+                  status = "FAILED";
+                  error = err.message || String(err);
+                } finally {
+                  try { fs.rmSync(cleanHome, { recursive: true, force: true }); } catch {}
+                }
+              }
+
+              const durationMs = Math.max(0, Date.now() - t0);
+              results.push({
+                installer,
+                status,
+                installedVersion,
+                entrypointUrl,
+                durationMs,
+                error,
+              });
+            }
+
+            fs.writeFileSync(installerResultsPath, JSON.stringify(results, null, 2) + "\n");
+            console.log("Post-promotion installer results recorded:", JSON.stringify(results, null, 2));
+          ' "$smoke_dir" "$installer_results_path"
+
+          node tools/publish-public-release.mjs record-smoke \
+            --dist-dir "release/${RELEASE_TAG}" \
+            --bucket "$RESIN_DISTRIBUTION_BUCKET" \
+            --distribution-id "$RESIN_DISTRIBUTION_ID" \
+            --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
+            --key-prefix "$KEY_PREFIX" \
+            --environment "$TARGET_ENV" \
+            --receipt-dir "$receipt_dir" \
+            --output-dir "$smoke_dir" \
+            --installer-results "$installer_results_path"
+      - name: Freeze release on post-promotion smoke failure
+        if: failure() && steps.promote.outcome == 'success'
+        env:
+          RESIN_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.RESIN_RELEASE_PRIVATE_KEY_PEM }}
+          RESIN_RELEASE_KEY_ID: ${{ vars.RESIN_RELEASE_KEY_ID }}
+          RESIN_RELEASE_PUBLIC_KEY_PEM: ${{ vars.RESIN_RELEASE_PUBLIC_KEY_PEM }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::error::Post-promotion smoke verification failed after channels promotion. Triggering emergency freeze."
+          if [ -z "${RESIN_RELEASE_PRIVATE_KEY_PEM:-}" ]; then
+            echo "::error::Emergency freeze failed: missing RESIN_RELEASE_PRIVATE_KEY_PEM signing secret"
+            exit 1
+          fi
+          receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
+          node tools/publish-public-release.mjs freeze \
+            --dist-dir "release/${RELEASE_TAG}" \
+            --bucket "$RESIN_DISTRIBUTION_BUCKET" \
+            --distribution-id "$RESIN_DISTRIBUTION_ID" \
+            --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
+            --key-prefix "$KEY_PREFIX" \
+            --environment "$TARGET_ENV" \
+            --reason "Automated rollback: post-promotion smoke verification failed for ${RELEASE_TAG} on ${TARGET_ENV}" \
+            --receipt-dir "$receipt_dir"

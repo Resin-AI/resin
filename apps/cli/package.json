@@ -1,0 +1,100 @@
+{
+  "name": "resin",
+  "version": "1.0.0",
+  "description": "Command-line interface and bootstrap installer for Resin.",
+  "private": false,
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Resin-AI/resin.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/Resin-AI/resin#readme",
+  "bugs": {
+    "url": "https://github.com/Resin-AI/resin/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "resin": "./bin/resin.mjs"
+  },
+  "files": ["dist", "bin", "README.md", "LICENSE", "NOTICE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./installer/channel-verifier": {
+      "types": "./dist/installer/channel-verifier.d.ts",
+      "import": "./dist/installer/channel-verifier.js",
+      "default": "./dist/installer/channel-verifier.js"
+    },
+    "./installer/asset-downloader": {
+      "types": "./dist/installer/asset-downloader.d.ts",
+      "import": "./dist/installer/asset-downloader.js",
+      "default": "./dist/installer/asset-downloader.js"
+    },
+    "./installer/release-client": {
+      "types": "./dist/installer/release-client.d.ts",
+      "import": "./dist/installer/release-client.js",
+      "default": "./dist/installer/release-client.js"
+    },
+    "./installer/user-service": {
+      "types": "./dist/installer/user-service.d.ts",
+      "import": "./dist/installer/user-service.js",
+      "default": "./dist/installer/user-service.js"
+    },
+    "./platform": {
+      "types": "./dist/platform/index.d.ts",
+      "import": "./dist/platform/index.js",
+      "default": "./dist/platform/index.js"
+    },
+    "./service/manager": {
+      "types": "./dist/service/manager.d.ts",
+      "import": "./dist/service/manager.js",
+      "default": "./dist/service/manager.js"
+    },
+    "./service/verification": {
+      "types": "./dist/service/verification.d.ts",
+      "import": "./dist/service/verification.js",
+      "default": "./dist/service/verification.js"
+    },
+    "./service/auth-bootstrap": {
+      "types": "./dist/service/auth-bootstrap.d.ts",
+      "import": "./dist/service/auth-bootstrap.js",
+      "default": "./dist/service/auth-bootstrap.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo .tsbuildinfo",
+    "lint": "eslint src/ tests/ --max-warnings 0",
+    "postinstall": "node bin/postinstall.mjs",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@resin/adapter-claude-code": "workspace:*",
+    "@resin/adapter-codex": "workspace:*",
+    "@resin/adapter-omp": "workspace:*",
+    "@resin/contracts": "workspace:*",
+    "@resin/crypto": "workspace:*",
+    "@resin/db": "workspace:*",
+    "@resin/gateway": "workspace:*",
+    "@resin/harness-contracts": "workspace:*",
+    "@resin/observer": "workspace:*",
+    "@resin/protocol": "workspace:*",
+    "@resin/runtime": "workspace:*",
+    "smol-toml": "^1.8.0",
+    "zod": "^3.25.76"
+  }
+}
