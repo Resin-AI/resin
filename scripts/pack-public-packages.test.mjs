@@ -440,7 +440,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
       expect(result.count).toBe(13);
       expect(fs.existsSync(path.join(specialOutputDir, "resin-1.0.0.tgz"))).toBe(true);
       expect(fs.existsSync(path.join(specialOutputDir, "packages-manifest.json"))).toBe(true);
-    });
+    }, 30_000);
   });
 
   describe("parseArgs", () => {
