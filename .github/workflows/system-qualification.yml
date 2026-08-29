@@ -1,0 +1,67 @@
+name: System Qualification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: system-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-system:
+    name: Clean Checkout Public Core System Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RESIN_RELEASE_TEST_ONLY: "1"
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build exact candidate
+        run: pnpm build
+
+      - name: Package release candidate
+        run: pnpm release:package
+
+      - name: Verify release candidate
+        run: pnpm release:verify
+
+      - name: Run release-bound public core qualification
+        run: >-
+          node scripts/system-qualification.mjs
+          --release-dir=dist/release/v1.0.3
+          --output=dist/qualification/system-e2e.json
+          --commit-sha=${{ github.sha }}
+
+      - name: Upload system qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: system-qualification-evidence
+          path: dist/qualification/system-e2e.json
+          if-no-files-found: error
+          retention-days: 30
