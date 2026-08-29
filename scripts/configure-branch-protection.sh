@@ -7,13 +7,12 @@
 # 2. Require at least one approving review from designated code owners (author cannot self-approve).
 # 3. Dismiss stale reviews upon new commit pushes and enforce last-push approval.
 # 4. Require branches to be up to date before merging.
-# 5. Require all 10 parallel CI status checks + rollup 'CI Gate Rollup' to pass.
+# 5. Require all 13 parallel CI status checks + rollup 'CI Gate Rollup' to pass.
 # 6. Enforce rules for administrators and prevent force pushes/deletions.
 #
 # Usage:
 #   ./scripts/configure-branch-protection.sh [--repo OWNER/REPO] [--branch main] [--dry-run]
 # ==============================================================================
-
 set -euo pipefail
 
 BRANCH="main"
@@ -95,11 +94,14 @@ PROTECTION_PAYLOAD=$(cat <<EOF
       "TypeScript Typecheck",
       "Monorepo Build",
       "Unit Tests",
-      "End-to-End Tests",
+      "E2E Tests (with PostgreSQL)",
       "Package Boundaries Check",
       "ADR Verification",
-      "Release Artifact Verification",
-      "Binary Smoke Tests",
+      "Privacy Data Boundary Check",
+      "Hostile Cloud Quarantine & Preactivation Check",
+      "Runtime IPC & Broker Security Check",
+      "Release Verification",
+      "Binary Smoke Test",
       "Secret Scanning",
       "CI Gate Rollup"
     ]

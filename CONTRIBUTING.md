@@ -55,23 +55,25 @@ pnpm run check:all
 The `main` branch is strictly protected and enforces PR-only release gates:
 - **Direct Pushes Blocked:** Direct commits and pushes to `main` are disabled. All changes must arrive via pull request.
 - **Force Pushes Disabled:** Force-pushing to `main` is strictly forbidden.
-- **Review Policy:** All pull requests touching protected paths (observer, gateway, runtime, crypto, protocol, contracts, cloud-contracts boundary, release/install scripts, workflows, lockfile, root package, and boundary manifest/checker) strictly require at least one independent code-owner approval from designated owners in `.github/CODEOWNERS`. Self-approvals are prohibited. Stale reviews are automatically dismissed upon pushing new commits, and last-push approval is enforced before merging.
+- **Review Policy:** All pull requests touching protected paths (observer, gateway, runtime, crypto, protocol, contracts, release/install scripts, workflows, lockfile, root package, and boundary manifest/checker) strictly require at least one independent code-owner approval from designated owners in `.github/CODEOWNERS`. Self-approvals are prohibited. Stale reviews are automatically dismissed upon pushing new commits, and last-push approval is enforced before merging.
 - **Branch Protection Automation:** Run `./scripts/configure-branch-protection.sh` (or `pnpm exec ./scripts/configure-branch-protection.sh`) to automatically configure strict branch protection rules via GitHub API / gh CLI.
-- **Required Status Checks:** All 10 parallel CI jobs and the rollup `ci-gate` must pass before merging:
+- **Required Status Checks:** All 13 parallel CI jobs and the rollup `ci-gate` must pass before merging:
   1. `lint` (Biome Lint & Format Check)
   2. `typecheck` (TypeScript Typecheck)
   3. `build` (Monorepo Build)
   4. `test-unit` (Unit Tests)
-  5. `test-e2e` (End-to-End Tests)
+  5. `test-e2e` (E2E Tests with PostgreSQL)
   6. `check-boundaries` (Package Import Boundaries)
   7. `check-adrs` (ADR Integrity & Glossary Validation)
-  8. `release-verification` (Release Packaging, Digest, SBOM, and Docs Cross-Links)
-  9. `binary-smoke` (Binary Entry Point Smoke Tests)
-  10. `secret-scan` (Gitleaks and Standalone Secret Scanner)
-  11. `ci-gate` (Rollup Status Gate)
+  8. `check-privacy-boundary` (Privacy Data Boundary Check)
+  9. `check-hostile-cloud` (Hostile Cloud Quarantine & Preactivation Check)
+  10. `check-runtime-security` (Runtime IPC & Broker Security Check)
+  11. `release-verification` (Release Packaging, Digest, SBOM, and Docs Cross-Links)
+  12. `binary-smoke` (Binary Entry Point Smoke Tests)
+  13. `secret-scan` (Gitleaks and Standalone Secret Scanner)
+  14. `ci-gate` (Rollup Status Gate)
 
 ### PR Template & Checklist
-
 All pull requests must use `.github/pull_request_template.md` and provide:
 - Detailed acceptance criteria evidence with verifiable command outputs or test artifacts.
 - Security and privacy impact assessment (cryptography, secrets, capability envelopes, data residency).
