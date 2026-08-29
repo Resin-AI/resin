@@ -1,0 +1,3 @@
+{"type":"user","content":"Please analyze our database schema and propose indexing optimizations.","model":"claude-3-7-sonnet","timestamp":"2026-08-17T12:00:10.000Z"}
+{"type":"assistant","content":[{"type":"thinking","thinking":"The user wants indexing optimizations for their DB schema. Let me inspect the tables first.","signature":"sig_test_123"},{"type":"text","text":"I will inspect the database migration scripts to see what tables and indexes currently exist."}],"model":"claude-3-7-sonnet","timestamp":"2026-08-17T12:00:12.000Z"}
+{"type":"user","content":[{"type":"text","text":"Great, please check the session repository specifically."}],"timestamp":"2026-08-17T12:00:15.000Z"}

@@ -1,0 +1,37 @@
+{
+  "name": "@resin/crypto",
+  "version": "0.1.0",
+  "description": "Cryptographic primitives and hashing utilities for Resin.",
+  "private": false,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Resin-AI/resin.git",
+    "directory": "packages/crypto"
+  },
+  "homepage": "https://github.com/Resin-AI/resin#readme",
+  "bugs": {
+    "url": "https://github.com/Resin-AI/resin/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  }
+}

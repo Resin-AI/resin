@@ -1,0 +1,111 @@
+name: Production Security Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact release candidate SHA to scan
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-security-scan-${{ inputs.commit_sha }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: resin-vm-linux-arm64
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$TARGET_SHA"
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.24.0
+          run_install: false
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit production dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/security-scan
+          pnpm audit --prod --audit-level high --json > dist/security-scan/pnpm-audit.json
+
+      - name: Build exact cloud container
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+        run: docker build --build-arg APP_VERSION="$TARGET_SHA" -f apps/cloud/Dockerfile -t "resin-cloud-scan:$TARGET_SHA" .
+
+      - name: Scan cloud container
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: resin-cloud-scan:${{ inputs.commit_sha }}
+          format: json
+          output: dist/security-scan/trivy.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: "1"
+
+      - name: Generate retained scan evidence
+        env:
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+        run: |
+          node --input-type=module -e '
+            import crypto from "node:crypto";
+            import fs from "node:fs";
+            const audit = fs.readFileSync("dist/security-scan/pnpm-audit.json");
+            const trivy = fs.readFileSync("dist/security-scan/trivy.json");
+            const generatedAt = new Date();
+            const parsed = JSON.parse(trivy);
+            const vulnerabilities = (parsed.Results || []).flatMap((result) =>
+              (result.Vulnerabilities || []).map((finding) => ({
+                id: finding.VulnerabilityID,
+                ratings: [{ severity: String(finding.Severity || "unknown").toLowerCase() }],
+                affects: [{ ref: finding.PkgIdentifier?.PURL || finding.PkgName || "unknown" }],
+              })),
+            );
+            const evidence = {
+              schemaVersion: "1.0.0",
+              source: "pnpm-audit+trivy-container",
+              generatedAt: generatedAt.toISOString(),
+              retentionUntil: new Date(generatedAt.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+              commitSha: process.env.RELEASE_SHA,
+              dependencyScan: { status: "COMPLETED", rawSha256: crypto.createHash("sha256").update(audit).digest("hex") },
+              containerScan: { status: "COMPLETED", rawSha256: crypto.createHash("sha256").update(trivy).digest("hex") },
+              vulnerabilities,
+            };
+            fs.writeFileSync("dist/security-scan/vulnerability-scan-evidence.json", JSON.stringify(evidence, null, 2) + "\n");
+          '
+
+      - name: Upload retained security evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vulnerability-scan-evidence
+          path: dist/security-scan/
+          if-no-files-found: error
+          retention-days: 365

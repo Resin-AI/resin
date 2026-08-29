@@ -1,0 +1,708 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Linter and Formatter Check
+        run: pnpm lint
+
+  typecheck:
+    name: TypeScript Typecheck
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Typecheck
+        run: pnpm typecheck
+
+  build:
+    name: Monorepo Build
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Build
+        run: pnpm build
+
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    services:
+      postgres:
+        image: postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+        env:
+          POSTGRES_DB: resin_test
+          POSTGRES_USER: resin_test
+          POSTGRES_PASSWORD: resin_test_password
+        ports:
+          - 5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Unit Tests
+        env:
+          TEST_DATABASE_URL: postgresql://resin_test:resin_test_password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/resin_test
+        run: pnpm test
+
+  test-e2e:
+    name: E2E Tests (with PostgreSQL)
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    services:
+      postgres:
+        image: postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+        env:
+          POSTGRES_DB: resin_test
+          POSTGRES_USER: resin_test
+          POSTGRES_PASSWORD: resin_test_password
+        ports:
+          - 5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Run E2E Tests
+        env:
+          TEST_DATABASE_URL: postgresql://resin_test:resin_test_password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/resin_test
+        run: pnpm test:e2e
+
+  check-boundaries:
+    name: Package Boundaries Check
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Package Boundaries
+        run: pnpm check:boundaries
+
+  check-adrs:
+    name: ADR Verification
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Architecture Decision Records
+        run: pnpm check:adrs
+
+  check-privacy-boundary:
+    name: Privacy Data Boundary Check
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Privacy Data Boundaries
+        run: pnpm check:privacy-boundary
+
+  check-hostile-cloud:
+    name: Hostile Cloud Quarantine & Preactivation Check
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Hostile Cloud Invariants
+        run: pnpm check:hostile-cloud
+
+  check-runtime-security:
+    name: Runtime IPC & Broker Security Check
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Runtime IPC & Broker Security
+        run: pnpm check:runtime-security
+
+  release-verification:
+    name: Release Verification
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    env:
+      RESIN_RELEASE_TEST_ONLY: "1"
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Run Test Package Release
+        run: pnpm release:package:test
+
+      - name: Run Test Verify Release
+        run: pnpm release:verify:test
+
+      - name: Run Release Pipeline Tests
+        run: pnpm release:test
+
+  binary-smoke:
+    name: Binary Smoke Test
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Packages
+        run: pnpm build
+
+      - name: Verify Binary Entry Points
+        run: pnpm check:smoke
+
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Standalone Secret Scanner
+        run: pnpm run check:secrets
+
+      - name: Run Gitleaks Secret Scanner
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            scan_range="${PR_BASE_SHA}..${GITHUB_SHA}"
+          elif [[ -n "${PUSH_BEFORE_SHA}" ]] && \
+               [[ ! "${PUSH_BEFORE_SHA}" =~ ^0+$ ]]; then
+            scan_range="${PUSH_BEFORE_SHA}..${GITHUB_SHA}"
+          else
+            scan_range="${GITHUB_SHA}^!"
+          fi
+          docker run --rm \
+            --network none \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks@sha256:b5918eb91b8d2473cec722f066abb4352e4ffdc4ec9f4283ec143aba9ec9ebc4 \
+            git --redact --no-banner --log-opts="${scan_range}"
+
+  ci-gate:
+    name: CI Gate Rollup
+    needs:
+      - lint
+      - typecheck
+      - build
+      - test-unit
+      - test-e2e
+      - check-boundaries
+      - check-adrs
+      - check-privacy-boundary
+      - check-hostile-cloud
+      - check-runtime-security
+      - release-verification
+      - binary-smoke
+      - secret-scan
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.gate.outputs.commit_sha }}
+      status: ${{ steps.gate.outputs.status }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify All 13 Required Checks Passed
+        id: gate
+        shell: bash
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Evaluating status check results..."
+          CHECKOUT_SHA="$(git rev-parse HEAD)"
+          echo "Checkout SHA: ${CHECKOUT_SHA}"
+          echo "Expected SHA: ${EXPECTED_SHA}"
+
+          if [ -z "${EXPECTED_SHA}" ] || [ "${CHECKOUT_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "❌ Checkout SHA mismatch: expected ${EXPECTED_SHA:-missing}, got ${CHECKOUT_SHA}"
+            exit 1
+          fi
+
+          failed=0
+          required_jobs=(
+            lint
+            typecheck
+            build
+            test-unit
+            test-e2e
+            check-boundaries
+            check-adrs
+            check-privacy-boundary
+            check-hostile-cloud
+            check-runtime-security
+            release-verification
+            binary-smoke
+            secret-scan
+          )
+
+          for job in "${required_jobs[@]}"; do
+            result=$(echo "$RESULTS" | jq -r ".[\"$job\"].result // \"missing\"")
+            if [ "$result" != "success" ]; then
+              echo "❌ Check '$job' failed or was skipped (result: $result)"
+              failed=1
+            else
+              echo "✅ Check '$job' passed"
+            fi
+            job_sha=$(echo "$RESULTS" | jq -r ".[\"$job\"].outputs.commit_sha // \"missing\"")
+            if [ "$job_sha" != "$CHECKOUT_SHA" ]; then
+              echo "❌ Check '$job' ran against SHA $job_sha instead of $CHECKOUT_SHA"
+              failed=1
+            fi
+          done
+
+          if [ $failed -ne 0 ]; then
+            echo "🚫 CI Gate FAILED: One or more required upstream checks did not succeed or were skipped."
+            exit 1
+          fi
+
+          echo "commit_sha=${CHECKOUT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "🎉 All 13 required checks passed. CI gate is open!"

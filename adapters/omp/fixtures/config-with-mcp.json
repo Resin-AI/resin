@@ -1,0 +1,15 @@
+{
+  "theme": "dark",
+  "model": "gemini-3.7-flash",
+  "extensions": ["omp-plugin-git", "omp-plugin-terminal"],
+  "mcpServers": {
+    "existing-server": {
+      "command": "node",
+      "args": ["server.js"]
+    },
+    "resin": {
+      "url": "http://127.0.0.1:4000/mcp/sse",
+      "type": "sse"
+    }
+  }
+}

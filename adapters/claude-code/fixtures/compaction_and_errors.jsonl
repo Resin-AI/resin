@@ -1,0 +1,3 @@
+{"type":"compaction","originalTokenCount":85000,"compactedTokenCount":12500,"summary":"Summary of previous conversation about database schema and indexing","rangeStart":"event-1","rangeEnd":"event-45","timestamp":"2026-08-17T12:00:40.000Z"}
+{"type":"error","code":"RATE_LIMIT_EXCEEDED","message":"Claude API rate limit reached. Backing off for 5 seconds.","fatal":false,"details":{"retryAfterMs":5000},"timestamp":"2026-08-17T12:00:42.000Z"}
+{"type":"error","code":"CRITICAL_SANDBOX_FAILURE","message":"Sandbox process terminated unexpectedly","fatal":true,"stack":"Error: Sandbox terminated\n  at run (/worker/runner.ts:42)","timestamp":"2026-08-17T12:00:45.000Z"}

@@ -1,0 +1,16 @@
+# OpenAI Codex CLI Configuration File
+# Managed by workstation environment
+
+model = "gpt-4o"
+temperature = 0.2
+max_tokens = 4096
+
+# File system MCP server
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/workspace"]
+
+# User profile configuration
+[profiles.development]
+auto_approve = ["read_file", "git_status"]
+sandbox = "docker"

@@ -1,0 +1,4 @@
+{"type":"assistant","content":[{"type":"tool_use","id":"toolu_bash_01","name":"Bash","input":{"command":"git status --short","cwd":"/workspace"}}],"timestamp":"2026-08-17T12:00:20.000Z"}
+{"type":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash_01","name":"Bash","content":" M packages/db/src/repositories/session-repository.ts\n?? adapters/claude-code/","is_error":false}],"timestamp":"2026-08-17T12:00:21.000Z"}
+{"type":"assistant","content":[{"type":"tool_use","id":"toolu_custom_02","name":"search_sessions","input":{"query":"active_sessions","limit":10}}],"timestamp":"2026-08-17T12:00:22.000Z"}
+{"type":"user","content":[{"type":"tool_result","tool_use_id":"toolu_custom_02","name":"search_sessions","content":{"results":[{"id":"session-1","status":"active"}]},"is_error":false}],"timestamp":"2026-08-17T12:00:23.000Z"}

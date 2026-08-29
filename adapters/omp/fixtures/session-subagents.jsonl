@@ -1,0 +1,10 @@
+{"type":"session_lifecycle","lifecycleType":"start","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:00.000Z"}
+{"type":"message","role":"user","content":"Run parallel audit across packages","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:01.000Z"}
+{"type":"subagent_lifecycle","subagentId":"scout-01","lifecycleType":"spawn","parentId":"session-subagents-1","role":"scout","reason":"Scan repository structure","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:02.000Z"}
+{"type":"subagent_lifecycle","subagentId":"scout-01","lifecycleType":"start","parentId":"session-subagents-1","role":"scout","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:03.000Z"}
+{"type":"subagent_lifecycle","subagentId":"scout-01","lifecycleType":"settle","parentId":"session-subagents-1","role":"scout","reason":"Discovered 5 packages","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:05.000Z"}
+{"type":"subagent_lifecycle","subagentId":"writer-01","lifecycleType":"spawn","parentId":"session-subagents-1","role":"writer","reason":"Implement changes","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:06.000Z"}
+{"type":"subagent_lifecycle","subagentId":"writer-01","lifecycleType":"start","parentId":"session-subagents-1","role":"writer","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:07.000Z"}
+{"type":"subagent_lifecycle","subagentId":"writer-01","lifecycleType":"settle","parentId":"session-subagents-1","role":"writer","reason":"Wrote implementation files","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:10.000Z"}
+{"type":"message","role":"assistant","content":"All subagent tasks completed successfully.","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:12.000Z"}
+{"type":"session_lifecycle","lifecycleType":"end","sessionId":"session-subagents-1","timestamp":"2026-08-17T11:00:13.000Z"}

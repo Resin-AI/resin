@@ -1,0 +1,49 @@
+{
+  "publicPackages": [
+    "resin",
+    "@resin/gateway",
+    "@resin/observer",
+    "@resin/runtime",
+    "@resin/crypto",
+    "@resin/protocol",
+    "@resin/contracts",
+    "@resin/harness-contracts",
+    "@resin/db",
+    "@resin/adapter-claude-code",
+    "@resin/adapter-codex",
+    "@resin/adapter-omp"
+  ],
+  "privatePackages": ["@resin/cloud", "@resin/web", "@resin/cloud-contracts", "@resin/e2e"],
+  "publicReleasePackages": [
+    "resin",
+    "@resin/gateway",
+    "@resin/observer",
+    "@resin/runtime",
+    "@resin/crypto",
+    "@resin/protocol",
+    "@resin/contracts",
+    "@resin/harness-contracts",
+    "@resin/db",
+    "@resin/adapter-claude-code",
+    "@resin/adapter-codex",
+    "@resin/adapter-omp"
+  ],
+  "cloudOnlyPaths": [
+    "apps/cloud",
+    "apps/web",
+    "packages/cloud-contracts",
+    "infra/aws",
+    "infra/serverless",
+    "deploy",
+    "aws"
+  ],
+  "publicDocumentationPaths": [
+    "docs",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "publicTestFixturePaths": ["fixtures/test-fixtures"]
+}

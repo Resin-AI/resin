@@ -1,0 +1,44 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/harness-contracts"
+    },
+    {
+      "path": "./packages/runtime"
+    },
+    {
+      "path": "./packages/crypto"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
+      "path": "./apps/gateway"
+    },
+    {
+      "path": "./apps/observer"
+    },
+    {
+      "path": "./apps/cli"
+    },
+    {
+      "path": "./adapters/claude-code"
+    },
+    {
+      "path": "./adapters/codex-cli"
+    },
+    {
+      "path": "./adapters/omp"
+    },
+    {
+      "path": "./fixtures/test-fixtures"
+    }
+  ]
+}

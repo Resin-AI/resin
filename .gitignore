@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+__pycache__/
+
+# Local runtime logs
+tmp/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+!apps/cloud/certs/aws-rds-global-bundle.pem
+*.key
+
+# Database & Local Storage
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+minio_data/
+postgres_data/
+redis_data/
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

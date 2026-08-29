@@ -1,0 +1,13 @@
+{
+  "model": "gpt-4o",
+  "temperature": 0.2,
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/workspace"]
+    }
+  },
+  "permissions": {
+    "allowWorkspaceRead": true
+  }
+}
