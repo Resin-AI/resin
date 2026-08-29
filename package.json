@@ -29,6 +29,7 @@
     "check:smoke": "node scripts/verify-binaries.mjs",
     "check:public-artifact": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/standalone-release-artifact.test.mjs",
     "release:package": "node scripts/package-release.mjs",
+    "release:packages": "node scripts/pack-public-packages.mjs",
     "release:evidence": "node scripts/generate-release-evidence.mjs",
     "release:publish": "node scripts/publish-public-release.mjs",
     "release:verify": "node scripts/verify-release-cli.mjs",

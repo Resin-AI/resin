@@ -84,6 +84,8 @@
     "scripts/install-ps1.test.mjs",
     "scripts/install-sh.test.mjs",
     "scripts/pack-npm-bootstrap.mjs",
+    "scripts/pack-public-packages.mjs",
+    "scripts/pack-public-packages.test.mjs",
     "scripts/package-release.mjs",
     "scripts/platform-qualification.mjs",
     "scripts/platform-qualification.test.mjs",
