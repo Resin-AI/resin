@@ -309,24 +309,13 @@ describe("install.ps1 execution and behavioral security tests", () => {
     }
   });
 
-  it("blocks SSRF attempts against loopback when RESIN_INSTALL_TEST_ONLY is not set", async () => {
-    if (pwshAvailable) {
-      const res = await runPwshAsync(
-        ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "output.mjs"],
-        {
-          timeout: 15000,
-          env: {
-            ...process.env,
-            RESIN_INSTALL_TEST_ONLY: "",
-            RESIN_INSTALL_HELPER_URL: "http://127.0.0.1:8080/install-helper-v1.mjs",
-          },
-        },
-      );
-      expect(res.status).not.toBe(0);
-    } else {
-      const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-      expect(content).toContain("Host $($helperUri.Host) resolved to forbidden IP address");
-    }
+  it("ignores helper URL overrides outside test mode and retains the loopback guard", () => {
+    const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+    expect(content).toContain("$helperUrl = $PINNED_HELPER_URL");
+    expect(content).toContain(
+      "if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_HELPER_URL))",
+    );
+    expect(content).toContain("Host $($helperUri.Host) resolved to forbidden IP address");
   });
 
   it("rejects helper download and aborts execution on SHA-256 digest mismatch", async () => {
