@@ -1047,8 +1047,9 @@ describe("Public Release Workflows Contract", () => {
       expect(checkAll).toContain("pnpm run release:verify:test");
     });
 
-    it("builds workspace packages before the privacy, hostile-cloud, and runtime-security checks", () => {
+    it("builds workspace packages before every test job that imports workspace outputs", () => {
       const jobCommands = {
+        "test-unit": "pnpm test",
         "check-privacy-boundary": "check:privacy-boundary",
         "check-hostile-cloud": "check:hostile-cloud",
         "check-runtime-security": "check:runtime-security",
