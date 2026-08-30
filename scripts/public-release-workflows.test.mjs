@@ -386,7 +386,7 @@ describe("Public Release Workflows Contract", () => {
       expect(production.doc.concurrency?.["cancel-in-progress"]).toBe(false);
       expect(job.environment?.name).toBe("${{ inputs.environment || 'production' }}");
       expect(job.permissions?.["id-token"]).toBe("write");
-      expect(job.permissions?.contents).toBe("read");
+      expect(job.permissions?.contents).toBe("write");
       expect(job.permissions?.actions).toBe("read");
       expect(job.permissions?.attestations).toBe("read");
     });
@@ -437,12 +437,38 @@ describe("Public Release Workflows Contract", () => {
           expect(step.run, "Production workflow must NOT publish to npm registry").not.toMatch(
             /npm publish/,
           );
-          expect(step.run, "Production workflow must NOT create GitHub releases").not.toMatch(
-            /gh release create/,
-          );
         }
       }
     });
+    it("keeps GitHub release side effects production-only and publishes only after verification", () => {
+      const steps = job.steps;
+      const createStep = steps.find((s) => s.name === "Create draft GitHub release");
+      const packageStep = steps.find((s) => s.name === "Package public fallback package tarballs");
+      const uploadStep = steps.find(
+        (s) => s.name === "Upload fallback package tarballs and manifest to GitHub release",
+      );
+      const promoteStep = steps.find((s) => s.id === "promote");
+      const smokeStep = steps.find((s) => s.id === "public_smoke");
+      const publishStep = steps.find((s) => s.name === "Publish verified GitHub release");
+
+      for (const step of [createStep, packageStep, uploadStep, publishStep]) {
+        expect(step).toBeDefined();
+        expect(step.if).toContain("inputs.environment == 'production'");
+      }
+
+      expect(createStep.run).toContain('gh release create "$RELEASE_TAG"');
+      expect(createStep.run).toContain("--draft");
+      expect(createStep.run).toContain('--target "$RELEASE_SHA"');
+      expect(createStep.run).toContain("targetCommitish");
+      expect(uploadStep.run).toContain('gh release upload "$RELEASE_TAG"');
+      expect(publishStep.run).toContain('gh release edit "$RELEASE_TAG" --draft=false');
+
+      expect(steps.indexOf(createStep)).toBeLessThan(steps.indexOf(uploadStep));
+      expect(steps.indexOf(uploadStep)).toBeLessThan(steps.indexOf(promoteStep));
+      expect(steps.indexOf(promoteStep)).toBeLessThan(steps.indexOf(smokeStep));
+      expect(steps.indexOf(smokeStep)).toBeLessThan(steps.indexOf(publishStep));
+    });
+
     it("gates partial immutable cleanup behind an explicit production-only input", () => {
       expect(inputs.reset_partial_release.type).toBe("boolean");
       expect(inputs.reset_partial_release.default).toBe(false);
@@ -494,7 +520,7 @@ describe("Public Release Workflows Contract", () => {
         s.uses?.startsWith("aws-actions/configure-aws-credentials"),
       );
       expect(awsStep).toBeDefined();
-      expect(awsStep.with?.["role-to-assume"]).toContain("RESIN_RELEASE_ROLE_ARN");
+      expect(awsStep.with?.["role-to-assume"]).toBe("${{ env.RESIN_RELEASE_ROLE_ARN }}");
       expect(awsStep.with?.["aws-region"]).toBe("us-east-1");
     });
 

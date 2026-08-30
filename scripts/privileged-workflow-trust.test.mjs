@@ -250,7 +250,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       }
     });
 
-    it("verifies contents permission is strictly read-only across all privileged workflows", () => {
+    it("keeps contents read-only except for the protected release publication job", () => {
       for (const [filePath, { doc }] of Object.entries(allWorkflows)) {
         if (
           doc.permissions &&
@@ -269,10 +269,14 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
             Object.prototype.toString.call(job.permissions) === "[object Object]"
           ) {
             if (job.permissions.contents) {
+              const expectedPermission =
+                filePath === ".github/workflows/release.yml" && jobId === "release"
+                  ? "write"
+                  : "read";
               expect(
                 job.permissions.contents,
-                `${filePath} job '${jobId}' contents permission must be read`,
-              ).toBe("read");
+                `${filePath} job '${jobId}' contents permission must be ${expectedPermission}`,
+              ).toBe(expectedPermission);
             }
           }
         }
@@ -287,8 +291,12 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
           if (!perms || Object.prototype.toString.call(perms) !== "[object Object]") return;
           for (const [scope, level] of Object.entries(perms)) {
             if (level === "write") {
+              const isProtectedReleaseContentsWrite =
+                scope === "contents" &&
+                filePath === ".github/workflows/release.yml" &&
+                context === "job 'release'";
               expect(
-                allowedWriteScopes.has(scope),
+                allowedWriteScopes.has(scope) || isProtectedReleaseContentsWrite,
                 `Write permission for '${scope}' in ${context} (${filePath}) must be an approved least-privilege scope`,
               ).toBe(true);
             }

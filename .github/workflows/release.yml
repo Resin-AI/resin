@@ -45,7 +45,7 @@ jobs:
     environment:
       name: ${{ inputs.environment || 'production' }}
     permissions:
-      contents: read
+      contents: write
       actions: read
       attestations: read
       id-token: write
@@ -271,7 +271,33 @@ jobs:
             echo "::error::Candidate archive missing required installer assets"
             exit 1
           fi
+      - name: Create draft GitHub release
+        if: ${{ inputs.environment == 'production' }}
+        id: create_github_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish 2>/dev/null)"; then
+            is_draft="$(jq -r '.isDraft' <<<"$release_json")"
+            target_commitish="$(jq -r '.targetCommitish' <<<"$release_json")"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::GitHub release ${RELEASE_TAG} already exists and is not a draft"
+              exit 1
+            fi
+            if [ "$target_commitish" != "$RELEASE_SHA" ]; then
+              echo "::error::Draft GitHub release target ${target_commitish} does not match ${RELEASE_SHA}"
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$RELEASE_SHA" \
+              --title "Resin ${RELEASE_TAG}" \
+              --notes "Resin ${RELEASE_TAG}."
+          fi
+
       - name: Package public fallback package tarballs
+        if: ${{ inputs.environment == 'production' }}
         id: package_fallback
         shell: bash
         run: |
@@ -284,6 +310,7 @@ jobs:
             --output-dir "$staging_dir"
 
       - name: Upload fallback package tarballs and manifest to GitHub release
+        if: ${{ inputs.environment == 'production' }}
         id: upload_github_release
         shell: bash
         run: |
@@ -298,7 +325,7 @@ jobs:
       - name: Assume AWS release publication role
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: ${{ vars.RESIN_RELEASE_ROLE_ARN }}
+          role-to-assume: ${{ env.RESIN_RELEASE_ROLE_ARN }}
           aws-region: us-east-1
       - name: Delete confirmed partial immutable release prefix
         if: ${{ inputs.reset_partial_release && inputs.environment == 'production' }}
@@ -633,6 +660,12 @@ jobs:
             --receipt-dir "$receipt_dir" \
             --output-dir "$smoke_dir" \
             --installer-results "$installer_results_path"
+      - name: Publish verified GitHub release
+        if: ${{ inputs.environment == 'production' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false
       - name: Freeze release on post-promotion smoke failure
         if: failure() && steps.promote.outcome == 'success'
         env:
