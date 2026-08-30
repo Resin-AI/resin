@@ -191,9 +191,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Embed active production release trust root
-        run: node scripts/embed-cli-release-trust.mjs
-
       - name: Generate production qualification evidence
         run: >-
           node scripts/generate-production-qualification-evidence.mjs

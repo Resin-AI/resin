@@ -24,7 +24,9 @@ import {
   isForbiddenReleasePath,
   isProductionDistFile,
   resolvePublicReleasePackages,
+  writeCliReleaseTrustBundle,
 } from "./package-release.mjs";
+import { createTestReleaseSigningKey } from "./release-trust.mjs";
 import { verifyReleaseFiles } from "./verify-release.mjs";
 
 describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
@@ -566,6 +568,38 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
       expect(() => {
         collectPackageProductionDistFiles(tempDir, stalePkgDir, { rejectStale: true });
       }).toThrow(/Package dist hygiene check failed/);
+    });
+
+    it("writes the CLI trust bundle only after the clean-build boundary", () => {
+      const keyPair = createTestReleaseSigningKey();
+      const trustRoot = path.join(tempDir, "trust-bundle-root");
+      const result = writeCliReleaseTrustBundle(trustRoot, keyPair, { testOnly: true });
+
+      expect(result.outputPath).toBe(
+        path.join(trustRoot, "apps", "cli", "dist", "release-trust.json"),
+      );
+
+      const cliPackageDir = path.join(trustRoot, "apps", "cli");
+      fs.mkdirSync(path.join(cliPackageDir, "src"), { recursive: true });
+      expect(() => assertCleanProductionDist(trustRoot, cliPackageDir)).toThrow(
+        /Package dist hygiene check failed/,
+      );
+      expect(() =>
+        assertCleanProductionDist(trustRoot, cliPackageDir, {
+          allowedGeneratedFiles: ["release-trust.json"],
+        }),
+      ).not.toThrow();
+      expect(
+        collectPackageProductionDistFiles(trustRoot, cliPackageDir, {
+          rejectStale: true,
+          allowedGeneratedFiles: ["release-trust.json"],
+        }).map(({ relPath }) => relPath),
+      ).toContain("dist/release-trust.json");
+      expect(result.payload).toMatchObject({
+        schemaVersion: "2.0.0",
+        trustDomain: "test-only",
+        trustedKeys: [{ keyId: keyPair.keyId }],
+      });
     });
   });
 
