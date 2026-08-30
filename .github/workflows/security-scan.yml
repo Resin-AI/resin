@@ -56,21 +56,6 @@ jobs:
           mkdir -p dist/security-scan
           pnpm audit --prod --audit-level high --json > dist/security-scan/pnpm-audit.json
 
-      - name: Build exact cloud container
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-        run: docker build --build-arg APP_VERSION="$TARGET_SHA" -f apps/cloud/Dockerfile -t "resin-cloud-scan:$TARGET_SHA" .
-
-      - name: Scan cloud container
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: resin-cloud-scan:${{ inputs.commit_sha }}
-          format: json
-          output: dist/security-scan/trivy.json
-          severity: CRITICAL,HIGH
-          ignore-unfixed: false
-          exit-code: "1"
-
       - name: Generate retained scan evidence
         env:
           RELEASE_SHA: ${{ inputs.commit_sha }}
@@ -79,24 +64,27 @@ jobs:
             import crypto from "node:crypto";
             import fs from "node:fs";
             const audit = fs.readFileSync("dist/security-scan/pnpm-audit.json");
-            const trivy = fs.readFileSync("dist/security-scan/trivy.json");
             const generatedAt = new Date();
-            const parsed = JSON.parse(trivy);
-            const vulnerabilities = (parsed.Results || []).flatMap((result) =>
-              (result.Vulnerabilities || []).map((finding) => ({
-                id: finding.VulnerabilityID,
-                ratings: [{ severity: String(finding.Severity || "unknown").toLowerCase() }],
-                affects: [{ ref: finding.PkgIdentifier?.PURL || finding.PkgName || "unknown" }],
-              })),
-            );
+            const parsed = JSON.parse(audit);
+            const vulnerabilities = Object.values(parsed.vulnerabilities || {}).map((finding) => {
+              const advisory = (finding.via || []).find((item) => typeof item === "object");
+              return {
+                id: String(advisory?.source || `pnpm:${finding.name || "unknown"}`),
+                ratings: [{ severity: String(finding.severity || "unknown").toLowerCase() }],
+                affects: [{ ref: finding.name || "unknown" }],
+              };
+            });
             const evidence = {
               schemaVersion: "1.0.0",
-              source: "pnpm-audit+trivy-container",
+              source: "pnpm-audit",
               generatedAt: generatedAt.toISOString(),
               retentionUntil: new Date(generatedAt.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(),
               commitSha: process.env.RELEASE_SHA,
               dependencyScan: { status: "COMPLETED", rawSha256: crypto.createHash("sha256").update(audit).digest("hex") },
-              containerScan: { status: "COMPLETED", rawSha256: crypto.createHash("sha256").update(trivy).digest("hex") },
+              containerScan: {
+                status: "NOT_APPLICABLE",
+                reason: "The public local-core release does not publish a container artifact",
+              },
               vulnerabilities,
             };
             fs.writeFileSync("dist/security-scan/vulnerability-scan-evidence.json", JSON.stringify(evidence, null, 2) + "\n");

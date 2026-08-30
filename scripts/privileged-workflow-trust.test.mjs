@@ -98,6 +98,15 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       expect(Object.keys(securityScan.doc.on)).toEqual(["workflow_dispatch"]);
     });
 
+    it("keeps the public security scan independent of the private cloud container", () => {
+      const securityScan = releaseWorkflows[".github/workflows/security-scan.yml"];
+
+      expect(securityScan.raw).not.toContain("apps/cloud");
+      expect(securityScan.raw).not.toContain("trivy");
+      expect(securityScan.raw).toContain('source: "pnpm-audit"');
+      expect(securityScan.raw).toContain('status: "NOT_APPLICABLE"');
+    });
+
     it("validates workflow_dispatch inputs enforce required fields and descriptive parameters", () => {
       for (const [filePath, { doc }] of Object.entries(releaseWorkflows)) {
         const inputs = doc.on.workflow_dispatch?.inputs || {};
