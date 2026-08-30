@@ -1379,11 +1379,6 @@ describe("Release Packaging & Verification Suite", () => {
           size: 20,
         },
         {
-          name: "resin/bin/resin-mcp",
-          content: Buffer.from("#!/usr/bin/env node\n"),
-          size: 20,
-        },
-        {
           name: "resin/apps/cli/dist/bin/cli.js",
           content: Buffer.from("export function main() {}\n"),
           size: 30,
@@ -1426,6 +1421,17 @@ describe("Release Packaging & Verification Suite", () => {
       ];
       const binViolations = verifyTarballEntries(unexpectedBinEntries, "test.tar.gz", { boundary });
       expect(binViolations.some((v) => v.rule === "UNEXPECTED_BINARY")).toBe(true);
+
+      // Obsolete resin-mcp binary in resin/bin/ fails with UNEXPECTED_BINARY
+      const mcpBinEntries = [
+        ...validEntries,
+        { name: "resin/bin/resin-mcp", content: Buffer.from("#!/usr/bin/env node\n"), size: 20 },
+      ];
+      const mcpBinViolations = verifyTarballEntries(mcpBinEntries, "test.tar.gz", { boundary });
+      expect(mcpBinViolations.some((v) => v.rule === "UNEXPECTED_BINARY")).toBe(true);
+      expect(ALLOWED_RELEASE_BINARIES).not.toContain("resin/bin/resin-mcp");
+      expect(ALLOWED_RELEASE_BINARIES).not.toContain("resin/bin/resin-mcp.cmd");
+      expect(ALLOWED_RELEASE_BINARIES).not.toContain("resin/bin/resin-mcp.ps1");
 
       // Missing legal file fails with MISSING_LEGAL_FILE
       const missingLicense = validEntries.filter((e) => e.name !== "resin/LICENSE");

@@ -25,18 +25,19 @@ describe("HarnessConfigOrchestrator", () => {
     const claudeContent = await bridge.readFile(`${home}/.claude/claude.json`);
     expect(claudeContent).not.toBeNull();
     const claudeJson = JSON.parse(claudeContent ?? "{}");
-    expect(claudeJson.mcpServers.resin.url).toBe("http://127.0.0.1:9400/mcp/sse");
+    expect(claudeJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
 
     // Verify Codex config was written
     const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
     expect(codexContent).not.toBeNull();
-    expect(codexContent).toContain("resin-mcp");
+    expect(codexContent).toContain('command = "resin"');
+    expect(codexContent).toContain('args = ["mcp"]');
 
     // Verify OMP config was written
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
+    expect(ompJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {

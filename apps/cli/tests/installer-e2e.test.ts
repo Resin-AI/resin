@@ -365,7 +365,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(pairingRollbackCalled).toBe(true);
   });
 
-  it("propagates explicit gatewayUrl to all configured harnesses and defaults when omitted", async () => {
+  it("emits canonical stdio configurations and does not write explicit gatewayUrl into harness configs", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
     const workspace = "/home/developer/code/my-app";
@@ -384,10 +384,24 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
       autoApprove: true,
     });
 
-    // Verify all harness configs received custom gateway
-    expect(await bridge.readFile(`${home}/.claude/claude.json`)).toContain(customGateway);
-    expect(await bridge.readFile(`${home}/.codex/config.toml`)).toContain("resin");
-    expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toContain("resin");
+    // Verify all three emitted configs are canonical stdio and do not contain custom gateway
+    const claudeContent = await bridge.readFile(`${home}/.claude/claude.json`);
+    expect(claudeContent).not.toBeNull();
+    const claudeJson = JSON.parse(claudeContent ?? "{}");
+    expect(claudeJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(claudeContent).not.toContain(customGateway);
+
+    const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
+    expect(codexContent).not.toBeNull();
+    expect(codexContent).toContain('command = "resin"');
+    expect(codexContent).toContain('args = ["mcp"]');
+    expect(codexContent).not.toContain(customGateway);
+
+    const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
+    expect(ompContent).not.toBeNull();
+    const ompJson = JSON.parse(ompContent ?? "{}");
+    expect(ompJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(ompContent).not.toContain(customGateway);
   });
 
   it("omitted service setup does not record serviceHealthy as true in journal", async () => {
@@ -442,6 +456,8 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
 
     const helpExit = await main(["help"]);
     expect(helpExit).toBe(0);
+    const mcpHelpExit = await main(["mcp", "--help"]);
+    expect(mcpHelpExit).toBe(0);
 
     const unknownExit = await main(["unknown-command"]);
     expect(unknownExit).toBe(1);

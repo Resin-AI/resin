@@ -294,8 +294,8 @@ describe("real host platform qualification", () => {
     const validOmpConfig = {
       mcpServers: {
         resin: {
-          command: "resin-mcp",
-          args: [],
+          command: "resin",
+          args: ["mcp"],
         },
       },
     };
@@ -308,7 +308,8 @@ describe("real host platform qualification", () => {
       },
     };
 
-    expect(validOmpConfig.mcpServers.resin.command).toBe("resin-mcp");
+    expect(validOmpConfig.mcpServers.resin.command).toBe("resin");
+    expect(validOmpConfig.mcpServers.resin.args).toEqual(["mcp"]);
     expect(validOmpConfig.mcpServers.resin.url).toBeUndefined();
     expect(invalidOmpConfig.mcpServers.resin.url).toContain("127.0.0.1:9400");
   });

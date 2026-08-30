@@ -64,7 +64,7 @@ describe("status command & collector", () => {
 
     const fsBridge = createMockFsBridge({
       [claudePath]: JSON.stringify({
-        mcpServers: { resin: { url: "http://localhost:9400" } },
+        mcpServers: { resin: { command: "resin", args: ["mcp"] } },
       }),
       [codexPath]: "[mcp_servers.resin]\nurl = 'http://localhost:9400'\n",
       [ompPath]: JSON.stringify({

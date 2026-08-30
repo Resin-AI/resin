@@ -138,6 +138,7 @@ export * from "./commands/upgrade.js";
 export * from "./commands/login.js";
 export * from "./commands/logout.js";
 export * from "./commands/uninstall.js";
+export * from "./commands/mcp.js";
 
 // CLI Main & Onboarding Helpers
 export {

@@ -29,8 +29,8 @@ describe("Claude Code MCP Config Planner", () => {
 
     expect(parsed.mcpServers).toBeDefined();
     expect(parsed.mcpServers.resin).toEqual({
-      type: "sse",
-      url: "http://127.0.0.1:4545/sse",
+      command: "resin",
+      args: ["mcp"],
     });
   });
 
@@ -62,12 +62,12 @@ describe("Claude Code MCP Config Planner", () => {
     expect(parsed.mcpServers.github).toBeDefined();
     expect(parsed.mcpServers.sqlite).toBeDefined();
     expect(parsed.mcpServers.resin).toEqual({
-      type: "sse",
-      url: "http://127.0.0.1:4545/sse",
+      command: "resin",
+      args: ["mcp"],
     });
   });
 
-  it("is idempotent when gateway is already configured with identical URL", () => {
+  it("is idempotent when gateway is already configured with identical command", () => {
     const initialConfig = generatePlannedClaudeConfig(null, "http://127.0.0.1:4545/sse");
     const secondPlan = generatePlannedClaudeConfig(initialConfig, "http://127.0.0.1:4545/sse");
 
@@ -106,11 +106,7 @@ describe("Claude Code MCP Config Planner", () => {
     const updatedContent = await fsBridge.readFile(mockWorkspace.configPath);
     expect(updatedContent).toContain("resin");
     expect(updatedContent).toContain("postgres");
-    const isVerified = await verifyClaudeMcpConfig(
-      mockWorkspace,
-      "http://127.0.0.1:4545/sse",
-      fsBridge,
-    );
+    const isVerified = await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge);
     expect(isVerified).toBe(true);
 
     // 4. Rollback mutation
@@ -135,7 +131,7 @@ describe("Claude Code MCP Config Planner", () => {
     );
   });
 
-  it("verifies gateway URL presence correctly", async () => {
+  it("verifies registration presence correctly", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
 
     expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
@@ -150,11 +146,23 @@ describe("Claude Code MCP Config Planner", () => {
     );
 
     expect(await verifyClaudeMcpConfig(mockWorkspace, "http://127.0.0.1:4545/sse", fsBridge)).toBe(
-      true,
+      false,
     );
     expect(await verifyClaudeMcpConfig(mockWorkspace, "http://wrong-url:9999", fsBridge)).toBe(
       false,
     );
+
+    await fsBridge.writeFile(
+      mockWorkspace.configPath,
+      JSON.stringify({
+        mcpServers: {
+          resin: { command: "resin", args: ["mcp"] },
+        },
+      }),
+    );
+
+    expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(true);
+    expect(await verifyClaudeMcpConfig(mockWorkspace, "resin", fsBridge)).toBe(true);
   });
 
   describe("Canonical resin key and legacy alias migration", () => {
@@ -171,8 +179,8 @@ describe("Claude Code MCP Config Planner", () => {
       const parsed = JSON.parse(planned);
 
       expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin_gateway).toBeUndefined();
       expect(parsed.mcpServers["resin-gateway"]).toBeUndefined();
@@ -191,8 +199,8 @@ describe("Claude Code MCP Config Planner", () => {
       const parsed = JSON.parse(planned);
 
       expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin_gateway).toBeUndefined();
     });
@@ -208,12 +216,198 @@ describe("Claude Code MCP Config Planner", () => {
       const parsed = JSON.parse(planned);
 
       expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin_gateway).toEqual({
         url: "http://custom-external.company/sse",
       });
+    });
+  });
+
+  describe("verifyClaudeMcpConfig", () => {
+    it("verifies fresh canonical resin mcp configuration with command resin and leading mcp arg", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { command: "resin", args: ["mcp"] },
+          },
+        }),
+      );
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(true);
+      expect(
+        await verifyClaudeMcpConfig(mockWorkspace, "http://127.0.0.1:9400/mcp/sse", fsBridge),
+      ).toBe(true);
+    });
+
+    it("verifies canonical configuration with additional arguments or environment variables", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: {
+              command: "resin",
+              args: ["mcp", "--verbose"],
+              env: { DEBUG: "1" },
+            },
+          },
+        }),
+      );
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(true);
+    });
+
+    it("rejects legacy SSE and URL-only configurations regardless of expectedGatewayUrl", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      const gatewayUrl = "http://127.0.0.1:9400/mcp/sse";
+
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { type: "sse", url: gatewayUrl },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, gatewayUrl, fsBridge)).toBe(false);
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { url: gatewayUrl },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, gatewayUrl, fsBridge)).toBe(false);
+    });
+
+    it("rejects entries where url is present alongside stdio command", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: {
+              type: "stdio",
+              command: "resin",
+              args: ["mcp"],
+              url: "http://127.0.0.1:9400/mcp/sse",
+            },
+          },
+        }),
+      );
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+    });
+
+    it("rejects command equal to gateway URL", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      const gatewayUrl = "http://127.0.0.1:9400/mcp/sse";
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: {
+              command: gatewayUrl,
+              args: ["mcp"],
+            },
+          },
+        }),
+      );
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, gatewayUrl, fsBridge)).toBe(false);
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+    });
+
+    it("rejects malformed stdio configurations with wrong command or missing/invalid args", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+
+      // Missing args
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { command: "resin" },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      // Empty args
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { command: "resin", args: [] },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      // Wrong first arg
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { command: "resin", args: ["status"] },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      // Legacy resin-mcp binary
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({
+          mcpServers: {
+            resin: { command: "resin-mcp", args: ["mcp"] },
+          },
+        }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+    });
+
+    it("rejects missing file, corrupt JSON, or missing server entry", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      await fsBridge.writeFile(mockWorkspace.configPath, "not-json");
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      await fsBridge.writeFile(
+        mockWorkspace.configPath,
+        JSON.stringify({ mcpServers: { other: { command: "other" } } }),
+      );
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+    });
+
+    it("verifies true after planning and applying mutation from legacy config", async () => {
+      const fsBridge = new InMemoryConfigFsBridge();
+      const legacyContent = JSON.stringify({
+        mcpServers: {
+          resin_gateway: { url: "http://127.0.0.1:9400/mcp/sse" },
+          user_tool: { command: "tool" },
+        },
+      });
+      await fsBridge.writeFile(mockWorkspace.configPath, legacyContent);
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(false);
+
+      const plan = await planClaudeMcpConfig(
+        mockWorkspace,
+        "http://127.0.0.1:9400/mcp/sse",
+        fsBridge,
+      );
+      await applyClaudeMcpConfig(plan, fsBridge);
+
+      expect(await verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).toBe(true);
     });
   });
 });

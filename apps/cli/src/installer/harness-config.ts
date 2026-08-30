@@ -157,17 +157,63 @@ export async function planHarnessRegistration(
       return planCodexMcpConfig({
         targetPath: options.targetPath,
         command: CANONICAL_RESIN_MCP_COMMAND,
-        args: [],
+        args: ["mcp"],
         fsBridge: options.fsBridge,
       });
     case "omp":
       return planOmpMcpConfig({
         customConfigPath: options.targetPath,
         command: CANONICAL_RESIN_MCP_COMMAND,
-        args: [],
+        args: ["mcp"],
         fsBridge: options.fsBridge,
       });
   }
+}
+
+function isResinExecutable(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (
+    trimmed === "resin" ||
+    trimmed.endsWith("/resin") ||
+    trimmed.endsWith("\\resin") ||
+    /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(trimmed)
+  ) {
+    return true;
+  }
+  const tokens = trimmed.split(/\s+/);
+  for (const token of tokens) {
+    if (
+      token === "resin" ||
+      token.endsWith("/resin") ||
+      token.endsWith("\\resin") ||
+      /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(token)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isRecognizedResinStdioServer(server: HarnessConfigRecord): boolean {
+  if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
+    return false;
+  }
+  const command = server.command;
+  if (typeof command !== "string") {
+    return false;
+  }
+  const trimmed = command.trim();
+  if (isResinExecutable(trimmed)) {
+    const args = server.args;
+    return Array.isArray(args) && args.length > 0 && args[0] === "mcp";
+  }
+  if (isResinMcpCommand(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -196,14 +242,7 @@ export async function verifyHarnessRegistration(
         if (server === null) {
           return false;
         }
-        const command = server.command;
-        if (typeof command !== "string" || !isResinMcpCommand(command)) {
-          return false;
-        }
-        if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
-          return false;
-        }
-        return true;
+        return isRecognizedResinStdioServer(server);
       } catch {
         return false;
       }
@@ -220,20 +259,13 @@ export async function verifyHarnessRegistration(
       if (server === null) {
         return false;
       }
-      const command = server.command;
-      if (typeof command !== "string" || !isResinMcpCommand(command)) {
-        return false;
-      }
-      if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
-        return false;
-      }
-      return true;
+      return isRecognizedResinStdioServer(server);
     } catch {
       return false;
     }
   }
 
-  if (options.harnessId === "omp") {
+  if (options.harnessId === "omp" || options.harnessId === "claude-code") {
     const content = await options.fsBridge.readFile(options.targetPath);
     if (content === null || content.trim().length === 0) {
       return false;
@@ -251,50 +283,13 @@ export async function verifyHarnessRegistration(
       if (server === null) {
         return false;
       }
-      const command = server.command;
-      if (typeof command !== "string" || !isResinMcpCommand(command)) {
-        return false;
-      }
-      if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
-        return false;
-      }
-      return true;
+      return isRecognizedResinStdioServer(server);
     } catch {
       return false;
     }
   }
 
-  const content = await options.fsBridge.readFile(options.targetPath);
-  if (content === null || content.trim().length === 0) {
-    return false;
-  }
-
-  try {
-    const config = asObject(JSON.parse(content));
-    if (config === null) {
-      return false;
-    }
-    const server = findJsonServerConfig(
-      config,
-      options.harnessId,
-      RESIN_MCP_SERVER_KEYS[options.harnessId],
-    );
-
-    if (server === null) {
-      return false;
-    }
-    const expectedTransport = {
-      type: "sse",
-      url: options.gatewayUrl,
-      command: undefined,
-      args: undefined,
-    } satisfies Record<(typeof RESIN_TRANSPORT_FIELDS)[number], HarnessConfigValue | undefined>;
-    return RESIN_TRANSPORT_FIELDS.every((field) =>
-      isDeepStrictEqual(server[field], expectedTransport[field]),
-    );
-  } catch {
-    return false;
-  }
+  return false;
 }
 
 const RESIN_TRANSPORT_FIELDS = ["type", "url", "command", "args"] as const;

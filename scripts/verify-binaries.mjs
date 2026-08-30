@@ -37,20 +37,20 @@ export const BINARY_SPECS = [
     expectedOutputPattern: /Resin CLI/i,
   },
   {
+    packageName: "resin",
+    packageDir: "apps/cli",
+    binKey: "resin",
+    binPath: "apps/cli/bin/resin.mjs",
+    testArgs: ["mcp", "--help"],
+    expectedOutputPattern: /Resin MCP/i,
+  },
+  {
     packageName: "@resin/observer",
     packageDir: "apps/observer",
     binKey: "resin-daemon",
     binPath: "apps/observer/bin/daemon.mjs",
     testArgs: ["--help"],
     expectedOutputPattern: /Resin Daemon/i,
-  },
-  {
-    packageName: "@resin/gateway",
-    packageDir: "apps/gateway",
-    binKey: "resin-mcp",
-    binPath: "apps/gateway/bin/mcp-shim.mjs",
-    testArgs: ["--help"],
-    expectedOutputPattern: /Resin MCP Shim/i,
   },
   {
     packageName: "@resin/test-fixtures",

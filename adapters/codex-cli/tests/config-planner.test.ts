@@ -91,8 +91,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
 
       expect(parsed.mcpServers).toBeDefined();
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
     });
 
@@ -124,8 +124,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
         args: ["-y", "fs"],
       });
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
     });
 
@@ -146,8 +146,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       const parsed = JSON.parse(result);
 
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin.url).toBeUndefined();
     });
@@ -215,8 +215,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       expect(plan.harnessId).toBe("codex-cli");
       const parsed = JSON.parse(plan.plannedContent);
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
 
       // 2. Apply mutation
@@ -248,7 +248,7 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       });
       expect(plan.plannedContent).toContain("[mcp_servers.resin]");
       expect(plan.plannedContent).toContain(`command = "${DEFAULT_RESIN_MCP_COMMAND}"`);
-
+      expect(plan.plannedContent).toContain('args = ["mcp"]');
       const backup = await applyCodexMcpConfig(plan, fsBridge);
       expect(backup.targetPath).toBe(targetPath);
 
@@ -339,8 +339,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       const parsed = JSON.parse(result);
 
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin_gateway).toBeUndefined();
       expect(parsed.mcpServers["resin-gateway"]).toBeUndefined();
@@ -359,8 +359,8 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       const parsed = JSON.parse(result);
 
       expect(parsed.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers.resin_gateway).toBeUndefined();
       expect(parsed.mcpServers["resin-gateway"]).toEqual({

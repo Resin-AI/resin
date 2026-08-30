@@ -251,12 +251,12 @@ function healthyFiles() {
     [path.join(STATE_DIR, "recovery-state.json")]: JSON.stringify(recoverySnapshot()),
     [path.join(STATE_DIR, "harness-health.json")]: JSON.stringify(harnessSnapshot()),
     [path.join(HOME, ".claude.json")]: JSON.stringify({
-      mcpServers: { resin: { url: "http://localhost:9400" } },
+      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
     }),
     [path.join(HOME, ".codex", "config.toml")]:
-      '[mcp_servers.resin]\nurl = "http://localhost:9400"\n',
+      '[mcp_servers.resin]\ncommand = "resin"\nargs = ["mcp"]\n',
     [path.join(HOME, ".omp", "agent", "mcp.json")]: JSON.stringify({
-      mcpServers: { resin: { url: "http://localhost:9400" } },
+      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
     }),
     "/workspace/resin.json": JSON.stringify({
       workspaceId: "ws_project_99",

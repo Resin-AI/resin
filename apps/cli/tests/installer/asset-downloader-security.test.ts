@@ -157,11 +157,6 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
         mode: 0o755,
       },
       {
-        name: "bin/resin-mcp",
-        content: "#!/usr/bin/env node\nconsole.log('mcp v1.0.0');\n",
-        mode: 0o755,
-      },
-      {
         name: "bin/resin",
         content: "#!/usr/bin/env node\nconsole.log('cli v1.0.0');\n",
         mode: 0o755,
@@ -540,11 +535,6 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
         content: "#!/usr/bin/env node\nconsole.log('daemon v2.0.0');\n",
         mode: 0o755,
       },
-      {
-        name: "bin/resin-mcp",
-        content: "#!/usr/bin/env node\nconsole.log('mcp v2.0.0');\n",
-        mode: 0o755,
-      },
     ]);
 
     await installReleaseVersion({
@@ -576,10 +566,12 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
 
     // Verify all global binaries belong to v2.0.0
     const globalBinDir = path.join(resinHome, "bin");
+    const globalCli = path.join(globalBinDir, "resin");
     const globalDaemon = path.join(globalBinDir, "resin-daemon");
     const globalMcp = path.join(globalBinDir, "resin-mcp");
+    expect(fs.existsSync(globalCli)).toBe(true);
     expect(fs.existsSync(globalDaemon)).toBe(true);
-    expect(fs.existsSync(globalMcp)).toBe(true);
+    expect(fs.existsSync(globalMcp)).toBe(false);
 
     // Rollback to v1.0.0
     const rollbackResult = await rollbackActiveVersion({

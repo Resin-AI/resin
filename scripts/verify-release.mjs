@@ -96,9 +96,6 @@ export const ALLOWED_RELEASE_BINARIES = Object.freeze([
   "resin/bin/resin-daemon",
   "resin/bin/resin-daemon.cmd",
   "resin/bin/resin-daemon.ps1",
-  "resin/bin/resin-mcp",
-  "resin/bin/resin-mcp.cmd",
-  "resin/bin/resin-mcp.ps1",
   "resin/bin/resin-gateway",
   "resin/bin/resin-gateway.cmd",
   "resin/bin/resin-gateway.ps1",
@@ -293,8 +290,7 @@ function isTextOrCodeFile(filePath) {
       ".html",
     ].includes(ext) ||
     filePath.endsWith("resin/bin/resin") ||
-    filePath.endsWith("resin/bin/resin-daemon") ||
-    filePath.endsWith("resin/bin/resin-mcp")
+    filePath.endsWith("resin/bin/resin-daemon")
   );
 }
 

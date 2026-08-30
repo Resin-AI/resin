@@ -246,7 +246,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
     const releaseTar = createSimpleTarGz([
       { name: "bin/resin", content: "#!/bin/sh\nexit 0\n", mode: 0o755 },
       { name: "bin/resin-daemon", content: "#!/bin/sh\nexit 0\n", mode: 0o755 },
-      { name: "bin/resin-mcp", content: "#!/bin/sh\nexit 0\n", mode: 0o755 },
     ]);
     for (const force of [false, true]) {
       const resinHome = path.join(tempTestDir, `install-version-${String(force)}`);
@@ -337,11 +336,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
       { mode: 0o755 },
     );
     fs.writeFileSync(
-      path.join(mockV1Dir, "bin", "resin-mcp"),
-      "#!/usr/bin/env node\nconsole.log('mcp v1.0.0');\n",
-      { mode: 0o755 },
-    );
-    fs.writeFileSync(
       path.join(mockV1Dir, "bin", "resin"),
       "#!/usr/bin/env node\nconsole.log('cli v1.0.0');\n",
       { mode: 0o755 },
@@ -352,11 +346,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
       {
         name: "bin/resin-daemon",
         content: "#!/usr/bin/env node\nconsole.log('daemon v1.0.0');\n",
-        mode: 0o755,
-      },
-      {
-        name: "bin/resin-mcp",
-        content: "#!/usr/bin/env node\nconsole.log('mcp v1.0.0');\n",
         mode: 0o755,
       },
       {
@@ -396,11 +385,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
       {
         name: "bin/resin-daemon",
         content: "#!/usr/bin/env node\nconsole.log('daemon v1.1.0');\n",
-        mode: 0o755,
-      },
-      {
-        name: "bin/resin-mcp",
-        content: "#!/usr/bin/env node\nconsole.log('mcp v1.1.0');\n",
         mode: 0o755,
       },
       {
@@ -456,11 +440,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
       {
         name: "bin/resin-daemon",
         content: "#!/usr/bin/env node\nconsole.log('daemon v1.0.0');\n",
-        mode: 0o600,
-      },
-      {
-        name: "bin/resin-mcp",
-        content: "#!/usr/bin/env node\nconsole.log('mcp v1.0.0');\n",
         mode: 0o600,
       },
       {
@@ -533,9 +512,6 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
         );
         expect(
           fs.statSync(path.join(firstInstall.versionDir, "bin", "resin-daemon")).mode & 0o7777,
-        ).toBe(0o755);
-        expect(
-          fs.statSync(path.join(firstInstall.versionDir, "bin", "resin-mcp")).mode & 0o7777,
         ).toBe(0o755);
         expect(
           fs.statSync(path.join(firstInstall.versionDir, "scripts", "archive-tool")).mode & 0o7777,

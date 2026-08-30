@@ -307,9 +307,19 @@ export const CANONICAL_RESIN_MCP_KEY = CANONICAL_RESIN_MCP_SERVER_KEY;
 /**
  * Canonical MCP stdio command for Resin.
  */
-export const CANONICAL_RESIN_MCP_COMMAND = "resin-mcp";
+export const CANONICAL_RESIN_MCP_COMMAND = "resin";
 export const DEFAULT_RESIN_MCP_COMMAND = CANONICAL_RESIN_MCP_COMMAND;
 
+/**
+ * Canonical MCP stdio arguments for Resin.
+ */
+export const CANONICAL_RESIN_MCP_ARGS = ["mcp"] as const;
+export const DEFAULT_RESIN_MCP_ARGS = CANONICAL_RESIN_MCP_ARGS;
+
+/**
+ * Known legacy MCP stdio command for Resin (for migration/cleanup recognition).
+ */
+export const LEGACY_RESIN_MCP_COMMAND = "resin-mcp";
 /**
  * Known legacy MCP server keys used by earlier versions of Resin harnesses.
  */
@@ -323,7 +333,37 @@ export const DEFAULT_RESIN_GATEWAY_URL = LEGACY_RESIN_GATEWAY_URL;
 export const RESIN_MCP_SERVER_URL = LEGACY_RESIN_GATEWAY_URL;
 
 /**
- * Checks whether a command string resolves or ends in "resin-mcp".
+ * Checks whether a command or binary string resolves or ends in "resin".
+ */
+export function isResinExecutable(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (
+    trimmed === "resin" ||
+    trimmed.endsWith("/resin") ||
+    trimmed.endsWith("\\resin") ||
+    /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(trimmed)
+  ) {
+    return true;
+  }
+  const tokens = trimmed.split(/\s+/);
+  for (const token of tokens) {
+    if (
+      token === "resin" ||
+      token.endsWith("/resin") ||
+      token.endsWith("\\resin") ||
+      /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(token)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Checks whether a command string resolves or ends in legacy "resin-mcp".
  */
 export function isResinMcpCommand(command: string): boolean {
   const trimmed = command.trim();
@@ -356,7 +396,8 @@ export function isResinMcpCommand(command: string): boolean {
  * Checks if a given MCP server entry object/table is recognizably Resin-owned.
  * An entry is recognizably Resin-owned if:
  * 1. Its URL matches the configured gateway URL, the legacy Resin gateway URL, or localhost:9400.
- * 2. Its command or arguments resolve/end in "resin-mcp".
+ * 2. Its command is legacy "resin-mcp" (or wrapper running "resin-mcp").
+ * 3. Its command is canonical "resin" with leading "mcp" arg (or inline "resin mcp").
  */
 export function isRecognizedResinMcpEntry(
   entry: ConfigMetadataRecord | null | undefined,
@@ -396,17 +437,48 @@ export function isRecognizedResinMcpEntry(
 
   const commandCandidate =
     Object.prototype.toString.call(record.command) === "[object String]"
-      ? String(record.command)
+      ? String(record.command).trim()
       : null;
+
+  const rawArgs = Array.isArray(record.args) ? record.args : null;
+  const stringArgs = rawArgs?.map((a) => (typeof a === "string" ? a : String(a))) ?? [];
+
+  // Legacy resin-mcp in command
   if (commandCandidate && isResinMcpCommand(commandCandidate)) {
     return true;
   }
 
-  if (Array.isArray(record.args)) {
-    for (const arg of record.args) {
+  // Legacy resin-mcp in args (e.g. node /path/to/resin-mcp.js)
+  if (rawArgs) {
+    for (const arg of rawArgs) {
       if (typeof arg === "string" && isResinMcpCommand(arg)) {
         return true;
       }
+    }
+  }
+
+  // Canonical resin command: only accepted if leading arg is "mcp"
+  if (commandCandidate && isResinExecutable(commandCandidate)) {
+    const tokens = commandCandidate.split(/\s+/);
+    const resinIndex = tokens.findIndex((t) => isResinExecutable(t));
+    if (resinIndex !== -1 && tokens.length > resinIndex + 1 && tokens[resinIndex + 1] === "mcp") {
+      return true;
+    }
+    if (stringArgs.length > 0 && stringArgs[0] === "mcp") {
+      return true;
+    }
+    return false;
+  }
+
+  // Wrapper command running resin with leading "mcp" arg (e.g. node /path/to/resin.js mcp)
+  if (rawArgs) {
+    const resinArgIndex = stringArgs.findIndex((a) => isResinExecutable(a));
+    if (
+      resinArgIndex !== -1 &&
+      stringArgs.length > resinArgIndex + 1 &&
+      stringArgs[resinArgIndex + 1] === "mcp"
+    ) {
+      return true;
     }
   }
 

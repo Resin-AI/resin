@@ -887,7 +887,6 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
             resin: "./bin/resin",
             "resin-daemon": "./bin/resin-daemon",
             "resin-gateway": "./bin/resin-gateway",
-            "resin-mcp": "./bin/resin-mcp",
           },
           dependencies: rootPkgJson.dependencies || {},
         },
@@ -909,11 +908,6 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
     },
     {
       path: "resin/bin/resin-gateway",
-      content: "#!/usr/bin/env node\nimport '../apps/gateway/dist/bin/mcp-shim.js';\n",
-      mode: 0o755,
-    },
-    {
-      path: "resin/bin/resin-mcp",
       content: "#!/usr/bin/env node\nimport '../apps/gateway/dist/bin/mcp-shim.js';\n",
       mode: 0o755,
     },

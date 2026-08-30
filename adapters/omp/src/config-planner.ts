@@ -1,5 +1,6 @@
 import path from "node:path";
 import {
+  CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
@@ -9,6 +10,7 @@ import {
   NodeConfigFsBridge,
   applyConfigMutation,
   computeConfigHash,
+  isRecognizedResinMcpEntry,
   migrateJsonMcpServers,
   planConfigMutation,
   rollbackConfigMutation,
@@ -147,16 +149,10 @@ export async function planOmpMcpConfig(
     if (options.env !== undefined) {
       serverEntry.env = options.env;
     }
-    if (options.gatewayUrl !== undefined) {
-      serverEntry.url = options.gatewayUrl;
-    }
-    if (options.url !== undefined) {
-      serverEntry.url = options.url;
-    }
-  } else if (options.gatewayUrl !== undefined || options.url !== undefined) {
+  } else if (options.url !== undefined) {
     serverEntry = {
       type: explicitType ?? "sse",
-      url: options.gatewayUrl ?? options.url,
+      url: options.url,
     };
     if (options.env !== undefined) {
       serverEntry.env = options.env;
@@ -164,7 +160,7 @@ export async function planOmpMcpConfig(
   } else {
     serverEntry = {
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: options.args ?? [],
+      args: options.args !== undefined ? options.args : [...CANONICAL_RESIN_MCP_ARGS],
     };
     if (explicitType !== undefined) {
       serverEntry.type = explicitType;
@@ -268,8 +264,7 @@ export async function verifyOmpMcpConfig(
     ) {
       return false;
     }
-
-    const expectedUrl = mergedOptions.expectedUrl ?? mergedOptions.gatewayUrl;
+    const expectedUrl = mergedOptions.expectedUrl;
     const expectedCommand = mergedOptions.expectedCommand ?? mergedOptions.command;
 
     if (expectedUrl !== undefined && entry.url !== expectedUrl) {
@@ -278,6 +273,14 @@ export async function verifyOmpMcpConfig(
 
     if (expectedCommand !== undefined && entry.command !== expectedCommand) {
       return false;
+    }
+
+    if (
+      serverName === DEFAULT_GATEWAY_SERVER_NAME &&
+      expectedUrl === undefined &&
+      expectedCommand === undefined
+    ) {
+      return isRecognizedResinMcpEntry(entry, mergedOptions.gatewayUrl);
     }
 
     return true;

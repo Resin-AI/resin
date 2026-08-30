@@ -194,7 +194,7 @@ export class McpStdioShim {
       };
     }
 
-    const actionMsg = `Resin Daemon is not running at '${this.socketPath}'.\nTo start the daemon, run: 'resin daemon start'\nOr launch MCP in standalone mode with: 'resin-mcp --standalone'\n`;
+    const actionMsg = `Resin Daemon is not running at '${this.socketPath}'.\nTo start the daemon, run: 'resin daemon start'\nOr launch MCP in standalone mode with: 'resin mcp --standalone'\n`;
     this.writeStderr(actionMsg);
 
     return {

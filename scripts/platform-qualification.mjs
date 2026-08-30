@@ -205,12 +205,7 @@ function validatePlatformMetadata(installedRoot, lane, manifest) {
   return metadata;
 }
 
-const REQUIRED_ARTIFACT_FILES = Object.freeze([
-  "platform.json",
-  "bin/resin",
-  "bin/resin-daemon",
-  "bin/resin-mcp",
-]);
+const REQUIRED_ARTIFACT_FILES = Object.freeze(["platform.json", "bin/resin", "bin/resin-daemon"]);
 
 const PROPRIETARY_ARTIFACT_PATHS = Object.freeze([
   "apps/cloud",
@@ -406,14 +401,14 @@ function createRpcClient(child) {
 }
 
 async function qualifyMcp(installedRoot, sandboxDir) {
-  const mcpBin = path.join(installedRoot, "bin", "resin-mcp");
+  const resinBin = path.join(installedRoot, "bin", "resin");
   const workspace = path.join(sandboxDir, "mcp-workspace");
   fs.mkdirSync(workspace, { recursive: true });
   const env = { ...process.env, NODE_ENV: "production" };
   delete env.NODE_PATH;
   const child = spawn(
     process.execPath,
-    [mcpBin, "--standalone", "--cwd", workspace, "--harness", "qualification"],
+    [resinBin, "mcp", "--standalone", "--cwd", workspace, "--harness", "qualification"],
     { cwd: workspace, env, stdio: ["pipe", "pipe", "pipe"] },
   );
   let stderr = "";
@@ -809,7 +804,7 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       }
     }
 
-    // Invariant 4: Generated OMP and Codex configs each contain one canonical stdio resin-mcp entry and no legacy localhost SSE
+    // Invariant 4: Generated OMP and Codex configs each contain one canonical stdio resin entry and no legacy localhost SSE
     const ompConfigCandidates = [
       path.join(cleanWorkspace, ".omp", "agent", "mcp.json"),
       path.join(cleanWorkspace, ".omp", "mcp.json"),
@@ -832,10 +827,12 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     }
     if (
       !ompServer.command ||
-      (!ompServer.command.includes("resin-mcp") && ompServer.command !== "resin-mcp")
+      (!ompServer.command.includes("resin") && ompServer.command !== "resin") ||
+      !Array.isArray(ompServer.args) ||
+      !ompServer.args.includes("mcp")
     ) {
       throw new Error(
-        `OMP mcpServers entry does not use canonical command 'resin-mcp': ${JSON.stringify(ompServer)}`,
+        `OMP mcpServers entry does not use canonical command 'resin' with 'mcp' arg: ${JSON.stringify(ompServer)}`,
       );
     }
     if (
@@ -843,10 +840,11 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       ompServer.url ||
       ompConfigRaw.includes("localhost:9400") ||
       ompConfigRaw.includes("127.0.0.1:9400") ||
-      ompConfigRaw.includes("/mcp/sse")
+      ompConfigRaw.includes("/mcp/sse") ||
+      ompConfigRaw.includes("resin-mcp")
     ) {
       throw new Error(
-        `OMP config at ${ompConfigFile} leaked legacy localhost SSE configuration: ${ompConfigRaw}`,
+        `OMP config at ${ompConfigFile} leaked legacy localhost SSE or resin-mcp configuration: ${ompConfigRaw}`,
       );
     }
 
@@ -869,21 +867,19 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
         `Codex config at ${codexConfigFile} missing [mcp_servers.resin] section: ${codexConfigRaw}`,
       );
     }
-    if (
-      !codexConfigRaw.includes('command = "resin-mcp"') &&
-      !codexConfigRaw.includes("resin-mcp")
-    ) {
+    if (!codexConfigRaw.includes('command = "resin"') || !codexConfigRaw.includes('"mcp"')) {
       throw new Error(
-        `Codex config at ${codexConfigFile} does not contain canonical command 'resin-mcp': ${codexConfigRaw}`,
+        `Codex config at ${codexConfigFile} does not contain canonical command 'resin' with args ['mcp']: ${codexConfigRaw}`,
       );
     }
     if (
       codexConfigRaw.includes("localhost:9400") ||
       codexConfigRaw.includes("127.0.0.1:9400") ||
-      codexConfigRaw.includes("/mcp/sse")
+      codexConfigRaw.includes("/mcp/sse") ||
+      codexConfigRaw.includes("resin-mcp")
     ) {
       throw new Error(
-        `Codex config at ${codexConfigFile} leaked legacy localhost SSE configuration: ${codexConfigRaw}`,
+        `Codex config at ${codexConfigFile} leaked legacy localhost SSE or resin-mcp configuration: ${codexConfigRaw}`,
       );
     }
 

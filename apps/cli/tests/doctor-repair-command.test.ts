@@ -295,6 +295,7 @@ describe("doctor & repair commands", () => {
   it("repairs and converges legacy localhost SSE entries to canonical stdio", async () => {
     const ompConfigPath = path.join(homeDir, ".omp", "agent", "mcp.json");
     const codexConfigPath = path.join(homeDir, ".codex", "config.toml");
+    const claudeConfigPath = path.join(homeDir, ".claude", "claude.json");
     const fsBridge = createMockFsBridge({
       [ompConfigPath]: JSON.stringify({
         mcpServers: {
@@ -309,6 +310,12 @@ describe("doctor & repair commands", () => {
         "[mcp_servers.other]",
         'command = "other-tool"',
       ].join("\n"),
+      [claudeConfigPath]: JSON.stringify({
+        mcpServers: {
+          resin: { type: "sse", url: "http://localhost:9400/mcp/sse" },
+          other: { command: "other-tool" },
+        },
+      }),
     });
 
     await repairState({
@@ -321,14 +328,19 @@ describe("doctor & repair commands", () => {
     });
 
     const omp = JSON.parse((await fsBridge.readFile(ompConfigPath)) ?? "{}");
-    expect(omp.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
+    expect(omp.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
     expect(omp.mcpServers.custom).toEqual({ command: "custom-cmd" });
 
     const codex = await fsBridge.readFile(codexConfigPath);
     expect(codex).toContain("[mcp_servers.resin]");
-    expect(codex).toContain('command = "resin-mcp"');
+    expect(codex).toContain('command = "resin"');
+    expect(codex).toContain('args = ["mcp"]');
     expect(codex).not.toContain("9400/mcp/sse");
     expect(codex).toContain("[mcp_servers.other]");
+
+    const claude = JSON.parse((await fsBridge.readFile(claudeConfigPath)) ?? "{}");
+    expect(claude.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(claude.mcpServers.other).toEqual({ command: "other-tool" });
   });
 
   it("formats terminal doctor report with proper icons and summary", () => {

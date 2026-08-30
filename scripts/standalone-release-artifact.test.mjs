@@ -65,9 +65,8 @@ describe("standalone platform release artifact", () => {
     const binFiles = fs.readdirSync(binDir);
     expect(binFiles).toContain("resin");
     expect(binFiles).toContain("resin-daemon");
-    expect(
-      binFiles.some((b) => b === "resin-gateway" || b === "resin-mcp" || b === "gateway.js"),
-    ).toBe(true);
+    expect(binFiles).not.toContain("resin-mcp");
+    expect(binFiles.some((b) => b === "resin-gateway" || b === "gateway.js")).toBe(true);
     expect(binFiles.filter((b) => b.includes("cloud"))).toEqual([]);
 
     // Scan all extracted files to ensure no source maps and no proprietary cloud identifiers

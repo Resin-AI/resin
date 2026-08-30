@@ -54,7 +54,6 @@ function tarGz(files: Record<string, TarGzFixture> = {}): Buffer {
       : [
           ["bin/resin", "#!/bin/sh\necho resin 1.0.0\n"],
           ["bin/resin-daemon", "#!/bin/sh\nexit 0\n"],
-          ["bin/resin-mcp", "#!/bin/sh\nexit 0\n"],
         ];
 
   const tarBuffers: Buffer[] = [];
@@ -188,7 +187,6 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
     },
     packages: {
       daemon: { version, path: "bin/resin-daemon" },
-      mcp: { version, path: "bin/resin-mcp" },
       cli: { version, path: "bin/resin" },
     },
     runtimes: {
@@ -609,9 +607,6 @@ describe("bootstrap-entry", () => {
     fs.writeFileSync(path.join(v1Dir, "bin", "resin-daemon"), "#!/bin/sh\nexit 0\n", {
       mode: 0o755,
     });
-    fs.writeFileSync(path.join(v1Dir, "bin", "resin-mcp"), "#!/bin/sh\nexit 0\n", {
-      mode: 0o755,
-    });
     fs.writeFileSync(
       path.join(v1Dir, "version.json"),
       JSON.stringify({ version: "1.0.0", installedAt: new Date().toISOString() }),
@@ -626,7 +621,6 @@ describe("bootstrap-entry", () => {
     const releaseBytes = tarGz({
       "bin/resin": "#!/bin/sh\necho 1.1.0\n",
       "bin/resin-daemon": "#!/bin/sh\nexit 0\n",
-      "bin/resin-mcp": "#!/bin/sh\nexit 0\n",
     });
 
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -921,10 +915,6 @@ describe("bootstrap-entry", () => {
         content: "#!/bin/sh\nexit 0\n",
         mode: 0o600,
       },
-      "bin/resin-mcp": {
-        content: "#!/bin/sh\nexit 0\n",
-        mode: 0o600,
-      },
       "bin/release-notes.txt": {
         content: "not an executable\n",
         mode: 0o600,
@@ -1037,9 +1027,6 @@ describe("bootstrap-entry", () => {
         expect(
           fs.statSync(path.join(firstRun.activePath, "bin", "resin-daemon")).mode & 0o7777,
         ).toBe(0o755);
-        expect(fs.statSync(path.join(firstRun.activePath, "bin", "resin-mcp")).mode & 0o7777).toBe(
-          0o755,
-        );
         expect(
           fs.statSync(path.join(firstRun.activePath, "scripts", "archive-tool")).mode & 0o7777,
         ).toBe(0o755);
