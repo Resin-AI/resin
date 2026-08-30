@@ -30,7 +30,7 @@ describe("HarnessConfigOrchestrator", () => {
     // Verify Codex config was written
     const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
     expect(codexContent).not.toBeNull();
-    expect(codexContent).toContain("http://127.0.0.1:9400/mcp/sse");
+    expect(codexContent).toContain("resin-mcp");
 
     // Verify OMP config was written
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);

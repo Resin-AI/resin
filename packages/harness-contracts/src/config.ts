@@ -305,15 +305,22 @@ export const CANONICAL_RESIN_MCP_SERVER_KEY = "resin";
 export const CANONICAL_RESIN_MCP_KEY = CANONICAL_RESIN_MCP_SERVER_KEY;
 
 /**
+ * Canonical MCP stdio command for Resin.
+ */
+export const CANONICAL_RESIN_MCP_COMMAND = "resin-mcp";
+export const DEFAULT_RESIN_MCP_COMMAND = CANONICAL_RESIN_MCP_COMMAND;
+
+/**
  * Known legacy MCP server keys used by earlier versions of Resin harnesses.
  */
 export const LEGACY_RESIN_MCP_SERVER_ALIASES = ["resin_gateway", "resin-gateway"] as const;
 
 /**
- * Default loopback SSE endpoint for Resin Gateway.
+ * Legacy loopback SSE endpoint for Resin Gateway.
  */
-export const DEFAULT_RESIN_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
-export const RESIN_MCP_SERVER_URL = DEFAULT_RESIN_GATEWAY_URL;
+export const LEGACY_RESIN_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
+export const DEFAULT_RESIN_GATEWAY_URL = LEGACY_RESIN_GATEWAY_URL;
+export const RESIN_MCP_SERVER_URL = LEGACY_RESIN_GATEWAY_URL;
 
 /**
  * Checks whether a command string resolves or ends in "resin-mcp".
@@ -348,8 +355,8 @@ export function isResinMcpCommand(command: string): boolean {
 /**
  * Checks if a given MCP server entry object/table is recognizably Resin-owned.
  * An entry is recognizably Resin-owned if:
- * 1. Its URL matches the configured gateway URL or the default Resin gateway URL.
- * 2. Its command resolves/ends in "resin-mcp".
+ * 1. Its URL matches the configured gateway URL, the legacy Resin gateway URL, or localhost:9400.
+ * 2. Its command or arguments resolve/end in "resin-mcp".
  */
 export function isRecognizedResinMcpEntry(
   entry: ConfigMetadataRecord | null | undefined,
@@ -363,8 +370,9 @@ export function isRecognizedResinMcpEntry(
     return false;
   }
 
-  // SAFETY: entry is confirmed to be a non-null object record via tag check.
+  // SAFETY: entry is confirmed to be a non-null object record.
   const record = entry as ConfigMetadataRecord;
+
   const urlCandidate =
     Object.prototype.toString.call(record.url) === "[object String]"
       ? String(record.url)
@@ -377,7 +385,11 @@ export function isRecognizedResinMcpEntry(
     if (configuredGatewayUrl && trimmedUrl === configuredGatewayUrl.trim()) {
       return true;
     }
-    if (trimmedUrl === DEFAULT_RESIN_GATEWAY_URL) {
+    if (
+      trimmedUrl === LEGACY_RESIN_GATEWAY_URL ||
+      trimmedUrl === DEFAULT_RESIN_GATEWAY_URL ||
+      /^https?:\/\/(?:127\.0\.0\.1|localhost):9400(?:\/.*)?$/i.test(trimmedUrl)
+    ) {
       return true;
     }
   }
@@ -386,18 +398,21 @@ export function isRecognizedResinMcpEntry(
     Object.prototype.toString.call(record.command) === "[object String]"
       ? String(record.command)
       : null;
-  if (commandCandidate) {
-    if (
-      commandCandidate === "resin-mcp" ||
-      commandCandidate.endsWith("/resin-mcp") ||
-      commandCandidate.endsWith("\\resin-mcp")
-    ) {
-      return true;
+  if (commandCandidate && isResinMcpCommand(commandCandidate)) {
+    return true;
+  }
+
+  if (Array.isArray(record.args)) {
+    for (const arg of record.args) {
+      if (typeof arg === "string" && isResinMcpCommand(arg)) {
+        return true;
+      }
     }
   }
 
   return false;
 }
+
 /**
  * Migrates a JSON dictionary of MCP servers, updating or injecting the canonical Resin server key.
  * Invariant guarantees:
@@ -429,6 +444,22 @@ export function migrateJsonMcpServers<T extends ConfigMetadataRecord = ConfigMet
     for (const [k, v] of Object.entries(canonicalObj)) {
       if (!transportFieldNames.includes(k)) {
         inheritedExtras[k] = v;
+      }
+    }
+  } else {
+    for (const [key, entry] of Object.entries(result)) {
+      if (
+        key !== canonicalKey &&
+        isRecognizedResinMcpEntry(entry, configuredGatewayUrl) &&
+        entry &&
+        Object.prototype.toString.call(entry) === "[object Object]"
+      ) {
+        const entryObj = entry as ConfigMetadataRecord;
+        for (const [k, v] of Object.entries(entryObj)) {
+          if (!transportFieldNames.includes(k) && !(k in inheritedExtras)) {
+            inheritedExtras[k] = v;
+          }
+        }
       }
     }
   }

@@ -278,4 +278,37 @@ url = "http://localhost:9400"
       process.stdout.write = originalStdout;
     }
   });
+
+  it("purges vault and cloud device token without expecting IPC token when --purge-secrets is used", async () => {
+    const vaultDir = path.join(resinHome, "vault");
+    const cloudTokenPath = path.join(resinHome, "state", "device-token.json");
+    const fsBridge = createMockFsBridge({
+      [resinHome]: "dir",
+      [vaultDir]: "dir",
+      [cloudTokenPath]: '{"accessToken":"cloud-token"}',
+    });
+
+    const stdoutChunks: string[] = [];
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
+      stdoutChunks.push(String(chunk));
+      return true;
+    });
+
+    try {
+      const exitCode = await uninstallCommand(["--purge-secrets", "--json", "--home", homeDir], {
+        fsBridge,
+      });
+
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdoutChunks.join(""));
+      expect(parsed.success).toBe(true);
+      expect(parsed.purgedSecrets).toBe(true);
+      expect(parsed.removedPaths).toContain(vaultDir);
+      expect(parsed.removedPaths).toContain(cloudTokenPath);
+      expect(parsed.removedPaths).not.toContain(path.join(resinHome, "state", "token.json"));
+    } finally {
+      process.stdout.write = originalStdout;
+    }
+  });
 });

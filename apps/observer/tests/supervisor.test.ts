@@ -253,14 +253,16 @@ describe("supervisor", () => {
       const mod = createTrackingModule("mod");
       const config = DaemonConfigSchema.parse({
         logLevel: "silent",
-        authToken: "secret-token",
+        custom: {
+          authToken: "secret-token",
+        },
       });
       const supervisor = new DaemonSupervisor({ config, modules: [mod] });
       await supervisor.start();
 
       const diag = await supervisor.getDiagnostics();
       expect(diag.pid).toBe(process.pid);
-      expect(diag.config.authToken).toBe("[REDACTED]");
+      expect((diag.config.custom as JsonObject).authToken).toBe("[REDACTED]");
       // SAFETY: Verifies sensitive key is omitted from redacted config.
       expect((diag.config as JsonObject).cloudApiKey).toBeUndefined();
       expect(diag.modules.mod).toEqual({ customInfo: "diagnostics-for-mod" });

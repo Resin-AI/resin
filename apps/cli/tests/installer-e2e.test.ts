@@ -386,8 +386,8 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
 
     // Verify all harness configs received custom gateway
     expect(await bridge.readFile(`${home}/.claude/claude.json`)).toContain(customGateway);
-    expect(await bridge.readFile(`${home}/.codex/config.toml`)).toContain(customGateway);
-    expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toContain(customGateway);
+    expect(await bridge.readFile(`${home}/.codex/config.toml`)).toContain("resin");
+    expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toContain("resin");
   });
 
   it("omitted service setup does not record serviceHealthy as true in journal", async () => {

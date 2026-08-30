@@ -2,7 +2,11 @@ import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { planClaudeMcpConfig, probeClaudeInstallation } from "@resin/adapter-claude-code";
-import { planCodexMcpConfig, probeCodexInstallation } from "@resin/adapter-codex";
+import {
+  planCodexMcpConfig,
+  probeCodexInstallation,
+  verifyCodexMcpConfig,
+} from "@resin/adapter-codex";
 import { planOmpMcpConfig, probeOmpInstallation } from "@resin/adapter-omp";
 import {
   type ConfigBackup,
@@ -148,36 +152,12 @@ export async function planHarnessRegistration(
   switch (options.harnessId) {
     case "claude-code":
       return planClaudeMcpConfig(workspace, options.gatewayUrl, options.fsBridge);
-    case "codex-cli": {
-      const adapterPlan = await planCodexMcpConfig({
+    case "codex-cli":
+      return planCodexMcpConfig({
         targetPath: options.targetPath,
         gatewayUrl: options.gatewayUrl,
         fsBridge: options.fsBridge,
       });
-      if (options.targetPath.endsWith(".json")) {
-        return adapterPlan;
-      }
-
-      const currentContent = await options.fsBridge.readFile(options.targetPath);
-      if (currentContent === null || currentContent.trim().length === 0) {
-        parseCodexTomlConfig(adapterPlan.plannedContent);
-        return adapterPlan;
-      }
-
-      const currentConfig = parseCodexTomlConfig(currentContent);
-      if (findCodexTomlServerConfig(currentConfig, RESIN_MCP_SERVER_KEYS["codex-cli"]) === null) {
-        parseCodexTomlConfig(adapterPlan.plannedContent);
-        return adapterPlan;
-      }
-
-      const plannedContent = updateCodexTomlServerTransport(
-        currentContent,
-        RESIN_MCP_SERVER_KEYS["codex-cli"],
-        options.gatewayUrl,
-      );
-      parseCodexTomlConfig(plannedContent);
-      return { ...adapterPlan, plannedContent };
-    }
     case "omp":
       return planOmpMcpConfig({
         customConfigPath: options.targetPath,
@@ -194,35 +174,35 @@ export async function planHarnessRegistration(
 export async function verifyHarnessRegistration(
   options: HarnessAdapterOperationOptions,
 ): Promise<boolean> {
+  if (options.harnessId === "codex-cli") {
+    return verifyCodexMcpConfig({
+      targetPath: options.targetPath,
+      gatewayUrl: options.gatewayUrl,
+      fsBridge: options.fsBridge,
+    });
+  }
+
   const content = await options.fsBridge.readFile(options.targetPath);
   if (content === null || content.trim().length === 0) {
     return false;
   }
 
   try {
-    let server: HarnessConfigRecord | null;
-    if (options.harnessId === "codex-cli" && !options.targetPath.endsWith(".json")) {
-      server = findCodexTomlServerConfig(
-        parseCodexTomlConfig(content),
-        RESIN_MCP_SERVER_KEYS["codex-cli"],
-      );
-    } else {
-      const config = asObject(JSON.parse(content));
-      if (config === null) {
-        return false;
-      }
-      server = findJsonServerConfig(
-        config,
-        options.harnessId,
-        RESIN_MCP_SERVER_KEYS[options.harnessId],
-      );
+    const config = asObject(JSON.parse(content));
+    if (config === null) {
+      return false;
     }
+    const server = findJsonServerConfig(
+      config,
+      options.harnessId,
+      RESIN_MCP_SERVER_KEYS[options.harnessId],
+    );
 
     if (server === null) {
       return false;
     }
     const expectedTransport = {
-      type: options.harnessId === "codex-cli" ? undefined : "sse",
+      type: "sse",
       url: options.gatewayUrl,
       command: undefined,
       args: undefined,

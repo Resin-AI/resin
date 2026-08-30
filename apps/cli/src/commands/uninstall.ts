@@ -380,7 +380,6 @@ export async function uninstallCommand(
       if (purgeSecrets) {
         const secretDirs = [
           path.join(resinHome, "vault"),
-          daemonPaths.tokenFilePath,
           path.join(resinHome, "state", "device-token.json"),
         ];
         for (const target of secretDirs) {

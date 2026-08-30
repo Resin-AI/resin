@@ -614,7 +614,6 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
         }
         client = new IpcClient({
           socketPath,
-          tokenFilePath: daemonPaths.tokenFilePath,
           timeoutMs: Math.min(1_500, timeoutMs || 1_500),
         });
         ownsClient = true;

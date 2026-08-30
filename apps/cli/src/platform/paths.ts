@@ -17,7 +17,6 @@ export interface PlatformPaths {
   readonly socketPath: string;
   readonly lockFilePath: string;
   readonly pidFilePath: string;
-  readonly tokenFilePath: string;
   readonly configFile: string;
   readonly artifactsDir: string;
   readonly versionsDir: string;
@@ -229,7 +228,6 @@ export function resolvePlatformPaths(options: PlatformPathOptions = {}): Platfor
 
   const lockFilePath = path.join(stateDir, "daemon.lock");
   const pidFilePath = path.join(stateDir, "daemon.pid");
-  const tokenFilePath = path.join(stateDir, "daemon.token");
   const configFile = options.configFile ?? path.join(configDir, "config.json");
   const artifactsDir = path.join(dataDir, "artifacts");
   const versionsDir = path.join(homeDir, "versions");
@@ -259,7 +257,6 @@ export function resolvePlatformPaths(options: PlatformPathOptions = {}): Platfor
     socketPath,
     lockFilePath,
     pidFilePath,
-    tokenFilePath,
     configFile,
     artifactsDir,
     versionsDir,

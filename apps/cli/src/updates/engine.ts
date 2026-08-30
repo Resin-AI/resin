@@ -1415,7 +1415,6 @@ export class UpdateEngine {
     const paths = resolvePlatformPaths({ home: this.homeDir, platformInfo: this.platformInfo });
     const ipcClient = new IpcClient({
       socketPath: paths.socketPath,
-      tokenFilePath: paths.tokenFilePath,
       timeoutMs: 2_000,
     });
     try {
@@ -1515,7 +1514,6 @@ export class UpdateEngine {
     const paths = resolvePlatformPaths({ home: this.homeDir, platformInfo: this.platformInfo });
     const client = new IpcClient({
       socketPath: paths.socketPath,
-      tokenFilePath: paths.tokenFilePath,
       timeoutMs: Math.min(this.drainTimeoutMs, 5_000),
     });
     let drainInitiated = false;
