@@ -61,7 +61,7 @@ describe("config", () => {
       expect(parsed.host).toBe("0.0.0.0");
       expect(parsed.port).toBe(8080);
       expect(parsed.socketPath).toBe("/custom/socket.sock");
-      expect(parsed.authToken).toBe("secret-token-123");
+      expect(parsed).not.toHaveProperty("authToken");
       expect(parsed.cloudUrl).toBe("https://cloud.custom.dev");
       expect(parsed.telemetryEnabled).toBe(true);
       expect(parsed.storageDir).toBe("/custom/storage");
@@ -104,7 +104,7 @@ describe("config", () => {
   });
 
   describe("Secret Redaction", () => {
-    it("redacts local authToken in DaemonConfig while keeping non-secret fields", () => {
+    it("ignores obsolete local authToken while redacting nested secrets", () => {
       const config = DaemonConfigSchema.parse({
         authToken: "sentinel-local-ipc-token",
         moduleConfigs: {
@@ -121,7 +121,7 @@ describe("config", () => {
 
       const redacted = redactConfig(config);
 
-      expect(redacted.authToken).toBe("[REDACTED]");
+      expect(redacted).not.toHaveProperty("authToken");
       expect(redacted.port).toBe(9400);
       expect(redacted.cloudUrl).toBe("https://api.resin.sh");
 
