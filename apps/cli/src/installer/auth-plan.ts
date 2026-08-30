@@ -256,6 +256,18 @@ export function formatAuthPlanForDisplay(plan: AuthorizationPlan): string {
   return lines.join("\n");
 }
 
+/**
+ * Formats an authorization plan into a compact summary for default terminal display.
+ */
+export function formatCompactAuthPlan(plan: AuthorizationPlan): string {
+  const harnesses = plan.harnesses.map((h) => h.displayName).join(", ");
+  const lines: string[] = [
+    `Resin Authorization (${plan.planId}):`,
+    `  Workspace: ${plan.workspacePath}`,
+    `  Harnesses: ${harnesses || "None"}`,
+  ];
+  return lines.join("\n");
+}
 export type AuthorizationPromptFn = (question: string) => Promise<boolean>;
 
 /**

@@ -111,6 +111,7 @@ export interface PerformPairingOptions {
   fsBridge?: ConfigFsBridge;
   timeoutMs?: number;
   abortSignal?: AbortSignal;
+  stdout?: { write(chunk: string): boolean | undefined };
 }
 
 async function restartActiveServiceIfRunning(
@@ -218,14 +219,15 @@ export async function performPairing(
         }
       }
 
-      process.stdout.write(
+      const stdout = options.stdout ?? process.stdout;
+      stdout.write(
         browserOpened
           ? "\nA browser window was opened for Resin authorization.\n"
           : "\nA browser could not be opened automatically. Continue on any browser:\n",
       );
-      process.stdout.write(`1. Navigate to: ${targetUrl}\n`);
-      process.stdout.write(`2. Enter code:   ${info.userCode}\n\n`);
-      process.stdout.write(
+      stdout.write(`1. Navigate to: ${targetUrl}\n`);
+      stdout.write(`2. Enter code:   ${info.userCode}\n\n`);
+      stdout.write(
         "Keep this installer open. Setup continues automatically after authorization.\n",
       );
     },

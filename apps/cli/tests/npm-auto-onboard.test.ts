@@ -345,7 +345,7 @@ describe("npm-auto-onboard: fail-safe npm lifecycle & first-run onboarding", () 
       expect(openBrowser).toHaveBeenCalledWith(
         expect.stringContaining("https://auth.resin.sh/device?code=ABCD-9876"),
       );
-      expect(stdoutOutput).toContain("Resin installation completed successfully");
+      expect(stdoutOutput).toContain("Resin initialization complete.");
     });
 
     it("displays global help on bare resin in CI or non-interactive environment without triggering onboarding", async () => {

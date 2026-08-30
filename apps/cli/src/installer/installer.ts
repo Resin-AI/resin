@@ -12,6 +12,7 @@ import {
 } from "@resin/observer";
 
 export const resolveDaemonPaths = resolvePaths;
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
   type DaemonReadinessResult,
@@ -36,6 +37,7 @@ import {
   type AuthorizationPromptFn,
   createAuthorizationPlan,
   formatAuthPlanForDisplay,
+  formatCompactAuthPlan,
   validateAuthorization,
 } from "./auth-plan.js";
 import {
@@ -113,6 +115,9 @@ export interface InstallerOptions {
   gatewayUrl?: string;
   logger?: (msg: string) => void;
   fsBridge?: ConfigFsBridge;
+  verbosity?: VerbosityLevel;
+  verbose?: boolean;
+  quiet?: boolean;
 }
 
 export interface InstallationSummary {
@@ -155,6 +160,7 @@ export class ResinInstaller {
   private readonly journal: InstallationJournal;
   private logger: (msg: string) => void;
   private promptFn?: AuthorizationPromptFn;
+  private verbosity: VerbosityLevel = "default";
 
   constructor(
     options: {
@@ -162,12 +168,21 @@ export class ResinInstaller {
       logger?: (msg: string) => void;
       promptFn?: AuthorizationPromptFn;
       authPromptFn?: AuthorizationPromptFn;
+      verbosity?: VerbosityLevel;
+      verbose?: boolean;
+      quiet?: boolean;
     } = {},
   ) {
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.journal = new InstallationJournal();
     this.logger = options.logger ?? ((msg: string) => process.stdout.write(`${msg}\n`));
     this.promptFn = options.promptFn ?? options.authPromptFn;
+    this.verbosity =
+      options.verbosity ??
+      resolveVerbosity({
+        flags: { quiet: options.quiet, verbose: options.verbose },
+        env: process.env,
+      });
   }
 
   /**
@@ -179,6 +194,18 @@ export class ResinInstaller {
     const dryRun = Boolean(options.dryRun);
     if (options.logger) {
       this.logger = options.logger;
+    }
+    if (
+      options.verbosity !== undefined ||
+      options.verbose !== undefined ||
+      options.quiet !== undefined
+    ) {
+      this.verbosity =
+        options.verbosity ??
+        resolveVerbosity({
+          flags: { quiet: options.quiet, verbose: options.verbose },
+          env: process.env,
+        });
     }
     if (options.fsBridge) {
       this.fsBridge = options.fsBridge;
@@ -454,7 +481,17 @@ export class ResinInstaller {
       });
 
       if (!options.json) {
-        this.log(`\n${formatAuthPlanForDisplay(authPlan)}\n`);
+        if (this.verbosity === "verbose") {
+          this.logger(`\n${formatAuthPlanForDisplay(authPlan)}\n`);
+        } else if (
+          !options.autoApprove &&
+          !options.dryRun &&
+          !options.capabilitiesFile &&
+          !options.nonInteractive &&
+          this.verbosity !== "quiet"
+        ) {
+          this.logger(`\n${formatCompactAuthPlan(authPlan)}\n`);
+        }
       }
 
       const promptFn = options.promptFn ?? options.authPromptFn ?? this.promptFn;
@@ -844,10 +881,14 @@ export class ResinInstaller {
     if (await this.fsBridge.exists(journalPath)) {
       loadedJournal = await InstallationJournal.load(journalPath, this.fsBridge);
       await loadedJournal.rollback(this.fsBridge);
-      this.log("✔ Successfully rolled back configuration files to prior state.");
+      if (this.verbosity !== "quiet") {
+        this.logger("✔ Successfully rolled back configuration files to prior state.");
+      }
     } else {
       loadedJournal = new InstallationJournal();
-      this.log("⚠️  No install journal found to roll back configurations from.");
+      if (this.verbosity !== "quiet") {
+        this.logger("⚠️  No install journal found to roll back configurations from.");
+      }
     }
 
     // Try version rollback if pointer exists
@@ -885,6 +926,8 @@ export class ResinInstaller {
   }
 
   private log(message: string): void {
-    this.logger(message);
+    if (this.verbosity === "verbose") {
+      this.logger(message);
+    }
   }
 }

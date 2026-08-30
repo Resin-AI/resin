@@ -434,6 +434,12 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     const versionExit = await main(["version"]);
     expect(versionExit).toBe(0);
 
+    const shortVersionExit = await main(["-V"]);
+    expect(shortVersionExit).toBe(0);
+
+    const longVersionExit = await main(["--version"]);
+    expect(longVersionExit).toBe(0);
+
     const helpExit = await main(["help"]);
     expect(helpExit).toBe(0);
 
