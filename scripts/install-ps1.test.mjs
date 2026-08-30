@@ -9,7 +9,7 @@ import process from "node:process";
 import { describe, expect, it } from "vitest";
 
 const EXPECTED_HELPER_URL = "https://resin.sh/install-helper-v1.mjs";
-const EXPECTED_HELPER_SHA256 = "4fdae2b7beb34bb5d74eee867f68ce143588990758595c4a7287ed258b9de12c";
+const EXPECTED_HELPER_SHA256 = "3218802b9a9f5ca18398b1cb56705e0b28ea3eb831c6b15d6af70a1db4705ac6";
 const EXPECTED_MIN_NODE_VERSION = 22;
 
 const SCRIPT_PATH = path.resolve(process.cwd(), "apps/cli/install/install.ps1");

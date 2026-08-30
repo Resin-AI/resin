@@ -350,11 +350,11 @@ describe("bootstrap-entry", () => {
 
       // Ambient env should NOT override bundled production keys
       const keys = resolveTrustedReleaseKeys({});
-      expect(keys.length).toBe(1);
-      expect(keys[0].keyId).toBe("resin-release-2026a");
-      expect(keys[0].publicKeyHex).toBe(
-        "f59235aaff92fadc6c30b0dfd56ca54c28a89e5abb1fa57ab7d5ea683d607851",
-      );
+      expect(keys).toHaveLength(2);
+      expect(keys.map((key) => key.keyId)).toEqual([
+        "resin-release-2026a",
+        "resin-public-release-v1",
+      ]);
 
       // Custom trusted release keys passed in options without programmatic override flag are rejected
       expect(() =>
@@ -1142,14 +1142,19 @@ describe("bootstrap-entry", () => {
   it("exposes the production trust root record matching specification", () => {
     expect(PRODUCTION_RELEASE_TRUST_RECORD.schemaVersion).toBe("2.0.0");
     expect(PRODUCTION_RELEASE_TRUST_RECORD.trustDomain).toBe("production");
-    const key = PRODUCTION_RELEASE_TRUST_RECORD.trustedKeys[0];
-    expect(key.keyId).toBe("resin-release-2026a");
-    expect(key.publicKeyHex).toBe(
-      "f59235aaff92fadc6c30b0dfd56ca54c28a89e5abb1fa57ab7d5ea683d607851",
-    );
-    expect(key.publicKeyFingerprintSha256).toBe(
-      "a702d0d424e5797ecb672afabd275548c1ef6e1e95d1ea9651916e147e784359",
-    );
+    expect(PRODUCTION_RELEASE_TRUST_RECORD.trustedKeys).toHaveLength(2);
+    expect(PRODUCTION_RELEASE_TRUST_RECORD.trustedKeys[0]).toMatchObject({
+      keyId: "resin-release-2026a",
+      publicKeyHex: "f59235aaff92fadc6c30b0dfd56ca54c28a89e5abb1fa57ab7d5ea683d607851",
+      publicKeyFingerprintSha256:
+        "a702d0d424e5797ecb672afabd275548c1ef6e1e95d1ea9651916e147e784359",
+    });
+    expect(PRODUCTION_RELEASE_TRUST_RECORD.trustedKeys[1]).toMatchObject({
+      keyId: "resin-public-release-v1",
+      publicKeyHex: "0fa2f2783ffcacbf1fb1c02cf01d289015c6448d0f0ab1886de706a39955d204",
+      publicKeyFingerprintSha256:
+        "54a0077e1353cd20f2c4d4eab5dd0d9d883a5e814c6992f61287ef544255836f",
+    });
   });
 
   describe("automatic onboarding & device linking", () => {
