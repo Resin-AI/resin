@@ -139,13 +139,12 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       }
     });
 
-    it("includes cloud staging qualification tests (Backup, Fault Injection & Soak)", () => {
+    it("includes clean-checkout full-system qualification evidence", () => {
       const evidence = generateReleaseEvidence({ rootDir, testOnly: true });
-      const staging = evidence.qualification.cloudStaging;
+      const system = evidence.qualification.system;
 
-      expect(staging.backupRestoreRehearsal.status).toBe("TEST_ONLY");
-      expect(staging.faultInjectionMatrix.status).toBe("TEST_ONLY");
-      expect(staging.soakPerformance.status).toBe("TEST_ONLY");
+      expect(system.status).toBe("TEST_ONLY");
+      expect(system.suites).toEqual([]);
     });
 
     it("records security and boundary audit status with zero violations", () => {
@@ -170,7 +169,7 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       expect(md).not.toContain("#48");
       expect(md).toContain("Platform Qualification Matrix (REM-018)");
       expect(md).toContain("Multi-Harness Qualification Matrix (REM-017)");
-      expect(md).toContain("Cloud Staging Qualification Matrix (REM-019)");
+      expect(md).toContain("Full-System Qualification Gate");
       expect(md).toContain("Security & Architecture Attestation");
     });
 

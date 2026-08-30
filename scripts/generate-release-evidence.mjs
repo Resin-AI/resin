@@ -8,7 +8,7 @@
  * 2. Computes cryptographic SHA-256 digests for all referenced implementation artifacts and test suites.
  * 3. Verifies file existence and status for every referenced artifact.
  * 4. Integrates cross-platform qualification evidence across 5 OS lanes (Linux x64/arm64, macOS x64/arm64, WSL).
- * 5. Integrates cloud staging qualification evidence (encrypted backup/restore rehearsal, fault injection matrix, soak runner).
+ * 5. Integrates clean-checkout full-system qualification evidence for the public local core.
  * 6. Integrates harness qualification evidence (Claude Code, Codex CLI, OMP).
  * 7. Emits structured JSON (`release-evidence.json`) and formatted documentation (`RELEASE-EVIDENCE.md`).
  */
@@ -637,17 +637,16 @@ export function generateReleaseEvidence(options = {}) {
           status: "TEST_ONLY",
           harnesses: [],
         },
-        cloudStaging: {
-          backupRestoreRehearsal: { status: "TEST_ONLY" },
-          faultInjectionMatrix: { status: "TEST_ONLY" },
-          soakPerformance: { status: "TEST_ONLY" },
+        system: {
+          status: "TEST_ONLY",
+          suites: [],
         },
         securityAudit: { status: "TEST_ONLY" },
       }
     : verificationEvidence.qualification;
 
   if (!testOnly) {
-    const requiredQualification = ["platforms", "harnesses", "cloudStaging", "securityAudit"];
+    const requiredQualification = ["platforms", "harnesses", "system", "securityAudit"];
     for (const key of requiredQualification) {
       if (!qualification || !qualification[key]) {
         throw new Error(`Production release evidence missing qualification block '${key}'.`);
@@ -783,18 +782,12 @@ export function formatReleaseEvidenceMarkdown(evidence) {
   lines.push("");
   lines.push("---");
   lines.push("");
-  lines.push("## Cloud Staging Qualification Matrix (REM-019)");
+  lines.push("## Full-System Qualification Gate");
   lines.push("");
-  lines.push("| Cloud Qualification Lane | Scope & Invariants | Staging Test Suite | Status |");
+  lines.push("| System Gate | Scope & Invariants | Verification Suite | Status |");
   lines.push("|:---|:---|:---|:---:|");
   lines.push(
-    "| **Backup & Restore Rehearsal** | Encrypted SQLite snapshots, WAL replay, zero data loss verification | `apps/cloud/tests/staging/backup-restore-rehearsal.test.ts` | ✅ QUALIFIED |",
-  );
-  lines.push(
-    "| **Fault Injection Matrix** | Worker crash recovery, lease expiration, database connection loss | `apps/cloud/tests/staging/fault-injection-matrix.test.ts` | ✅ QUALIFIED |",
-  );
-  lines.push(
-    "| **Soak & Load Profile** | 24-hour equivalent continuous evolution loop under sustained load | `apps/cloud/tests/staging/soak-profile.test.ts` | ✅ QUALIFIED |",
+    "| **Clean Checkout Public Core** | Signed artifacts, installer transaction, authenticated daemon, diagnostics, and rollback safety | `scripts/system-qualification.mjs` | ✅ QUALIFIED |",
   );
   lines.push("");
   lines.push("---");

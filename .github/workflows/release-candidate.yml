@@ -177,6 +177,7 @@ jobs:
           test -s dist/upstream-qualification/system/system-e2e.json
 
           validate_run "$SECURITY_SCAN_RUN_ID" ".github/workflows/security-scan.yml" "Production security scan"
+          echo "security_scan_run_id=$SECURITY_SCAN_RUN_ID" >> "$GITHUB_OUTPUT"
           gh run download "$SECURITY_SCAN_RUN_ID" --name vulnerability-scan-evidence --dir dist/security-scan
           test -s dist/security-scan/vulnerability-scan-evidence.json
 
@@ -201,7 +202,7 @@ jobs:
           --system-run-id=${{ steps.gates.outputs.system_run_id }}
           --commit-sha=$RELEASE_SHA
           --output=$RESIN_RELEASE_EVIDENCE_PATH
-          --operational-evidence=dist/operational-evidence/operational-evidence.json
+          --security-run-id=${{ steps.gates.outputs.security_scan_run_id }}
 
       - name: Require qualification for every production platform
         shell: bash
