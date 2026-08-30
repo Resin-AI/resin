@@ -26,6 +26,7 @@ import {
   isReusableCredentialRecord,
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 
 const PackageJsonSchema = z.object({
   version: z.string().min(1),
@@ -275,10 +276,15 @@ Commands:
   doctor       Diagnose platform, filesystem, service, IPC, database, and harness state.
   repair       Automatically remediate detected issues and restore healthy service state.
   upgrade      Atomic in-place release upgrade with health gate and auto-rollback.
-  logout       Sign out of Resin Cloud and revoke cached session credentials.
   uninstall    Safely stop services and remove Resin integration from harnesses.
   version      Display Resin CLI version.
   help         Display this help message.
+
+Global Options:
+  -V, --version  Display Resin CLI version.
+  -v, --verbose  Enable verbose diagnostic logging.
+  -q, --quiet    Suppress non-error standard output.
+  -h, --help     Display this help message.
 
 Run "resin <command> --help" for detailed information on a specific command.
 `;
@@ -300,19 +306,78 @@ export interface MainOptions {
   autoOnboard?: boolean;
   harnessHealthRunner?: HarnessHealthRunner;
   harnessHealthDeadlineMs?: number;
+  verbosity?: VerbosityLevel;
+  verbose?: boolean;
+  quiet?: boolean;
+}
+
+function parseTopLevelArgv(argv: string[]) {
+  const globalFlags = { quiet: false, verbose: false };
+  let command: string | undefined;
+  const commandArgs: string[] = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!command) {
+      if (arg === "-V" || arg === "--version" || arg === "version") {
+        return { isVersion: true, isHelp: false, command: "version", commandArgs: [], globalFlags };
+      }
+      if (arg === "-h" || arg === "--help" || arg === "help") {
+        return { isVersion: false, isHelp: true, command: "help", commandArgs: [], globalFlags };
+      }
+      if (arg === "-v" || arg === "--verbose") {
+        globalFlags.verbose = true;
+        continue;
+      }
+      if (arg === "-q" || arg === "--quiet") {
+        globalFlags.quiet = true;
+        continue;
+      }
+      command = arg;
+    } else {
+      commandArgs.push(arg);
+    }
+  }
+
+  return { isVersion: false, isHelp: false, command, commandArgs, globalFlags };
 }
 
 export async function main(
   argv = process.argv.slice(2),
   options: MainOptions = {},
 ): Promise<number> {
-  const [command, ...args] = argv;
+  const parsed = parseTopLevelArgv(argv);
   const stdout =
     options.stdout?.write === undefined
       ? process.stdout
       : { isTTY: options.stdout.isTTY, write: options.stdout.write };
   const stderr =
     options.stderr?.write === undefined ? process.stderr : { write: options.stderr.write };
+
+  if (parsed.isVersion) {
+    stdout.write(`resin v${VERSION}\n`);
+    return 0;
+  }
+  if (parsed.isHelp) {
+    printGlobalHelp(stdout);
+    return 0;
+  }
+
+  const env = options.env ?? process.env;
+  const verbosity =
+    options.verbosity ??
+    resolveVerbosity({
+      args: argv,
+      flags: {
+        quiet: (parsed.globalFlags.quiet || options.quiet) ?? undefined,
+        verbose: (parsed.globalFlags.verbose || options.verbose) ?? undefined,
+      },
+      env,
+    });
+  const isQuiet = verbosity === "quiet";
+  const isVerbose = verbosity === "verbose";
+  const command = parsed.command;
+  const args = parsed.commandArgs;
 
   let harnessHealthHome = options.home;
   for (let index = 0; index < args.length; index += 1) {
@@ -379,10 +444,22 @@ export async function main(
       if (cloudUrl) {
         initArgs.push(`--cloud-url=${cloudUrl}`);
       }
+      if (isVerbose) {
+        initArgs.push("--verbose");
+      }
+      if (isQuiet) {
+        initArgs.push("--quiet");
+      }
       return await initCommand(initArgs, {
         customFetch: options.customFetch,
         openBrowser: options.openBrowser,
         customFsBridge: options.fsBridge,
+        env,
+        stdout,
+        stderr,
+        verbosity,
+        verbose: isVerbose,
+        quiet: isQuiet,
         logger: options.stdout?.write
           ? (msg: string) => options.stdout?.write?.(`${msg}\n`)
           : undefined,
@@ -403,7 +480,12 @@ export async function main(
       return initCommand(args, {
         customFetch: options.customFetch,
         openBrowser: options.openBrowser,
-        customFsBridge: options.fsBridge,
+        env,
+        stdout,
+        stderr,
+        verbosity,
+        verbose: isVerbose,
+        quiet: isQuiet,
       });
 
     case "login":
@@ -437,7 +519,16 @@ export async function main(
       return repairCommand(args);
 
     case "upgrade": {
-      const exitCode = await upgradeCommand(args);
+      const exitCode = await upgradeCommand(args, {
+        fsBridge: options.fsBridge,
+        customFetch: options.customFetch,
+        env,
+        stdout,
+        stderr,
+        verbosity,
+        verbose: isVerbose,
+        quiet: isQuiet,
+      });
       if (exitCode === 0 && harnessHealthEnabled) {
         try {
           await runHarnessHealthStartupCheck({
@@ -462,7 +553,7 @@ export async function main(
 
     case "version":
     case "--version":
-    case "-v":
+    case "-V":
       stdout.write(`resin v${VERSION}\n`);
       return 0;
 
@@ -471,7 +562,6 @@ export async function main(
       return 1;
   }
 }
-
 export function isMainModule(metaUrl: string = import.meta.url, argv1?: string): boolean {
   const targetPath = argv1 ?? (process?.argv ? process.argv[1] : undefined);
   if (!targetPath) return false;

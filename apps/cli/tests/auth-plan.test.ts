@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAuthorizationPlan,
   formatAuthPlanForDisplay,
+  formatCompactAuthPlan,
   generateDefaultCapabilities,
   validateAuthorization,
 } from "../src/installer/auth-plan.js";
@@ -39,6 +40,23 @@ describe("Authorization Plan & Privacy Boundary", () => {
     expect(display).toContain("PRIVACY & OBSERVABILITY BOUNDARY");
     expect(display).toContain("[Claude Code CLI]");
     expect(display).toContain("[Oh My Pi (OMP)]");
+  });
+
+  it("formats compact authorization summary for default terminal display", async () => {
+    const plan = await createAuthorizationPlan({
+      workspacePath: "/workspace/my-app",
+      targetHarnesses: [
+        { id: "claude-code", name: "Claude Code CLI" },
+        { id: "omp", name: "Oh My Pi (OMP)" },
+      ],
+    });
+
+    const compact = formatCompactAuthPlan(plan);
+
+    expect(compact).toContain("Resin Authorization");
+    expect(compact).toContain("Workspace: /workspace/my-app");
+    expect(compact).toContain("Claude Code CLI");
+    expect(compact).not.toContain("================================================================================");
   });
 
   it("rejects non-interactive authorization when no approval flags or files are provided", async () => {

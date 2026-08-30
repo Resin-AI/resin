@@ -150,3 +150,13 @@ export {
   type MainOptions,
   type ShouldOnboardOptions,
 } from "./bin/cli.js";
+
+// Output and Verbosity
+export {
+  type VerbosityLevel,
+  type VerbosityResolutionOptions,
+  type OutputStreams,
+  type CliOutputOptions,
+  CliOutput,
+  resolveVerbosity,
+} from "./output.js";

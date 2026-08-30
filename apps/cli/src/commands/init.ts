@@ -17,6 +17,7 @@ import {
   ResinInstaller,
 } from "../installer/installer.js";
 import { DEFAULT_CLOUD_URL, validateCloudUrl } from "../service/auth-bootstrap.js";
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import { type BrowserLauncher, performPairing } from "./login.js";
 export interface InitCommandFlags {
@@ -35,6 +36,8 @@ export interface InitCommandFlags {
   cloudUrl?: string;
   help?: boolean;
   autoRepair?: boolean;
+  verbose?: boolean;
+  quiet?: boolean;
 }
 
 export interface InitCommandOptions {
@@ -57,6 +60,12 @@ export interface InitCommandOptions {
   harnessHealthDeadlineMs?: number;
   authorizationTimeoutMs?: number;
   abortSignal?: AbortSignal;
+  verbosity?: VerbosityLevel;
+  verbose?: boolean;
+  quiet?: boolean;
+  env?: NodeJS.ProcessEnv;
+  stdout?: { write(chunk: string): boolean | undefined; isTTY?: boolean };
+  stderr?: { write(chunk: string): boolean | undefined };
 }
 
 export function parseInitFlags(args: string[]): InitCommandFlags {
@@ -81,6 +90,10 @@ export function parseInitFlags(args: string[]): InitCommandFlags {
       flags.autoRepair = true;
     } else if (arg === "--no-auto-repair") {
       flags.autoRepair = false;
+    } else if (arg === "--verbose" || arg === "-v") {
+      flags.verbose = true;
+    } else if (arg === "--quiet" || arg === "-q") {
+      flags.quiet = true;
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
     } else if (arg.startsWith("--harness=")) {
@@ -158,6 +171,8 @@ Options:
   --home <path>              Custom home directory (credentials under <home>/.resin).
   --auto-repair             Enable automatic harness repair for startup/hourly checks.
   --no-auto-repair          Persistently disable automatic repair while retaining detection.
+  -v, --verbose              Enable verbose diagnostic logging and full authorization plan display.
+  -q, --quiet                Suppress non-error standard output.
   --rollback-install         Roll back the previous installation using the saved journal.
   -h, --help                 Show this help message.
 
@@ -211,6 +226,16 @@ export async function initCommand(
       ? { customFsBridge: optionsOrBridge }
       : (optionsOrBridge ?? {});
 
+  const env = options.env ?? process.env;
+  const verbosity =
+    options.verbosity ??
+    resolveVerbosity({
+      args: argv,
+      flags: { quiet: flags.quiet ?? options.quiet, verbose: flags.verbose ?? options.verbose },
+      env,
+    });
+  const isQuiet = verbosity === "quiet";
+  const isVerbose = verbosity === "verbose";
   const isRealInstall = !flags.dryRun && !flags.rollbackInstall;
   const cancellationController = new AbortController();
   const cancelForSignal = (signal: "SIGINT" | "SIGTERM") => {
@@ -271,6 +296,8 @@ export async function initCommand(
           fsBridge: options.customFsBridge,
           timeoutMs: options.authorizationTimeoutMs,
           abortSignal: cancellationController.signal,
+          stdout:
+            isQuiet || flags.nonInteractive ? { write: () => true } : options.stdout,
         });
       };
     }
@@ -288,12 +315,16 @@ export async function initCommand(
     rollbackInstall: flags.rollbackInstall,
     gatewayUrl: flags.gatewayUrl,
     customHome: flags.home,
+    promptFn: options.promptFn ?? options.authPromptFn,
+    logger: options.logger,
+    fetchImpl: options.customFetch,
+    verbosity,
+    verbose: isVerbose,
+    quiet: isQuiet,
     releaseMode:
       options.releaseMode ??
-      (flags.dryRun
-        ? "local-test"
-        : (resolveReleaseMode(process.env.RESIN_RELEASE_MODE) ??
-          (process.env.VITEST || process.env.NODE_ENV === "test" ? "local-test" : "production"))),
+      (resolveReleaseMode(process.env.RESIN_RELEASE_MODE) ??
+        (process.env.VITEST || process.env.NODE_ENV === "test" ? "local-test" : "production")),
     releaseChannelUrl: process.env.RESIN_RELEASE_CHANNEL_URL,
     allowInsecureReleaseTransportForTests:
       process.env.RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES === "1",
@@ -302,11 +333,7 @@ export async function initCommand(
     setupService: options.setupService ?? (isRealInstall && !process.env.VITEST),
     autoStartService: options.autoStartService ?? (isRealInstall && !process.env.VITEST),
     readinessVerifier: options.readinessVerifier,
-    readinessTimeoutMs: options.readinessTimeoutMs,
-    readinessRetryIntervalMs: options.readinessRetryIntervalMs,
     pairing: pairingCallback,
-    promptFn: options.promptFn ?? options.authPromptFn,
-    logger: options.logger,
     abortSignal: cancellationController.signal,
   };
 
@@ -353,13 +380,17 @@ export async function initCommand(
     }
 
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      const stdoutWriter = options.stdout ?? process.stdout;
+      stdoutWriter.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else if (!isQuiet) {
+      const stdoutWriter = options.stdout ?? process.stdout;
+      stdoutWriter.write("Resin initialization complete.\n");
     }
 
     return 0;
   } catch (err: unknown) {
+    const journal = err instanceof InstallationError ? err.journal : undefined;
     if (flags.json) {
-      const journal = err instanceof InstallationError ? err.journal : undefined;
       const stepName = err instanceof InstallationError ? err.stepName : undefined;
       const errorJson = {
         success: false,
@@ -367,10 +398,12 @@ export async function initCommand(
         error: err instanceof Error ? err.message : String(err),
         journal,
       };
-      process.stdout.write(`${JSON.stringify(errorJson, null, 2)}\n`);
+      const stdoutWriter = options.stdout ?? process.stdout;
+      stdoutWriter.write(`${JSON.stringify(errorJson, null, 2)}\n`);
     } else {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`\nError: ${msg}\n`);
+      const stderrWriter = options.stderr ?? process.stderr;
+      stderrWriter.write(`\nError: ${msg}\n`);
     }
     return 1;
   } finally {

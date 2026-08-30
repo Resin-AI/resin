@@ -12,6 +12,7 @@ import {
   type UpdateRunStatus,
 } from "../updates/engine.js";
 
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 export const CURRENT_VERSION = "0.1.0";
 
 export interface UpgradeCommandFlags {
@@ -25,9 +26,10 @@ export interface UpgradeCommandFlags {
   home?: string;
   help?: boolean;
   signal?: AbortSignal;
+  verbose?: boolean;
+  quiet?: boolean;
 }
-
-export interface UpgradeResult {
+export interface UpgradeCommandResult {
   success: boolean;
   dryRun: boolean;
   status: UpdateRunStatus | "dry-run";
@@ -55,6 +57,8 @@ export function parseUpgradeFlags(args: string[]): UpgradeCommandFlags {
     else if (arg === "--rollback") flags.rollback = true;
     else if (arg === "--no-rollback") flags.noRollback = true;
     else if (arg === "--help" || arg === "-h") flags.help = true;
+    else if (arg === "--verbose" || arg === "-v") flags.verbose = true;
+    else if (arg === "--quiet" || arg === "-q") flags.quiet = true;
     else if (arg === "--target-version" && i + 1 < args.length) flags.targetVersion = args[++i];
     else if (arg?.startsWith("--target-version=")) flags.targetVersion = arg.slice(17);
     else if (arg === "--channel" && i + 1 < args.length) flags.channel = args[++i];
@@ -70,7 +74,7 @@ export function parseUpgradeFlags(args: string[]): UpgradeCommandFlags {
 
 export function printUpgradeHelp(): void {
   process.stdout.write(
-    `Usage:\n  resin upgrade [options]\n\nStages and activates only releases authenticated by a signed release channel.\n\nOptions:\n  --target-version <v>  Require the signed channel to resolve to this exact version.\n  --channel <channel>   Override the configured channel (stable, beta, nightly).\n  --rollback            Activate the recorded previous known-good version; cannot be combined with --target-version.\n  --dry-run             Simulate without network or filesystem mutation.\n  --force               Reinstall even if the exact signed version is active.\n  --no-rollback         Disable automatic rollback if the health gate fails.\n  --json                Output structured JSON.\n  --home <path>         Custom Resin home.\n  -h, --help            Show help.\n`,
+    `Usage:\n  resin upgrade [options]\n\nStages and activates only releases authenticated by a signed release channel.\n\nOptions:\n  --target-version <v>  Require the signed channel to resolve to this exact version.\n  --channel <channel>   Override the configured channel (stable, beta, nightly).\n  --rollback            Activate the recorded previous known-good version; cannot be combined with --target-version.\n  --dry-run             Simulate without network or filesystem mutation.\n  --force               Reinstall even if the exact signed version is active.\n  --no-rollback         Disable automatic rollback if the health gate fails.\n  --json                Output structured JSON.\n  -v, --verbose         Enable verbose diagnostic logging.\n  -q, --quiet           Suppress non-error standard output.\n  --home <path>         Custom Resin home.\n  -h, --help            Show help.\n`,
   );
 }
 
@@ -109,7 +113,7 @@ export class UpgradeOrchestrator {
       });
   }
 
-  async runUpgrade(flags: UpgradeCommandFlags = {}): Promise<UpgradeResult> {
+  async runUpgrade(flags: UpgradeCommandFlags = {}): Promise<UpgradeCommandResult> {
     if (flags.rollback && flags.targetVersion !== undefined) {
       throw new Error("--rollback cannot be combined with --target-version.");
     }
@@ -153,7 +157,7 @@ export class UpgradeOrchestrator {
     return CURRENT_VERSION;
   }
 
-  private mapEngineResult(result: UpdateEngineResult): UpgradeResult {
+  private mapEngineResult(result: UpdateEngineResult): UpgradeCommandResult {
     return {
       success: result.success,
       dryRun: false,
@@ -181,17 +185,25 @@ export async function upgradeCommand(
     customFetch?: typeof fetch;
     engine?: UpgradeEngineRunner;
     signal?: AbortSignal;
+    verbosity?: VerbosityLevel;
+    verbose?: boolean;
+    quiet?: boolean;
+    env?: NodeJS.ProcessEnv;
+    stdout?: { write(chunk: string): boolean | undefined };
+    stderr?: { write(chunk: string): boolean | undefined };
   } = {},
 ): Promise<number> {
+  const stdout = options.stdout ?? process.stdout;
+  const stderr = options.stderr ?? process.stderr;
   let flags: UpgradeCommandFlags;
   try {
     flags = parseUpgradeFlags(args);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (args.includes("--json")) {
-      process.stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
+      stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
     } else {
-      process.stderr.write(`\nFatal error during upgrade: ${message}\n`);
+      stderr.write(`\nFatal error during upgrade: ${message}\n`);
     }
     return 1;
   }
@@ -199,6 +211,14 @@ export async function upgradeCommand(
     printUpgradeHelp();
     return 0;
   }
+  const verbosity =
+    options.verbosity ??
+    resolveVerbosity({
+      args,
+      flags: { quiet: flags.quiet ?? options.quiet, verbose: flags.verbose ?? options.verbose },
+      env: options.env ?? process.env,
+    });
+  const isQuiet = verbosity === "quiet";
   const customHome = flags.home ? path.resolve(flags.home) : os.homedir();
   const orchestrator = new UpgradeOrchestrator({
     homeDir: customHome,
@@ -214,25 +234,31 @@ export async function upgradeCommand(
     }
     const result = await orchestrator.runUpgrade(upgradeFlags);
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else if (result.status === "activation-deferred") {
-      process.stdout.write(
-        `\nResin v${result.targetVersion} is staged; activation is deferred until active sessions finish.\n`,
-      );
+      if (!isQuiet) {
+        stdout.write(
+          `\nResin v${result.targetVersion} is staged; activation is deferred until active sessions finish.\n`,
+        );
+      }
     } else if (result.success && result.status === "rolled-back") {
-      process.stdout.write(`\nResin rollback complete: v${result.activeVersion}\n`);
+      if (!isQuiet) {
+        stdout.write(`\nResin rollback complete: v${result.activeVersion}\n`);
+      }
     } else if (result.success) {
-      process.stdout.write(`\nResin upgrade complete: v${result.activeVersion}\n`);
+      if (!isQuiet) {
+        stdout.write(`\nResin upgrade complete: v${result.activeVersion}\n`);
+      }
     } else {
-      process.stderr.write(`\nUpgrade failed: ${result.error ?? result.status}\n`);
+      stderr.write(`\nUpgrade failed: ${result.error ?? result.status}\n`);
     }
     return result.success ? 0 : 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
+      stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
     } else {
-      process.stderr.write(`\nFatal error during upgrade: ${message}\n`);
+      stderr.write(`\nFatal error during upgrade: ${message}\n`);
     }
     return 1;
   }

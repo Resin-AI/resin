@@ -108,7 +108,7 @@ describe("init onboarding & pairing workflow", () => {
     await fs.rm(home, { recursive: true, force: true });
     await fs.rm(workspace, { recursive: true, force: true });
   });
-  it("displays formatted capability and privacy plan and proceeds on explicit interactive approval", async () => {
+  it("displays formatted capability and privacy plan in verbose mode and proceeds on explicit interactive approval", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = successfulDeviceFetch();
     const openBrowser = vi.fn().mockResolvedValue(true);
@@ -121,7 +121,7 @@ describe("init onboarding & pairing workflow", () => {
       });
 
       const exitCode = await initCommand(
-        ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        ["--verbose", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
           // SAFETY: Mock fetch implementing fetch interface for testing.
@@ -140,8 +140,6 @@ describe("init onboarding & pairing workflow", () => {
     });
 
     expect(result.exitCode).toBe(0);
-
-    // Prove privacy and capability details are printed before prompt
     expect(capturedStdoutAtPrompt).toContain("RESIN AUTHORIZATION PLAN");
     expect(capturedStdoutAtPrompt).toContain("1. CAPABILITY ENVELOPE (SANDBOX CONSTRAINTS):");
     expect(capturedStdoutAtPrompt).toContain("Filesystem Read/Write:");
@@ -163,6 +161,80 @@ describe("init onboarding & pairing workflow", () => {
     expect(result.stdout).not.toContain(REFRESH_TOKEN);
     expect(openBrowser).toHaveBeenCalledTimes(1);
   });
+
+  it("displays compact authorization summary in default mode during interactive approval", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const customFetch = successfulDeviceFetch();
+    const openBrowser = vi.fn().mockResolvedValue(true);
+    let capturedStdoutAtPrompt = "";
+
+    const result = await captureOutput(async (getStdout) => {
+      const promptFn = vi.fn().mockImplementation(async (question: string) => {
+        capturedStdoutAtPrompt = getStdout();
+        return true;
+      });
+
+      const exitCode = await initCommand(
+        ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        {
+          customFsBridge: bridge,
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+          promptFn,
+        },
+      );
+      return exitCode;
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(capturedStdoutAtPrompt).toContain("Resin Authorization");
+    expect(capturedStdoutAtPrompt).toContain(`Workspace: ${workspace}`);
+    expect(capturedStdoutAtPrompt).not.toContain("================================================================================");
+    expect(result.stdout).toContain("Resin initialization complete.");
+  });
+
+  it("default auto-approved init omits diagnostic progress", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const customFetch = successfulDeviceFetch();
+    const openBrowser = vi.fn().mockResolvedValue(true);
+
+    const result = await captureOutput(async () => {
+      return await initCommand(
+        ["--auto-approve", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        {
+          customFsBridge: bridge,
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+        },
+      );
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("==> Step 1/11");
+    expect(result.stdout).not.toContain("RESIN AUTHORIZATION PLAN");
+    expect(result.stdout).toContain("Resin initialization complete.");
+  });
+
+  it("quiet init suppresses success and progress output entirely", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const customFetch = successfulDeviceFetch();
+    const openBrowser = vi.fn().mockResolvedValue(true);
+
+    const result = await captureOutput(async () => {
+      return await initCommand(
+        ["--quiet", "--auto-approve", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        {
+          customFsBridge: bridge,
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+        },
+      );
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
   it("aborts cleanly and prevents pairing or file mutation when interactive authorization is denied", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = successfulDeviceFetch();
@@ -184,7 +256,8 @@ describe("init onboarding & pairing workflow", () => {
 
     expect(result.exitCode).toBe(1);
     expect(promptFn).toHaveBeenCalledTimes(1);
-    expect(result.stdout).toContain("RESIN AUTHORIZATION PLAN");
+    expect(result.stdout).toContain("Resin Authorization");
+    expect(result.stdout).not.toContain("RESIN AUTHORIZATION PLAN");
     expect(result.stderr).toContain("Authorization declined by user. Installation aborted.");
     expect(customFetch).not.toHaveBeenCalled();
     expect(openBrowser).not.toHaveBeenCalled();
