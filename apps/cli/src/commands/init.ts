@@ -323,7 +323,11 @@ export async function initCommand(
     releaseMode:
       options.releaseMode ??
       resolveReleaseMode(env.RESIN_RELEASE_MODE) ??
-      (env.RESIN_RELEASE_TEST_ONLY === "1" || env.VITEST || env.NODE_ENV === "test"
+      (env.RESIN_RELEASE_TEST_ONLY === "1" ||
+      env.VITEST ||
+      process.env.VITEST ||
+      env.NODE_ENV === "test" ||
+      process.env.NODE_ENV === "test"
         ? "local-test"
         : "production"),
     releaseChannelUrl: process.env.RESIN_RELEASE_CHANNEL_URL,
