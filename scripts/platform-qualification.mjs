@@ -750,6 +750,10 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     RESIN_TELEMETRY_ENABLED: "true",
     RESIN_LOG_LEVEL: "info",
   };
+  if (process.env.RESIN_RELEASE_TEST_ONLY === "1") {
+    cleanEnv.RESIN_RELEASE_MODE = "local-test";
+    cleanEnv.VITEST = "1";
+  }
   delete cleanEnv.NODE_PATH;
 
   let daemonChild = null;
