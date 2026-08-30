@@ -276,6 +276,22 @@ describe("Public Release Workflows Contract", () => {
       expect(packageSteps.length, "package-release.mjs must be called exactly once").toBe(1);
     });
 
+    it("packages fallback tarballs before assembling the trusted candidate archive", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const packageStepIndex = steps.findIndex(
+        (s) => s.name === "Package public fallback tarballs",
+      );
+      const assembleStepIndex = steps.findIndex((s) => s.name?.includes("Assemble deterministic"));
+      expect(packageStepIndex).toBeGreaterThan(-1);
+      expect(packageStepIndex).toBeLessThan(assembleStepIndex);
+      expect(steps[packageStepIndex].run).toContain("pnpm run release:packages");
+      expect(steps[packageStepIndex].run).toContain(
+        '"https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"',
+      );
+      expect(steps[packageStepIndex].run).toContain('--output-dir "$package_dir"');
+      expect(steps[packageStepIndex].run).toContain('"${#package_tarballs[@]}" -ne 13');
+    });
+
     it("mirrors runtime sources and verifies candidate before tar assembly", () => {
       const steps = jobs["build-and-sign"].steps;
       const mirrorStepIndex = steps.findIndex((s) => s.run?.includes("mirror-runtimes"));
@@ -312,6 +328,8 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("apps/cli/install/install.ps1");
       expect(script).toContain("apps/cli/install/install-helper-v1.mjs");
       expect(script).toContain("$candidate_stage/installers");
+      expect(script).toContain("$candidate_stage/packages");
+      expect(script).toContain("dist/release-packages");
       expect(script).toContain("--sort=name");
       expect(script).toContain("--mtime=");
       expect(script).toContain("--owner=0");
@@ -443,7 +461,7 @@ describe("Public Release Workflows Contract", () => {
     it("keeps GitHub release side effects production-only and publishes only after verification", () => {
       const steps = job.steps;
       const createStep = steps.find((s) => s.name === "Create draft GitHub release");
-      const packageStep = steps.find((s) => s.name === "Package public fallback package tarballs");
+      const packageStep = steps.find((s) => s.id === "package_fallback");
       const uploadStep = steps.find(
         (s) => s.name === "Upload fallback package tarballs and manifest to GitHub release",
       );
@@ -716,7 +734,7 @@ describe("Public Release Workflows Contract", () => {
       expect(freezeStep.run).toContain('--key-prefix "$KEY_PREFIX"');
     });
 
-    it("packages all 13 public fallback tarballs with contracted release:packages command, base URL, and staging output directory", () => {
+    it("uses the 13 package tarballs from the trusted candidate without rebuilding from source", () => {
       const packageStep = job.steps.find(
         (s) => s.id === "package_fallback" || s.name?.includes("fallback package"),
       );
@@ -724,12 +742,10 @@ describe("Public Release Workflows Contract", () => {
       expect(packageStep.shell).toBe("bash");
 
       const script = packageStep.run;
-      expect(script).toContain("pnpm run release:packages");
-      expect(script).toContain(
-        '--artifact-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"',
-      );
-      expect(script).toContain('--output-dir "$staging_dir"');
-      expect(script).toContain('TAG="$RELEASE_TAG"');
+      expect(script).toContain('cp -a packages/. "$staging_dir/"');
+      expect(script).toContain('"${#package_tarballs[@]}" -ne 13');
+      expect(script).toContain('"$staging_dir/packages-manifest.json"');
+      expect(script).not.toContain("pnpm run release:packages");
       expect(script).not.toMatch(/\$\{\{\s*inputs\./);
     });
 

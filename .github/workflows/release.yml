@@ -296,19 +296,22 @@ jobs:
               --notes "Resin ${RELEASE_TAG}."
           fi
 
-      - name: Package public fallback package tarballs
+      - name: Validate candidate fallback package tarballs
         if: ${{ inputs.environment == 'production' }}
         id: package_fallback
         shell: bash
         run: |
           set -euo pipefail
           staging_dir="${RUNNER_TEMP:-/tmp}/resin-release-packages"
+          rm -rf "$staging_dir"
           mkdir -p "$staging_dir"
-          TAG="$RELEASE_TAG"
-          pnpm run release:packages -- \
-            --artifact-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}" \
-            --output-dir "$staging_dir"
-
+          cp -a packages/. "$staging_dir/"
+          test -s "$staging_dir/packages-manifest.json"
+          mapfile -t package_tarballs < <(find "$staging_dir" -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#package_tarballs[@]}" -ne 13 ]; then
+            echo "::error::Expected exactly 13 candidate fallback package tarballs, found ${#package_tarballs[@]}"
+            exit 1
+          fi
       - name: Upload fallback package tarballs and manifest to GitHub release
         if: ${{ inputs.environment == 'production' }}
         id: upload_github_release

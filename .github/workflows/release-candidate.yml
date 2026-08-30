@@ -230,6 +230,21 @@ jobs:
           set -euo pipefail
           node scripts/package-release.mjs
 
+      - name: Package public fallback tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="dist/release-packages"
+          pnpm run release:packages -- \
+            --artifact-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}" \
+            --output-dir "$package_dir"
+          test -s "$package_dir/packages-manifest.json"
+          mapfile -t package_tarballs < <(find "$package_dir" -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#package_tarballs[@]}" -ne 13 ]; then
+            echo "::error::Expected exactly 13 public fallback package tarballs, found ${#package_tarballs[@]}"
+            exit 1
+          fi
+
       - name: Mirror runtime sources upstream
         shell: bash
         run: |
@@ -292,7 +307,7 @@ jobs:
           candidate_stage="$(mktemp -d)"
           trap 'rm -rf "$candidate_stage"' EXIT
 
-          mkdir -p "$candidate_stage/release" "$candidate_stage/qualification" "$candidate_stage/tools" "$candidate_stage/installers"
+          mkdir -p "$candidate_stage/release" "$candidate_stage/qualification" "$candidate_stage/tools" "$candidate_stage/installers" "$candidate_stage/packages"
           cp -a "dist/release/${RELEASE_TAG}" "$candidate_stage/release/"
           cp -a dist/qualification/* "$candidate_stage/qualification/"
           cp -a scripts/publish-public-release.mjs "$candidate_stage/tools/"
@@ -301,6 +316,7 @@ jobs:
           cp -a apps/cli/install/install.sh "$candidate_stage/installers/"
           cp -a apps/cli/install/install.ps1 "$candidate_stage/installers/"
           cp -a apps/cli/install/install-helper-v1.mjs "$candidate_stage/installers/"
+          cp -a dist/release-packages/. "$candidate_stage/packages/"
 
           tar --sort=name --mtime='2026-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
             -czf resin-release-candidate.tar.gz -C "$candidate_stage" release qualification tools installers
