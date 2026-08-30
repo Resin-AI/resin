@@ -4098,57 +4098,68 @@ function canonicalJsonStringify(value) {
     if (val === null) {
       return "null";
     }
-    if (val === void 0 || typeof val === "symbol" || typeof val === "function") {
+    const valTag = Object.prototype.toString.call(val);
+    if (val === void 0 || valTag === "[object Symbol]" || valTag === "[object Function]") {
       return void 0;
     }
-    if (typeof val === "boolean") {
+    if (valTag === "[object Boolean]") {
       return val ? "true" : "false";
     }
-    if (typeof val === "number") {
-      if (!Number.isFinite(val)) {
-        throw new TypeError(`Cannot canonically serialize non-finite number: ${val}`);
+    if (valTag === "[object Number]") {
+      if (!Number.isFinite(Number(val))) {
+        throw new TypeError(`Cannot canonically serialize non-finite number: ${String(val)}`);
       }
+      return String(val);
+    }
+    if (valTag === "[object BigInt]") {
+      throw new TypeError("Cannot canonically serialize BigInt value");
+    }
+    if (valTag === "[object String]") {
       return JSON.stringify(val);
     }
-    if (typeof val === "string") {
-      return JSON.stringify(val);
-    }
-    if (typeof val === "bigint") {
-      throw new TypeError("Cannot canonically serialize BigInt without explicit conversion");
-    }
-    if (typeof val === "object") {
-      const toJSONObj = val;
-      if (typeof toJSONObj.toJSON === "function") {
-        return serialize(toJSONObj.toJSON());
-      }
+    if (Array.isArray(val)) {
       if (seen.has(val)) {
-        throw new TypeError("Cyclic reference detected during canonical JSON serialization");
+        throw new TypeError("Cannot canonically serialize cyclic structure");
       }
       seen.add(val);
       try {
-        if (Array.isArray(val)) {
-          const serializedElements = [];
-          for (let i = 0; i < val.length; i++) {
-            const itemStr = serialize(val[i]);
-            serializedElements.push(itemStr === void 0 ? "null" : itemStr);
-          }
-          return `[${serializedElements.join(",")}]`;
-        }
-        const keys = Object.keys(val).sort();
-        const entries = [];
-        for (const key of keys) {
-          const propVal = val[key];
-          const serializedProp = serialize(propVal);
-          if (serializedProp !== void 0) {
-            entries.push(`${JSON.stringify(key)}:${serializedProp}`);
-          }
-        }
-        return `{${entries.join(",")}}`;
+        const elements = val.map((item) => serialize(item) ?? "null");
+        return `[${elements.join(",")}]`;
       } finally {
         seen.delete(val);
       }
     }
-    throw new TypeError(`Unsupported data type encountered: ${typeof val}`);
+    if (valTag === "[object Object]" && val !== null) {
+      const obj = val;
+      if ("toJSON" in obj) {
+        const toJSONFn = obj.toJSON;
+        if (Object.prototype.toString.call(toJSONFn) === "[object Function]") {
+          const normalized = toJSONFn.call(obj);
+          if (Object.prototype.toString.call(normalized) !== "[object Object]") {
+            return serialize(normalized);
+          }
+        }
+      }
+      if (seen.has(obj)) {
+        throw new TypeError("Cannot canonically serialize cyclic structure");
+      }
+      seen.add(obj);
+      try {
+        const entries = Object.entries(obj);
+        entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        const serializedMembers = [];
+        for (const [k, v] of entries) {
+          const memberVal = serialize(v);
+          if (memberVal !== void 0) {
+            serializedMembers.push(`${JSON.stringify(k)}:${memberVal}`);
+          }
+        }
+        return `{${serializedMembers.join(",")}}`;
+      } finally {
+        seen.delete(obj);
+      }
+    }
+    return JSON.stringify(val);
   }
   const result = serialize(value);
   return result === void 0 ? "undefined" : result;
@@ -4535,6 +4546,411 @@ var SecretMediationResultSchema = external_exports.object({
   secretName: external_exports.string(),
   referenceId: external_exports.string().optional(),
   appliedTo: external_exports.string().optional()
+});
+
+// packages/contracts/dist/versions.js
+var BundleReferenceSchema = external_exports.object({
+  uri: external_exports.string().min(1),
+  hash: Sha256DigestSchema,
+  sizeBytes: external_exports.number().int().nonnegative(),
+  format: external_exports.enum(["js_bundle", "zip", "tar_gz", "embedded", "wasm"])
+});
+var ToolArtifactSchema = external_exports.object({
+  artifactDigest: Sha256DigestSchema,
+  bundleReference: BundleReferenceSchema,
+  entrypoint: external_exports.string().min(1),
+  sourceCode: external_exports.string().optional(),
+  sourceMap: external_exports.string().optional(),
+  checksums: external_exports.record(external_exports.string()).default({})
+});
+var ProvenanceMetadataSchema = external_exports.object({
+  sourceCandidateId: IdentifierSchema.optional(),
+  synthesizedAt: ISOTimestampSchema,
+  synthesizerModel: external_exports.string().min(1),
+  promptHash: Sha256DigestSchema.optional(),
+  gitCommitSha: external_exports.string().optional(),
+  deterministicBuildHash: Sha256DigestSchema,
+  environment: external_exports.record(external_exports.string()).default({})
+});
+var SignatureMetadataSchema = external_exports.object({
+  signature: external_exports.string().min(1),
+  keyId: external_exports.string().min(1),
+  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
+  signedAt: ISOTimestampSchema,
+  certificateChain: external_exports.array(external_exports.string()).optional()
+});
+var ToolVersionStatusSchema = external_exports.enum(["draft", "active", "deprecated", "revoked"]);
+var ToolVersionSchema = external_exports.object({
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  manifest: ToolManifestSchema,
+  artifact: ToolArtifactSchema,
+  provenance: ProvenanceMetadataSchema,
+  signature: SignatureMetadataSchema.optional(),
+  status: ToolVersionStatusSchema.default("draft"),
+  supersededBy: SchemaVersionSchema.nullable().optional(),
+  createdAt: ISOTimestampSchema,
+  createdBy: external_exports.string().min(1)
+});
+
+// packages/contracts/dist/deployments.js
+var DeploymentStateSchema = external_exports.enum([
+  "drafted",
+  "validating",
+  "rejected",
+  "replaying",
+  "eligible",
+  "canary",
+  "promoted",
+  "suspended",
+  "rolling_back",
+  "rolled_back",
+  "retired"
+]);
+var DeploymentTransitionReasonSchema = external_exports.enum([
+  "initial_draft",
+  "validation_started",
+  "validation_passed",
+  "validation_failed",
+  "replay_started",
+  "replay_passed",
+  "replay_failed",
+  "marked_eligible",
+  "canary_started",
+  "canary_passed",
+  "canary_failed",
+  "manual_promotion",
+  "auto_promotion",
+  "manual_suspension",
+  "health_check_failed",
+  "manual_rollback",
+  "automated_rollback",
+  "rollback_completed",
+  "retired_by_superseded",
+  "manual_retirement"
+]);
+var DeploymentTransitionSchema = external_exports.object({
+  fromState: DeploymentStateSchema,
+  toState: DeploymentStateSchema,
+  timestamp: ISOTimestampSchema,
+  reason: DeploymentTransitionReasonSchema,
+  actor: external_exports.object({
+    type: external_exports.enum(["daemon", "user", "policy_engine", "gateway", "system"]),
+    id: external_exports.string().min(1)
+  }),
+  message: external_exports.string().optional(),
+  metadata: external_exports.record(external_exports.unknown()).default({})
+});
+var AutoRollbackThresholdsSchema = external_exports.object({
+  maxErrorRate: external_exports.number().min(0).max(1).default(0.05),
+  maxLatencyP95Ms: external_exports.number().positive().default(5e3),
+  maxSchemaMismatchRate: external_exports.number().min(0).max(1).default(0.01),
+  consecutiveFailureThreshold: external_exports.number().int().positive().default(3)
+});
+var CanaryConfigSchema = external_exports.object({
+  strategy: external_exports.enum(["shadow", "traffic_split", "developer_opt_in"]).default("shadow"),
+  trafficPercentage: external_exports.number().min(0).max(100).default(0),
+  durationMinutes: external_exports.number().int().positive().default(30),
+  maxShadowWorkers: external_exports.number().int().min(1).max(8).default(2),
+  autoRollbackThresholds: AutoRollbackThresholdsSchema.default({})
+});
+var DeploymentRecordSchema = external_exports.object({
+  deploymentId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  state: DeploymentStateSchema,
+  canaryConfig: CanaryConfigSchema.optional(),
+  history: external_exports.array(DeploymentTransitionSchema).default([]),
+  activeTrafficPercentage: external_exports.number().min(0).max(100).default(0),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+
+// packages/contracts/dist/records.js
+var WorkspaceRecordSchema = external_exports.object({
+  workspaceId: IdentifierSchema,
+  rootPath: external_exports.string().min(1),
+  name: external_exports.string().min(1),
+  config: external_exports.record(external_exports.unknown()).default({}),
+  capabilityEnvelope: CapabilityEnvelopeSchema,
+  activeTools: external_exports.record(SchemaVersionSchema).default({}),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+var DeviceRecordSchema = external_exports.object({
+  deviceId: IdentifierSchema,
+  hostname: external_exports.string().min(1),
+  platform: external_exports.enum(["darwin", "linux", "win32", "other"]),
+  arch: external_exports.enum(["arm64", "x64", "arm", "ia32", "other"]),
+  osVersion: external_exports.string(),
+  cpuCores: external_exports.number().int().positive(),
+  totalMemoryMb: external_exports.number().int().positive(),
+  daemonVersion: SchemaVersionSchema,
+  registeredAt: ISOTimestampSchema,
+  lastSeenAt: ISOTimestampSchema
+});
+var InstallationRecordSchema = external_exports.object({
+  installationId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  deploymentId: IdentifierSchema,
+  installedAt: ISOTimestampSchema,
+  state: external_exports.enum(["active", "inactive", "broken", "uninstalled"]),
+  configOverrides: external_exports.record(external_exports.unknown()).default({})
+});
+var CatalogToolSummarySchema = external_exports.object({
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  manifestDigest: Sha256DigestSchema,
+  scope: ToolScopeSchema,
+  status: external_exports.enum(["active", "draft", "deprecated", "revoked"])
+});
+var CatalogSnapshotSchema = external_exports.object({
+  snapshotId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  tools: external_exports.record(CatalogToolSummarySchema).default({}),
+  digest: Sha256DigestSchema
+});
+var InvocationResourceUsageSchema = external_exports.object({
+  cpuTimeMs: external_exports.number().nonnegative(),
+  memoryBytes: external_exports.number().int().nonnegative(),
+  shadowRun: external_exports.boolean().default(false)
+});
+var InvocationErrorDetailsSchema = external_exports.object({
+  errorType: external_exports.string().min(1),
+  message: external_exports.string(),
+  stack: external_exports.string().optional()
+});
+var InvocationRecordSchema = external_exports.object({
+  invocationId: IdentifierSchema,
+  sessionId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  startedAt: ISOTimestampSchema,
+  completedAt: ISOTimestampSchema,
+  durationMs: external_exports.number().nonnegative(),
+  status: external_exports.enum(["success", "error", "timeout", "rejected_capability"]),
+  inputDigest: Sha256DigestSchema,
+  outputDigest: Sha256DigestSchema.optional(),
+  errorDetails: InvocationErrorDetailsSchema.optional(),
+  resourceUsage: InvocationResourceUsageSchema.optional()
+});
+var AuditActorSchema = external_exports.object({
+  type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),
+  id: external_exports.string().min(1)
+});
+var AuditRecordSchema = external_exports.object({
+  auditId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  eventType: external_exports.string().min(1),
+  actor: AuditActorSchema,
+  workspaceId: IdentifierSchema.optional(),
+  resourceType: external_exports.enum([
+    "tool",
+    "deployment",
+    "candidate",
+    "workspace",
+    "capability",
+    "session",
+    "device",
+    "config"
+  ]),
+  resourceId: external_exports.string().min(1),
+  action: external_exports.string().min(1),
+  status: external_exports.enum(["success", "failure", "denied"]),
+  details: external_exports.record(external_exports.unknown()).default({}),
+  clientIp: external_exports.string().optional()
+});
+var TelemetryRecordSchema = external_exports.object({
+  telemetryId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  deviceId: IdentifierSchema,
+  workspaceId: IdentifierSchema.optional(),
+  metricName: external_exports.string().min(1),
+  metricType: external_exports.enum(["counter", "gauge", "histogram"]),
+  value: external_exports.number(),
+  tags: external_exports.record(external_exports.string()).default({})
+});
+var SyncCursorSchema = external_exports.object({
+  cursorId: IdentifierSchema,
+  deviceId: IdentifierSchema,
+  workspaceId: IdentifierSchema.optional(),
+  entityType: external_exports.string().min(1),
+  lastSyncedSequence: external_exports.number().int().nonnegative(),
+  lastSyncedTimestamp: ISOTimestampSchema,
+  syncToken: external_exports.string().min(1)
+});
+var DeadLetterRecordSchema = external_exports.object({
+  deadLetterId: IdentifierSchema,
+  originalEventType: external_exports.string().min(1),
+  payload: external_exports.record(external_exports.unknown()),
+  errorReason: external_exports.string().min(1),
+  failedAt: ISOTimestampSchema,
+  retryCount: external_exports.number().int().nonnegative().default(0),
+  nextRetryAt: ISOTimestampSchema.optional(),
+  status: external_exports.enum(["pending", "exhausted", "resolved", "discarded"]).default("pending")
+});
+var VerificationDigestsSchema = external_exports.object({
+  sourceDigest: Sha256DigestSchema,
+  manifestDigest: Sha256DigestSchema,
+  testsDigest: Sha256DigestSchema,
+  sdkDigest: Sha256DigestSchema,
+  runtimeDigest: Sha256DigestSchema,
+  policyDigest: Sha256DigestSchema,
+  denoDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  compositeEvidenceDigest: Sha256DigestSchema
+});
+var VerificationChecksSchema = external_exports.object({
+  compilationAndTypeCheck: external_exports.boolean(),
+  staticAnalysis: external_exports.boolean(),
+  schemaValidation: external_exports.boolean(),
+  unitTests: external_exports.boolean(),
+  securityProbes: external_exports.boolean(),
+  deterministicPackaging: external_exports.boolean()
+});
+var ProbeResultEntrySchema = external_exports.object({
+  probeId: external_exports.string().min(1),
+  name: external_exports.string().min(1),
+  passed: external_exports.boolean(),
+  details: external_exports.string().optional()
+});
+var VerificationEvidenceRecordSchema = external_exports.object({
+  evidenceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  status: external_exports.enum(["passed", "failed"]),
+  verifiedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  digests: VerificationDigestsSchema,
+  checks: VerificationChecksSchema,
+  probeResults: external_exports.array(ProbeResultEntrySchema).default([]),
+  metadata: external_exports.record(external_exports.unknown()).optional(),
+  signature: SignatureMetadataSchema.optional()
+});
+var RecordVisibilitySchema = external_exports.enum(["personal", "workspace"]);
+var PersonalOwnershipRecordSchema = external_exports.object({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceOwnershipRecordSchema = external_exports.object({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var RecordOwnershipSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalOwnershipRecordSchema,
+  WorkspaceOwnershipRecordSchema
+]);
+var SessionRecordBaseSchema = external_exports.object({
+  id: IdentifierSchema,
+  accountId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  harnessType: external_exports.string().min(1).default("default"),
+  status: external_exports.enum(["active", "idle", "completed", "failed", "archived", "terminated"]).default("active"),
+  fidelity: external_exports.enum(["full", "compact", "summary", "lossless"]).default("full"),
+  startedAt: ISOTimestampSchema,
+  endedAt: ISOTimestampSchema.nullable().optional(),
+  cursor: external_exports.string().nullable().optional(),
+  eventCount: external_exports.number().int().nonnegative().default(0),
+  summaryByKind: external_exports.record(external_exports.number().int().nonnegative()).default({}),
+  metadata: external_exports.record(external_exports.unknown()).default({}),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema
+});
+var PersonalSessionRecordSchema = SessionRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceSessionRecordSchema = SessionRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var SessionRecordSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalSessionRecordSchema,
+  WorkspaceSessionRecordSchema
+]);
+var EvidenceSetRecordBaseSchema = external_exports.object({
+  id: IdentifierSchema,
+  accountId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  sessionId: IdentifierSchema.nullable().optional(),
+  name: external_exports.string().min(1),
+  description: external_exports.string().default(""),
+  revision: external_exports.number().int().positive().default(1),
+  rootDigest: Sha256DigestSchema,
+  memberCount: external_exports.number().int().nonnegative().default(0),
+  metadata: external_exports.record(external_exports.unknown()).default({}),
+  createdAt: ISOTimestampSchema
+});
+var PersonalEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var EvidenceSetRecordSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalEvidenceSetRecordSchema,
+  WorkspaceEvidenceSetRecordSchema
+]);
+
+// packages/contracts/dist/safety-gate.js
+var CURRENT_SAFETY_GATE_VERSION = "1.0.0";
+var SafetyAttestationRecordSchema = external_exports.object({
+  attestationId: IdentifierSchema,
+  schemaVersion: SchemaVersionSchema.default(CURRENT_SAFETY_GATE_VERSION),
+  issuedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  environment: external_exports.enum(["production", "staging", "development", "test"]).default("production"),
+  compatibility: external_exports.object({
+    runtimeVersion: SchemaVersionSchema,
+    brokerProtocolVersion: SchemaVersionSchema,
+    bundleVerifierVersion: SchemaVersionSchema,
+    policyVersion: SchemaVersionSchema
+  }),
+  checks: external_exports.record(external_exports.boolean()),
+  metadata: external_exports.record(external_exports.unknown()).optional(),
+  signature: SignatureMetadataSchema.optional()
+});
+var UnmetRequirementSchema = external_exports.object({
+  code: external_exports.string().min(1),
+  message: external_exports.string().min(1),
+  remediation: external_exports.string().min(1)
+});
+var ProductionSafetyGateStatusSchema = external_exports.object({
+  isOpen: external_exports.boolean(),
+  status: external_exports.enum(["passed", "failed", "unsafe_override", "uninitialized"]),
+  evaluatedAt: ISOTimestampSchema,
+  versions: external_exports.object({
+    runtimeVersion: SchemaVersionSchema,
+    brokerProtocolVersion: SchemaVersionSchema,
+    bundleVerifierVersion: SchemaVersionSchema,
+    policyVersion: SchemaVersionSchema
+  }),
+  reasons: external_exports.array(external_exports.string()),
+  unmetRequirements: external_exports.array(UnmetRequirementSchema),
+  attestation: SafetyAttestationRecordSchema.optional(),
+  unsafeOverrideActive: external_exports.boolean().default(false)
+});
+var SafetyGateRefusalSchema = external_exports.object({
+  isError: external_exports.literal(true),
+  refusalCode: external_exports.string().min(1),
+  refusalReason: external_exports.string().min(1),
+  remediation: external_exports.string().min(1),
+  unmetGates: external_exports.array(external_exports.string()),
+  evaluatedAt: ISOTimestampSchema,
+  content: external_exports.array(external_exports.object({
+    type: external_exports.literal("text"),
+    text: external_exports.string()
+  })),
+  details: external_exports.record(external_exports.unknown()).optional()
 });
 
 // packages/contracts/dist/qualification.js
@@ -5042,14 +5458,17 @@ var QualificationArtifactBundleBaseSchema = external_exports.object({
   metadata: external_exports.record(external_exports.unknown()).optional()
 }).strict();
 function computeRawEvidenceDigest(bundle, options = {}) {
-  return hashCanonical({
+  const payload = {
     domain: "resin/raw-evidence/v1",
     candidateId: bundle.candidateId,
     frozenIntent: bundle.frozenIntent,
-    ...bundle.rawBundle ? { rawBundle: bundle.rawBundle } : {},
     runs: bundle.runs,
     schemaVersion: bundle.schemaVersion
-  }, options);
+  };
+  if (bundle.rawBundle) {
+    payload.rawBundle = bundle.rawBundle;
+  }
+  return hashCanonical(payload, options);
 }
 function computeQualificationBundleDigest(bundle, options = {}) {
   const { approval: _, ...unsignedBundle } = bundle;
@@ -5677,507 +6096,6 @@ var QualificationArtifactBundleSchema = QualificationArtifactBundleBaseSchema.su
   }
 });
 
-// packages/contracts/dist/candidates.js
-var CandidateStateSchema = external_exports.enum([
-  "detected",
-  "synthesizing",
-  "synthesized",
-  "evaluating",
-  "evaluated",
-  "approved",
-  "rejected",
-  "superseded",
-  "failed"
-]);
-var CandidateTriggerReasonSchema = external_exports.enum([
-  "repeated_pattern",
-  "latency_bottleneck",
-  "failure_recovery",
-  "missing_abstraction",
-  "manual_request"
-]);
-var CandidateTriggerSchema = external_exports.object({
-  reason: CandidateTriggerReasonSchema,
-  evidenceEventIds: external_exports.array(IdentifierSchema).min(1),
-  sessionOccurrences: external_exports.number().int().positive().default(1),
-  detectedAt: ISOTimestampSchema,
-  patternFrequency: external_exports.number().nonnegative().default(1),
-  estimatedLatencySavingsMs: external_exports.number().nonnegative().optional(),
-  estimatedTokenSavings: external_exports.number().nonnegative().optional()
-});
-var CandidateEvaluationSummarySchema = external_exports.object({
-  benchmarkScore: external_exports.number().min(0).max(1),
-  replaySuccessRate: external_exports.number().min(0).max(1),
-  latencyImprovementPercent: external_exports.number(),
-  tokenSavingsPercent: external_exports.number(),
-  securityVerdict: external_exports.enum(["passed", "failed", "requires_review"]),
-  evaluatorVersion: SchemaVersionSchema,
-  evaluatedAt: ISOTimestampSchema
-});
-var EvolutionCandidateSchema = external_exports.object({
-  id: IdentifierSchema,
-  opportunityId: IdentifierSchema.optional(),
-  workspaceId: IdentifierSchema,
-  state: CandidateStateSchema,
-  trigger: CandidateTriggerSchema,
-  proposedTool: ToolManifestSchema,
-  requiredCapabilities: CapabilityManifestSchema,
-  evaluationSummary: CandidateEvaluationSummarySchema.optional(),
-  sourceCode: external_exports.string().optional(),
-  rejectionReason: external_exports.string().optional(),
-  frozenIntent: FrozenToolIntentSchema.optional(),
-  createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema.optional()
-});
-
-// packages/contracts/dist/versions.js
-var BundleReferenceSchema = external_exports.object({
-  uri: external_exports.string().min(1),
-  hash: Sha256DigestSchema,
-  sizeBytes: external_exports.number().int().nonnegative(),
-  format: external_exports.enum(["js_bundle", "zip", "tar_gz", "embedded", "wasm"])
-});
-var ToolArtifactSchema = external_exports.object({
-  artifactDigest: Sha256DigestSchema,
-  bundleReference: BundleReferenceSchema,
-  entrypoint: external_exports.string().min(1),
-  sourceCode: external_exports.string().optional(),
-  sourceMap: external_exports.string().optional(),
-  checksums: external_exports.record(external_exports.string()).default({})
-});
-var ProvenanceMetadataSchema = external_exports.object({
-  sourceCandidateId: IdentifierSchema.optional(),
-  synthesizedAt: ISOTimestampSchema,
-  synthesizerModel: external_exports.string().min(1),
-  promptHash: Sha256DigestSchema.optional(),
-  gitCommitSha: external_exports.string().optional(),
-  deterministicBuildHash: Sha256DigestSchema,
-  environment: external_exports.record(external_exports.string()).default({})
-});
-var SignatureMetadataSchema = external_exports.object({
-  signature: external_exports.string().min(1),
-  keyId: external_exports.string().min(1),
-  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
-  signedAt: ISOTimestampSchema,
-  certificateChain: external_exports.array(external_exports.string()).optional()
-});
-var ToolVersionStatusSchema = external_exports.enum(["draft", "active", "deprecated", "revoked"]);
-var ToolVersionSchema = external_exports.object({
-  toolId: IdentifierSchema,
-  version: SchemaVersionSchema,
-  manifestDigest: Sha256DigestSchema,
-  artifactDigest: Sha256DigestSchema,
-  manifest: ToolManifestSchema,
-  artifact: ToolArtifactSchema,
-  provenance: ProvenanceMetadataSchema,
-  signature: SignatureMetadataSchema.optional(),
-  status: ToolVersionStatusSchema.default("draft"),
-  supersededBy: SchemaVersionSchema.nullable().optional(),
-  createdAt: ISOTimestampSchema,
-  createdBy: external_exports.string().min(1)
-});
-
-// packages/contracts/dist/deployments.js
-var DeploymentStateSchema = external_exports.enum([
-  "drafted",
-  "validating",
-  "rejected",
-  "replaying",
-  "eligible",
-  "canary",
-  "promoted",
-  "suspended",
-  "rolling_back",
-  "rolled_back",
-  "retired"
-]);
-var DeploymentTransitionReasonSchema = external_exports.enum([
-  "initial_draft",
-  "validation_started",
-  "validation_passed",
-  "validation_failed",
-  "replay_started",
-  "replay_passed",
-  "replay_failed",
-  "marked_eligible",
-  "canary_started",
-  "canary_passed",
-  "canary_failed",
-  "manual_promotion",
-  "auto_promotion",
-  "manual_suspension",
-  "health_check_failed",
-  "manual_rollback",
-  "automated_rollback",
-  "rollback_completed",
-  "retired_by_superseded",
-  "manual_retirement"
-]);
-var DeploymentTransitionSchema = external_exports.object({
-  fromState: DeploymentStateSchema,
-  toState: DeploymentStateSchema,
-  timestamp: ISOTimestampSchema,
-  reason: DeploymentTransitionReasonSchema,
-  actor: external_exports.object({
-    type: external_exports.enum(["daemon", "user", "policy_engine", "gateway", "system"]),
-    id: external_exports.string().min(1)
-  }),
-  message: external_exports.string().optional(),
-  metadata: external_exports.record(external_exports.unknown()).default({})
-});
-var AutoRollbackThresholdsSchema = external_exports.object({
-  maxErrorRate: external_exports.number().min(0).max(1).default(0.05),
-  maxLatencyP95Ms: external_exports.number().positive().default(5e3),
-  maxSchemaMismatchRate: external_exports.number().min(0).max(1).default(0.01),
-  consecutiveFailureThreshold: external_exports.number().int().positive().default(3)
-});
-var CanaryConfigSchema = external_exports.object({
-  strategy: external_exports.enum(["shadow", "traffic_split", "developer_opt_in"]).default("shadow"),
-  trafficPercentage: external_exports.number().min(0).max(100).default(0),
-  durationMinutes: external_exports.number().int().positive().default(30),
-  maxShadowWorkers: external_exports.number().int().min(1).max(8).default(2),
-  autoRollbackThresholds: AutoRollbackThresholdsSchema.default({})
-});
-var DeploymentRecordSchema = external_exports.object({
-  deploymentId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: SchemaVersionSchema,
-  state: DeploymentStateSchema,
-  canaryConfig: CanaryConfigSchema.optional(),
-  history: external_exports.array(DeploymentTransitionSchema).default([]),
-  activeTrafficPercentage: external_exports.number().min(0).max(100).default(0),
-  createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema.optional()
-});
-
-// packages/contracts/dist/evaluation.js
-var EvaluationDimensionNameSchema = external_exports.enum([
-  "test",
-  "replay",
-  "security",
-  "quality",
-  "latency",
-  "reliability",
-  "token_savings"
-]);
-var EvaluationDimensionSchema = external_exports.object({
-  name: EvaluationDimensionNameSchema,
-  weight: external_exports.number().min(0).max(1).default(1),
-  score: external_exports.number().min(0).max(1),
-  threshold: external_exports.number().min(0).max(1),
-  passed: external_exports.boolean(),
-  metrics: external_exports.record(external_exports.union([external_exports.number(), external_exports.string(), external_exports.boolean()])).default({}),
-  details: external_exports.string().optional()
-});
-var EvaluationVerdictSchema = external_exports.enum(["pass", "fail", "conditional"]);
-var EvaluationDecisionSchema = external_exports.object({
-  verdict: EvaluationVerdictSchema,
-  score: external_exports.number().min(0).max(1),
-  confidence: external_exports.number().min(0).max(1),
-  threshold: external_exports.number().min(0).max(1),
-  notes: external_exports.string().optional(),
-  evaluatedBy: external_exports.string().min(1),
-  evaluatedAt: ISOTimestampSchema
-});
-var EvaluationResultSchema = external_exports.object({
-  evaluationId: IdentifierSchema,
-  candidateId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: SchemaVersionSchema,
-  overallDecision: EvaluationDecisionSchema,
-  dimensions: external_exports.array(EvaluationDimensionSchema),
-  replayTestCount: external_exports.number().int().nonnegative().default(0),
-  replaySuccessCount: external_exports.number().int().nonnegative().default(0),
-  securityChecklist: external_exports.record(external_exports.boolean()).default({}),
-  completedAt: ISOTimestampSchema,
-  durationMs: external_exports.number().nonnegative()
-});
-
-// packages/contracts/dist/records.js
-var WorkspaceRecordSchema = external_exports.object({
-  workspaceId: IdentifierSchema,
-  rootPath: external_exports.string().min(1),
-  name: external_exports.string().min(1),
-  config: external_exports.record(external_exports.unknown()).default({}),
-  capabilityEnvelope: CapabilityEnvelopeSchema,
-  activeTools: external_exports.record(SchemaVersionSchema).default({}),
-  createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema.optional()
-});
-var DeviceRecordSchema = external_exports.object({
-  deviceId: IdentifierSchema,
-  hostname: external_exports.string().min(1),
-  platform: external_exports.enum(["darwin", "linux", "win32", "other"]),
-  arch: external_exports.enum(["arm64", "x64", "arm", "ia32", "other"]),
-  osVersion: external_exports.string(),
-  cpuCores: external_exports.number().int().positive(),
-  totalMemoryMb: external_exports.number().int().positive(),
-  daemonVersion: SchemaVersionSchema,
-  registeredAt: ISOTimestampSchema,
-  lastSeenAt: ISOTimestampSchema
-});
-var InstallationRecordSchema = external_exports.object({
-  installationId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: SchemaVersionSchema,
-  deploymentId: IdentifierSchema,
-  installedAt: ISOTimestampSchema,
-  state: external_exports.enum(["active", "inactive", "broken", "uninstalled"]),
-  configOverrides: external_exports.record(external_exports.unknown()).default({})
-});
-var CatalogToolSummarySchema = external_exports.object({
-  toolId: IdentifierSchema,
-  version: SchemaVersionSchema,
-  manifestDigest: Sha256DigestSchema,
-  scope: ToolScopeSchema,
-  status: external_exports.enum(["active", "draft", "deprecated", "revoked"])
-});
-var CatalogSnapshotSchema = external_exports.object({
-  snapshotId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  timestamp: ISOTimestampSchema,
-  tools: external_exports.record(CatalogToolSummarySchema).default({}),
-  digest: Sha256DigestSchema
-});
-var InvocationResourceUsageSchema = external_exports.object({
-  cpuTimeMs: external_exports.number().nonnegative(),
-  memoryBytes: external_exports.number().int().nonnegative(),
-  shadowRun: external_exports.boolean().default(false)
-});
-var InvocationErrorDetailsSchema = external_exports.object({
-  errorType: external_exports.string().min(1),
-  message: external_exports.string(),
-  stack: external_exports.string().optional()
-});
-var InvocationRecordSchema = external_exports.object({
-  invocationId: IdentifierSchema,
-  sessionId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: SchemaVersionSchema,
-  startedAt: ISOTimestampSchema,
-  completedAt: ISOTimestampSchema,
-  durationMs: external_exports.number().nonnegative(),
-  status: external_exports.enum(["success", "error", "timeout", "rejected_capability"]),
-  inputDigest: Sha256DigestSchema,
-  outputDigest: Sha256DigestSchema.optional(),
-  errorDetails: InvocationErrorDetailsSchema.optional(),
-  resourceUsage: InvocationResourceUsageSchema.optional()
-});
-var AuditActorSchema = external_exports.object({
-  type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),
-  id: external_exports.string().min(1)
-});
-var AuditRecordSchema = external_exports.object({
-  auditId: IdentifierSchema,
-  timestamp: ISOTimestampSchema,
-  eventType: external_exports.string().min(1),
-  actor: AuditActorSchema,
-  workspaceId: IdentifierSchema.optional(),
-  resourceType: external_exports.enum([
-    "tool",
-    "deployment",
-    "candidate",
-    "workspace",
-    "capability",
-    "session",
-    "device",
-    "config"
-  ]),
-  resourceId: external_exports.string().min(1),
-  action: external_exports.string().min(1),
-  status: external_exports.enum(["success", "failure", "denied"]),
-  details: external_exports.record(external_exports.unknown()).default({}),
-  clientIp: external_exports.string().optional()
-});
-var TelemetryRecordSchema = external_exports.object({
-  telemetryId: IdentifierSchema,
-  timestamp: ISOTimestampSchema,
-  deviceId: IdentifierSchema,
-  workspaceId: IdentifierSchema.optional(),
-  metricName: external_exports.string().min(1),
-  metricType: external_exports.enum(["counter", "gauge", "histogram"]),
-  value: external_exports.number(),
-  tags: external_exports.record(external_exports.string()).default({})
-});
-var SyncCursorSchema = external_exports.object({
-  cursorId: IdentifierSchema,
-  deviceId: IdentifierSchema,
-  workspaceId: IdentifierSchema.optional(),
-  entityType: external_exports.string().min(1),
-  lastSyncedSequence: external_exports.number().int().nonnegative(),
-  lastSyncedTimestamp: ISOTimestampSchema,
-  syncToken: external_exports.string().min(1)
-});
-var DeadLetterRecordSchema = external_exports.object({
-  deadLetterId: IdentifierSchema,
-  originalEventType: external_exports.string().min(1),
-  payload: external_exports.record(external_exports.unknown()),
-  errorReason: external_exports.string().min(1),
-  failedAt: ISOTimestampSchema,
-  retryCount: external_exports.number().int().nonnegative().default(0),
-  nextRetryAt: ISOTimestampSchema.optional(),
-  status: external_exports.enum(["pending", "exhausted", "resolved", "discarded"]).default("pending")
-});
-var VerificationDigestsSchema = external_exports.object({
-  sourceDigest: Sha256DigestSchema,
-  manifestDigest: Sha256DigestSchema,
-  testsDigest: Sha256DigestSchema,
-  sdkDigest: Sha256DigestSchema,
-  runtimeDigest: Sha256DigestSchema,
-  policyDigest: Sha256DigestSchema,
-  denoDigest: Sha256DigestSchema,
-  artifactDigest: Sha256DigestSchema,
-  compositeEvidenceDigest: Sha256DigestSchema
-});
-var VerificationChecksSchema = external_exports.object({
-  compilationAndTypeCheck: external_exports.boolean(),
-  staticAnalysis: external_exports.boolean(),
-  schemaValidation: external_exports.boolean(),
-  unitTests: external_exports.boolean(),
-  securityProbes: external_exports.boolean(),
-  deterministicPackaging: external_exports.boolean()
-});
-var ProbeResultEntrySchema = external_exports.object({
-  probeId: external_exports.string().min(1),
-  name: external_exports.string().min(1),
-  passed: external_exports.boolean(),
-  details: external_exports.string().optional()
-});
-var VerificationEvidenceRecordSchema = external_exports.object({
-  evidenceId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  version: SchemaVersionSchema,
-  status: external_exports.enum(["passed", "failed"]),
-  verifiedAt: ISOTimestampSchema,
-  expiresAt: ISOTimestampSchema,
-  digests: VerificationDigestsSchema,
-  checks: VerificationChecksSchema,
-  probeResults: external_exports.array(ProbeResultEntrySchema).default([]),
-  metadata: external_exports.record(external_exports.unknown()).optional(),
-  signature: SignatureMetadataSchema.optional()
-});
-var RecordVisibilitySchema = external_exports.enum(["personal", "workspace"]);
-var PersonalOwnershipRecordSchema = external_exports.object({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-  visibility: external_exports.literal("personal")
-});
-var WorkspaceOwnershipRecordSchema = external_exports.object({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-  visibility: external_exports.literal("workspace")
-});
-var RecordOwnershipSchema = external_exports.discriminatedUnion("visibility", [
-  PersonalOwnershipRecordSchema,
-  WorkspaceOwnershipRecordSchema
-]);
-var SessionRecordBaseSchema = external_exports.object({
-  id: IdentifierSchema,
-  accountId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  harnessType: external_exports.string().min(1).default("default"),
-  status: external_exports.enum(["active", "idle", "completed", "failed", "archived", "terminated"]).default("active"),
-  fidelity: external_exports.enum(["full", "compact", "summary", "lossless"]).default("full"),
-  startedAt: ISOTimestampSchema,
-  endedAt: ISOTimestampSchema.nullable().optional(),
-  cursor: external_exports.string().nullable().optional(),
-  eventCount: external_exports.number().int().nonnegative().default(0),
-  summaryByKind: external_exports.record(external_exports.number().int().nonnegative()).default({}),
-  metadata: external_exports.record(external_exports.unknown()).default({}),
-  createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema
-});
-var PersonalSessionRecordSchema = SessionRecordBaseSchema.extend({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-  visibility: external_exports.literal("personal")
-});
-var WorkspaceSessionRecordSchema = SessionRecordBaseSchema.extend({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-  visibility: external_exports.literal("workspace")
-});
-var SessionRecordSchema = external_exports.discriminatedUnion("visibility", [
-  PersonalSessionRecordSchema,
-  WorkspaceSessionRecordSchema
-]);
-var EvidenceSetRecordBaseSchema = external_exports.object({
-  id: IdentifierSchema,
-  accountId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  sessionId: IdentifierSchema.nullable().optional(),
-  name: external_exports.string().min(1),
-  description: external_exports.string().default(""),
-  revision: external_exports.number().int().positive().default(1),
-  rootDigest: Sha256DigestSchema,
-  memberCount: external_exports.number().int().nonnegative().default(0),
-  metadata: external_exports.record(external_exports.unknown()).default({}),
-  createdAt: ISOTimestampSchema
-});
-var PersonalEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-  visibility: external_exports.literal("personal")
-});
-var WorkspaceEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
-  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-  visibility: external_exports.literal("workspace")
-});
-var EvidenceSetRecordSchema = external_exports.discriminatedUnion("visibility", [
-  PersonalEvidenceSetRecordSchema,
-  WorkspaceEvidenceSetRecordSchema
-]);
-
-// packages/contracts/dist/safety-gate.js
-var CURRENT_SAFETY_GATE_VERSION = "1.0.0";
-var SafetyAttestationRecordSchema = external_exports.object({
-  attestationId: IdentifierSchema,
-  schemaVersion: SchemaVersionSchema.default(CURRENT_SAFETY_GATE_VERSION),
-  issuedAt: ISOTimestampSchema,
-  expiresAt: ISOTimestampSchema,
-  environment: external_exports.enum(["production", "staging", "development", "test"]).default("production"),
-  compatibility: external_exports.object({
-    runtimeVersion: SchemaVersionSchema,
-    brokerProtocolVersion: SchemaVersionSchema,
-    bundleVerifierVersion: SchemaVersionSchema,
-    policyVersion: SchemaVersionSchema
-  }),
-  checks: external_exports.record(external_exports.boolean()),
-  metadata: external_exports.record(external_exports.unknown()).optional(),
-  signature: SignatureMetadataSchema.optional()
-});
-var UnmetRequirementSchema = external_exports.object({
-  code: external_exports.string().min(1),
-  message: external_exports.string().min(1),
-  remediation: external_exports.string().min(1)
-});
-var ProductionSafetyGateStatusSchema = external_exports.object({
-  isOpen: external_exports.boolean(),
-  status: external_exports.enum(["passed", "failed", "unsafe_override", "uninitialized"]),
-  evaluatedAt: ISOTimestampSchema,
-  versions: external_exports.object({
-    runtimeVersion: SchemaVersionSchema,
-    brokerProtocolVersion: SchemaVersionSchema,
-    bundleVerifierVersion: SchemaVersionSchema,
-    policyVersion: SchemaVersionSchema
-  }),
-  reasons: external_exports.array(external_exports.string()),
-  unmetRequirements: external_exports.array(UnmetRequirementSchema),
-  attestation: SafetyAttestationRecordSchema.optional(),
-  unsafeOverrideActive: external_exports.boolean().default(false)
-});
-var SafetyGateRefusalSchema = external_exports.object({
-  isError: external_exports.literal(true),
-  refusalCode: external_exports.string().min(1),
-  refusalReason: external_exports.string().min(1),
-  remediation: external_exports.string().min(1),
-  unmetGates: external_exports.array(external_exports.string()),
-  evaluatedAt: ISOTimestampSchema,
-  content: external_exports.array(external_exports.object({
-    type: external_exports.literal("text"),
-    text: external_exports.string()
-  })),
-  details: external_exports.record(external_exports.unknown()).optional()
-});
-
 // packages/contracts/dist/v1.js
 var V1_SCHEMA_VERSION = "1.0.0";
 var V1_SCHEMA_KINDS = {
@@ -6338,137 +6256,6 @@ var V1RevocationMetadataSchema = external_exports.object({
 }, {
   message: "Revocation metadata timestamps invalid: issuedAt must be before or equal to expiresAt"
 });
-var V1ObservationStatusSchema = external_exports.enum(["unavailable", "preliminary", "measured"]);
-var V1UsageMetricsSchema = external_exports.object({
-  inputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-  outputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-  reasoningTokens: external_exports.number().int().nonnegative().optional().nullable(),
-  cachedInputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-  totalTokens: external_exports.number().int().nonnegative().optional().nullable(),
-  costMicroUsd: external_exports.number().int().nonnegative().optional().nullable(),
-  durationMs: external_exports.number().int().nonnegative().optional().nullable()
-}).strict();
-var V1CalibrationRowSchema = external_exports.object({
-  rowId: UUIDSchema,
-  workloadId: external_exports.string().min(1),
-  benchmarkId: external_exports.string().min(1),
-  baselineModel: external_exports.string().min(1),
-  candidateModel: external_exports.string().min(1),
-  runtimeVersion: V1ExactSemVerSchema,
-  candidateVersion: V1ExactSemVerSchema,
-  toolId: UUIDSchema,
-  baselineUsage: V1UsageMetricsSchema.optional().nullable(),
-  candidateUsage: V1UsageMetricsSchema.optional().nullable(),
-  catalogExposureTokens: external_exports.number().int().nonnegative(),
-  isEquivalent: external_exports.boolean(),
-  status: V1ObservationStatusSchema,
-  measuredAt: ISOTimestampSchema,
-  digest: Sha256DigestSchema
-}).strict().superRefine((data, ctx) => {
-  if (data.status === "measured" || data.status === "preliminary") {
-    if (data.baselineUsage === null || data.baselineUsage === void 0 || typeof data.baselineUsage.totalTokens !== "number" || data.baselineUsage.totalTokens < 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `Calibration row with status '${data.status}' requires numeric baselineUsage.totalTokens`,
-        path: ["baselineUsage", "totalTokens"]
-      });
-    }
-    if (data.candidateUsage === null || data.candidateUsage === void 0 || typeof data.candidateUsage.totalTokens !== "number" || data.candidateUsage.totalTokens < 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `Calibration row with status '${data.status}' requires numeric candidateUsage.totalTokens`,
-        path: ["candidateUsage", "totalTokens"]
-      });
-    }
-  }
-});
-var V1SavingsSummarySchema = external_exports.object({
-  status: V1ObservationStatusSchema,
-  totalSamples: external_exports.number().int().nonnegative().optional().nullable(),
-  equivalentSamples: external_exports.number().int().nonnegative().optional().nullable(),
-  tokenSavingsNet: external_exports.number().int().optional().nullable(),
-  tokenSavingsPercentage: external_exports.number().optional().nullable(),
-  costSavingsMicroUsdNet: external_exports.number().int().optional().nullable(),
-  catalogExposureTokenSum: external_exports.number().int().nonnegative().optional().nullable(),
-  confidenceInterval: external_exports.object({
-    low: external_exports.number(),
-    high: external_exports.number(),
-    confidenceLevel: external_exports.number().min(0).max(1)
-  }).strict().optional().nullable()
-}).strict().superRefine((data, ctx) => {
-  if (data.status === "measured") {
-    if (data.totalSamples === null || data.totalSamples === void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Measured summary requires numeric totalSamples",
-        path: ["totalSamples"]
-      });
-    }
-    if (data.equivalentSamples === null || data.equivalentSamples === void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Measured summary requires numeric equivalentSamples",
-        path: ["equivalentSamples"]
-      });
-    }
-    if (data.tokenSavingsNet === null || data.tokenSavingsNet === void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Measured summary requires numeric tokenSavingsNet",
-        path: ["tokenSavingsNet"]
-      });
-    }
-    if (data.tokenSavingsPercentage === null || data.tokenSavingsPercentage === void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Measured summary requires numeric tokenSavingsPercentage",
-        path: ["tokenSavingsPercentage"]
-      });
-    }
-    if (data.catalogExposureTokenSum === null || data.catalogExposureTokenSum === void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Measured summary requires numeric catalogExposureTokenSum",
-        path: ["catalogExposureTokenSum"]
-      });
-    }
-  } else if (data.status === "unavailable") {
-    if (data.tokenSavingsNet !== null && data.tokenSavingsNet !== void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Unavailable summary cannot claim numeric tokenSavingsNet",
-        path: ["tokenSavingsNet"]
-      });
-    }
-    if (data.tokenSavingsPercentage !== null && data.tokenSavingsPercentage !== void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Unavailable summary cannot claim numeric tokenSavingsPercentage",
-        path: ["tokenSavingsPercentage"]
-      });
-    }
-    if (data.costSavingsMicroUsdNet !== null && data.costSavingsMicroUsdNet !== void 0) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Unavailable summary cannot claim numeric costSavingsMicroUsdNet",
-        path: ["costSavingsMicroUsdNet"]
-      });
-    }
-  }
-});
-var V1SavingsEvidenceSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.SAVINGS_EVIDENCE),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  evidenceId: UUIDSchema,
-  toolId: UUIDSchema,
-  toolVersion: V1ExactSemVerSchema,
-  projectId: UUIDSchema.optional(),
-  status: V1ObservationStatusSchema,
-  calibrationRows: external_exports.array(V1CalibrationRowSchema),
-  summary: V1SavingsSummarySchema,
-  createdAt: ISOTimestampSchema,
-  evidenceDigest: Sha256DigestSchema
-}).strict();
 
 // packages/harness-contracts/dist/types.js
 var InstallationStatusSchema = external_exports.enum([
@@ -6678,10 +6465,10 @@ var NodeConfigFsBridge = class {
     try {
       return await fs.readFile(filePath, "utf8");
     } catch (err) {
-      if (err.code === "ENOENT") {
+      if (err instanceof Error && "code" in err && err.code === "ENOENT") {
         return null;
       }
-      if (err.code === "EACCES") {
+      if (err instanceof Error && "code" in err && err.code === "EACCES") {
         throw new HarnessPermissionError(`Permission denied reading ${filePath}`, {
           targetPath: filePath,
           cause: err
@@ -6696,7 +6483,7 @@ var NodeConfigFsBridge = class {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(filePath, content, "utf8");
     } catch (err) {
-      if (err.code === "EACCES") {
+      if (err instanceof Error && "code" in err && err.code === "EACCES") {
         throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
           targetPath: filePath,
           cause: err
@@ -6717,17 +6504,17 @@ var NodeConfigFsBridge = class {
     await fs.mkdir(dirPath, { recursive: true });
   }
   async copyFile(srcPath, destPath) {
-    const dir = path.dirname(destPath);
-    await fs.mkdir(dir, { recursive: true });
+    await this.mkdirp(path.dirname(destPath));
     await fs.copyFile(srcPath, destPath);
   }
   async unlink(filePath) {
     try {
       await fs.unlink(filePath);
     } catch (err) {
-      if (err.code !== "ENOENT") {
-        throw err;
+      if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+        return;
       }
+      throw err;
     }
   }
 };
@@ -7110,7 +6897,7 @@ var RELEASE_MODE_MASK = 4095;
 var TAR_BLOCK_SIZE = 512;
 var EXACT_RELEASE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 function normalizeReleaseVersion(version) {
-  if (typeof version !== "string" || version.length === 0 || version !== version.trim()) {
+  if (!version || String(version) !== version || version !== version.trim()) {
     throw new Error(
       "Security violation: release version must be a non-empty exact SemVer segment."
     );
@@ -7146,7 +6933,7 @@ function lstatIfExists(filePath, fsSync) {
   try {
     return fsSync.lstatSync(filePath);
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (error instanceof Error && "code" in error && Boolean(error) && error instanceof Object && "code" in error && error.code === "ENOENT") {
       return null;
     }
     throw error;
@@ -7381,7 +7168,7 @@ function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes
       try {
         fsSync.mkdirSync(currentPath, { recursive: false, mode: desiredMode2 });
       } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+        if (!(error instanceof Error && "code" in error && Boolean(error) && error instanceof Object && "code" in error && error.code === "EEXIST")) {
           throw error;
         }
       }
@@ -7938,10 +7725,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { main } = await import(path.resolve(__dirname, "../apps/cli/dist/bin/cli.js"));
-if (typeof main === "function") {
+if (main instanceof Function) {
   try {
     const exitCode = await main(process.argv.slice(2));
-    if (typeof exitCode === "number" && exitCode !== 0) {
+    if (Number.isInteger(exitCode) && exitCode !== 0) {
       process.exit(exitCode);
     }
   } catch (err) {
@@ -8262,12 +8049,16 @@ import "${path2.resolve(binTarget)}";
     if (priorVersionStateRaw) {
       try {
         const state = JSON.parse(priorVersionStateRaw);
-        existingProvenance = { ...state.provenanceByVersion ?? {} };
+        if (state.provenanceByVersion) {
+          existingProvenance = { ...state.provenanceByVersion };
+        }
       } catch {
       }
     }
     try {
-      const versionMetadata = JSON.parse(fs2.readFileSync(targetVersionJson, "utf8"));
+      const versionMetadata = JSON.parse(
+        fs2.readFileSync(targetVersionJson, "utf8")
+      );
       if (versionMetadata.provenance) existingProvenance[cleanTarget] = versionMetadata.provenance;
     } catch {
     }
@@ -8528,7 +8319,7 @@ import crypto2 from "node:crypto";
 var REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 var ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 function canonicalJson(val) {
-  if (val === null || typeof val !== "object") {
+  if (val === null || val === void 0 || Array.isArray(val) || Object.prototype.toString.call(val) !== "[object Object]") {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
@@ -8540,7 +8331,7 @@ function canonicalJson(val) {
   return `{${pairs.join(",")}}`;
 }
 function createPublicKeyFromInput(key) {
-  if (typeof key !== "string") {
+  if (key instanceof crypto2.KeyObject) {
     return key;
   }
   const trimmed = key.trim();
@@ -8608,7 +8399,7 @@ function verifyChannelMetadata(channelData, options = {}) {
   const errors = [];
   const warnings = [];
   const requestedChannel = options.channel || "stable";
-  if (!channelData || typeof channelData !== "object") {
+  if (!channelData || Array.isArray(channelData) || Object.prototype.toString.call(channelData) !== "[object Object]") {
     return {
       valid: false,
       channel: requestedChannel,
@@ -8622,14 +8413,14 @@ function verifyChannelMetadata(channelData, options = {}) {
   }
   if (meta.metadataVersion === void 0 || meta.metadataVersion === null) {
     errors.push("Channel metadata is missing required 'metadataVersion'.");
-  } else if (typeof meta.metadataVersion !== "number" || !Number.isInteger(meta.metadataVersion) || meta.metadataVersion < 1) {
+  } else if (!Number.isInteger(meta.metadataVersion) || meta.metadataVersion < 1) {
     errors.push(`Invalid channel metadataVersion '${String(meta.metadataVersion)}'.`);
   } else if (meta.metadataVersion > 1) {
     errors.push(
       `Unsupported channel metadataVersion ${meta.metadataVersion}. Expected metadataVersion 1.`
     );
   }
-  if (!meta.expiresAt || typeof meta.expiresAt !== "string") {
+  if (!meta.expiresAt || String(meta.expiresAt) !== meta.expiresAt) {
     errors.push("Channel metadata is missing required 'expiresAt'.");
   } else {
     const expiresAtMs = Date.parse(meta.expiresAt);
@@ -8638,7 +8429,7 @@ function verifyChannelMetadata(channelData, options = {}) {
         `Channel metadata 'expiresAt' is not a valid ISO timestamp: '${meta.expiresAt}'.`
       );
     } else {
-      const nowMs = typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : typeof options.now === "string" ? Date.parse(options.now) : Date.now();
+      const nowMs = Number.isFinite(options.now) ? Number(options.now) : options.now instanceof Date ? options.now.getTime() : String(options.now) === options.now ? Date.parse(String(options.now)) : Date.now();
       if (!Number.isNaN(nowMs) && nowMs > expiresAtMs) {
         errors.push(
           `Channel metadata has expired (expiresAt: '${meta.expiresAt}', current: '${new Date(nowMs).toISOString()}').`
@@ -8646,7 +8437,7 @@ function verifyChannelMetadata(channelData, options = {}) {
       }
     }
   }
-  if (!meta.channels || typeof meta.channels !== "object") {
+  if (!meta.channels || Array.isArray(meta.channels) || Object.prototype.toString.call(meta.channels) !== "[object Object]") {
     errors.push("Channel metadata is missing required 'channels' mapping.");
   } else {
     const channelInfo = meta.channels[requestedChannel];
@@ -8701,17 +8492,31 @@ function verifyChannelMetadata(channelData, options = {}) {
     if (meta.signatures && meta.signatures.length > 0 && trustedKeys.length > 0) {
       const payloadToVerify = {
         schemaVersion: meta.schemaVersion,
-        ...meta.metadataVersion !== void 0 ? { metadataVersion: meta.metadataVersion } : {},
-        ...meta.expiresAt !== void 0 ? { expiresAt: meta.expiresAt } : {},
-        ...meta.minSupportedVersion !== void 0 ? { minSupportedVersion: meta.minSupportedVersion } : {},
         currentVersion: meta.currentVersion,
         updatedAt: meta.updatedAt,
-        ...meta.releaseIdentity !== void 0 ? { releaseIdentity: meta.releaseIdentity } : {},
-        channels: meta.channels,
-        ...meta.rollbackReferences !== void 0 ? { rollbackReferences: meta.rollbackReferences } : {},
-        ...meta.revokedVersions !== void 0 ? { revokedVersions: meta.revokedVersions } : {},
-        ...meta.revokedKeyIds !== void 0 ? { revokedKeyIds: meta.revokedKeyIds } : {}
+        channels: meta.channels
       };
+      if (meta.metadataVersion !== void 0) {
+        payloadToVerify.metadataVersion = meta.metadataVersion;
+      }
+      if (meta.expiresAt !== void 0) {
+        payloadToVerify.expiresAt = meta.expiresAt;
+      }
+      if (meta.minSupportedVersion !== void 0) {
+        payloadToVerify.minSupportedVersion = meta.minSupportedVersion;
+      }
+      if (meta.releaseIdentity !== void 0) {
+        payloadToVerify.releaseIdentity = meta.releaseIdentity;
+      }
+      if (meta.rollbackReferences !== void 0) {
+        payloadToVerify.rollbackReferences = meta.rollbackReferences;
+      }
+      if (meta.revokedVersions !== void 0) {
+        payloadToVerify.revokedVersions = meta.revokedVersions;
+      }
+      if (meta.revokedKeyIds !== void 0) {
+        payloadToVerify.revokedKeyIds = meta.revokedKeyIds;
+      }
       const revokedSet = /* @__PURE__ */ new Set([
         ...REVOKED_RELEASE_KEY_IDS,
         ...options.revokedKeyIds || []
@@ -8778,7 +8583,7 @@ function verifyChannelMetadata(channelData, options = {}) {
 function verifyManifest(manifestData, options = {}) {
   const errors = [];
   const warnings = [];
-  if (!manifestData || typeof manifestData !== "object") {
+  if (!manifestData || Array.isArray(manifestData) || Object.prototype.toString.call(manifestData) !== "[object Object]") {
     return {
       valid: false,
       assets: {},
@@ -8792,21 +8597,21 @@ function verifyManifest(manifestData, options = {}) {
   }
   if (manifest.metadataVersion === void 0 || manifest.metadataVersion === null) {
     errors.push("Manifest missing required 'metadataVersion'.");
-  } else if (typeof manifest.metadataVersion !== "number" || !Number.isInteger(manifest.metadataVersion) || manifest.metadataVersion < 1) {
+  } else if (!Number.isInteger(manifest.metadataVersion) || manifest.metadataVersion < 1) {
     errors.push(`Invalid manifest metadataVersion '${String(manifest.metadataVersion)}'.`);
   } else if (manifest.metadataVersion > 1) {
     errors.push(
       `Unsupported manifest metadataVersion ${manifest.metadataVersion}. Expected metadataVersion 1.`
     );
   }
-  if (!manifest.expiresAt || typeof manifest.expiresAt !== "string") {
+  if (!manifest.expiresAt || String(manifest.expiresAt) !== manifest.expiresAt) {
     errors.push("Manifest missing required 'expiresAt'.");
   } else {
     const expiresAtMs = Date.parse(manifest.expiresAt);
     if (Number.isNaN(expiresAtMs)) {
       errors.push(`Manifest 'expiresAt' is not a valid ISO timestamp: '${manifest.expiresAt}'.`);
     } else {
-      const nowMs = typeof options.now === "number" ? options.now : options.now instanceof Date ? options.now.getTime() : typeof options.now === "string" ? Date.parse(options.now) : Date.now();
+      const nowMs = Number.isFinite(options.now) ? Number(options.now) : options.now instanceof Date ? options.now.getTime() : String(options.now) === options.now ? Date.parse(String(options.now)) : Date.now();
       if (!Number.isNaN(nowMs) && nowMs > expiresAtMs) {
         errors.push(
           `Manifest has expired (expiresAt: '${manifest.expiresAt}', current: '${new Date(nowMs).toISOString()}').`
@@ -8830,15 +8635,15 @@ function verifyManifest(manifestData, options = {}) {
       );
     }
   }
-  if (!manifest.assets || typeof manifest.assets !== "object") {
+  if (!manifest.assets || Array.isArray(manifest.assets) || Object.prototype.toString.call(manifest.assets) !== "[object Object]") {
     errors.push("Manifest missing required 'assets' object.");
   } else {
     for (const [key, asset] of Object.entries(manifest.assets)) {
-      if (!asset || typeof asset !== "object") {
+      if (!asset || Array.isArray(asset) || Object.prototype.toString.call(asset) !== "[object Object]") {
         errors.push(`Manifest asset '${key}' is invalid.`);
         continue;
       }
-      if (typeof asset.sizeBytes !== "number" || !Number.isSafeInteger(asset.sizeBytes) || asset.sizeBytes <= 0) {
+      if (!Number.isSafeInteger(asset.sizeBytes) || Number(asset.sizeBytes) <= 0) {
         errors.push(`Manifest asset '${key}' has invalid sizeBytes.`);
       } else if (asset.sizeBytes > 2 * 1024 * 1024 * 1024) {
         errors.push(`Manifest asset '${key}' exceeds maximum allowed release size of 2 GiB.`);
@@ -8871,16 +8676,28 @@ function verifyManifest(manifestData, options = {}) {
     if (manifest.signatures && manifest.signatures.length > 0 && trustedKeys.length > 0) {
       const payloadToVerify = {
         schemaVersion: manifest.schemaVersion,
-        ...manifest.metadataVersion !== void 0 ? { metadataVersion: manifest.metadataVersion } : {},
-        ...manifest.expiresAt !== void 0 ? { expiresAt: manifest.expiresAt } : {},
         version: manifest.version,
         releaseDate: manifest.releaseDate,
-        ...manifest.releaseIdentity !== void 0 ? { releaseIdentity: manifest.releaseIdentity } : {},
-        ...manifest.packages !== void 0 ? { packages: manifest.packages } : {},
-        assets: manifest.assets,
-        ...manifest.runtimes !== void 0 ? { runtimes: manifest.runtimes } : {},
-        ...manifest.evidence !== void 0 ? { evidence: manifest.evidence } : {}
+        assets: manifest.assets
       };
+      if (manifest.metadataVersion !== void 0) {
+        payloadToVerify.metadataVersion = manifest.metadataVersion;
+      }
+      if (manifest.expiresAt !== void 0) {
+        payloadToVerify.expiresAt = manifest.expiresAt;
+      }
+      if (manifest.releaseIdentity !== void 0) {
+        payloadToVerify.releaseIdentity = manifest.releaseIdentity;
+      }
+      if (manifest.packages !== void 0) {
+        payloadToVerify.packages = manifest.packages;
+      }
+      if (manifest.runtimes !== void 0) {
+        payloadToVerify.runtimes = manifest.runtimes;
+      }
+      if (manifest.evidence !== void 0) {
+        payloadToVerify.evidence = manifest.evidence;
+      }
       const revokedSet = /* @__PURE__ */ new Set([
         ...REVOKED_RELEASE_KEY_IDS,
         ...options.revokedKeyIds || []
@@ -8940,7 +8757,7 @@ function verifyManifest(manifestData, options = {}) {
   };
 }
 function selectPlatformAsset(manifest, platform) {
-  if (!manifest.assets || typeof manifest.assets !== "object") {
+  if (!manifest.assets || Array.isArray(manifest.assets) || Object.prototype.toString.call(manifest.assets) !== "[object Object]") {
     throw new Error("Release manifest has no assets available.");
   }
   const isWsl = Boolean(platform.isWsl) || platform.os === "wsl";
@@ -9297,7 +9114,9 @@ async function nodePinnedFetch(currentUrl, pinnedAddress, family, options = {}) 
         method: "GET",
         maxHeaderSize,
         lookup: (_hostname, lookupOptions, callback) => {
-          const isAll = typeof lookupOptions === "object" && lookupOptions !== null && Boolean(lookupOptions.all);
+          const isAll = Boolean(
+            lookupOptions && lookupOptions instanceof Object && "all" in lookupOptions && lookupOptions.all
+          );
           if (isAll) {
             callback(null, [{ address: pinnedAddress, family }]);
           } else {
@@ -9445,7 +9264,7 @@ async function fetchBytes(urlString, fetchImplOrOptions, allowInsecureHttpForTes
   let timeoutMs;
   let idleTimeoutMs;
   let connectTimeoutMs;
-  if (typeof fetchImplOrOptions === "function") {
+  if (fetchImplOrOptions instanceof Function) {
     fetchImpl = fetchImplOrOptions;
     allowInsecure = allowInsecureHttpForTestsArg ?? false;
     dnsLookup = extraOptions?.dnsLookup;
@@ -9455,7 +9274,7 @@ async function fetchBytes(urlString, fetchImplOrOptions, allowInsecureHttpForTes
     timeoutMs = extraOptions?.timeoutMs;
     idleTimeoutMs = extraOptions?.idleTimeoutMs;
     connectTimeoutMs = extraOptions?.connectTimeoutMs;
-  } else if (fetchImplOrOptions && typeof fetchImplOrOptions === "object") {
+  } else if (fetchImplOrOptions) {
     fetchImpl = fetchImplOrOptions.fetchImpl;
     allowInsecure = fetchImplOrOptions.allowInsecureHttpForTests ?? false;
     dnsLookup = fetchImplOrOptions.dnsLookup;
@@ -9533,7 +9352,7 @@ async function fetchBytes(urlString, fetchImplOrOptions, allowInsecureHttpForTes
           }
         }
         let bodyBuf;
-        if (resp.body && typeof resp.body.getReader === "function") {
+        if (resp.body && "getReader" in resp.body && resp.body.getReader instanceof Function) {
           const reader = resp.body.getReader();
           const chunks = [];
           let total = 0;
@@ -9674,7 +9493,7 @@ var OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS = {
   publicKeyHex: true
 };
 function parseBundledReleaseTrust(parsed) {
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+  if (!parsed || Array.isArray(parsed) || Object.prototype.toString.call(parsed) !== "[object Object]") {
     throw new Error("Bundled release trust root must be a JSON object.");
   }
   const root = parsed;
@@ -9696,17 +9515,17 @@ function parseBundledReleaseTrust(parsed) {
   const validatedKeys = [];
   for (let i = 0; i < root.trustedKeys.length; i++) {
     const entry = root.trustedKeys[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (!entry || Array.isArray(entry) || Object.prototype.toString.call(entry) !== "[object Object]") {
       throw new Error(`Bundled trustedKeys[${i}] must be a JSON object.`);
     }
     const record = entry;
     for (const key of Object.keys(record)) {
-      if (!BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS[key]) {
+      if (!(key in BUNDLED_TRUSTED_KEY_ALLOWED_FIELDS)) {
         throw new Error(`Bundled trustedKeys[${i}] contains forbidden property '${key}'.`);
       }
     }
     const keyId = record.keyId;
-    if (typeof keyId !== "string" || !keyId.trim()) {
+    if (String(keyId) !== keyId || !keyId.trim()) {
       throw new Error(`Bundled trustedKeys[${i}] is missing a valid 'keyId'.`);
     }
     if (seenKeyIds.has(keyId)) {
@@ -9726,7 +9545,7 @@ function parseBundledReleaseTrust(parsed) {
         `Release key '${keyId}' belongs to '${String(record.trustDomain)}' trust domain, not 'production'.`
       );
     }
-    if (typeof record.publicKeyPem !== "string" || !record.publicKeyPem.trim()) {
+    if (String(record.publicKeyPem) !== record.publicKeyPem || !String(record.publicKeyPem).trim()) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyPem'.`);
     }
     let keyObject;
@@ -9746,7 +9565,7 @@ function parseBundledReleaseTrust(parsed) {
     const rawPublicKey = der.subarray(-32);
     const derivedHex = rawPublicKey.toString("hex").toLowerCase();
     const derivedFingerprint = crypto3.createHash("sha256").update(der).digest("hex").toLowerCase();
-    if (typeof record.publicKeyHex !== "string") {
+    if (String(record.publicKeyHex) !== record.publicKeyHex) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyHex'.`);
     }
     const normalizedDeclaredHex = record.publicKeyHex.trim().toLowerCase();
@@ -9755,7 +9574,7 @@ function parseBundledReleaseTrust(parsed) {
         `Trusted release key '${keyId}' publicKeyHex does not match publicKeyPem (expected ${derivedHex}, got ${normalizedDeclaredHex}).`
       );
     }
-    if (typeof record.publicKeyFingerprintSha256 !== "string") {
+    if (String(record.publicKeyFingerprintSha256) !== record.publicKeyFingerprintSha256) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyFingerprintSha256'.`);
     }
     const normalizedDeclaredFingerprint = record.publicKeyFingerprintSha256.trim().toLowerCase();
@@ -9792,21 +9611,21 @@ function parseTrustedKeysJsonOverride(overrideJson) {
   const validatedKeys = [];
   for (let i = 0; i < parsed.length; i++) {
     const entry = parsed[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (!entry || Array.isArray(entry) || Object.prototype.toString.call(entry) !== "[object Object]") {
       throw new Error(
         `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] must be a JSON object with keyId and publicKeyHex.`
       );
     }
     const record = entry;
     for (const key of Object.keys(record)) {
-      if (!OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS[key]) {
+      if (!(key in OVERRIDE_TRUSTED_KEY_ALLOWED_FIELDS)) {
         throw new Error(
           `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] contains forbidden property '${key}'.`
         );
       }
     }
     const keyId = record.keyId;
-    if (typeof keyId !== "string" || !keyId.trim()) {
+    if (String(keyId) !== keyId || !keyId.trim()) {
       throw new Error(`RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] is missing a valid 'keyId'.`);
     }
     if (seenKeyIds.has(keyId)) {
@@ -9817,7 +9636,7 @@ function parseTrustedKeysJsonOverride(overrideJson) {
       throw new Error(`Trusted release key '${keyId}' is revoked.`);
     }
     const publicKeyHex = record.publicKeyHex;
-    if (typeof publicKeyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(publicKeyHex.trim())) {
+    if (String(publicKeyHex) !== publicKeyHex || !/^[0-9a-fA-F]{64}$/.test(String(publicKeyHex).trim())) {
       throw new Error(
         `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS[${i}] requires a 64-character hex publicKeyHex.`
       );
@@ -9836,13 +9655,14 @@ function parseTrustedKeysJsonOverride(overrideJson) {
 }
 async function loadBundledTrustedReleaseKeys(customTrustData) {
   if (customTrustData !== void 0) {
-    if (typeof customTrustData === "string") {
-      return parseTrustedKeysJsonOverride(customTrustData);
+    if (String(customTrustData) === customTrustData) {
+      return parseTrustedKeysJsonOverride(String(customTrustData));
     }
-    if (typeof customTrustData === "object" && customTrustData !== null && "RESIN_TRUSTED_RELEASE_PUBLIC_KEYS" in customTrustData) {
-      const rawOverride = customTrustData.RESIN_TRUSTED_RELEASE_PUBLIC_KEYS;
-      if (typeof rawOverride === "string") {
-        return parseTrustedKeysJsonOverride(rawOverride);
+    if (customTrustData && !Array.isArray(customTrustData) && Object.prototype.toString.call(customTrustData) === "[object Object]") {
+      const customObj = customTrustData;
+      const rawOverride = customObj.RESIN_TRUSTED_RELEASE_PUBLIC_KEYS;
+      if (String(rawOverride) === rawOverride) {
+        return parseTrustedKeysJsonOverride(String(rawOverride));
       }
     }
     return parseBundledReleaseTrust(customTrustData);
@@ -9900,7 +9720,7 @@ function resolveDenoAsset(descriptor, platform, manifestUrl, allowInsecureHttpFo
   if (!asset) throw new Error(`No pinned Deno runtime asset exists for '${key}'.`);
   const pinnedRuntime = PINNED_DENO_RUNTIMES[key] ?? (linuxFallback ? PINNED_DENO_RUNTIMES[linuxFallback] : void 0);
   if (pinnedRuntime && !allowInsecureHttpForTests) {
-    if (typeof asset.sizeBytes === "number" && asset.sizeBytes !== pinnedRuntime.sizeBytes) {
+    if (Number.isFinite(asset.sizeBytes) && asset.sizeBytes !== pinnedRuntime.sizeBytes) {
       throw new Error(
         `Deno runtime asset size mismatch for '${key}': expected ${pinnedRuntime.sizeBytes} bytes, got ${asset.sizeBytes} bytes.`
       );
@@ -9913,7 +9733,7 @@ function resolveDenoAsset(descriptor, platform, manifestUrl, allowInsecureHttpFo
     }
   }
   const exactSize = asset.sizeBytes ?? pinnedRuntime?.sizeBytes;
-  if (typeof exactSize !== "number" || !Number.isSafeInteger(exactSize) || exactSize <= 0) {
+  if (!Number.isSafeInteger(exactSize) || Number(exactSize) <= 0) {
     throw new Error(`Deno runtime asset '${key}' is missing a valid positive sizeBytes.`);
   }
   let assetUrl = asset.url;
@@ -10009,7 +9829,7 @@ async function resolveProductionRelease(options) {
     );
   }
   const releaseAsset = selectPlatformAsset(manifest, options.platform);
-  if (typeof releaseAsset.sizeBytes !== "number" || !Number.isSafeInteger(releaseAsset.sizeBytes) || releaseAsset.sizeBytes <= 0) {
+  if (!Number.isSafeInteger(releaseAsset.sizeBytes) || releaseAsset.sizeBytes <= 0) {
     throw new Error(
       `Release manifest specified invalid sizeBytes for asset '${releaseAsset.filename}'.`
     );
@@ -10038,8 +9858,8 @@ async function resolveProductionRelease(options) {
     resolvedManifestUrl,
     allowInsecure
   );
-  const signingKeyIds = (manifest.signatures ?? []).map((s) => s.keyId).filter((k) => typeof k === "string" && k.length > 0);
-  const identity = typeof manifest.releaseIdentity === "object" && manifest.releaseIdentity !== null ? manifest.releaseIdentity : void 0;
+  const signingKeyIds = (manifest.signatures ?? []).map((s) => s.keyId).filter((k) => String(k) === k && String(k).length > 0);
+  const identity = manifest.releaseIdentity && !Array.isArray(manifest.releaseIdentity) && Object.prototype.toString.call(manifest.releaseIdentity) === "[object Object]" ? manifest.releaseIdentity : void 0;
   return {
     channel,
     manifest,
@@ -10056,8 +9876,8 @@ async function resolveProductionRelease(options) {
       releaseAssetUrl,
       releaseAssetSha256: normalizeSha2562(releaseAsset.sha256),
       releaseAssetSizeBytes: releaseAsset.sizeBytes,
-      repository: typeof identity?.repository === "string" ? identity.repository : void 0,
-      commitSha: typeof identity?.commitSha === "string" ? identity.commitSha : void 0,
+      repository: String(identity?.repository) === identity?.repository ? identity.repository : void 0,
+      commitSha: String(identity?.commitSha) === identity?.commitSha ? identity.commitSha : void 0,
       signingKeyIds,
       deno: {
         version: denoAsset.version,
@@ -10081,6 +9901,14 @@ var PRODUCTION_RELEASE_TRUST_RECORD = Object.freeze({
       publicKeyPem: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA9ZI1qv+S+txsMLDf1WylTCionlq7H6V6t9XqaD1geFE=\n-----END PUBLIC KEY-----\n",
       publicKeyHex: "f59235aaff92fadc6c30b0dfd56ca54c28a89e5abb1fa57ab7d5ea683d607851",
       publicKeyFingerprintSha256: "a702d0d424e5797ecb672afabd275548c1ef6e1e95d1ea9651916e147e784359"
+    }),
+    Object.freeze({
+      keyId: "resin-public-release-v1",
+      algorithm: "Ed25519",
+      trustDomain: "production",
+      publicKeyPem: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAD6LyeD/8rL8fscAs8B0okBXGRI0PCrGIbecGo5lV0gQ=\n-----END PUBLIC KEY-----\n",
+      publicKeyHex: "0fa2f2783ffcacbf1fb1c02cf01d289015c6448d0f0ab1886de706a39955d204",
+      publicKeyFingerprintSha256: "54a0077e1353cd20f2c4d4eab5dd0d9d883a5e814c6992f61287ef544255836f"
     })
   ])
 });
@@ -10240,7 +10068,7 @@ async function detectOnboardingSkipReason(options) {
     env.JENKINS_URL
   ];
   if (ciVariables.some(
-    (value) => typeof value === "string" && value.length > 0 && value !== "0" && value.toLowerCase() !== "false"
+    (value) => String(value) === value && value.length > 0 && value !== "0" && value.toLowerCase() !== "false"
   )) {
     return "CI environment detected";
   }
@@ -10248,7 +10076,7 @@ async function detectOnboardingSkipReason(options) {
     return "Non-interactive environment detected";
   }
   const allowRoot = env.RESIN_ALLOW_ROOT === "1" || env.RESIN_ALLOW_ROOT === "true";
-  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : typeof process3.getuid === "function" ? process3.getuid() === 0 : false);
+  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : process3.getuid instanceof Function ? process3.getuid() === 0 : false);
   if (isRoot && !allowRoot) {
     return "Running in root/sudo context (avoiding root-owned browser launch or user config)";
   }
@@ -10520,7 +10348,7 @@ async function configureShellPath(options) {
     try {
       if (await fsBridge.exists(fullCandidatePath)) {
         const content = await fsBridge.readFile(fullCandidatePath);
-        if (content.includes(".resin/bin") || content.includes(binDir) || content.includes(pathLine)) {
+        if (content !== null && (content.includes(".resin/bin") || content.includes(binDir) || content.includes(pathLine))) {
           const profileName2 = `~/${candidate}`;
           return {
             attempted: true,
@@ -10559,7 +10387,7 @@ async function configureShellPath(options) {
     let newContent = "";
     if (await fsBridge.exists(targetFullPath)) {
       const existing = await fsBridge.readFile(targetFullPath);
-      if (existing.includes(".resin/bin") || existing.includes(binDir) || existing.includes(pathLine)) {
+      if (existing !== null && (existing.includes(".resin/bin") || existing.includes(binDir) || existing.includes(pathLine))) {
         return {
           attempted: true,
           updated: false,
@@ -10572,10 +10400,13 @@ async function configureShellPath(options) {
           reloadCommand
         };
       }
-      const needsNewline = existing.length > 0 && !existing.endsWith("\n");
-      newContent = existing + (needsNewline ? "\n" : "") + pathLine + "\n";
+      const existingContent = existing ?? "";
+      const needsNewline = existingContent.length > 0 && !existingContent.endsWith("\n");
+      newContent = `${existingContent + (needsNewline ? "\n" : "") + pathLine}
+`;
     } else {
-      newContent = pathLine + "\n";
+      newContent = `${pathLine}
+`;
     }
     await fsBridge.writeFile(targetFullPath, newContent);
     return {
@@ -10619,14 +10450,15 @@ async function bootstrapInstall(options = {}) {
   const isOverrideAllowed = isTestMode || Boolean(options.allowOverrides);
   logVerbose("==> Detecting and validating target platform...");
   let platformInfo;
-  if (options.platform && "isSupported" in options.platform && typeof options.platform.isSupported === "boolean") {
+  if (options.platform && "isSupported" in options.platform && (options.platform.isSupported === true || options.platform.isSupported === false)) {
     platformInfo = options.platform;
   } else if (options.platform) {
     const p = options.platform;
     const normalizedArch = p.arch === "x86_64" ? "x64" : p.arch === "aarch64" ? "arm64" : p.arch;
     const isWslRequested = Boolean(p.isWsl) || p.os === "wsl";
+    const targetPlatform = p.os === "wsl" ? "linux" : p.os === "darwin" || p.os === "linux" || p.os === "win32" ? p.os : "linux";
     platformInfo = detectPlatform({
-      platform: p.os === "wsl" ? "linux" : p.os,
+      platform: targetPlatform,
       arch: normalizedArch,
       env: options.env ? {
         ...process3.env,
@@ -10638,10 +10470,11 @@ async function bootstrapInstall(options = {}) {
     platformInfo = detectPlatform();
   }
   if (!platformInfo.isSupported) {
-    throw new UnsupportedPlatformError(
-      platformInfo,
-      `Unsupported platform '${platformInfo.platform}'. Resin requires 64-bit x86_64 or arm64 on Linux, macOS, or Windows WSL2.`
-    );
+    throw new UnsupportedPlatformError(platformInfo.platform, {
+      arch: platformInfo.arch,
+      nodeVersion: platformInfo.nodeVersion,
+      isWsl: platformInfo.isWsl
+    });
   }
   const homeDir = options.customHome ?? env.HOME ?? os2.homedir();
   const resinHome = options.resinHome ?? env.RESIN_HOME ?? path3.join(homeDir, ".resin");
@@ -10667,7 +10500,9 @@ async function bootstrapInstall(options = {}) {
     currentActiveVersion: previousActiveVersion ?? void 0,
     now: options.now
   });
-  logVerbose(`Resolved release version v${release.version} (asset: ${release.releaseAsset.filename})`);
+  logVerbose(
+    `Resolved release version v${release.version} (asset: ${release.releaseAsset.filename})`
+  );
   logVerbose(`==> Fetching release asset from ${release.releaseAssetUrl}...`);
   let releaseBuffer;
   if (options.sourceAssetBuffer) {
@@ -10711,11 +10546,16 @@ async function bootstrapInstall(options = {}) {
         maxSizeBytes: release.denoAsset.sizeBytes ?? 64 * 1024 * 1024
       });
     }
+    const denoFilename = release.denoAsset.filename || path3.basename(new URL(release.denoAsset.url).pathname);
     const denoAssetObj = {
-      filename: path3.basename(new URL(release.denoAsset.url).pathname),
-      url: release.denoAsset.url,
+      filename: denoFilename,
+      platform: platformInfo.os,
+      arch: platformInfo.arch,
+      isWsl: platformInfo.isWsl,
+      sizeBytes: release.denoAsset.sizeBytes,
       sha256: release.denoAsset.sha256,
-      sizeBytes: release.denoAsset.sizeBytes
+      path: denoFilename,
+      url: release.denoAsset.url
     };
     logVerbose(`==> Verifying Deno runtime package '${denoAssetObj.filename}'...`);
     downloadedDeno = await downloadAndVerifyAsset({
@@ -10890,7 +10730,7 @@ To get started, reload your shell or run:
   };
 }
 function isMainModule(metaUrl = import.meta.url, argv1) {
-  const targetPath = argv1 ?? (typeof process3 !== "undefined" && process3.argv ? process3.argv[1] : void 0);
+  const targetPath = argv1 ?? (process3?.argv ? process3.argv[1] : void 0);
   if (!targetPath) return false;
   try {
     const resolvedPath = path3.resolve(targetPath);
@@ -11013,7 +10853,7 @@ Options:
     process3.exit(1);
   }
 }
-if (typeof process3 !== "undefined" && process3.argv && process3.argv[1] && isMainModule(import.meta.url, process3.argv[1])) {
+if (process3?.argv?.[1] && isMainModule(import.meta.url, process3.argv[1])) {
   runCli().catch((err) => {
     process3.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}

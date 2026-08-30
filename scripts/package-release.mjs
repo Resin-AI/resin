@@ -441,6 +441,26 @@ export function buildWorkspacePackages(rootDir = process.cwd()) {
   execSync("pnpm turbo run build", { cwd: rootDir, stdio: "inherit" });
   console.log("✅ All workspace packages built successfully.");
 }
+export function assertInstallHelperTrustRoot(rootDir, keyPair) {
+  const helperPath = path.resolve(rootDir, "apps/cli/install/install-helper-v1.mjs");
+  if (!fs.existsSync(helperPath)) {
+    throw new Error(`Standalone install helper not found at '${helperPath}'.`);
+  }
+
+  const helperSource = fs.readFileSync(helperPath, "utf8");
+  const requiredTrustValues = [
+    ["key ID", keyPair.keyId],
+    ["public key", keyPair.publicKeyHex],
+    ["public key fingerprint", keyPair.publicKeyFingerprintSha256],
+  ];
+  for (const [label, value] of requiredTrustValues) {
+    if (typeof value !== "string" || !value || !helperSource.includes(value)) {
+      throw new Error(
+        `Standalone install helper does not pin the active release signing ${label} for '${keyPair.keyId}'.`,
+      );
+    }
+  }
+}
 export const CLOUD_ONLY_IDENTIFIERS = Object.freeze([
   "apps/cloud",
   "apps/web",
@@ -1512,6 +1532,7 @@ export function packageRelease(options = {}) {
   }
 
   if (!skipBuild) buildWorkspacePackages(rootDir);
+  if (!testOnly) assertInstallHelperTrustRoot(rootDir, keyPair);
   const cliTrust = writeCliReleaseTrustBundle(rootDir, keyPair, { testOnly });
   const allowedGeneratedFilesByPackage = { "apps/cli": ["release-trust.json"] };
 

@@ -11,6 +11,7 @@ import {
   PUBLIC_RELEASE_PACKAGES,
   RELEASE_VERSION,
   assertCleanProductionDist,
+  assertInstallHelperTrustRoot,
   assertNoForbiddenReleaseArtifacts,
   collectPackageProductionDistFiles,
   collectProjectDependencies,
@@ -600,6 +601,23 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
         trustDomain: "test-only",
         trustedKeys: [{ keyId: keyPair.keyId }],
       });
+    });
+
+    it("rejects a release signer that is not pinned by the standalone install helper", () => {
+      const keyPair = createTestReleaseSigningKey();
+      const helperRoot = path.join(tempDir, "helper-trust-root");
+      const helperPath = path.join(helperRoot, "apps", "cli", "install", "install-helper-v1.mjs");
+      fs.mkdirSync(path.dirname(helperPath), { recursive: true });
+      fs.writeFileSync(
+        helperPath,
+        [keyPair.keyId, keyPair.publicKeyHex, keyPair.publicKeyFingerprintSha256].join("\n"),
+      );
+
+      expect(() => assertInstallHelperTrustRoot(helperRoot, keyPair)).not.toThrow();
+      fs.writeFileSync(helperPath, `${keyPair.keyId}\n`);
+      expect(() => assertInstallHelperTrustRoot(helperRoot, keyPair)).toThrow(
+        /does not pin the active release signing public key/,
+      );
     });
   });
 
