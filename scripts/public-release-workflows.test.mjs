@@ -330,6 +330,7 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("$candidate_stage/installers");
       expect(script).toContain("$candidate_stage/packages");
       expect(script).toContain("dist/release-packages");
+      expect(script).toContain("release qualification tools installers packages");
       expect(script).toContain("--sort=name");
       expect(script).toContain("--mtime=");
       expect(script).toContain("--owner=0");
