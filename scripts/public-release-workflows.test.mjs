@@ -628,7 +628,7 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("expected_version");
     });
 
-    it("runs post-promotion smoke downloading canonical resin.sh assets anonymously and checking byte parity", () => {
+    it("runs post-promotion smoke downloading canonical dist.resin.sh assets anonymously and checking byte parity", () => {
       const smokeStep = job.steps.find(
         (s) =>
           s.id === "public_smoke" ||
@@ -636,9 +636,11 @@ describe("Public Release Workflows Contract", () => {
       );
       expect(smokeStep).toBeDefined();
       const script = smokeStep.run;
-      expect(script).toContain("https://resin.sh/install.sh");
-      expect(script).toContain("https://resin.sh/install.ps1");
-      expect(script).toContain("https://resin.sh/install-helper-v1.mjs");
+      expect(script).toContain("https://dist.resin.sh/releases/v1/installers/install.sh");
+      expect(script).toContain("https://dist.resin.sh/releases/v1/installers/install.ps1");
+      expect(script).toContain(
+        "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs",
+      );
       expect(script).toContain('redirect: "manual"');
       expect(script).toContain("installers/install.sh");
       expect(script).toContain("installers/install.ps1");
