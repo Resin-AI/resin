@@ -572,6 +572,26 @@ export class ResinInstaller {
         },
       );
 
+      let effectiveTelemetryEnabled = authPlan.privacy.telemetryEnabled ?? true;
+      if (options.privacyConfig === undefined) {
+        const configFileExists = await this.fsBridge.exists(daemonPaths.configFile);
+        if (configFileExists) {
+          try {
+            const previousConfigContent = await this.fsBridge.readFile(daemonPaths.configFile);
+            if (previousConfigContent && previousConfigContent.trim().length > 0) {
+              const parsed = JSON.parse(previousConfigContent);
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                if (parsed.telemetryEnabled === false) {
+                  effectiveTelemetryEnabled = false;
+                } else if (parsed.telemetryEnabled === true) {
+                  effectiveTelemetryEnabled = true;
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
       // Persist daemon configuration (0600 mode) for telemetry and background service startup
       const daemonConfigPayload: DaemonConfig = DaemonConfigSchema.parse({
         version: options.targetVersion || "0.1.0",
@@ -579,13 +599,28 @@ export class ResinInstaller {
         host: "127.0.0.1",
         port: 9400,
         cloudUrl: pairingSummary?.cloudUrl || options.gatewayUrl || "https://api.resin.sh",
-        telemetryEnabled: authPlan.privacy.telemetryEnabled ?? true,
+        telemetryEnabled: effectiveTelemetryEnabled,
         storageDir: daemonPaths.dataDir,
         moduleConfigs: {},
         custom: {},
       });
-
       if (!dryRun) {
+        const staleTokenCandidates = [
+          path.join(resinHome, "auth.token"),
+          path.join(resinHome, "daemon.token"),
+          path.join(daemonPaths.stateDir, "auth.token"),
+          path.join(daemonPaths.stateDir, "daemon.token"),
+          path.join(daemonPaths.configDir, "auth.token"),
+          path.join(daemonPaths.configDir, "daemon.token"),
+        ];
+        for (const tokenPath of staleTokenCandidates) {
+          if (await this.fsBridge.exists(tokenPath)) {
+            try {
+              await this.fsBridge.unlink(tokenPath);
+            } catch {}
+          }
+        }
+
         await this.fsBridge.mkdirp(daemonPaths.configDir);
         try {
           await fs.chmod(daemonPaths.configDir, 0o700);

@@ -5,7 +5,7 @@ import path from "node:path";
 import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
 import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
 import { OmpHarnessAdapter, OmpRecordDecoder } from "@resin/adapter-omp";
-import { createLocalStateStore } from "@resin/db";
+import { type LocalStateStore, createLocalStateStore } from "@resin/db";
 import type {
   HarnessAdapter,
   HarnessRecordDecoder,
@@ -764,6 +764,317 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         expect(cursor2?.sequence).toBe(additionalLines.length);
         store2.close();
       } finally {
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup error
+        }
+      }
+    });
+  });
+
+  describe("OMP JSONL Ingestion & Local Storage Integration", () => {
+    it("defaults to enabled when telemetryEnabled option is omitted on construction", async () => {
+      const module = new TrajectoryCaptureRuntimeModule();
+      expect(module.isTelemetryEnabled()).toBe(true);
+
+      const context = createMockModuleContext();
+      await module.start(context);
+      expect(module.getState()).toBe("ready");
+      await module.stop(context);
+    });
+
+    it("remains disabled when telemetryEnabled option is explicitly false", async () => {
+      const module = new TrajectoryCaptureRuntimeModule({
+        telemetryEnabled: false,
+      });
+      expect(module.isTelemetryEnabled()).toBe(false);
+
+      const context = createMockModuleContext();
+      await module.start(context);
+      expect(module.getState()).toBe("stopped");
+    });
+
+    it("discovers, decodes, normalizes OMP JSONL transcript into local SQLite storage and acknowledges observation upload", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ingestion-test-"));
+      const stateDbPath = path.join(tmpDir, "state.db");
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      let store: LocalStateStore | undefined;
+      let module: TrajectoryCaptureRuntimeModule | undefined;
+      let context: ModuleContext | undefined;
+
+      try {
+        store = createLocalStateStore({ path: stateDbPath });
+        await store.initialize();
+
+        const ompLines = [
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            harnessName: "omp",
+            workspaceId: "ws-omp-integration-1",
+            timestamp: "2026-08-17T10:00:00.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "message",
+            role: "user",
+            content: "Inspect repository and run qualification check",
+            timestamp: "2026-08-17T10:00:01.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "model_reasoning",
+            reasoningContent: "I will start by checking the codebase structure.",
+            model: "gemini-3.7-flash",
+            provider: "google",
+            timestamp: "2026-08-17T10:00:02.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "tool_call",
+            toolName: "read",
+            callId: "call-101",
+            parameters: { path: "src/index.ts" },
+            timestamp: "2026-08-17T10:00:03.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "tool_result",
+            toolName: "read",
+            callId: "call-101",
+            output: "export const version = '0.1.0';",
+            timestamp: "2026-08-17T10:00:04.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "The version is 0.1.0 and checks passed.",
+            timestamp: "2026-08-17T10:00:05.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "settle",
+            role: "candidate",
+            reason: "Completed qualification check",
+            timestamp: "2026-08-17T10:00:06.000Z",
+            sessionId: "sess-omp-integration-1",
+          }),
+        ];
+        fs.writeFileSync(transcriptPath, "");
+
+        const submittedBatches: Array<{
+          batchId: string;
+          observations: TrajectoryObservation[];
+        }> = [];
+        let uploadAcknowledged = false;
+
+        const mockClient = mockCloudObservationClient({
+          sendTrajectoryObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            submittedBatches.push(batch);
+            uploadAcknowledged = true;
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          sendObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            submittedBatches.push(batch);
+            uploadAcknowledged = true;
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          submitTrajectoryObservation: vi.fn().mockResolvedValue({ accepted: true }),
+        });
+
+        module = new TrajectoryCaptureRuntimeModule({
+          store,
+          observationClient: mockClient,
+          now: () => 1,
+        });
+
+        context = createMockModuleContext();
+        await module.start(context);
+
+        const session: HarnessSession = {
+          sessionId: "sess-omp-integration-1",
+          workspaceId: "ws-omp-integration-1",
+          harnessId: "omp",
+          transcriptPath,
+          status: "completed",
+          createdAt: "2026-08-17T10:00:00.000Z",
+          updatedAt: "2026-08-17T10:00:06.000Z",
+          metadata: {
+            resinTrajectoryAttribution: createValidAttribution({
+              accountId: "acc-omp-integration-1",
+              workspaceId: "ws-omp-integration-1",
+              trajectoryId: "traj-omp-integration-1",
+              provider: "google",
+              model: "gemini-3.7-flash",
+            }),
+          },
+        };
+
+        fs.appendFileSync(transcriptPath, `${ompLines.join("\n")}\n`);
+        const rawRecords: RawHarnessRecord[] = ompLines.map((rawPayload, index) => ({
+          recordId: `omp-integration-${index + 1}`,
+          harnessId: "omp",
+          sourcePath: transcriptPath,
+          rawPayload,
+          timestamp: "2026-08-17T10:00:00.000Z",
+        }));
+        const cursorManager = module.getCursorManager();
+        const ack = vi.fn(async () => {
+          await cursorManager.commitCheckpoint(session.sessionId, {
+            offset: fs.statSync(transcriptPath).size,
+            line: ompLines.length,
+            sequence: ompLines.length,
+            timestamp: "2026-08-17T10:00:06.000Z",
+          });
+        });
+        await module.getCaptureCoordinator().handleRecords(session, rawRecords, ack);
+        await module.stop(context);
+
+        expect(uploadAcknowledged).toBe(true);
+        expect(submittedBatches.length).toBeGreaterThanOrEqual(1);
+
+        const batch = submittedBatches[0];
+        expect(batch.observations).toHaveLength(1);
+        const observation = batch.observations[0];
+        expect(observation.accountId).toBe("acc-omp-integration-1");
+        expect(observation.workspaceId).toBe("ws-omp-integration-1");
+        expect(observation.trajectoryId).toBe("traj-omp-integration-1");
+        expect(observation.role).toBe("candidate");
+        expect(observation.canonicalPayload).toBeDefined();
+
+        const cursor = await cursorManager.getCursor(session.sessionId);
+        expect(cursor).toBeDefined();
+        expect(cursor?.sequence).toBe(ompLines.length);
+        expect(cursor?.line).toBe(ompLines.length);
+      } finally {
+        if (module && context) {
+          await module.stop(context).catch(() => undefined);
+        }
+        store?.close();
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup error
+        }
+      }
+    });
+
+    it("discovers, decodes, normalizes un-attributed OMP JSONL into generic observation upload and persists cursor", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-generic-test-"));
+      const stateDbPath = path.join(tmpDir, "state.db");
+      const transcriptPath = path.join(tmpDir, "session-generic.jsonl");
+
+      try {
+        const store = createLocalStateStore({ path: stateDbPath });
+        await store.initialize();
+
+        const ompLines = [
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            harnessName: "omp",
+            workspaceId: "ws-omp-generic-1",
+            timestamp: "2026-08-17T10:00:00.000Z",
+            sessionId: "sess-omp-generic-1",
+          }),
+          JSON.stringify({
+            type: "message",
+            role: "user",
+            content: "Check general repo status",
+            timestamp: "2026-08-17T10:00:01.000Z",
+            sessionId: "sess-omp-generic-1",
+          }),
+          JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "Everything is clean",
+            timestamp: "2026-08-17T10:00:02.000Z",
+            sessionId: "sess-omp-generic-1",
+          }),
+        ];
+        fs.writeFileSync(transcriptPath, "");
+
+        const submittedObservations: any[] = [];
+        let uploadAcknowledged = false;
+
+        const mockClient = mockCloudObservationClient({
+          sendObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            submittedObservations.push(...batch.observations);
+            uploadAcknowledged = true;
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+        });
+
+        const module = new TrajectoryCaptureRuntimeModule({
+          store,
+          observationClient: mockClient,
+          now: () => 1,
+        });
+
+        const context = createMockModuleContext();
+        await module.start(context);
+
+        const session: HarnessSession = {
+          sessionId: "sess-omp-generic-1",
+          workspaceId: "ws-omp-generic-1",
+          harnessId: "omp",
+          transcriptPath,
+          status: "active",
+          createdAt: "2026-08-17T10:00:00.000Z",
+          updatedAt: "2026-08-17T10:00:02.000Z",
+          metadata: {},
+        };
+
+        const batchReceivedPromise = new Promise<void>((resolve) => {
+          const original = mockClient.sendObservationBatch as Mock;
+          mockClient.sendObservationBatch = vi.fn().mockImplementation(async (batch) => {
+            const res = await original(batch);
+            resolve();
+            return res;
+          });
+        });
+
+        await module.getObserverCoordinator().getTailer().attachSession(session, undefined, {
+          pollingIntervalMs: 10,
+        });
+        fs.appendFileSync(transcriptPath, `${ompLines.join("\n")}\n`);
+        await module.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
+
+        await batchReceivedPromise;
+        await module.stop(context);
+
+        expect(uploadAcknowledged).toBe(true);
+        expect(submittedObservations.length).toBeGreaterThanOrEqual(1);
+
+        const cursor = await module.getCursorManager().getCursor(session.sessionId);
+        expect(cursor).toBeDefined();
+        expect(cursor?.sequence).toBe(ompLines.length);
+      } finally {
+        try {
+          await module.stop(context);
+        } catch {
+          // Ignore stop error
+        }
+        try {
+          store.close();
+        } catch {
+          // Ignore close error
+        }
         try {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch {

@@ -36,7 +36,7 @@ describe("HarnessConfigOrchestrator", () => {
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin.url).toBe("http://127.0.0.1:9400/mcp/sse");
+    expect(ompJson.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {

@@ -9,6 +9,7 @@ import {
 } from "@resin/adapter-codex";
 import { planOmpMcpConfig, probeOmpInstallation } from "@resin/adapter-omp";
 import {
+  CANONICAL_RESIN_MCP_COMMAND,
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMutationPlan,
@@ -16,6 +17,7 @@ import {
   type HarnessWorkspace,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   isRecognizedResinMcpEntry,
+  isResinMcpCommand,
 } from "@resin/harness-contracts";
 import { parse as parseToml } from "smol-toml";
 
@@ -148,20 +150,21 @@ export async function planHarnessRegistration(
     mcpConfigPath: options.targetPath,
     metadata: {},
   };
-
   switch (options.harnessId) {
     case "claude-code":
       return planClaudeMcpConfig(workspace, options.gatewayUrl, options.fsBridge);
     case "codex-cli":
       return planCodexMcpConfig({
         targetPath: options.targetPath,
-        gatewayUrl: options.gatewayUrl,
+        command: CANONICAL_RESIN_MCP_COMMAND,
+        args: [],
         fsBridge: options.fsBridge,
       });
     case "omp":
       return planOmpMcpConfig({
         customConfigPath: options.targetPath,
-        gatewayUrl: options.gatewayUrl,
+        command: CANONICAL_RESIN_MCP_COMMAND,
+        args: [],
         fsBridge: options.fsBridge,
       });
   }
@@ -175,11 +178,90 @@ export async function verifyHarnessRegistration(
   options: HarnessAdapterOperationOptions,
 ): Promise<boolean> {
   if (options.harnessId === "codex-cli") {
-    return verifyCodexMcpConfig({
-      targetPath: options.targetPath,
-      gatewayUrl: options.gatewayUrl,
-      fsBridge: options.fsBridge,
-    });
+    if (options.targetPath.endsWith(".json")) {
+      const content = await options.fsBridge.readFile(options.targetPath);
+      if (content === null || content.trim().length === 0) {
+        return false;
+      }
+      try {
+        const config = asObject(JSON.parse(content));
+        if (config === null) {
+          return false;
+        }
+        const server = findJsonServerConfig(
+          config,
+          options.harnessId,
+          RESIN_MCP_SERVER_KEYS[options.harnessId],
+        );
+        if (server === null) {
+          return false;
+        }
+        const command = server.command;
+        if (typeof command !== "string" || !isResinMcpCommand(command)) {
+          return false;
+        }
+        if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
+          return false;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    const content = await options.fsBridge.readFile(options.targetPath);
+    if (content === null || content.trim().length === 0) {
+      return false;
+    }
+    try {
+      const server = findCodexTomlServerConfig(
+        parseCodexTomlConfig(content),
+        RESIN_MCP_SERVER_KEYS[options.harnessId],
+      );
+      if (server === null) {
+        return false;
+      }
+      const command = server.command;
+      if (typeof command !== "string" || !isResinMcpCommand(command)) {
+        return false;
+      }
+      if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (options.harnessId === "omp") {
+    const content = await options.fsBridge.readFile(options.targetPath);
+    if (content === null || content.trim().length === 0) {
+      return false;
+    }
+    try {
+      const config = asObject(JSON.parse(content));
+      if (config === null) {
+        return false;
+      }
+      const server = findJsonServerConfig(
+        config,
+        options.harnessId,
+        RESIN_MCP_SERVER_KEYS[options.harnessId],
+      );
+      if (server === null) {
+        return false;
+      }
+      const command = server.command;
+      if (typeof command !== "string" || !isResinMcpCommand(command)) {
+        return false;
+      }
+      if (server.url !== undefined || server.endpoint !== undefined || server.type === "sse") {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   const content = await options.fsBridge.readFile(options.targetPath);

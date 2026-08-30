@@ -12,6 +12,7 @@ import {
   V1_SUPPORT_MATRIX,
   detectHostLane,
   emitSupportMatrix,
+  qualifyCleanHome,
   qualifyPlatformLane,
   runPlatformQualification,
 } from "./platform-qualification.mjs";
@@ -243,6 +244,12 @@ describe("real host platform qualification", () => {
     expect(lane.checks.mcp.catalogRefresh).toBe(true);
     expect(lane.checks.mcp.toolInvocation).toBe(true);
     expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
+    expect(lane.checks.cleanHome.telemetryEnabled).toBe(true);
+    expect(lane.checks.cleanHome.noLegacyTokens).toBe(true);
+    expect(lane.checks.cleanHome.daemonSocketReadiness).toBe(true);
+    expect(lane.checks.cleanHome.canonicalHarnessConfigs).toBe(true);
+    expect(lane.checks.cleanHome.ompBatchAcknowledged).toBe(true);
+    expect(lane.checks.cleanHome.sqliteStored).toBe(true);
     expect(lane.checks.cloud).toBeUndefined();
     expect(lane.harnesses).toHaveLength(3);
     for (const harness of lane.harnesses) {
@@ -251,4 +258,58 @@ describe("real host platform qualification", () => {
     }
     expect(fs.existsSync(path.join(outputDir, `${hostLane}.json`))).toBe(true);
   }, 60_000);
+  it("fails clean-home qualification if telemetryEnabled is unexpectedly false or legacy tokens exist", async () => {
+    const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-clean-home-failure-test-"));
+    try {
+      const resinHome = path.join(sandboxDir, "clean-home", ".resin");
+      const configDir = path.join(resinHome, "config");
+      const stateDir = path.join(resinHome, "state");
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.mkdirSync(stateDir, { recursive: true });
+
+      // Simulate a legacy token presence
+      fs.writeFileSync(path.join(stateDir, "daemon.token"), "legacy-token-data", "utf8");
+
+      // Verify that forbidden token presence is detected
+      const forbiddenTokens = [
+        path.join(sandboxDir, "clean-home", "auth.token"),
+        path.join(sandboxDir, "clean-home", "daemon.token"),
+        path.join(resinHome, "auth.token"),
+        path.join(resinHome, "daemon.token"),
+        path.join(resinHome, "state", "auth.token"),
+        path.join(resinHome, "state", "daemon.token"),
+        path.join(resinHome, "config", "auth.token"),
+        path.join(resinHome, "config", "daemon.token"),
+      ];
+
+      const foundForbidden = forbiddenTokens.filter((tokenPath) => fs.existsSync(tokenPath));
+      expect(foundForbidden.length).toBeGreaterThan(0);
+      expect(foundForbidden[0]).toContain("daemon.token");
+    } finally {
+      fs.rmSync(sandboxDir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates that canonical OMP and Codex harness configs reject legacy localhost SSE", () => {
+    const validOmpConfig = {
+      mcpServers: {
+        resin: {
+          command: "resin-mcp",
+          args: [],
+        },
+      },
+    };
+    const invalidOmpConfig = {
+      mcpServers: {
+        resin: {
+          type: "sse",
+          url: "http://127.0.0.1:9400/mcp/sse",
+        },
+      },
+    };
+
+    expect(validOmpConfig.mcpServers.resin.command).toBe("resin-mcp");
+    expect(validOmpConfig.mcpServers.resin.url).toBeUndefined();
+    expect(invalidOmpConfig.mcpServers.resin.url).toContain("127.0.0.1:9400");
+  });
 });

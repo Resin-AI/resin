@@ -185,11 +185,13 @@ function createPersistentModule(id: string) {
   return { module, start, stop };
 }
 
-async function createLiveFixture(initialTelemetryEnabled: boolean) {
+async function createLiveFixture(initialTelemetryEnabled?: boolean) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-telemetry-gating-"));
   temporaryDirectories.push(home);
   const logger = createLogger();
-  const config = DaemonConfigSchema.parse({ telemetryEnabled: initialTelemetryEnabled });
+  const config = DaemonConfigSchema.parse(
+    initialTelemetryEnabled !== undefined ? { telemetryEnabled: initialTelemetryEnabled } : {},
+  );
   const supervisor = new RecoveryAwareDaemonSupervisor({
     config,
     paths: resolvePaths({ home }),
@@ -263,6 +265,71 @@ async function createLiveFixture(initialTelemetryEnabled: boolean) {
 }
 
 describe("observer telemetry gating", () => {
+  it("automatically registers and starts trajectory capture when startup config has telemetryEnabled omitted (default-on) and cloud consent is affirmative", async () => {
+    const logger = createLogger();
+    const config = DaemonConfigSchema.parse({});
+    const supervisor = new RecoveryAwareDaemonSupervisor({
+      config,
+      paths: resolvePaths({ home: os.tmpdir() }),
+      logger,
+      enableSignalHandlers: false,
+    });
+    supervisor.registerModule(createPersistentModule("cloud-runtime").module);
+    const { module, observer } = createRuntimeModule(true);
+    const controller = new TelemetryCaptureController({
+      supervisor,
+      captureModule: module,
+      logger,
+      deviceEnabled: undefined,
+      getCloudConsentEnabled: () => true,
+    });
+
+    controller.prepareForStartup();
+
+    expect(supervisor.getModule("trajectory-capture")).toBe(module);
+    expect(controller.getStatus()).toMatchObject({
+      deviceEnabled: true,
+      cloudConsentEnabled: true,
+      effectiveEnabled: true,
+      captureActive: false,
+    });
+
+    await supervisor.start();
+    expect(observer.start).toHaveBeenCalledOnce();
+    expect(controller.getStatus().captureActive).toBe(true);
+    await supervisor.stop({ reason: "test cleanup" });
+  });
+
+  it("does not register or start capture when device telemetry is enabled but cloud consent is missing or absent", async () => {
+    const logger = createLogger();
+    const config = DaemonConfigSchema.parse({});
+    const supervisor = new RecoveryAwareDaemonSupervisor({
+      config,
+      paths: resolvePaths({ home: os.tmpdir() }),
+      logger,
+      enableSignalHandlers: false,
+    });
+    const { module, observer } = createRuntimeModule(true);
+    const controller = new TelemetryCaptureController({
+      supervisor,
+      captureModule: module,
+      logger,
+      deviceEnabled: true,
+      getCloudConsentEnabled: () => undefined,
+    });
+
+    controller.prepareForStartup();
+
+    expect(supervisor.getModule("trajectory-capture")).toBeUndefined();
+    expect(observer.start).not.toHaveBeenCalled();
+    expect(controller.getStatus()).toMatchObject({
+      deviceEnabled: true,
+      cloudConsentEnabled: null,
+      effectiveEnabled: false,
+      captureActive: false,
+    });
+  });
+
   it("does not register or start trajectory tailing when startup config is false", async () => {
     const logger = createLogger();
     const config = DaemonConfigSchema.parse({ telemetryEnabled: false });
@@ -365,6 +432,56 @@ describe("observer telemetry gating", () => {
     expect(resolveDeviceTelemetryEnabled(invalid.telemetryEnabled)).toBe(false);
   });
 
+  it("resolves device telemetry enabled correctly across boolean, missing, and invalid types", () => {
+    expect(resolveDeviceTelemetryEnabled(undefined)).toBe(true);
+    expect(resolveDeviceTelemetryEnabled(true)).toBe(true);
+    expect(resolveDeviceTelemetryEnabled(false)).toBe(false);
+
+    expect(resolveDeviceTelemetryEnabled(undefined, true)).toBe(false);
+    expect(resolveDeviceTelemetryEnabled(true, true)).toBe(false);
+    expect(resolveDeviceTelemetryEnabled(false, true)).toBe(false);
+
+    expect(resolveDeviceTelemetryEnabled("true")).toBe(false);
+    expect(resolveDeviceTelemetryEnabled("false")).toBe(false);
+    expect(resolveDeviceTelemetryEnabled(null)).toBe(false);
+    expect(resolveDeviceTelemetryEnabled({})).toBe(false);
+    expect(resolveDeviceTelemetryEnabled(0)).toBe(false);
+  });
+
+  it("handles reload from default-on config to explicit false and re-enable", async () => {
+    const fixture = await createLiveFixture(undefined);
+    try {
+      expect(fixture.supervisor.getModule("trajectory-capture")).toBe(fixture.captureModule);
+      expect(fixture.doubles.observer.start).toHaveBeenCalledOnce();
+      expect(fixture.captureController.getStatus()).toMatchObject({
+        deviceEnabled: true,
+        cloudConsentEnabled: true,
+        effectiveEnabled: true,
+        captureActive: true,
+      });
+
+      const disabled = await fixture.client.reloadConfig({ telemetryEnabled: false });
+      expect(disabled.success).toBe(true);
+      expect(fixture.supervisor.getModule("trajectory-capture")).toBe(fixture.captureModule);
+      expect(fixture.doubles.observer.stop).toHaveBeenCalled();
+      expect(fixture.captureController.getStatus()).toMatchObject({
+        deviceEnabled: false,
+        effectiveEnabled: false,
+        captureActive: false,
+      });
+
+      const reEnabled = await fixture.client.reloadConfig({ telemetryEnabled: true });
+      expect(reEnabled.success).toBe(true);
+      expect(fixture.supervisor.getModule("trajectory-capture")).toBe(fixture.captureModule);
+      expect(fixture.captureController.getStatus()).toMatchObject({
+        deviceEnabled: true,
+        effectiveEnabled: true,
+        captureActive: true,
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
   it("fails closed for malformed or schema-invalid config without starting a tailer", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-invalid-telemetry-"));
     temporaryDirectories.push(home);
@@ -753,7 +870,7 @@ describe("observer telemetry gating", () => {
     });
   });
 
-  it("enables and disables capture over authenticated reload while local MCP stays ready", async () => {
+  it("enables and disables capture over tokenless local reload while local MCP stays ready", async () => {
     const fixture = await createLiveFixture(false);
     try {
       expect(fixture.supervisor.getModule("trajectory-capture")).toBeUndefined();
@@ -773,18 +890,6 @@ describe("observer telemetry gating", () => {
       expect(fixture.supervisor.getModuleStatus("trajectory-capture")).toMatchObject([
         { id: "trajectory-capture", state: "ready" },
       ]);
-
-      const { serverTransport, clientTransport } = createInMemoryIpcPair();
-      fixture.server.attachTransport(serverTransport);
-      const unauthorizedClient = new IpcClient({
-        transport: clientTransport,
-        authToken: "wrong-token",
-      });
-      await expect(unauthorizedClient.reloadConfig({ telemetryEnabled: false })).rejects.toThrow(
-        /Unauthorized/,
-      );
-      expect(fixture.captureModule.isTelemetryEnabled()).toBe(true);
-      await unauthorizedClient.close();
 
       const disabled = await fixture.client.reloadConfig({ telemetryEnabled: false });
       expect(disabled.success).toBe(true);

@@ -123,17 +123,33 @@ export function updateTomlMcpConfig(
     }
     return `# Codex CLI Configuration\n\n${freshSection}`;
   }
+  const existingServer = parseCodexTomlServerConfig(content, serverName);
+  const hasLegacyAlias = LEGACY_RESIN_MCP_SERVER_ALIASES.some(
+    (alias) => alias !== serverName && parseCodexTomlServerConfig(content, alias) !== null,
+  );
+  if (
+    !hasLegacyAlias &&
+    serverConfig.command === CANONICAL_RESIN_MCP_COMMAND &&
+    (serverConfig.args === undefined || serverConfig.args.length === 0) &&
+    serverConfig.url === undefined &&
+    serverConfig.type === undefined &&
+    serverConfig.env === undefined &&
+    existingServer?.command === CANONICAL_RESIN_MCP_COMMAND &&
+    existingServer.url === undefined
+  ) {
+    return content;
+  }
 
   let cleanedContent = content;
   const legacyExtraLines: string[] = [];
 
   // Step 1: Remove recognized legacy aliases from TOML content while preserving user extras and non-Resin aliases
-  for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
+  for (const alias of [...LEGACY_RESIN_MCP_SERVER_ALIASES, serverName]) {
     const escapedAlias = escapeRegExp(alias);
 
     // Check table section: [mcp_servers.<alias>] or [mcpServers.<alias>] or [mcp.servers.<alias>]
     const sectionRegex = new RegExp(
-      `^[ \\t]*\\[[ \\t]*(?:mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*\\][ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`,
+      `^[ \\t]*\\[[ \\t]*(?:"(?:mcp_servers|mcpServers)"|'(?:mcp_servers|mcpServers)'|mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*\\][ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`,
       "m",
     );
     const sectionMatch = cleanedContent.match(sectionRegex);
@@ -155,21 +171,62 @@ export function updateTomlMcpConfig(
         command: commandMatch ? commandMatch[1] : undefined,
       };
 
-      if (isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)) {
-        // Collect extra custom lines/comments from legacy section (excluding url/command lines)
+      if (
+        alias === serverName ||
+        isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)
+      ) {
+        // Collect user-owned lines/comments while dropping the full Resin transport block.
         const lines = sectionBody.split(/\r?\n/);
+        let skippingArgs = false;
         for (const line of lines) {
+          if (skippingArgs) {
+            if (line.includes("]")) {
+              skippingArgs = false;
+            }
+            continue;
+          }
+          if (/^\s*args\s*=/.test(line)) {
+            skippingArgs = !line.includes("]");
+            continue;
+          }
           const trimmedLine = line.trim();
           if (
             trimmedLine &&
-            !/^\s*url\s*=/m.test(line) &&
-            !/^\s*command\s*=/m.test(line) &&
-            !/^\s*args\s*=/m.test(line)
+            !/^\s*url\s*=/.test(line) &&
+            !/^\s*command\s*=/.test(line) &&
+            !/^\s*type\s*=/.test(line)
           ) {
             legacyExtraLines.push(line);
           }
         }
         cleanedContent = `${cleanedContent.slice(0, sectionStart)}${cleanedContent.slice(sectionEnd)}`;
+      }
+    }
+    const dottedInlineRegex = new RegExp(
+      `^[ \\t]*(?:mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*=[ \\t]*\\{([^\\r\\n]*)\\}[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`,
+      "m",
+    );
+    const dottedInlineMatch = cleanedContent.match(dottedInlineRegex);
+    if (dottedInlineMatch && dottedInlineMatch.index !== undefined) {
+      const inlineBody = dottedInlineMatch[1] ?? "";
+      const urlMatch = inlineBody.match(/url\s*=\s*["']([^"']+)["']/);
+      const commandMatch = inlineBody.match(/command\s*=\s*["']([^"']+)["']/);
+      if (
+        alias === serverName ||
+        isRecognizedResinMcpEntry(
+          {
+            url: urlMatch?.[1],
+            command: commandMatch?.[1],
+          },
+          configuredGatewayUrl ?? serverConfig.url,
+        )
+      ) {
+        for (const extraMatch of inlineBody.matchAll(/\b(headers|env)\s*=\s*(\{[^}]*\})/g)) {
+          legacyExtraLines.push(`${extraMatch[1]} = ${extraMatch[2]}`);
+        }
+        const removeStart = dottedInlineMatch.index;
+        const removeEnd = removeStart + dottedInlineMatch[0].length;
+        cleanedContent = `${cleanedContent.slice(0, removeStart)}${cleanedContent.slice(removeEnd)}`;
       }
     }
 
@@ -188,7 +245,7 @@ export function updateTomlMcpConfig(
 
       const containerBody = cleanedContent.slice(containerStart, containerEnd);
       const inlineInContainerRegex = new RegExp(
-        `^[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*=[ \\t]*\\{([^}]+)\\}[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`,
+        `^[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*=[ \\t]*\\{([^\\r\\n]*)\\}[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`,
         "m",
       );
       const matchInContainer = containerBody.match(inlineInContainerRegex);
@@ -200,7 +257,14 @@ export function updateTomlMcpConfig(
           url: urlMatch ? urlMatch[1] : undefined,
           command: commandMatch ? commandMatch[1] : undefined,
         };
-        if (isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)) {
+        if (
+          alias === serverName ||
+          isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)
+        ) {
+          const inlineBody = matchInContainer[1] ?? "";
+          for (const extraMatch of inlineBody.matchAll(/\b(headers|env)\s*=\s*(\{[^}]*\})/g)) {
+            legacyExtraLines.push(`${extraMatch[1]} = ${extraMatch[2]}`);
+          }
           const removeStart = containerStart + matchInContainer.index;
           const removeEnd = removeStart + matchInContainer[0].length;
           cleanedContent = `${cleanedContent.slice(0, removeStart)}${cleanedContent.slice(removeEnd)}`;

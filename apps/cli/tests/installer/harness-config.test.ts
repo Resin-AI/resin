@@ -71,11 +71,13 @@ describe("harness adapter operations", () => {
         harnessId: "claude-code" as const,
         targetPath: "/home/developer/.claude/claude.json",
         serverKey: "resin",
+        expectedServer: { type: "sse", url: gatewayUrl },
       },
       {
         harnessId: "omp" as const,
         targetPath: "/home/developer/.omp/agent/mcp.json",
         serverKey: "resin",
+        expectedServer: { command: "resin-mcp", args: [] },
       },
     ];
 
@@ -88,7 +90,6 @@ describe("harness adapter operations", () => {
             command: "user-mcp",
             env: { USER_SERVER_TOKEN: "also-keep-me" },
           },
-          [testCase.serverKey]: { type: "sse", url: "http://old.invalid/sse" },
         },
       };
       await bridge.writeFile(testCase.targetPath, JSON.stringify(original));
@@ -106,7 +107,7 @@ describe("harness adapter operations", () => {
       expect(planned.settings).toEqual(original.settings);
       expect(planned.env).toEqual(original.env);
       expect(planned.mcpServers.user_server).toEqual(original.mcpServers.user_server);
-      expect(planned.mcpServers[testCase.serverKey]).toMatchObject({ url: gatewayUrl });
+      expect(planned.mcpServers[testCase.serverKey]).toMatchObject(testCase.expectedServer);
     }
   });
 
@@ -138,7 +139,8 @@ describe("harness adapter operations", () => {
     expect(plan.plannedContent).toContain('model = "gpt-5.6"');
     expect(plan.plannedContent).toContain("[mcp_servers.user_server]");
     expect(plan.plannedContent).toContain('env.USER_TOKEN = "keep-me"');
-    expect(plan.plannedContent).toContain(`url = "${gatewayUrl}"`);
+    expect(plan.plannedContent).toContain("[mcp_servers.resin]");
+    expect(plan.plannedContent).toContain('command = "resin-mcp"');
 
     await bridge.writeFile(
       targetPath,
@@ -361,6 +363,7 @@ describe("harness adapter operations", () => {
         fsBridge: bridge,
       });
       expect(codexPlan.plannedContent).toContain("[mcp_servers.resin]");
+      expect(codexPlan.plannedContent).toContain('command = "resin-mcp"');
       expect(codexPlan.plannedContent).not.toContain("[mcp_servers.resin_gateway]");
       expect(codexPlan.plannedContent).toContain("[mcp_servers.user_tool]");
 
@@ -382,7 +385,7 @@ describe("harness adapter operations", () => {
         fsBridge: bridge,
       });
       const ompParsed = JSON.parse(ompPlan.plannedContent);
-      expect(ompParsed.mcpServers.resin).toEqual({ type: "sse", url: gatewayUrl });
+      expect(ompParsed.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
       expect(ompParsed.mcpServers["resin-gateway"]).toBeUndefined();
       expect(ompParsed.mcpServers.user_tool).toBeDefined();
     });

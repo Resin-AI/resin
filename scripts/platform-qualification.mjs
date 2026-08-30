@@ -476,6 +476,569 @@ async function qualifyMcp(installedRoot, sandboxDir) {
     await waitForExit(child, 3000);
   }
 }
+const OMP_QUALIFICATION_FIXTURE_LINES = `${[
+  JSON.stringify({
+    type: "session_lifecycle",
+    lifecycleType: "start",
+    harnessName: "omp",
+    workspaceId: "ws_clean_home_1",
+    timestamp: "2026-08-30T10:00:00.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+  JSON.stringify({
+    type: "message",
+    role: "user",
+    content: "Inspect the qualification status and run checks",
+    timestamp: "2026-08-30T10:00:01.000Z",
+    sessionId: "session-clean-qual-1",
+    provider: "anthropic",
+  }),
+  JSON.stringify({
+    type: "model_reasoning",
+    reasoningContent: "Checking qualification invariants in clean home.",
+    model: "claude-3-7-sonnet",
+    provider: "anthropic",
+    timestamp: "2026-08-30T10:00:02.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+  JSON.stringify({
+    type: "tool_call",
+    toolName: "read",
+    callId: "call_qual_1",
+    parameters: { path: "package.json" },
+    timestamp: "2026-08-30T10:00:03.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+  JSON.stringify({
+    type: "tool_result",
+    callId: "call_qual_1",
+    output: '{"name": "resin"}',
+    timestamp: "2026-08-30T10:00:04.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+  JSON.stringify({
+    type: "message",
+    role: "assistant",
+    content: "Qualification checks verified successfully.",
+    provider: "anthropic",
+    model: "claude-3-7-sonnet",
+    timestamp: "2026-08-30T10:00:05.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+  JSON.stringify({
+    lifecycleType: "settle",
+    role: "candidate",
+    reason: "Qualification completed",
+    exitReason: "task_completed",
+    harnessName: "omp",
+    workspaceId: "ws_clean_home_1",
+    timestamp: "2026-08-30T10:00:06.000Z",
+    sessionId: "session-clean-qual-1",
+  }),
+].join("\n")}\n`;
+
+async function ingestPackagedOmpFixture({ installedRoot, stateDbPath, transcriptPath, cloudUrl }) {
+  const cacheBust = `qualification=${Date.now()}`;
+  const [
+    { TrajectoryCaptureRuntimeModule },
+    { CloudObservationClient },
+    { createLocalStateStore },
+  ] = await Promise.all([
+    import(
+      `${pathToFileURL(path.join(installedRoot, "apps", "observer", "dist", "trajectory-capture-module.js")).href}?${cacheBust}`
+    ),
+    import(
+      `${pathToFileURL(path.join(installedRoot, "apps", "observer", "dist", "cloud-runtime.js")).href}?${cacheBust}`
+    ),
+    import(
+      `${pathToFileURL(path.join(installedRoot, "packages", "db", "dist", "index.js")).href}?${cacheBust}`
+    ),
+  ]);
+
+  const store = createLocalStateStore({ path: stateDbPath });
+  await store.initialize();
+  const observationClient = new CloudObservationClient({
+    identityProvider: async () => ({
+      cloudUrl,
+      accessToken: "test-qualification-token",
+      accountId: "acc_qual_clean",
+      workspaceId: "ws_clean_home_1",
+      deviceId: "dev_clean_home_1",
+      installationId: "inst_clean_home_1",
+      userId: "usr_clean_home_1",
+    }),
+  });
+  const captureModule = new TrajectoryCaptureRuntimeModule({
+    store,
+    observationClient,
+    telemetryEnabled: true,
+    now: () => Date.parse("2026-08-30T09:59:00.000Z"),
+    remoteTelemetryConsent: {
+      metadataTelemetryEnabled: true,
+      updatedAt: "2020-01-01T00:00:00.000Z",
+    },
+  });
+  const sessionId = "session-clean-qual-1";
+  const lines = OMP_QUALIFICATION_FIXTURE_LINES.trim().split("\n");
+  const session = {
+    sessionId,
+    workspaceId: "ws_clean_home_1",
+    harnessId: "omp",
+    transcriptPath,
+    status: "completed",
+    createdAt: "2026-08-30T10:00:00.000Z",
+    updatedAt: "2026-08-30T10:00:06.000Z",
+    metadata: {
+      resinTrajectoryAttribution: {
+        accountId: "acc_qual_clean",
+        workspaceId: "ws_clean_home_1",
+        ownerUserId: "usr_clean_home_1",
+        projectId: "proj_qual_clean",
+        candidateId: "candidate_qual_clean",
+        toolId: "tool_qual_clean",
+        toolVersion: "1.0.0",
+        workloadId: "workload_qual_clean",
+        trajectoryId: "trajectory_qual_clean",
+        provider: "anthropic",
+        model: "claude-3-7-sonnet",
+        runtimeVersion: "1.0.0",
+        role: "candidate",
+      },
+    },
+  };
+  const rawRecords = lines.map((rawPayload, index) => {
+    const sequenceNumber = index + 1;
+    const timestamp = JSON.parse(rawPayload).timestamp;
+    return {
+      recordId: `qualification-${sequenceNumber}`,
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber,
+      timestamp,
+      recordType: "transcript_line",
+      rawPayload,
+      cursor: {
+        offset: sequenceNumber,
+        line: sequenceNumber,
+        sequence: sequenceNumber,
+        timestamp,
+      },
+      metadata: { sourcePath: transcriptPath },
+    };
+  });
+
+  try {
+    const pipeline = captureModule.getNormalizationPipeline();
+    const results = await pipeline.processBatch(rawRecords, {
+      workspaceId: session.workspaceId,
+      deferCommitUntilCloudAck: true,
+    });
+    const observations = results.flatMap((result) =>
+      result.status === "success" && !result.isDuplicate ? [result.event] : [],
+    );
+    if (observations.length === 0) {
+      throw new Error("Packaged OMP normalization produced no observations");
+    }
+    await observationClient.sendObservationBatch({
+      batchId: "qualification-omp-clean-home",
+      observations,
+    });
+    await pipeline.commitCloudAcknowledgedEvents(observations);
+    await captureModule.getCursorManager().commitCheckpoint(sessionId, {
+      offset: fs.statSync(transcriptPath).size,
+      line: lines.length,
+      sequence: lines.length,
+      timestamp: "2026-08-30T10:00:06.000Z",
+    });
+  } finally {
+    observationClient.dispose();
+    store.close();
+  }
+}
+
+export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
+  const cleanHome = path.join(sandboxDir, "clean-home");
+  const cleanWorkspace = path.join(sandboxDir, "clean-workspace");
+  const resinHome = path.join(cleanHome, ".resin");
+  fs.mkdirSync(cleanHome, { recursive: true });
+  fs.mkdirSync(cleanWorkspace, { recursive: true });
+
+  const receivedObservationBatches = [];
+  const receivedTrajectoryBatches = [];
+
+  const mockServer = http.createServer((req, res) => {
+    let rawBody = "";
+    req.on("data", (chunk) => {
+      rawBody += chunk.toString("utf8");
+    });
+    req.on("end", () => {
+      let body = {};
+      try {
+        body = JSON.parse(rawBody);
+      } catch {}
+
+      if (req.method === "POST" && req.url.startsWith("/v1/observations/batch")) {
+        receivedObservationBatches.push({ body, headers: req.headers });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            batchId: body.batchId || "batch-qual-1",
+            status: "accepted",
+            acceptedCount: Array.isArray(body.observations) ? body.observations.length : 1,
+            rejectedCount: 0,
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && req.url.startsWith("/v1/analytics/trajectories/batch")) {
+        receivedTrajectoryBatches.push({ body, headers: req.headers });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            batchId: body.batchId || "batch-qual-1",
+            status: "accepted",
+            acceptedCount: Array.isArray(body.observations) ? body.observations.length : 1,
+            rejectedCount: 0,
+          }),
+        );
+        return;
+      }
+      if (req.method === "POST" && req.url.startsWith("/v1/telemetry/batch")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            batchId: "batch-qual-telemetry",
+            status: "accepted",
+            acceptedEvents: 1,
+            rejectedEvents: 0,
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && req.url.startsWith("/api/user/privacy")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            privacy: {
+              metadataTelemetryEnabled: true,
+              updatedAt: "2020-01-01T00:00:00.000Z",
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", authenticated: true }));
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    mockServer.once("error", reject);
+    mockServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const serverPort = mockServer.address().port;
+  const cloudUrl = `http://127.0.0.1:${serverPort}`;
+
+  const cleanEnv = {
+    ...process.env,
+    HOME: cleanHome,
+    USERPROFILE: cleanHome,
+    RESIN_HOME: resinHome,
+    NODE_ENV: "production",
+    RESIN_CLOUD_URL: cloudUrl,
+    RESIN_CLOUD_SYNC_ENABLED: "true",
+    RESIN_TELEMETRY_ENABLED: "true",
+    RESIN_LOG_LEVEL: "info",
+  };
+  delete cleanEnv.NODE_PATH;
+
+  let daemonChild = null;
+
+  try {
+    const cliBin = path.join(installedRoot, "bin", "resin");
+    const initResult = runNode(
+      cliBin,
+      [
+        "init",
+        "--non-interactive",
+        "--auto-approve",
+        "--local-only",
+        "--harness=omp,codex-cli",
+        `--home=${cleanHome}`,
+        `--workspace=${cleanWorkspace}`,
+        "--json",
+      ],
+      { cwd: cleanWorkspace, env: cleanEnv, timeoutMs: 30_000 },
+    );
+    if (initResult.status !== 0) {
+      throw new Error(
+        `Packaged CLI init in clean home failed: ${initResult.stderr || initResult.stdout}`,
+      );
+    }
+
+    // Invariant 1: Installed config has telemetryEnabled true
+    const daemonConfigFile = path.join(resinHome, "config", "config.json");
+    if (!fs.existsSync(daemonConfigFile)) {
+      throw new Error(`Expected daemon config file at ${daemonConfigFile}, but it was not created`);
+    }
+    const daemonConfig = JSON.parse(fs.readFileSync(daemonConfigFile, "utf8"));
+    if (daemonConfig.telemetryEnabled !== true) {
+      throw new Error(
+        `Expected installed daemon config to have telemetryEnabled: true, got: ${daemonConfig.telemetryEnabled}`,
+      );
+    }
+
+    // Invariant 2: No auth.token/daemon.token is generated
+    const forbiddenTokenPaths = [
+      path.join(cleanHome, "auth.token"),
+      path.join(cleanHome, "daemon.token"),
+      path.join(resinHome, "auth.token"),
+      path.join(resinHome, "daemon.token"),
+      path.join(resinHome, "state", "auth.token"),
+      path.join(resinHome, "state", "daemon.token"),
+      path.join(resinHome, "config", "auth.token"),
+      path.join(resinHome, "config", "daemon.token"),
+    ];
+    for (const tokenPath of forbiddenTokenPaths) {
+      if (fs.existsSync(tokenPath)) {
+        throw new Error(`Found unexpected legacy token file at: ${tokenPath}`);
+      }
+    }
+
+    // Invariant 4: Generated OMP and Codex configs each contain one canonical stdio resin-mcp entry and no legacy localhost SSE
+    const ompConfigCandidates = [
+      path.join(cleanWorkspace, ".omp", "agent", "mcp.json"),
+      path.join(cleanWorkspace, ".omp", "mcp.json"),
+      path.join(cleanHome, ".omp", "agent", "mcp.json"),
+      path.join(cleanHome, ".omp", "mcp.json"),
+    ];
+    const ompConfigFile = ompConfigCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!ompConfigFile) {
+      throw new Error(
+        `No OMP MCP configuration found in candidate locations: ${ompConfigCandidates.join(", ")}`,
+      );
+    }
+    const ompConfigRaw = fs.readFileSync(ompConfigFile, "utf8");
+    const ompConfig = JSON.parse(ompConfigRaw);
+    const ompServer = ompConfig.mcpServers?.resin ?? ompConfig.mcpServers?.["resin-gateway"];
+    if (!ompServer) {
+      throw new Error(
+        `OMP config at ${ompConfigFile} missing 'resin' mcpServers entry: ${ompConfigRaw}`,
+      );
+    }
+    if (
+      !ompServer.command ||
+      (!ompServer.command.includes("resin-mcp") && ompServer.command !== "resin-mcp")
+    ) {
+      throw new Error(
+        `OMP mcpServers entry does not use canonical command 'resin-mcp': ${JSON.stringify(ompServer)}`,
+      );
+    }
+    if (
+      ompServer.type === "sse" ||
+      ompServer.url ||
+      ompConfigRaw.includes("localhost:9400") ||
+      ompConfigRaw.includes("127.0.0.1:9400") ||
+      ompConfigRaw.includes("/mcp/sse")
+    ) {
+      throw new Error(
+        `OMP config at ${ompConfigFile} leaked legacy localhost SSE configuration: ${ompConfigRaw}`,
+      );
+    }
+
+    const codexConfigCandidates = [
+      path.join(cleanWorkspace, ".codex", "config.toml"),
+      path.join(cleanHome, ".codex", "config.toml"),
+    ];
+    const codexConfigFile = codexConfigCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!codexConfigFile) {
+      throw new Error(
+        `No Codex configuration found in candidate locations: ${codexConfigCandidates.join(", ")}`,
+      );
+    }
+    const codexConfigRaw = fs.readFileSync(codexConfigFile, "utf8");
+    if (
+      !codexConfigRaw.includes("[mcp_servers.resin]") &&
+      !codexConfigRaw.includes("[mcp_servers.resin-gateway]")
+    ) {
+      throw new Error(
+        `Codex config at ${codexConfigFile} missing [mcp_servers.resin] section: ${codexConfigRaw}`,
+      );
+    }
+    if (
+      !codexConfigRaw.includes('command = "resin-mcp"') &&
+      !codexConfigRaw.includes("resin-mcp")
+    ) {
+      throw new Error(
+        `Codex config at ${codexConfigFile} does not contain canonical command 'resin-mcp': ${codexConfigRaw}`,
+      );
+    }
+    if (
+      codexConfigRaw.includes("localhost:9400") ||
+      codexConfigRaw.includes("127.0.0.1:9400") ||
+      codexConfigRaw.includes("/mcp/sse")
+    ) {
+      throw new Error(
+        `Codex config at ${codexConfigFile} leaked legacy localhost SSE configuration: ${codexConfigRaw}`,
+      );
+    }
+
+    // Set up mock cloud device credentials and OMP fixture
+    const stateDir = path.join(resinHome, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const deviceTokenPayload = {
+      cloudUrl,
+      accessToken: "test-qualification-token",
+      claims: {
+        accountId: "acc_qual_clean",
+        workspaceId: "ws_clean_home_1",
+        deviceId: "dev_clean_home_1",
+        installationId: "inst_clean_home_1",
+        userId: "usr_clean_home_1",
+        actorType: "user",
+        tokenType: "access",
+        rawUploadConsent: false,
+        scopes: ["device:connect", "observations:write"],
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      },
+      deviceId: "dev_clean_home_1",
+      workspaceId: "ws_clean_home_1",
+      storedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(
+      path.join(stateDir, "device-token.json"),
+      JSON.stringify(deviceTokenPayload, null, 2),
+      { mode: 0o600 },
+    );
+
+    const ompSessionsDir = path.join(cleanHome, ".omp", "sessions");
+    const ompAgentSessionsDir = path.join(cleanHome, ".omp", "agent", "sessions");
+    const ompBreadcrumbsDir = path.join(cleanHome, ".omp", "breadcrumbs");
+    const workspaceOmpSessionsDir = path.join(cleanWorkspace, ".omp", "sessions");
+    fs.mkdirSync(ompSessionsDir, { recursive: true });
+    fs.mkdirSync(ompAgentSessionsDir, { recursive: true });
+    fs.mkdirSync(ompBreadcrumbsDir, { recursive: true });
+    fs.mkdirSync(workspaceOmpSessionsDir, { recursive: true });
+
+    const workspaceTranscriptPath = path.join(
+      workspaceOmpSessionsDir,
+      "session-clean-qual-1.jsonl",
+    );
+    fs.writeFileSync(path.join(ompSessionsDir, "session-clean-qual-1.jsonl"), "", "utf8");
+    fs.writeFileSync(path.join(ompAgentSessionsDir, "session-clean-qual-1.jsonl"), "", "utf8");
+    fs.writeFileSync(workspaceTranscriptPath, "", "utf8");
+    fs.writeFileSync(
+      path.join(ompBreadcrumbsDir, "session-clean-qual-1.json"),
+      JSON.stringify(
+        {
+          sessionId: "session-clean-qual-1",
+          workspaceId: "ws_clean_home_1",
+          workspacePath: cleanWorkspace,
+          metadata: { harness: "omp" },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    // Invariant 3: Daemon readiness works through local socket
+    const daemonBin = path.join(installedRoot, "bin", "resin-daemon");
+    const socketPath = path.join(stateDir, "daemon.sock");
+    daemonChild = spawn(
+      process.execPath,
+      [daemonBin, "--foreground", "--home", cleanHome, "--socket", socketPath],
+      {
+        cwd: cleanWorkspace,
+        env: cleanEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    daemonChild.stdout.resume();
+    daemonChild.stderr.resume();
+
+    const statusResult = await waitFor(
+      () => {
+        const res = runNode(daemonBin, ["--status", "--home", cleanHome, "--socket", socketPath], {
+          cwd: cleanWorkspace,
+          env: cleanEnv,
+          timeoutMs: 3000,
+        });
+        return res.status === 0 ? res : false;
+      },
+      { timeoutMs: 15_000, intervalMs: 200 },
+    );
+    if (!statusResult) {
+      throw new Error(
+        `Packaged daemon in clean home did not respond over local socket ${socketPath}`,
+      );
+    }
+
+    const diagResult = runNode(
+      daemonBin,
+      ["--diagnostics", "--home", cleanHome, "--socket", socketPath],
+      { cwd: cleanWorkspace, env: cleanEnv, timeoutMs: 5000 },
+    );
+    if (diagResult.status !== 0) {
+      throw new Error(
+        `Packaged daemon diagnostics failed: ${diagResult.stderr || diagResult.stdout}`,
+      );
+    }
+    fs.appendFileSync(workspaceTranscriptPath, OMP_QUALIFICATION_FIXTURE_LINES, "utf8");
+
+    // Invariant 5: the packaged capture runtime normalizes OMP JSONL into SQLite and
+    // receives an acknowledgment from the existing mock-cloud batch endpoint.
+    const stateDbPath = path.join(resinHome, "data", "qualification-state.db");
+    await ingestPackagedOmpFixture({
+      installedRoot,
+      stateDbPath,
+      transcriptPath: workspaceTranscriptPath,
+      cloudUrl,
+    });
+    if (receivedObservationBatches.length === 0 && receivedTrajectoryBatches.length === 0) {
+      throw new Error("Packaged OMP capture did not reach the mock-cloud batch endpoint");
+    }
+    if (!fs.existsSync(stateDbPath)) {
+      throw new Error(`Expected SQLite state database at ${stateDbPath}, but it was not created`);
+    }
+    const dbStat = fs.statSync(stateDbPath);
+    if (dbStat.size === 0) {
+      throw new Error(`SQLite state database at ${stateDbPath} is empty`);
+    }
+
+    const stopResult = runNode(daemonBin, ["--stop", "--home", cleanHome, "--socket", socketPath], {
+      cwd: cleanWorkspace,
+      env: cleanEnv,
+      timeoutMs: 5000,
+    });
+    if (stopResult.status !== 0) {
+      throw new Error(
+        `Packaged daemon stop command failed: ${stopResult.stderr || stopResult.stdout}`,
+      );
+    }
+    const exitCode = await waitForExit(daemonChild, 7000);
+    if (exitCode === null) {
+      throw new Error("Packaged daemon did not exit after authenticated stop command");
+    }
+
+    return {
+      telemetryEnabled: true,
+      noLegacyTokens: true,
+      daemonSocketReadiness: true,
+      canonicalHarnessConfigs: true,
+      ompBatchAcknowledged: true,
+      sqliteStored: true,
+    };
+  } finally {
+    if (daemonChild) {
+      terminateProcess(daemonChild);
+    }
+    try {
+      mockServer.close();
+    } catch {}
+  }
+}
 
 async function reservePort() {
   return await new Promise((resolve, reject) => {
@@ -616,6 +1179,7 @@ export async function qualifyPlatformLane(lane, options = {}) {
       const cli = qualifyCli(installedRoot, sandboxDir, manifest);
       const daemon = await qualifyDaemon(installedRoot, sandboxDir);
       const mcp = await qualifyMcp(installedRoot, sandboxDir);
+      const cleanHome = await qualifyCleanHome(installedRoot, sandboxDir, manifest);
       harnesses = await probeHarnesses(installedRoot);
       status = "QUALIFIED";
       checks = {
@@ -623,6 +1187,7 @@ export async function qualifyPlatformLane(lane, options = {}) {
         packagedCli: cli,
         daemon,
         mcp,
+        cleanHome,
       };
     }
 

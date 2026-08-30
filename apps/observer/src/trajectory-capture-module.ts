@@ -3,7 +3,12 @@ import path from "node:path";
 import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
 import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
 import { OmpHarnessAdapter, OmpRecordDecoder } from "@resin/adapter-omp";
-import type { LocalDatabaseConnection, LocalStateStore, SessionRepository } from "@resin/db";
+import type {
+  LocalDatabaseConnection,
+  LocalStateStore,
+  SessionRepository,
+  SyncRepository,
+} from "@resin/db";
 import type {
   HarnessAdapter,
   HarnessRecordDecoder,
@@ -184,6 +189,12 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
   logger?: Logger;
 }
 
+function isLocalStateStore(
+  store: LocalStateStore | LocalDatabaseConnection,
+): store is LocalStateStore {
+  return "sessions" in store;
+}
+
 /**
  * Daemon runtime module managing the transcript tailing coordinator, normalization pipeline,
  * harness adapter decoders, and trajectory capture & calibration submission.
@@ -264,7 +275,27 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       new OmpRecordDecoder(),
     ];
 
-    this.normalizationPipeline = options.normalizationPipeline ?? new NormalizationPipeline();
+    let dbConnection: LocalDatabaseConnection | undefined;
+    let sessionRepository: SessionRepository | undefined = options.sessionRepository;
+    let syncRepository: SyncRepository | undefined;
+
+    if (options.store) {
+      if (isLocalStateStore(options.store)) {
+        dbConnection = options.store.conn;
+        sessionRepository = sessionRepository ?? options.store.sessions;
+        syncRepository = options.store.sync;
+      } else {
+        dbConnection = options.store;
+      }
+    }
+
+    this.normalizationPipeline =
+      options.normalizationPipeline ??
+      new NormalizationPipeline({
+        sessionRepository,
+        syncRepository,
+        dbConnection,
+      });
     for (const decoder of this.decoders) {
       this.normalizationPipeline.registerDecoder(decoder);
     }
@@ -624,6 +655,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private rebuildOwnedObserverCoordinator(): void {
     if (!this.ownsObserverCoordinator || !this.observerCoordinatorNeedsRebuild) {
       return;
+    }
+    if (this.unsubscribeRecords) {
+      this.unsubscribeRecords();
+      this.unsubscribeRecords = undefined;
     }
     this.observerCoordinator = new ObserverCoordinator({
       cursorManager: this.cursorManager,
