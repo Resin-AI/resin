@@ -329,7 +329,7 @@ exec "$RESIN_TEST_REAL_NODE" --require "$RESIN_TEST_DNS_FIXTURE" "$@"
 
       expect(res.status).toBe(1);
       expect(res.stderr).toContain(
-        `Host "resin.sh" resolved to prohibited address "${address}". Helper acquisition rejected.`,
+        `Host "dist.resin.sh" resolved to prohibited address "${address}". Helper acquisition rejected.`,
       );
       expect(fs.existsSync(downloadTarget)).toBe(false);
     }
