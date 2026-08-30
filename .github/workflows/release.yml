@@ -56,9 +56,9 @@ jobs:
       CONFIRM_PROMOTION: ${{ inputs.confirm_promotion }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       KEY_PREFIX: ${{ (inputs.environment || 'production') == 'staging' && format('dry-runs/{0}', github.run_id) || '' }}
-      RESIN_RELEASE_ROLE_ARN: ${{ vars.RESIN_RELEASE_ROLE_ARN }}
-      RESIN_DISTRIBUTION_BUCKET: ${{ vars.RESIN_DISTRIBUTION_BUCKET }}
-      RESIN_DISTRIBUTION_ID: ${{ vars.RESIN_DISTRIBUTION_ID }}
+      RESIN_RELEASE_ROLE_ARN: ${{ secrets.RESIN_RELEASE_ROLE_ARN }}
+      RESIN_DISTRIBUTION_BUCKET: ${{ secrets.RESIN_DISTRIBUTION_BUCKET }}
+      RESIN_DISTRIBUTION_ID: ${{ secrets.RESIN_DISTRIBUTION_ID }}
       RESIN_DISTRIBUTION_BASE_URL: ${{ vars.RESIN_DISTRIBUTION_BASE_URL }}
       RESIN_RELEASE_KEY_ID: ${{ vars.RESIN_RELEASE_KEY_ID }}
       RESIN_RELEASE_PUBLIC_KEY_PEM: ${{ vars.RESIN_RELEASE_PUBLIC_KEY_PEM }}
