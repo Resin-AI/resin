@@ -401,6 +401,18 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("RESIN_RELEASE_ROLE_ARN");
       expect(script).toContain("RESIN_DISTRIBUTION_BUCKET");
       expect(script).toContain("RESIN_DISTRIBUTION_ID");
+      expect(production.raw).toContain(
+        "RESIN_RELEASE_ROLE_ARN: ${{ secrets.RESIN_RELEASE_ROLE_ARN }}",
+      );
+      expect(production.raw).toContain(
+        "RESIN_DISTRIBUTION_BUCKET: ${{ secrets.RESIN_DISTRIBUTION_BUCKET }}",
+      );
+      expect(production.raw).toContain(
+        "RESIN_DISTRIBUTION_ID: ${{ secrets.RESIN_DISTRIBUTION_ID }}",
+      );
+      expect(production.raw).not.toContain("RESIN_RELEASE_ROLE_ARN: ${{ vars.");
+      expect(production.raw).not.toContain("RESIN_DISTRIBUTION_BUCKET: ${{ vars.");
+      expect(production.raw).not.toContain("RESIN_DISTRIBUTION_ID: ${{ vars.");
     });
 
     it("contains ZERO source checkout, dependency installation, or packaging steps in production", () => {
