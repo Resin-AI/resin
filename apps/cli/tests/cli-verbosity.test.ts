@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin/cli.js";
-import { parseUpgradeFlags, upgradeCommand } from "../src/commands/upgrade.js";
 import { parseInitFlags } from "../src/commands/init.js";
+import { parseUpgradeFlags, upgradeCommand } from "../src/commands/upgrade.js";
 import { CliOutput, resolveVerbosity } from "../src/output.js";
 
 describe("CLI Verbosity Policy & Output Controls", () => {
@@ -52,7 +52,12 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let defaultOut = "";
       const defaultHandler = new CliOutput({
         verbosity: "default",
-        stdout: { write: (c) => { defaultOut += c; return true; } },
+        stdout: {
+          write: (c) => {
+            defaultOut += c;
+            return true;
+          },
+        },
       });
       defaultHandler.step("==> Step 1/11");
       expect(defaultOut).toBe("");
@@ -60,7 +65,12 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let verboseOut = "";
       const verboseHandler = new CliOutput({
         verbosity: "verbose",
-        stdout: { write: (c) => { verboseOut += c; return true; } },
+        stdout: {
+          write: (c) => {
+            verboseOut += c;
+            return true;
+          },
+        },
       });
       verboseHandler.step("==> Step 1/11");
       expect(verboseOut).toContain("==> Step 1/11");
@@ -70,7 +80,12 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let quietOut = "";
       const quietHandler = new CliOutput({
         verbosity: "quiet",
-        stdout: { write: (c) => { quietOut += c; return true; } },
+        stdout: {
+          write: (c) => {
+            quietOut += c;
+            return true;
+          },
+        },
       });
       quietHandler.log("Some progress");
       quietHandler.success("Resin initialization complete.");
@@ -79,7 +94,12 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let defaultOut = "";
       const defaultHandler = new CliOutput({
         verbosity: "default",
-        stdout: { write: (c) => { defaultOut += c; return true; } },
+        stdout: {
+          write: (c) => {
+            defaultOut += c;
+            return true;
+          },
+        },
       });
       defaultHandler.success("Resin initialization complete.");
       expect(defaultOut).toContain("Resin initialization complete.");
@@ -89,7 +109,12 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let quietErr = "";
       const quietHandler = new CliOutput({
         verbosity: "quiet",
-        stderr: { write: (c) => { quietErr += c; return true; } },
+        stderr: {
+          write: (c) => {
+            quietErr += c;
+            return true;
+          },
+        },
       });
       quietHandler.error("Error: something failed");
       expect(quietErr).toContain("Error: something failed");
@@ -120,7 +145,10 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let stdout = "";
       const outStream = {
         isTTY: true,
-        write: (c: string) => { stdout += c; return true; },
+        write: (c: string) => {
+          stdout += c;
+          return true;
+        },
       };
 
       const code1 = await main(["-V"], { stdout: outStream });
@@ -142,7 +170,10 @@ describe("CLI Verbosity Policy & Output Controls", () => {
       let stdout = "";
       const outStream = {
         isTTY: true,
-        write: (c: string) => { stdout += c; return true; },
+        write: (c: string) => {
+          stdout += c;
+          return true;
+        },
       };
 
       // With isInitialized: true and no autoOnboard, running "-v" prints global help with verbose mode, not "resin v..."
@@ -173,8 +204,18 @@ describe("CLI Verbosity Policy & Output Controls", () => {
 
       const exitCode = await upgradeCommand(["--quiet", "--force"], {
         engine: mockEngine,
-        stdout: { write: (c) => { stdout += c; return true; } },
-        stderr: { write: (c) => { stderr += c; return true; } },
+        stdout: {
+          write: (c) => {
+            stdout += c;
+            return true;
+          },
+        },
+        stderr: {
+          write: (c) => {
+            stderr += c;
+            return true;
+          },
+        },
       });
 
       expect(exitCode).toBe(0);

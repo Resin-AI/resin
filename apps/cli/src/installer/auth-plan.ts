@@ -256,7 +256,6 @@ export function formatAuthPlanForDisplay(plan: AuthorizationPlan): string {
   return lines.join("\n");
 }
 
-
 /**
  * Formats an authorization plan into a compact summary for default terminal display.
  */

@@ -16,8 +16,8 @@ import {
   type InstallerPairingMutation,
   ResinInstaller,
 } from "../installer/installer.js";
-import { DEFAULT_CLOUD_URL, validateCloudUrl } from "../service/auth-bootstrap.js";
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
+import { DEFAULT_CLOUD_URL, validateCloudUrl } from "../service/auth-bootstrap.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import { type BrowserLauncher, performPairing } from "./login.js";
 export interface InitCommandFlags {
@@ -296,8 +296,7 @@ export async function initCommand(
           fsBridge: options.customFsBridge,
           timeoutMs: options.authorizationTimeoutMs,
           abortSignal: cancellationController.signal,
-          stdout:
-            isQuiet || flags.nonInteractive ? { write: () => true } : options.stdout,
+          stdout: isQuiet || flags.nonInteractive ? { write: () => true } : options.stdout,
         });
       };
     }
@@ -323,8 +322,10 @@ export async function initCommand(
     quiet: isQuiet,
     releaseMode:
       options.releaseMode ??
-      (resolveReleaseMode(process.env.RESIN_RELEASE_MODE) ??
-        (process.env.VITEST || process.env.NODE_ENV === "test" ? "local-test" : "production")),
+      resolveReleaseMode(env.RESIN_RELEASE_MODE) ??
+      (env.RESIN_RELEASE_TEST_ONLY === "1" || env.VITEST || env.NODE_ENV === "test"
+        ? "local-test"
+        : "production"),
     releaseChannelUrl: process.env.RESIN_RELEASE_CHANNEL_URL,
     allowInsecureReleaseTransportForTests:
       process.env.RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES === "1",

@@ -121,7 +121,15 @@ describe("init onboarding & pairing workflow", () => {
       });
 
       const exitCode = await initCommand(
-        ["--verbose", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        [
+          "--verbose",
+          "--home",
+          home,
+          "--workspace",
+          workspace,
+          "--cloud-url",
+          "https://api.resin.sh",
+        ],
         {
           customFsBridge: bridge,
           // SAFETY: Mock fetch implementing fetch interface for testing.
@@ -189,7 +197,9 @@ describe("init onboarding & pairing workflow", () => {
     expect(result.exitCode).toBe(0);
     expect(capturedStdoutAtPrompt).toContain("Resin Authorization");
     expect(capturedStdoutAtPrompt).toContain(`Workspace: ${workspace}`);
-    expect(capturedStdoutAtPrompt).not.toContain("================================================================================");
+    expect(capturedStdoutAtPrompt).not.toContain(
+      "================================================================================",
+    );
     expect(result.stdout).toContain("Resin initialization complete.");
   });
 
@@ -200,7 +210,15 @@ describe("init onboarding & pairing workflow", () => {
 
     const result = await captureOutput(async () => {
       return await initCommand(
-        ["--auto-approve", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        [
+          "--auto-approve",
+          "--home",
+          home,
+          "--workspace",
+          workspace,
+          "--cloud-url",
+          "https://api.resin.sh",
+        ],
         {
           customFsBridge: bridge,
           customFetch: customFetch as typeof fetch,
@@ -222,7 +240,16 @@ describe("init onboarding & pairing workflow", () => {
 
     const result = await captureOutput(async () => {
       return await initCommand(
-        ["--quiet", "--auto-approve", "--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
+        [
+          "--quiet",
+          "--auto-approve",
+          "--home",
+          home,
+          "--workspace",
+          workspace,
+          "--cloud-url",
+          "https://api.resin.sh",
+        ],
         {
           customFsBridge: bridge,
           customFetch: customFetch as typeof fetch,

@@ -56,7 +56,9 @@ describe("Authorization Plan & Privacy Boundary", () => {
     expect(compact).toContain("Resin Authorization");
     expect(compact).toContain("Workspace: /workspace/my-app");
     expect(compact).toContain("Claude Code CLI");
-    expect(compact).not.toContain("================================================================================");
+    expect(compact).not.toContain(
+      "================================================================================",
+    );
   });
 
   it("rejects non-interactive authorization when no approval flags or files are provided", async () => {

@@ -12,6 +12,7 @@ import {
 } from "@resin/observer";
 
 export const resolveDaemonPaths = resolvePaths;
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
   type DaemonReadinessResult,
@@ -39,7 +40,6 @@ import {
   formatCompactAuthPlan,
   validateAuthorization,
 } from "./auth-plan.js";
-import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import {
   type ChannelMetadata,
   type ChannelVerificationResult,
@@ -195,7 +195,11 @@ export class ResinInstaller {
     if (options.logger) {
       this.logger = options.logger;
     }
-    if (options.verbosity !== undefined || options.verbose !== undefined || options.quiet !== undefined) {
+    if (
+      options.verbosity !== undefined ||
+      options.verbose !== undefined ||
+      options.quiet !== undefined
+    ) {
       this.verbosity =
         options.verbosity ??
         resolveVerbosity({

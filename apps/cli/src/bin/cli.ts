@@ -9,7 +9,7 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
-import { type InitCommandOptions, initCommand } from "../commands/init.js";
+import { initCommand } from "../commands/init.js";
 import { type BrowserLauncher, loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { privacyCommand } from "../commands/privacy.js";
@@ -20,13 +20,13 @@ import {
   type HarnessHealthRunner,
   runHarnessHealthStartupCheck,
 } from "../installer/harness-health.js";
+import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import {
   DEFAULT_CLOUD_URL,
   DeviceAuthClient,
   isReusableCredentialRecord,
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
-import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 
 const PackageJsonSchema = z.object({
   version: z.string().min(1),
@@ -354,15 +354,6 @@ export async function main(
   const stderr =
     options.stderr?.write === undefined ? process.stderr : { write: options.stderr.write };
 
-  if (parsed.isVersion) {
-    stdout.write(`resin v${VERSION}\n`);
-    return 0;
-  }
-  if (parsed.isHelp) {
-    printGlobalHelp(stdout);
-    return 0;
-  }
-
   const env = options.env ?? process.env;
   const verbosity =
     options.verbosity ??
@@ -574,12 +565,7 @@ export function isMainModule(metaUrl: string = import.meta.url, argv1?: string):
   }
 }
 
-if (
-  process?.argv &&
-  process.argv &&
-  process.argv[1] &&
-  isMainModule(import.meta.url, process.argv[1])
-) {
+if (process.argv[1] && isMainModule(import.meta.url, process.argv[1])) {
   main()
     .then((exitCode) => {
       if (exitCode !== 0) {
