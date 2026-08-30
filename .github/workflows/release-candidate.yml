@@ -319,7 +319,7 @@ jobs:
           cp -a dist/release-packages/. "$candidate_stage/packages/"
 
           tar --sort=name --mtime='2026-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
-            -czf resin-release-candidate.tar.gz -C "$candidate_stage" release qualification tools installers
+            -czf resin-release-candidate.tar.gz -C "$candidate_stage" release qualification tools installers packages
 
           sha256sum resin-release-candidate.tar.gz > resin-release-candidate.tar.gz.sha256
       - name: Upload unsigned candidate artifact
