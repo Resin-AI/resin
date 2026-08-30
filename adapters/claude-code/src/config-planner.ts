@@ -1,4 +1,6 @@
 import {
+  CANONICAL_RESIN_MCP_ARGS,
+  CANONICAL_RESIN_MCP_COMMAND,
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
   type ConfigFsBridge,
@@ -10,7 +12,6 @@ import {
   migrateJsonMcpServers,
   planConfigMutation,
   rollbackConfigMutation,
-  verifyConfigIntegrity,
 } from "@resin/harness-contracts";
 
 /**
@@ -37,7 +38,7 @@ export interface ClaudeConfigDoc {
  */
 export function generatePlannedClaudeConfig(
   currentContent: string | null,
-  gatewayUrl: string,
+  gatewayUrl?: string,
   serverKey = CANONICAL_RESIN_MCP_SERVER_KEY,
 ): string {
   let doc: ClaudeConfigDoc = {};
@@ -62,10 +63,9 @@ export function generatePlannedClaudeConfig(
 
   // Configure resin gateway MCP endpoint
   const serverConfig: ClaudeMcpServerConfig = {
-    type: "sse",
-    url: gatewayUrl,
+    command: CANONICAL_RESIN_MCP_COMMAND,
+    args: [...CANONICAL_RESIN_MCP_ARGS],
   };
-
   doc.mcpServers = migrateJsonMcpServers(existingServers, serverConfig, gatewayUrl, serverKey);
   // Format with consistent 2-space indentation and trailing newline
   return `${JSON.stringify(doc, null, 2)}\n`;
@@ -76,7 +76,7 @@ export function generatePlannedClaudeConfig(
  */
 export async function planClaudeMcpConfig(
   workspace: HarnessWorkspace,
-  gatewayUrl: string,
+  gatewayUrl?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
 ): Promise<ConfigMutationPlan> {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
@@ -112,20 +112,16 @@ export async function rollbackClaudeMcpConfig(
 }
 
 /**
- * Verifies whether the workspace's MCP configuration contains the expected Gateway URL.
+ * Verifies whether the workspace's MCP configuration contains the expected Resin MCP registration.
  */
 export async function verifyClaudeMcpConfig(
   workspace: HarnessWorkspace,
-  expectedGatewayUrl?: string,
+  _expectedGatewayUrl?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
 ): Promise<boolean> {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
   const exists = await fsBridge.exists(targetPath);
   if (!exists) return false;
-
-  if (!expectedGatewayUrl) {
-    return true;
-  }
 
   try {
     const content = await fsBridge.readFile(targetPath);
@@ -139,10 +135,28 @@ export async function verifyClaudeMcpConfig(
     if (!doc.mcpServers || !(doc.mcpServers instanceof Object) || Array.isArray(doc.mcpServers)) {
       return false;
     }
-    const entry = doc.mcpServers.resin;
-    if (!entry) return false;
+    const entry = doc.mcpServers[CANONICAL_RESIN_MCP_SERVER_KEY] || doc.mcpServers.resin;
+    if (!entry || !(entry instanceof Object) || Array.isArray(entry)) {
+      return false;
+    }
 
-    return entry.url === expectedGatewayUrl;
+    if (entry.url !== undefined || entry.type === "sse") {
+      return false;
+    }
+
+    if (typeof entry.command !== "string" || entry.command.trim() !== CANONICAL_RESIN_MCP_COMMAND) {
+      return false;
+    }
+
+    if (
+      !Array.isArray(entry.args) ||
+      entry.args.length === 0 ||
+      entry.args[0] !== CANONICAL_RESIN_MCP_ARGS[0]
+    ) {
+      return false;
+    }
+
+    return true;
   } catch {
     return false;
   }

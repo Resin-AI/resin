@@ -1,10 +1,12 @@
 import {
+  CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMetadataRecord,
   type ConfigMutationPlan,
+  DEFAULT_RESIN_MCP_ARGS,
   DEFAULT_RESIN_MCP_COMMAND,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   applyConfigMutation,
@@ -35,7 +37,12 @@ export interface CodexJsonConfigDoc {
 }
 
 export const DEFAULT_GATEWAY_SERVER_NAME = CANONICAL_RESIN_MCP_SERVER_KEY;
-export { DEFAULT_RESIN_MCP_COMMAND };
+export {
+  CANONICAL_RESIN_MCP_ARGS,
+  CANONICAL_RESIN_MCP_COMMAND,
+  DEFAULT_RESIN_MCP_ARGS,
+  DEFAULT_RESIN_MCP_COMMAND,
+};
 
 /**
  * Options for planning Codex MCP configuration mutations.
@@ -77,7 +84,7 @@ function resolveServerConfig(
   if (!serverConfigOrUrl) {
     return {
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: [],
+      args: [...CANONICAL_RESIN_MCP_ARGS],
     };
   }
   if (typeof serverConfigOrUrl === "string") {
@@ -93,7 +100,7 @@ function resolveServerConfig(
   if (config.command === undefined && config.url === undefined) {
     config.command = CANONICAL_RESIN_MCP_COMMAND;
     if (config.args === undefined) {
-      config.args = [];
+      config.args = [...CANONICAL_RESIN_MCP_ARGS];
     }
   }
   return config;
@@ -372,8 +379,7 @@ export function updateTomlMcpConfig(
   }
 
   const newSection = lines.join("\n");
-  const suffix = cleanedContent.endsWith("\n") ? "" : "\n";
-  return `${cleanedContent}${suffix}\n${newSection}\n`;
+  return `${cleanedContent.trimEnd()}\n\n${newSection}\n`;
 }
 
 /**
@@ -466,7 +472,7 @@ export async function planCodexMcpConfig(
   } else {
     serverEntry = {
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: options.args ?? [],
+      args: options.args !== undefined ? options.args : [...CANONICAL_RESIN_MCP_ARGS],
     };
     if (explicitType !== undefined) {
       serverEntry.type = explicitType;
@@ -991,10 +997,11 @@ export async function verifyCodexMcpConfig(
     return server.url === expectedUrl;
   }
 
+  if (isRecognizedResinMcpEntry(server, gatewayUrl)) {
+    return true;
+  }
+
   if (server.command !== undefined && typeof server.command === "string") {
-    if (isResinMcpCommand(server.command) || server.command === CANONICAL_RESIN_MCP_COMMAND) {
-      return true;
-    }
     if (sName !== DEFAULT_GATEWAY_SERVER_NAME && server.command.trim().length > 0) {
       return true;
     }
@@ -1004,13 +1011,9 @@ export async function verifyCodexMcpConfig(
     if (gatewayUrl && server.url === gatewayUrl) {
       return true;
     }
-    if (isRecognizedResinMcpEntry(server, gatewayUrl)) {
-      return true;
-    }
     if (sName !== DEFAULT_GATEWAY_SERVER_NAME && server.url.trim().length > 0) {
       return true;
     }
   }
-
   return false;
 }

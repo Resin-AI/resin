@@ -195,13 +195,13 @@ describe("HarnessReconciler", () => {
       "reconciled",
     ]);
     expect(JSON.parse((await bridge.readFile(`${HOME}/.claude/claude.json`)) ?? "")).toMatchObject({
-      mcpServers: { resin: { type: "sse", url: GATEWAY_URL } },
+      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
     });
     expect(await bridge.readFile(`${HOME}/.codex/config.toml`)).toContain(
-      `[mcp_servers.resin]\ncommand = "resin-mcp"`,
+      `[mcp_servers.resin]\ncommand = "resin"`,
     );
     expect(JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "")).toMatchObject({
-      mcpServers: { resin: { command: "resin-mcp", args: [] } },
+      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
     });
 
     const backupCount = Object.keys(bridge.dump()).filter(
@@ -296,7 +296,8 @@ describe("HarnessReconciler", () => {
       command: "user-mcp",
       env: { TOKEN: "keep" },
     });
-    expect(omp.mcpServers.resin.command).toBe("resin-mcp");
+    expect(omp.mcpServers.resin.command).toBe("resin");
+    expect(omp.mcpServers.resin.args).toEqual(["mcp"]);
     expect(omp.mcpServers.resin.env).toEqual({
       RESIN_USER_TOKEN: "keep-owned-env",
     });
@@ -386,6 +387,16 @@ describe("HarnessReconciler", () => {
     const reconciler = new HarnessReconciler();
 
     for (let index = 0; index < 7; index += 1) {
+      await bridge.writeFile(
+        targetPath,
+        JSON.stringify({
+          settings: { keep: true },
+          mcpServers: {
+            user_server: { command: "keep" },
+            resin: { type: "sse", url: `${GATEWAY_URL}?revision=${index}` },
+          },
+        }),
+      );
       const report = await reconciler.reconcile({
         harnesses: ["claude-code"],
         installedHarnesses: ["claude-code"],
@@ -532,8 +543,8 @@ describe("HarnessReconciler", () => {
     });
     const repaired = JSON.parse((await bridge.readFile(targetPath)) ?? "");
     expect(repaired.mcpServers.resin).toEqual({
-      command: "resin-mcp",
-      args: [],
+      command: "resin",
+      args: ["mcp"],
       env: { RESIN_TOKEN: "keep" },
     });
   });
@@ -565,7 +576,7 @@ describe("HarnessReconciler", () => {
       expect((await fs.lstat(targetPath)).isSymbolicLink()).toBe(true);
       expect(JSON.parse(await fs.readFile(managedPath, "utf8"))).toMatchObject({
         keep: "managed",
-        mcpServers: { resin: { type: "sse", url: GATEWAY_URL } },
+        mcpServers: { resin: { command: "resin", args: ["mcp"] } },
       });
 
       const externallyEdited = JSON.stringify({
@@ -778,7 +789,7 @@ describe("HarnessReconciler", () => {
       });
 
       expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-      expect(await fs.readFile(targetPath, "utf8")).toContain('command = "resin-mcp"');
+      expect(await fs.readFile(targetPath, "utf8")).toContain('command = "resin"');
       await expect(fs.access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await fs.rm(home, { recursive: true, force: true });
@@ -832,10 +843,10 @@ describe("HarnessReconciler", () => {
       fsBridge: bridge,
       probeHarness: NO_INSTALLATION_PROBE,
     });
+    const repaired = await bridge.readFile(targetPath);
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    const repaired = await bridge.readFile(targetPath);
-    expect(repaired).toContain('[mcp_servers.resin]\ncommand = "resin-mcp"');
+    expect(repaired).toContain('[mcp_servers.resin]\ncommand = "resin"');
     expect(repaired).not.toContain("url =");
   });
 
@@ -869,7 +880,7 @@ describe("HarnessReconciler", () => {
     const repaired = await bridge.readFile(targetPath);
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    expect(repaired).toContain('command = "resin-mcp"');
+    expect(repaired).toContain('command = "resin"');
     expect(repaired).toContain('user_note = "preserve me"');
     expect(repaired).not.toContain("legacy-command");
     expect(repaired).not.toContain("--legacy");
@@ -909,9 +920,7 @@ describe("HarnessReconciler", () => {
         expect(transactionName).toBeDefined();
         const transactionPath = path.join(path.dirname(targetPath), transactionName!);
         expect(await fs.readFile(path.join(transactionPath, "captured"), "utf8")).toBe(original);
-        expect(await fs.readFile(path.join(transactionPath, "planned"), "utf8")).toContain(
-          GATEWAY_URL,
-        );
+        expect(await fs.readFile(path.join(transactionPath, "planned"), "utf8")).toContain("resin");
       } finally {
         await fs.rm(home, { recursive: true, force: true });
       }
@@ -1162,16 +1171,16 @@ describe("HarnessReconciler", () => {
       expect(report.success).toBe(true);
 
       const claude = JSON.parse((await bridge.readFile(`${HOME}/.claude/claude.json`)) ?? "{}");
-      expect(claude.mcpServers.resin).toEqual({ type: "sse", url: GATEWAY_URL });
+      expect(claude.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
       expect(claude.mcpServers.resin_gateway).toBeUndefined();
 
       const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
       expect(codex).toContain("[mcp_servers.resin]");
-      expect(codex).toContain('command = "resin-mcp"');
+      expect(codex).toContain('command = "resin"');
       expect(codex).not.toContain("[mcp_servers.resin_gateway]");
 
       const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
-      expect(omp.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
+      expect(omp.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
 
@@ -1256,8 +1265,8 @@ describe("HarnessReconciler", () => {
       expect(omp.settings).toEqual({ compact: true });
       expect(omp.mcpServers.user_srv).toEqual({ command: "user-bin" });
       expect(omp.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
         env: { CUSTOM_VAR: "keep-me" },
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
@@ -1303,14 +1312,14 @@ describe("HarnessReconciler", () => {
 
       const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
       expect(omp.mcpServers.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
         env: { TOKEN: "user-tok" },
       });
 
       const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
       expect(codex).toContain("[mcp_servers.resin]");
-      expect(codex).toContain('command = "resin-mcp"');
+      expect(codex).toContain('command = "resin"');
       expect(codex).not.toContain("localhost:9400");
       expect(codex).toContain('env.CUSTOM = "preserve"');
     });

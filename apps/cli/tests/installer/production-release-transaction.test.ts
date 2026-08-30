@@ -45,7 +45,6 @@ function sha256(buf: Buffer): string {
 function tarGz(): Buffer {
   const files = [
     ["bin/resin-daemon", "#!/usr/bin/env node\n"],
-    ["bin/resin-mcp", "#!/usr/bin/env node\n"],
     ["bin/resin", "#!/usr/bin/env node\n"],
   ] as const;
   const blocks: Buffer[] = [];

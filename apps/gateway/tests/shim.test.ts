@@ -16,8 +16,13 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     const args2 = parseArgs(["--no-standalone", "--socket", "/tmp/custom.sock"]);
     expect(args2.standaloneFallback).toBe(false);
     expect(args2.socketPath).toBe("/tmp/custom.sock");
-  });
 
+    const args3 = parseArgs(["--help"]);
+    expect(args3.showHelp).toBe(true);
+
+    const args4 = parseArgs(["-h"]);
+    expect(args4.showHelp).toBe(true);
+  });
   it("detects absent daemon and starts in standalone mode by default", async () => {
     const nonExistentSocket = path.join(os.tmpdir(), `test-nonexistent-${Date.now()}.sock`);
 
@@ -149,7 +154,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       expect(status.mode).toBe("failed");
       expect(status.daemonReachable).toBe(false);
       expect(stderrOutput).toContain("resin daemon start");
-      expect(stderrOutput).toContain("--standalone");
+      expect(stderrOutput).toContain("resin mcp --standalone");
     } finally {
       await shim.stop();
     }

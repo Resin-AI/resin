@@ -271,6 +271,7 @@ Commands:
   init         Install, authorize, and configure AI agent harnesses for Resin.
   login        Authenticate this installation with Resin Cloud.
   status       Display live status and health of the daemon, tools, and harnesses.
+  mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
   privacy      Inspect and manage device and cloud privacy controls.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.
   doctor       Diagnose platform, filesystem, service, IPC, database, and harness state.
@@ -347,12 +348,25 @@ export async function main(
   options: MainOptions = {},
 ): Promise<number> {
   const parsed = parseTopLevelArgv(argv);
+  const command = parsed.command;
+  const args = parsed.commandArgs;
   const stdout =
     options.stdout?.write === undefined
       ? process.stdout
       : { isTTY: options.stdout.isTTY, write: options.stdout.write };
   const stderr =
     options.stderr?.write === undefined ? process.stderr : { write: options.stderr.write };
+  if (command === "mcp") {
+    // Lazy dynamic import: prevents eagerly loading @resin/gateway and node:sqlite on non-MCP CLI paths.
+    const { mcpCommand } = await import("../commands/mcp.js");
+    return mcpCommand(args, {
+      stdin: options.stdin as NodeJS.ReadableStream | undefined,
+      stdout,
+      stderr,
+      home: options.home,
+      env: options.env,
+    });
+  }
 
   const env = options.env ?? process.env;
   const verbosity =
@@ -367,8 +381,6 @@ export async function main(
     });
   const isQuiet = verbosity === "quiet";
   const isVerbose = verbosity === "verbose";
-  const command = parsed.command;
-  const args = parsed.commandArgs;
 
   let harnessHealthHome = options.home;
   for (let index = 0; index < args.length; index += 1) {

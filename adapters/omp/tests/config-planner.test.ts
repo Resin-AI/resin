@@ -64,12 +64,14 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(hash).toMatch(/^[a-f0-9]{64}$/);
     // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc with resin MCP server.
     const plannedParsed = JSON.parse(plan.plannedContent) as {
-      mcpServers: { resin: { url: string; type: string } };
+      mcpServers: { resin: { command: string; args: string[]; url?: string; type?: string } };
     };
     expect(plannedParsed.mcpServers.resin).toEqual({
-      url: "http://127.0.0.1:4000/mcp/sse",
-      type: "sse",
+      command: "resin",
+      args: ["mcp"],
     });
+    expect(plannedParsed.mcpServers.resin.url).toBeUndefined();
+    expect(plannedParsed.mcpServers.resin.type).toBeUndefined();
 
     const backup = await applyOmpMcpConfig(plan, fsBridge);
     expect(backup.targetPath).toBe(configPath);
@@ -182,17 +184,46 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
     // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
     const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
-    expect(plannedParsed.mcpServers.resin).toEqual({
-      type: "sse",
-      url: "http://127.0.0.1:4000/mcp/sse",
+    expect(plannedParsed.mcpServers?.resin).toEqual({
+      command: "resin",
+      args: ["mcp"],
     });
-    expect(plannedParsed.mcpServers["existing-db-server"]).toEqual({
+    expect(plannedParsed.mcpServers?.["existing-db-server"]).toEqual({
       command: "node",
       args: ["db-server.js"],
     });
   });
 
-  it("is idempotent when re-planning against already mutated config", async () => {
+  it("is idempotent when re-planning against already mutated canonical config", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const configPath = "/test/home/.omp/agent/mcp.json";
+    const initialConfig = {
+      mcpServers: {
+        resin: {
+          command: "resin",
+          args: ["mcp"],
+        },
+      },
+    };
+    await fsBridge.writeFile(configPath, JSON.stringify(initialConfig, null, 2));
+
+    const plan = await planOmpMcpConfig({
+      gatewayUrl: "http://127.0.0.1:4000/mcp/sse",
+      customConfigPath: configPath,
+      fsBridge,
+    });
+
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+    const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
+    expect(plannedParsed.mcpServers?.resin).toEqual({
+      command: "resin",
+      args: ["mcp"],
+    });
+    expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
+    expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
+  });
+
+  it("migrates existing legacy SSE resin entry to canonical stdio using gatewayUrl as migration context", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
     const configPath = "/test/home/.omp/agent/mcp.json";
     const initialConfig = {
@@ -211,9 +242,49 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       fsBridge,
     });
 
-    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
     const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
-    expect(plannedParsed.mcpServers.resin).toEqual({
+    expect(plannedParsed.mcpServers?.resin).toEqual({
+      command: "resin",
+      args: ["mcp"],
+    });
+    expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
+    expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
+  });
+
+  it("never adds url alongside command when both command and gatewayUrl or url are passed", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const configPath = "/test/home/.omp/agent/mcp.json";
+
+    const plan = await planOmpMcpConfig({
+      command: "resin",
+      args: ["mcp"],
+      gatewayUrl: "http://127.0.0.1:4000/mcp/sse",
+      url: "http://127.0.0.1:4000/mcp/sse",
+      customConfigPath: configPath,
+      fsBridge,
+    });
+
+    const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
+    expect(plannedParsed.mcpServers?.resin).toEqual({
+      command: "resin",
+      args: ["mcp"],
+    });
+    expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
+    expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
+  });
+
+  it("preserves explicit URL-only configuration when caller intentionally requests it via url", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const configPath = "/test/home/.omp/agent/mcp.json";
+
+    const plan = await planOmpMcpConfig({
+      url: "http://127.0.0.1:4000/mcp/sse",
+      customConfigPath: configPath,
+      fsBridge,
+    });
+
+    const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
+    expect(plannedParsed.mcpServers?.resin).toEqual({
       type: "sse",
       url: "http://127.0.0.1:4000/mcp/sse",
     });
@@ -239,10 +310,13 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     const currentLegacyContent = await fsBridge.readFile(legacyConfigPath);
     expect(currentLegacyContent).toBe(legacyContent);
 
-    // Verify new agent/mcp.json was created
     const newContent = await fsBridge.readFile(path.resolve(ompHome, "agent", "mcp.json"));
     expect(newContent).not.toBeNull();
-    expect(JSON.parse(newContent!).mcpServers.resin).toBeDefined();
+    const parsedDoc = JSON.parse(newContent!) as OmpConfigDoc;
+    expect(parsedDoc.mcpServers?.resin).toEqual({
+      command: "resin",
+      args: ["mcp"],
+    });
   });
 
   it("throws ConfigPreconditionFailedError when current content changes before apply", async () => {
@@ -292,8 +366,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
       expect(parsed.mcpServers?.resin_gateway).toBeUndefined();
@@ -325,8 +399,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
     });
@@ -352,8 +426,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
-        command: "resin-mcp",
-        args: [],
+        command: "resin",
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toEqual({
         type: "sse",

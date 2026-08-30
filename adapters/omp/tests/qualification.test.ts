@@ -129,8 +129,8 @@ describe("Oh My Pi (OMP) Harness Qualification Suite [REM-017]", () => {
       expect(parsedWritten.keybindings.palette).toBe("ctrl+p");
       expect(parsedWritten.mcpServers.existing_tool_server).toBeDefined();
       expect(parsedWritten.mcpServers.resin).toEqual({
-        url: gatewayUrl,
-        type: "sse",
+        command: "resin",
+        args: ["mcp"],
       });
 
       // 3. Verify write verification

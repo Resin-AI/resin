@@ -34,7 +34,7 @@ function printHelp(): void {
 Resin MCP Shim (v${VERSION})
 
 Usage:
-  resin-mcp [options]
+  resin mcp [options]
 
 Options:
   -s, --standalone       Enable standalone fallback (default)
@@ -80,8 +80,8 @@ function parseArgs(args: string[]) {
   return { standaloneMode, standaloneFallback, socketPath, cwd, harnessId, dbPath, showHelp };
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  const args = parseArgs(argv);
 
   if (args.showHelp) {
     printHelp();
@@ -136,4 +136,4 @@ if (isDirectExecution || process.env.NODE_ENV !== "test") {
   });
 }
 
-export { main, parseArgs };
+export { main, parseArgs, printHelp, resolveVersion, VERSION };

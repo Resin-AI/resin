@@ -15,8 +15,11 @@ describe("verify-binaries", () => {
       const packageNames = BINARY_SPECS.map((s) => s.packageName);
       expect(packageNames).toContain("resin");
       expect(packageNames).toContain("@resin/observer");
-      expect(packageNames).toContain("@resin/gateway");
       expect(packageNames).toContain("@resin/test-fixtures");
+
+      const resinSpecs = BINARY_SPECS.filter((s) => s.packageName === "resin");
+      expect(resinSpecs).toHaveLength(2);
+      expect(resinSpecs.some((s) => s.testArgs.includes("mcp"))).toBe(true);
     });
 
     it("has valid configurations for each binary spec", () => {

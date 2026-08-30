@@ -93,7 +93,18 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       const gatewayUrl = "http://127.0.0.1:4000/mcp/sse";
       const plan = await adapter.planMcpConfig(workspace, gatewayUrl);
       expect(plan.harnessId).toBe("omp");
-
+      const parsedPlan = JSON.parse(plan.plannedContent) as {
+        mcpServers?: Record<
+          string,
+          { command?: string; args?: string[]; url?: string; type?: string }
+        >;
+      };
+      expect(parsedPlan.mcpServers?.resin).toEqual({
+        command: "resin",
+        args: ["mcp"],
+      });
+      expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
+      expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
       const backup = await adapter.applyMcpConfig(plan);
       expect(backup.targetPath).toContain("mcp.json");
 
@@ -115,6 +126,85 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
         timestamp: new Date().toISOString(),
       });
       expect(refreshResult.outcome).toBe("native_list_change");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+  it("plans canonical stdio and migrates legacy SSE entry using gatewayUrl as migration context", async () => {
+    const adapter = new OmpHarnessAdapter();
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-migration-"));
+    try {
+      const wsPath = path.join(tmpDir, "repo");
+      const configDir = path.join(wsPath, ".omp", "agent");
+      const configPath = path.join(configDir, "mcp.json");
+      await fsp.mkdir(configDir, { recursive: true });
+
+      const initialConfig = {
+        mcpServers: {
+          "resin-gateway": {
+            type: "sse",
+            url: "http://127.0.0.1:4000/mcp/sse",
+          },
+          "custom-tool": {
+            command: "custom-binary",
+            args: ["--flag"],
+          },
+        },
+      };
+      await fsp.writeFile(configPath, JSON.stringify(initialConfig, null, 2));
+
+      const workspace = {
+        workspaceId: "ws-migration",
+        rootPath: wsPath,
+        name: "repo",
+        harnessId: "omp",
+        configPath,
+        metadata: {},
+      };
+
+      const plan = await adapter.planMcpConfig(workspace, "http://127.0.0.1:4000/mcp/sse");
+      expect(plan.harnessId).toBe("omp");
+
+      const parsedPlan = JSON.parse(plan.plannedContent) as {
+        mcpServers?: Record<
+          string,
+          { command?: string; args?: string[]; url?: string; type?: string }
+        >;
+      };
+      expect(parsedPlan.mcpServers?.resin).toEqual({
+        command: "resin",
+        args: ["mcp"],
+      });
+      expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
+      expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
+      expect(parsedPlan.mcpServers?.["resin-gateway"]).toBeUndefined();
+      expect(parsedPlan.mcpServers?.["custom-tool"]).toEqual({
+        command: "custom-binary",
+        args: ["--flag"],
+      });
+
+      const backup = await adapter.applyMcpConfig(plan);
+      expect(backup.targetPath).toBe(configPath);
+
+      const verified = await adapter.verifyMcpConfig(workspace);
+      expect(verified).toBe(true);
+
+      const appliedContent = await fsp.readFile(configPath, "utf8");
+      const parsedApplied = JSON.parse(appliedContent) as {
+        mcpServers?: Record<
+          string,
+          { command?: string; args?: string[]; url?: string; type?: string }
+        >;
+      };
+      expect(parsedApplied.mcpServers?.resin).toEqual({
+        command: "resin",
+        args: ["mcp"],
+      });
+      expect(parsedApplied.mcpServers?.["resin-gateway"]).toBeUndefined();
+      expect(parsedApplied.mcpServers?.["custom-tool"]).toEqual({
+        command: "custom-binary",
+        args: ["--flag"],
+      });
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

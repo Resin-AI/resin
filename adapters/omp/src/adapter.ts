@@ -1,5 +1,7 @@
 import {
   type AdapterCapabilities,
+  CANONICAL_RESIN_MCP_ARGS,
+  CANONICAL_RESIN_MCP_COMMAND,
   type CatalogChangeSummary,
   type ConfigBackup,
   type ConfigFsBridge,
@@ -114,7 +116,13 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     workspace: HarnessWorkspace,
     gatewayUrl: string,
   ): Promise<ConfigMutationPlan> {
-    return planOmpMcpConfig({ workspace, gatewayUrl, fsBridge: this.fsBridge });
+    return planOmpMcpConfig({
+      workspace,
+      gatewayUrl,
+      fsBridge: this.fsBridge,
+      command: CANONICAL_RESIN_MCP_COMMAND,
+      args: [...CANONICAL_RESIN_MCP_ARGS],
+    });
   }
 
   /**

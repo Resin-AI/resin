@@ -49,7 +49,7 @@ export interface VersionInstallResult {
   readonly installedFiles: string[];
   readonly entryPoints: {
     readonly daemon: string;
-    readonly mcpShim: string;
+    readonly mcpShim?: string;
     readonly cli: string;
     readonly deno?: string;
   };
@@ -1237,10 +1237,8 @@ export async function installReleaseVersion(
 
     const expectedCli = path.join(stagingDir, "bin", "resin");
     const expectedDaemon = path.join(stagingDir, "bin", "resin-daemon");
-    const expectedMcp = path.join(stagingDir, "bin", "resin-mcp");
     trustedExecutablePaths.add(path.resolve(expectedCli));
     trustedExecutablePaths.add(path.resolve(expectedDaemon));
-    trustedExecutablePaths.add(path.resolve(expectedMcp));
 
     if (!fs.existsSync(expectedCli)) {
       await fsPromises.writeFile(
@@ -1260,16 +1258,6 @@ export async function installReleaseVersion(
       );
       extractedFiles.push(expectedDaemon);
       await fsPromises.chmod(expectedDaemon, 0o755);
-    }
-
-    if (!fs.existsSync(expectedMcp)) {
-      await fsPromises.writeFile(
-        expectedMcp,
-        `#!/usr/bin/env node\nimport path from "node:path";\nimport { fileURLToPath } from "node:url";\nconst __dirname = path.dirname(fileURLToPath(import.meta.url));\nawait import(path.resolve(__dirname, "../apps/gateway/dist/bin/mcp-shim.js"));\n`,
-        { mode: 0o755 },
-      );
-      extractedFiles.push(expectedMcp);
-      await fsPromises.chmod(expectedMcp, 0o755);
     }
 
     const versionMetadataPath = path.join(stagingDir, "version.json");
@@ -1336,7 +1324,6 @@ export async function installReleaseVersion(
         installedFiles: installedFilePaths,
         entryPoints: {
           daemon: path.join(targetVersionDir, "bin", "resin-daemon"),
-          mcpShim: path.join(targetVersionDir, "bin", "resin-mcp"),
           cli: path.join(targetVersionDir, "bin", "resin"),
           deno: fs.existsSync(
             path.join(targetVersionDir, "deno", process.platform === "win32" ? "deno.exe" : "deno"),
@@ -1379,7 +1366,6 @@ export async function installReleaseVersion(
       installedFiles: extractedFiles.map((f) => f.replace(stagingDir, targetVersionDir)),
       entryPoints: {
         daemon: path.join(targetVersionDir, "bin", "resin-daemon"),
-        mcpShim: path.join(targetVersionDir, "bin", "resin-mcp"),
         cli: path.join(targetVersionDir, "bin", "resin"),
         deno: fs.existsSync(
           path.join(targetVersionDir, "deno", process.platform === "win32" ? "deno.exe" : "deno"),
@@ -1545,11 +1531,13 @@ export async function switchActiveVersion(
     await fsBridge.mkdirp(stagingBinDir);
     await fsPromises.chmod(stagingBinDir, 0o755).catch(() => {});
     const targetBinDir = path.join(targetVersionDir, "bin");
-    const binNames = new Set<string>(["resin", "resin-daemon", "resin-mcp"]);
+    const binNames = new Set<string>(["resin", "resin-daemon"]);
     if (fs.existsSync(targetBinDir)) {
       const files = fs.readdirSync(targetBinDir);
       for (const f of files) {
-        binNames.add(f);
+        if (f !== "resin-mcp") {
+          binNames.add(f);
+        }
       }
     }
 

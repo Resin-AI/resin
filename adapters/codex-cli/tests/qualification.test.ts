@@ -136,6 +136,7 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
       const writtenContent = await fsBridge.readFile(configPath);
       expect(writtenContent).toContain("[mcp_servers.resin]");
       expect(writtenContent).toContain(`command = "${DEFAULT_RESIN_MCP_COMMAND}"`);
+      expect(writtenContent).toContain('args = ["mcp"]');
       expect(writtenContent).toContain("[mcp_servers.existing_custom_server]");
       expect(writtenContent).toContain('model = "code-davinci-002"');
 
@@ -194,7 +195,10 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
 
       expect(parsed.model).toBe("gpt-4o");
       expect(parsed.mcp_servers.existing_lsp).toBeDefined();
-      expect(parsed.mcp_servers.resin).toEqual({ command: DEFAULT_RESIN_MCP_COMMAND, args: [] });
+      expect(parsed.mcp_servers.resin).toEqual({
+        command: "resin",
+        args: ["mcp"],
+      });
 
       await rollbackCodexMcpConfig(backup, fsBridge);
       const restored = await fsBridge.readFile(configPath);

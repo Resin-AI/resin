@@ -145,8 +145,8 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
       expect(parsedWritten.mcpServers.existing_filesystem).toBeDefined();
       expect(parsedWritten.mcpServers.existing_github).toBeDefined();
       expect(parsedWritten.mcpServers.resin).toEqual({
-        type: "sse",
-        url: gatewayUrl,
+        command: "resin",
+        args: ["mcp"],
       });
 
       // 3. Verify write verification
