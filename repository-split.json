@@ -129,6 +129,7 @@
     "CONTEXT.md",
     "DEPLOY.md",
     "WORKFLOW.md",
+    "public-core-provenance.json",
     "scripts/aws/**",
     "scripts/aws-automation.test.mjs",
     "scripts/backfill-observability.mjs",
