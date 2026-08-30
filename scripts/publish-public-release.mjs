@@ -86,11 +86,11 @@ export const CONTRACTED_INSTALLERS = Object.freeze(["posix", "powershell"]);
 export function loadInstallerResults(input) {
   if (input === null || input === undefined) return null;
   if (Array.isArray(input)) return input;
-  if (typeof input === "object") {
+  if (input !== null && Object.prototype.toString.call(input) === "[object Object]") {
     if (Array.isArray(input.results)) return input.results;
     return input;
   }
-  if (typeof input === "string") {
+  if (Object.prototype.toString.call(input) === "[object String]") {
     const trimmed = input.trim();
     if (fs.existsSync(trimmed)) {
       try {
@@ -108,7 +108,7 @@ export function loadInstallerResults(input) {
       throw new Error(`Failed to parse installer results JSON: ${err.message}`);
     }
   }
-  throw new Error(`Unsupported installer results input type: ${typeof input}`);
+  throw new Error(`Unsupported installer results input type: ${input?.constructor?.name ?? input}`);
 }
 
 /**
@@ -139,11 +139,15 @@ export function validateInstallerResults(results) {
 
   for (let idx = 0; idx < results.length; idx++) {
     const item = results[idx];
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
+    if (
+      !item ||
+      Array.isArray(item) ||
+      Object.prototype.toString.call(item) !== "[object Object]"
+    ) {
       throw new Error(`Installer result at index ${idx} must be a non-null object.`);
     }
 
-    if (typeof item.installer !== "string") {
+    if (Object.prototype.toString.call(item.installer) !== "[object String]") {
       throw new Error(`Installer result at index ${idx} missing required 'installer' field.`);
     }
 
@@ -164,13 +168,19 @@ export function validateInstallerResults(results) {
       );
     }
 
-    if (typeof item.installedVersion !== "string" && item.installedVersion !== null) {
+    if (
+      Object.prototype.toString.call(item.installedVersion) !== "[object String]" &&
+      item.installedVersion !== null
+    ) {
       throw new Error(
-        `Installer result for '${item.installer}' installedVersion must be a string or null, received ${typeof item.installedVersion}.`,
+        `Installer result for '${item.installer}' installedVersion must be a string or null, received ${item.installedVersion?.constructor?.name ?? item.installedVersion}.`,
       );
     }
 
-    if (typeof item.entrypointUrl !== "string" || !item.entrypointUrl.trim()) {
+    if (
+      Object.prototype.toString.call(item.entrypointUrl) !== "[object String]" ||
+      !item.entrypointUrl.trim()
+    ) {
       throw new Error(`Installer result for '${item.installer}' missing required 'entrypointUrl'.`);
     }
 
@@ -188,19 +198,15 @@ export function validateInstallerResults(results) {
       );
     }
 
-    if (
-      typeof item.durationMs !== "number" ||
-      Number.isNaN(item.durationMs) ||
-      item.durationMs < 0
-    ) {
+    if (!Number.isFinite(item.durationMs) || Number.isNaN(item.durationMs) || item.durationMs < 0) {
       throw new Error(
         `Installer result for '${item.installer}' durationMs must be a non-negative number, received ${item.durationMs}.`,
       );
     }
 
-    if (typeof item.error !== "string" && item.error !== null) {
+    if (Object.prototype.toString.call(item.error) !== "[object String]" && item.error !== null) {
       throw new Error(
-        `Installer result for '${item.installer}' error must be a string or null, received ${typeof item.error}.`,
+        `Installer result for '${item.installer}' error must be a string or null, received ${item.error?.constructor?.name ?? item.error}.`,
       );
     }
 
@@ -235,7 +241,10 @@ export function fileSha256(filePath) {
 }
 
 export function validatePathSafety(relPath, label = "path") {
-  if (typeof relPath !== "string" || relPath.trim().length === 0) {
+  if (
+    Object.prototype.toString.call(relPath) !== "[object String]" ||
+    relPath.trim().length === 0
+  ) {
     throw new Error(`Invalid empty ${label}.`);
   }
   const normalized = relPath.replace(/\\/g, "/");
@@ -273,8 +282,10 @@ export function validateKeyPrefix(keyPrefix, options = {}) {
     return "";
   }
 
-  if (typeof keyPrefix !== "string") {
-    throw new Error(`Invalid keyPrefix type: expected string, received ${typeof keyPrefix}.`);
+  if (Object.prototype.toString.call(keyPrefix) !== "[object String]") {
+    throw new Error(
+      `Invalid keyPrefix type: expected string, received ${keyPrefix?.constructor?.name ?? keyPrefix}.`,
+    );
   }
 
   const trimmed = keyPrefix.trim();
@@ -334,7 +345,7 @@ export function validateKeyPrefix(keyPrefix, options = {}) {
 export const normalizeKeyPrefix = validateKeyPrefix;
 
 export function applyKeyPrefix(key, keyPrefix) {
-  if (typeof key !== "string" || key.length === 0) {
+  if (Object.prototype.toString.call(key) !== "[object String]" || key.length === 0) {
     throw new Error("Invalid empty S3 key.");
   }
   const cleanKey = key.replace(/^\/+/, "");
@@ -410,7 +421,10 @@ export function determineContentType(filePathOrKey) {
  */
 export async function runAwsCli(args, options = {}) {
   const runner = options.runner;
-  if (typeof runner === "function") {
+  if (
+    runner instanceof Function ||
+    Object.prototype.toString.call(runner) === "[object Function]"
+  ) {
     return runner("aws", args, options);
   }
   try {
@@ -500,7 +514,7 @@ export async function s3PutObject(params, options = {}) {
     "--content-type",
     contentType || determineContentType(key),
   ];
-  if (params.metadata && typeof params.metadata === "object") {
+  if (params.metadata && Object.prototype.toString.call(params.metadata) === "[object Object]") {
     const metaPairs = Object.entries(params.metadata)
       .map(([k, v]) => `${k}=${v}`)
       .join(",");
@@ -770,7 +784,12 @@ export async function mirrorRuntimes(options = {}) {
       buffer = Buffer.from(options.runtimeAssets[platformId].buffer);
       fs.writeFileSync(localFilePath, buffer);
     } else {
-      if (typeof fetchFn !== "function") {
+      if (
+        !(
+          fetchFn instanceof Function ||
+          Object.prototype.toString.call(fetchFn) === "[object Function]"
+        )
+      ) {
         throw new Error(`Fetch function required to download runtime for '${platformId}'.`);
       }
       const response = await fetchFn(upstream.sourceUrl, { redirect: "follow" });
@@ -1107,7 +1126,11 @@ export async function verifyPublic(options = {}) {
   const keyPrefix = normalizeKeyPrefix(options.keyPrefix, options);
   const plan = options.uploadPlan || createUploadPlan({ ...options, keyPrefix });
   const fetchFn = options.fetch || globalThis.fetch;
-  if (typeof fetchFn !== "function") {
+  if (
+    !(
+      fetchFn instanceof Function || Object.prototype.toString.call(fetchFn) === "[object Function]"
+    )
+  ) {
     throw new Error("A valid fetch implementation is required for anonymous verification.");
   }
 
@@ -1336,7 +1359,11 @@ export async function promote(options = {}) {
     const fetchFn = options.fetch || globalThis.fetch;
     let fetchedAuthoritativeBytes = false;
 
-    if (baseUrl && typeof fetchFn === "function") {
+    if (
+      baseUrl &&
+      (fetchFn instanceof Function ||
+        Object.prototype.toString.call(fetchFn) === "[object Function]")
+    ) {
       try {
         const resp = await fetchFn(`${baseUrl.replace(/\/$/, "")}/${channelsKey}`, {
           method: "GET",
@@ -1811,7 +1838,12 @@ export async function recordSmoke(options = {}) {
       options,
     );
     evidencePublicUrl = derivePublicUrl(baseUrl, smokeEvidenceS3Key);
-    if (!options.skipEvidencePublicVerification && baseUrl && typeof fetchFn === "function") {
+    if (
+      !options.skipEvidencePublicVerification &&
+      baseUrl &&
+      (fetchFn instanceof Function ||
+        Object.prototype.toString.call(fetchFn) === "[object Function]")
+    ) {
       const evResp = await fetchFn(evidencePublicUrl, { method: "GET", redirect: "manual" });
       if (!evResp.ok) {
         throw new Error(
@@ -2007,7 +2039,11 @@ export async function freeze(options = {}) {
 
   // 4. Anonymous retrieval & verification of freeze notice
   const fetchFn = options.fetch || globalThis.fetch;
-  if (typeof fetchFn === "function" && baseUrl) {
+  if (
+    (fetchFn instanceof Function ||
+      Object.prototype.toString.call(fetchFn) === "[object Function]") &&
+    baseUrl
+  ) {
     const noticeUrl = derivePublicUrl(baseUrl, freezeS3Key);
     const noticeResp = await fetchFn(noticeUrl, { method: "GET", redirect: "manual" });
     if (!noticeResp.ok) {
@@ -2141,7 +2177,11 @@ export async function freeze(options = {}) {
       options,
     );
 
-    if (typeof fetchFn === "function" && baseUrl) {
+    if (
+      (fetchFn instanceof Function ||
+        Object.prototype.toString.call(fetchFn) === "[object Function]") &&
+      baseUrl
+    ) {
       const resp = await fetchFn(finalSmokeEvidenceUrl, { method: "GET", redirect: "manual" });
       if (resp && resp.ok) {
         const retrievedBuf = Buffer.from(await resp.arrayBuffer());

@@ -1,5 +1,6 @@
 import type { CapabilityEnvelope, ToolManifest } from "@resin/contracts";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
+import type { JsonObject } from "../normalization/redaction.js";
 import type { DeploymentActivator } from "./activator.js";
 import type { ArtifactTransferClient } from "./client.js";
 import type { LocalPreactivationChecker } from "./preactivation.js";
@@ -16,7 +17,7 @@ export interface DesiredToolSpec {
   version: string;
   digest?: string;
   manifest?: ToolManifest;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
 }
 
 /**
@@ -175,7 +176,7 @@ export class DeploymentReconciler {
         const overrideRows = this.conn.all<{
           override_id: string;
           tool_id: string;
-          action: string;
+          action: "disable" | "pin" | "allow" | "custom";
           pinned_version?: string;
           is_enabled?: number;
         }>(
@@ -187,7 +188,7 @@ export class DeploymentReconciler {
           overrideId: r.override_id,
           toolId: r.tool_id,
           workspaceId,
-          action: r.action as "disable" | "pin" | "allow" | "custom",
+          action: r.action,
           pinnedVersion: r.pinned_version,
           isEnabled: r.is_enabled !== 0,
           createdAt: timestamp,

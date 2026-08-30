@@ -74,7 +74,9 @@ describe("Restart Resilience and Deduplication", () => {
 
     // First batch of 3 received and acked
     expect(receivedPass1).toHaveLength(3);
+    // SAFETY: Test record rawPayload carries seq number.
     expect((receivedPass1[0].rawPayload as { seq: number }).seq).toBe(1);
+    // SAFETY: Test record rawPayload carries seq number.
     expect((receivedPass1[2].rawPayload as { seq: number }).seq).toBe(3);
 
     // Verify checkpoint in DB is at sequence 3
@@ -117,6 +119,7 @@ describe("Restart Resilience and Deduplication", () => {
 
     // Pass 2 must receive records 4, 5, 6, 7, 8 (no duplicate records 1, 2, 3!)
     expect(receivedPass2).toHaveLength(5);
+    // SAFETY: Test record rawPayload carries seq number.
     const seqs = receivedPass2.map((r) => (r.rawPayload as { seq: number }).seq);
     expect(seqs).toEqual([4, 5, 6, 7, 8]);
 
@@ -176,7 +179,9 @@ describe("Restart Resilience and Deduplication", () => {
     await p1;
 
     expect(receivedPass1).toHaveLength(3);
+    // SAFETY: Test record rawPayload carries seq number.
     expect((receivedPass1[0].rawPayload as { seq: number }).seq).toBe(1);
+    // SAFETY: Test record rawPayload carries seq number.
     expect((receivedPass1[2].rawPayload as { seq: number }).seq).toBe(3);
 
     // Verify checkpoint in SQLite DB is at sequence 3
@@ -229,6 +234,7 @@ describe("Restart Resilience and Deduplication", () => {
 
     // Second tailer must resume from sequence 3 and receive records 4..8 without replaying 1..3
     expect(receivedPass2).toHaveLength(5);
+    // SAFETY: Test record rawPayload carries seq number.
     const seqs = receivedPass2.map((r) => (r.rawPayload as { seq: number }).seq);
     expect(seqs).toEqual([4, 5, 6, 7, 8]);
 

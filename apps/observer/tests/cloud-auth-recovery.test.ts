@@ -24,6 +24,7 @@ import {
 import type { DaemonConfig } from "../src/config.js";
 import type { ModuleContext } from "../src/lifecycle.js";
 import { NormalizationPipeline } from "../src/normalization/pipeline.js";
+import type { JsonObject } from "../src/normalization/redaction.js";
 import type { DaemonPaths } from "../src/paths.js";
 import { SourceCursorManager } from "../src/tailing/cursor-manager.js";
 import { TranscriptTailer } from "../src/tailing/tailer.js";
@@ -111,7 +112,7 @@ async function seedCredentials(
 }
 
 function makeModuleContext(homeDir: string, stateDir: string): ModuleContext {
-  const config = {
+  const config: DaemonConfig = {
     version: "0.1.0",
     port: 3100,
     logLevel: "info",
@@ -122,8 +123,8 @@ function makeModuleContext(homeDir: string, stateDir: string): ModuleContext {
     healthCheckIntervalMs: 15_000,
     maxRestarts: 5,
     restartWindowMs: 60_000,
-  } as unknown as DaemonConfig;
-  const paths = {
+  };
+  const paths: DaemonPaths = {
     homeDir,
     configDir: path.join(homeDir, "config"),
     dataDir: path.join(homeDir, "data"),
@@ -134,8 +135,7 @@ function makeModuleContext(homeDir: string, stateDir: string): ModuleContext {
     pidFilePath: path.join(stateDir, "daemon.pid"),
     tokenFilePath: path.join(stateDir, "auth.token"),
     configFile: path.join(homeDir, "config", "config.json"),
-  } as unknown as DaemonPaths;
-
+  };
   return {
     config,
     paths,
@@ -239,12 +239,14 @@ describe("cloud authentication recovery", () => {
     });
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await seedCredentials(store, initialClaims, initialToken, "refresh-initial");
     const client = new CloudObservationClient({
       credentialStore: store,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const response = await client.sendTrajectoryObservationBatch([makeObservation()]);
@@ -295,12 +297,14 @@ describe("cloud authentication recovery", () => {
     });
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await seedCredentials(store, expiredClaims, expiredToken, "refresh-before-expiry");
     const client = new CloudObservationClient({
       credentialStore: store,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const response = await client.sendTrajectoryObservationBatch([makeObservation()]);
@@ -345,12 +349,14 @@ describe("cloud authentication recovery", () => {
     });
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await seedCredentials(store, initialClaims, initialToken, "refresh-initial-rejected");
     const client = new CloudObservationClient({
       credentialStore: store,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeObservation()])).rejects.toBeInstanceOf(
@@ -404,7 +410,8 @@ describe("cloud authentication recovery", () => {
     });
     const client = new CloudObservationClient({
       identityProvider,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const sends = Promise.all([
@@ -427,6 +434,7 @@ describe("cloud authentication recovery", () => {
     expect(client.getAuthRecoverySnapshot().status).toBe("AUTHENTICATED");
   });
 
+  // SAFETY: Type assertion in test fixture/mock verified by test context.
   it("treats a 403 response as an auth failure and performs one refresh", async () => {
     const initialIdentity = makeIdentity("access-forbidden");
     const refreshedIdentity = makeIdentity("access-after-forbidden");
@@ -449,7 +457,8 @@ describe("cloud authentication recovery", () => {
     });
     const client = new CloudObservationClient({
       identityProvider,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const response = await client.sendTrajectoryObservationBatch([makeObservation()]);
@@ -478,7 +487,8 @@ describe("cloud authentication recovery", () => {
     });
     const client = new CloudObservationClient({
       identityProvider,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const response = await client.sendTrajectoryObservationBatch([makeObservation()]);
@@ -512,6 +522,7 @@ describe("cloud authentication recovery", () => {
       }
 
       observationRequestCalls += 1;
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const request = JSON.parse(String(init?.body)) as {
         batchId: string;
         observations: Array<{
@@ -546,12 +557,14 @@ describe("cloud authentication recovery", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await seedCredentials(store, initialClaims, initialToken, "refresh-revoked-sensitive");
     const runtime = new CloudRuntimeModule({
       credentialStore: store,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     const context = makeModuleContext(tempDir, path.dirname(tokenFilePath));
     await runtime.start(context);
@@ -620,12 +633,14 @@ describe("cloud authentication recovery", () => {
 
     const restartedStore = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     expect((await restartedStore.load()).status).toBe("missing");
     const restartedRuntime = new CloudRuntimeModule({
       credentialStore: restartedStore,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await restartedRuntime.start(context);
 
@@ -755,7 +770,8 @@ describe("cloud authentication recovery", () => {
 
     const store = new CloudCredentialStore({
       tokenFilePath,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     await seedCredentials(store, initialClaims, initialToken, "refresh-before-outage");
     const authRecovery = new AuthRecoveryController({
@@ -766,7 +782,8 @@ describe("cloud authentication recovery", () => {
     const runtime = new CloudRuntimeModule({
       credentialStore: store,
       authRecoveryController: authRecovery,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
     const context = makeModuleContext(tempDir, path.dirname(tokenFilePath));
     await runtime.start(context);

@@ -217,7 +217,7 @@ describe("CLI actionable notifications", () => {
       healthyStatus({ service: { installed: true, active: false } }),
       NOW,
     )[0];
-    const unsafeRuntimeValue = {
+    const unsafeRuntimeValue: ActionableNotification = {
       id: CLI_NOTIFICATION_IDS.network,
       severity: "warning",
       source: "network",
@@ -225,7 +225,7 @@ describe("CLI actionable notifications", () => {
       remediationCommand: "resin status\u001b[2J",
       timestamp: new Date(NOW).toISOString(),
       cooldownMs: CLI_NOTIFICATION_COOLDOWN_MS,
-    } as ActionableNotification;
+    };
 
     const output = formatActionableNotificationsForTerminal([
       safeRuntimeValue!,

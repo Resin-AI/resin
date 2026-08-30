@@ -11,9 +11,20 @@ import {
   type GetToolSchemaResponse,
   createGetToolSchemaHandler,
 } from "../../src/meta/get-tool-schema.js";
+import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
+
+function parseResponseJson(result: CallToolResult): GetToolSchemaResponse {
+  const first = result.content[0];
+  const text =
+    first && "text" in first && Object.prototype.toString.call(first.text) === "[object String]"
+      ? String(first.text)
+      : "{}";
+  // SAFETY: Test helper parses serialized JSON response into GetToolSchemaResponse domain object.
+  return JSON.parse(text) as GetToolSchemaResponse;
+}
 
 function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
   const raw = {
@@ -76,7 +87,7 @@ describe("get_tool_schema Meta-Tool", () => {
     // Lookup by toolId
     const resId = await handler(context, { toolId: "tool_math" });
     expect(resId.isError).toBeFalsy();
-    const dataId = JSON.parse(resId.content[0].text as string) as GetToolSchemaResponse;
+    const dataId = parseResponseJson(resId);
     expect(dataId.toolId).toBe("tool_math");
     expect(dataId.name).toBe("calc_tool");
     expect(dataId.inputSchema.properties).toHaveProperty("expression");
@@ -84,7 +95,7 @@ describe("get_tool_schema Meta-Tool", () => {
     // Lookup by name
     const resName = await handler(context, { name: "calc_tool" });
     expect(resName.isError).toBeFalsy();
-    const dataName = JSON.parse(resName.content[0].text as string) as GetToolSchemaResponse;
+    const dataName = parseResponseJson(resName);
     expect(dataName.toolId).toBe("tool_math");
 
     // Lookup by tool_name alias
@@ -99,7 +110,7 @@ describe("get_tool_schema Meta-Tool", () => {
 
     const res = await handler(context, { toolId: "sys_search_tools" });
     expect(res.isError).toBeFalsy();
-    const data = JSON.parse(res.content[0].text as string) as GetToolSchemaResponse;
+    const data = parseResponseJson(res);
     expect(data.name).toBe("search_tools");
     expect(data.scope).toBe("system");
     expect(data.inputSchema.properties).toHaveProperty("query");
@@ -129,20 +140,20 @@ describe("get_tool_schema Meta-Tool", () => {
 
     // Request specific version v1
     const resV1 = await handler(context, { toolId: "tool_multiver", version: "1.0.0" });
-    const dataV1 = JSON.parse(resV1.content[0].text as string) as GetToolSchemaResponse;
+    const dataV1 = parseResponseJson(resV1);
     expect(dataV1.version).toBe("1.0.0");
     expect(dataV1.description).toBe("Version 1.0.0 description");
 
     // Request specific version v2
     const resV2 = await handler(context, { toolId: "tool_multiver", version: "2.0.0" });
-    const dataV2 = JSON.parse(resV2.content[0].text as string) as GetToolSchemaResponse;
+    const dataV2 = parseResponseJson(resV2);
     expect(dataV2.version).toBe("2.0.0");
     expect(dataV2.description).toBe("Version 2.0.0 description");
 
     // Pin to v1 and check default resolution without version param
     await registry.pinToolVersion("tool_multiver", "1.0.0", "ws-version");
     const resPinned = await handler(context, { toolId: "tool_multiver" });
-    const dataPinned = JSON.parse(resPinned.content[0].text as string) as GetToolSchemaResponse;
+    const dataPinned = parseResponseJson(resPinned);
     expect(dataPinned.version).toBe("1.0.0");
     expect(dataPinned.isPinned).toBe(true);
   });
@@ -192,7 +203,7 @@ describe("get_tool_schema Meta-Tool", () => {
 
     const res = await handler(context, { toolId: "tool_dis" });
     expect(res.isError).toBeFalsy();
-    const data = JSON.parse(res.content[0].text as string) as GetToolSchemaResponse;
+    const data = parseResponseJson(res);
     expect(data.isDisabled).toBe(true);
     expect(data.status).toBe("disabled");
   });
@@ -229,13 +240,15 @@ describe("get_tool_schema Meta-Tool", () => {
 
     const res = await handler(context, { toolId: "tool_secure" });
     expect(res.isError).toBeFalsy();
-    const rawText = res.content[0].text as string;
-
-    // Verify secrets and code are NOT in the payload
+    const first = res.content[0];
+    const rawText =
+      first && "text" in first && Object.prototype.toString.call(first.text) === "[object String]"
+        ? String(first.text)
+        : "";
     expect(rawText).not.toContain("super_secret_token_12345");
     expect(rawText).not.toContain("const SECRET_KEY");
 
-    const data = JSON.parse(rawText) as GetToolSchemaResponse;
+    const data = parseResponseJson(res);
     expect(data.provenance.manifestDigest).toBe(manifest.digest);
     expect(data.provenance.artifactDigest).toBe(artifact.artifactDigest);
     expect(data.provenance.author).toBe("security-auditor");

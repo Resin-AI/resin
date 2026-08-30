@@ -57,7 +57,6 @@ export interface InitCommandOptions {
   harnessHealthDeadlineMs?: number;
   authorizationTimeoutMs?: number;
   abortSignal?: AbortSignal;
-  [key: string]: unknown;
 }
 
 export function parseInitFlags(args: string[]): InitCommandFlags {
@@ -182,6 +181,16 @@ export async function runInit(
 
   return await installer.run(options);
 }
+function isConfigFsBridge(value: ConfigFsBridge | InitCommandOptions): value is ConfigFsBridge {
+  return "readFile" in value && value.readFile instanceof Function;
+}
+
+function resolveReleaseMode(envMode: string | undefined): "production" | "local-test" | undefined {
+  if (envMode === "production" || envMode === "local-test") {
+    return envMode;
+  }
+  return undefined;
+}
 
 /**
  * Command entry point for `resin init`.
@@ -198,9 +207,9 @@ export async function initCommand(
   }
 
   const options: InitCommandOptions =
-    optionsOrBridge && typeof (optionsOrBridge as ConfigFsBridge).readFile === "function"
-      ? { customFsBridge: optionsOrBridge as ConfigFsBridge }
-      : ((optionsOrBridge as InitCommandOptions) ?? {});
+    optionsOrBridge !== undefined && isConfigFsBridge(optionsOrBridge)
+      ? { customFsBridge: optionsOrBridge }
+      : (optionsOrBridge ?? {});
 
   const isRealInstall = !flags.dryRun && !flags.rollbackInstall;
   const cancellationController = new AbortController();
@@ -283,7 +292,7 @@ export async function initCommand(
       options.releaseMode ??
       (flags.dryRun
         ? "local-test"
-        : ((process.env.RESIN_RELEASE_MODE as "production" | "local-test" | undefined) ??
+        : (resolveReleaseMode(process.env.RESIN_RELEASE_MODE) ??
           (process.env.VITEST || process.env.NODE_ENV === "test" ? "local-test" : "production"))),
     releaseChannelUrl: process.env.RESIN_RELEASE_CHANNEL_URL,
     allowInsecureReleaseTransportForTests:

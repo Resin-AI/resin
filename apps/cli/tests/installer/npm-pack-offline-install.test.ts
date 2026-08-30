@@ -23,6 +23,7 @@ describe("public npm bootstrap offline installation", () => {
     fs.mkdirSync(packDir, { recursive: true });
     fs.mkdirSync(installDir, { recursive: true });
 
+    // SAFETY: JSON output of pack-npm-bootstrap.mjs contains tarballPath and filename.
     const packed = JSON.parse(
       execFileSync(
         process.execPath,

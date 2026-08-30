@@ -16,6 +16,8 @@ import {
   ObservationBatchResponseSchema,
   PROTOCOL_VERSION,
   ProtocolError,
+  type ProtocolErrorDetailRecord,
+  type ProtocolErrorDetailValue,
   RateLimitedError,
 } from "@resin/protocol";
 import { z } from "zod";
@@ -32,6 +34,23 @@ import {
   CloudCredentialStore,
   type CloudRequestIdentity,
 } from "./cloud-credentials.js";
+import type { JsonObject } from "./normalization/redaction.js";
+
+const ProtocolErrorDetailValueSchema: z.ZodType<ProtocolErrorDetailValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.record(ProtocolErrorDetailValueSchema),
+    z.array(ProtocolErrorDetailValueSchema),
+  ]),
+);
+
+const ProtocolErrorDetailRecordSchema: z.ZodType<ProtocolErrorDetailRecord> = z.record(
+  ProtocolErrorDetailValueSchema,
+);
 export {
   AUTH_RECOVERY_REMEDIATION,
   AuthRecoveryController,
@@ -343,8 +362,8 @@ export class CloudObservationClient {
     return this.recoverAfterAuthFailure(category, response.status, rejectedIdentity, isRetry);
   }
 
-  private async recoverFromAuthError(
-    error: unknown,
+  private async recoverFromAuthError<E>(
+    error: E,
     rejectedIdentity: CloudRequestIdentity,
     isRetry: boolean,
   ): Promise<CloudRequestIdentity | null> {
@@ -356,13 +375,11 @@ export class CloudObservationClient {
     let status = category === "FORBIDDEN" ? 403 : 401;
     if (error instanceof ProtocolError) {
       status = error.status;
-    } else if (
-      error &&
-      typeof error === "object" &&
-      "status" in error &&
-      typeof error.status === "number"
-    ) {
-      status = error.status;
+    } else {
+      const parsedStatus = z.object({ status: z.number() }).safeParse(error);
+      if (parsedStatus.success) {
+        status = parsedStatus.data.status;
+      }
     }
     return this.recoverAfterAuthFailure(category, status, rejectedIdentity, isRetry);
   }
@@ -606,7 +623,9 @@ export class CloudObservationClient {
       toolBytes: toolArtifact?.bytes,
       toolSha256: toolArtifact?.sha256,
       toolDescriptor: statusResponse.tool,
-      metadata: statusResponse.result?.metadata,
+      metadata: statusResponse.result?.metadata
+        ? ProtocolErrorDetailRecordSchema.safeParse(statusResponse.result.metadata).data
+        : undefined,
     };
   }
 
@@ -793,8 +812,7 @@ export class CloudRuntimeModule implements DaemonModule {
     };
   }
 
-  async getDiagnostics(): Promise<Record<string, unknown>> {
-    await this.refreshCredentialsState(false);
+  async getDiagnostics(): Promise<JsonObject> {
     const credentials = this.lastLoadResult.credentials;
     return {
       paired: this.lastLoadResult.status === "valid",

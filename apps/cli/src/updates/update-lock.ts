@@ -130,8 +130,8 @@ export class UpdateLockOwnershipError extends Error {
   }
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+function hasErrorCode(cause: unknown, code: string): boolean {
+  return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === code;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -513,7 +513,7 @@ async function ensureDirectoryPathIsSecure(lockPath: string): Promise<Stats> {
       if (!hasErrorCode(error, "ENOENT")) {
         throw error;
       }
-      await mkdir(currentPath, { mode: 0o700 }).catch((mkdirError: unknown) => {
+      await mkdir(currentPath, { mode: 0o700 }).catch((mkdirError: Error | { code?: string }) => {
         if (!hasErrorCode(mkdirError, "EEXIST")) {
           throw mkdirError;
         }
@@ -805,6 +805,20 @@ function createMetadata(options: ResolvedUpdateLockOptions, now: number): Update
     throw new RangeError("Update lock lease expiration exceeds the safe timestamp range");
   }
 
+  if (options.label !== undefined) {
+    return {
+      version: UPDATE_LOCK_METADATA_VERSION,
+      ownerId,
+      pid: options.pid,
+      hostname: options.hostname,
+      bootId: options.processIdentity.bootId,
+      processStartId: options.processIdentity.processStartId,
+      acquiredAtMs: now,
+      leaseExpiresAtMs,
+      label: options.label,
+    };
+  }
+
   return {
     version: UPDATE_LOCK_METADATA_VERSION,
     ownerId,
@@ -814,7 +828,6 @@ function createMetadata(options: ResolvedUpdateLockOptions, now: number): Update
     processStartId: options.processIdentity.processStartId,
     acquiredAtMs: now,
     leaseExpiresAtMs,
-    ...(options.label === undefined ? {} : { label: options.label }),
   };
 }
 
@@ -838,7 +851,7 @@ async function removeStaleFile(
     return current === null;
   }
 
-  await unlink(await directory.resolve(lockPath)).catch((error: unknown) => {
+  await unlink(await directory.resolve(lockPath)).catch((error: Error | { code?: string }) => {
     if (!hasErrorCode(error, "ENOENT")) {
       throw error;
     }
@@ -1011,11 +1024,13 @@ export class UpdateLock {
             this.currentMetadata = renewed;
             return { ...renewed };
           } finally {
-            await unlink(await this.directory.resolve(temporaryPath)).catch((error: unknown) => {
-              if (!hasErrorCode(error, "ENOENT")) {
-                throw error;
-              }
-            });
+            await unlink(await this.directory.resolve(temporaryPath)).catch(
+              (error: Error | { code?: string }) => {
+                if (!hasErrorCode(error, "ENOENT")) {
+                  throw error;
+                }
+              },
+            );
           }
         });
       } catch (error: unknown) {

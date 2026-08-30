@@ -2,6 +2,7 @@ import fs from "node:fs";
 import type { AuditActor } from "@resin/contracts";
 import type { LocalDatabaseConnection } from "@resin/db";
 import { inspectLockFile } from "../lock.js";
+import type { JsonObject } from "../normalization/redaction.js";
 import type { AuditTrailManager } from "./audit-trail.js";
 import type { KillSwitchManager } from "./kill-switches.js";
 
@@ -11,7 +12,7 @@ export interface RetryPolicy {
   maxDelayMs: number;
   backoffMultiplier: number;
   jitter: boolean;
-  retryableErrors?: (err: unknown) => boolean;
+  retryableErrors?: (err: Error) => boolean;
 }
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
@@ -110,7 +111,7 @@ export interface QuarantinedToolEntry {
   reason: string;
   failureCount: number;
   lastError?: string;
-  details?: Record<string, unknown>;
+  details?: JsonObject;
 }
 
 export interface ToolFailureStats {
@@ -200,7 +201,8 @@ export class RecoveryController {
           break;
         }
 
-        if (policy.retryableErrors && !policy.retryableErrors(err)) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (policy.retryableErrors && !policy.retryableErrors(error)) {
           throw err;
         }
 
@@ -362,7 +364,7 @@ export class RecoveryController {
     toolId: string,
     version: string,
     reason: string,
-    details?: Record<string, unknown>,
+    details?: JsonObject,
   ): Promise<void> {
     const key = this.toolKey(toolId, version);
     const entry: QuarantinedToolEntry = {

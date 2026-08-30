@@ -18,6 +18,7 @@ import {
   CRASH_WINDOW_MS,
   INITIAL_RESTART_DELAY_MS,
   MAX_CRASHES_IN_WINDOW,
+  type RecordCrashInput,
   type RecoveryState,
   RecoveryStateTracker,
   sanitizeCrashDiagnostic,
@@ -49,11 +50,25 @@ export const defaultServiceCommandRunner: ServiceCommandRunner = {
       });
       return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
     } catch (err: unknown) {
-      const error = err as { stdout?: string; stderr?: string; code?: number; message?: string };
+      let stdout = "";
+      let stderr = String(err);
+      let exitCode = 1;
+      if (err instanceof Error) {
+        stderr = err.message;
+        if ("stdout" in err && String(err.stdout) === err.stdout) {
+          stdout = err.stdout;
+        }
+        if ("stderr" in err && String(err.stderr) === err.stderr) {
+          stderr = err.stderr;
+        }
+        if ("code" in err && Number.isSafeInteger(err.code)) {
+          exitCode = Number(err.code);
+        }
+      }
       return {
-        stdout: (error.stdout ?? "").trim(),
-        stderr: (error.stderr ?? error.message ?? String(err)).trim(),
-        exitCode: typeof error.code === "number" ? error.code : 1,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode,
       };
     }
   },
@@ -187,10 +202,13 @@ export async function runServiceSupervisor(
         stderr: childExit.stderr,
         command: options.command,
       };
-      const decision = await tracker.recordCrash({
+      const crashRecord: RecordCrashInput = {
         error: diagnostic,
-        ...(childExit.exitCode === null ? {} : { exitCode: childExit.exitCode }),
-      });
+      };
+      if (childExit.exitCode !== null) {
+        crashRecord.exitCode = childExit.exitCode;
+      }
+      const decision = await tracker.recordCrash(crashRecord);
 
       if (!decision.shouldRestart) {
         report(
@@ -291,12 +309,15 @@ async function runSupervisedChild(
       if (pendingStderr.length > 0) {
         process.stderr.write(`${sanitizeCrashDiagnostic(pendingStderr)}\n`);
       }
-      resolve({
+      const exitResult: SupervisedChildExit = {
         exitCode,
         signal,
         stderr: capturedStderr,
-        ...(spawnError ? { spawnError } : {}),
-      });
+      };
+      if (spawnError) {
+        exitResult.spawnError = spawnError;
+      }
+      resolve(exitResult);
     });
   });
 
@@ -318,12 +339,15 @@ async function runSupervisedChild(
         childExited.then((exit) => ({ kind: "exit" as const, exit })),
         stabilityTask.then(
           () => ({ kind: "stable" as const }),
-          (error: unknown) => ({ kind: "stability-error" as const, error }),
+          (error: Error | string | { name?: string }) => ({
+            kind: "stability-error" as const,
+            error,
+          }),
         ),
       ]);
       if (firstResult.kind === "exit") {
         stabilityController.abort();
-        await stabilityTask.catch((error: unknown) => {
+        await stabilityTask.catch((error: Error | string | { name?: string }) => {
           if (!isAbortError(error)) {
             throw error;
           }
@@ -347,10 +371,14 @@ async function waitForSupervisorDelay(delayMs: number, signal: AbortSignal): Pro
   await waitForTimeout(delayMs, undefined, { signal });
 }
 
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" && error !== null && "name" in error && error.name === "AbortError"
-  );
+function isAbortError(cause: unknown): boolean {
+  if (cause instanceof Error) {
+    return cause.name === "AbortError";
+  }
+  if (cause !== null && cause !== undefined && cause instanceof Object && "name" in cause) {
+    return cause.name === "AbortError";
+  }
+  return false;
 }
 
 function createSupervisorProgramArguments(

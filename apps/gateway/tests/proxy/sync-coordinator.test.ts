@@ -207,6 +207,7 @@ describe("CloudCatalogSyncCoordinator", () => {
     let fetchCount = 0;
     const mockService = new MockCloudMcpService();
     const originalHandler = mockService.createFetchHandler();
+    // SAFETY: Test fixture provides mock fetchFn matching fetch signature.
     const fetchFn = (async (input: Request | URL | string, init?: RequestInit) => {
       fetchCount++;
       return originalHandler(input, init);
@@ -273,8 +274,8 @@ describe("CloudCatalogSyncCoordinator", () => {
       artifactDigest,
       status: "active",
     });
-
     let downloadCount = 0;
+    // SAFETY: Test fixture provides mock ArtifactTransferClient.
     const transferClient = {
       downloadArtifact: async (digest: string) => {
         downloadCount++;
@@ -283,7 +284,7 @@ describe("CloudCatalogSyncCoordinator", () => {
         }
         throw new Error("Not found");
       },
-    } as ArtifactTransferClient;
+    };
 
     const mockService = new MockCloudMcpService();
     const cache = new CloudCatalogCache();
@@ -322,14 +323,20 @@ describe("CloudCatalogSyncCoordinator", () => {
     const projectId = PROJECT_A;
     const toolV1 = makeTool(TOOL_SEARCH, "search_tool", "1.0.0");
     const lockManager = new ProjectLockManager({ lockPath, projectId });
-    const toolV1Meta = toolV1.metadata as Record<string, unknown> | undefined;
+    const toolV1Meta =
+      toolV1.metadata && toolV1.metadata instanceof Object ? toolV1.metadata : undefined;
+    const metaArtifactDigest =
+      toolV1Meta &&
+      "artifactDigest" in toolV1Meta &&
+      Object.prototype.toString.call(toolV1Meta.artifactDigest) === "[object String]"
+        ? String(toolV1Meta.artifactDigest)
+        : toolV1.digest;
     lockManager.reconcileQualified({
       toolId: TOOL_SEARCH,
       name: "search_tool",
       version: "1.0.0",
       manifestDigest: toolV1.digest,
-      artifactDigest:
-        typeof toolV1Meta?.artifactDigest === "string" ? toolV1Meta.artifactDigest : toolV1.digest,
+      artifactDigest: metaArtifactDigest,
       status: "active",
     });
 
@@ -520,6 +527,7 @@ describe("CloudCatalogSyncCoordinator", () => {
     });
 
     let downloadCount = 0;
+    // SAFETY: Test fixture provides mock ArtifactTransferClient.
     const transferClient = {
       downloadArtifact: async () => {
         downloadCount++;

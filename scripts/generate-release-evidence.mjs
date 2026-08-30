@@ -529,7 +529,7 @@ export function generateReleaseEvidence(options = {}) {
   const rawCommitSha =
     options.commitSha || options.releaseIdentity?.commitSha || getGitCommitSha(rootDir);
   if (
-    typeof rawCommitSha !== "string" ||
+    Object.prototype.toString.call(rawCommitSha) !== "[object String]" ||
     !/^[0-9a-f]{40}$/i.test(rawCommitSha) ||
     /^0{40}$/.test(rawCommitSha)
   ) {
@@ -553,12 +553,19 @@ export function generateReleaseEvidence(options = {}) {
     options.releaseIdentity?.releaseDate ||
     options.timestamp ||
     new Date().toISOString();
-  if (typeof releaseDate !== "string" || Number.isNaN(Date.parse(releaseDate))) {
+  if (
+    Object.prototype.toString.call(releaseDate) !== "[object String]" ||
+    Number.isNaN(Date.parse(releaseDate))
+  ) {
     throw new Error(`Release date must be a valid ISO-8601 string, received '${releaseDate}'.`);
   }
 
   const verificationEvidence = options.verificationEvidence;
-  if (!testOnly && (!verificationEvidence || typeof verificationEvidence !== "object")) {
+  if (
+    !testOnly &&
+    (!verificationEvidence ||
+      Object.prototype.toString.call(verificationEvidence) !== "[object Object]")
+  ) {
     throw new Error(
       "Production release evidence requires machine-readable CI qualification evidence; source file existence is not proof of a pass.",
     );

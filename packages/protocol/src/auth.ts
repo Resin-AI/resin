@@ -237,7 +237,7 @@ export function hasRequiredScope(claims: AuthClaims, requiredScope: AuthScope): 
  * Helper to check if claims have a valid user identity bound.
  */
 export function isUserAuthClaims(claims: AuthClaims): claims is UserAuthClaims {
-  return typeof claims.userId === "string" && claims.userId.trim().length > 0;
+  return claims.userId !== undefined && claims.userId !== null && claims.userId.trim().length > 0;
 }
 
 /**

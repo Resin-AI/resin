@@ -105,9 +105,12 @@ export async function verifyBinaries(options = {}) {
       }
 
       let declaredBinRelative = "";
-      if (typeof binField === "string") {
+      if (Object.prototype.toString.call(binField) === "[object String]") {
         declaredBinRelative = binField;
-      } else if (typeof binField === "object" && binField !== null) {
+      } else if (
+        binField !== null &&
+        Object.prototype.toString.call(binField) === "[object Object]"
+      ) {
         if (!binField[spec.binKey]) {
           throw new Error(`Package ${spec.packageName} "bin" field missing key "${spec.binKey}"`);
         }

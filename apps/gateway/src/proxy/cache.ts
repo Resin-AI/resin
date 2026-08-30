@@ -1,4 +1,9 @@
-import type { DeploymentRecord, ToolManifest } from "@resin/contracts";
+import type {
+  DeploymentRecord,
+  ToolManifest,
+  ToolOutputSchema,
+  ToolParameterSchema,
+} from "@resin/contracts";
 import type { CatalogSnapshotResponse } from "@resin/protocol";
 
 export type CloudToolAvailability = "fresh" | "stale" | "expired" | "unavailable";
@@ -15,11 +20,17 @@ export interface CachedCloudTool {
   availability: CloudToolAvailability;
   exposedName: string;
   description?: string;
-  parameters?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  parameters?: ToolParameterSchema;
+  outputSchema?: ToolOutputSchema;
   source: "cloud";
   staleReason?: string;
   workspaceId?: string;
+}
+
+export interface ToolAvailabilityResult {
+  availability: CloudToolAvailability;
+  tool?: CachedCloudTool;
+  reason?: string;
 }
 
 export interface CloudCatalogCacheOptions {
@@ -153,10 +164,7 @@ export class CloudCatalogCache {
   /**
    * Evaluates availability of a tool for invocation.
    */
-  getToolAvailability(
-    toolIdOrName: string,
-    workspaceId = "default",
-  ): { availability: CloudToolAvailability; tool?: CachedCloudTool; reason?: string } {
+  getToolAvailability(toolIdOrName: string, workspaceId = "default"): ToolAvailabilityResult {
     const tool = this.getTool(toolIdOrName, workspaceId);
     if (!tool) {
       return {

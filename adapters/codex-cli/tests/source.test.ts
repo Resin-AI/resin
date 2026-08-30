@@ -86,6 +86,7 @@ describe("CodexSessionEventSource", () => {
 
     const unsubscribe = source.onRecords((records) => {
       for (const r of records) {
+        // SAFETY: Test transcript records are JSON objects containing string content.
         const payload = r.rawPayload as { content?: string };
         if (payload.content) received.push(payload.content);
       }

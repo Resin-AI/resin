@@ -265,8 +265,8 @@ export const PROBE_RAW_SECRET_ACCESS: SecurityProbe = {
       // Check opaque reference invariant
       if (
         !isSecretReference(secretRef) ||
-        "value" in (secretRef as Record<string, unknown>) ||
-        "rawSecret" in (secretRef as Record<string, unknown>)
+        Object.prototype.hasOwnProperty.call(secretRef, "value") ||
+        Object.prototype.hasOwnProperty.call(secretRef, "rawSecret")
       ) {
         return {
           probeId: "probe-raw-secret-access",
@@ -581,8 +581,11 @@ export const PROBE_SCHEMA_SPOOFING: SecurityProbe = {
           "output",
         );
 
-        const schemaObj = context.manifest.outputSchema as Record<string, unknown>;
-        if (schemaObj.additionalProperties === false && validation.valid) {
+        const hasNoAdditionalProps =
+          context.manifest.outputSchema instanceof Object &&
+          "additionalProperties" in context.manifest.outputSchema &&
+          context.manifest.outputSchema.additionalProperties === false;
+        if (hasNoAdditionalProps && validation.valid) {
           return {
             probeId: "probe-schema-spoofing",
             name: "Schema Spoofing & Output Invariant Probe",

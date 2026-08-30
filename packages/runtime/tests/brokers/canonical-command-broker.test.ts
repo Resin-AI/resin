@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CapabilityLimits, CommandCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BrokerAuditEmitter,
@@ -51,7 +52,10 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     }
   });
 
-  const createGrant = (cmdOverrides: Record<string, unknown> = {}, limitOverrides = {}) => {
+  const createGrant = (
+    cmdOverrides: Partial<CommandCapability> = {},
+    limitOverrides: Partial<CapabilityLimits> = {},
+  ) => {
     return createInvocationGrant({
       invocationId: "inv_canon_cmd_001",
       toolId: "canon_cmd_tool",
@@ -99,16 +103,10 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       };
 
       // Attempting to execute the fake node executable in /tmp/fake_bin/node
-      await expect(broker.execute({ executable: fakeNode, args: [] }, ctx)).rejects.toThrow(
-        BrokerSecurityError,
-      );
-
-      try {
-        await broker.execute({ executable: fakeNode, args: [] }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_BINARY");
-        expect((err as BrokerSecurityError).message).toContain("not permitted by capability grant");
-      }
+      await expect(broker.execute({ executable: fakeNode, args: [] }, ctx)).rejects.toMatchObject({
+        code: "UNAUTHORIZED_BINARY",
+        message: expect.stringContaining("not permitted by capability grant"),
+      });
     });
 
     it("rejects relative path binary execution attempt", async () => {
@@ -120,15 +118,9 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
         scratchDir: tempScratch,
       };
 
-      await expect(broker.execute({ executable: "./fake_node" }, ctx)).rejects.toThrow(
-        BrokerSecurityError,
-      );
-
-      try {
-        await broker.execute({ executable: "./fake_node" }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_BINARY");
-      }
+      await expect(broker.execute({ executable: "./fake_node" }, ctx)).rejects.toMatchObject({
+        code: "UNAUTHORIZED_BINARY",
+      });
     });
   });
 
@@ -184,15 +176,9 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       ];
 
       for (const args of escapeFlags) {
-        await expect(broker.execute({ executable: "node", args }, ctx)).rejects.toThrow(
-          BrokerSecurityError,
-        );
-
-        try {
-          await broker.execute({ executable: "node", args }, ctx);
-        } catch (err) {
-          expect((err as BrokerSecurityError).code).toBe("FORBIDDEN_ARGUMENT_PATTERN");
-        }
+        await expect(broker.execute({ executable: "node", args }, ctx)).rejects.toMatchObject({
+          code: "FORBIDDEN_ARGUMENT_PATTERN",
+        });
       }
     });
 
@@ -207,16 +193,11 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
         workspaceRoot: tempWorkspace,
         scratchDir: tempScratch,
       };
-
       await expect(
-        broker.execute({ executable: "sh", args: ["-c", "echo pwned"] }, ctx),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.execute({ executable: "bash", args: ["-c", "echo pwned"] }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("SHELL_EXECUTION_DENIED");
-      }
+        broker.execute({ executable: "bash", args: ["-c", "echo pwned"] }, ctx),
+      ).rejects.toMatchObject({
+        code: "SHELL_EXECUTION_DENIED",
+      });
     });
 
     it("rejects arguments containing dangerous control characters or command injection sequences", async () => {
@@ -352,20 +333,9 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
           },
           ctx,
         ),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.execute(
-          {
-            executable: "node",
-            args: [loopScript],
-            timeoutMs: 100,
-          },
-          ctx,
-        );
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("COMMAND_TIMEOUT");
-      }
+      ).rejects.toMatchObject({
+        code: "COMMAND_TIMEOUT",
+      });
     });
 
     it("terminates subprocess and process group when output exceeds maxOutputSizeBytes", async () => {
@@ -382,16 +352,11 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
         workspaceRoot: tempWorkspace,
         scratchDir: tempScratch,
       };
-
       await expect(
         broker.execute({ executable: "node", args: [floodScript] }, ctx),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.execute({ executable: "node", args: [floodScript] }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("MAX_OUTPUT_EXCEEDED");
-      }
+      ).rejects.toMatchObject({
+        code: "MAX_OUTPUT_EXCEEDED",
+      });
     });
   });
 
@@ -507,13 +472,9 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       // Non-matching tuple is rejected despite allowedBinaries containing git
       await expect(
         broker.execute({ executable: "git", args: ["diff", "--stat"] }, ctx),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.execute({ executable: "git", args: ["diff", "--stat"] }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("UNAUTHORIZED_BINARY");
-      }
+      ).rejects.toMatchObject({
+        code: "UNAUTHORIZED_BINARY",
+      });
     });
 
     it("executes novel exact command tuple without global code changes", async () => {

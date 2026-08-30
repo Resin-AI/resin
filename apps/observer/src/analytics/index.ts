@@ -19,4 +19,7 @@ export {
   TrajectoryCaptureCoordinator,
 } from "./capture-coordinator.js";
 
-export { projectEventToMetadataOnly } from "./metadata-projection.js";
+export {
+  projectEventToMetadataOnly,
+  projectEventMetadataOnly,
+} from "./metadata-projection.js";

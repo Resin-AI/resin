@@ -69,9 +69,13 @@ function signedRelease(version = "1.1.0"): ResolvedProductionRelease {
     releaseAssetUrl: `https://dist.resin.sh/${version}/resin.tar.gz`,
     denoAsset: {
       filename: "deno.zip",
-      url: "https://dist.resin.sh/deno.zip",
+      platform: "linux",
+      arch: "x64",
+      isWsl: false,
+      sizeBytes: 10,
       sha256: DENO_SHA,
-      executable: "deno",
+      path: "deno.zip",
+      url: "https://dist.resin.sh/deno.zip",
     },
     provenance: {
       version,
@@ -81,15 +85,17 @@ function signedRelease(version = "1.1.0"): ResolvedProductionRelease {
       manifestSha256: MANIFEST_SHA,
       releaseAssetUrl: `https://dist.resin.sh/${version}/resin.tar.gz`,
       releaseAssetSha256: RELEASE_SHA,
+      releaseAssetSizeBytes: 10,
       signingKeyIds: ["release-key-1"],
       deno: {
-        version: "2.9.5",
+        version: "2.2.0",
         url: "https://dist.resin.sh/deno.zip",
         sha256: DENO_SHA,
+        executable: "deno",
       },
     },
-  } as ResolvedProductionRelease;
-  return release;
+  };
+  return release as unknown as ResolvedProductionRelease;
 }
 
 function installedMetadata(version: string): string {
@@ -110,11 +116,13 @@ function installedTreeDigest(files: Record<string, string>): string {
   return treeHash.digest("hex");
 }
 
-function trustedInstalledRecord(version: string): {
+interface TrustedInstalledRecord {
   readonly daemon: string;
   readonly metadata: string;
   readonly record: string;
-} {
+}
+
+function trustedInstalledRecord(version: string): TrustedInstalledRecord {
   const daemon = `daemon-${version}`;
   const metadata = installedMetadata(version);
   const files = { "bin/resin-daemon": daemon, "version.json": metadata };
@@ -271,18 +279,15 @@ function createEngineFixture(
     },
     serviceManager,
     sessionActivity: options.sessionActivity ?? (async () => false),
-    ...(options.useDefaultHealthProbe
-      ? {}
-      : {
-          healthProbe:
-            options.healthProbe ??
-            (async () => ({
-              serviceActive: true,
-              ipcResponsive: true,
-              mcpResponsive: true,
-              recoveryBreakerTripped: false,
-            })),
-        }),
+    healthProbe: options.useDefaultHealthProbe
+      ? undefined
+      : (options.healthProbe ??
+        (async () => ({
+          serviceActive: true,
+          ipcResponsive: true,
+          mcpResponsive: true,
+          recoveryBreakerTripped: false,
+        }))),
     probationMs: 0,
     clock: () => Date.parse("2026-08-28T00:00:00.000Z"),
     onSnapshot: options.onSnapshot,
@@ -309,7 +314,6 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     const fixture = createEngineFixture();
 
     const result = await fixture.engine.run({ mode: "background" });
-
     expect(result).toMatchObject({
       success: true,
       status: "activated",
@@ -557,7 +561,10 @@ describe("UpdateEngine staging, activation, and rollback", () => {
 
   it("preserves and reports concurrent configuration changes during rollback", async () => {
     const configPath = path.join("/home/update-test", ".resin", "config.json");
-    const bridge = { current: undefined as ConfigFsBridge | undefined };
+    interface BridgeHolder {
+      current?: ConfigFsBridge;
+    }
+    const bridge: BridgeHolder = {};
     const fixture = createEngineFixture({
       initialFiles: {
         [configPath]: JSON.stringify({ authToken: "persistent-secret", updates: {} }),
@@ -844,6 +851,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     let activeSessions = 1;
     let drainPolls = 0;
     let completeDrain: (() => void) | undefined;
+    // SAFETY: Mock supervisor object implements subset of DaemonSupervisor required for IPC stop lifecycle tests.
     const supervisor = {
       getConfig() {
         return {};
@@ -880,7 +888,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
           };
         });
       },
-    } as unknown as DaemonSupervisor;
+    } as DaemonSupervisor;
     const server = new IpcServer({
       supervisor,
       socketPath: platformPaths.socketPath,

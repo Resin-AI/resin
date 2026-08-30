@@ -12,17 +12,32 @@ import { afterEach, describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 const cleanupPaths: string[] = [];
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
+type TestCanonicalJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | TestCanonicalJsonValue[]
+  | { [key: string]: TestCanonicalJsonValue };
+
+function canonical(value: TestCanonicalJsonValue | undefined): string {
+  if (
+    value === null ||
+    value === undefined ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  )
+    return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const record = value as Record<string, unknown>;
+  // SAFETY: value is confirmed to be a record object by type guard and toString tag.
+  const record = value as Record<string, TestCanonicalJsonValue>;
   return `{${Object.keys(record)
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
     .join(",")}}`;
 }
 
-function sign(payload: unknown, privateKey: crypto.KeyObject): string {
+function sign(payload: TestCanonicalJsonValue | undefined, privateKey: crypto.KeyObject): string {
   return crypto.sign(null, Buffer.from(canonical(payload), "utf8"), privateKey).toString("hex");
 }
 
@@ -129,6 +144,7 @@ describe("packed CLI production bootstrap", () => {
       [path.join(rootDir, "scripts", "pack-npm-bootstrap.mjs"), `--output-dir=${packDir}`],
       { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
     );
+    // SAFETY: Output from npm pack --json contains tarballPath.
     const packed = JSON.parse(packStdout) as { tarballPath: string };
     const npm = process.platform === "win32" ? "npm.cmd" : "npm";
     await execFileAsync(
@@ -226,7 +242,7 @@ describe("packed CLI production bootstrap", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
-    if (!address || typeof address === "string")
+    if (!address || String(address) === address)
       throw new Error("HTTP fixture did not bind a port");
     baseUrl = `http://127.0.0.1:${address.port}`;
 
@@ -343,10 +359,14 @@ describe("packed CLI production bootstrap", () => {
       stdout = result.stdout;
       stderr = result.stderr;
     } catch (error: unknown) {
-      const errObj = error && typeof error === "object" ? (error as Record<string, unknown>) : null;
+      // SAFETY: Error object inspected for stdout/stderr strings.
+      const errObj =
+        error && error instanceof Object
+          ? (error as { stdout?: string; stderr?: string; code?: unknown })
+          : null;
       const message = error instanceof Error ? error.message : String(error);
-      const out = typeof errObj?.stdout === "string" ? errObj.stdout : "";
-      const err = typeof errObj?.stderr === "string" ? errObj.stderr : "";
+      const out = errObj && String(errObj.stdout) === errObj.stdout ? errObj.stdout : "";
+      const err = errObj && String(errObj.stderr) === errObj.stderr ? errObj.stderr : "";
       const code = errObj?.code !== undefined ? String(errObj.code) : "UNKNOWN";
       throw new Error(
         `Packed CLI init failed (code: ${code}): ${message}\n--- stdout ---\n${out}\n--- stderr ---\n${err}`,

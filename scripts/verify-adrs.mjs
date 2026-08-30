@@ -179,7 +179,7 @@ export function validateSequentialNumbering(adrs, rootDirOrExcluded = process.cw
   const excludedNumbers =
     rootDirOrExcluded instanceof Set
       ? rootDirOrExcluded
-      : typeof rootDirOrExcluded === "string"
+      : Object.prototype.toString.call(rootDirOrExcluded) === "[object String]"
         ? getExcludedAdrNumbers(rootDirOrExcluded)
         : new Set();
 

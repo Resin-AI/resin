@@ -76,18 +76,20 @@ export function buildTarArchive(files: Array<{ name: string; content: string | B
   return Buffer.concat(buffers);
 }
 
+export interface TestSigningKeyPair {
+  keyId: string;
+  keyEntry: SigningKeyEntry;
+  privateKeyPem: string;
+  signPayload: (payload: string | Buffer) => string;
+}
+
 /**
  * Generates an Ed25519 signing key pair and key store entry.
  */
 export function generateTestSigningKey(
   keyId = `key_${crypto.randomUUID()}`,
   trustLevel: "production" | "development" | "revoked" = "production",
-): {
-  keyId: string;
-  keyEntry: SigningKeyEntry;
-  privateKeyPem: string;
-  signPayload: (payload: string | Buffer) => string;
-} {
+): TestSigningKeyPair {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
     publicKeyEncoding: { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
@@ -259,6 +261,11 @@ export function createSampleCapabilityEnvelope(
 /**
  * Creates a complete signed test bundle archive buffer.
  */
+export interface SignedTestBundle {
+  archiveBuffer: Buffer;
+  digest: string;
+}
+
 export function createSignedTestBundle(
   manifest: ToolManifest,
   signer?: {
@@ -266,7 +273,7 @@ export function createSignedTestBundle(
     keyEntry?: { keyId: string };
     signPayload: (payload: string | Buffer) => string;
   },
-): { archiveBuffer: Buffer; digest: string } {
+): SignedTestBundle {
   const indexJs = 'export default function run(args) { return { result: "ok" }; }';
   const packageJson = JSON.stringify({
     name: manifest.name,
@@ -285,7 +292,7 @@ export function createSignedTestBundle(
   const bundleDigest = crypto.createHash("sha256").update(tempArchive).digest("hex");
 
   if (signer) {
-    const fileDigests: Record<string, string> = {
+    const fileDigests = {
       "index.js": crypto.createHash("sha256").update(indexJs).digest("hex"),
       "package.json": crypto.createHash("sha256").update(packageJson).digest("hex"),
       "manifest.json": crypto

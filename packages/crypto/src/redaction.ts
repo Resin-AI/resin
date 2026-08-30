@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { RedactionOptions } from "./types.js";
+import type { RedactedRecord, RedactionOptions } from "./types.js";
 
 /**
  * Standard regular expressions for detecting sensitive tokens and credentials.
@@ -92,10 +92,9 @@ export class SecretRedactor {
    * Registers a secret value for automatic redaction.
    */
   registerSecret(value: string, name?: string): void {
-    if (!value || typeof value !== "string" || value.trim().length === 0) {
+    if (!value || value.trim().length === 0) {
       return;
     }
-
     const trimmedValue = value.trim();
     if (trimmedValue.length < 3) {
       // Avoid masking excessively short substrings (e.g. 1-2 chars) that could match everywhere
@@ -143,7 +142,7 @@ export class SecretRedactor {
       for (const secret of secrets) {
         this.registerSecret(secret);
       }
-    } else if (secrets && typeof secrets === "object") {
+    } else if (secrets) {
       for (const [name, secret] of Object.entries(secrets)) {
         this.registerSecret(secret, name);
       }
@@ -190,10 +189,9 @@ export class SecretRedactor {
    * Checks if any registered secret or pattern exists within the given text.
    */
   hasSecret(text: string): boolean {
-    if (!text || typeof text !== "string") {
+    if (!text) {
       return false;
     }
-
     // Check exact matches
     for (const secret of this.secretValues) {
       if (text.includes(secret)) {
@@ -232,10 +230,9 @@ export class SecretRedactor {
    * Redacts all registered secret values, encodings, and common secret patterns in the input text.
    */
   redact(input: string): string {
-    if (!input || typeof input !== "string") {
+    if (!input) {
       return input;
     }
-
     let result = input;
 
     // 1. Redact known exact secrets and encodings, sorted by length descending to match longest first
@@ -301,36 +298,45 @@ export class SecretRedactor {
       return obj;
     }
 
-    if (typeof obj === "string") {
-      return this.redact(obj) as unknown as T;
+    if (Object.prototype.toString.call(obj) === "[object String]") {
+      // SAFETY: String primitive is redacted and returned with preserved type T.
+      return this.redact(String(obj)) as T;
     }
 
-    if (typeof obj === "number" || typeof obj === "boolean" || typeof obj === "bigint") {
+    if (
+      Object.prototype.toString.call(obj) === "[object Number]" ||
+      Object.prototype.toString.call(obj) === "[object Boolean]" ||
+      Object.prototype.toString.call(obj) === "[object BigInt]"
+    ) {
       return obj;
     }
 
     if (Array.isArray(obj)) {
-      return obj.map((item) => this.redactObject(item)) as unknown as T;
+      // SAFETY: Array elements are recursively redacted and returned with preserved array type T.
+      return obj.map((item) => this.redactObject(item)) as T;
     }
 
     if (obj instanceof Error) {
-      const sanitizedError = new (obj.constructor as new (msg: string) => Error)(
-        this.redact(obj.message),
-      );
+      // SAFETY: Error constructor is instantiated to preserve specific Error subclass.
+      const ErrorCtor = obj.constructor as new (msg: string) => Error;
+      const sanitizedError = new ErrorCtor(this.redact(obj.message));
       sanitizedError.name = obj.name;
       if (obj.stack) {
         sanitizedError.stack = this.redact(obj.stack);
       }
-      return sanitizedError as unknown as T;
+      // SAFETY: Redacted Error instance matches return type T.
+      return sanitizedError as T;
     }
 
-    if (typeof obj === "object") {
-      const result: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(obj)) {
+    if (Object.prototype.toString.call(obj) === "[object Object]") {
+      const result: RedactedRecord = {};
+      // SAFETY: Plain object entries are extracted for recursive key and value redaction.
+      for (const [key, value] of Object.entries(obj as object)) {
         const sanitizedKey = this.redact(key);
         result[sanitizedKey] = this.redactObject(value);
       }
-      return result as unknown as T;
+      // SAFETY: Redacted property map matches return type T.
+      return result as T;
     }
 
     return obj;

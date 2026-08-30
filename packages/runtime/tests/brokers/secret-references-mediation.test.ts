@@ -16,7 +16,7 @@ import {
   NetworkBroker,
   SecretBroker,
 } from "../../src/brokers/index.js";
-import { createInvocationGrant } from "../../src/policy/grant.js";
+import { type CreateInvocationGrantParams, createInvocationGrant } from "../../src/policy/grant.js";
 
 describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
   let server: http.Server;
@@ -78,7 +78,7 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
-        serverPort = typeof addr === "object" && addr ? addr.port : 0;
+        serverPort = addr && "port" in addr ? addr.port : 0;
         serverUrl = `http://127.0.0.1:${serverPort}`;
         resolve();
       });
@@ -143,7 +143,7 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
 
   const createGrant = (
     secretNames = ["GITHUB_TOKEN", "API_KEY", "DB_PASSWORD"],
-    overrides: Record<string, unknown> = {},
+    overrides: Partial<CreateInvocationGrantParams> = {},
   ) => {
     return createInvocationGrant({
       ...baseGrantParams,
@@ -394,13 +394,9 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
 
       await expect(
         secretBroker.resolveSecretReference(secretRef, maliciousCtx, "bearer_token"),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await secretBroker.resolveSecretReference(secretRef, maliciousCtx, "bearer_token");
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("WORKSPACE_MISMATCH");
-      }
+      ).rejects.toMatchObject({
+        code: "WORKSPACE_MISMATCH",
+      });
     });
 
     it("fails with TOOL_MISMATCH when secret reference is replayed by another tool", async () => {
@@ -430,13 +426,9 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
 
       await expect(
         secretBroker.resolveSecretReference(secretRef, otherToolCtx, "bearer_token"),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await secretBroker.resolveSecretReference(secretRef, otherToolCtx, "bearer_token");
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("TOOL_MISMATCH");
-      }
+      ).rejects.toMatchObject({
+        code: "TOOL_MISMATCH",
+      });
     });
 
     it("fails with GRANT_EXPIRED when secret reference lifetime has elapsed", async () => {
@@ -455,13 +447,9 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
 
       await expect(
         secretBroker.resolveSecretReference(expiredRef, ctx, "bearer_token"),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await secretBroker.resolveSecretReference(expiredRef, ctx, "bearer_token");
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("GRANT_EXPIRED");
-      }
+      ).rejects.toMatchObject({
+        code: "GRANT_EXPIRED",
+      });
     });
 
     it("fails with OPERATION_NOT_PERMITTED when reference is used with an unpermitted mediation mode", async () => {
@@ -481,13 +469,9 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
       // Attempt command_stdin mediation mode
       await expect(
         secretBroker.resolveSecretReference(restrictedRef, ctx, "command_stdin"),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await secretBroker.resolveSecretReference(restrictedRef, ctx, "command_stdin");
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("OPERATION_NOT_PERMITTED");
-      }
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_PERMITTED",
+      });
     });
 
     it("fails with SECRET_NOT_AUTHORIZED when secret name is not granted in capability envelope", async () => {
@@ -501,15 +485,11 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
       };
 
       // Attempt to create reference for unauthorized secret DB_PASSWORD
-      expect(() => secretBroker.createSecretReference("DB_PASSWORD", ctx)).toThrow(
-        BrokerSecurityError,
+      expect(() => secretBroker.createSecretReference("DB_PASSWORD", ctx)).toThrowError(
+        expect.objectContaining({
+          code: "SECRET_NOT_AUTHORIZED",
+        }),
       );
-
-      try {
-        secretBroker.createSecretReference("DB_PASSWORD", ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("SECRET_NOT_AUTHORIZED");
-      }
     });
 
     it("fails with DIRECT_READ_DENIED when worker RPC calls legacy direct-read", async () => {
@@ -528,18 +508,9 @@ describe("Secret Reference Mediation and Trusted Broker Host Isolation", () => {
 
       await expect(
         brokerManager.handleRequest("secret", "getSecret", { name: "GITHUB_TOKEN" }, workerCtx),
-      ).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await brokerManager.handleRequest(
-          "secret",
-          "getSecret",
-          { name: "GITHUB_TOKEN" },
-          workerCtx,
-        );
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("DIRECT_READ_DENIED");
-      }
+      ).rejects.toMatchObject({
+        code: "DIRECT_READ_DENIED",
+      });
     });
   });
 });

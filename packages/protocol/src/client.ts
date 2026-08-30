@@ -33,10 +33,12 @@ import {
 } from "./errors.js";
 import type {
   ArtifactDownloadMetadata,
+  ArtifactMetadataResponse,
   CatalogSnapshotResponse,
   DeploymentStatusItem,
   DeploymentStatusReportResponse,
   HealthNegotiateResponse,
+  InstallationRegisterRequest,
   InstallationRegisterResponse,
   ObservationBatchResponse,
   TelemetryBatchResponse,
@@ -71,6 +73,15 @@ export interface ProtocolClientOptions {
   maxClockSkewMs?: number;
   mockServer?: MockProtocolServer;
 }
+export interface SendObservationBatchResult {
+  envelope: ProtocolMessageEnvelope<{ observations: NormalizedSessionEvent[]; cursor?: string }>;
+  response: ObservationBatchResponse;
+}
+
+export interface DownloadArtifactResult {
+  bytes: Uint8Array;
+  metadata: ArtifactMetadataResponse;
+}
 
 /**
  * ProtocolClient: Local daemon client for interacting with Cloud Control Plane.
@@ -84,7 +95,6 @@ export class ProtocolClient {
   readonly protocolVersion: string;
   readonly maxArtifactSizeBytes: number;
   readonly maxClockSkewMs: number;
-
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
   private claims: AuthClaims | null = null;
@@ -213,7 +223,7 @@ export class ProtocolClient {
 
   registerInstallation(
     harnesses: string[] = [],
-    metadata?: Record<string, unknown>,
+    metadata?: InstallationRegisterRequest["metadata"],
   ): InstallationRegisterResponse {
     return this.mockServer.handleInstallationRegister({
       installationId: this.installationId,
@@ -248,10 +258,7 @@ export class ProtocolClient {
   sendObservationBatch(
     observations: NormalizedSessionEvent[],
     cursor?: string,
-  ): {
-    envelope: ProtocolMessageEnvelope<{ observations: NormalizedSessionEvent[]; cursor?: string }>;
-    response: ObservationBatchResponse;
-  } {
+  ): SendObservationBatchResult {
     const batchId = randomUUID();
     const payload = { observations, cursor };
     const envelope = createProtocolEnvelope({
@@ -305,11 +312,10 @@ export class ProtocolClient {
 
   // --- 5. Artifact Download & Verification ---
 
-  downloadArtifact(digest: string): { bytes: Uint8Array; metadata: ArtifactDownloadMetadata } {
+  downloadArtifact(digest: string): DownloadArtifactResult {
     const { bytes, metadata } = this.mockServer.handleArtifactDownload({
       digest,
       workspaceId: this.workspaceId,
-      expectedSizeLimitBytes: this.maxArtifactSizeBytes,
     });
 
     // 1. Check size limit / decompression bomb protection

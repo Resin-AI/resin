@@ -196,7 +196,8 @@ describe("Privacy and Data Residency Boundary Enforcement", () => {
       });
 
       const client = new ObservationSyncClient({
-        fetchFn: mockFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch satisfies fetchFn test contract.
+        fetchFn: mockFetch as typeof fetch,
       });
 
       const validDto = createSanitizedObservationDto(createSampleSanitizedEvent());
@@ -268,7 +269,8 @@ describe("Privacy and Data Residency Boundary Enforcement", () => {
 
       const client = new ObservationSyncClient({
         baseUrl: "https://api.resin.cloud",
-        fetchFn: mockFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch satisfies fetchFn test contract.
+        fetchFn: mockFetch as typeof fetch,
         identityProvider: async () => ({
           tenantId: "tenant_01j7db4n000000000000000001",
           token: "valid-auth-token",
@@ -305,7 +307,8 @@ describe("Privacy and Data Residency Boundary Enforcement", () => {
     it("fails closed before network request if an unbranded raw object is passed into syncObservations", async () => {
       const mockFetch = vi.fn();
       const client = new ObservationSyncClient({
-        fetchFn: mockFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch satisfies fetchFn test contract.
+        fetchFn: mockFetch as typeof fetch,
       });
 
       const unbrandedRawEvent = {

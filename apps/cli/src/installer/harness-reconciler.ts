@@ -34,7 +34,29 @@ import type { HarnessProbeOptions, SupportedHarnessId } from "./harness-config.j
 export const DEFAULT_HARNESS_AUTO_REPAIR = true;
 export const HARNESS_BACKUP_RETENTION = 5;
 
-const HarnessJsonObjectSchema = z.record(z.unknown());
+export type HarnessJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | HarnessJsonValue[]
+  | { [key: string]: HarnessJsonValue };
+
+export type HarnessJsonObject = Record<string, HarnessJsonValue>;
+
+const HarnessJsonValueSchema: z.ZodType<HarnessJsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(HarnessJsonValueSchema),
+    z.record(HarnessJsonValueSchema),
+  ]),
+);
+
+const HarnessJsonObjectSchema: z.ZodType<HarnessJsonObject> = z.record(HarnessJsonValueSchema);
+
 const RESIN_OWNED_SERVER_FIELDS = ["type", "url", "command", "args"] as const;
 const BACKUP_FORMAT = "resin-harness-backup/v1" as const;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -81,6 +103,7 @@ export interface HarnessReconcileFsBridge extends ConfigFsBridge {
   ): Promise<boolean>;
   unlinkIfUnchanged?(filePath: string, expectedContent: string): Promise<boolean>;
   withFileLock?<T>(filePath: string, action: () => Promise<T>): Promise<T>;
+  dump?(): Record<string, string>;
 }
 
 export type HarnessInstallationProbe = (
@@ -541,8 +564,8 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
       await activeLock.refreshTail;
       try {
         await this.removeOwnedClaim(activeLock);
-        await fs.rmdir(lockPath).catch((error: unknown) => {
-          const code = (error as NodeJS.ErrnoException).code;
+        await fs.rmdir(lockPath).catch((error: Error | { code?: string }) => {
+          const code = "code" in error ? error.code : undefined;
           if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
             throw error;
           }
@@ -564,6 +587,7 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
     if (cleanupError !== undefined) {
       throw cleanupError;
     }
+    // SAFETY: Locked action result returned to caller.
     return result as T;
   }
 
@@ -664,7 +688,7 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
       transaction.plannedPath,
       transaction.capturedPath,
     ]) {
-      await fs.unlink(ownedPath).catch((error: unknown) => {
+      await fs.unlink(ownedPath).catch((error: Error | { code?: string }) => {
         if (!isMissingFileError(error)) {
           throw error;
         }
@@ -686,10 +710,10 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
     }
   }
 
-  private preservedTransactionError(
+  private preservedTransactionError<TError>(
     filePath: string,
     transaction: ReconciliationTransaction,
-    error: unknown,
+    error: TError,
   ): Error {
     return new Error(
       `${describeError(error)}; Resin preserved both transaction versions at ${transaction.directoryPath} and did not claim reconciliation of ${filePath}`,
@@ -1019,8 +1043,8 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
     try {
       process.kill(pid, 0);
       return true;
-    } catch (error: unknown) {
-      return (error as NodeJS.ErrnoException).code === "EPERM";
+    } catch (error) {
+      return Boolean(error) && error instanceof Object && "code" in error && error.code === "EPERM";
     }
   }
 
@@ -1053,7 +1077,7 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
       }
       await this.refreshLockLeaseNow(activeLock);
     });
-    activeLock.refreshTail = refresh.catch((error: unknown) => {
+    activeLock.refreshTail = refresh.catch((error: Error | string | { message?: string }) => {
       if (activeLock.leaseError === undefined) {
         activeLock.leaseError = error;
       }
@@ -1247,6 +1271,7 @@ export class HarnessReconciler {
     backups: readonly ConfigBackup[],
     fsBridge: ConfigFsBridge = defaultReconciliationFsBridge,
   ): Promise<void> {
+    // SAFETY: fsBridge satisfies HarnessReconcileFsBridge required by reconciler.
     const reconciliationBridge = fsBridge as HarnessReconcileFsBridge;
     const failures: Error[] = [];
     for (const backup of [...backups].reverse()) {
@@ -1835,6 +1860,7 @@ export class HarnessReconciler {
     if (fsBridge.writeFileExclusive !== undefined) {
       return fsBridge.writeFileExclusive(filePath, content);
     }
+    await fsBridge.mkdirp(path.dirname(filePath)).catch(() => {});
     if (await fsBridge.exists(filePath)) {
       return false;
     }
@@ -1926,17 +1952,11 @@ export class HarnessReconciler {
           candidates.add(absolutePath);
         }
       }
-    } else {
-      const dump = (
-        fsBridge as ConfigFsBridge & {
-          dump?: () => Record<string, string>;
-        }
-      ).dump?.();
-      if (dump !== undefined) {
-        for (const filePath of Object.keys(dump)) {
-          if (parseOwnedBackupName(targetPath, filePath) !== null) {
-            candidates.add(filePath);
-          }
+    } else if (fsBridge.dump !== undefined) {
+      const dump = fsBridge.dump();
+      for (const filePath of Object.keys(dump)) {
+        if (parseOwnedBackupName(targetPath, filePath) !== null) {
+          candidates.add(filePath);
         }
       }
     }
@@ -2077,9 +2097,11 @@ function preserveUserOwnedServerFields(
     let currentRawEntry = currentServersResult.data[serverName];
     if (!currentRawEntry) {
       for (const legacyAlias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
-        const candidate = currentServersResult.data[legacyAlias];
-        if (candidate && isRecognizedResinMcpEntry(candidate)) {
-          currentRawEntry = candidate;
+        const candidateResult = HarnessJsonObjectSchema.safeParse(
+          currentServersResult.data[legacyAlias],
+        );
+        if (candidateResult.success && isRecognizedResinMcpEntry(candidateResult.data)) {
+          currentRawEntry = candidateResult.data;
           break;
         }
       }
@@ -2143,12 +2165,9 @@ function validateMutationPlan(
     : `Adapter mutation would modify user-owned ${harnessId} settings`;
 }
 
-function projectUserOwnedJson(
-  content: string,
-  harnessId: SupportedHarnessId,
-): Record<string, unknown> {
+function projectUserOwnedJson(content: string, harnessId: SupportedHarnessId): HarnessJsonObject {
   const projected = HarnessJsonObjectSchema.parse(JSON.parse(content));
-  const serverName = RESIN_MCP_SERVER_KEYS[harnessId];
+  const serverName: string = RESIN_MCP_SERVER_KEYS[harnessId];
   const containerKeys = harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
 
   for (const key of containerKeys) {
@@ -2159,7 +2178,7 @@ function projectUserOwnedJson(
 
     const userServers = { ...serversResult.data };
 
-    let legacyExtras: Record<string, unknown> | null = null;
+    let legacyExtras: HarnessJsonObject | null = null;
     for (const legacyAlias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
       if (legacyAlias in userServers && legacyAlias !== serverName) {
         const legacyEntryResult = HarnessJsonObjectSchema.safeParse(userServers[legacyAlias]);
@@ -2248,18 +2267,14 @@ function combineDiagnostics(
   return first ?? second;
 }
 
-function isAlreadyExistsError(error: unknown): error is NodeJS.ErrnoException {
-  return (
-    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST"
-  );
+function isAlreadyExistsError(cause: unknown): cause is NodeJS.ErrnoException {
+  return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === "EEXIST";
 }
 
-function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
-  return (
-    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
+function isMissingFileError(cause: unknown): cause is NodeJS.ErrnoException {
+  return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === "ENOENT";
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function describeError(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause ?? "");
 }

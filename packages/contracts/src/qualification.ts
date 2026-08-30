@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { canonicalJsonStringify, hashCanonical } from "./canonical.js";
 import { ISOTimestampSchema, IdentifierSchema, normalizeSha256 } from "./common.js";
+import type { V1MetadataPayloadValue } from "./v1.js";
 
 /**
  * Standard literal version string for qualification contracts.
@@ -64,10 +65,10 @@ export type FrozenToolIntent = z.infer<typeof FrozenToolIntentSchema>;
  * Computes deterministic canonical digest for FrozenToolIntent excluding intentDigest.
  */
 export function computeFrozenIntentDigest(
-  intent: Omit<FrozenToolIntent, "intentDigest"> | FrozenToolIntent,
+  intent: Omit<FrozenToolIntent, "intentDigest"> & { intentDigest?: string },
   options: { prefix?: boolean } = {},
 ): string {
-  const { intentDigest: _, ...projection } = intent as FrozenToolIntent;
+  const { intentDigest: _, ...projection } = intent;
   return hashCanonical(
     {
       domain: "resin/frozen-intent/v1",
@@ -220,10 +221,10 @@ export type ObservedEffectProfile = z.infer<typeof ObservedEffectProfileSchema>;
  * Computes deterministic canonical digest for ObservedEffectProfile excluding profileDigest.
  */
 export function computeObservedEffectProfileDigest(
-  profile: Omit<ObservedEffectProfile, "profileDigest"> | ObservedEffectProfile,
+  profile: Omit<ObservedEffectProfile, "profileDigest"> & { profileDigest?: string },
   options: { prefix?: boolean } = {},
 ): string {
-  const { profileDigest: _, ...projection } = profile as ObservedEffectProfile;
+  const { profileDigest: _, ...projection } = profile;
   return hashCanonical(
     {
       domain: "resin/observed-effect-profile/v1",
@@ -519,10 +520,10 @@ export type QualificationRunRecord = z.infer<typeof QualificationRunRecordSchema
  * Computes deterministic canonical digest for QualificationRunRecord excluding recordDigest.
  */
 export function computeQualificationRunDigest(
-  run: Omit<QualificationRunRecord, "recordDigest"> | QualificationRunRecord,
+  run: Omit<QualificationRunRecord, "recordDigest"> & { recordDigest?: string },
   options: { prefix?: boolean } = {},
 ): string {
-  const { recordDigest: _, ...projection } = run as QualificationRunRecord;
+  const { recordDigest: _, ...projection } = run;
   return hashCanonical(
     {
       domain: "resin/qualification-run-record/v1",
@@ -583,15 +584,16 @@ export const ReviewerVerdictSchema = z
   .strict();
 
 export type ReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;
+export type QualificationClaim = ReviewerVerdict;
 
 /**
  * Computes deterministic canonical digest for ReviewerVerdict excluding recordDigest.
  */
 export function computeReviewerVerdictDigest(
-  verdict: Omit<ReviewerVerdict, "recordDigest"> | ReviewerVerdict,
+  verdict: Omit<ReviewerVerdict, "recordDigest"> & { recordDigest?: string },
   options: { prefix?: boolean } = {},
 ): string {
-  const { recordDigest: _, ...projection } = verdict as ReviewerVerdict;
+  const { recordDigest: _, ...projection } = verdict;
   return hashCanonical(
     {
       domain: "resin/reviewer-verdict/v1",
@@ -618,6 +620,11 @@ export function computeReviewerVerdictDigest(
 }
 
 /**
+ * Alias for computeReviewerVerdictDigest.
+ */
+export const computeQualificationClaimDigest = computeReviewerVerdictDigest;
+
+/**
  * 5. IndependentReplayRecord
  * Independent replay verification asserting reproduction of committed run evidence in a fresh environment.
  */
@@ -641,15 +648,16 @@ export const IndependentReplayRecordSchema = z
   .strict();
 
 export type IndependentReplayRecord = z.infer<typeof IndependentReplayRecordSchema>;
+export type ReplayResult = IndependentReplayRecord;
 
 /**
  * Computes deterministic canonical digest for IndependentReplayRecord excluding recordDigest.
  */
 export function computeIndependentReplayDigest(
-  replay: Omit<IndependentReplayRecord, "recordDigest"> | IndependentReplayRecord,
+  replay: Omit<IndependentReplayRecord, "recordDigest"> & { recordDigest?: string },
   options: { prefix?: boolean } = {},
 ): string {
-  const { recordDigest: _, ...projection } = replay as IndependentReplayRecord;
+  const { recordDigest: _, ...projection } = replay;
   return hashCanonical(
     {
       domain: "resin/independent-replay-record/v1",
@@ -670,6 +678,11 @@ export function computeIndependentReplayDigest(
     options,
   );
 }
+
+/**
+ * Alias for computeIndependentReplayDigest.
+ */
+export const computeReplayResultDigest = computeIndependentReplayDigest;
 
 /**
  * Approval Signature Schema.
@@ -713,12 +726,13 @@ export type ToolQualificationApproval = z.infer<typeof ToolQualificationApproval
  * Excludes approvalDigest and signature.
  */
 export function computeApprovalDigest(
-  approval:
-    | Omit<ToolQualificationApproval, "approvalDigest" | "signature">
-    | ToolQualificationApproval,
+  approval: Omit<ToolQualificationApproval, "approvalDigest" | "signature"> & {
+    approvalDigest?: string;
+    signature?: ApprovalSignature | string;
+  },
   options: { prefix?: boolean } = {},
 ): string {
-  const { approvalDigest: _, signature: __, ...projection } = approval as ToolQualificationApproval;
+  const { approvalDigest: _, signature: __, ...projection } = approval;
   return hashCanonical(
     {
       domain: "resin/qualification-approval/v1",
@@ -808,28 +822,37 @@ export function computeRawEvidenceDigest(
   },
   options: { prefix?: boolean } = {},
 ): string {
-  return hashCanonical(
-    {
-      domain: "resin/raw-evidence/v1",
-      candidateId: bundle.candidateId,
-      frozenIntent: bundle.frozenIntent,
-      ...(bundle.rawBundle ? { rawBundle: bundle.rawBundle } : {}),
-      runs: bundle.runs,
-      schemaVersion: bundle.schemaVersion,
-    },
-    options,
-  );
+  const payload: RawEvidenceDigestPayload = {
+    domain: "resin/raw-evidence/v1",
+    candidateId: bundle.candidateId,
+    frozenIntent: bundle.frozenIntent,
+    runs: bundle.runs,
+    schemaVersion: bundle.schemaVersion,
+  };
+  if (bundle.rawBundle) {
+    payload.rawBundle = bundle.rawBundle;
+  }
+  return hashCanonical(payload, options);
 }
+
+export type RawEvidenceDigestPayload = {
+  domain: string;
+  candidateId: string;
+  frozenIntent: FrozenToolIntent;
+  runs: QualificationRunRecord[];
+  schemaVersion: string;
+  rawBundle?: RawBundleDescriptor;
+};
 
 /**
  * Computes the deterministic canonical digest for a qualification bundle content.
  * Excludes the approval object so the bundle can be verified and signed.
  */
 export function computeQualificationBundleDigest(
-  bundle: Omit<QualificationArtifactBundleBase, "approval"> | QualificationArtifactBundleBase,
+  bundle: Omit<QualificationArtifactBundleBase, "approval"> & { approval?: unknown },
   options: { prefix?: boolean } = {},
 ): string {
-  const { approval: _, ...unsignedBundle } = bundle as QualificationArtifactBundleBase;
+  const { approval: _, ...unsignedBundle } = bundle;
   return hashCanonical(
     {
       domain: "resin/qualification-bundle/v1",
@@ -1630,8 +1653,10 @@ export interface QualificationValidationResult {
 /**
  * Validates any candidate qualification artifact bundle structure and invariants.
  */
+export type QualificationArtifactBundleInput = z.input<typeof QualificationArtifactBundleSchema>;
+
 export function validateQualificationBundle(
-  data: unknown,
+  data: QualificationArtifactBundleInput | V1MetadataPayloadValue | null | undefined,
   options?: ValidateQualificationOptions,
 ): QualificationValidationResult {
   const parseResult = QualificationArtifactBundleBaseSchema.safeParse(data);
@@ -1732,6 +1757,7 @@ export function validateQualificationBundle(
 
   return {
     valid: true,
+    // SAFETY: Parsed qualification bundle matches validated schema and invariants.
     bundle: parseResult.data as QualificationArtifactBundle,
     issues: [],
     errorCodes: [],
@@ -1742,7 +1768,7 @@ export function validateQualificationBundle(
  * Asserts that a value is a valid QualificationArtifactBundle, throwing an error if invalid.
  */
 export function assertValidQualificationBundle(
-  data: unknown,
+  data: QualificationArtifactBundleInput | V1MetadataPayloadValue | null | undefined,
   options?: ValidateQualificationOptions,
 ): asserts data is QualificationArtifactBundle {
   const result = validateQualificationBundle(data, options);
@@ -1756,7 +1782,7 @@ export function assertValidQualificationBundle(
  * Type guard for QualificationArtifactBundle.
  */
 export function isQualificationArtifactBundle(
-  data: unknown,
+  data: QualificationArtifactBundleInput | V1MetadataPayloadValue | null | undefined,
   options?: ValidateQualificationOptions,
 ): data is QualificationArtifactBundle {
   return validateQualificationBundle(data, options).valid;

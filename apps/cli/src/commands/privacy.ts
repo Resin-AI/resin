@@ -90,6 +90,32 @@ export interface DaemonReloadResult {
   errors?: string[];
 }
 
+export type ConfigValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ConfigValue[]
+  | { [key: string]: ConfigValue };
+
+export type ConfigRecord = Record<string, ConfigValue>;
+
+export interface PrivacyJobResult {
+  jobId: string;
+  status: string;
+  requestedAt: string | null;
+  expiresAt: string | null;
+}
+
+function isConfigRecord(value: ConfigValue | null | undefined): value is ConfigRecord {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
 export interface PrivacyCommandOptions {
   home?: string;
   env?: NodeJS.ProcessEnv;
@@ -98,8 +124,8 @@ export interface PrivacyCommandOptions {
   reloadDaemon?: (config: { telemetryEnabled: boolean }) => Promise<DaemonReloadResult>;
   confirmDeletion?: (question: string) => Promise<boolean>;
   stdinIsTTY?: boolean;
-  stdout?: { write: (chunk: string) => unknown };
-  stderr?: { write: (chunk: string) => unknown };
+  stdout?: { write: (chunk: string) => boolean | undefined };
+  stderr?: { write: (chunk: string) => boolean | undefined };
   now?: () => number;
 }
 
@@ -134,20 +160,26 @@ export class PrivacyCommandError extends Error {
   }
 }
 
+interface PrivacyCommandErrorJsonPayload {
+  code: string;
+  message: string;
+  activeHolds?: Array<{ type: RetentionHoldType }>;
+}
+
 interface ConfigSnapshot {
   contents: string | null;
-  record: Record<string, unknown>;
+  record: ConfigRecord;
   configuredEnabled: boolean;
 }
 
-const HOLD_TYPES: Record<RetentionHoldType, true> = {
+const HOLD_TYPES = {
   legal_hold: true,
   investigation: true,
   security_incident: true,
-};
+} satisfies Record<RetentionHoldType, true>;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
-const JOB_STATUSES: Record<string, true> = {
+const JOB_STATUSES = {
   pending: true,
   queued: true,
   processing: true,
@@ -155,7 +187,7 @@ const JOB_STATUSES: Record<string, true> = {
   completed: true,
   failed: true,
   cancelled: true,
-};
+} satisfies Record<string, true>;
 
 function invalidArguments(message: string): never {
   throw new PrivacyCommandError("INVALID_ARGUMENTS", message);
@@ -217,9 +249,13 @@ export function parsePrivacyFlags(args: string[]): PrivacyCommandFlags {
     if (positional.length !== 2 || !["enable", "disable"].includes(positional[1] ?? "")) {
       invalidArguments("Usage: resin privacy telemetry enable|disable");
     }
+    const subAction = positional[1];
+    if (subAction !== "enable" && subAction !== "disable") {
+      invalidArguments("Usage: resin privacy telemetry enable|disable");
+    }
     return {
       action,
-      telemetryAction: positional[1] as "enable" | "disable",
+      telemetryAction: subAction,
       confirm,
       json,
       home,
@@ -230,7 +266,7 @@ export function parsePrivacyFlags(args: string[]): PrivacyCommandFlags {
 }
 
 export function printPrivacyHelp(
-  output: { write: (chunk: string) => unknown } = process.stdout,
+  output: { write: (chunk: string) => boolean | undefined } = process.stdout,
 ): void {
   const text = `
 Usage:
@@ -266,13 +302,8 @@ function aggregateLocalTelemetry(configured: boolean, environment: boolean | nul
   return environment ?? configured;
 }
 
-function isErrno(error: unknown, code: string): boolean {
-  if (!(error instanceof Error) || !("code" in error)) return false;
-  return error.code === code;
-}
-
-function parseConfigRecord(contents: string): Record<string, unknown> {
-  let parsed: unknown;
+function parseConfigRecord(contents: string): ConfigRecord {
+  let parsed: ConfigValue | null | undefined;
   try {
     parsed = JSON.parse(contents);
   } catch {
@@ -281,14 +312,18 @@ function parseConfigRecord(contents: string): Record<string, unknown> {
       "The daemon configuration is malformed; telemetry was not changed.",
     );
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isConfigRecord(parsed)) {
     throw new PrivacyCommandError(
       "CONFIG_INVALID",
       "The daemon configuration is malformed; telemetry was not changed.",
     );
   }
-  const record = parsed as Record<string, unknown>;
-  if (record.telemetryEnabled !== undefined && typeof record.telemetryEnabled !== "boolean") {
+  const record = parsed;
+  if (
+    record.telemetryEnabled !== undefined &&
+    record.telemetryEnabled !== true &&
+    record.telemetryEnabled !== false
+  ) {
     throw new PrivacyCommandError(
       "CONFIG_INVALID",
       "The daemon configuration has an invalid telemetry setting; telemetry was not changed.",
@@ -305,10 +340,12 @@ async function readConfigSnapshot(configFile: string): Promise<ConfigSnapshot> {
       contents,
       record,
       configuredEnabled:
-        typeof record.telemetryEnabled === "boolean" ? record.telemetryEnabled : true,
+        record.telemetryEnabled === true || record.telemetryEnabled === false
+          ? record.telemetryEnabled
+          : true,
     };
   } catch (error) {
-    if (isErrno(error, "ENOENT")) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return { contents: null, record: {}, configuredEnabled: true };
     }
     if (error instanceof PrivacyCommandError) throw error;
@@ -373,7 +410,7 @@ async function restoreConfig(filePath: string, previousContents: string | null):
     await fs.unlink(filePath);
     await syncDirectory(path.dirname(filePath));
   } catch (error) {
-    if (!isErrno(error, "ENOENT")) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
       throw new PrivacyCommandError(
         "CONFIG_ROLLBACK_FAILED",
         "The daemon rejected the change and its configuration could not be restored.",
@@ -508,41 +545,44 @@ export async function setDeviceTelemetry(
   };
 }
 
-function sanitizeIdentifier(value: unknown): string | null {
-  return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : null;
+function sanitizeIdentifier(value: ConfigValue | undefined): string | null {
+  return String(value) === value && SAFE_IDENTIFIER.test(value) ? value : null;
 }
 
-function sanitizeDate(value: unknown): string | null {
-  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return null;
+function sanitizeDate(value: ConfigValue | undefined): string | null {
+  if (String(value) !== value || !ISO_TIMESTAMP.test(value)) return null;
   return Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-function isRetentionHoldType(value: unknown): value is RetentionHoldType {
-  return typeof value === "string" && Object.hasOwn(HOLD_TYPES, value);
+function isRetentionHoldType(value: ConfigValue | undefined): value is RetentionHoldType {
+  return String(value) === value && Object.hasOwn(HOLD_TYPES, value);
 }
 
-function parseActiveHolds(value: unknown): Array<{ type: RetentionHoldType }> {
+function parseActiveHolds(value: ConfigValue | undefined): Array<{ type: RetentionHoldType }> {
   if (!Array.isArray(value)) return [];
   const result: Array<{ type: RetentionHoldType }> = [];
   for (const entry of value) {
-    let type: unknown;
-    if (typeof entry === "string") {
+    let type: ConfigValue | undefined;
+    if (String(entry) === entry) {
       type = entry;
-    } else if (entry && typeof entry === "object" && "type" in entry) {
-      type = entry.type;
+    } else if (isConfigRecord(entry) && "type" in entry) {
+      if (String(entry.type) === entry.type) {
+        type = entry.type;
+      }
     }
     if (isRetentionHoldType(type)) result.push({ type });
   }
   return result;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+function asRecord(value: ConfigValue | undefined): ConfigRecord | null {
+  return isConfigRecord(value) ? value : null;
 }
 
-function unwrapRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+function unwrapRecord(
+  value: ConfigValue | undefined,
+  keys: readonly string[],
+): ConfigRecord | null {
   const record = asRecord(value);
   if (!record) return null;
   for (const key of keys) {
@@ -552,20 +592,17 @@ function unwrapRecord(value: unknown, keys: readonly string[]): Record<string, u
   return record;
 }
 
-export function parsePrivacySettings(value: unknown): PrivacySettings {
+export function parsePrivacySettings(value: ConfigValue | undefined): PrivacySettings {
   const record = unwrapRecord(value, ["settings", "privacy"]);
   const updatedAt = sanitizeDate(record?.updatedAt);
+  const isBool = (v: ConfigValue | undefined): v is boolean => v === true || v === false;
+  const isRetentionDays = (v: ConfigValue | undefined): v is number | null =>
+    v === null || (Number(v) === v && Number.isInteger(v) && v >= 1 && v <= 3_650);
   if (
     !record ||
-    typeof record.metadataTelemetryEnabled !== "boolean" ||
-    typeof record.rawTranscriptUploadEnabled !== "boolean" ||
-    !(
-      record.retentionDays === null ||
-      (typeof record.retentionDays === "number" &&
-        Number.isInteger(record.retentionDays) &&
-        record.retentionDays >= 1 &&
-        record.retentionDays <= 3_650)
-    ) ||
+    !isBool(record.metadataTelemetryEnabled) ||
+    !isBool(record.rawTranscriptUploadEnabled) ||
+    !isRetentionDays(record.retentionDays) ||
     !Array.isArray(record.activeHolds) ||
     updatedAt === null
   ) {
@@ -635,7 +672,7 @@ function assertPairedCredentials(
   }
 
   const expiresAt = credentials.claims?.expiresAt;
-  if (typeof expiresAt === "string") {
+  if (String(expiresAt) === expiresAt) {
     const expiration = Date.parse(expiresAt);
     if (Number.isFinite(expiration) && expiration <= now) {
       throw new PrivacyCommandError(
@@ -648,26 +685,30 @@ function assertPairedCredentials(
   return credentials;
 }
 
-async function parseResponseBody(response: Response): Promise<unknown> {
+async function parseResponseBody(response: Response): Promise<ConfigValue | null> {
   if (response.status === 204) return {};
+  const text = await response.text();
+  if (text.length === 0) return null;
   try {
-    return await response.json();
+    return JSON.parse(text);
   } catch {
     return null;
   }
 }
 
-function serverErrorCode(body: unknown): string | null {
+function serverErrorCode(body: ConfigValue | null | undefined): string | null {
   const record = asRecord(body);
   if (!record) return null;
-  if (typeof record.error === "string") return record.error.toUpperCase();
+  if (String(record.error) === record.error) return record.error.toUpperCase();
   const error = asRecord(record.error);
-  if (error && typeof error.code === "string") return error.code.toUpperCase();
-  if (typeof record.code === "string") return record.code.toUpperCase();
+  if (error && String(error.code) === error.code) return error.code.toUpperCase();
+  if (String(record.code) === record.code) return record.code.toUpperCase();
   return null;
 }
 
-function holdsFromErrorBody(body: unknown): Array<{ type: RetentionHoldType }> {
+function serverRetentionHolds(
+  body: ConfigValue | null | undefined,
+): Array<{ type: RetentionHoldType }> {
   const record = asRecord(body);
   if (!record) return [];
   const error = asRecord(record.error);
@@ -677,9 +718,12 @@ function holdsFromErrorBody(body: unknown): Array<{ type: RetentionHoldType }> {
   );
 }
 
-function classifyCloudFailure(response: Response, body: unknown): PrivacyCommandError {
+function classifyCloudFailure(
+  response: Response,
+  body: ConfigValue | null | undefined,
+): PrivacyCommandError {
   const code = serverErrorCode(body) ?? "";
-  const holds = holdsFromErrorBody(body);
+  const holds = serverRetentionHolds(body);
   if (
     holds.length > 0 ||
     (response.status === 409 && code.includes("HOLD")) ||
@@ -708,22 +752,29 @@ async function cloudRequest(
   method: "GET" | "POST",
   credentials: StoredCloudCredentials,
   fetchImpl: typeof fetch,
-): Promise<unknown> {
+): Promise<ConfigValue> {
   const cloudUrl = validateCloudUrl(credentials.cloudUrl);
-  const url = new URL(`${cloudUrl}${route}`);
+  const url = new URL(`${cloudUrl.replace(/\/$/, "")}${route}`);
   let response: Response;
   try {
-    response = await fetchImpl(url, {
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${credentials.accessToken}`,
+    };
+    if (method === "POST") {
+      // SAFETY: Setting Content-Type header on plain request headers object for POST request.
+      Object.assign(headers, { "Content-Type": "application/json" });
+    }
+    const init: RequestInit = {
       method,
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${credentials.accessToken}`,
-        ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(method === "POST" ? { body: "{}" } : {}),
+      headers,
       redirect: "error",
       signal: AbortSignal.timeout(5_000),
-    });
+    };
+    if (method === "POST") {
+      init.body = "{}";
+    }
+    response = await fetchImpl(url, init);
   } catch {
     throw new PrivacyCommandError("CLOUD_UNREACHABLE", "Resin Cloud is currently unreachable.");
   }
@@ -799,9 +850,9 @@ export async function collectPrivacyStatus(
 }
 
 function parseJobResult(
-  value: unknown,
+  value: ConfigValue | undefined,
   nestedKeys: readonly string[],
-): { jobId: string; status: string; requestedAt: string | null; expiresAt: string | null } {
+): PrivacyJobResult {
   const record = unwrapRecord(value, nestedKeys);
   const jobId = sanitizeIdentifier(
     record?.jobId ?? record?.exportId ?? record?.deletionId ?? record?.id,
@@ -812,7 +863,8 @@ function parseJobResult(
       "Resin Cloud returned an invalid job response.",
     );
   }
-  const rawStatus = typeof record.status === "string" ? record.status.toLowerCase() : "pending";
+  const rawStatus =
+    String(record.status) === record.status ? record.status.toLowerCase() : "pending";
   return {
     jobId,
     status: Object.hasOwn(JOB_STATUSES, rawStatus) ? rawStatus : "pending",
@@ -982,7 +1034,7 @@ export async function requestPrivacyExport(
   const body = await cloudRequest("/api/user/data/export", "POST", credentials, fetchImpl);
   const record = unwrapRecord(body, ["export", "job"]);
   const result = parseJobResult(body, ["export", "job"]);
-  if (!record || typeof record.downloadAvailable !== "boolean") {
+  if (!record || (record.downloadAvailable !== true && record.downloadAvailable !== false)) {
     throw new PrivacyCommandError(
       "INVALID_CLOUD_RESPONSE",
       "Resin Cloud returned an invalid export response.",
@@ -996,7 +1048,7 @@ export async function requestPrivacyDeletion(
 ): Promise<PrivacyDeletionResult> {
   const { credentials, fetchImpl } = await loadRequiredCredentials(options);
   const authorization = await authorizePrivacyDeletion(credentials, fetchImpl, options);
-  let body: unknown;
+  let body: ConfigValue | undefined;
   try {
     body = await cloudRequest(
       "/api/user/data/delete",
@@ -1061,13 +1113,31 @@ export function formatPrivacyStatus(status: PrivacyStatus): string {
   return `${lines.join("\n")}\n`;
 }
 
-function writeJson(output: { write: (chunk: string) => unknown }, value: unknown): void {
+function writeJson(
+  output: { write: (chunk: string) => boolean | undefined },
+  value:
+    | ConfigValue
+    | PrivacyStatus
+    | Record<
+        string,
+        | ConfigValue
+        | PrivacyJobResult
+        | PrivacyDeletionResult
+        | PrivacyCommandErrorJsonPayload
+        | Array<{ type: RetentionHoldType }>
+        | boolean
+        | string
+        | number
+        | null
+        | undefined
+      >,
+): void {
   output.write(`${JSON.stringify(value)}\n`);
 }
 
-function safeCommandError(error: unknown): PrivacyCommandError {
-  return error instanceof PrivacyCommandError
-    ? error
+function safeCommandError(cause: unknown): PrivacyCommandError {
+  return cause instanceof PrivacyCommandError
+    ? cause
     : new PrivacyCommandError(
         "CLOUD_REQUEST_FAILED",
         "The privacy command could not be completed.",
@@ -1077,17 +1147,20 @@ function safeCommandError(error: unknown): PrivacyCommandError {
 function writeCommandError(
   error: PrivacyCommandError,
   json: boolean,
-  output: { write: (chunk: string) => unknown },
+  output: { write: (chunk: string) => boolean | undefined },
 ): void {
   if (json) {
+    const errError: PrivacyCommandErrorJsonPayload = {
+      code: error.code,
+      message: error.message,
+    };
+    if (error.activeHolds.length > 0) {
+      errError.activeHolds = error.activeHolds;
+    }
     writeJson(output, {
       schemaVersion: 1,
       ok: false,
-      error: {
-        code: error.code,
-        message: error.message,
-        ...(error.activeHolds.length > 0 ? { activeHolds: error.activeHolds } : {}),
-      },
+      error: errError,
     });
     return;
   }

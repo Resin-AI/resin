@@ -1,7 +1,22 @@
 import { createHash } from "node:crypto";
 import { ProtocolError, type ProtocolErrorCode } from "@resin/protocol";
+import { z } from "zod";
 import type { CloudCredentialRefreshFailure, CloudRequestIdentity } from "./cloud-credentials.js";
+import type { JsonObject, JsonValue } from "./normalization/redaction.js";
 
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema),
+  ]),
+);
+
+const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
 export type AuthRecoveryStatus =
   | "AUTHENTICATED"
   | "REFRESHING"
@@ -16,13 +31,13 @@ export type AuthRecoveryCategory =
   | "REFRESH_REVOKED"
   | "REFRESH_INVALID";
 
-export interface AuthRecoverySnapshot {
+export type AuthRecoverySnapshot = {
   readonly status: AuthRecoveryStatus;
   readonly category: AuthRecoveryCategory | null;
   readonly remediation: string | null;
   readonly lastTransitionAt: string;
   readonly refreshAttempts: number;
-}
+};
 
 export interface AuthRecoveryControllerOptions {
   getRefreshFailure?: () => CloudCredentialRefreshFailure | null;
@@ -37,39 +52,37 @@ export const AUTH_RECOVERY_RETRY_REMEDIATION =
 export const AUTH_ERROR_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTH_ERROR_BODY_MAX_CHUNKS = 256;
 
-const TOKEN_EXPIRY_CODES: Readonly<Record<string, true>> = {
+const TOKEN_EXPIRY_CODES = {
   token_expired: true,
   expired_token: true,
   jwt_expired: true,
-};
-const REVOKED_CODES: Readonly<Record<string, true>> = {
+} as const;
+const REVOKED_CODES = {
   device_revoked: true,
   invalid_grant: true,
   revoked_token: true,
   unauthorized_client: true,
-};
+} as const;
 
-function responseErrorCode(value: unknown): string | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  if ("code" in value && typeof value.code === "string") {
-    return value.code.toLowerCase();
-  }
-  if (!("error" in value)) {
-    return null;
-  }
-  if (typeof value.error === "string") {
-    return value.error.toLowerCase();
-  }
-  if (
-    value.error &&
-    typeof value.error === "object" &&
-    "code" in value.error &&
-    typeof value.error.code === "string"
-  ) {
-    return value.error.code.toLowerCase();
+function responseErrorCode<T>(value: T): string | null {
+  const schema = z.union([
+    z.object({ code: z.string() }),
+    z.object({ error: z.string() }),
+    z.object({ error: z.object({ code: z.string() }) }),
+  ]);
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) return null;
+  const data = parsed.data;
+  if ("code" in data && data.code) return data.code.toLowerCase();
+  if ("error" in data) {
+    const errStr = z.string().safeParse(data.error);
+    if (errStr.success) {
+      return errStr.data.toLowerCase();
+    }
+    const errObj = z.object({ code: z.string() }).safeParse(data.error);
+    if (errObj.success) {
+      return errObj.data.code.toLowerCase();
+    }
   }
   return null;
 }
@@ -84,8 +97,7 @@ function cancelResponseBody(response: Response): void {
     // Some fetch implementations throw synchronously when a stream cannot be cancelled.
   }
 }
-
-async function readCappedAuthErrorJson(response: Response): Promise<unknown> {
+async function readCappedAuthErrorJson(response: Response): Promise<JsonObject | null> {
   const body = response.body;
   if (!body || response.bodyUsed) {
     return null;
@@ -136,13 +148,6 @@ async function readCappedAuthErrorJson(response: Response): Promise<unknown> {
       }
       chunks.push(result.value);
     }
-  } catch {
-    try {
-      void reader.cancel().catch(() => undefined);
-    } catch {
-      // The status remains sufficient for classification.
-    }
-    return null;
   } finally {
     reader.releaseLock();
   }
@@ -153,9 +158,10 @@ async function readCappedAuthErrorJson(response: Response): Promise<unknown> {
     bodyBytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-
   try {
-    return JSON.parse(new TextDecoder().decode(bodyBytes));
+    const parsed = JSON.parse(new TextDecoder().decode(bodyBytes));
+    const result = JsonObjectSchema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
@@ -179,10 +185,10 @@ export async function classifyAuthResponse(
   }
 
   const errorCode = responseErrorCode(await readCappedAuthErrorJson(response));
-  if (errorCode && TOKEN_EXPIRY_CODES[errorCode]) {
+  if (errorCode && errorCode in TOKEN_EXPIRY_CODES) {
     return "TOKEN_EXPIRED";
   }
-  if (errorCode && REVOKED_CODES[errorCode]) {
+  if (errorCode && errorCode in REVOKED_CODES) {
     return "REFRESH_REVOKED";
   }
   if (response.status === 401) {
@@ -193,8 +199,7 @@ export async function classifyAuthResponse(
   }
   return null;
 }
-
-export function classifyAuthError(error: unknown): AuthRecoveryCategory | null {
+export function classifyAuthError<E>(error: E): AuthRecoveryCategory | null {
   if (error instanceof ProtocolError) {
     switch (error.code) {
       case "token_expired":
@@ -211,15 +216,15 @@ export function classifyAuthError(error: unknown): AuthRecoveryCategory | null {
     }
   }
 
-  if (error && typeof error === "object" && "status" in error) {
-    if (error.status === 401) {
+  const statusParsed = z.object({ status: z.number() }).safeParse(error);
+  if (statusParsed.success) {
+    if (statusParsed.data.status === 401) {
       return "UNAUTHORIZED";
     }
-    if (error.status === 403) {
+    if (statusParsed.data.status === 403) {
       return "FORBIDDEN";
     }
   }
-
   return null;
 }
 

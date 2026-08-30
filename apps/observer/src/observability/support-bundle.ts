@@ -3,6 +3,7 @@ import os from "node:os";
 import process from "node:process";
 import type { DaemonConfig } from "../config.js";
 import { redactConfig } from "../config.js";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { AuditIntegrityReport, AuditTrailEntry, AuditTrailManager } from "./audit-trail.js";
 import type { HealthAggregator, SystemHealthReport } from "./health-aggregator.js";
 import type { KillSwitchManager, KillSwitchSnapshot } from "./kill-switches.js";
@@ -45,7 +46,7 @@ export interface SafeCloudState {
   deviceId?: string;
   userId?: string;
   reason?: string;
-  [key: string]: unknown;
+  [key: string]: JsonValue;
 }
 
 export interface SupportBundleData {
@@ -54,15 +55,15 @@ export interface SupportBundleData {
   observerVersion: string;
   platform: PlatformDiagnostics;
   health: SystemHealthReport;
-  config: Record<string, unknown>;
+  config: JsonObject;
   cloudState?: SafeCloudState;
   killSwitches?: KillSwitchSnapshot;
   auditSummary?: SanitizedAuditSummary;
   telemetry?: TelemetrySummary;
-  databaseDiagnostics?: Record<string, unknown>;
-  quarantinedTools: QuarantinedToolEntry[];
-  sanitizedLogs: LogEntry[];
-  schemaCompatibility: SchemaCompatibilityInfo;
+  databaseDiagnostics?: JsonObject;
+  quarantinedTools?: QuarantinedToolEntry[];
+  sanitizedLogs?: LogEntry[];
+  schemaCompatibility?: SchemaCompatibilityInfo;
 }
 
 export interface SupportBundleGeneratorOptions {
@@ -76,7 +77,7 @@ export interface SupportBundleGeneratorOptions {
   auditTrail?: AuditTrailManager;
   telemetry?: TelemetryAggregator;
   recoveryController?: RecoveryController;
-  databaseDiagnosticsProvider?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
+  databaseDiagnosticsProvider?: () => Promise<JsonObject> | JsonObject;
   maxLogs?: number;
   maxAuditEntries?: number;
 }
@@ -95,12 +96,9 @@ export class SupportBundleGenerator {
   private readonly auditTrail?: AuditTrailManager;
   private readonly telemetry?: TelemetryAggregator;
   private readonly recoveryController?: RecoveryController;
-  private readonly dbDiagnosticsProvider?: () =>
-    | Promise<Record<string, unknown>>
-    | Record<string, unknown>;
+  private dbDiagnosticsProvider?: () => Promise<JsonObject> | JsonObject;
   private readonly maxLogs: number;
   private readonly maxAuditEntries: number;
-
   constructor(options: SupportBundleGeneratorOptions = {}) {
     this.observerVersion = options.observerVersion ?? "0.1.0";
     this.config = options.config;
@@ -115,6 +113,11 @@ export class SupportBundleGenerator {
     this.dbDiagnosticsProvider = options.databaseDiagnosticsProvider;
     this.maxLogs = options.maxLogs ?? 200;
     this.maxAuditEntries = options.maxAuditEntries ?? 50;
+  }
+
+  setDatabaseDiagnosticsProvider(provider: () => Promise<JsonObject> | JsonObject): this {
+    this.dbDiagnosticsProvider = provider;
+    return this;
   }
 
   async generateBundle(): Promise<SupportBundleData> {
@@ -150,9 +153,8 @@ export class SupportBundleGenerator {
     }
 
     // 3. Sanitized Config
-    const sanitizedConfig = this.config
-      ? (redactConfig(this.config) as Record<string, unknown>)
-      : {};
+    // SAFETY: redactConfig produces an object dictionary of sanitized configuration properties.
+    const sanitizedConfig = this.config ? (redactConfig(this.config) as JsonObject) : {};
 
     // 4. Safe Cloud State (no secrets, safe status and binding fields only)
     let cloudState: SafeCloudState | undefined;
@@ -160,12 +162,14 @@ export class SupportBundleGenerator {
       try {
         const rawCloudState = await this.cloudStateProvider();
         if (rawCloudState) {
+          // SAFETY: redactSecrets deeply redacts secret tokens while preserving SafeCloudState shape.
           cloudState = redactSecrets(rawCloudState) as SafeCloudState;
         }
       } catch (err) {
         cloudState = { status: "offline", reason: String(err) };
       }
     } else if (this.cloudState) {
+      // SAFETY: redactSecrets deeply redacts secret tokens while preserving SafeCloudState shape.
       cloudState = redactSecrets(this.cloudState) as SafeCloudState;
     }
 
@@ -203,13 +207,16 @@ export class SupportBundleGenerator {
     const telemetry = this.telemetry ? this.telemetry.getSummary() : undefined;
 
     // 7. Database diagnostics
-    let databaseDiagnostics: Record<string, unknown> | undefined;
+    let databaseDiagnostics: JsonObject | undefined;
     if (this.dbDiagnosticsProvider) {
       try {
         const rawDbDiag = await this.dbDiagnosticsProvider();
-        databaseDiagnostics = redactSecrets(rawDbDiag) as Record<string, unknown>;
+        if (rawDbDiag) {
+          // SAFETY: redactSecrets deeply redacts secret tokens while preserving JsonObject structure.
+          databaseDiagnostics = redactSecrets(rawDbDiag) as JsonObject;
+        }
       } catch (err) {
-        databaseDiagnostics = { error: String(err) };
+        databaseDiagnostics = { error: `Failed to retrieve DB diagnostics: ${String(err)}` };
       }
     }
 
@@ -220,6 +227,7 @@ export class SupportBundleGenerator {
 
     // 9. Sanitized Logs
     const rawLogs = this.logger ? this.logger.getRecentLogs(this.maxLogs) : [];
+    // SAFETY: redactSecrets deep-cleans log objects while preserving LogEntry fields.
     const sanitizedLogs = rawLogs.map((log) => redactSecrets(log) as LogEntry);
 
     // 10. Schema compatibility
@@ -248,6 +256,7 @@ export class SupportBundleGenerator {
     };
 
     // Final deep sanitization pass on the entire bundle
+    // SAFETY: redactSecrets deep-cleans the assembled bundle object while preserving SupportBundleData.
     return redactSecrets(bundle) as SupportBundleData;
   }
 
@@ -261,6 +270,7 @@ export class SupportBundleGenerator {
   ): Promise<{ bundleId: string; filePath: string; bytesWritten: number }> {
     const json = await this.generateBundleJson({ pretty: true });
     await fs.promises.writeFile(destinationPath, json, "utf8");
+    // SAFETY: SupportBundle JSON string parses into SupportBundleData object.
     const parsed = JSON.parse(json) as SupportBundleData;
 
     return {

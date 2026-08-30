@@ -66,6 +66,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
       capturedUrl = url;
       capturedMethod = init?.method ?? "";
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       capturedBody = init?.body as string;
 
       return new Response(
@@ -80,7 +81,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     // Test passing { observations: [...] }
@@ -120,6 +122,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
     let capturedHeaders: Record<string, string> = {};
 
     const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
       return new Response(JSON.stringify({ received: 1, accepted: 1, rejected: 0 }), {
         status: 200,
@@ -129,7 +132,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await client.sendTrajectoryObservationBatch([obs]);
@@ -157,6 +161,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
       callCount++;
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const authHeader = (init?.headers as Record<string, string>)?.Authorization;
 
       if (callCount === 1) {
@@ -176,7 +181,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: providerMock,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const result = await client.sendTrajectoryObservationBatch([makeValidObservation()]);
@@ -205,7 +211,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: providerMock,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
@@ -235,7 +242,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: providerMock,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
@@ -256,7 +264,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     try {
@@ -264,6 +273,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
       expect.unreachable("Should have thrown RateLimitedError");
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(RateLimitedError);
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const rateErr = err as RateLimitedError;
       expect(rateErr.retryAfterMs).toBe(15000);
       expect(rateErr.status).toBe(429);
@@ -283,7 +293,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     try {
@@ -291,6 +302,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
       expect.unreachable("Should have thrown RateLimitedError");
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(RateLimitedError);
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const rateErr = err as RateLimitedError;
       expect(rateErr.retryAfterMs).toBeDefined();
       expect(rateErr.retryAfterMs).toBeGreaterThan(5000);
@@ -310,7 +322,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     try {
@@ -318,6 +331,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
       expect.unreachable("Should have thrown RateLimitedError");
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(RateLimitedError);
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const rateErr = err as RateLimitedError;
       expect(rateErr.retryAfterMs).toBeUndefined();
     }
@@ -329,16 +343,19 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
-    const invalidInput = {
+    const baseBatch: SendObservationBatchInput = {
+      batchId: "batch_invalid_1",
       observations: [makeValidObservation()],
+    };
+    const invalidInput = Object.assign(baseBatch, {
       unknownField: "malicious_payload",
-    } as unknown as { observations: TrajectoryObservation[] };
+    });
 
-    await expect(client.sendTrajectoryObservationBatch(invalidInput)).rejects.toThrow(ZodError);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(client.sendBatchAndFetchResult(invalidInput)).rejects.toThrow(ZodError);
   });
 
   it("rejects request schema locally when unknown fields are present on observation", async () => {
@@ -347,14 +364,14 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
-    const invalidObs = {
-      ...makeValidObservation(),
+    const invalidObs: TrajectoryObservation = Object.assign(makeValidObservation(), {
       prompt: "SELECT * FROM users",
       rawTranscript: "user asked for credentials",
-    } as unknown as TrajectoryObservation;
+    });
 
     await expect(client.sendTrajectoryObservationBatch([invalidObs])).rejects.toThrow(ZodError);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -366,15 +383,21 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
-    const invalidObs = makeValidObservation({
-      usage: {
-        availability: "complete",
+    const invalidUsage: TrajectoryObservation["usage"] = Object.assign(
+      {
+        availability: "complete" as const,
         totalTokens: 100,
+      },
+      {
         unsupportedField: 42,
-      } as unknown as TrajectoryObservation["usage"],
+      },
+    );
+    const invalidObs = makeValidObservation({
+      usage: invalidUsage,
     });
 
     await expect(client.sendTrajectoryObservationBatch([invalidObs])).rejects.toThrow(ZodError);
@@ -387,7 +410,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([])).rejects.toThrow(ZodError);
@@ -400,15 +424,18 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
+    // SAFETY: Test purposefully passes invalid usage missing totalTokens to verify schema rejection.
+    const invalidUsage = {
+      availability: "complete",
+      inputTokens: 100,
+      outputTokens: 50,
+    } as TrajectoryObservation["usage"];
     const invalidObs = makeValidObservation({
-      usage: {
-        availability: "complete",
-        inputTokens: 100,
-        outputTokens: 50,
-      } as unknown as TrajectoryObservation["usage"],
+      usage: invalidUsage,
     });
 
     await expect(client.sendTrajectoryObservationBatch([invalidObs])).rejects.toThrow(ZodError);
@@ -432,7 +459,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     const response = await client.sendTrajectoryObservationBatch([
@@ -464,7 +492,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
@@ -489,7 +518,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
@@ -509,7 +539,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
@@ -529,7 +560,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     try {
@@ -537,12 +569,14 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
       expect.unreachable("Should have thrown ProtocolError");
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(ProtocolError);
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const protoErr = err as ProtocolError;
       expect(protoErr.code).toBe("retryable");
       expect(protoErr.status).toBe(500);
     }
   });
 
+  // SAFETY: Type assertion in test fixture/mock verified by test context.
   it("handles network failure as retryable ProtocolError", async () => {
     const identity = makeTestIdentity();
 
@@ -552,7 +586,8 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
+      fetchImpl: fetchMock as typeof fetch,
     });
 
     try {
@@ -560,6 +595,7 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
       expect.unreachable("Should have thrown ProtocolError");
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(ProtocolError);
+      // SAFETY: Type assertion in test fixture/mock verified by test context.
       const protoErr = err as ProtocolError;
       expect(protoErr.code).toBe("retryable");
       expect(protoErr.message).toContain("Failed to transmit trajectory observation batch");

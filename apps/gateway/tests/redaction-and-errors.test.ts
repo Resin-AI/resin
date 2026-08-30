@@ -50,7 +50,7 @@ describe("Error Mapping & Sensitive Redaction", () => {
 
       const home = os.homedir();
       const secretMsg = `Database connection failed at ${home}/.secrets/db.key using sk-1234567890abcdef12345`;
-
+      // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
       const resp = (await gateway.handleMessage(conn.connectionId, {
         jsonrpc: "2.0",
         id: 2,
@@ -94,14 +94,13 @@ describe("Error Mapping & Sensitive Redaction", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       });
-
+      // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
       const resp = (await gateway.handleMessage(conn.connectionId, {
         jsonrpc: "2.0",
-        id: 3,
-        method: "unsupported/method",
+        id: 2,
+        method: "non_existent_method",
         params: {},
       })) as JsonRpcErrorResponse;
-
       expect(resp.error).toBeDefined();
       expect(resp.error.code).toBe(JSON_RPC_ERROR_CODES.METHOD_NOT_FOUND);
     } finally {
@@ -127,10 +126,10 @@ describe("Error Mapping & Sensitive Redaction", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       });
-
+      // SAFETY: Gateway response is confirmed to be JsonRpcErrorResponse.
       const resp = (await gateway.handleMessage(conn.connectionId, {
         jsonrpc: "2.0",
-        id: 4,
+        id: 2,
         method: "tools/call",
         params: {
           // Missing name

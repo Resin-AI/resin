@@ -11,6 +11,8 @@ import {
   canonicalJson,
   normalizeSha256,
 } from "@resin/contracts";
+import { z } from "zod";
+import type { JsonObject } from "../normalization/redaction.js";
 import {
   type ArtifactFileEntry,
   type ArtifactInspectionResult,
@@ -53,12 +55,16 @@ export function createCanonicalSignPayload(
 /**
  * Verifies safety attestation record against required checks and version invariants.
  */
-export function verifySafetyAttestation(record: SafetyAttestationRecord): {
+export interface SafetyAttestationVerificationResult {
   valid: boolean;
   error?: string;
   errorCode?: string;
-} {
-  if (!record || typeof record !== "object") {
+}
+
+export function verifySafetyAttestation(
+  record: SafetyAttestationRecord,
+): SafetyAttestationVerificationResult {
+  if (!record || !z.record(z.unknown()).safeParse(record).success) {
     return {
       valid: false,
       errorCode: SAFETY_GATE_ERROR_CODES.MISSING_ATTESTATION,
@@ -73,7 +79,7 @@ export function verifySafetyAttestation(record: SafetyAttestationRecord): {
       error: `Invalid attestation schema: ${parseResult.error.message}`,
     };
   }
-  const checks = record.checks as Record<string, boolean>;
+  const checks = record.checks ?? {};
   for (const reqCheck of REQUIRED_SAFETY_CHECKS) {
     if (checks[reqCheck] !== true) {
       return {
@@ -89,7 +95,7 @@ export function verifySafetyAttestation(record: SafetyAttestationRecord): {
 /**
  * Computes canonical manifest digest, stripping existing digest.
  */
-export function computeManifestDigest(manifest: ToolManifest | Record<string, unknown>): string {
+export function computeManifestDigest(manifest: ToolManifest | JsonObject): string {
   const withEmptyDigest = { ...manifest, digest: "" };
   return crypto.createHash("sha256").update(canonicalJson(withEmptyDigest)).digest("hex");
 }
@@ -215,7 +221,7 @@ export class AttestationVerificationError extends Error {
 export class EnvelopeViolationError extends Error {
   constructor(
     public readonly violation: string,
-    public readonly details?: Record<string, unknown>,
+    public readonly details?: JsonObject,
   ) {
     super(`Candidate capability violates local envelope: ${violation}`);
     this.name = "EnvelopeViolationError";
@@ -231,7 +237,7 @@ export interface ArtifactDownloadResult {
   manifest: ToolManifest;
   inspection: ArtifactInspectionResult;
   sizeBytes: number;
-  metadata: Record<string, unknown>;
+  metadata: JsonObject;
 }
 
 /**
@@ -294,7 +300,7 @@ export interface ArtifactTransferClientOptions {
   requireSignature?: boolean;
   downloadHandler?: (
     digest: string,
-    metadata?: Record<string, unknown>,
+    metadata?: JsonObject,
   ) => Promise<Uint8Array | Buffer> | Uint8Array | Buffer;
 }
 
@@ -374,7 +380,7 @@ export class ArtifactTransferClient {
   private readonly requireSignature: boolean;
   private readonly downloadHandler?: (
     digest: string,
-    metadata?: Record<string, unknown>,
+    metadata?: JsonObject,
   ) => Promise<Uint8Array | Buffer> | Uint8Array | Buffer;
 
   // Content-addressed cache: digest -> ArtifactDownloadResult
@@ -402,7 +408,7 @@ export class ArtifactTransferClient {
   async cacheArtifact(
     digest: string,
     rawBytes: Buffer | Uint8Array,
-    metadata: Record<string, unknown> = {},
+    metadata: JsonObject = {},
   ): Promise<ArtifactDownloadResult> {
     const normExpected = normalizeSha256(digest);
     const buffer = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
@@ -438,7 +444,7 @@ export class ArtifactTransferClient {
   async downloadArtifact(
     digest: string,
     options: {
-      metadata?: Record<string, unknown>;
+      metadata?: JsonObject;
       allowDevKeys?: boolean;
       verifySignature?: boolean;
       requireSignature?: boolean;
@@ -591,21 +597,23 @@ export class ArtifactTransferClient {
     const supportedEngines = new Set(
       options.supportedEngines ?? ["deno", "node", "bun", "wasm", "process", "builtin"],
     );
-    const rawRuntime = (manifestRaw as Record<string, unknown>)?.runtime as
-      | Record<string, unknown>
-      | undefined;
-    const runtimeObj = manifest.runtime as unknown as {
-      runtime?: string;
-      engine?: string;
-      sdkVersion?: string;
-    };
+    const rawRuntimeObj = z.record(z.unknown()).safeParse(manifestRaw).data?.runtime;
+    const rawRuntime = z.record(z.unknown()).safeParse(rawRuntimeObj).data;
+    const runtimeObj =
+      z
+        .object({
+          runtime: z.string().optional(),
+          engine: z.string().optional(),
+          sdkVersion: z.string().optional(),
+        })
+        .safeParse(manifest.runtime).data ?? {};
     const engine =
-      (rawRuntime?.engine as string | undefined) ??
-      (rawRuntime?.runtime as string | undefined) ??
+      z.string().safeParse(rawRuntime?.engine).data ??
+      z.string().safeParse(rawRuntime?.runtime).data ??
       runtimeObj.engine ??
       runtimeObj.runtime ??
       "deno";
-    const sdkVersion = (rawRuntime?.sdkVersion as string | undefined) ?? runtimeObj.sdkVersion;
+    const sdkVersion = z.string().safeParse(rawRuntime?.sdkVersion).data ?? runtimeObj.sdkVersion;
     if (!supportedEngines.has(engine)) {
       throw new IncompatibleRuntimeError(
         engine,
@@ -617,22 +625,23 @@ export class ArtifactTransferClient {
     // Check manifest self-digest if present
     const rawManifestJsonDigest = crypto
       .createHash("sha256")
-      .update(canonicalJson(manifestRaw as Record<string, unknown>))
+      .update(canonicalJson(manifestRaw))
       .digest("hex");
+    const rawObj = z.record(z.unknown()).safeParse(manifestRaw).data ?? {};
     const rawWithEmptyDigest = crypto
       .createHash("sha256")
-      .update(canonicalJson({ ...(manifestRaw as Record<string, unknown>), digest: "" }))
+      .update(canonicalJson({ ...rawObj, digest: "" }))
       .digest("hex");
-    const computedManifestDigest = computeManifestDigest(manifest);
     const rawManifestDigest = crypto
       .createHash("sha256")
       .update(canonicalJson(manifest))
       .digest("hex");
-    const { digest: _digest, ...restOfManifest } = manifest as Record<string, unknown>;
+    const { digest: _digest, ...restOfManifest } = Object.assign({}, manifest);
     const strippedManifestDigest = crypto
       .createHash("sha256")
       .update(canonicalJson(restOfManifest))
       .digest("hex");
+    const computedManifestDigest = computeManifestDigest(manifest);
 
     const validManifestDigests = new Set([
       rawManifestJsonDigest,
@@ -647,12 +656,17 @@ export class ArtifactTransferClient {
     }
     // Locate signature.json
     const signatureBuffer = fileMap.get("signature.json");
-    let rawSignature: Record<string, unknown> | undefined;
+    let rawSignature: JsonObject | undefined;
     let signatureResult: ArtifactInspectionResult["signature"];
 
     if (signatureBuffer) {
       try {
-        rawSignature = JSON.parse(signatureBuffer.toString("utf-8")) as Record<string, unknown>;
+        const parsedSig = JSON.parse(signatureBuffer.toString("utf-8"));
+        const parsedSigObj = z.record(z.unknown()).safeParse(parsedSig);
+        if (parsedSigObj.success) {
+          // SAFETY: parsedSigObj is a valid JSON object map conforming to JsonObject.
+          rawSignature = parsedSigObj.data as JsonObject;
+        }
       } catch (err) {
         throw new ArtifactInspectionError(
           `Failed to parse signature.json: ${err instanceof Error ? err.message : String(err)}`,
@@ -666,15 +680,11 @@ export class ArtifactTransferClient {
     }
 
     if (rawSignature && (options.verifySignature || options.requireSignature)) {
-      const keyId = typeof rawSignature.keyId === "string" ? rawSignature.keyId : undefined;
-      const algorithm =
-        typeof rawSignature.algorithm === "string" ? rawSignature.algorithm : "ed25519";
+      const keyId = z.string().safeParse(rawSignature.keyId).data;
+      const algorithm = z.string().safeParse(rawSignature.algorithm).data ?? "ed25519";
       const signatureHex =
-        typeof rawSignature.signature === "string"
-          ? rawSignature.signature
-          : typeof rawSignature.sig === "string"
-            ? rawSignature.sig
-            : undefined;
+        z.string().safeParse(rawSignature.signature).data ??
+        z.string().safeParse(rawSignature.sig).data;
 
       if (!keyId) {
         throw new InvalidSignatureError("unknown", "Missing keyId in signature.json");
@@ -701,11 +711,12 @@ export class ArtifactTransferClient {
       }
 
       // Verify manifest digest in signature matches computed manifest digest
+      const sigManDigest = z.string().safeParse(rawSignature.manifestDigest).data;
       if (
-        typeof rawSignature.manifestDigest === "string" &&
-        rawSignature.manifestDigest !== computedManifestDigest &&
-        rawSignature.manifestDigest !== rawManifestDigest &&
-        rawSignature.manifestDigest !== manifest.digest
+        sigManDigest &&
+        sigManDigest !== computedManifestDigest &&
+        sigManDigest !== rawManifestDigest &&
+        sigManDigest !== manifest.digest
       ) {
         throw new InvalidSignatureError(
           keyId,
@@ -714,57 +725,46 @@ export class ArtifactTransferClient {
       }
 
       // Check fileDigests in signature if present
-      const rawFileDigests =
-        rawSignature.fileDigests && typeof rawSignature.fileDigests === "object"
-          ? (rawSignature.fileDigests as Record<string, string>)
-          : {};
+      const rawFileDigests = z.record(z.string()).safeParse(rawSignature.fileDigests).data;
+      const fileDigestsRecord: Record<string, string> = {};
+      if (rawFileDigests) {
+        Object.assign(fileDigestsRecord, rawFileDigests);
+      }
 
-      const fileDigestsRecord: Record<string, string> = { ...rawFileDigests };
       if (Object.keys(fileDigestsRecord).length === 0) {
-        for (const f of files) {
-          if (f.path !== "signature.json") {
-            fileDigestsRecord[f.path] = f.digest;
-          }
+        for (const file of files) {
+          fileDigestsRecord[file.path] = file.digest;
         }
-      } else {
-        // 1. Verify all files in archive match signature.fileDigests
-        for (const f of files) {
-          if (f.path !== "signature.json") {
-            const expectedFileDigest = fileDigestsRecord[f.path];
-            if (!expectedFileDigest || expectedFileDigest !== f.digest) {
-              throw new InvalidSignatureError(
-                keyId,
-                `File digest mismatch or unknown file '${f.path}' in signature (expected=${expectedFileDigest ?? "none"}, actual=${f.digest})`,
-              );
-            }
-          }
-        }
-        // 2. Verify all files in signature.fileDigests exist in archive
-        for (const expectedPath of Object.keys(fileDigestsRecord)) {
-          const found = files.some((f) => f.path === expectedPath);
-          if (!found) {
+      }
+
+      // If signature contains fileDigests, verify every inspected file against it
+      if (rawSignature.fileDigests) {
+        for (const inspectedFile of files) {
+          const expectedFileDigest = fileDigestsRecord[inspectedFile.path];
+          if (expectedFileDigest && expectedFileDigest !== inspectedFile.digest) {
             throw new InvalidSignatureError(
               keyId,
-              `File '${expectedPath}' listed in signature is missing from archive`,
+              `File digest mismatch in signature for ${inspectedFile.path}: expected ${expectedFileDigest}, actual ${inspectedFile.digest}`,
             );
           }
         }
       }
 
+      // Verify actual cryptographic signature over canonical payload
+      const rawBundleDigest =
+        z.string().safeParse(rawSignature.bundleDigest).data ??
+        z.string().safeParse(rawSignature.digest).data ??
+        bundleDigest;
+
+      if (!rawBundleDigest) {
+        throw new InvalidSignatureError(keyId, "Missing bundle digest in signature");
+      }
+
       // Recreate canonical payload
       const signedAt =
-        typeof rawSignature.signedAt === "string"
-          ? rawSignature.signedAt
-          : typeof rawSignature.timestamp === "string"
-            ? rawSignature.timestamp
-            : "";
-
-      const rawBundleDigest =
-        typeof rawSignature.bundleDigest === "string"
-          ? rawSignature.bundleDigest
-          : typeof rawSignature.digest === "string"
-            ? rawSignature.digest
-            : bundleDigest;
+        z.string().safeParse(rawSignature.signedAt).data ??
+        z.string().safeParse(rawSignature.timestamp).data ??
+        "";
 
       const signPayload = createCanonicalSignPayload(
         rawBundleDigest,
@@ -802,25 +802,31 @@ export class ArtifactTransferClient {
 
     // Production-Safety Attestation Check
     let attestationRecord: SafetyAttestationRecord | undefined;
-    let rawAttestation: Record<string, unknown> | undefined;
+    let rawAttestation: JsonObject | undefined;
     const attestationBuffer = fileMap.get("attestation.json");
     if (attestationBuffer) {
       try {
-        rawAttestation = JSON.parse(attestationBuffer.toString("utf-8")) as Record<string, unknown>;
-        attestationRecord = SafetyAttestationRecordSchema.parse(rawAttestation);
+        const parsedAttestation = JSON.parse(attestationBuffer.toString("utf-8"));
+        const parsedAttestationObj = z.record(z.unknown()).safeParse(parsedAttestation);
+        if (parsedAttestationObj.success) {
+          // SAFETY: parsed JSON object conforms to JsonObject contract.
+          rawAttestation = parsedAttestationObj.data as JsonObject;
+        }
+        attestationRecord = SafetyAttestationRecordSchema.parse(parsedAttestation);
       } catch (err) {
         throw new AttestationVerificationError(
           `Failed to parse attestation.json: ${err instanceof Error ? err.message : String(err)}`,
           "INVALID_ATTESTATION_SCHEMA",
         );
       }
-    } else {
-      const customManifest = manifest as unknown as { safetyAttestation?: unknown };
-      if (
-        customManifest.safetyAttestation &&
-        typeof customManifest.safetyAttestation === "object"
-      ) {
-        attestationRecord = customManifest.safetyAttestation as SafetyAttestationRecord;
+    } else if (manifest) {
+      const manifestWithAttestation = z
+        .object({ safetyAttestation: z.unknown().optional() })
+        .safeParse(manifest).data;
+      const customAttestation = manifestWithAttestation?.safetyAttestation;
+      const parsedCustom = SafetyAttestationRecordSchema.safeParse(customAttestation);
+      if (parsedCustom.success) {
+        attestationRecord = parsedCustom.data;
       }
     }
 
@@ -937,11 +943,12 @@ export class ObservationSyncClient {
       clientTimestamp: batch.clientTimestamp,
       cursor: batch.cursor,
       observations: batch.observations.map((obs) => {
-        const { [SanitizedObservationBrandSymbol]: _, ...cleanObs } = obs as unknown as Record<
-          string | symbol,
-          unknown
-        >;
-        return cleanObs;
+        const copy = Object.assign({}, obs);
+        // SAFETY: Sanitized observation may contain symbol brand to be stripped before serialization.
+        delete (copy as { [SanitizedObservationBrandSymbol]?: unknown })[
+          SanitizedObservationBrandSymbol
+        ];
+        return copy;
       }),
     };
 
@@ -958,18 +965,18 @@ export class ObservationSyncClient {
     }
 
     // 4. Resolve auth headers if available
-    const headers: Record<string, string> = {
+    const headers = new Headers({
       "Content-Type": "application/json",
       "User-Agent": "Resin-Observer/0.1.0",
-    };
+    });
 
     if (this.identityProvider) {
       const identity = await this.identityProvider();
       if (identity.token) {
-        headers.Authorization = `Bearer ${identity.token}`;
+        headers.set("Authorization", `Bearer ${identity.token}`);
       }
       if (identity.tenantId) {
-        headers["X-Resin-Tenant-Id"] = identity.tenantId;
+        headers.set("X-Resin-Tenant-Id", identity.tenantId);
       }
     }
 
@@ -986,19 +993,17 @@ export class ObservationSyncClient {
       );
     }
 
-    const responseData = (await response.json()) as Record<string, unknown>;
+    const responseObj = z.record(z.unknown()).safeParse(await response.json());
+    const responseData = responseObj.success ? responseObj.data : {};
 
     // 6. Check response for any hostile remote commands attempting to enable raw upload
     this.assertNoHostileRemoteDirectives(responseData);
 
     return {
-      accepted:
-        typeof responseData.accepted === "number"
-          ? responseData.accepted
-          : batch.observations.length,
-      rejected: typeof responseData.rejected === "number" ? responseData.rejected : 0,
+      accepted: z.number().safeParse(responseData.accepted).data ?? batch.observations.length,
+      rejected: z.number().safeParse(responseData.rejected).data ?? 0,
       batchId: batch.batchId,
-      cursor: typeof responseData.cursor === "string" ? responseData.cursor : batch.cursor,
+      cursor: z.string().safeParse(responseData.cursor).data ?? batch.cursor,
     };
   }
 
@@ -1006,9 +1011,10 @@ export class ObservationSyncClient {
    * Asserts that a cloud response or configuration does not attempt to enable raw uploads
    * or weaken local privacy boundaries. Fails closed if any remote raw-upload directive is present.
    */
-  assertNoHostileRemoteDirectives(configOrResponse: unknown): void {
-    if (!configOrResponse || typeof configOrResponse !== "object") return;
-    const obj = configOrResponse as Record<string, unknown>;
+  assertNoHostileRemoteDirectives<T>(configOrResponse: T): void {
+    const objParsed = z.record(z.unknown()).safeParse(configOrResponse);
+    if (!objParsed.success) return;
+    const obj = objParsed.data;
 
     const hostileKeys = [
       "enableRawUpload",

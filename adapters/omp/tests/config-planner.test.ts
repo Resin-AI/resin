@@ -12,6 +12,7 @@ import {
   rollbackOmpMcpConfig,
   verifyOmpMcpConfig,
 } from "../src/config-planner.js";
+import type { OmpConfigDoc } from "../src/config-planner.js";
 
 describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
   it("resolves config paths across custom, workspace, and global scopes", () => {
@@ -61,7 +62,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
     const hash = computeConfigHash(plan.plannedContent);
     expect(hash).toMatch(/^[a-f0-9]{64}$/);
-
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc with resin MCP server.
     const plannedParsed = JSON.parse(plan.plannedContent) as {
       mcpServers: { resin: { url: string; type: string } };
     };
@@ -180,9 +181,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       fsBridge,
     });
 
-    const plannedParsed = JSON.parse(plan.plannedContent) as {
-      mcpServers: Record<string, unknown>;
-    };
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+    const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
     expect(plannedParsed.mcpServers.resin).toEqual({
       type: "sse",
       url: "http://127.0.0.1:4000/mcp/sse",
@@ -212,9 +212,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       fsBridge,
     });
 
-    const plannedParsed = JSON.parse(plan.plannedContent) as {
-      mcpServers: Record<string, unknown>;
-    };
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+    const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
     expect(plannedParsed.mcpServers.resin).toEqual({
       type: "sse",
       url: "http://127.0.0.1:4000/mcp/sse",
@@ -292,9 +291,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
         fsBridge,
       });
 
-      const parsed = JSON.parse(plan.plannedContent) as {
-        mcpServers: Record<string, unknown>;
-      };
+      // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+      const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers.resin).toEqual({
         type: "sse",
         url: "http://127.0.0.1:9400/mcp/sse",
@@ -327,9 +325,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
         fsBridge,
       });
 
-      const parsed = JSON.parse(plan.plannedContent) as {
-        mcpServers: Record<string, unknown>;
-      };
+      // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+      const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers.resin).toEqual({
         type: "sse",
         url: "http://127.0.0.1:9400/mcp/sse",
@@ -356,9 +353,8 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
         fsBridge,
       });
 
-      const parsed = JSON.parse(plan.plannedContent) as {
-        mcpServers: Record<string, unknown>;
-      };
+      // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+      const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers.resin).toEqual({
         type: "sse",
         url: "http://127.0.0.1:9400/mcp/sse",

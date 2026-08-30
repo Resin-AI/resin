@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { JsonObject } from "../../src/normalization/redaction.js";
 import {
   type LogEntry,
   StructuredLogger,
@@ -129,7 +130,8 @@ describe("StructuredLogger", () => {
     expect(entry.context?.userPassword).toBe("[REDACTED]");
     expect(entry.context?.sessionSecret).toBe("[REDACTED]");
 
-    const nested = entry.context?.nested as Record<string, unknown>;
+    // SAFETY: Logger context nested field is a validated JSON object.
+    const nested = entry.context?.nested as JsonObject;
     expect(nested.privateKey).toBe("[REDACTED]");
     expect(nested.safeValue).toBe("public-metadata");
   });

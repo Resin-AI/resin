@@ -6,7 +6,11 @@
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { SERVICE_SUPERVISOR_COMMAND, runServiceSupervisor } from "./service/manager.js";
+import {
+  SERVICE_SUPERVISOR_COMMAND,
+  type ServiceSupervisorOptions,
+  runServiceSupervisor,
+} from "./service/manager.js";
 import { sanitizeCrashDiagnostic } from "./service/recovery-state.js";
 
 // Legacy helper compatibility
@@ -61,11 +65,14 @@ export async function runServiceSupervisorCommand(argv: string[]): Promise<numbe
   if (!command) {
     throw new Error("Service supervisor invocation has an empty child command");
   }
-  await runServiceSupervisor({
+  const supervisorOptions: ServiceSupervisorOptions = {
     command,
     args: argv.slice(separatorIndex + 2),
-    ...(resinHome === undefined ? {} : { resinHome }),
-  });
+  };
+  if (resinHome !== undefined) {
+    supervisorOptions.resinHome = resinHome;
+  }
+  await runServiceSupervisor(supervisorOptions);
   return 0;
 }
 
@@ -84,7 +91,7 @@ if (process.argv[2] === SERVICE_SUPERVISOR_COMMAND && isDirectServiceSupervisorE
     .then((exitCode) => {
       process.exitCode = exitCode;
     })
-    .catch((error: unknown) => {
+    .catch((error: Error | string) => {
       process.stderr.write(
         `[resin recovery] supervisor failed: ${sanitizeCrashDiagnostic(error)}\n`,
       );
@@ -112,6 +119,7 @@ export * from "./updates/policy.js";
 export * from "./updates/update-lock.js";
 export * from "./updates/scheduler.js";
 export * from "./updates/engine.js";
+export type { JsonPrimitive, JsonValue } from "./updates/engine.js";
 
 // Service & Auth
 export * from "./service/manager.js";

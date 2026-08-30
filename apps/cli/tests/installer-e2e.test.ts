@@ -285,7 +285,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(summary.pairing?.userId).toBe("usr_xyz");
     expect(summary.pairing?.cloudUrl).toBe("https://cloud.resin.dev");
     // Verify rollback and secret fields are NOT leaked in summary
-    expect((summary.pairing as Record<string, unknown>).rollback).toBeUndefined();
+    expect(summary.pairing).not.toHaveProperty("rollback");
 
     // Verify pairing step in journal
     const pairingStep = summary.journal.steps.find((s) => s.name === "pairing");

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
+import { z } from "zod";
 
 /**
  * Options for configuring RecordDeduplicator.
@@ -44,8 +45,8 @@ export class RecordDeduplicator {
    * Computes a deterministic SHA-256 content digest for a raw record's payload.
    */
   computePayloadHash(record: RawHarnessRecord): string {
-    const raw =
-      typeof record.rawPayload === "string" ? record.rawPayload : canonicalJson(record.rawPayload);
+    const payloadStr = z.string().safeParse(record.rawPayload);
+    const raw = payloadStr.success ? payloadStr.data : canonicalJson(record.rawPayload);
     return createHash("sha256").update(raw).digest("hex");
   }
 

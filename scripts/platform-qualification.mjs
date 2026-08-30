@@ -483,7 +483,7 @@ async function reservePort() {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (!address || typeof address === "string") {
+      if (!address || Object.prototype.toString.call(address) === "[object String]") {
         server.close();
         reject(new Error("Could not reserve a cloud qualification port"));
         return;

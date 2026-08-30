@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import process from "node:process";
 import {
   type ControlPlaneAppliedField,
   type ControlPlaneDesiredState,
@@ -10,14 +11,18 @@ import {
   type ControlPlaneStateResponse,
   ControlPlaneStateResponseSchema,
   PROTOCOL_VERSION,
+  ProtocolError,
 } from "@resin/protocol";
+import { z } from "zod";
 import type { CloudRequestIdentity } from "./cloud-credentials.js";
+import type { CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
   ModuleContext,
   ModuleHealth,
   ModuleLifecycleState,
 } from "./lifecycle.js";
+import type { JsonObject } from "./normalization/redaction.js";
 
 export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = 2_000;
 export const DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS = 30_000;
@@ -45,14 +50,16 @@ interface EffectiveFetchResult {
   notModified: boolean;
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response): Promise<JsonObject | null> {
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_CONTROL_PLANE_RESPONSE_BYTES) {
     throw new ControlPlaneClientError("Cloud control-plane response exceeded the size limit", 502);
   }
   if (text.length === 0) return null;
   try {
-    return JSON.parse(text) as unknown;
+    const parsed = JSON.parse(text);
+    // SAFETY: Parsed JSON response is an object record.
+    return z.record(z.unknown()).safeParse(parsed).success ? (parsed as JsonObject) : null;
   } catch {
     throw new ControlPlaneClientError("Cloud control-plane response was not valid JSON", 502);
   }
@@ -187,15 +194,15 @@ export interface ControlPlaneApplyAdapter {
 }
 
 export interface FileControlPlaneApplyAdapterOptions {
-  reloadConfig?: () => Promise<unknown>;
+  reloadConfig?: () => Promise<undefined | boolean | JsonObject>;
   now?: () => Date;
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
+function sameJson<L, R>(left: L, right: R): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-async function writePrivateJsonAtomically(filePath: string, value: unknown): Promise<void> {
+async function writePrivateJsonAtomically<V>(filePath: string, value: V): Promise<void> {
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   try {
@@ -212,17 +219,16 @@ function fieldResult(
   code?: string,
   message?: string,
 ): ControlPlaneAppliedField {
-  return {
-    status,
-    ...(code ? { code } : {}),
-    ...(message ? { message } : {}),
-  };
+  const res: ControlPlaneAppliedField = { status };
+  if (code) res.code = code;
+  if (message) res.message = message;
+  return res;
 }
 
 function recordGroupFields(
   fields: ControlPlaneDeviceReport["fields"],
   prefix: "harnesses" | "tools",
-  values: Record<string, unknown> | undefined,
+  values: JsonObject | undefined,
   result: ControlPlaneAppliedField,
 ): void {
   for (const key of Object.keys(values ?? {})) fields[`${prefix}.${key}`] = result;
@@ -234,7 +240,7 @@ function recordGroupFields(
  * never falsely reported as globally applied.
  */
 export class FileControlPlaneApplyAdapter implements ControlPlaneApplyAdapter {
-  private readonly reloadConfig?: () => Promise<unknown>;
+  private readonly reloadConfig?: () => Promise<undefined | boolean | JsonObject>;
   private readonly now: () => Date;
 
   constructor(options: FileControlPlaneApplyAdapterOptions = {}) {
@@ -249,15 +255,17 @@ export class FileControlPlaneApplyAdapter implements ControlPlaneApplyAdapter {
     context: ModuleContext,
   ): Promise<ControlPlaneApplyResult> {
     const fields: ControlPlaneDeviceReport["fields"] = {};
-    let rawConfig: Record<string, unknown> = {};
+    let rawConfig: JsonObject = {};
     let configExisted = true;
     try {
       const raw = await fs.readFile(context.paths.configFile, "utf8");
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      const parsed = JSON.parse(raw);
+      const parsedObj = z.record(z.unknown()).safeParse(parsed);
+      if (!parsedObj.success) {
         throw new Error("Daemon configuration must be a JSON object");
       }
-      rawConfig = parsed as Record<string, unknown>;
+      // SAFETY: Validated parsed object conforms to JsonObject.
+      rawConfig = parsedObj.data as JsonObject;
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
         throw new Error("Local daemon configuration is unreadable or invalid");
@@ -301,12 +309,8 @@ export class FileControlPlaneApplyAdapter implements ControlPlaneApplyAdapter {
       await writePrivateJsonAtomically(context.paths.configFile, nextConfig);
       try {
         const reloadResult = await this.reloadConfig?.();
-        if (
-          typeof reloadResult === "object" &&
-          reloadResult !== null &&
-          "success" in reloadResult &&
-          reloadResult.success === false
-        ) {
+        const parsedReload = z.object({ success: z.boolean() }).safeParse(reloadResult);
+        if (parsedReload.success && !parsedReload.data.success) {
           throw new Error("Daemon rejected updated configuration");
         }
       } catch {
@@ -362,8 +366,7 @@ export interface ControlPlaneRuntimeModuleOptions {
   reportIntervalMs?: number;
   now?: () => Date;
 }
-
-function safeRuntimeError(error: unknown): string {
+function safeRuntimeError<E>(error: E): string {
   const message = error instanceof Error ? error.message : "Unknown control-plane failure";
   return message
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [REDACTED]")
@@ -502,8 +505,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
       lastCheckTime: this.now().getTime(),
     };
   }
-
-  async getDiagnostics(): Promise<Record<string, unknown>> {
+  async getDiagnostics(): Promise<JsonObject> {
     return {
       state: this.state,
       deviceId: this.deviceId,

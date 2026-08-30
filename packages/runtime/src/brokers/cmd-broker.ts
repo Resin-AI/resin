@@ -2,7 +2,12 @@ import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type CommandCapability, type SecretReference, isSecretReference } from "@resin/contracts";
+import {
+  type CommandCapability,
+  type SecretReference,
+  SecretReferenceSchema,
+  isSecretReference,
+} from "@resin/contracts";
 import {
   type CommandIdentity,
   containsForbiddenArgMetacharacters,
@@ -52,6 +57,18 @@ export interface CommandExecuteResult {
   durationMs: number;
 }
 
+export interface SanitizedChildEnvironment {
+  [key: string]: string;
+}
+
+export interface AuthorizedCommandExecution {
+  identity: CommandIdentity;
+  executable: string;
+  args: string[];
+  cwd: string;
+  childEnv: SanitizedChildEnvironment;
+}
+
 /**
  * Options for configuring CommandBroker.
  */
@@ -65,7 +82,7 @@ export interface CommandBrokerOptions extends BaseCapabilityBrokerOptions {
  * Rejects unterminated quotes/escapes, shell operators, and expansions.
  */
 export function parseCommandLine(commandLine: string): string[] {
-  if (typeof commandLine !== "string") {
+  if (String(commandLine) !== commandLine) {
     throw new BrokerSecurityError("INVALID_PATH", "Command line must be a string");
   }
 
@@ -202,7 +219,7 @@ export const lexCommandLine = parseCommandLine;
  * Helper to detect sensitive or credential paths for response file validation.
  */
 function isCredentialOrSensitivePath(targetPath: string, workspaceRoot?: string): boolean {
-  if (!targetPath || typeof targetPath !== "string") {
+  if (!targetPath || String(targetPath) !== targetPath) {
     return false;
   }
   const clean = targetPath.replace(/\\+/g, "/").replace(/^\.\//, "");
@@ -497,7 +514,7 @@ export class CommandBroker extends BaseCapabilityBroker {
         if (err instanceof BrokerSecurityError) throw err;
         throw new BrokerSecurityError(
           "FILE_NOT_FOUND",
-          `Failed to inspect working directory component: ${current} (${(err as Error).message})`,
+          `Failed to inspect working directory component: ${current} (${err instanceof Error ? err.message : String(err)})`,
           { path: current, targetPath },
         );
       }
@@ -533,7 +550,7 @@ export class CommandBroker extends BaseCapabilityBroker {
       if (err instanceof BrokerSecurityError) throw err;
       throw new BrokerSecurityError(
         "WORKING_DIRECTORY_DENIED",
-        `Failed to resolve realpath for workspace root '${workspaceRoot}': ${(err as Error).message}`,
+        `Failed to resolve realpath for workspace root '${workspaceRoot}': ${err instanceof Error ? err.message : String(err)}`,
         { workspaceRoot },
       );
     }
@@ -597,7 +614,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     } catch (err) {
       throw new BrokerSecurityError(
         "WORKING_DIRECTORY_DENIED",
-        `Failed to resolve realpath for working directory '${nominalTargetCwd}': ${(err as Error).message}`,
+        `Failed to resolve realpath for working directory '${nominalTargetCwd}': ${err instanceof Error ? err.message : String(err)}`,
         { cwd: requestedCwd, resolvedCwd: nominalTargetCwd },
       );
     }
@@ -647,13 +664,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     params: CommandExecuteParams,
     context: BrokerContext,
     cmdCap: CommandCapability,
-  ): {
-    identity: CommandIdentity;
-    executable: string;
-    args: string[];
-    cwd: string;
-    childEnv: NodeJS.ProcessEnv;
-  } {
+  ): AuthorizedCommandExecution {
     // 1. Extract raw binary and validate string via deterministic non-shell argv lexer
     let commandTokens: string[] = [];
     if (params.command) {
@@ -662,7 +673,7 @@ export class CommandBroker extends BaseCapabilityBroker {
 
     const rawBinary =
       params.executable ?? (commandTokens.length > 0 ? commandTokens[0] : undefined);
-    if (!rawBinary || typeof rawBinary !== "string" || rawBinary.trim().length === 0) {
+    if (!rawBinary || String(rawBinary) !== rawBinary || rawBinary.trim().length === 0) {
       throw new BrokerSecurityError("INVALID_PATH", "Executable binary name must be specified");
     }
     const binary = rawBinary.trim();
@@ -692,7 +703,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     } catch (err) {
       throw new BrokerSecurityError(
         "UNAUTHORIZED_BINARY",
-        `Binary '${binary}' could not be resolved or is invalid: ${(err as Error).message}`,
+        `Binary '${binary}' could not be resolved or is invalid: ${err instanceof Error ? err.message : String(err)}`,
         { binary },
       );
     }
@@ -721,7 +732,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     if (allowedCommands.length > 0) {
       let matched = false;
       for (const commandProfile of allowedCommands) {
-        if (typeof commandProfile !== "string" || commandProfile.trim().length === 0) {
+        if (String(commandProfile) !== commandProfile || commandProfile.trim().length === 0) {
           continue;
         }
         const profileTokens = parseCommandLine(commandProfile);
@@ -815,7 +826,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     // 6. Validate argument syntax guards
     for (let i = 0; i < rawArgs.length; i++) {
       const arg = rawArgs[i];
-      if (typeof arg !== "string") {
+      if (String(arg) !== arg) {
         throw new BrokerSecurityError(
           "FORBIDDEN_ARGUMENT_PATTERN",
           "All command arguments must be strings",
@@ -872,7 +883,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     const targetCwd = this.validateAndResolveCwd(params.cwd, workspaceRoot, scratchDir);
 
     // 7. Construct minimal sanitized child environment
-    const childEnv: NodeJS.ProcessEnv = {
+    const childEnv: SanitizedChildEnvironment = {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       LANG: process.env.LANG ?? "C.UTF-8",
       LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
@@ -895,9 +906,10 @@ export class CommandBroker extends BaseCapabilityBroker {
     }
 
     if (params.env) {
-      const secretsCap = context.grant?.capabilities?.secrets;
+      const grant = this.validateGrant(context);
+      const secretsCap = grant.capabilities.secrets;
       const allowedSecretNames = secretsCap?.allowedSecretNames ?? [];
-      const allowedPrefixes = secretsCap?.allowedPrefixes ?? [];
+      const allowedPrefixes: readonly string[] = secretsCap?.allowedPrefixes ?? [];
       const hasSecretsCapability = allowedSecretNames.length > 0 || allowedPrefixes.length > 0;
 
       for (const [key, val] of Object.entries(params.env)) {
@@ -909,7 +921,7 @@ export class CommandBroker extends BaseCapabilityBroker {
           );
         }
 
-        if (isSecretReference(val)) {
+        if (SecretReferenceSchema.safeParse(val).success) {
           continue;
         }
 
@@ -924,12 +936,11 @@ export class CommandBroker extends BaseCapabilityBroker {
           );
         }
 
-        if (typeof val === "string") {
+        if (String(val) === val) {
           childEnv[key] = val;
         }
       }
     }
-
     return {
       identity,
       executable: identity.realPath,
@@ -957,7 +968,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     );
     const maxOutputBytes = limits?.maxOutputSizeBytes ?? 10485760; // 10MB default
 
-    const secretBroker = this.secretBroker ?? (context.secretBroker as SecretBroker | undefined);
+    const secretBroker = this.secretBroker ?? context.secretBroker;
     const redactor = secretBroker?.getRedactor();
 
     try {
@@ -995,16 +1006,16 @@ export class CommandBroker extends BaseCapabilityBroker {
       if (params.stdin !== undefined) {
         if (secretBroker) {
           resolvedStdin = await secretBroker.mediateCommandStdin(params.stdin, context);
-        } else if (typeof params.stdin === "string") {
+        } else if (String(params.stdin) === params.stdin) {
           resolvedStdin = params.stdin;
         }
       }
 
       // 2. Host-side environment secret mediation
-      const rawEnv: Record<string, string | SecretReference> = {
+      const rawEnv = {
         ...(params.env ?? {}),
         ...(params.secretEnv ?? {}),
-      };
+      } satisfies Record<string, string | SecretReference>;
 
       if (Object.keys(rawEnv).length > 0 && secretBroker) {
         const mediatedEnv = await secretBroker.mediateCommandEnv(rawEnv, context);
@@ -1053,7 +1064,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     } catch (error) {
       const isSecErr = error instanceof BrokerSecurityError;
       const errCode = isSecErr ? error.code : "PROCESS_SPAWN_FAILED";
-      const rawMsg = (error as Error).message;
+      const rawMsg = error instanceof Error ? error.message : String(error);
       const errMsg = redactor ? redactor.redact(rawMsg) : rawMsg;
 
       this.recordAudit(
@@ -1062,10 +1073,8 @@ export class CommandBroker extends BaseCapabilityBroker {
         "denied",
         {
           command: params.executable ?? params.command ?? "unknown",
-          params:
-            redactor && params.args
-              ? { ...params, args: params.args.map((a) => redactor.redact(a)) }
-              : params,
+          args: redactor && params.args ? params.args.map((a) => redactor.redact(a)) : params.args,
+          cwd: params.cwd,
         },
         {
           error: {
@@ -1119,8 +1128,11 @@ export class CommandBroker extends BaseCapabilityBroker {
       reject(
         new BrokerSecurityError(
           "PROCESS_SPAWN_FAILED",
-          `Failed to spawn binary '${options.executable}': ${(err as Error).message}`,
-          { executable: options.executable, error: (err as Error).message },
+          `Failed to spawn binary '${options.executable}': ${err instanceof Error ? err.message : String(err)}`,
+          {
+            executable: options.executable,
+            error: err instanceof Error ? err.message : String(err),
+          },
         ),
       );
       return promise;

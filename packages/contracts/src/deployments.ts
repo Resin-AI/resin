@@ -109,10 +109,14 @@ export const DeploymentRecordSchema = z.object({
 
 export type DeploymentRecord = z.infer<typeof DeploymentRecordSchema>;
 
+export type DeploymentTransitionMap = {
+  readonly [State in DeploymentState]: readonly DeploymentState[];
+};
+
 /**
  * Mapping of valid state transitions across the deployment lifecycle.
  */
-export const VALID_DEPLOYMENT_TRANSITIONS: Record<DeploymentState, readonly DeploymentState[]> = {
+export const VALID_DEPLOYMENT_TRANSITIONS: DeploymentTransitionMap = {
   drafted: ["validating", "rejected"],
   validating: ["replaying", "rejected"],
   replaying: ["eligible", "rejected"],
@@ -120,9 +124,9 @@ export const VALID_DEPLOYMENT_TRANSITIONS: Record<DeploymentState, readonly Depl
   canary: ["promoted", "rolling_back", "suspended"],
   promoted: ["rolling_back", "suspended", "retired"],
   suspended: ["canary", "promoted", "rolling_back", "retired"],
-  rolling_back: ["rolled_back"],
-  rolled_back: ["retired", "drafted"],
-  rejected: ["retired", "drafted"],
+  rolling_back: ["rolled_back", "suspended"],
+  rolled_back: ["retired"],
+  rejected: [],
   retired: [],
 };
 
@@ -137,6 +141,19 @@ export type DeploymentErrorCode =
   | "ENVELOPE_VIOLATION"
   | "HEALTH_CHECK_FAILED";
 
+export type DeploymentDetailValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | DeploymentDetailRecord
+  | DeploymentDetailValue[];
+
+export interface DeploymentDetailRecord {
+  [key: string]: DeploymentDetailValue;
+}
+
 /**
  * Structured error class for deployment lifecycle failures.
  */
@@ -144,14 +161,14 @@ export class DeploymentError extends Error {
   readonly code: DeploymentErrorCode;
   readonly currentState?: DeploymentState;
   readonly targetState?: DeploymentState;
-  readonly details?: Record<string, unknown>;
+  readonly details?: DeploymentDetailRecord;
 
   constructor(params: {
     message: string;
     code: DeploymentErrorCode;
     currentState?: DeploymentState;
     targetState?: DeploymentState;
-    details?: Record<string, unknown>;
+    details?: DeploymentDetailRecord;
   }) {
     super(params.message);
     this.name = "DeploymentError";
@@ -179,7 +196,7 @@ export function validateDeploymentTransition(
       currentState,
       targetState: nextState,
       message: `Illegal deployment transition from '${currentState}' to '${nextState}'. Allowed target states: [${(allowedNext ?? []).join(", ")}]`,
-      details: { allowedTransitions: allowedNext ?? [] },
+      details: { allowedTransitions: [...(allowedNext ?? [])] },
     });
     return { valid: false, error };
   }

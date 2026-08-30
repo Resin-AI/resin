@@ -1,7 +1,9 @@
 import {
   type SecretCapability,
   type SecretMediationMode,
+  type SecretMetadataRecord,
   type SecretReference,
+  SecretReferenceSchema,
   createSecretReference,
   isSecretReference,
   validateSecretReferenceScope,
@@ -13,6 +15,8 @@ import {
   type SecretRedactor,
   type SetSecretOptions,
 } from "@resin/crypto";
+import { z } from "zod";
+import type { BrokerAuditValue } from "./audit.js";
 import {
   BaseCapabilityBroker,
   type BaseCapabilityBrokerOptions,
@@ -20,6 +24,75 @@ import {
   type BrokerErrorCode,
   BrokerSecurityError,
 } from "./base.js";
+
+export interface SecretReferenceOptions {
+  modes?: SecretMediationMode[];
+  expiresAt?: string;
+  toolId?: string;
+  accountId?: string;
+  installationId?: string;
+  metadata?: SecretMetadataRecord;
+}
+
+export type BrokerSecretResult =
+  | SecretReference
+  | SecretReference[]
+  | { secret: string | null }
+  | { mediated: string }
+  | null
+  | boolean;
+
+export type BrokerSecretRequestPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | SecretReference
+  | readonly BrokerSecretRequestPayloadValue[]
+  | BrokerSecretRequestPayloadValue[]
+  | { [key: string]: BrokerSecretRequestPayloadValue | undefined };
+
+export interface BrokerSecretRequestPayload {
+  [key: string]: BrokerSecretRequestPayloadValue | undefined;
+}
+export type BrokerSecretRequestPayloadInputValue =
+  | string
+  | number
+  | boolean
+  | null
+  | z.input<typeof SecretReferenceSchema>
+  | BrokerSecretRequestPayloadInputValue[]
+  | { [key: string]: BrokerSecretRequestPayloadInputValue | undefined };
+
+export interface BrokerSecretRequestPayloadInput {
+  [key: string]: BrokerSecretRequestPayloadInputValue | undefined;
+}
+
+export const BrokerSecretRequestPayloadValueSchema: z.ZodType<
+  BrokerSecretRequestPayloadValue,
+  z.ZodTypeDef,
+  BrokerSecretRequestPayloadInputValue
+> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    SecretReferenceSchema,
+    z.array(BrokerSecretRequestPayloadValueSchema),
+    z.record(BrokerSecretRequestPayloadValueSchema),
+  ]),
+);
+
+export const BrokerSecretRequestPayloadSchema: z.ZodType<
+  BrokerSecretRequestPayload,
+  z.ZodTypeDef,
+  BrokerSecretRequestPayloadInput
+> = z.record(BrokerSecretRequestPayloadValueSchema);
+
+function isBrokerContext(val: BrokerContext | string | undefined): val is BrokerContext {
+  return Object.prototype.toString.call(val) === "[object Object]";
+}
 
 /**
  * Options for initializing SecretBroker.
@@ -54,7 +127,7 @@ export class SecretBroker extends BaseCapabilityBroker {
         passphrase: options.passphrase,
       });
 
-      if (options.secrets && typeof options.secrets === "object") {
+      if (options.secrets && options.secrets !== null && !Array.isArray(options.secrets)) {
         for (const [name, value] of Object.entries(options.secrets)) {
           this.manager.addSecret(name, value).catch(() => {});
         }
@@ -83,14 +156,7 @@ export class SecretBroker extends BaseCapabilityBroker {
   createSecretReference(
     name: string,
     context?: BrokerContext,
-    options: {
-      modes?: SecretMediationMode[];
-      expiresAt?: string;
-      toolId?: string;
-      accountId?: string;
-      installationId?: string;
-      metadata?: Record<string, unknown>;
-    } = {},
+    options: SecretReferenceOptions = {},
   ): SecretReference {
     if (context?.grant) {
       const grant = this.validateGrant(context);
@@ -109,8 +175,8 @@ export class SecretBroker extends BaseCapabilityBroker {
       name,
       workspaceId,
       toolId: options.toolId ?? context?.toolId ?? context?.grant?.toolId,
-      accountId: options.accountId ?? (context?.accountId as string | undefined),
-      installationId: options.installationId ?? (context?.installationId as string | undefined),
+      accountId: options.accountId ?? context?.accountId,
+      installationId: options.installationId ?? context?.installationId,
       grantId: context?.grant?.grantId,
       permittedModes: options.modes,
       expiresAt: options.expiresAt,
@@ -130,7 +196,7 @@ export class SecretBroker extends BaseCapabilityBroker {
     context: BrokerContext,
     mode: MediationMode,
   ): Promise<string> {
-    if (typeof refOrName === "string") {
+    if (String(refOrName) === refOrName) {
       // Check if it's a template like {{secret:NAME}}
       const templateMatch = refOrName.match(/^\{\{(?:secret:)?([A-Za-z0-9_\-\.]+)\}\}$/);
       if (templateMatch) {
@@ -146,49 +212,49 @@ export class SecretBroker extends BaseCapabilityBroker {
       return this.authorizeSecretAccess(refOrName, context, mode);
     }
 
-    if (!isSecretReference(refOrName)) {
+    const parsedRef = SecretReferenceSchema.safeParse(refOrName);
+    if (!parsedRef.success) {
       throw new BrokerSecurityError(
         "INVALID_SECRET_REFERENCE",
         "Provided object is not a valid SecretReference",
       );
     }
+    const secretRef = parsedRef.data;
 
     // 1. Validate scope (workspace, tool, account, installation, grant, expiry)
-    const scopeResult = validateSecretReferenceScope(refOrName, {
+    const scopeResult = validateSecretReferenceScope(secretRef, {
       workspaceId: context.workspaceId ?? context.grant?.workspaceId,
       toolId: context.toolId ?? context.grant?.toolId,
-      accountId: context.accountId as string | undefined,
-      installationId: context.installationId as string | undefined,
+      accountId: context.accountId,
+      installationId: context.installationId,
       grantId: context.grant?.grantId,
       currentTimestamp: context.currentTimestamp,
     });
 
     if (!scopeResult.valid) {
+      // SAFETY: Scope failure code maps to BrokerErrorCode.
       const code = (scopeResult.code as BrokerErrorCode) ?? "SECRET_SCOPE_MISMATCH";
       throw new BrokerSecurityError(code, scopeResult.reason ?? "Secret scope mismatch", {
-        referenceName: refOrName.name,
-        referenceWorkspace: refOrName.workspaceId,
+        referenceName: secretRef.name,
+        referenceWorkspace: secretRef.workspaceId,
       });
     }
 
     // 2. Validate permitted mediation modes
-    if (
-      refOrName.permittedModes &&
-      !refOrName.permittedModes.includes(mode as SecretMediationMode)
-    ) {
+    if (secretRef.permittedModes && !secretRef.permittedModes.some((m) => m === mode)) {
       throw new BrokerSecurityError(
         "OPERATION_NOT_PERMITTED",
-        `Mediation mode '${mode}' is not permitted for secret reference '${refOrName.name}' (permitted: ${refOrName.permittedModes.join(", ")})`,
+        `Mediation mode '${mode}' is not permitted for secret reference '${secretRef.name}' (permitted: ${secretRef.permittedModes.join(", ")})`,
         {
-          secretName: refOrName.name,
+          secretName: secretRef.name,
           requestedMode: mode,
-          permittedModes: refOrName.permittedModes,
+          permittedModes: secretRef.permittedModes,
         },
       );
     }
 
     // 3. Authorize and retrieve value host-side
-    return this.authorizeSecretAccess(refOrName.name, context, mode);
+    return this.authorizeSecretAccess(secretRef.name, context, mode);
   }
 
   /**
@@ -257,14 +323,20 @@ export class SecretBroker extends BaseCapabilityBroker {
         {
           secretName: secretNameOrAlias,
           mode,
-          error: (err as Error).message,
+          error: err instanceof Error ? err.message : String(err),
         },
         {
           durationMs: Date.now() - startTime,
-          error: { code: "SECRET_NOT_FOUND", message: (err as Error).message },
+          error: {
+            code: "SECRET_NOT_FOUND",
+            message: err instanceof Error ? err.message : String(err),
+          },
         },
       );
-      throw new BrokerSecurityError("SECRET_NOT_FOUND", (err as Error).message);
+      throw new BrokerSecurityError(
+        "SECRET_NOT_FOUND",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -275,7 +347,7 @@ export class SecretBroker extends BaseCapabilityBroker {
     headers: Record<string, string | SecretReference>,
     context: BrokerContext,
   ): Promise<Record<string, string>> {
-    if (!headers || typeof headers !== "object") {
+    if (!headers || headers === null || Array.isArray(headers)) {
       return {};
     }
 
@@ -283,16 +355,17 @@ export class SecretBroker extends BaseCapabilityBroker {
     const placeholderRegex = /\{\{(?:secret:)?([A-Za-z0-9_\-\.]+)\}\}/g;
 
     for (const [key, value] of Object.entries(headers)) {
-      if (isSecretReference(value)) {
+      const parsedRef = SecretReferenceSchema.safeParse(value);
+      if (parsedRef.success) {
         // Direct SecretReference passed as header value
         const isAuthHeader = key.toLowerCase() === "authorization";
         const mode = isAuthHeader ? "bearer_token" : "header_template";
-        const secretVal = await this.resolveSecretReference(value, context, mode);
+        const secretVal = await this.resolveSecretReference(parsedRef.data, context, mode);
         mediatedHeaders[key] = isAuthHeader ? `Bearer ${secretVal}` : secretVal;
         continue;
       }
 
-      if (typeof value !== "string") {
+      if (String(value) !== value) {
         mediatedHeaders[key] = String(value ?? "");
         continue;
       }
@@ -350,7 +423,7 @@ export class SecretBroker extends BaseCapabilityBroker {
     context: BrokerContext,
     secretReferences?: Record<string, SecretReference>,
   ): Promise<string> {
-    if (!url || typeof url !== "string") {
+    if (!url || String(url) !== url) {
       return url;
     }
 
@@ -365,7 +438,7 @@ export class SecretBroker extends BaseCapabilityBroker {
     }
 
     // Substitute explicit secret references in query params if provided
-    if (secretReferences && typeof secretReferences === "object") {
+    if (secretReferences && secretReferences !== null && !Array.isArray(secretReferences)) {
       for (const [paramName, secretRef] of Object.entries(secretReferences)) {
         const secretValue = await this.resolveSecretReference(secretRef, context, "query_template");
         const encodedVal = encodeURIComponent(secretValue);
@@ -390,11 +463,12 @@ export class SecretBroker extends BaseCapabilityBroker {
     templateOrRef: string | SecretReference,
     context: BrokerContext,
   ): Promise<string> {
-    if (isSecretReference(templateOrRef)) {
-      return this.resolveSecretReference(templateOrRef, context, "command_stdin");
+    const parsedRef = SecretReferenceSchema.safeParse(templateOrRef);
+    if (parsedRef.success) {
+      return this.resolveSecretReference(parsedRef.data, context, "command_stdin");
     }
 
-    if (!templateOrRef || typeof templateOrRef !== "string") {
+    if (!templateOrRef || String(templateOrRef) !== templateOrRef) {
       return "";
     }
 
@@ -431,13 +505,18 @@ export class SecretBroker extends BaseCapabilityBroker {
     const placeholderRegex = /\{\{(?:secret:)?([A-Za-z0-9_\-\.]+)\}\}/g;
 
     for (const [key, value] of Object.entries(env)) {
-      if (isSecretReference(value)) {
-        const secretValue = await this.resolveSecretReference(value, context, "command_env");
+      const parsedRef = SecretReferenceSchema.safeParse(value);
+      if (parsedRef.success) {
+        const secretValue = await this.resolveSecretReference(
+          parsedRef.data,
+          context,
+          "command_env",
+        );
         mediatedEnv[key] = secretValue;
         continue;
       }
 
-      if (typeof value !== "string") {
+      if (String(value) !== value) {
         mediatedEnv[key] = String(value ?? "");
         continue;
       }
@@ -621,10 +700,9 @@ export class SecretBroker extends BaseCapabilityBroker {
    * Lists non-sensitive secret metadata.
    */
   async listMetadata(contextOrWorkspaceId?: BrokerContext | string): Promise<SecretMetadata[]> {
-    const workspaceId =
-      typeof contextOrWorkspaceId === "string"
-        ? contextOrWorkspaceId
-        : contextOrWorkspaceId?.workspaceId;
+    const workspaceId = isBrokerContext(contextOrWorkspaceId)
+      ? contextOrWorkspaceId.workspaceId
+      : contextOrWorkspaceId;
     return this.manager.listMetadata(workspaceId);
   }
 
@@ -654,9 +732,9 @@ export class SecretBroker extends BaseCapabilityBroker {
    */
   async handleRequest(
     action: string,
-    payload: Record<string, unknown>,
+    payload: BrokerSecretRequestPayload,
     context: BrokerContext,
-  ): Promise<unknown> {
+  ): Promise<BrokerSecretResult> {
     // Flag this context as a worker call
     const workerContext: BrokerContext = { ...context, isWorker: true, source: "worker" };
 
@@ -730,15 +808,13 @@ export class SecretBroker extends BaseCapabilityBroker {
 
       case "createReference":
       case "createSecretReference": {
-        const name = String(payload.name ?? payload.alias ?? "");
-        const options = (payload.options ?? {}) as {
-          modes?: SecretMediationMode[];
-          expiresAt?: string;
-          toolId?: string;
-          accountId?: string;
-          installationId?: string;
-          metadata?: Record<string, unknown>;
-        };
+        const rawOptions =
+          payload.options && payload.options !== null && !Array.isArray(payload.options)
+            ? payload.options
+            : {};
+        // SAFETY: Options conforms to SecretReferenceOptions shape.
+        const options = rawOptions as SecretReferenceOptions;
+        const name = String(payload.name ?? "");
         return this.createSecretReference(name, workerContext, options);
       }
 

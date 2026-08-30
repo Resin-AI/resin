@@ -74,13 +74,15 @@ export class InMemoryIpcTransport implements IpcTransport {
   }
 }
 
+export interface InMemoryIpcPair {
+  serverTransport: InMemoryIpcTransport;
+  clientTransport: InMemoryIpcTransport;
+}
+
 /**
  * Creates a connected pair of in-memory transports for testing.
  */
-export function createInMemoryIpcPair(): {
-  serverTransport: InMemoryIpcTransport;
-  clientTransport: InMemoryIpcTransport;
-} {
+export function createInMemoryIpcPair(): InMemoryIpcPair {
   const serverTransport = new InMemoryIpcTransport();
   const clientTransport = new InMemoryIpcTransport();
 

@@ -39,10 +39,10 @@ function createValidContext(
 }
 
 function createMockEvent(
-  overrides: Partial<NormalizedSessionEvent> & { providerUsage?: ProviderReportedUsage } = {},
+  overrides: Partial<Extract<NormalizedSessionEvent, { type: "message" }>> = {},
 ): NormalizedSessionEvent {
   const eventId = `evt_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
-  return {
+  const baseEvent: Extract<NormalizedSessionEvent, { type: "message" }> = {
     eventId,
     sessionId: "01J5XYZ7890ABCDEFGHJKMNPQR",
     timestamp: "2026-08-27T12:00:00.000Z",
@@ -50,8 +50,8 @@ function createMockEvent(
     type: "message",
     role: "assistant",
     content: [{ type: "text", text: "Standard assistant output" }],
-    ...overrides,
-  } as NormalizedSessionEvent;
+  };
+  return Object.assign(baseEvent, overrides);
 }
 
 describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => {
@@ -203,9 +203,8 @@ describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => 
       const nonUsageEvent = createMockEvent({
         type: "tool_call",
         toolName: "read_file",
-        input: { path: "src/index.ts" },
-      } as unknown as Partial<NormalizedSessionEvent>);
-
+        input: { path: "/workspace/config.json" },
+      });
       emitter.ingest(nonUsageEvent);
       const observation = emitter.finalize();
 
@@ -382,15 +381,13 @@ describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => 
 
     it("automatically sets status to failure on session crash lifecycle event", () => {
       const emitter = createTrajectoryEmitter(createValidContext());
-
       const crashEvent = createMockEvent({
         type: "session_lifecycle",
         lifecycleType: "crash",
-        exitReason: "fatal_signal",
-      } as unknown as Partial<NormalizedSessionEvent>);
+        exitReason: "fatal_uncaught_panic",
+      });
 
       emitter.ingest(crashEvent);
-
       expect(emitter.isFinalized()).toBe(true);
       const observation = emitter.getObservation();
       expect(observation).not.toBeNull();
@@ -404,8 +401,7 @@ describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => 
         type: "session_lifecycle",
         lifecycleType: "end",
         exitReason: "timeout",
-      } as unknown as Partial<NormalizedSessionEvent>);
-
+      });
       emitter.ingest(endEvent);
 
       expect(emitter.isFinalized()).toBe(true);
@@ -507,8 +503,7 @@ describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => 
         type: "tool_call",
         toolName: "bash",
         input: { command: sensitiveCommand, code: sensitiveSourceCode },
-      } as unknown as Partial<NormalizedSessionEvent>);
-
+      });
       emitter.ingestBatch([event1, event2]);
       const observation = emitter.finalize();
 
@@ -544,7 +539,8 @@ describe("TrajectoryEmitter: Authoritative Outer Trajectory Aggregation", () => 
 
       expect(obs1.canonicalPayload?.accountingVersion).toBe("claude-code-v1");
       expect(obs1.metadata?.accountingVersion).toBe("claude-code-v1");
-      expect((obs1 as unknown as Record<string, unknown>).accountingVersion).toBeUndefined();
+      // SAFETY: Checks absence of accountingVersion on observation record.
+      expect((obs1 as { accountingVersion?: unknown }).accountingVersion).toBeUndefined();
 
       const emitter2 = createTrajectoryEmitter({
         ...baseContext,

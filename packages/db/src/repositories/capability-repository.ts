@@ -5,7 +5,7 @@ import {
   CapabilityGrantSchema,
   canonicalJson,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
 /**
  * Repository managing workspace capability envelopes and fine-grained tool capability grants.
@@ -151,7 +151,7 @@ export class CapabilityRepository {
 
   async listGrants(workspaceId: string, toolId?: string): Promise<CapabilityGrant[]> {
     let sql = "SELECT * FROM capability_grants WHERE workspace_id = ?";
-    const params: unknown[] = [workspaceId];
+    const params: SQLBindValue[] = [workspaceId];
     if (toolId) {
       sql += " AND tool_id = ?";
       params.push(toolId);

@@ -17,6 +17,7 @@ import type {
   RefreshAttempt,
   RefreshCoordinatorOptions,
   RefreshCoordinatorStats,
+  RefreshLogMeta,
   RefreshOutcome,
   RefreshVerification,
 } from "./types.js";
@@ -34,7 +35,7 @@ export interface McpGatewayLike {
 /**
  * Outcome priority order for selecting the primary outcome of a refresh attempt.
  */
-const OUTCOME_PRECEDENCE: Record<RefreshOutcome, number> = {
+const OUTCOME_PRECEDENCE = {
   native_observed: 7,
   native_sent: 6,
   nudge_delivered: 5,
@@ -43,7 +44,7 @@ const OUTCOME_PRECEDENCE: Record<RefreshOutcome, number> = {
   meta_tools_only: 2,
   unsupported: 1,
   failed: 0,
-};
+} satisfies Record<RefreshOutcome, number>;
 
 /**
  * Central coordinator for tool catalog refresh notifications and harness-specific nudges.
@@ -54,7 +55,7 @@ export class CatalogRefreshCoordinator {
   private readonly debounceMs: number;
   private readonly verificationTimeoutMs: number;
   private readonly metaToolsReminder: string;
-  private readonly logger?: (level: string, message: string, meta?: unknown) => void;
+  private readonly logger?: (level: string, message: string, meta?: RefreshLogMeta) => void;
 
   private readonly deduplicator: NudgeDeduplicator;
   private readonly verifier: RefreshVerifier;
@@ -310,21 +311,20 @@ export class CatalogRefreshCoordinator {
     let error: string | undefined;
 
     const harnessId = conn.harnessId || "generic";
-    const adapter = this.adapters.get(harnessId);
-    const capabilities: RefreshCapability = adapter?.getCapabilities?.() ?? {
-      supportsNativeListChange: Boolean(conn.clientCapabilities?.tools?.listChanged),
-      supportsContextNudge: false,
-      requiresSessionRestart: false,
-    };
-
     const clientSupportsNative = Boolean(conn.clientCapabilities?.tools?.listChanged);
     const scope: NudgeScope = {
       workspaceId: conn.workspaceContext.workspaceId,
-      ...(conn.workspaceContext.sessionId ? { sessionId: conn.workspaceContext.sessionId } : {}),
+      sessionId: conn.workspaceContext.sessionId,
+      accountRoot: conn.workspaceContext.projectRoot ?? conn.workspaceContext.canonicalRoot,
     };
-
-    // 1. Native MCP Notification Dispatch (if client negotiated tools.listChanged)
-    if (clientSupportsNative && conn.isInitialized && !conn.isClosed) {
+    const adapter = this.adapters.get(harnessId);
+    const capabilities: RefreshCapability = adapter?.getCapabilities?.() ?? {
+      supportsNativeListChange: clientSupportsNative,
+      supportsContextNudge: false,
+      requiresSessionRestart: false,
+    };
+    // 1. Native MCP list_changed notification
+    if (capabilities.supportsNativeListChange && conn.isInitialized) {
       try {
         const notification: JsonRpcNotification = {
           jsonrpc: "2.0",
@@ -335,11 +335,12 @@ export class CatalogRefreshCoordinator {
         outcomes.push("native_sent");
         this.totalNativeSent++;
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         this.logger?.(
           "error",
-          `Failed to send native list_changed to ${conn.connectionId}: ${(err as Error).message}`,
+          `Failed to send native list_changed to ${conn.connectionId}: ${message}`,
         );
-        error = (err as Error).message;
+        error = message;
         outcomes.push("failed");
       }
     }
@@ -385,11 +386,18 @@ export class CatalogRefreshCoordinator {
             configPath: path.join(conn.workspaceContext.canonicalRoot, ".config"),
             harnessId,
             metadata: {},
-            ...(conn.workspaceContext.sessionId
-              ? { activeSessionId: conn.workspaceContext.sessionId }
-              : {}),
           };
-
+          const contextUpdatePayload =
+            scope.sessionId !== undefined
+              ? {
+                  message: nudgePayload.noticeMessage,
+                  revision: event.revision,
+                  sessionId: scope.sessionId,
+                }
+              : {
+                  message: nudgePayload.noticeMessage,
+                  revision: event.revision,
+                };
           const changeSummary: CatalogChangeSummary = {
             addedToolIds: nudgePayload.addedToolIds,
             updatedToolIds: nudgePayload.updatedToolIds,
@@ -416,25 +424,17 @@ export class CatalogRefreshCoordinator {
               this.totalNextSessionRequired++;
             } else if (result.outcome === "unsupported") {
               outcomes.push("unsupported");
-              this.totalUnsupported++;
             } else {
               outcomes.push("failed");
               this.totalFailed++;
             }
           } catch (err) {
-            this.logger?.(
-              "error",
-              `Adapter refresh failed for ${harnessId}: ${(err as Error).message}`,
-            );
-            error = (err as Error).message;
+            const message = err instanceof Error ? err.message : String(err);
+            this.logger?.("error", `Adapter refresh failed for ${harnessId}: ${message}`);
+            error = message;
             outcomes.push("failed");
             this.totalFailed++;
           }
-        } else {
-          adapterNudgeSent = true;
-          this.deduplicator.recordNudgeSent(scope, event.revision);
-          outcomes.push("nudge_delivered");
-          this.totalNudgesDelivered++;
         }
       }
     } else if (capabilities.requiresSessionRestart) {
@@ -457,23 +457,28 @@ export class CatalogRefreshCoordinator {
         primaryOutcome = o;
       }
     }
-
     const attempt: RefreshAttempt = {
       attemptId,
       connectionId: conn.connectionId,
       harnessId,
-      workspaceId: conn.workspaceContext.workspaceId,
-      ...(conn.workspaceContext.sessionId ? { sessionId: conn.workspaceContext.sessionId } : {}),
+      workspaceId: scope.workspaceId,
       revision: event.revision,
       primaryOutcome,
       outcomes,
       mcpNotificationSent,
       adapterNudgeSent,
-      ...(nudgePayload ? { nudgePayload } : {}),
-      ...(error ? { error } : {}),
       timestamp,
       verificationStatus: mcpNotificationSent ? "pending" : "skipped",
     };
+    if (scope.sessionId !== undefined) {
+      attempt.sessionId = scope.sessionId;
+    }
+    if (nudgePayload !== undefined) {
+      attempt.nudgePayload = nudgePayload;
+    }
+    if (error !== undefined) {
+      attempt.error = error;
+    }
 
     if (mcpNotificationSent) {
       this.verifier.registerAttempt(attempt, this.verificationTimeoutMs);

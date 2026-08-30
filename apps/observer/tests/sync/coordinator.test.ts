@@ -366,6 +366,7 @@ describe("DeploymentSyncCoordinator", () => {
     };
 
     if (commandHandler) {
+      // SAFETY: Handler function accepts DeploymentCommandMessage in test.
       await (commandHandler as (cmd: DeploymentCommandMessage) => Promise<void>)(cmd);
     }
 

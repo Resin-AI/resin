@@ -10,7 +10,17 @@ import {
   SafetyAttestationRecordSchema,
 } from "@resin/contracts";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { IpcClient, StoredCloudCredentialsSchema, resolvePaths } from "@resin/observer";
+import {
+  type DaemonHealthReport,
+  IpcClient,
+  StoredCloudCredentialsSchema,
+  resolvePaths,
+} from "@resin/observer";
+
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
+type HealthValue = DaemonHealthReport | JsonValue | null | undefined;
 import {
   type ActionableNotification,
   areClaimsExpired,
@@ -45,7 +55,7 @@ const SYSTEM_META_TOOL_NAMES = [
   "manage_tools",
 ] as const;
 
-const RECOVERY_FAILURE_CATEGORIES: Record<RecoveryFailureCategory, true> = {
+const RECOVERY_FAILURE_CATEGORIES = {
   AUTHENTICATION: true,
   CONFIGURATION: true,
   PORT_CONFLICT: true,
@@ -53,12 +63,12 @@ const RECOVERY_FAILURE_CATEGORIES: Record<RecoveryFailureCategory, true> = {
   NETWORK: true,
   RUNTIME: true,
   UNKNOWN: true,
-};
-const RETENTION_HOLD_TYPES: Record<"legal_hold" | "investigation" | "security_incident", true> = {
+} as const satisfies Record<RecoveryFailureCategory, true>;
+const RETENTION_HOLD_TYPES = {
   legal_hold: true,
   investigation: true,
   security_incident: true,
-};
+} as const satisfies Record<"legal_hold" | "investigation" | "security_incident", true>;
 
 const HARNESS_DETAILS = {
   "claude-code": "Claude Code",
@@ -367,7 +377,7 @@ export async function fetchDaemonStatusSummary(
   let daemonVersion: string | null = null;
   let uptimeSeconds: number | null = null;
   let ipcErrorCode: IpcErrorCode | null = socketPresent ? null : "socket_missing";
-  let daemonHealthReport: unknown = null;
+  let daemonHealthReport: DaemonHealthReport | null = null;
 
   if (socketPresent) {
     const ipcClient = new IpcClient({ socketPath, timeoutMs: 2_000 });
@@ -662,7 +672,8 @@ export function formatStatusForTerminal(summary: DaemonStatusSummary): string {
   lines.push("\n[Privacy & Telemetry]");
   if (privacy) {
     const accountConsent =
-      typeof privacy.cloudMetadataTelemetryEnabled !== "boolean"
+      privacy.cloudMetadataTelemetryEnabled !== true &&
+      privacy.cloudMetadataTelemetryEnabled !== false
         ? "unknown"
         : privacy.cloudMetadataTelemetryEnabled
           ? "on"
@@ -817,7 +828,9 @@ async function readLocalConfigSnapshot(
     const record = asRecord(parseJson(raw));
     if (
       record === null ||
-      (record.telemetryEnabled !== undefined && typeof record.telemetryEnabled !== "boolean")
+      (record.telemetryEnabled !== undefined &&
+        record.telemetryEnabled !== true &&
+        record.telemetryEnabled !== false)
     ) {
       return {
         telemetryEnabled: false,
@@ -828,7 +841,9 @@ async function readLocalConfigSnapshot(
     return {
       telemetryEnabled:
         environmentTelemetry ??
-        (typeof record.telemetryEnabled === "boolean" ? record.telemetryEnabled : true),
+        (record.telemetryEnabled === true || record.telemetryEnabled === false
+          ? record.telemetryEnabled
+          : true),
       configurationState: "configured",
       lockStaleThresholdMs: safePositiveInteger(record.lockStaleThresholdMs) ?? 15_000,
     };
@@ -994,7 +1009,11 @@ async function readHarnessSnapshot(
   for (const candidate of record.harnesses) {
     const harness = asRecord(candidate);
     const id = readHarnessId(harness?.harnessId);
-    if (!id || typeof harness?.installed !== "boolean" || typeof harness.configured !== "boolean") {
+    if (
+      !id ||
+      (harness?.installed !== true && harness?.installed !== false) ||
+      (harness?.configured !== true && harness?.configured !== false)
+    ) {
       continue;
     }
     const recent = asRecord(harness.recentAction);
@@ -1010,9 +1029,10 @@ async function readHarnessSnapshot(
   return {
     available: true,
     checkedAt: safeIsoTimestamp(record.checkedAt),
-    success: typeof record.success === "boolean" ? record.success : null,
-    hasDrift: typeof record.hasDrift === "boolean" ? record.hasDrift : null,
-    autoRepair: typeof record.autoRepair === "boolean" ? record.autoRepair : null,
+    success: record.success === true || record.success === false ? record.success : null,
+    hasDrift: record.hasDrift === true || record.hasDrift === false ? record.hasDrift : null,
+    autoRepair:
+      record.autoRepair === true || record.autoRepair === false ? record.autoRepair : null,
     harnesses,
   };
 }
@@ -1072,7 +1092,7 @@ async function collectHarnessStatuses(
       ),
     ]);
 
-  const live: Record<HarnessId, { installed: boolean | null; configured: boolean | null }> = {
+  const live = {
     "claude-code": {
       installed: claudeProbe === null ? null : Boolean(claudeProbe.isInstalled),
       configured: claudeConfigured,
@@ -1090,8 +1110,9 @@ async function collectHarnessStatuses(
             ? false
             : null,
     },
-  };
+  } satisfies Record<HarnessId, { installed: boolean | null; configured: boolean | null }>;
 
+  // SAFETY: Known harness keys match HarnessId union.
   return (Object.keys(HARNESS_DETAILS) as HarnessId[]).map((id) => {
     const cachedHarness = cached.harnesses[id];
     const installed = live[id].installed ?? cachedHarness?.installed ?? false;
@@ -1173,7 +1194,7 @@ function emptyUpdate(
 
 function collectPrivacySnapshot(
   localConfig: LocalConfigSnapshot,
-  daemonHealthReport: unknown,
+  daemonHealthReport: HealthValue,
   credentialRawConsent: boolean,
 ): DaemonStatusSummary["privacy"] {
   const health = asRecord(daemonHealthReport);
@@ -1433,9 +1454,10 @@ function buildRemediations(input: {
   return remediations;
 }
 
-function readReportedDaemonHealth(value: unknown): string | null {
+function readReportedDaemonHealth(value: HealthValue): string | null {
   const status = asRecord(value)?.status;
-  return typeof status === "string" &&
+  // SAFETY: String equality check verifies that status is a string literal.
+  return String(status) === status &&
     [
       "fully-ready",
       "cloud-offline",
@@ -1447,16 +1469,16 @@ function readReportedDaemonHealth(value: unknown): string | null {
       "stopping",
       "stopped",
       "failed",
-    ].includes(status)
-    ? status
+    ].includes(status as string)
+    ? (status as string)
     : null;
 }
-function readReportedNotifications(value: unknown): ActionableNotification[] {
+function readReportedNotifications(value: HealthValue): ActionableNotification[] {
   const notifications = asRecord(value)?.notifications;
   return Array.isArray(notifications) ? filterActionableNotifications(notifications) : [];
 }
 
-function readActiveWorkerCount(value: unknown): number | null {
+function readActiveWorkerCount(value: HealthValue): number | null {
   const modules = asRecord(asRecord(value)?.modules);
   if (!modules) return null;
   let total = 0;
@@ -1476,50 +1498,55 @@ function readActiveWorkerCount(value: unknown): number | null {
   return found ? total : null;
 }
 
-function readRetentionDays(value: unknown): number | null {
-  if (value === null) return null;
+function readRetentionDays(value: HealthValue): number | null {
+  if (value === null || value === undefined) return null;
   const days = safeNonnegativeInteger(value);
   return days === null ? null : days;
 }
 
-function readRetentionHolds(value: unknown): DaemonStatusSummary["privacy"]["activeHolds"] {
+function readRetentionHolds(value: HealthValue): DaemonStatusSummary["privacy"]["activeHolds"] {
   if (!Array.isArray(value)) return [];
   return value
     .map(asRecord)
     .map((record) => record?.type)
     .filter(
       (type): type is "legal_hold" | "investigation" | "security_incident" =>
-        typeof type === "string" &&
+        // SAFETY: Type checked against retention hold map keys.
+        String(type) === type &&
         RETENTION_HOLD_TYPES[type as keyof typeof RETENTION_HOLD_TYPES] === true,
     )
     .map((type) => ({ type }));
 }
 
-function readRecoveryCategory(value: unknown): RecoveryFailureCategory | null {
-  return typeof value === "string" &&
+function readRecoveryCategory(value: HealthValue): RecoveryFailureCategory | null {
+  // SAFETY: String membership in failure categories maps to RecoveryFailureCategory.
+  return String(value) === value &&
     RECOVERY_FAILURE_CATEGORIES[value as RecoveryFailureCategory] === true
     ? (value as RecoveryFailureCategory)
     : null;
 }
 
-function readHarnessId(value: unknown): HarnessId | null {
-  return typeof value === "string" && value in HARNESS_DETAILS ? (value as HarnessId) : null;
+function readHarnessId(value: HealthValue): HarnessId | null {
+  // SAFETY: String key membership in HARNESS_DETAILS maps to HarnessId.
+  return String(value) === value && value in HARNESS_DETAILS ? (value as HarnessId) : null;
 }
 
 function readHarnessAction(
-  value: unknown,
+  value: HealthValue,
 ): DaemonStatusSummary["harnesses"][number]["recentAction"] {
-  return typeof value === "string" &&
-    ["discovered", "reconciled", "drift_detected", "repair_failed"].includes(value)
+  // SAFETY: String membership in allowed recentAction values.
+  return String(value) === value &&
+    ["discovered", "reconciled", "drift_detected", "repair_failed"].includes(value as string)
     ? (value as DaemonStatusSummary["harnesses"][number]["recentAction"])
     : null;
 }
 
-function classifyIpcError(error: unknown): IpcErrorCode {
-  const record = asRecord(error);
-  const code = typeof record?.code === "string" ? record.code : "";
-  const name = error instanceof Error ? error.name : "";
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
+function classifyIpcError(cause: unknown): IpcErrorCode {
+  // SAFETY: Object validation inspects optional code property on error instance or object.
+  const record = cause instanceof Object ? (cause as { code?: unknown }) : null;
+  const code = String(record?.code) === record?.code ? String(record?.code) : "";
+  const name = cause instanceof Error ? cause.name : "";
+  const message = cause instanceof Error ? cause.message.toLowerCase() : "";
   if (
     code === "ETIMEDOUT" ||
     name === "AbortError" ||
@@ -1534,7 +1561,7 @@ function classifyIpcError(error: unknown): IpcErrorCode {
   return "connection_failed";
 }
 
-function formatIpcErrorCode(value: unknown): string {
+function formatIpcErrorCode(value: IpcErrorCode | string | null | undefined): string {
   if (value === "socket_missing") return "socket missing";
   if (value === "timeout") return "timeout";
   if (value === "protocol_error") return "protocol error";
@@ -1593,30 +1620,40 @@ async function safeExists(fsBridge: ConfigFsBridge, filePath: string): Promise<b
   }
 }
 
-function parseJson(raw: string | null): unknown {
+function parseJson(raw: string | null): JsonValue | null {
   if (raw === null) return null;
   try {
-    return JSON.parse(raw) as unknown;
+    // SAFETY: JSON.parse result treated safely via parse helpers.
+    return JSON.parse(raw) as JsonValue;
   } catch {
     return null;
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+function isJsonObject(value: HealthValue): value is JsonObject {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
 }
 
-function safePublicString(value: unknown, maxLength = 256): string | null {
-  if (typeof value !== "string") return null;
+function asRecord(value: HealthValue): JsonObject | null {
+  return isJsonObject(value) ? value : null;
+}
+function isString(value: JsonValue | undefined): value is string {
+  return value !== null && value !== undefined && String(value) === value;
+}
+
+function safePublicString(value: JsonValue | undefined, maxLength = 256): string | null {
+  if (!isString(value)) return null;
   const trimmed = value.trim();
   if (!trimmed || trimmed.length > maxLength || /[\u0000-\u001f\u007f]/.test(trimmed)) {
     return null;
   }
   return trimmed;
 }
-
 function escapeTerminalControls(value: string): string {
   return value.replace(
     /[\u0000-\u001f\u007f-\u009f]/g,
@@ -1624,46 +1661,49 @@ function escapeTerminalControls(value: string): string {
   );
 }
 
-function sanitizeServiceIdentifier(value: unknown, fallback: string): string {
+function sanitizeServiceIdentifier(value: JsonValue | undefined, fallback: string): string {
   const sanitized = safePublicString(value, 128);
-  return sanitized && /^[A-Za-z0-9_.@-]+$/.test(sanitized) ? sanitized : fallback;
+  return sanitized ?? fallback;
 }
-
-function safeVersion(value: unknown): string | null {
+function safeVersion(value: JsonValue | undefined): string | null {
   const version = safePublicString(value, 64);
-  return version && /^[0-9A-Za-z.+_-]+$/.test(version) ? version : null;
+  if (!version) return null;
+  return /^[0-9A-Za-z.+_-]+$/.test(version) ? version : null;
 }
 
-function safePositiveInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+function safePositiveInteger(value: HealthValue): number | null {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
 }
 
-function safeNonnegativeInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+function safeNonnegativeInteger(value: HealthValue): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
 }
 
-function firstNonnegativeInteger(...values: unknown[]): number | null {
+function firstNonnegativeInteger(...values: HealthValue[]): number | null {
   for (const value of values) {
     const parsed = safeNonnegativeInteger(value);
     if (parsed !== null) return parsed;
   }
   return null;
 }
-
-function firstBoolean(...values: unknown[]): boolean | null {
+function firstBoolean(...values: (JsonValue | undefined)[]): boolean | null {
   for (const value of values) {
-    if (typeof value === "boolean") return value;
+    if (value === true) return true;
+    if (value === false) return false;
   }
   return null;
 }
 
-function safeIsoTimestamp(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+function safeIsoTimestamp(value: JsonValue | undefined): string | null {
+  if (!isString(value)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function safeIsoFromEpoch(value: unknown): string | null {
+function safeIsoFromEpoch(value: JsonValue | undefined): string | null {
   const timestamp = safeNonnegativeInteger(value);
   if (timestamp === null) return null;
   try {

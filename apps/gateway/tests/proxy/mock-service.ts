@@ -83,7 +83,7 @@ export class MockCloudMcpService {
   private readonly deployments = new Map<string, DeploymentRecord>();
   private readonly toolHandlers = new Map<
     string,
-    (params: Record<string, unknown>, context: CloudInvocationContext) => Promise<CallToolResult>
+    (params: JsonRpcParams, context: CloudInvocationContext) => Promise<CallToolResult>
   >();
 
   private readonly invalidationListeners = new Set<(event: StreamCatalogInvalidation) => void>();
@@ -148,10 +148,7 @@ export class MockCloudMcpService {
   addTool(
     manifest: ToolManifest,
     deployment?: DeploymentRecord,
-    handler?: (
-      params: Record<string, unknown>,
-      context: CloudInvocationContext,
-    ) => Promise<CallToolResult>,
+    handler?: (params: JsonRpcParams, context: CloudInvocationContext) => Promise<CallToolResult>,
   ): void {
     const validated = ToolManifestSchema.parse(manifest);
     this.tools.set(validated.id, validated);
@@ -191,11 +188,17 @@ export class MockCloudMcpService {
       this.addTool(tool);
     }
   }
-
   createFetchHandler(): typeof fetch {
-    return (async (input: Request | URL | string, init?: RequestInit): Promise<Response> => {
+    const handler: typeof fetch = async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
       const urlStr =
-        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        Object.prototype.toString.call(input) === "[object String]"
+          ? String(input)
+          : input instanceof URL
+            ? input.href
+            : input.url;
       const url = new URL(urlStr);
 
       if (url.pathname.includes("/catalog/snapshot")) {
@@ -219,20 +222,16 @@ export class MockCloudMcpService {
             headers: { "Content-Type": "application/json" },
           });
         } catch (err: unknown) {
-          if (err instanceof ProtocolError) {
-            return new Response(
-              JSON.stringify({
-                error: err.code,
-                message: err.message,
-                details: err.details,
-              }),
-              {
-                status: err.status || 400,
-                headers: { "Content-Type": "application/json" },
-              },
-            );
-          }
-          throw err;
+          return new Response(
+            JSON.stringify({
+              error: "snapshot_failed",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+            {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         }
       }
 
@@ -240,7 +239,8 @@ export class MockCloudMcpService {
         status: 404,
         headers: { "Content-Type": "application/json" },
       });
-    }) as typeof fetch;
+    };
+    return handler;
   }
 
   // --- Invalidation Events ---
@@ -307,7 +307,7 @@ export class MockCloudMcpService {
 
   async handleToolInvocation(
     toolIdOrName: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     context: CloudInvocationContext,
   ): Promise<CallToolResult> {
     await this.applyFaultInjections(context.signal);

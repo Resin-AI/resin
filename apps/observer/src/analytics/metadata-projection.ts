@@ -1,6 +1,20 @@
 import {
+  type DiscoveredToolEntry,
+  type NormalizedBranchForkEvent,
+  type NormalizedCommandExecEvent,
+  type NormalizedCompactionEvent,
+  type NormalizedErrorEvent,
+  type NormalizedFileEditEvent,
+  type NormalizedMessageEvent,
+  type NormalizedModelReasoningEvent,
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
+  type NormalizedSessionLifecycleEvent,
+  type NormalizedSubagentLifecycleEvent,
+  type NormalizedToolCallEvent,
+  type NormalizedToolDiscoveryEvent,
+  type NormalizedToolResultEvent,
+  type NormalizedUnknownPassthroughEvent,
   type RedactionMeta,
   nowIso,
 } from "@resin/contracts";
@@ -15,245 +29,233 @@ import {
  * Operational fields (event identity, lifecycle transitions, tool/model names,
  * token/usage metrics, exit codes, durations) are strictly preserved.
  *
- * Redaction metadata is updated to mark `isRedacted: true` with strategy `"drop"`.
+ * Redaction metadata is enriched to reflect synthetic redaction across all stripped fields.
  */
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
-  validate = true,
+  options: { validate?: boolean } = {},
 ): NormalizedSessionEvent {
-  const existingRedactedFields = event.redaction?.redactedFields ?? [];
-  const newlyRedactedFields: string[] = [];
+  const { validate = false } = options;
 
-  const buildRedactionMeta = (fields: string[]): RedactionMeta => {
-    const combined = Array.from(new Set([...existingRedactedFields, ...fields]));
+  const buildRedaction = (fieldsToRedact: readonly string[]): RedactionMeta => {
+    const existingFields = event.redaction?.redactedFields ?? [];
+    const fieldsSet = new Set<string>(existingFields);
+    for (const field of fieldsToRedact) {
+      fieldsSet.add(field);
+    }
     return {
       isRedacted: true,
+      redactedFields: Array.from(fieldsSet).sort(),
       redactionStrategy: "drop",
-      redactedFields: combined.length > 0 ? combined : ["metadata_only_projection"],
       scrubbedPatterns: event.redaction?.scrubbedPatterns ?? [],
-      redactedAt: nowIso(),
+      redactedAt: event.redaction?.redactedAt || nowIso(),
     };
   };
 
-  const { eventId, schemaVersion, sessionId, timestamp, causalRef, providerUsage } = event;
-
-  const baseHeader = {
-    eventId,
-    schemaVersion,
-    sessionId,
-    timestamp,
-    causalRef,
-    ...(providerUsage ? { providerUsage } : {}),
+  const baseHeaders = {
+    eventId: event.eventId,
+    schemaVersion: event.schemaVersion,
+    sessionId: event.sessionId,
+    timestamp: event.timestamp,
+    causalRef: event.causalRef,
+    providerUsage: event.providerUsage,
   };
 
   let projected: NormalizedSessionEvent;
 
   switch (event.type) {
     case "message": {
-      newlyRedactedFields.push("content");
-      if (event.contentParts && event.contentParts.length > 0) {
-        newlyRedactedFields.push("contentParts");
-      }
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const msgEvent: NormalizedMessageEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["content", "contentParts"]),
         type: "message",
         role: event.role,
         content: "",
-        ...(event.model ? { model: event.model } : {}),
       };
+      if (event.model !== undefined) {
+        msgEvent.model = event.model;
+      }
+      projected = msgEvent;
       break;
     }
 
     case "model_reasoning": {
-      newlyRedactedFields.push("reasoningContent");
-      if (event.signature) {
-        newlyRedactedFields.push("signature");
-      }
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const reasonEvent: NormalizedModelReasoningEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["reasoningContent", "signature"]),
         type: "model_reasoning",
         reasoningContent: "",
-        ...(event.tokenCount !== undefined ? { tokenCount: event.tokenCount } : {}),
-        ...(event.model ? { model: event.model } : {}),
-        ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
       };
+      if (event.tokenCount !== undefined) reasonEvent.tokenCount = event.tokenCount;
+      if (event.model !== undefined) reasonEvent.model = event.model;
+      if (event.durationMs !== undefined) reasonEvent.durationMs = event.durationMs;
+      projected = reasonEvent;
       break;
     }
 
     case "tool_discovery": {
-      let hasDescription = false;
-      let hasInputSchema = false;
-      const sanitizedTools = event.tools.map((t) => {
-        if (t.description) hasDescription = true;
-        if (t.inputSchema && Object.keys(t.inputSchema).length > 0) hasInputSchema = true;
-        return {
+      const tools: DiscoveredToolEntry[] = event.tools.map((t) => {
+        const item: DiscoveredToolEntry = {
           name: t.name,
-          ...(t.provider ? { provider: t.provider } : {}),
         };
+        if (t.provider !== undefined) item.provider = t.provider;
+        return item;
       });
-      if (hasDescription) newlyRedactedFields.push("tools[].description");
-      if (hasInputSchema) newlyRedactedFields.push("tools[].inputSchema");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const discEvent: NormalizedToolDiscoveryEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["tools[].description", "tools[].inputSchema"]),
         type: "tool_discovery",
-        tools: sanitizedTools,
-        ...(event.provider ? { provider: event.provider } : {}),
-        source: event.source ?? "mcp",
+        tools,
+        source: event.source,
       };
+      if (event.provider !== undefined) discEvent.provider = event.provider;
+      projected = discEvent;
       break;
     }
 
     case "tool_call": {
-      newlyRedactedFields.push("parameters");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const callEvent: NormalizedToolCallEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["parameters"]),
         type: "tool_call",
         callId: event.callId,
         toolName: event.toolName,
         parameters: {},
-        ...(event.candidateRef ? { candidateRef: event.candidateRef } : {}),
-        isShadow: event.isShadow ?? false,
+        isShadow: event.isShadow,
       };
+      if (event.candidateRef !== undefined) callEvent.candidateRef = event.candidateRef;
+      projected = callEvent;
       break;
     }
 
     case "tool_result": {
-      newlyRedactedFields.push("result");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const resEvent: NormalizedToolResultEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["result"]),
         type: "tool_result",
         callId: event.callId,
         toolName: event.toolName,
+        result: undefined,
         isError: event.isError,
         executionDurationMs: event.executionDurationMs,
-        ...(event.outputSizeBytes !== undefined ? { outputSizeBytes: event.outputSizeBytes } : {}),
-        isShadow: event.isShadow ?? false,
+        isShadow: event.isShadow,
       };
+      if (event.outputSizeBytes !== undefined) resEvent.outputSizeBytes = event.outputSizeBytes;
+      projected = resEvent;
       break;
     }
 
     case "command_exec": {
-      newlyRedactedFields.push("command");
-      if (event.args && event.args.length > 0) newlyRedactedFields.push("args");
-      if (event.cwd) newlyRedactedFields.push("cwd");
-      if (event.stdout) newlyRedactedFields.push("stdout");
-      if (event.stderr) newlyRedactedFields.push("stderr");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const cmdEvent: NormalizedCommandExecEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["command", "args", "cwd", "stdout", "stderr"]),
         type: "command_exec",
         command: "",
         args: [],
         exitCode: event.exitCode,
         durationMs: event.durationMs,
       };
+      projected = cmdEvent;
       break;
     }
 
     case "file_edit": {
-      if (event.patch) newlyRedactedFields.push("patch");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const editEvent: NormalizedFileEditEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["patch"]),
         type: "file_edit",
         filePath: event.filePath,
         operation: event.operation,
-        ...(event.beforeHash ? { beforeHash: event.beforeHash } : {}),
-        ...(event.afterHash ? { afterHash: event.afterHash } : {}),
-        ...(event.diffStats ? { diffStats: event.diffStats } : {}),
       };
+      if (event.beforeHash !== undefined) editEvent.beforeHash = event.beforeHash;
+      if (event.afterHash !== undefined) editEvent.afterHash = event.afterHash;
+      if (event.diffStats !== undefined) editEvent.diffStats = event.diffStats;
+      projected = editEvent;
       break;
     }
 
     case "error": {
-      newlyRedactedFields.push("message");
-      if (event.stack) newlyRedactedFields.push("stack");
-      if (event.details && Object.keys(event.details).length > 0)
-        newlyRedactedFields.push("details");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const errEvent: NormalizedErrorEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["message", "stack", "details"]),
         type: "error",
         errorType: event.errorType,
         message: "",
         recoverable: event.recoverable,
       };
+      projected = errEvent;
       break;
     }
 
     case "compaction": {
-      if (event.preservedContextSummary) newlyRedactedFields.push("preservedContextSummary");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const compEvent: NormalizedCompactionEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["preservedContextSummary"]),
         type: "compaction",
         triggerReason: event.triggerReason,
         tokensBefore: event.tokensBefore,
         tokensAfter: event.tokensAfter,
       };
+      projected = compEvent;
       break;
     }
 
     case "branch_fork": {
-      if (event.forkReason) newlyRedactedFields.push("forkReason");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const forkEvent: NormalizedBranchForkEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["forkReason"]),
         type: "branch_fork",
         sourceSessionId: event.sourceSessionId,
         branchPointEventId: event.branchPointEventId,
-        ...(event.branchName ? { branchName: event.branchName } : {}),
       };
+      if (event.branchName !== undefined) forkEvent.branchName = event.branchName;
+      projected = forkEvent;
       break;
     }
 
     case "subagent_lifecycle": {
-      if (event.reason) newlyRedactedFields.push("reason");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const subagentEvent: NormalizedSubagentLifecycleEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["reason"]),
         type: "subagent_lifecycle",
         subagentId: event.subagentId,
         lifecycleType: event.lifecycleType,
-        ...(event.parentId ? { parentId: event.parentId } : {}),
-        ...(event.role ? { role: event.role } : {}),
       };
+      if (event.parentId !== undefined) subagentEvent.parentId = event.parentId;
+      if (event.role !== undefined) subagentEvent.role = event.role;
+      projected = subagentEvent;
       break;
     }
 
     case "session_lifecycle": {
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const lifeEvent: NormalizedSessionLifecycleEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction([]),
         type: "session_lifecycle",
         lifecycleType: event.lifecycleType,
-        ...(event.exitReason ? { exitReason: event.exitReason } : {}),
-        ...(event.harnessName ? { harnessName: event.harnessName } : {}),
-        ...(event.workspaceId ? { workspaceId: event.workspaceId } : {}),
       };
+      if (event.exitReason !== undefined) lifeEvent.exitReason = event.exitReason;
+      if (event.harnessName !== undefined) lifeEvent.harnessName = event.harnessName;
+      if (event.workspaceId !== undefined) lifeEvent.workspaceId = event.workspaceId;
+      projected = lifeEvent;
       break;
     }
 
     case "unknown_passthrough": {
-      newlyRedactedFields.push("rawPayload");
-      projected = {
-        ...baseHeader,
-        redaction: buildRedactionMeta(newlyRedactedFields),
+      const passEvent: NormalizedUnknownPassthroughEvent = {
+        ...baseHeaders,
+        redaction: buildRedaction(["rawPayload"]),
         type: "unknown_passthrough",
         rawEventType: event.rawEventType,
         rawPayload: {},
       };
+      projected = passEvent;
       break;
     }
 
     default: {
       const exhaustiveCheck: never = event;
-      throw new Error(`Unhandled event type: ${(exhaustiveCheck as NormalizedSessionEvent).type}`);
+      throw new Error(`Unhandled event type: ${String(exhaustiveCheck)}`);
     }
   }
 
@@ -262,3 +264,5 @@ export function projectEventToMetadataOnly(
   }
   return projected;
 }
+
+export { projectEventToMetadataOnly as projectEventMetadataOnly };

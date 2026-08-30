@@ -1,6 +1,9 @@
 import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
   type OpaqueSecretRef,
   type SecretMediationMode,
+  type SecretMetadataRecord,
   type SecretReference,
   createOpaqueSecretRef,
   createSecretReference,
@@ -14,6 +17,7 @@ export {
   type SecretReference,
   type OpaqueSecretRef,
   type SecretMediationMode,
+  type SecretMetadataRecord,
   createSecretReference,
   createOpaqueSecretRef,
   isSecretReference,
@@ -105,7 +109,7 @@ export interface SecretBrokerClient {
       workspaceId?: string;
       toolId?: string;
       expiresAt?: string;
-      metadata?: Record<string, unknown>;
+      metadata?: SecretMetadataRecord;
     },
   ): SecretReference;
 
@@ -133,8 +137,12 @@ export interface SecretBrokerClient {
 /**
  * Helper to build an opaque Bearer Authorization secret reference.
  */
+function isSecretRefObject(val: string | SecretReference): val is SecretReference {
+  return Object.prototype.toString.call(val) !== "[object String]";
+}
+
 export function bearerToken(nameOrRef: string | SecretReference): SecretReference {
-  if (isSecretReference(nameOrRef)) {
+  if (isSecretRefObject(nameOrRef)) {
     return nameOrRef;
   }
   return createSecretReference({
@@ -154,7 +162,7 @@ export function querySecret(nameOrRef: string | SecretReference): string {
  * Helper to build an opaque command stdin secret reference.
  */
 export function stdinSecret(nameOrRef: string | SecretReference): SecretReference {
-  if (isSecretReference(nameOrRef)) {
+  if (isSecretRefObject(nameOrRef)) {
     return nameOrRef;
   }
   return createSecretReference({
@@ -167,7 +175,7 @@ export function stdinSecret(nameOrRef: string | SecretReference): SecretReferenc
  * Helper to build an opaque environment variable secret reference.
  */
 export function envSecret(nameOrRef: string | SecretReference): SecretReference {
-  if (isSecretReference(nameOrRef)) {
+  if (isSecretRefObject(nameOrRef)) {
     return nameOrRef;
   }
   return createSecretReference({
@@ -190,10 +198,10 @@ export interface ToolBrokerClient {
  * Tool logger interface.
  */
 export interface ToolLogger {
-  debug(message: string, data?: unknown): Promise<void>;
-  info(message: string, data?: unknown): Promise<void>;
-  warn(message: string, data?: unknown): Promise<void>;
-  error(message: string, data?: unknown): Promise<void>;
+  debug(message: string, data?: CanonicalJsonValue): Promise<void>;
+  info(message: string, data?: CanonicalJsonValue): Promise<void>;
+  warn(message: string, data?: CanonicalJsonValue): Promise<void>;
+  error(message: string, data?: CanonicalJsonValue): Promise<void>;
 }
 
 /**
@@ -204,12 +212,12 @@ export interface ToolContext<TInput = unknown> {
   readonly invocationId: string;
   readonly workspaceRoot: string;
   readonly scratchDir: string;
-  readonly metadata?: Record<string, unknown>;
+  readonly metadata?: CanonicalJsonRecord;
   readonly progress: (percent: number, message?: string, stage?: string) => Promise<void>;
   readonly log: (
     level: "debug" | "info" | "warn" | "error",
     message: string,
-    data?: unknown,
+    data?: CanonicalJsonValue,
   ) => Promise<void>;
   readonly logger: ToolLogger;
   readonly broker: ToolBrokerClient;
@@ -239,13 +247,23 @@ export interface LegacyToolDefinition<TInput = unknown, TOutput = unknown> {
  * handler. Legacy descriptor objects are adapted at definition time so the
  * Deno bootstrap always receives one callable default export.
  */
+function isToolHandlerFunction<TInput, TOutput>(
+  value: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
+): value is ToolHandler<TInput, TOutput> {
+  const tag = Object.prototype.toString.call(value);
+  return tag === "[object Function]" || tag === "[object AsyncFunction]";
+}
+
 export function defineTool<TInput = unknown, TOutput = unknown>(
   handlerOrDefinition: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
 ): ToolHandler<TInput, TOutput> {
-  if (typeof handlerOrDefinition === "function") {
+  if (isToolHandlerFunction(handlerOrDefinition)) {
     return handlerOrDefinition;
   }
-  if (!handlerOrDefinition || typeof handlerOrDefinition.handler !== "function") {
+  if (
+    !handlerOrDefinition ||
+    Object.prototype.toString.call(handlerOrDefinition.handler) !== "[object Function]"
+  ) {
     throw new TypeError("defineTool requires a callable handler");
   }
   return (context: ToolContext<TInput>) => handlerOrDefinition.handler(context.input, context);
@@ -254,8 +272,8 @@ export function defineTool<TInput = unknown, TOutput = unknown>(
 export type BrokerRequestHandlerFn = (
   service: "fs" | "net" | "cmd" | "secret",
   action: string,
-  payload?: Record<string, unknown>,
-) => Promise<unknown>;
+  payload?: CanonicalJsonRecord,
+) => Promise<CanonicalJsonValue>;
 
 /**
  * Concrete implementation of ToolBrokerClient backed by a request handler function.
@@ -263,11 +281,12 @@ export type BrokerRequestHandlerFn = (
 export class DefaultToolBrokerClient implements ToolBrokerClient {
   constructor(private readonly handler: BrokerRequestHandlerFn) {}
 
-  private async request<T = unknown>(
+  private async request<T = CanonicalJsonValue>(
     service: "fs" | "net" | "cmd" | "secret",
     action: string,
-    payload: Record<string, unknown> = {},
+    payload: CanonicalJsonRecord = {},
   ): Promise<T> {
+    // SAFETY: Broker handler returns payload compatible with expected T.
     return (await this.handler(service, action, payload)) as T;
   }
 
@@ -280,7 +299,13 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
       return res.content;
     },
     writeFile: async (filePath: string, content: string | Uint8Array) => {
-      await this.request("fs", "writeFile", { path: filePath, content });
+      const isString = Object.prototype.toString.call(content) === "[object String]";
+      // SAFETY: Tag check confirms content is a string primitive.
+      const payloadContent = isString
+        ? (content as string)
+        : Buffer.from(content).toString("base64");
+      const encoding = isString ? "utf-8" : "base64";
+      await this.request("fs", "writeFile", { path: filePath, content: payloadContent, encoding });
     },
     exists: async (filePath: string) => {
       const res = await this.request<{ exists: boolean }>("fs", "exists", { path: filePath });
@@ -345,17 +370,18 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
         url: raw.finalUrl,
         redirected: raw.redirected,
         text: async () => raw.body,
-        json: async <T = unknown>() => JSON.parse(raw.body) as T,
+        // SAFETY: Parsed JSON response body conforms to caller requested type T.
+        json: async <T = CanonicalJsonValue>() => JSON.parse(raw.body) as T,
         arrayBuffer: async () => {
           const buf =
-            typeof Buffer !== "undefined"
-              ? Buffer.from(raw.body, "utf-8")
+            globalThis.Buffer !== undefined
+              ? globalThis.Buffer.from(raw.body, "utf-8")
               : new TextEncoder().encode(raw.body);
           return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         },
         bytes: async () => {
-          return typeof Buffer !== "undefined"
-            ? new Uint8Array(Buffer.from(raw.body, "utf-8"))
+          return globalThis.Buffer !== undefined
+            ? new Uint8Array(globalThis.Buffer.from(raw.body, "utf-8"))
             : new TextEncoder().encode(raw.body);
         },
       };
@@ -395,7 +421,7 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
         workspaceId?: string;
         toolId?: string;
         expiresAt?: string;
-        metadata?: Record<string, unknown>;
+        metadata?: SecretMetadataRecord;
       },
     ): SecretReference => {
       return createSecretReference({
@@ -431,16 +457,16 @@ export interface CreateToolContextOptions<TInput = unknown> {
   invocationId: string;
   workspaceRoot: string;
   scratchDir?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: CanonicalJsonRecord;
   onProgress?: (percent: number, message?: string, stage?: string) => void | Promise<void>;
   onLog?: (
     level: "debug" | "info" | "warn" | "error",
     message: string,
-    data?: unknown,
+    data?: CanonicalJsonValue,
   ) => void | Promise<void>;
   brokerHandler?: BrokerRequestHandlerFn;
   requestHandler?: BrokerRequestHandlerFn;
-  onMessage?: (type: WorkerMessageType, payload: unknown) => void;
+  onMessage?: (type: WorkerMessageType, payload: CanonicalJsonValue) => void;
 }
 
 /**
@@ -454,24 +480,33 @@ export function createToolContext<TInput = unknown>(
     scratchDir?: string;
     requestHandler?: BrokerRequestHandlerFn;
     brokerHandler?: BrokerRequestHandlerFn;
-    onMessage?: (type: WorkerMessageType, payload: unknown) => void;
+    onProgress?: (percent: number, message?: string, stage?: string) => void | Promise<void>;
+    onLog?: (
+      level: "debug" | "info" | "warn" | "error",
+      message: string,
+      data?: CanonicalJsonValue,
+    ) => void | Promise<void>;
+    onMessage?: (type: WorkerMessageType, payload: CanonicalJsonValue) => void;
   },
 ): ToolContext<TInput> {
+  // SAFETY: Object tag check confirms optionsOrInput is an object for property checks.
   const isOptionsObject =
     legacyOptions === undefined &&
-    optionsOrInput !== null &&
-    typeof optionsOrInput === "object" &&
-    "invocationId" in optionsOrInput &&
-    "workspaceRoot" in optionsOrInput;
-
+    Object.prototype.toString.call(optionsOrInput) === "[object Object]" &&
+    "invocationId" in (optionsOrInput as object) &&
+    "workspaceRoot" in (optionsOrInput as object);
+  // SAFETY: isOptionsObject tag check and key presence verify options shape.
   const options: CreateToolContextOptions<TInput> = isOptionsObject
     ? (optionsOrInput as CreateToolContextOptions<TInput>)
     : {
+        // SAFETY: Fallback branch treats optionsOrInput directly as TInput.
         input: optionsOrInput as TInput,
         invocationId: legacyOptions?.invocationId ?? "",
         workspaceRoot: legacyOptions?.workspaceRoot ?? process.cwd(),
         scratchDir: legacyOptions?.scratchDir,
         requestHandler: legacyOptions?.requestHandler ?? legacyOptions?.brokerHandler,
+        onProgress: legacyOptions?.onProgress,
+        onLog: legacyOptions?.onLog,
         onMessage: legacyOptions?.onMessage,
       };
 
@@ -493,7 +528,7 @@ export function createToolContext<TInput = unknown>(
   const logFn = async (
     level: "debug" | "info" | "warn" | "error",
     message: string,
-    data?: unknown,
+    data?: CanonicalJsonValue,
   ) => {
     if (options.onLog) {
       await options.onLog(level, message, data);

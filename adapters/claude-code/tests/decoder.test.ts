@@ -148,7 +148,7 @@ describe("Claude Code Transcript Decoder", () => {
     const reasoning = events.find((e) => e.type === "model_reasoning");
     expect(reasoning).toBeDefined();
     if (reasoning && reasoning.type === "model_reasoning") {
-      expect(reasoning.thought).toBe("I will check the build status first using Bash.");
+      expect(reasoning.reasoningText).toBe("I will check the build status first using Bash.");
       expect(reasoning.signature).toBe("sig_abc");
     }
 
@@ -197,7 +197,7 @@ describe("Claude Code Transcript Decoder", () => {
     expect(fileEdit).toBeDefined();
     if (fileEdit && fileEdit.type === "file_edit") {
       expect(fileEdit.filePath).toBe("src/index.ts");
-      expect(fileEdit.editType).toBe("modify");
+      expect(fileEdit.operation).toBe("update");
       expect(fileEdit.diff).toContain("-const a = 1;");
       expect(fileEdit.diff).toContain("+const a = 2;");
     }
@@ -233,7 +233,7 @@ describe("Claude Code Transcript Decoder", () => {
     expect(errorEvents).toHaveLength(1);
     expect(errorEvents[0].type).toBe("error");
     if (errorEvents[0].type === "error") {
-      expect(errorEvents[0].errorCode).toBe("API_TIMEOUT");
+      expect(errorEvents[0].errorType).toBe("API_TIMEOUT");
       expect(errorEvents[0].message).toBe("Gateway connection timed out");
       expect(errorEvents[0].fatal).toBe(true);
     }
@@ -328,9 +328,11 @@ describe("Claude Code Transcript Decoder", () => {
       expect(events).toHaveLength(1);
       expect(events[0].type).toBe("message");
 
-      const messageEvent = events[0] as Record<string, unknown>;
-      expect(messageEvent.providerUsage).toBeDefined();
-      const usage = messageEvent.providerUsage as Record<string, unknown>;
+      const messageEvent = events[0];
+      expect(messageEvent.type).toBe("message");
+      const usage = messageEvent.type === "message" ? messageEvent.providerUsage : undefined;
+      expect(usage).toBeDefined();
+      if (!usage) throw new Error("Expected providerUsage");
 
       expect(usage.provider).toBe(CLAUDE_PROVIDER);
       expect(usage.model).toBe("claude-3-7-sonnet");
@@ -364,9 +366,11 @@ describe("Claude Code Transcript Decoder", () => {
       const events = decodeClaudeTranscriptLine(rawRecord, sessionId, 2);
       expect(events).toHaveLength(1);
 
-      const messageEvent = events[0] as Record<string, unknown>;
-      expect(messageEvent.providerUsage).toBeDefined();
-      const usage = messageEvent.providerUsage as Record<string, unknown>;
+      const messageEvent = events[0];
+      expect(messageEvent.type).toBe("message");
+      const usage = messageEvent.type === "message" ? messageEvent.providerUsage : undefined;
+      expect(usage).toBeDefined();
+      if (!usage) throw new Error("Expected providerUsage");
 
       expect(usage.provider).toBe("anthropic");
       expect(usage.model).toBe("claude-3-5-sonnet");
@@ -391,8 +395,10 @@ describe("Claude Code Transcript Decoder", () => {
 
       const events = decodeClaudeTranscriptLine(rawRecord, sessionId, 3);
       expect(events).toHaveLength(1);
-      const messageEvent = events[0] as Record<string, unknown>;
-      expect(messageEvent.providerUsage).toBeUndefined();
+      const messageEvent = events[0];
+      expect(
+        messageEvent.type === "message" ? messageEvent.providerUsage : undefined,
+      ).toBeUndefined();
     });
 
     it("handles malformed usage objects safely without crashing or attaching invalid metrics", () => {
@@ -403,7 +409,7 @@ describe("Claude Code Transcript Decoder", () => {
         usage: "1500 tokens used",
       };
       const events1 = decodeClaudeTranscriptLine(stringUsageRecord, sessionId, 4);
-      expect((events1[0] as Record<string, unknown>).providerUsage).toBeUndefined();
+      expect(events1[0].type === "message" ? events1[0].providerUsage : undefined).toBeUndefined();
 
       // Null usage
       const nullUsageRecord = {
@@ -412,7 +418,7 @@ describe("Claude Code Transcript Decoder", () => {
         usage: null,
       };
       const events2 = decodeClaudeTranscriptLine(nullUsageRecord, sessionId, 5);
-      expect((events2[0] as Record<string, unknown>).providerUsage).toBeUndefined();
+      expect(events2[0].type === "message" ? events2[0].providerUsage : undefined).toBeUndefined();
 
       // Negative numbers
       const negativeUsageRecord = {
@@ -421,7 +427,7 @@ describe("Claude Code Transcript Decoder", () => {
         usage: { input_tokens: -100, output_tokens: -50 },
       };
       const events3 = decodeClaudeTranscriptLine(negativeUsageRecord, sessionId, 6);
-      expect((events3[0] as Record<string, unknown>).providerUsage).toBeUndefined();
+      expect(events3[0].type === "message" ? events3[0].providerUsage : undefined).toBeUndefined();
 
       // Non-numeric garbage
       const garbageUsageRecord = {
@@ -430,7 +436,7 @@ describe("Claude Code Transcript Decoder", () => {
         usage: { input_tokens: "garbage", output_tokens: {} },
       };
       const events4 = decodeClaudeTranscriptLine(garbageUsageRecord, sessionId, 7);
-      expect((events4[0] as Record<string, unknown>).providerUsage).toBeUndefined();
+      expect(events4[0].type === "message" ? events4[0].providerUsage : undefined).toBeUndefined();
 
       // Partial valid fields with invalid ones
       const mixedUsageRecord = {
@@ -439,10 +445,8 @@ describe("Claude Code Transcript Decoder", () => {
         usage: { input_tokens: 500, output_tokens: -20 },
       };
       const events5 = decodeClaudeTranscriptLine(mixedUsageRecord, sessionId, 8);
-      const usage5 = (events5[0] as Record<string, unknown>).providerUsage as Record<
-        string,
-        unknown
-      >;
+      const message5 = events5[0];
+      const usage5 = message5.type === "message" ? message5.providerUsage : undefined;
       expect(usage5).toBeDefined();
       expect(usage5.inputTokens).toBe(500);
       expect(usage5.outputTokens).toBeUndefined();
@@ -464,8 +468,11 @@ describe("Claude Code Transcript Decoder", () => {
       };
 
       const events = decodeClaudeTranscriptLine(cacheRecord, sessionId, 9);
-      const messageEvent = events[0] as Record<string, unknown>;
-      const usage = messageEvent.providerUsage as Record<string, unknown>;
+      const messageEvent = events[0];
+      expect(messageEvent.type).toBe("message");
+      const usage = messageEvent.type === "message" ? messageEvent.providerUsage : undefined;
+      expect(usage).toBeDefined();
+      if (!usage) throw new Error("Expected providerUsage");
 
       expect(usage).toBeDefined();
       expect(usage.cachedInputTokens).toBe(400); // Exact cache-read only
@@ -496,8 +503,11 @@ describe("Claude Code Transcript Decoder", () => {
       };
 
       const events = decodeClaudeTranscriptLine(sensitiveRecord, sessionId, 10);
-      const messageEvent = events[0] as Record<string, unknown>;
-      const usage = messageEvent.providerUsage as Record<string, unknown>;
+      const messageEvent = events[0];
+      expect(messageEvent.type).toBe("message");
+      const usage = messageEvent.type === "message" ? messageEvent.providerUsage : undefined;
+      expect(usage).toBeDefined();
+      if (!usage) throw new Error("Expected providerUsage");
 
       expect(usage).toBeDefined();
       const usageJson = JSON.stringify(usage);
@@ -508,7 +518,7 @@ describe("Claude Code Transcript Decoder", () => {
       expect(usageJson).not.toContain("shadow");
       expect(usageJson).not.toContain("prompt");
 
-      const allowedKeys: Record<string, true> = {
+      const allowedKeys = {
         provider: true,
         model: true,
         accountingVersion: true,
@@ -520,7 +530,7 @@ describe("Claude Code Transcript Decoder", () => {
         totalTokens: true,
         costMicroUsd: true,
         durationMs: true,
-      };
+      } satisfies Record<string, true>;
 
       for (const key of Object.keys(usage)) {
         expect(allowedKeys[key]).toBe(true);
@@ -570,16 +580,16 @@ describe("Claude Code Transcript Decoder", () => {
 
       // message event receives providerUsage
       expect(messageEvents).toHaveLength(1);
-      expect((messageEvents[0] as Record<string, unknown>).providerUsage).toBeDefined();
+      expect(messageEvents[0].type === "message" && messageEvents[0].providerUsage).toBeDefined();
 
       // synthetic command_exec MUST NOT have providerUsage
       for (const cmd of commandExecEvents) {
-        expect((cmd as Record<string, unknown>).providerUsage).toBeUndefined();
+        expect("providerUsage" in cmd && cmd.providerUsage).toBeFalsy();
       }
 
       // synthetic file_edit MUST NOT have providerUsage
       for (const edit of fileEditEvents) {
-        expect((edit as Record<string, unknown>).providerUsage).toBeUndefined();
+        expect("providerUsage" in edit && edit.providerUsage).toBeFalsy();
       }
     });
 
@@ -594,8 +604,11 @@ describe("Claude Code Transcript Decoder", () => {
       };
 
       const events = decodeClaudeTranscriptLine(unavailableRecord, sessionId, 12);
-      const messageEvent = events[0] as Record<string, unknown>;
-      const usage = messageEvent.providerUsage as Record<string, unknown>;
+      const messageEvent = events[0];
+      expect(messageEvent.type).toBe("message");
+      const usage = messageEvent.type === "message" ? messageEvent.providerUsage : undefined;
+      expect(usage).toBeDefined();
+      if (!usage) throw new Error("Expected providerUsage");
 
       expect(usage).toBeDefined();
       expect(usage.provider).toBe("anthropic");

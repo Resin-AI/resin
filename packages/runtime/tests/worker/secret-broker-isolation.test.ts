@@ -10,7 +10,7 @@ import {
   NetworkBroker,
   SecretBroker,
 } from "../../src/brokers/index.js";
-import { createInvocationGrant } from "../../src/policy/grant.js";
+import { type CreateInvocationGrantParams, createInvocationGrant } from "../../src/policy/grant.js";
 import { ToolRuntime } from "../../src/worker/runner.js";
 import { type ToolContext, bearerToken, defineTool } from "../../src/worker/sdk.js";
 
@@ -60,7 +60,7 @@ describe("Worker Secret Broker Isolation & Trusted Mediation Integration", () =>
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
-        serverPort = typeof addr === "object" && addr ? addr.port : 0;
+        serverPort = addr && "port" in addr ? addr.port : 0;
         serverUrl = `http://127.0.0.1:${serverPort}`;
         resolve();
       });
@@ -115,7 +115,7 @@ describe("Worker Secret Broker Isolation & Trusted Mediation Integration", () =>
     });
   });
 
-  const createGrant = (overrides: Record<string, unknown> = {}) => {
+  const createGrant = (overrides: Partial<CreateInvocationGrantParams> = {}) => {
     return createInvocationGrant({
       grantId: "grant_worker_iso_001",
       invocationId: "inv_worker_iso_001",
@@ -265,14 +265,13 @@ describe("Worker Secret Broker Isolation & Trusted Mediation Integration", () =>
     );
 
     expect(result.status).toBe("success");
-    const output = result.output as {
-      itemsCount: number;
-      authenticatedAs: string;
-      tokenRefHandle: string;
-    };
-    expect(output.itemsCount).toBe(3);
-    expect(output.authenticatedAs).toBe("worker-client");
-    expect(output.tokenRefHandle).toBeDefined();
+    expect(result.output).toEqual(
+      expect.objectContaining({
+        itemsCount: 3,
+        authenticatedAs: "worker-client",
+        tokenRefHandle: expect.stringMatching(/^sec_ref_/),
+      }),
+    );
 
     // Verify synthetic server received the real Bearer token
     expect(serverAuthHeader).toBe(`Bearer ${TEST_SECRET_VAL}`);
@@ -331,9 +330,10 @@ describe("Worker Secret Broker Isolation & Trusted Mediation Integration", () =>
     }
 
     expect(result.status).toBe("success");
-    const output = result.output as { exitCode: number; stdout: string };
-    expect(output.exitCode).toBe(0);
-    expect(output.stdout).toBe(`ENV_LEN:${TEST_DB_SECRET.length}`);
+    expect(result.output).toEqual({
+      exitCode: 0,
+      stdout: `ENV_LEN:${TEST_DB_SECRET.length}`,
+    });
     expect(JSON.stringify(result)).not.toContain(TEST_DB_SECRET);
   });
 

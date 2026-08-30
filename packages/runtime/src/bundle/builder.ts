@@ -45,7 +45,7 @@ export interface BuildToolBundleOptions {
   sourceDir?: string;
   entrypoint?: string;
   testsPath?: string;
-  packageJson?: Record<string, unknown> | string;
+  packageJson?: ToolBundleSpec["packageJson"] | string;
   format?: BundleFormat;
   signOptions?: SignBundleOptions;
   createdAt?: string;
@@ -156,7 +156,12 @@ function createTarHeader(filePath: string, size: number, typeflag = "0", mode = 
 /**
  * Creates GNU @LongLink tar entry for paths exceeding ustar header limit.
  */
-function createGnuLongLink(filePath: string): { header: Buffer; body: Buffer } {
+export interface GnuLongLinkEntry {
+  header: Buffer;
+  body: Buffer;
+}
+
+function createGnuLongLink(filePath: string): GnuLongLinkEntry {
   const pathBuf = Buffer.from(filePath, "utf8");
   // Null-terminated path body
   const bodyBuf = Buffer.concat([pathBuf, Buffer.from([0])]);
@@ -176,20 +181,21 @@ function createGnuLongLink(filePath: string): { header: Buffer; body: Buffer } {
  * 2. mtime is normalized to 0.
  * 3. uid and gid are normalized to 0.
  * 4. File modes are normalized to 0o644 (or 0o755 if executable).
- * 5. Two 512-byte zero blocks terminate the archive.
  */
-export function encodeDeterministicTar(files: BundleFileInput[]): {
+export interface DeterministicTarResult {
   archive: Buffer;
   fileDigests: Record<string, string>;
   fileEntries: BundleFileEntry[];
-} {
+}
+
+export function encodeDeterministicTar(files: BundleFileInput[]): DeterministicTarResult {
   // Sort files strictly by lexicographical path order (UTF-8 code unit / code point comparison)
   const sortedFiles = [...files]
     .map((f) => {
       const isExec = Boolean(f.executable || (f.mode && (f.mode & 0o111) !== 0));
       return {
         path: normalizeTarPath(f.path),
-        content: typeof f.content === "string" ? Buffer.from(f.content, "utf8") : f.content,
+        content: Buffer.isBuffer(f.content) ? f.content : Buffer.from(f.content, "utf8"),
         mode: isExec ? 0o755 : 0o644,
         executable: isExec,
       };
@@ -377,10 +383,12 @@ export async function buildToolBundle(options: BuildToolBundleOptions): Promise<
 
   // Ensure package.json is present
   if (options.packageJson && !fileMap.has(BUNDLE_FILE_PACKAGE)) {
+    const pkg = options.packageJson;
+    // SAFETY: Object tag check confirms package.json is a raw JSON string.
     const pkgContent =
-      typeof options.packageJson === "string"
-        ? options.packageJson
-        : canonicalJson(options.packageJson);
+      Object.prototype.toString.call(pkg) === "[object String]"
+        ? (pkg as string)
+        : canonicalJson(pkg);
     fileMap.set(BUNDLE_FILE_PACKAGE, {
       path: BUNDLE_FILE_PACKAGE,
       content: pkgContent,
@@ -402,10 +410,16 @@ export async function buildToolBundle(options: BuildToolBundleOptions): Promise<
   // Ensure qualification.json is present if provided
   const qualificationInput = options.qualification ?? options.qualificationBundle;
   if (qualificationInput) {
-    const qualContent =
-      typeof qualificationInput === "string" || Buffer.isBuffer(qualificationInput)
-        ? qualificationInput
-        : canonicalJson(qualificationInput);
+    const qual = qualificationInput;
+    let qualContent: string | Buffer;
+    if (Buffer.isBuffer(qual)) {
+      qualContent = qual;
+    } else if (Object.prototype.toString.call(qual) === "[object String]") {
+      // SAFETY: Object tag check confirms qualification bundle is a serialized string.
+      qualContent = qual as string;
+    } else {
+      qualContent = canonicalJson(qual);
+    }
     fileMap.set(BUNDLE_FILE_QUALIFICATION, {
       path: BUNDLE_FILE_QUALIFICATION,
       content: qualContent,
@@ -450,7 +464,12 @@ export async function buildToolBundle(options: BuildToolBundleOptions): Promise<
     entrypoint: options.entrypoint ?? BUNDLE_FILE_ENTRYPOINT_TS,
     testsPath:
       options.testsPath ?? (fileMap.has(BUNDLE_FILE_TESTS_TS) ? BUNDLE_FILE_TESTS_TS : undefined),
-    packageJson: typeof options.packageJson === "object" ? options.packageJson : undefined,
+    // SAFETY: Object tag check confirms packageJson is a parsed record object.
+    packageJson:
+      options.packageJson &&
+      Object.prototype.toString.call(options.packageJson) === "[object Object]"
+        ? (options.packageJson as ToolBundleSpec["packageJson"])
+        : undefined,
     files: fileEntries,
     bundleDigest: finalBundleDigest,
     signature: signatureData,
@@ -461,9 +480,10 @@ export async function buildToolBundle(options: BuildToolBundleOptions): Promise<
   const qualFile = fileMap.get(BUNDLE_FILE_QUALIFICATION);
   if (qualFile) {
     try {
-      parsedQualification = JSON.parse(
-        typeof qualFile.content === "string" ? qualFile.content : qualFile.content.toString("utf8"),
-      );
+      const rawQual = Buffer.isBuffer(qualFile.content)
+        ? qualFile.content.toString("utf8")
+        : qualFile.content;
+      parsedQualification = JSON.parse(rawQual);
     } catch {
       parsedQualification = undefined;
     }

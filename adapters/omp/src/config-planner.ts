@@ -4,6 +4,7 @@ import {
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMutationPlan,
+  DEFAULT_RESIN_GATEWAY_URL,
   type HarnessWorkspace,
   NodeConfigFsBridge,
   applyConfigMutation,
@@ -29,19 +30,45 @@ export interface PlanOmpMcpConfigOptions {
   customConfigPath?: string;
   fsBridge?: ConfigFsBridge;
   serverName?: string;
-  serverType?: "stdio" | "sse" | "http";
-  type?: "stdio" | "sse" | "http" | string;
+  serverType?: "stdio" | "sse" | "http" | "websocket";
+  type?: "stdio" | "sse" | "http" | "websocket";
   url?: string;
 }
 
 export interface VerifyOmpMcpConfigOptions {
   workspace?: HarnessWorkspace;
   gatewayUrl?: string;
+  expectedUrl?: string;
   command?: string;
+  expectedCommand?: string;
   fsBridge?: ConfigFsBridge;
   customConfigPath?: string;
   ompHome?: string;
   serverName?: string;
+}
+
+export interface OmpMcpServerConfig {
+  type?: "sse" | "stdio" | "websocket" | "http";
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  transport?: string;
+  [key: string]: string | number | boolean | null | undefined | string[] | Record<string, string>;
+}
+
+export interface OmpConfigDoc {
+  $schema?: string;
+  mcpServers?: Record<string, OmpMcpServerConfig>;
+  [key: string]:
+    | string
+    | number
+    | boolean
+    | null
+    | undefined
+    | string[]
+    | Record<string, OmpMcpServerConfig>
+    | Record<string, string>;
 }
 
 /**
@@ -86,59 +113,71 @@ export async function planOmpMcpConfig(
   const serverName = options.serverName ?? DEFAULT_GATEWAY_SERVER_NAME;
   const currentContent = await fsBridge.readFile(targetPath);
 
-  let currentConfig: Record<string, unknown> = {};
-  if (currentContent !== null && currentContent.trim().length > 0) {
+  let currentConfig: OmpConfigDoc = {};
+  if (currentContent && currentContent.trim().length > 0) {
     try {
-      currentConfig = JSON.parse(currentContent) as Record<string, unknown>;
+      const parsed = JSON.parse(currentContent);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        // SAFETY: Parsed JSON represents an OMP configuration document preserving existing fields.
+        currentConfig = parsed as OmpConfigDoc;
+      }
     } catch {
       currentConfig = {};
     }
   }
 
-  // Preserve existing mcpServers, $schema, extensions, tools, settings, etc.
-  const existingMcpServers =
-    typeof currentConfig.mcpServers === "object" && currentConfig.mcpServers !== null
-      ? { ...(currentConfig.mcpServers as Record<string, unknown>) }
+  const existingServers: Record<string, OmpMcpServerConfig> =
+    currentConfig.mcpServers &&
+    currentConfig.mcpServers instanceof Object &&
+    !Array.isArray(currentConfig.mcpServers)
+      ? { ...currentConfig.mcpServers }
       : {};
 
   const explicitType = options.serverType ?? options.type;
-  let serverEntry: Record<string, unknown>;
+  let serverEntry: OmpMcpServerConfig;
 
   if (options.command !== undefined) {
     serverEntry = {
       type: explicitType ?? "stdio",
       command: options.command,
       args: options.args ?? [],
-      ...(options.env !== undefined ? { env: options.env } : {}),
-      ...(options.gatewayUrl !== undefined ? { url: options.gatewayUrl } : {}),
-      ...(options.url !== undefined ? { url: options.url } : {}),
     };
+    if (options.env !== undefined) {
+      serverEntry.env = options.env;
+    }
+    if (options.gatewayUrl !== undefined) {
+      serverEntry.url = options.gatewayUrl;
+    }
+    if (options.url !== undefined) {
+      serverEntry.url = options.url;
+    }
   } else if (options.gatewayUrl !== undefined || options.url !== undefined) {
     serverEntry = {
       type: explicitType ?? "sse",
       url: options.gatewayUrl ?? options.url,
-      ...(options.args !== undefined ? { args: options.args } : {}),
-      ...(options.env !== undefined ? { env: options.env } : {}),
     };
+    if (options.env !== undefined) {
+      serverEntry.env = options.env;
+    }
   } else {
     serverEntry = {
-      type: explicitType ?? "stdio",
-      ...(options.args !== undefined ? { args: options.args } : {}),
-      ...(options.env !== undefined ? { env: options.env } : {}),
+      type: explicitType ?? "sse",
+      url: DEFAULT_RESIN_GATEWAY_URL,
     };
+    if (options.env !== undefined) {
+      serverEntry.env = options.env;
+    }
   }
-
-  const updatedMcpServers = migrateJsonMcpServers(
-    existingMcpServers,
+  const updatedServers = migrateJsonMcpServers(
+    existingServers,
     serverEntry,
-    options.gatewayUrl ?? options.url,
+    options.gatewayUrl,
     serverName,
   );
 
-  const updatedConfig: Record<string, unknown> = {
-    ...(currentConfig.$schema !== undefined ? { $schema: currentConfig.$schema } : {}),
+  const updatedConfig: OmpConfigDoc = {
     ...currentConfig,
-    mcpServers: updatedMcpServers,
+    mcpServers: updatedServers,
   };
 
   const plannedContent = `${JSON.stringify(updatedConfig, null, 2)}\n`;
@@ -173,10 +212,17 @@ export async function verifyOmpMcpConfig(
   optionsOrWorkspace: VerifyOmpMcpConfigOptions | HarnessWorkspace,
   options?: VerifyOmpMcpConfigOptions,
 ): Promise<boolean> {
-  const mergedOptions: VerifyOmpMcpConfigOptions =
-    "workspaceId" in optionsOrWorkspace
-      ? { workspace: optionsOrWorkspace as HarnessWorkspace, ...options }
-      : optionsOrWorkspace;
+  let mergedOptions: VerifyOmpMcpConfigOptions;
+  if ("workspaceId" in optionsOrWorkspace || "harnessId" in optionsOrWorkspace) {
+    mergedOptions = {
+      // SAFETY: optionsOrWorkspace has workspaceId or harnessId confirming it is a HarnessWorkspace.
+      workspace: optionsOrWorkspace as HarnessWorkspace,
+      ...options,
+    };
+  } else {
+    // SAFETY: optionsOrWorkspace without workspaceId/harnessId is already a VerifyOmpMcpConfigOptions.
+    mergedOptions = optionsOrWorkspace as VerifyOmpMcpConfigOptions;
+  }
 
   const bridge = mergedOptions.fsBridge ?? new NodeConfigFsBridge();
   const targetPath = resolveOmpConfigPath(mergedOptions.workspace, {
@@ -185,30 +231,47 @@ export async function verifyOmpMcpConfig(
   });
 
   const content = await bridge.readFile(targetPath);
-  if (content === null) {
-    return false;
-  }
+  if (!content) return false;
 
   try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    const mcpServers = parsed.mcpServers as Record<string, unknown> | undefined;
-    if (!mcpServers || typeof mcpServers !== "object") {
+    const parsedObj = JSON.parse(content);
+    if (
+      !parsedObj ||
+      Object.prototype.toString.call(parsedObj) !== "[object Object]" ||
+      Array.isArray(parsedObj)
+    ) {
+      return false;
+    }
+    // SAFETY: Parsed JSON document represents an OMP config containing mcpServers.
+    const parsed = parsedObj as OmpConfigDoc;
+    const mcpServers = parsed.mcpServers;
+    if (
+      !mcpServers ||
+      Object.prototype.toString.call(mcpServers) !== "[object Object]" ||
+      Array.isArray(mcpServers)
+    ) {
       return false;
     }
 
     const serverName = mergedOptions.serverName ?? DEFAULT_GATEWAY_SERVER_NAME;
-    const serverEntry = mcpServers[serverName] as Record<string, unknown> | undefined;
-    if (!serverEntry || typeof serverEntry !== "object") {
+    const entry = mcpServers[serverName];
+    if (
+      !entry ||
+      Object.prototype.toString.call(entry) !== "[object Object]" ||
+      Array.isArray(entry)
+    ) {
       return false;
     }
 
-    if (mergedOptions.gatewayUrl) {
-      const entryUrl = serverEntry.url ?? serverEntry.endpoint;
-      return entryUrl === mergedOptions.gatewayUrl;
+    const expectedUrl = mergedOptions.expectedUrl ?? mergedOptions.gatewayUrl;
+    const expectedCommand = mergedOptions.expectedCommand ?? mergedOptions.command;
+
+    if (expectedUrl !== undefined && entry.url !== expectedUrl) {
+      return false;
     }
 
-    if (mergedOptions.command) {
-      return serverEntry.command === mergedOptions.command;
+    if (expectedCommand !== undefined && entry.command !== expectedCommand) {
+      return false;
     }
 
     return true;

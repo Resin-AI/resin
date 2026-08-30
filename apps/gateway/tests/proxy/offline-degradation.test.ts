@@ -143,7 +143,7 @@ async function seedCachedArtifact(
   await fs.promises.mkdir(path.join(staging, "src"), { recursive: true });
   await fs.promises.writeFile(path.join(staging, "src/index.js"), content);
   await fs.promises.writeFile(path.join(staging, "manifest.json"), JSON.stringify(manifest ?? {}));
-  const size = typeof content === "string" ? Buffer.byteLength(content) : content.length;
+  const size = Buffer.isBuffer(content) ? content.length : Buffer.byteLength(content);
   await artifactCache.commitStagingDirectory(staging, digest, {
     digest,
     extractedAt: new Date().toISOString(),

@@ -84,12 +84,13 @@ function privacySettings(metadataTelemetryEnabled: boolean, rawTranscriptUploadE
     metadataTelemetryEnabled,
     rawTranscriptUploadEnabled,
     retentionDays: 30,
+    // SAFETY: Typed activeHolds array for test setup.
     activeHolds: [] as Array<{ type: "legal_hold" }>,
     updatedAt: "2026-08-28T00:00:00.000Z",
   };
 }
 
-function jsonResponse(value: unknown, status = 200): Response {
+function jsonResponse(value: Parameters<typeof JSON.stringify>[0], status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -453,6 +454,7 @@ describe("cloud export and deletion", () => {
     expect(stdout.text()).not.toContain("signed_secret");
     expect(stderr.text()).toBe("");
 
+    // SAFETY: Vitest mock call tuple extraction.
     const [url, init] = customFetch.mock.calls[0] as [URL, RequestInit];
     expect(url.toString()).toBe("https://cloud.resin.test/api/user/data/export");
     expect(init.method).toBe("POST");
@@ -626,7 +628,8 @@ describe("cloud export and deletion", () => {
     try {
       const pendingCommand = privacyCommand(["delete"], {
         home,
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch signature for test.
+        customFetch: customFetch as typeof fetch,
         loadCredentials: async () => createCredentials(),
         confirmDeletion,
         stdinIsTTY: true,
@@ -670,11 +673,12 @@ describe("cloud export and deletion", () => {
       "ordinary",
     );
     const elevatedToken = createScopedToken(["privacy:delete"], "elevated");
-    const scopesByToken: Record<string, readonly string[]> = {
+    const scopesByToken = {
       [ordinaryToken]: ["device:connect", "observations:write", "privacy:read", "privacy:write"],
       [elevatedToken]: ["privacy:delete"],
     };
     const scopeFetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      // SAFETY: Cast headers to inspect Authorization header in test mock.
       const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
       const token = authorization?.replace(/^Bearer /, "") ?? "";
       const scopes = scopesByToken[token] ?? [];
@@ -695,7 +699,8 @@ describe("cloud export and deletion", () => {
 
     const status = await collectPrivacyStatus({
       home,
-      customFetch: scopeFetch as unknown as typeof fetch,
+      // SAFETY: Mock fetch matching fetch signature for test.
+      customFetch: scopeFetch as typeof fetch,
       loadCredentials,
     });
     expect(status.cloud).toMatchObject({ paired: true, available: true });
@@ -705,7 +710,8 @@ describe("cloud export and deletion", () => {
       await privacyCommand(["delete", "--confirm", "--json"], {
         home,
         env: {},
-        customFetch: scopeFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch signature for test.
+        customFetch: scopeFetch as typeof fetch,
         loadCredentials,
         stdinIsTTY: false,
         stdout: captureOutput().writer,
@@ -720,7 +726,8 @@ describe("cloud export and deletion", () => {
       await privacyCommand(["delete", "--confirm", "--json"], {
         home,
         env: { RESIN_PRIVACY_DELETE_TOKEN: ordinaryToken },
-        customFetch: scopeFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch signature for test.
+        customFetch: scopeFetch as typeof fetch,
         loadCredentials,
         stdinIsTTY: false,
         stdout: captureOutput().writer,
@@ -735,7 +742,8 @@ describe("cloud export and deletion", () => {
       await privacyCommand(["delete", "--confirm", "--json"], {
         home,
         env: { RESIN_PRIVACY_DELETE_TOKEN: elevatedToken },
-        customFetch: scopeFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch signature for test.
+        customFetch: scopeFetch as typeof fetch,
         loadCredentials,
         stdinIsTTY: false,
         stdout: elevatedStdout.writer,
@@ -754,6 +762,7 @@ describe("cloud export and deletion", () => {
     ).not.toContain(elevatedToken);
     expect(
       scopeFetch.mock.calls.map(
+        // SAFETY: Cast headers to inspect Authorization header in test assertion.
         ([, init]) => (init?.headers as Record<string, string>).Authorization,
       ),
     ).toEqual([`Bearer ${ordinaryToken}`, `Bearer ${ordinaryToken}`, `Bearer ${elevatedToken}`]);

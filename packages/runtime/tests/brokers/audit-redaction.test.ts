@@ -81,14 +81,12 @@ describe("Broker Audit Trail & Redaction", () => {
     expect(sanitized.durationMs).toBe(120);
 
     // Headers and URLs must be redacted
-    const headers = sanitized.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("[REDACTED]");
-    expect(headers.Host).toBe("api.example.com");
+    expect(sanitized.headers).toEqual({
+      Authorization: "[REDACTED]",
+      Host: "api.example.com",
+    });
 
-    const url = sanitized.url as string;
-    expect(url).not.toContain("pass");
-    expect(url).not.toContain("secret123");
-    expect(url).toContain("[REDACTED]");
+    expect(sanitized.url).toBe("https://[REDACTED]:[REDACTED]@api.example.com/data?key=[REDACTED]");
   });
 
   it("records and filters audit events via BrokerAuditEmitter", () => {

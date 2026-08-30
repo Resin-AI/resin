@@ -1,3 +1,6 @@
+import type { ToolParameterSchema } from "@resin/contracts";
+import type { JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
+
 /**
  * Helper to validate tool parameters against manifest JSON Schema strictly.
  */
@@ -6,42 +9,55 @@ export interface ParameterValidationResult {
   errors: string[];
 }
 
+function isJsonRpcParams<TInput>(val: TInput): val is TInput & JsonRpcParams {
+  return Object.prototype.toString.call(val) === "[object Object]";
+}
+
+function describeValueType<TInput>(v: TInput): string {
+  if (v === null) return "null";
+  if (v === undefined) return "undefined";
+  if (Array.isArray(v)) return "array";
+  if (Object.prototype.toString.call(v) === "[object String]") return "string";
+  if (Object.prototype.toString.call(v) === "[object Number]") return "number";
+  if (Object.prototype.toString.call(v) === "[object Boolean]") return "boolean";
+  if (v instanceof Function) return "function";
+  return "object";
+}
+
 export function validateParameters(
-  schema: Record<string, unknown> | undefined,
-  params: unknown,
+  schema: ToolParameterSchema | JsonRpcParams | null | undefined,
+  params: JsonRpcParams | null | undefined,
 ): ParameterValidationResult {
   const errors: string[] = [];
 
-  if (!schema || typeof schema !== "object") {
+  if (!schema || !(schema instanceof Object)) {
     return { valid: true, errors: [] };
   }
 
   // Parameter root must be an object
-  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+  if (!params || !isJsonRpcParams(params)) {
     return {
       valid: false,
       errors: ["Parameters must be a JSON object"],
     };
   }
 
-  const p = params as Record<string, unknown>;
+  const p: JsonRpcParams = params;
 
   // Check required properties
   if (Array.isArray(schema.required)) {
     for (const req of schema.required) {
-      if (typeof req === "string") {
-        if (p[req] === undefined) {
-          errors.push(`Missing required parameter '${req}'`);
+      if (req && Object.prototype.toString.call(req) === "[object String]") {
+        const reqKey = String(req);
+        if (p[reqKey] === undefined) {
+          errors.push(`Missing required parameter '${reqKey}'`);
         }
       }
     }
   }
 
   // Check defined properties
-  const properties =
-    schema.properties && typeof schema.properties === "object"
-      ? (schema.properties as Record<string, unknown>)
-      : undefined;
+  const properties = isJsonRpcParams(schema.properties) ? schema.properties : undefined;
 
   if (properties) {
     for (const [key, value] of Object.entries(p)) {
@@ -50,107 +66,132 @@ export function validateParameters(
       }
 
       const propSchema = properties[key];
-      if (propSchema && typeof propSchema === "object") {
-        const subSchema = propSchema as Record<string, unknown>;
+      if (isJsonRpcParams(propSchema)) {
+        const subSchema = propSchema;
         const type = subSchema.type;
 
-        if (typeof type === "string") {
-          switch (type) {
+        if (type && Object.prototype.toString.call(type) === "[object String]") {
+          switch (String(type)) {
             case "string":
-              if (typeof value !== "string") {
-                errors.push(`Parameter '${key}' must be a string (got ${typeof value})`);
+              if (Object.prototype.toString.call(value) !== "[object String]") {
+                errors.push(
+                  `Parameter '${key}' must be a string (got ${describeValueType(value)})`,
+                );
               } else {
-                if (typeof subSchema.minLength === "number" && value.length < subSchema.minLength) {
+                const strVal = String(value);
+                if (
+                  Number.isFinite(subSchema.minLength) &&
+                  strVal.length < Number(subSchema.minLength)
+                ) {
                   errors.push(
-                    `Parameter '${key}' must be at least ${subSchema.minLength} characters`,
+                    `Parameter '${key}' must be at least ${Number(subSchema.minLength)} characters`,
                   );
                 }
-                if (typeof subSchema.maxLength === "number" && value.length > subSchema.maxLength) {
+                if (
+                  Number.isFinite(subSchema.maxLength) &&
+                  strVal.length > Number(subSchema.maxLength)
+                ) {
                   errors.push(
-                    `Parameter '${key}' must be at most ${subSchema.maxLength} characters`,
+                    `Parameter '${key}' must be at most ${Number(subSchema.maxLength)} characters`,
                   );
                 }
-                if (typeof subSchema.pattern === "string") {
+                if (
+                  subSchema.pattern &&
+                  Object.prototype.toString.call(subSchema.pattern) === "[object String]"
+                ) {
                   try {
-                    const regex = new RegExp(subSchema.pattern);
-                    if (!regex.test(value)) {
+                    const regex = new RegExp(String(subSchema.pattern));
+                    if (!regex.test(strVal)) {
                       errors.push(
-                        `Parameter '${key}' does not match pattern '${subSchema.pattern}'`,
+                        `Parameter '${key}' does not match required pattern '${String(subSchema.pattern)}'`,
                       );
                     }
                   } catch {
-                    // Ignore regex syntax errors
+                    // Ignore invalid regex in schema
                   }
                 }
               }
               break;
 
             case "number":
-              if (typeof value !== "number" || Number.isNaN(value)) {
-                errors.push(`Parameter '${key}' must be a number (got ${typeof value})`);
+              if (!Number.isFinite(value)) {
+                errors.push(
+                  `Parameter '${key}' must be a number (got ${describeValueType(value)})`,
+                );
               } else {
-                if (typeof subSchema.minimum === "number" && value < subSchema.minimum) {
-                  errors.push(`Parameter '${key}' must be >= ${subSchema.minimum}`);
+                const numVal = Number(value);
+                if (Number.isFinite(subSchema.minimum) && numVal < Number(subSchema.minimum)) {
+                  errors.push(`Parameter '${key}' must be >= ${Number(subSchema.minimum)}`);
                 }
-                if (typeof subSchema.maximum === "number" && value > subSchema.maximum) {
-                  errors.push(`Parameter '${key}' must be <= ${subSchema.maximum}`);
+                if (Number.isFinite(subSchema.maximum) && numVal > Number(subSchema.maximum)) {
+                  errors.push(`Parameter '${key}' must be <= ${Number(subSchema.maximum)}`);
                 }
               }
               break;
 
             case "integer":
-              if (typeof value !== "number" || !Number.isInteger(value)) {
-                errors.push(`Parameter '${key}' must be an integer`);
+              if (!Number.isInteger(value)) {
+                errors.push(
+                  `Parameter '${key}' must be an integer (got ${describeValueType(value)})`,
+                );
               } else {
-                if (typeof subSchema.minimum === "number" && value < subSchema.minimum) {
-                  errors.push(`Parameter '${key}' must be >= ${subSchema.minimum}`);
+                const numVal = Number(value);
+                if (Number.isFinite(subSchema.minimum) && numVal < Number(subSchema.minimum)) {
+                  errors.push(`Parameter '${key}' must be >= ${Number(subSchema.minimum)}`);
                 }
-                if (typeof subSchema.maximum === "number" && value > subSchema.maximum) {
-                  errors.push(`Parameter '${key}' must be <= ${subSchema.maximum}`);
+                if (Number.isFinite(subSchema.maximum) && numVal > Number(subSchema.maximum)) {
+                  errors.push(`Parameter '${key}' must be <= ${Number(subSchema.maximum)}`);
                 }
               }
               break;
 
             case "boolean":
-              if (typeof value !== "boolean") {
-                errors.push(`Parameter '${key}' must be a boolean (got ${typeof value})`);
+              if (value !== true && value !== false) {
+                errors.push(
+                  `Parameter '${key}' must be a boolean (got ${describeValueType(value)})`,
+                );
               }
               break;
 
             case "array":
               if (!Array.isArray(value)) {
-                errors.push(`Parameter '${key}' must be an array`);
+                errors.push(
+                  `Parameter '${key}' must be an array (got ${describeValueType(value)})`,
+                );
               } else {
-                if (typeof subSchema.minItems === "number" && value.length < subSchema.minItems) {
+                if (
+                  Number.isFinite(subSchema.minItems) &&
+                  value.length < Number(subSchema.minItems)
+                ) {
                   errors.push(
-                    `Parameter '${key}' must contain at least ${subSchema.minItems} items`,
+                    `Parameter '${key}' must have at least ${Number(subSchema.minItems)} items`,
                   );
                 }
-                if (typeof subSchema.maxItems === "number" && value.length > subSchema.maxItems) {
+                if (
+                  Number.isFinite(subSchema.maxItems) &&
+                  value.length > Number(subSchema.maxItems)
+                ) {
                   errors.push(
-                    `Parameter '${key}' must contain at most ${subSchema.maxItems} items`,
+                    `Parameter '${key}' must have at most ${Number(subSchema.maxItems)} items`,
                   );
                 }
-                if (subSchema.items && typeof subSchema.items === "object") {
-                  const itemSchema = subSchema.items as Record<string, unknown>;
+                if (isJsonRpcParams(subSchema.items)) {
+                  const itemSchema = subSchema.items;
                   const itemType = itemSchema.type;
-                  if (typeof itemType === "string") {
+                  if (itemType && Object.prototype.toString.call(itemType) === "[object String]") {
                     for (let i = 0; i < value.length; i++) {
-                      const item = value[i];
-                      if (itemType === "string" && typeof item !== "string") {
-                        errors.push(`Parameter '${key}[${i}]' must be a string`);
-                      } else if (
-                        itemType === "number" &&
-                        (typeof item !== "number" || Number.isNaN(item))
+                      const itemVal = value[i];
+                      if (
+                        String(itemType) === "string" &&
+                        Object.prototype.toString.call(itemVal) !== "[object String]"
                       ) {
-                        errors.push(`Parameter '${key}[${i}]' must be a number`);
-                      } else if (
-                        itemType === "integer" &&
-                        (typeof item !== "number" || !Number.isInteger(item))
-                      ) {
-                        errors.push(`Parameter '${key}[${i}]' must be an integer`);
-                      } else if (itemType === "boolean" && typeof item !== "boolean") {
-                        errors.push(`Parameter '${key}[${i}]' must be a boolean`);
+                        errors.push(
+                          `Parameter '${key}[${i}]' must be a string (got ${describeValueType(itemVal)})`,
+                        );
+                      } else if (String(itemType) === "number" && !Number.isFinite(itemVal)) {
+                        errors.push(
+                          `Parameter '${key}[${i}]' must be a number (got ${describeValueType(itemVal)})`,
+                        );
                       }
                     }
                   }
@@ -159,14 +200,16 @@ export function validateParameters(
               break;
 
             case "object":
-              if (typeof value !== "object" || value === null || Array.isArray(value)) {
-                errors.push(`Parameter '${key}' must be an object`);
+              if (!value || !(value instanceof Object) || Array.isArray(value)) {
+                errors.push(
+                  `Parameter '${key}' must be an object (got ${describeValueType(value)})`,
+                );
               }
               break;
           }
         }
 
-        // Enum check
+        // Check enum constraint
         if (Array.isArray(subSchema.enum)) {
           if (!subSchema.enum.includes(value)) {
             errors.push(

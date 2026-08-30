@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
+import type {
+  CanonicalJsonRecord,
+  CanonicalJsonValue,
+  CapabilityEnvelope,
+  CapabilityManifest,
+} from "@resin/contracts";
 import {
-  type CapabilityManifest,
   CapabilityManifestSchema,
   ISOTimestampSchema,
   IdentifierSchema,
@@ -7,7 +13,6 @@ import {
   Sha256DigestSchema,
   canonicalJson,
 } from "@resin/contracts";
-import { sha256 } from "@resin/crypto";
 import { z } from "zod";
 
 /**
@@ -51,14 +56,13 @@ export type InvocationGrantPayload = Omit<InvocationGrant, "digest">;
  * Deep freezes an object recursively to ensure strict immutability.
  */
 export function deepFreeze<T>(obj: T): Readonly<T> {
-  if (obj === null || typeof obj !== "object") {
+  if (obj === null || !(obj instanceof Object)) {
     return obj;
   }
 
   // Freeze properties first
-  for (const key of Object.keys(obj)) {
-    const val = (obj as Record<string, unknown>)[key];
-    if (val !== null && typeof val === "object" && !Object.isFrozen(val)) {
+  for (const val of Object.values(obj)) {
+    if (val !== null && val instanceof Object && !Object.isFrozen(val)) {
       deepFreeze(val);
     }
   }
@@ -86,7 +90,7 @@ export function computeGrantDigest(payload: InvocationGrantPayload): string {
   };
 
   const canonicalStr = canonicalJson(normalized);
-  return sha256(canonicalStr);
+  return createHash("sha256").update(canonicalStr).digest("hex");
 }
 
 export interface CreateInvocationGrantParams {
@@ -168,7 +172,7 @@ export interface GrantVerificationResult {
  * Verifies an InvocationGrant for cryptographic integrity, expiration, and contextual binding.
  */
 export function verifyInvocationGrant(
-  grant: unknown,
+  grant: InvocationGrant | CanonicalJsonValue,
   options: VerifyGrantOptions = {},
 ): GrantVerificationResult {
   const parseResult = InvocationGrantSchema.safeParse(grant);

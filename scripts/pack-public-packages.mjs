@@ -42,10 +42,10 @@ export const FORBIDDEN_FILE_PATTERNS = Object.freeze([
  * Generate standard tarball filename from package name and version.
  */
 export function getTarballFilename(name, version) {
-  if (!name || typeof name !== "string") {
+  if (!name || Object.prototype.toString.call(name) !== "[object String]") {
     throw new Error(`Invalid package name: ${name}`);
   }
-  if (!version || typeof version !== "string") {
+  if (!version || Object.prototype.toString.call(version) !== "[object String]") {
     throw new Error(`Invalid package version for ${name}: ${version}`);
   }
   const sanitized = name.startsWith("@") ? name.slice(1).replace("/", "-") : name;
@@ -56,7 +56,7 @@ export function getTarballFilename(name, version) {
  * Check if a relative file path matches forbidden release patterns.
  */
 export function isForbiddenReleaseEntry(relPath) {
-  if (!relPath || typeof relPath !== "string") return false;
+  if (!relPath || Object.prototype.toString.call(relPath) !== "[object String]") return false;
   const normalized = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
   const parts = normalized.split("/");
 
@@ -76,7 +76,7 @@ export function isForbiddenReleaseEntry(relPath) {
  * Rewrite all workspace:* dependencies in a package manifest to immutable artifact URLs.
  */
 export function rewriteManifestDependencies(manifest, publicPackageMap, artifactBaseUrl) {
-  if (!artifactBaseUrl || typeof artifactBaseUrl !== "string") {
+  if (!artifactBaseUrl || Object.prototype.toString.call(artifactBaseUrl) !== "[object String]") {
     throw new Error("Artifact base URL is required");
   }
   const normalizedBaseUrl = artifactBaseUrl.trim();
@@ -89,12 +89,16 @@ export function rewriteManifestDependencies(manifest, publicPackageMap, artifact
   const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 
   for (const section of sections) {
-    if (!pkg[section] || typeof pkg[section] !== "object") continue;
+    if (!pkg[section] || Object.prototype.toString.call(pkg[section]) !== "[object Object]")
+      continue;
     for (const [depName, depVer] of Object.entries(pkg[section])) {
       if (publicPackageMap[depName]) {
         const tarball = publicPackageMap[depName].tarball;
         pkg[section][depName] = `${baseUrl}/${tarball}`;
-      } else if (typeof depVer === "string" && depVer.includes("workspace:")) {
+      } else if (
+        Object.prototype.toString.call(depVer) === "[object String]" &&
+        depVer.includes("workspace:")
+      ) {
         throw new Error(
           `Unresolved workspace dependency in package "${pkg.name || "unknown"}" (${section}): ${depName} -> ${depVer}`,
         );
@@ -104,9 +108,13 @@ export function rewriteManifestDependencies(manifest, publicPackageMap, artifact
 
   // Reject any remaining workspace:* specifiers across all dependency sections
   for (const section of sections) {
-    if (!pkg[section] || typeof pkg[section] !== "object") continue;
+    if (!pkg[section] || Object.prototype.toString.call(pkg[section]) !== "[object Object]")
+      continue;
     for (const [depName, depVer] of Object.entries(pkg[section])) {
-      if (typeof depVer === "string" && depVer.includes("workspace:")) {
+      if (
+        Object.prototype.toString.call(depVer) === "[object String]" &&
+        depVer.includes("workspace:")
+      ) {
         throw new Error(
           `Unresolved workspace:* dependency remaining in staged manifest for "${pkg.name}": ${section}.${depName} = "${depVer}"`,
         );
@@ -309,7 +317,7 @@ export function packPublicPackages(options = {}) {
 
   // 1. Validate Base URL
   const artifactBaseUrl = options.artifactBaseUrl;
-  if (!artifactBaseUrl || typeof artifactBaseUrl !== "string") {
+  if (!artifactBaseUrl || Object.prototype.toString.call(artifactBaseUrl) !== "[object String]") {
     throw new Error("Artifact base URL is required (--artifact-base-url <https-url>)");
   }
   const normalizedBaseUrl = artifactBaseUrl.trim();

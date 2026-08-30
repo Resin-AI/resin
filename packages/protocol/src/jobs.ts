@@ -5,7 +5,12 @@ import {
   Sha256DigestSchema,
 } from "@resin/contracts";
 import { z } from "zod";
-import { ProtocolError, type ProtocolErrorCode, ProtocolErrorCodeSchema } from "./errors.js";
+import {
+  ProtocolError,
+  type ProtocolErrorCode,
+  ProtocolErrorCodeSchema,
+  type ProtocolErrorDetailRecord,
+} from "./errors.js";
 
 /**
  * Standard asynchronous job execution lifecycle states.
@@ -122,7 +127,7 @@ export class JobFailedError extends ProtocolError {
     options: {
       failureReason?: string;
       errorCode?: ProtocolErrorCode;
-      details?: Record<string, unknown>;
+      details?: ProtocolErrorDetailRecord;
       cause?: unknown;
     } = {},
   ) {
@@ -221,7 +226,7 @@ export class ArtifactSizeExceededError extends ProtocolError {
  * Error thrown when job status response is malformed or invalid according to schema.
  */
 export class JobMalformedResponseError extends ProtocolError {
-  constructor(message: string, details?: Record<string, unknown>) {
+  constructor(message: string, details?: ProtocolErrorDetailRecord) {
     super("validation", `Malformed job status response: ${message}`, {
       status: 502,
       details,
@@ -283,5 +288,5 @@ export interface JobExecutionResult {
   readonly toolBytes?: Uint8Array;
   readonly toolSha256?: string;
   readonly toolDescriptor?: JobToolDescriptor;
-  readonly metadata?: Record<string, unknown>;
+  readonly metadata?: ProtocolErrorDetailRecord;
 }

@@ -4,6 +4,7 @@ import {
   createSecretReference,
   formatSecretTemplate,
 } from "@resin/contracts";
+import { z } from "zod";
 import type { BrokerRequestHandlerFn, BrokeredFetchResponse } from "../worker/sdk.js";
 import { bearerToken } from "../worker/sdk.js";
 import type { CommandExecuteResult } from "./cmd-broker.js";
@@ -36,6 +37,21 @@ export interface CommandExecuteOptions {
   maxOutputSizeBytes?: number;
   secretEnv?: Record<string, SecretReference | string>;
 }
+export interface FsReadFileOptions {
+  encoding?: "utf-8" | "base64" | "buffer";
+}
+
+const FsReadFileOptionsSchema: z.ZodType<FsReadFileOptions> = z
+  .object({
+    encoding: z.enum(["utf-8", "base64", "buffer"]).optional(),
+  })
+  .strict();
+
+function isFsReadFileOptions(
+  optionsOrEncoding: "utf-8" | "base64" | "buffer" | FsReadFileOptions,
+): optionsOrEncoding is FsReadFileOptions {
+  return FsReadFileOptionsSchema.safeParse(optionsOrEncoding).success;
+}
 
 /**
  * Client SDK for brokered filesystem operations.
@@ -45,26 +61,22 @@ export class FsClient {
 
   async readFile(
     filePath: string,
-    optionsOrEncoding:
-      | "utf-8"
-      | "base64"
-      | "buffer"
-      | { encoding?: "utf-8" | "base64" | "buffer" } = "utf-8",
+    optionsOrEncoding: "utf-8" | "base64" | "buffer" | FsReadFileOptions = "utf-8",
   ): Promise<string | Uint8Array> {
-    const encoding =
-      typeof optionsOrEncoding === "string"
-        ? optionsOrEncoding
-        : (optionsOrEncoding.encoding ?? "utf-8");
+    const encoding = isFsReadFileOptions(optionsOrEncoding)
+      ? (optionsOrEncoding.encoding ?? "utf-8")
+      : optionsOrEncoding;
     const rpcEncoding = encoding === "buffer" ? "base64" : encoding;
+    // SAFETY: Broker readFile returns ReadFileResult on success.
     const res = (await this.requestHandler("fs", "readFile", {
       path: filePath,
       encoding: rpcEncoding,
     })) as ReadFileResult;
 
     if (encoding === "buffer") {
-      if (typeof res.content === "string") {
+      if (String(res.content) === res.content) {
         return res.encoding === "base64"
-          ? typeof Buffer !== "undefined"
+          ? globalThis.Buffer !== undefined
             ? new Uint8Array(Buffer.from(res.content, "base64"))
             : Uint8Array.from(atob(res.content), (c) => c.charCodeAt(0))
           : new TextEncoder().encode(res.content);
@@ -76,17 +88,17 @@ export class FsClient {
 
   async readText(filePath: string, encoding: "utf-8" | "base64" = "utf-8"): Promise<string> {
     const res = await this.readFile(filePath, { encoding });
-    return typeof res === "string" ? res : new TextDecoder().decode(res);
+    return res instanceof Uint8Array ? new TextDecoder().decode(res) : res;
   }
 
   async readBytes(filePath: string): Promise<Uint8Array> {
     const res = await this.readFile(filePath, { encoding: "base64" });
-    if (typeof res === "string") {
-      return typeof Buffer !== "undefined"
-        ? new Uint8Array(Buffer.from(res, "base64"))
-        : Uint8Array.from(atob(res), (c) => c.charCodeAt(0));
+    if (res instanceof Uint8Array) {
+      return res;
     }
-    return res;
+    return globalThis.Buffer !== undefined
+      ? new Uint8Array(Buffer.from(res, "base64"))
+      : Uint8Array.from(atob(res), (c) => c.charCodeAt(0));
   }
 
   async readBuffer(filePath: string): Promise<Buffer> {
@@ -102,7 +114,7 @@ export class FsClient {
     let serializedContent: string;
     let encoding: "utf-8" | "base64" = options.encoding ?? "utf-8";
 
-    if (typeof content === "string") {
+    if (String(content) === content) {
       serializedContent = content;
     } else if (content instanceof Uint8Array || Buffer.isBuffer(content)) {
       encoding = "base64";
@@ -123,7 +135,7 @@ export class FsClient {
     let serializedContent: string;
     let encoding: "utf-8" | "base64" = "utf-8";
 
-    if (typeof content === "string") {
+    if (String(content) === content) {
       serializedContent = content;
     } else if (content instanceof Uint8Array || Buffer.isBuffer(content)) {
       encoding = "base64";
@@ -140,6 +152,7 @@ export class FsClient {
   }
 
   async exists(filePath: string): Promise<boolean> {
+    // SAFETY: Broker fs.exists returns an object with boolean exists property.
     const res = (await this.requestHandler("fs", "exists", { path: filePath })) as {
       exists: boolean;
     };
@@ -147,6 +160,7 @@ export class FsClient {
   }
 
   async stat(targetPath: string): Promise<FileStatResult> {
+    // SAFETY: Broker fs.stat returns FileStatResult.
     return (await this.requestHandler("fs", "stat", { path: targetPath })) as FileStatResult;
   }
 
@@ -156,10 +170,13 @@ export class FsClient {
       recursive: options.recursive,
     });
     if (Array.isArray(res)) {
-      return res;
+      return res.filter((e): e is string => String(e) === e);
     }
-    if (res && typeof res === "object" && "entries" in res && Array.isArray(res.entries)) {
-      return res.entries;
+    if (res !== null && res !== undefined && !Array.isArray(res) && "entries" in Object(res)) {
+      const entries = Object(res).entries;
+      if (Array.isArray(entries)) {
+        return entries.filter((e): e is string => String(e) === e);
+      }
     }
     return [];
   }
@@ -196,6 +213,7 @@ export class NetClient {
   constructor(private readonly requestHandler: BrokerRequestHandlerFn) {}
 
   async request(url: string, options: NetRequestOptions = {}): Promise<BrokeredFetchResponse> {
+    // SAFETY: Broker net.request returns NetResponseResult.
     const raw = (await this.requestHandler("net", "request", {
       url,
       method: options.method ?? "GET",
@@ -216,16 +234,17 @@ export class NetClient {
       url: raw.finalUrl,
       redirected: raw.redirected,
       text: async () => raw.body,
+      // SAFETY: Caller specifies expected JSON return type T.
       json: async <T = unknown>() => JSON.parse(raw.body) as T,
       arrayBuffer: async () => {
         const buf =
-          typeof Buffer !== "undefined"
+          globalThis.Buffer !== undefined
             ? Buffer.from(raw.body, "utf-8")
             : new TextEncoder().encode(raw.body);
         return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
       },
       bytes: async () => {
-        return typeof Buffer !== "undefined"
+        return globalThis.Buffer !== undefined
           ? new Uint8Array(Buffer.from(raw.body, "utf-8"))
           : new TextEncoder().encode(raw.body);
       },
@@ -245,12 +264,12 @@ export class NetClient {
 
   async post(
     url: string,
-    body: string | Record<string, unknown>,
+    body: string | Record<string, string | number | boolean | null | undefined>,
     headers: Record<string, string | SecretReference> = {},
   ): Promise<BrokeredFetchResponse> {
-    const serializedBody = typeof body === "object" ? JSON.stringify(body) : body;
+    const serializedBody = String(body) !== body ? JSON.stringify(body) : body;
     const finalHeaders =
-      typeof body === "object" && !headers["Content-Type"] && !headers["content-type"]
+      String(body) !== body && !headers["Content-Type"] && !headers["content-type"]
         ? { ...headers, "Content-Type": "application/json" }
         : headers;
 
@@ -259,12 +278,12 @@ export class NetClient {
 
   async put(
     url: string,
-    body: string | Record<string, unknown>,
+    body: string | Record<string, string | number | boolean | null | undefined>,
     headers: Record<string, string | SecretReference> = {},
   ): Promise<BrokeredFetchResponse> {
-    const serializedBody = typeof body === "object" ? JSON.stringify(body) : body;
+    const serializedBody = String(body) !== body ? JSON.stringify(body) : body;
     const finalHeaders =
-      typeof body === "object" && !headers["Content-Type"] && !headers["content-type"]
+      String(body) !== body && !headers["Content-Type"] && !headers["content-type"]
         ? { ...headers, "Content-Type": "application/json" }
         : headers;
 
@@ -290,6 +309,7 @@ export class CommandClient {
     args: string[] = [],
     options: CommandExecuteOptions = {},
   ): Promise<CommandExecuteResult> {
+    // SAFETY: Broker cmd.execute returns CommandExecuteResult.
     return (await this.requestHandler("cmd", "execute", {
       executable,
       args,
@@ -322,7 +342,7 @@ export class SecretClient {
       workspaceId?: string;
       toolId?: string;
       expiresAt?: string;
-      metadata?: Record<string, unknown>;
+      metadata?: Record<string, string | number | boolean | null | undefined>;
     },
   ): SecretReference {
     return createSecretReference({
@@ -353,6 +373,7 @@ export class SecretClient {
    * Legacy getSecret method - fails closed for worker callers.
    */
   async getSecret(name: string): Promise<string | null> {
+    // SAFETY: Broker secret.getSecret returns an object with secret property.
     const res = (await this.requestHandler("secret", "getSecret", { name })) as {
       secret: string | null;
     };
@@ -363,12 +384,14 @@ export class SecretClient {
 /**
  * Creates the complete suite of SDK clients bound to a request handler function.
  */
-export function createBrokerClients(requestHandler: BrokerRequestHandlerFn): {
+export interface BrokerClients {
   fs: FsClient;
   net: NetClient;
   cmd: CommandClient;
   secret: SecretClient;
-} {
+}
+
+export function createBrokerClients(requestHandler: BrokerRequestHandlerFn): BrokerClients {
   return {
     fs: new FsClient(requestHandler),
     net: new NetClient(requestHandler),

@@ -93,10 +93,10 @@ export interface NotificationConsumeOptions {
 export type NotificationConsumer = (
   active: readonly ActionableNotification[],
   options: NotificationConsumeOptions,
-) => Promise<readonly unknown[]>;
+) => Promise<readonly ActionableNotification[]>;
 
-function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+function isNodeError(cause: unknown, code: string): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === code;
 }
 
 async function readNotificationInbox(filePath: string): Promise<NotificationInboxState> {
@@ -232,14 +232,14 @@ const NOTIFICATION_DEFINITIONS = {
   },
 } as const;
 
-const DAEMON_DOCTOR_CATEGORIES: Partial<Record<DoctorNotificationDiagnostic["category"], true>> = {
+const DAEMON_DOCTOR_CATEGORIES = {
   filesystem: true,
   service: true,
   ipc: true,
   database: true,
   runtime: true,
   security: true,
-};
+} as const;
 
 export function deriveStatusActionableNotifications(
   snapshot: StatusNotificationSnapshot,
@@ -290,7 +290,7 @@ export function deriveDoctorActionableNotifications(
 
   for (const diagnostic of diagnostics) {
     if (diagnostic.category === "auth") managedIds.add(CLI_NOTIFICATION_IDS.auth);
-    if (DAEMON_DOCTOR_CATEGORIES[diagnostic.category] === true) {
+    if (diagnostic.category in DAEMON_DOCTOR_CATEGORIES) {
       managedIds.add(CLI_NOTIFICATION_IDS.daemon);
     }
     if (diagnostic.category === "harness") managedIds.add(CLI_NOTIFICATION_IDS.harness);
@@ -301,7 +301,7 @@ export function deriveDoctorActionableNotifications(
     if (!actionable) continue;
 
     if (diagnostic.category === "auth") authActionRequired = true;
-    if (DAEMON_DOCTOR_CATEGORIES[diagnostic.category] === true) daemonActionRequired = true;
+    if (diagnostic.category in DAEMON_DOCTOR_CATEGORIES) daemonActionRequired = true;
     if (diagnostic.category === "harness") harnessActionRequired = true;
     if (diagnostic.category === "gateway") networkActionRequired = true;
   }
@@ -344,11 +344,11 @@ export function formatActionableNotificationsForTerminal(
 ): string {
   if (notifications.length === 0) return "";
 
-  const severityRank: Record<NotificationSeverity, number> = {
+  const severityRank = {
     warning: 0,
     error: 1,
     critical: 2,
-  };
+  } as const satisfies Record<NotificationSeverity, number>;
   const safeNotifications = filterActionableNotifications(notifications)
     .filter(
       (notification) =>

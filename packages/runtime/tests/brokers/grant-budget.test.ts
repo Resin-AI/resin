@@ -33,7 +33,6 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
 
   it("rejects operation when grant is required but missing", async () => {
     const fsBroker = new FilesystemBroker({ requireGrant: true });
-
     await expect(
       fsBroker.stat(
         { path: "test.txt" },
@@ -42,13 +41,9 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
           // grant omitted
         },
       ),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await fsBroker.stat({ path: "test.txt" }, { invocationId: "inv_12345" });
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("GRANT_REQUIRED");
-    }
+    ).rejects.toMatchObject({
+      code: "GRANT_REQUIRED",
+    });
   });
 
   it("rejects expired invocation grant", async () => {
@@ -67,13 +62,9 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
           grant: expiredGrant,
         },
       ),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await fsBroker.stat({ path: "test.txt" }, { invocationId: "inv_12345", grant: expiredGrant });
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("GRANT_EXPIRED");
-    }
+    ).rejects.toMatchObject({
+      code: "GRANT_EXPIRED",
+    });
   });
 
   it("rejects invocation ID mismatch between request and grant", async () => {
@@ -88,19 +79,9 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
           grant: validGrant,
         },
       ),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await fsBroker.stat(
-        { path: "test.txt" },
-        {
-          invocationId: "inv_DIFFERENT_999",
-          grant: validGrant,
-        },
-      );
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("INVOCATION_MISMATCH");
-    }
+    ).rejects.toMatchObject({
+      code: "INVOCATION_MISMATCH",
+    });
   });
 
   it("rejects tampered grant digest", async () => {
@@ -119,19 +100,9 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
           grant: tamperedGrant,
         },
       ),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await fsBroker.stat(
-        { path: "test.txt" },
-        {
-          invocationId: "inv_12345",
-          grant: tamperedGrant,
-        },
-      );
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("GRANT_INVALID");
-    }
+    ).rejects.toMatchObject({
+      code: "GRANT_INVALID",
+    });
   });
 
   it("enforces cumulative output size limit across operations", async () => {
@@ -169,17 +140,11 @@ describe("Broker Grant Validation & Budget Enforcement", () => {
 
     // Read back 150 bytes (total cumulative output becomes 150 bytes tracked)
     await manager.handleRequest("fs", "readFile", { path: "test_budget.tmp" }, context);
-
-    // Second read would consume another 150 bytes (total 300 > 200 limit) -> rejected
     await expect(
       manager.handleRequest("fs", "readFile", { path: "test_budget.tmp" }, context),
-    ).rejects.toThrow(BrokerSecurityError);
-
-    try {
-      await manager.handleRequest("fs", "readFile", { path: "test_budget.tmp" }, context);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("BUDGET_EXCEEDED");
-    }
+    ).rejects.toMatchObject({
+      code: "BUDGET_EXCEEDED",
+    });
 
     // Clean up file
     await manager.handleRequest("fs", "delete", { path: "test_budget.tmp" }, context);

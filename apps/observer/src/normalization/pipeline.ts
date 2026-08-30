@@ -6,11 +6,16 @@ import {
   NormalizedSessionEventSchema,
   type RedactionMeta,
   canonicalJson,
-  hashCanonical,
   nowIso,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection, SessionRepository, SyncRepository } from "@resin/db";
+import type {
+  LocalDatabaseConnection,
+  SessionRepository,
+  SyncMessagePayloadRecord,
+  SyncRepository,
+} from "@resin/db";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
+import { z } from "zod";
 import {
   DecoderRegistry,
   type HarnessRecordDecoder,
@@ -22,6 +27,7 @@ import {
   NormalizationDeduplicator,
   type NormalizationDeduplicatorOptions,
 } from "./deduplicator.js";
+import type { JsonObject, JsonValue } from "./redaction.js";
 import { type RedactionConfig, RedactionEngine } from "./redaction.js";
 
 /**
@@ -43,7 +49,7 @@ export interface NormalizationPipelineOptions {
 export interface PipelineProcessContext extends RecordDecoderContext {
   deviceId?: string;
   workspaceId?: string;
-  customMetadata?: Record<string, unknown>;
+  customMetadata?: JsonObject;
   /**
    * Stage successful events without local deduplication/persistence until Cloud accepts them.
    */
@@ -70,12 +76,12 @@ export type PipelineProcessResult =
 /**
  * Generates a deterministic, collision-resistant event ID from session ID, sequence, and content.
  */
-export function generateDeterministicEventId(
+export function generateDeterministicEventId<T = JsonValue>(
   sessionId: string,
   causalSequence: number,
-  content: unknown,
+  content: T,
 ): string {
-  const contentDigest = hashCanonical(content);
+  const contentDigest = createHash("sha256").update(canonicalJson(content), "utf8").digest("hex");
   const hash = createHash("sha256")
     .update(`${sessionId}:${causalSequence}:${contentDigest}`, "utf8")
     .digest("hex");
@@ -133,11 +139,18 @@ export class NormalizationPipeline {
       intermediateEvents = await this.decoderRegistry.decode(record, context);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      let deadLetterPayload: JsonObject;
+      const rawPayloadParsed = z.record(z.unknown()).safeParse(record.rawPayload);
+      if (rawPayloadParsed.success) {
+        // SAFETY: parsed dictionary is a valid JsonObject for dead-letter payload.
+        deadLetterPayload = { ...(rawPayloadParsed.data as JsonObject) };
+      } else {
+        // SAFETY: rawPayload primitive or array is stored under rawPayload property as JsonValue.
+        deadLetterPayload = { rawPayload: record.rawPayload as JsonValue };
+      }
       const deadLetter = await this.createAndSaveDeadLetter(
         record.recordType || "unknown",
-        record.rawPayload && typeof record.rawPayload === "object"
-          ? (record.rawPayload as Record<string, unknown>)
-          : { rawPayload: record.rawPayload },
+        deadLetterPayload,
         `Decoder failure: ${errorMsg}`,
       );
 
@@ -191,7 +204,7 @@ export class NormalizationPipeline {
     if (!sessionId) {
       const deadLetter = await this.createAndSaveDeadLetter(
         intermediate.type || "unknown",
-        intermediate as unknown as Record<string, unknown>,
+        intermediate,
         "Missing required sessionId in intermediate event",
       );
       return {
@@ -220,6 +233,7 @@ export class NormalizationPipeline {
           ? null
           : (sessionMap.get(causalSequence - 1) ?? null);
     // 2. Perform privacy redaction on the payload fields
+    const intermediateObj = Object.assign({}, intermediate);
     const {
       type,
       timestamp,
@@ -230,8 +244,7 @@ export class NormalizationPipeline {
       redaction: _r,
       eventId: _e,
       ...payloadFields
-    } = intermediate as unknown as Record<string, unknown>;
-
+    } = intermediateObj;
     const redactionResult = this.redactionEngine.redact(payloadFields);
     const redactionMeta: RedactionMeta = {
       isRedacted: redactionResult.isRedacted,
@@ -242,13 +255,15 @@ export class NormalizationPipeline {
     };
 
     // 3. Construct deterministic event ID
+    const schemaVersionParsed = z.string().safeParse(schemaVersion);
+    const timestampParsed = z.string().safeParse(timestamp);
     const eventBodyForHashing = {
-      schemaVersion:
-        (typeof schemaVersion === "string" ? schemaVersion : undefined) ??
-        this.defaultSchemaVersion,
+      schemaVersion: schemaVersionParsed.success
+        ? schemaVersionParsed.data
+        : this.defaultSchemaVersion,
       sessionId,
       type: String(type),
-      timestamp: (typeof timestamp === "string" ? timestamp : undefined) || nowIso(),
+      timestamp: timestampParsed.success ? timestampParsed.data : nowIso(),
       causalRef: {
         parentId: parentId ?? null,
         causalSequence,
@@ -261,39 +276,59 @@ export class NormalizationPipeline {
         redactionStrategy: redactionMeta.redactionStrategy,
         scrubbedPatterns: redactionMeta.scrubbedPatterns,
       },
-      metadata:
-        typeof metadata === "object" && metadata !== null
-          ? (metadata as Record<string, unknown>)
-          : {},
-      ...(redactionResult.data as Record<string, unknown>),
+      ...payloadFields,
     };
 
     const eventId = generateDeterministicEventId(sessionId, causalSequence, eventBodyForHashing);
 
-    const fullEventCandidate = {
-      eventId,
-      ...eventBodyForHashing,
-      redaction: redactionMeta,
-    };
+    const metadataParsed = z.record(z.unknown()).safeParse(metadata);
+    let mergedMetadata: JsonObject | undefined;
+    if (metadataParsed.success || context?.customMetadata) {
+      mergedMetadata = {};
+      if (metadataParsed.success) {
+        Object.assign(mergedMetadata, metadataParsed.data);
+      }
+      if (context?.customMetadata) {
+        Object.assign(mergedMetadata, context.customMetadata);
+      }
+    }
 
-    // 4. Validate against NormalizedSessionEventSchema
-    const validationResult = NormalizedSessionEventSchema.safeParse(fullEventCandidate);
-    if (!validationResult.success) {
-      const errorMsg = `Schema validation failed: ${validationResult.error.message}`;
+    const fullEventCandidate = {
+      schemaVersion: schemaVersionParsed.success
+        ? schemaVersionParsed.data
+        : this.defaultSchemaVersion,
+      sessionId,
+      eventId,
+      type: String(type),
+      timestamp: timestampParsed.success ? timestampParsed.data : nowIso(),
+      causalRef: {
+        parentId: parentId ?? null,
+        causalSequence,
+        turnIndex: intermediate.causalRef?.turnIndex,
+        stepIndex: intermediate.causalRef?.stepIndex,
+      },
+      redaction: redactionMeta,
+      metadata: mergedMetadata,
+      ...redactionResult.data,
+    };
+    // 4. Validate complete schema compliance
+    const parseResult = NormalizedSessionEventSchema.safeParse(fullEventCandidate);
+    if (!parseResult.success) {
       const deadLetter = await this.createAndSaveDeadLetter(
         String(type || "unknown"),
-        fullEventCandidate as Record<string, unknown>,
-        errorMsg,
+        fullEventCandidate,
+        `Event failed schema validation: ${parseResult.error.message}`,
+        JSON.stringify(parseResult.error.issues),
       );
       return {
         status: "dead_letter",
-        errorReason: errorMsg,
+        errorReason: `Schema validation failed: ${parseResult.error.message}`,
         deadLetterRecord: deadLetter,
         rawRecord: originalRawRecord,
       };
     }
 
-    const validEvent = validationResult.data;
+    const validEvent = parseResult.data;
 
     // 5. Deduplication and Integrity Check
     const dedupOutcome = this.deduplicator.checkEvent(validEvent);
@@ -301,7 +336,7 @@ export class NormalizationPipeline {
     if (dedupOutcome.status === "conflict") {
       const deadLetter = await this.createAndSaveDeadLetter(
         validEvent.type,
-        validEvent as unknown as Record<string, unknown>,
+        validEvent,
         `Integrity conflict: ${dedupOutcome.errorReason}`,
       );
       return {
@@ -396,7 +431,8 @@ export class NormalizationPipeline {
         await this.syncRepository.enqueueOutbox({
           outboxId: `normalized_event_${validEvent.eventId}`,
           topic: "normalized_event",
-          payload: validEvent as unknown as Record<string, unknown>,
+          // SAFETY: validEvent matches the serialized record payload expected by enqueueOutbox.
+          payload: validEvent as SyncMessagePayloadRecord,
         });
       } catch {
         // Cloud acceptance must not be rolled back by secondary outbox persistence.
@@ -407,21 +443,24 @@ export class NormalizationPipeline {
   /**
    * Helper to construct and persist a DeadLetterRecord.
    */
-  private async createAndSaveDeadLetter(
+  private async createAndSaveDeadLetter<T extends object>(
     originalEventType: string,
-    payload: Record<string, unknown>,
+    payload: T,
     errorReason: string,
+    errorDetails?: string,
   ): Promise<DeadLetterRecord> {
     const deadLetterId = `dl_${createHash("sha256")
       .update(`${originalEventType}:${nowIso()}:${canonicalJson(payload)}`)
       .digest("hex")
       .slice(0, 24)}`;
 
+    // SAFETY: canonicalJson produces a serialized representation that parses into a valid record payload.
+    const deadLetterPayload = JSON.parse(canonicalJson(payload)) as JsonObject;
     const deadLetter: DeadLetterRecord = {
       deadLetterId,
       originalEventType,
-      payload,
-      errorReason,
+      payload: deadLetterPayload,
+      errorReason: errorDetails ? `${errorReason}: ${errorDetails}` : errorReason,
       failedAt: nowIso(),
       retryCount: 0,
       status: "pending",

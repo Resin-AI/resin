@@ -1,5 +1,10 @@
-import type { CapabilityManifest, ToolLimitConfig } from "@resin/contracts";
-import type { CallToolResult } from "../protocol/types.js";
+import type {
+  CapabilityManifest,
+  ToolLimitConfig,
+  ToolOutputSchema,
+  ToolParameterSchema,
+} from "@resin/contracts";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -21,8 +26,8 @@ export interface GetToolSchemaResponse {
   scope: string;
   status: string;
   description: string;
-  inputSchema: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  inputSchema: ToolParameterSchema | JsonRpcParams;
+  outputSchema?: ToolOutputSchema | JsonRpcParams;
   capabilities: CapabilityManifest;
   limits: ToolLimitConfig;
   provenance: ToolProvenance;
@@ -41,15 +46,19 @@ export interface GetToolSchemaParams {
  * Factory for creating the get_tool_schema handler.
  */
 export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler {
-  return async (
-    context: WorkspaceContext,
-    rawParams: Record<string, unknown>,
-    _options?: ToolCallOptions,
-  ): Promise<CallToolResult> => {
-    const params = (rawParams || {}) as GetToolSchemaParams;
-    const identifier = params.toolId ?? params.name ?? params.tool_name;
+  return async (context: WorkspaceContext, params: JsonRpcParams): Promise<CallToolResult> => {
+    const toolIdOrName =
+      (params.toolId && Object.prototype.toString.call(params.toolId) === "[object String]"
+        ? String(params.toolId)
+        : undefined) ??
+      (params.tool_name && Object.prototype.toString.call(params.tool_name) === "[object String]"
+        ? String(params.tool_name)
+        : undefined) ??
+      (params.name && Object.prototype.toString.call(params.name) === "[object String]"
+        ? String(params.name)
+        : undefined);
 
-    if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
+    if (!toolIdOrName) {
       return {
         isError: true,
         content: [
@@ -60,11 +69,12 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
         ],
       };
     }
+    const trimmedId = toolIdOrName.trim();
+    const requestedVersion =
+      params.version && Object.prototype.toString.call(params.version) === "[object String]"
+        ? String(params.version)
+        : undefined;
 
-    const trimmedId = identifier.trim();
-    const requestedVersion = typeof params.version === "string" ? params.version.trim() : undefined;
-
-    // Retrieve user controls for the caller's workspace
     const controls = await registry.controls.getControls(context.workspaceId);
 
     // Look up installed tools matching the identifier
@@ -128,17 +138,17 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
       controls.disabledTools.includes(resolvedTool.toolId) && !resolvedTool.isSystem;
 
     // Extract input schema safely
-    const inputSchema = resolvedTool.parameters ??
+    const inputSchema: ToolParameterSchema | JsonRpcParams = resolvedTool.parameters ??
       resolvedTool.manifest?.parameters ?? {
         type: "object",
         properties: {},
+        required: [],
+        additionalProperties: false,
       };
 
     // Extract output schema if available in metadata
-    const metadata = (resolvedTool.manifest?.metadata ?? {}) as Record<string, unknown>;
-    const outputSchema =
-      resolvedTool.outputSchema ?? (metadata.outputSchema as Record<string, unknown> | undefined);
-
+    const outputSchema: ToolOutputSchema | JsonRpcParams | undefined =
+      resolvedTool.outputSchema ?? resolvedTool.manifest?.outputSchema;
     // Extract capabilities safely
     const capabilities: CapabilityManifest = resolvedTool.manifest?.capabilities ?? {
       fs: {
@@ -182,17 +192,23 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
     // Extract provenance
     const artifactDigest = resolvedTool.artifact?.artifactDigest;
 
+    const manifestMetadata = resolvedTool.manifest?.metadata;
+    const toolMetadata = resolvedTool.metadata;
+    const authorRaw = manifestMetadata?.author ?? toolMetadata?.author;
+    const evolutionCycleRaw = manifestMetadata?.evolutionCycle ?? toolMetadata?.evolutionCycle;
+
     const provenance: ToolProvenance = {
       manifestDigest: resolvedTool.manifest?.digest ?? "",
       artifactDigest,
       createdAt:
         resolvedTool.manifest?.createdAt ?? resolvedTool.createdAt ?? new Date().toISOString(),
       updatedAt: resolvedTool.manifest?.updatedAt ?? resolvedTool.updatedAt,
-      author: typeof metadata.author === "string" ? metadata.author : undefined,
-      evolutionCycle:
-        typeof metadata.evolutionCycle === "number" ? metadata.evolutionCycle : undefined,
+      author:
+        authorRaw && Object.prototype.toString.call(authorRaw) === "[object String]"
+          ? String(authorRaw)
+          : undefined,
+      evolutionCycle: Number.isFinite(evolutionCycleRaw) ? Number(evolutionCycleRaw) : undefined,
     };
-
     const response: GetToolSchemaResponse = {
       toolId: resolvedTool.toolId,
       name: resolvedTool.exposedName || resolvedTool.name,

@@ -28,11 +28,11 @@ export const SEMVER_PATTERN =
  * Checks if a SemVer string belongs to a supported protocol major version.
  */
 export function isSupportedProtocolVersion(version: string): boolean {
-  if (typeof version !== "string") return false;
+  if (Object.prototype.toString.call(version) !== "[object String]") return false;
   const match = SEMVER_PATTERN.exec(version.trim());
   if (!match) return false;
   const major = Number.parseInt(match[1], 10);
-  return (SUPPORTED_PROTOCOL_MAJOR_VERSIONS as readonly number[]).includes(major);
+  return SUPPORTED_PROTOCOL_MAJOR_VERSIONS.some((v) => v === major);
 }
 
 /**
@@ -40,18 +40,13 @@ export function isSupportedProtocolVersion(version: string): boolean {
  * Throws ValidationError for missing/malformed versions and UpgradeRequiredError for unsupported/downgraded major versions.
  */
 export function assertSupportedProtocolVersion(
-  version: unknown,
+  version: string | null | undefined,
   context = "message",
 ): asserts version is string {
-  if (
-    version === undefined ||
-    version === null ||
-    typeof version !== "string" ||
-    version.trim() === ""
-  ) {
+  if (!version || version.trim() === "") {
     throw new ValidationError(
       `Missing explicit schema version in ${context}: wire protocol requires a valid SemVer version`,
-      { details: { receivedVersion: version, context, isTerminal: true } },
+      { details: { receivedVersion: version ?? "", context, isTerminal: true } },
     );
   }
   const trimmed = version.trim();
@@ -63,7 +58,7 @@ export function assertSupportedProtocolVersion(
     );
   }
   const major = Number.parseInt(match[1], 10);
-  if (!(SUPPORTED_PROTOCOL_MAJOR_VERSIONS as readonly number[]).includes(major)) {
+  if (!SUPPORTED_PROTOCOL_MAJOR_VERSIONS.some((v) => v === major)) {
     throw new UpgradeRequiredError(
       `Unsupported protocol version '${trimmed}' in ${context}. Client/cloud upgrade required (supported major versions: ${SUPPORTED_PROTOCOL_MAJOR_VERSIONS.join(", ")})`,
       `${SUPPORTED_PROTOCOL_MAJOR_VERSIONS[0]}.0.0`,
@@ -92,7 +87,7 @@ export const SupportedProtocolVersionSchema = SchemaVersionSchema.superRefine((v
     return;
   }
   const major = Number.parseInt(match[1], 10);
-  if (!(SUPPORTED_PROTOCOL_MAJOR_VERSIONS as readonly number[]).includes(major)) {
+  if (!SUPPORTED_PROTOCOL_MAJOR_VERSIONS.some((v) => v === major)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: `Unsupported protocol version '${val}': supported major versions are [${SUPPORTED_PROTOCOL_MAJOR_VERSIONS.join(", ")}]`,
@@ -100,7 +95,7 @@ export const SupportedProtocolVersionSchema = SchemaVersionSchema.superRefine((v
   }
 });
 
-const FORBIDDEN_PRIVATE_PROPERTY_KEYS: Record<string, true> = {
+const FORBIDDEN_PRIVATE_PROPERTY_KEYS = {
   AttributeUpdates: true,
   KeySchema: true,
   TableName: true,
@@ -116,9 +111,9 @@ const FORBIDDEN_PRIVATE_PROPERTY_KEYS: Record<string, true> = {
   _s3BucketPrivate: true,
   candidateInternalState: true,
   evaluationSandboxId: true,
-};
+} as const;
 
-const DYNAMODB_ATTRIBUTE_DESCRIPTOR_KEYS: Record<string, true> = {
+const DYNAMODB_ATTRIBUTE_DESCRIPTOR_KEYS = {
   S: true,
   N: true,
   B: true,
@@ -129,14 +124,62 @@ const DYNAMODB_ATTRIBUTE_DESCRIPTOR_KEYS: Record<string, true> = {
   L: true,
   NULL: true,
   BOOL: true,
-};
+} as const;
+
+export type ProtocolPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | ProtocolPayloadRecord
+  | ProtocolPayloadValue[];
+
+export interface ProtocolPayloadRecord {
+  [key: string]: ProtocolPayloadValue;
+}
+
+export const ProtocolPayloadValueSchema: z.ZodType<ProtocolPayloadValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(ProtocolPayloadValueSchema),
+    z.record(ProtocolPayloadValueSchema),
+  ]),
+);
+export type ProtocolPayload = Exclude<ProtocolPayloadValue, undefined>;
+
+const ProtocolPayloadSchema: z.ZodType<ProtocolPayload, z.ZodTypeDef, ProtocolPayloadValue> =
+  ProtocolPayloadValueSchema.refine((value): value is ProtocolPayload => value !== undefined);
+
+const ProtocolScalarInspectionSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.undefined(),
+]);
+const ProtocolObjectInspectionSchema = z.record(z.unknown());
 
 /**
  * Rejection filter ensuring raw private cloud implementation objects never cross the protocol boundary.
  */
-export function assertNoPrivateImplementationObjects(data: unknown, path = "$"): void {
-  if (data === null || data === undefined) return;
-  if (typeof data !== "object") return;
+export function assertNoPrivateImplementationObjects<T>(data: T, path = "$"): void {
+  if (data === null || data === undefined) {
+    return;
+  }
+
+  const dataTag = Object.prototype.toString.call(data);
+  if (
+    dataTag === "[object String]" ||
+    dataTag === "[object Number]" ||
+    dataTag === "[object Boolean]"
+  ) {
+    return;
+  }
 
   if (Array.isArray(data)) {
     for (let i = 0; i < data.length; i++) {
@@ -145,7 +188,14 @@ export function assertNoPrivateImplementationObjects(data: unknown, path = "$"):
     return;
   }
 
-  const obj = data as Record<string, unknown>;
+  if (dataTag !== "[object Object]") {
+    throw new ValidationError(`Unsupported private implementation object at ${path}`, {
+      details: { path, securityViolation: true },
+    });
+  }
+
+  // SAFETY: Data tag confirms data is a non-null object record.
+  const obj = data as ProtocolPayloadRecord;
 
   // Check prototype pollution attempt
   if (
@@ -161,34 +211,34 @@ export function assertNoPrivateImplementationObjects(data: unknown, path = "$"):
   }
 
   for (const key of Object.keys(obj)) {
-    if (FORBIDDEN_PRIVATE_PROPERTY_KEYS[key]) {
-      throw new ValidationError(
-        `Forbidden private cloud implementation property '${key}' detected at ${path}.${key}`,
-        { details: { path: `${path}.${key}`, key, securityViolation: true } },
-      );
+    if (Object.prototype.hasOwnProperty.call(FORBIDDEN_PRIVATE_PROPERTY_KEYS, key)) {
+      throw new ValidationError(`Forbidden private property '${key}' at ${path}`, {
+        details: { path, forbiddenKey: key, securityViolation: true },
+      });
     }
   }
 
+  // Detect raw DynamoDB typed attribute descriptor maps
   const keys = Object.keys(obj);
-  if (keys.length === 1 && DYNAMODB_ATTRIBUTE_DESCRIPTOR_KEYS[keys[0]]) {
+  if (
+    keys.length === 1 &&
+    Object.prototype.hasOwnProperty.call(DYNAMODB_ATTRIBUTE_DESCRIPTOR_KEYS, keys[0])
+  ) {
     const val = obj[keys[0]];
+    const valTag = Object.prototype.toString.call(val);
     if (
-      (keys[0] === "S" && typeof val === "string" && path.includes(".")) ||
+      (keys[0] === "S" && valTag === "[object String]" && path.includes(".")) ||
       (keys[0] === "N" &&
-        (typeof val === "string" || typeof val === "number") &&
+        (valTag === "[object String]" || valTag === "[object Number]") &&
         path.includes(".")) ||
-      (keys[0] === "BOOL" && typeof val === "boolean")
+      (keys[0] === "BOOL" && valTag === "[object Boolean]")
     ) {
-      if (
-        path.toLowerCase().includes("item") ||
-        path.toLowerCase().includes("record") ||
-        path.toLowerCase().includes("dynamo")
-      ) {
-        throw new ValidationError(
-          `Forbidden raw DynamoDB attribute representation detected at ${path}`,
-          { details: { path, key: keys[0], securityViolation: true } },
-        );
-      }
+      throw new ValidationError(
+        `Raw low-level database descriptor map { ${keys[0]}: ... } detected at ${path}`,
+        {
+          details: { path, detectedKey: keys[0], violation: "db_descriptor_leak" },
+        },
+      );
     }
   }
 
@@ -196,12 +246,15 @@ export function assertNoPrivateImplementationObjects(data: unknown, path = "$"):
     assertNoPrivateImplementationObjects(value, `${path}.${key}`);
   }
 }
-
 /**
  * Reusable strict parser helper.
  * Rejects private implementation objects and enforces schema validation.
  */
-export function strictParse<T>(schema: z.ZodType<T>, data: unknown, context?: string): T {
+export function strictParse<T>(
+  schema: z.ZodType<T>,
+  data: ProtocolPayloadValue,
+  context?: string,
+): T {
   assertNoPrivateImplementationObjects(data, context ?? "$");
   const result = schema.safeParse(data);
   if (!result.success) {
@@ -222,10 +275,6 @@ export function strictParse<T>(schema: z.ZodType<T>, data: unknown, context?: st
   }
   return result.data;
 }
-
-/**
- * Protocol compression algorithms.
- */
 export const ProtocolCompressionSchema = z
   .enum(["none", "gzip", "zstd", "deflate"])
   .default("none");
@@ -265,22 +314,35 @@ export const ProtocolMessageEnvelopeSchema = z
     payloadType: z.string().min(1),
     payloadDigest: Sha256DigestSchema,
     traceContext: TraceContextSchema.optional(),
-    payload: z.unknown(),
+    payload: ProtocolPayloadSchema,
     signature: z.string().optional(),
   })
   .strict();
 
-export type ProtocolMessageEnvelope<T = unknown> = Omit<
-  z.infer<typeof ProtocolMessageEnvelopeSchema>,
-  "payload"
-> & {
+export interface ProtocolMessageEnvelope<T = ProtocolPayloadValue> {
+  version: string;
+  messageId: string;
+  deviceId: string;
+  installationId: string;
+  workspaceId: string;
+  sequence: number;
+  causationId?: string;
+  correlationId?: string;
+  createdAt: string;
+  expiresAt?: string;
+  idempotencyKey?: string;
+  compression: ProtocolCompression;
+  payloadType: string;
+  payloadDigest: string;
+  traceContext?: TraceContext;
   payload: T;
-};
+  signature?: string;
+}
 
 /**
  * Options for constructing a ProtocolMessageEnvelope.
  */
-export interface CreateProtocolEnvelopeOptions<T> {
+export interface CreateProtocolEnvelopeOptions<T = ProtocolPayloadValue> {
   payloadType: string;
   payload: T;
   deviceId: string;
@@ -304,17 +366,18 @@ export interface CreateProtocolEnvelopeOptions<T> {
  * Creates a strongly-typed, canonical-digest-verified ProtocolMessageEnvelope.
  * Default version "1.0.0" is populated for producers if omitted in options.
  */
-export function createProtocolEnvelope<T>(
+export function createProtocolEnvelope<T = ProtocolPayloadValue>(
   options: CreateProtocolEnvelopeOptions<T>,
 ): ProtocolMessageEnvelope<T> {
   const messageId = options.messageId ?? randomUUID();
   const createdAt = options.createdAt ?? new Date().toISOString();
   const compression = options.compression ?? "none";
   const version = options.version ?? PROTOCOL_VERSION;
-  const payloadDigest = options.payloadDigest ?? hashCanonicalContent(options.payload);
+  assertNoPrivateImplementationObjects(options.payload, "payload");
+  const canonicalPayload = ProtocolPayloadSchema.parse(options.payload);
+  const payloadDigest = options.payloadDigest ?? hashCanonicalContent(canonicalPayload);
 
   assertSupportedProtocolVersion(version, "createProtocolEnvelope");
-  assertNoPrivateImplementationObjects(options.payload, "payload");
 
   const envelope: ProtocolMessageEnvelope<T> = {
     version,
@@ -336,7 +399,8 @@ export function createProtocolEnvelope<T>(
     signature: options.signature,
   };
 
-  return ProtocolMessageEnvelopeSchema.parse(envelope) as unknown as ProtocolMessageEnvelope<T>;
+  // SAFETY: Constructed envelope conforms to ProtocolMessageEnvelopeSchema and wraps typed payload T.
+  return ProtocolMessageEnvelopeSchema.parse(envelope) as ProtocolMessageEnvelope<T>;
 }
 
 export interface ValidateProtocolEnvelopeOptions {
@@ -354,7 +418,7 @@ export interface ValidateProtocolEnvelopeOptions {
  * Rejects missing versions, unsupported major versions, unknown envelope fields, and private objects.
  */
 export function validateProtocolEnvelope<T>(
-  raw: unknown,
+  raw: ProtocolPayloadValue | ProtocolMessageEnvelope<T>,
   payloadSchema?: z.ZodType<T>,
   options: ValidateProtocolEnvelopeOptions = {},
 ): ProtocolMessageEnvelope<T> {
@@ -382,23 +446,20 @@ export function validateProtocolEnvelope<T>(
   const effectiveServerTime =
     serverTime ?? (serverTimestamp ? new Date(serverTimestamp).getTime() : Date.now());
 
-  if (
-    !allowExpired &&
-    isEnvelopeExpired(parsed as ProtocolMessageEnvelope<unknown>, effectiveServerTime)
-  ) {
+  if (!allowExpired && isEnvelopeExpired(parsed, effectiveServerTime)) {
     throw new ValidationError("Protocol message envelope has expired", {
       details: { messageId: parsed.messageId, expiresAt: parsed.expiresAt },
     });
   }
 
   if (maxSkewMs !== undefined) {
-    assertEnvelopeClockSkew(parsed as ProtocolMessageEnvelope<unknown>, {
+    assertEnvelopeClockSkew(parsed, {
       maxSkewMs,
       serverTime: effectiveServerTime,
     });
   }
 
-  if (verifyDigest && !verifyPayloadDigest(parsed as ProtocolMessageEnvelope<unknown>)) {
+  if (verifyDigest && !verifyPayloadDigest(parsed)) {
     throw new ChecksumMismatchError(
       parsed.payloadDigest,
       hashCanonicalContent(parsed.payload),
@@ -411,16 +472,24 @@ export function validateProtocolEnvelope<T>(
     return {
       ...parsed,
       payload: validatedPayload,
-    } as ProtocolMessageEnvelope<T>;
+    };
   }
-  return parsed as unknown as ProtocolMessageEnvelope<T>;
+  // SAFETY: Without an explicit payload schema, the parsed wire envelope payload is passed through to the caller.
+  return {
+    ...parsed,
+    payload: parsed.payload as T,
+  };
 }
 
 /**
  * Verifies that the canonical hash of the envelope payload matches payloadDigest.
  */
-export function verifyPayloadDigest(envelope: ProtocolMessageEnvelope<unknown>): boolean {
-  const computed = hashCanonicalContent(envelope.payload);
+export function verifyPayloadDigest<TPayload>(envelope: {
+  payload: TPayload;
+  payloadDigest: string;
+}): boolean {
+  const canonicalPayload = ProtocolPayloadSchema.parse(envelope.payload);
+  const computed = hashCanonicalContent(canonicalPayload);
   const normalizedExpected = normalizeSha256(envelope.payloadDigest);
   const normalizedComputed = normalizeSha256(computed);
 
@@ -431,10 +500,21 @@ export function verifyPayloadDigest(envelope: ProtocolMessageEnvelope<unknown>):
 }
 
 /**
+ * Asserts that raw value is a valid protocol message envelope.
+ */
+export function assertValidProtocolEnvelope<T>(
+  raw: ProtocolPayloadValue | ProtocolMessageEnvelope<T>,
+  payloadSchema?: z.ZodType<T>,
+  options?: ValidateProtocolEnvelopeOptions,
+): asserts raw is ProtocolMessageEnvelope<T> {
+  validateProtocolEnvelope(raw, payloadSchema, options);
+}
+
+/**
  * Checks whether an envelope's optional expiration timestamp has passed.
  */
 export function isEnvelopeExpired(
-  envelope: ProtocolMessageEnvelope<unknown>,
+  envelope: { expiresAt?: string },
   currentTime = Date.now(),
 ): boolean {
   if (!envelope.expiresAt) return false;
@@ -445,7 +525,7 @@ export function isEnvelopeExpired(
  * Asserts that the envelope createdAt timestamp is within maximum clock skew tolerance.
  */
 export function assertEnvelopeClockSkew(
-  envelope: ProtocolMessageEnvelope<unknown>,
+  envelope: { createdAt: string },
   options: { serverTimestamp?: string; serverTime?: number; maxSkewMs?: number } = {},
 ): void {
   const maxSkewMs = options.maxSkewMs ?? 300_000; // 5 minutes default

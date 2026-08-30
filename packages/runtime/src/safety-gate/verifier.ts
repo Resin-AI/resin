@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import {
   CURRENT_SAFETY_GATE_VERSION,
+  type CanonicalJsonRecord,
   REQUIRED_BROKER_PROTOCOL_VERSION,
   REQUIRED_BUNDLE_VERIFIER_VERSION,
   REQUIRED_POLICY_VERSION,
@@ -13,7 +14,7 @@ import {
   type SafetyGateErrorCode,
   canonicalJson,
 } from "@resin/contracts";
-
+import { z } from "zod";
 export interface AttestationVerificationResult {
   valid: boolean;
   errorCode?: SafetyGateErrorCode;
@@ -52,7 +53,7 @@ export interface SignedSafetyAttestationOptions {
   validityMs?: number;
   now?: Date;
   compatibility?: Partial<SafetyAttestationRecord["compatibility"]>;
-  metadata?: Record<string, unknown>;
+  metadata?: SafetyAttestationRecord["metadata"];
 }
 
 function decodeSignature(signature: string): Buffer {
@@ -76,9 +77,12 @@ function buildUnsignedPayload(
     metadata: record.metadata,
   };
 }
+function isString<TInput>(val: TInput): val is TInput & string {
+  return z.string().safeParse(val).success;
+}
 
-function validSha256(value: unknown): value is string {
-  return typeof value === "string" && /^(?:sha256:)?[0-9a-f]{64}$/i.test(value);
+function validSha256(value: string | null | undefined): value is string {
+  return isString(value) && /^(?:sha256:)?[0-9a-f]{64}$/i.test(value);
 }
 
 /**
@@ -109,8 +113,11 @@ export class AttestationVerifier {
       Boolean(process.env.VITEST || process.env.VITEST_WORKER_ID);
   }
 
-  verify(input: unknown, now = new Date()): AttestationVerificationResult {
-    if (!input || typeof input !== "object") {
+  verify(
+    input: SafetyAttestationRecord | CanonicalJsonRecord | string | null | undefined,
+    now = new Date(),
+  ): AttestationVerificationResult {
+    if (!input || Object.prototype.toString.call(input) !== "[object Object]") {
       return {
         valid: false,
         errorCode: SAFETY_GATE_ERROR_CODES.MISSING_ATTESTATION,
@@ -193,7 +200,8 @@ export class AttestationVerifier {
     const isProductionLike =
       record.environment === "production" || record.environment === "staging";
     if (isProductionLike) {
-      const evidenceDigest = record.metadata?.evidenceDigest;
+      const rawEvidenceDigest = record.metadata?.evidenceDigest;
+      const evidenceDigest = isString(rawEvidenceDigest) ? rawEvidenceDigest : undefined;
       const componentDigests = record.metadata?.componentDigests;
       if (!validSha256(evidenceDigest)) {
         return {
@@ -204,7 +212,10 @@ export class AttestationVerifier {
           record,
         };
       }
-      if (!componentDigests || typeof componentDigests !== "object") {
+      if (
+        !componentDigests ||
+        Object.prototype.toString.call(componentDigests) !== "[object Object]"
+      ) {
         return {
           valid: false,
           errorCode: SAFETY_GATE_ERROR_CODES.CORRUPTED_ATTESTATION,
@@ -213,6 +224,8 @@ export class AttestationVerifier {
           record,
         };
       }
+      // SAFETY: Object prototype check confirms componentDigests is a non-null object record.
+      const componentDigestsMap = componentDigests as Record<string, string | undefined>;
       const requiredComponents = [
         "runtime",
         "worker",
@@ -221,7 +234,10 @@ export class AttestationVerifier {
         "secretBroker",
       ];
       for (const component of requiredComponents) {
-        if (!validSha256((componentDigests as Record<string, unknown>)[component])) {
+        // SAFETY: componentDigestsMap contains string digests for required runtime components
+        const rawDigest = componentDigestsMap[component];
+        const digest = isString(rawDigest) ? rawDigest : undefined;
+        if (!validSha256(digest)) {
           return {
             valid: false,
             errorCode: SAFETY_GATE_ERROR_CODES.CORRUPTED_ATTESTATION,

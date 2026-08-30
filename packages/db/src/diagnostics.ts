@@ -4,33 +4,60 @@ import type { LocalDatabaseConnection } from "./connection.js";
 const SENSITIVE_KEY_PATTERN = /token|secret|password|key|auth|credential|jwt/i;
 const REDACTED_PLACEHOLDER = "[REDACTED]";
 
+export type DiagnosticMetadataValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | DiagnosticMetadataRecord
+  | DiagnosticMetadataValue[];
+
+export interface DiagnosticMetadataRecord {
+  [key: string]: DiagnosticMetadataValue;
+}
+
 /**
  * Deeply redacts sensitive keys from any object/record.
  */
-export function redactSensitiveData(data: unknown): unknown {
+export function redactSensitiveData(data: DiagnosticMetadataRecord): DiagnosticMetadataRecord {
   if (data === null || data === undefined) {
-    return data;
-  }
-  if (typeof data !== "object") {
-    return data;
-  }
-  if (Array.isArray(data)) {
-    return data.map((item) => redactSensitiveData(item));
+    return {};
   }
 
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-    if (SENSITIVE_KEY_PATTERN.test(key) && typeof value === "string" && value.length > 0) {
+  const result: DiagnosticMetadataRecord = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (
+      SENSITIVE_KEY_PATTERN.test(key) &&
+      Object.prototype.toString.call(value) === "[object String]" &&
+      String(value).length > 0
+    ) {
       result[key] = REDACTED_PLACEHOLDER;
-    } else if (typeof value === "object" && value !== null) {
-      result[key] = redactSensitiveData(value);
+    } else if (
+      Object.prototype.toString.call(value) === "[object Object]" &&
+      value !== null &&
+      !Array.isArray(value)
+    ) {
+      // SAFETY: Nested object is confirmed to be an object before recursion.
+      result[key] = redactSensitiveData(value as DiagnosticMetadataRecord);
+    } else if (Array.isArray(value)) {
+      result[key] = value.map((item) => {
+        if (
+          Object.prototype.toString.call(item) === "[object Object]" &&
+          item !== null &&
+          !Array.isArray(item)
+        ) {
+          // SAFETY: Nested object in array is confirmed to be an object before recursion.
+          return redactSensitiveData(item as DiagnosticMetadataRecord);
+        }
+        return item;
+      });
     } else {
       result[key] = value;
     }
   }
   return result;
 }
-
 /**
  * Diagnostics report structure for LocalStateStore.
  */
@@ -49,7 +76,7 @@ export interface DatabaseDiagnosticsReport {
   schemaVersion: number;
   appliedMigrations: Array<{ version: number; name: string; appliedAt: string }>;
   tableCounts: Record<string, number>;
-  metadata: Record<string, unknown>;
+  metadata: DiagnosticMetadataRecord;
 }
 
 /**
@@ -84,7 +111,7 @@ export const STATE_STORE_TABLES = [
  */
 export function exportDatabaseDiagnostics(
   conn: LocalDatabaseConnection,
-  extraMetadata: Record<string, unknown> = {},
+  extraMetadata: DiagnosticMetadataRecord = {},
 ): DatabaseDiagnosticsReport {
   const location = conn.getLocation();
   const isMemory = location === ":memory:";
@@ -149,7 +176,7 @@ export function exportDatabaseDiagnostics(
   }
 
   // Safe redaction on any extra metadata
-  const safeMetadata = redactSensitiveData(extraMetadata) as Record<string, unknown>;
+  const safeMetadata = redactSensitiveData(extraMetadata);
 
   return {
     timestamp: new Date().toISOString(),

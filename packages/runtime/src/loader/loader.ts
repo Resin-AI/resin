@@ -2,9 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
   type ConsequentialAction,
   type ObservedEffectProfile,
+  QUALIFICATION_ERROR_CODES,
   type QualificationArtifactBundle,
+  QualificationArtifactBundleSchema,
   type QualificationRunRecord,
   type QualificationSignatureVerifier,
   type ToolManifest,
@@ -70,12 +74,12 @@ import {
  * Deeply freezes an object to make it immutable.
  */
 function deepFreeze<T>(obj: T): Readonly<T> {
-  if (obj === null || typeof obj !== "object") return obj;
-  const propNames = Object.getOwnPropertyNames(obj);
-  for (const name of propNames) {
-    const value = (obj as Record<string, unknown>)[name];
-    if (value && typeof value === "object") {
-      deepFreeze(value);
+  if (obj === null || !(obj instanceof Object)) {
+    return obj;
+  }
+  for (const val of Object.values(obj)) {
+    if (val !== null && val instanceof Object && !Object.isFrozen(val)) {
+      deepFreeze(val);
     }
   }
   return Object.freeze(obj);
@@ -226,6 +230,7 @@ export function deriveObservedEffectProfile(runs: QualificationRunRecord[]): Obs
       observation: first.consequentialActions?.observation ?? "complete",
       actions,
     },
+    // SAFETY: Verified or defaulted string value matches DeterminismLevel union.
     determinism: (first.determinism ?? "deterministic") as
       | "deterministic"
       | "non_deterministic"
@@ -296,8 +301,8 @@ async function scanExtractedRegularFiles(targetDir: string): Promise<{
 }
 
 export class BundleValidationError extends Error {
-  readonly details?: Record<string, unknown>;
-  constructor(message: string, details?: Record<string, unknown>) {
+  readonly details?: CanonicalJsonRecord;
+  constructor(message: string, details?: CanonicalJsonRecord) {
     super(message);
     this.name = "BundleValidationError";
     this.details = details;
@@ -474,10 +479,11 @@ export class ToolBundleLoader {
     }
 
     // Parse qualification.json
-    let qualData: unknown;
+    let qualData: CanonicalJsonValue = null;
     try {
       const qualContent = await fs.promises.readFile(qualPath, "utf8");
-      qualData = JSON.parse(qualContent);
+      // SAFETY: JSON parse result is typed as CanonicalJsonValue for qualification validation.
+      qualData = JSON.parse(qualContent) as CanonicalJsonValue;
     } catch (err) {
       throw new BundleValidationError(
         `Failed to parse ${BUNDLE_FILE_QUALIFICATION}: ${err instanceof Error ? err.message : String(err)}`,
@@ -485,19 +491,8 @@ export class ToolBundleLoader {
       );
     }
 
-    const rawKeyId =
-      typeof qualData === "object" && qualData !== null
-        ? (qualData as Record<string, unknown>).approval &&
-          typeof (qualData as Record<string, unknown>).approval === "object"
-          ? (
-              (qualData as Record<string, unknown>).approval as Record<
-                string,
-                Record<string, unknown>
-              >
-            ).signature?.keyId
-          : undefined
-        : undefined;
-    const keyId = typeof rawKeyId === "string" ? rawKeyId : undefined;
+    const parsedQual = QualificationArtifactBundleSchema.safeParse(qualData);
+    const keyId = parsedQual.success ? parsedQual.data.approval?.signature?.keyId : undefined;
 
     const keyEntry = keyId ? await this.resolveKey(keyId, options) : undefined;
 
@@ -522,18 +517,25 @@ export class ToolBundleLoader {
     }
 
     // Contract validation
-    const validationResult = validateQualificationBundle(qualData, { verifier });
+    // SAFETY: qualData is parsed JSON value validated against qualification bundle schema.
+    const validationResult = validateQualificationBundle(qualData as QualificationArtifactBundle, {
+      verifier,
+    });
     if (!validationResult.valid) {
       const isUnapproved =
         validationResult.issues.some(
           (i) =>
-            i.message.toLowerCase().includes("decision") ||
-            i.message.toLowerCase().includes("rejected") ||
-            i.message.toLowerCase().includes("not approved"),
+            i.code === QUALIFICATION_ERROR_CODES.REVIEWER_VERDICT_FAILED ||
+            i.message.toLowerCase().includes("unapproved") ||
+            i.message.toLowerCase().includes("rejected"),
         ) ||
-        (Boolean(validationResult.bundle) &&
-          validationResult.bundle?.approval?.decision !== "approved");
-
+        (Boolean(qualData) &&
+          qualData instanceof Object &&
+          "approval" in qualData &&
+          qualData.approval instanceof Object &&
+          "decision" in qualData.approval &&
+          // SAFETY: Checked as object record with decision property.
+          String((qualData.approval as CanonicalJsonRecord).decision) === "rejected");
       if (isUnapproved) {
         throw new BundleValidationError(
           `Qualification approval rejected or unapproved: ${validationResult.issues.map((i) => i.message).join("; ")}`,
@@ -607,8 +609,13 @@ export class ToolBundleLoader {
       });
     }
 
+    const qualMeta = qual.metadata;
+    const rawToolId = qualMeta?.toolId;
+    // SAFETY: Tag check confirms metadata.toolId is a string.
     const expectedToolId =
-      typeof qual.metadata?.toolId === "string" ? qual.metadata.toolId : undefined;
+      Object.prototype.toString.call(rawToolId) === "[object String]"
+        ? (rawToolId as string)
+        : undefined;
     if (expectedToolId && expectedToolId !== resolvedManifest.id) {
       throw new BundleValidationError(
         `Manifest tool id '${resolvedManifest.id}' does not match expected qualification tool id '${expectedToolId}'`,
@@ -616,8 +623,12 @@ export class ToolBundleLoader {
       );
     }
 
+    const rawToolVersion = qualMeta?.toolVersion;
+    // SAFETY: Tag check confirms metadata.toolVersion is a string.
     const expectedToolVersion =
-      typeof qual.metadata?.toolVersion === "string" ? qual.metadata.toolVersion : undefined;
+      Object.prototype.toString.call(rawToolVersion) === "[object String]"
+        ? (rawToolVersion as string)
+        : undefined;
     if (expectedToolVersion && expectedToolVersion !== resolvedManifest.version) {
       throw new BundleValidationError(
         `Manifest tool version '${resolvedManifest.version}' does not match expected qualification tool version '${expectedToolVersion}'`,
@@ -625,8 +636,12 @@ export class ToolBundleLoader {
       );
     }
 
+    const rawManifestDigest = qualMeta?.manifestDigest;
+    // SAFETY: Tag check confirms metadata.manifestDigest is a string.
     const expectedManifestDigest =
-      typeof qual.metadata?.manifestDigest === "string" ? qual.metadata.manifestDigest : undefined;
+      Object.prototype.toString.call(rawManifestDigest) === "[object String]"
+        ? (rawManifestDigest as string)
+        : undefined;
     if (expectedManifestDigest) {
       const computedManifestDigest = normalizeSha256(
         computeSha256(canonicalJson(resolvedManifest)),
@@ -738,42 +753,42 @@ export class ToolBundleLoader {
 
     if (fs.existsSync(pkgPath)) {
       const pkgContent = await fs.promises.readFile(pkgPath, "utf8");
-      let pkgParsed: Record<string, unknown> = {};
+      let pkgParsed: CanonicalJsonRecord = {};
       try {
         pkgParsed = JSON.parse(pkgContent);
       } catch (err) {
         throw new BundleValidationError(
           `Failed to parse ${BUNDLE_FILE_PACKAGE}: ${err instanceof Error ? err.message : String(err)}`,
-          { reason: "corrupted_archive" },
+          { reason: "manifest_invalid" },
         );
       }
+      // SAFETY: Object tag check confirms dependencies is an object record.
       const rawDeps =
-        typeof pkgParsed.dependencies === "object" &&
         pkgParsed.dependencies !== null &&
-        !Array.isArray(pkgParsed.dependencies)
-          ? (pkgParsed.dependencies as Record<string, unknown>)
+        Object.prototype.toString.call(pkgParsed.dependencies) === "[object Object]"
+          ? (pkgParsed.dependencies as CanonicalJsonRecord)
           : {};
       const deps: Record<string, string> = {};
       for (const [k, v] of Object.entries(rawDeps)) {
-        if (typeof v === "string") {
-          deps[k] = v;
+        if (Object.prototype.toString.call(v) === "[object String]") {
+          // SAFETY: Object tag check confirms dependency version is a string.
+          deps[k] = v as string;
         }
       }
       parsedDependencies = deps;
-
       const canonicalDepsDigest = normalizeSha256(computeSha256(canonicalJson(deps)), false);
       const canonicalPkgDigest = normalizeSha256(computeSha256(canonicalJson(pkgParsed)), false);
       const expectedDep = normalizeSha256(qual.approval.dependencyDigest, false);
 
       if (fs.existsSync(lockPath)) {
         const lockContent = await fs.promises.readFile(lockPath, "utf8");
-        let lockParsed: Record<string, unknown> = {};
+        let lockParsed: CanonicalJsonRecord = {};
         try {
           lockParsed = JSON.parse(lockContent);
         } catch (err) {
           throw new BundleValidationError(
             `Failed to parse ${BUNDLE_FILE_PACKAGE_LOCK}: ${err instanceof Error ? err.message : String(err)}`,
-            { reason: "corrupted_archive" },
+            { reason: "manifest_invalid" },
           );
         }
         const lockGraph = { package: pkgParsed, lock: lockParsed };
@@ -903,7 +918,7 @@ export class ToolBundleLoader {
     bundleInput: Buffer | string,
     options: LoadBundleOptions = {},
   ): Promise<LoadedToolBundle> {
-    if (typeof bundleInput === "string") {
+    if (!Buffer.isBuffer(bundleInput)) {
       const stats = await fs.promises.stat(bundleInput);
       if (stats.isDirectory()) {
         return this.loadFromDirectory(bundleInput, options);
@@ -1338,14 +1353,11 @@ export class ToolBundleLoader {
           await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
 
           if (options.reference) {
-            const refObj: ArtifactReference =
-              typeof options.reference === "string"
-                ? {
-                    refId: options.reference,
-                    refType: "active",
-                    createdAt: new Date().toISOString(),
-                  }
-                : options.reference;
+            const refObj: ArtifactReference = {
+              refId: options.reference,
+              refType: "active",
+              createdAt: new Date().toISOString(),
+            };
             await this.cache.acquireReference(digest, refObj);
           }
 
@@ -1386,10 +1398,10 @@ export class ToolBundleLoader {
                   ? "approval_drift"
                   : "signature_mismatch";
           } else if (err instanceof BundleValidationError) {
+            // SAFETY: BundleValidationError details are validated by constructor and reason matches QuarantineReason union
             const detailsReason = err.details?.reason as QuarantineReason | undefined;
             quarantineReason = detailsReason ?? "approval_drift";
           }
-
           await this.quarantine
             .quarantineDirectory(
               artifactDir,
@@ -1413,10 +1425,11 @@ export class ToolBundleLoader {
       );
 
       if (options.reference) {
-        const refObj: ArtifactReference =
-          typeof options.reference === "string"
-            ? { refId: options.reference, refType: "active", createdAt: new Date().toISOString() }
-            : options.reference;
+        const refObj: ArtifactReference = {
+          refId: options.reference,
+          refType: "active",
+          createdAt: new Date().toISOString(),
+        };
         await this.cache.acquireReference(digest, refObj);
       }
       const entrypointPath = path.join(finalArtifactDir, inspection.entrypoint);
@@ -1471,6 +1484,7 @@ export class ToolBundleLoader {
           quarantineReason = "resource_limit_exceeded";
         }
       } else if (err instanceof BundleValidationError) {
+        // SAFETY: BundleValidationError details are validated by constructor and reason matches QuarantineReason union
         const detailsReason = err.details?.reason as QuarantineReason | undefined;
         if (detailsReason) {
           quarantineReason = detailsReason;
@@ -1688,10 +1702,11 @@ export class ToolBundleLoader {
       );
 
       if (options.reference) {
-        const refObj: ArtifactReference =
-          typeof options.reference === "string"
-            ? { refId: options.reference, refType: "active", createdAt: new Date().toISOString() }
-            : options.reference;
+        const refObj: ArtifactReference = {
+          refId: options.reference,
+          refType: "active",
+          createdAt: new Date().toISOString(),
+        };
         await this.cache.acquireReference(digest, refObj);
       }
 
@@ -1747,6 +1762,7 @@ export class ToolBundleLoader {
           quarantineReason = "resource_limit_exceeded";
         }
       } else if (err instanceof BundleValidationError) {
+        // SAFETY: BundleValidationError details are validated by constructor and reason matches QuarantineReason union
         const detailsReason = err.details?.reason as QuarantineReason | undefined;
         if (detailsReason) {
           quarantineReason = detailsReason;

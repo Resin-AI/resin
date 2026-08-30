@@ -362,9 +362,10 @@ describe("HarnessHealthCoordinator", () => {
     const optedOut = await firstProcess.run({ trigger: "startup", force: true });
     expect(optedOut.snapshot?.autoRepair).toBe(false);
 
-    const permissionError = new Error(
-      `EACCES: permission denied, open '${settingsPath}'`,
-    ) as NodeJS.ErrnoException;
+    const permissionError = Object.assign(
+      new Error(`EACCES: permission denied, open '${settingsPath}'`),
+      { code: "EACCES" },
+    );
     permissionError.code = "EACCES";
     bridge.settingsReadError = permissionError;
     const writeSpy = vi.spyOn(bridge, "writeFile");
@@ -671,9 +672,11 @@ describe("harness health production triggers", () => {
       restartCount: 0,
       crashTimestamps: [],
     };
+    // SAFETY: Partial mock implementing only required getState method for testing.
     const tracker = {
       getState: vi.fn().mockResolvedValue(state),
-    } as unknown as RecoveryStateTracker;
+      // SAFETY: Test double implementing required interface.
+    } as RecoveryStateTracker;
     const resinHome = path.join(HOME, ".resin");
 
     const result = await runServiceSupervisor({

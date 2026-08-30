@@ -1,20 +1,22 @@
 import path from "node:path";
 import { type CapabilityManifest, ToolManifestSchema, hashCanonical } from "@resin/contracts";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type {
   PreactivationCheckOutcome,
   PreactivationCheckResult,
   PreactivationContext,
   PreactivationViolation,
 } from "./types.js";
-
 export type { PreactivationContext };
 
 /**
  * Safe SHA-256 digest normalization.
  */
 function normalizeDigest(digest?: string | null): string {
-  if (!digest || typeof digest !== "string") return "";
-  return digest
+  const parsed = z.string().safeParse(digest);
+  if (!parsed.success) return "";
+  return parsed.data
     .toLowerCase()
     .trim()
     .replace(/^sha256:/, "");
@@ -39,7 +41,7 @@ const DANGEROUS_ENV_VARS: readonly string[] = [
   "SSLKEYLOGFILE",
 ];
 
-const KNOWN_TOP_LEVEL_CAPABILITY_KEYS: Record<string, true> = {
+const KNOWN_TOP_LEVEL_CAPABILITY_KEYS = {
   schemaVersion: true,
   manifestId: true,
   fs: true,
@@ -47,18 +49,18 @@ const KNOWN_TOP_LEVEL_CAPABILITY_KEYS: Record<string, true> = {
   command: true,
   secrets: true,
   limits: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_FS_KEYS: Record<string, true> = {
+const KNOWN_FS_KEYS = {
   readPaths: true,
   writePaths: true,
   allowWorkspaceRoot: true,
   allowTemp: true,
   denyPaths: true,
   maxFileSizeBytes: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_NET_KEYS: Record<string, true> = {
+const KNOWN_NET_KEYS = {
   allowOutbound: true,
   allowedDomains: true,
   allowedHosts: true,
@@ -66,24 +68,24 @@ const KNOWN_NET_KEYS: Record<string, true> = {
   allowedProtocols: true,
   allowLocalhost: true,
   denyPrivateRanges: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_COMMAND_KEYS: Record<string, true> = {
+const KNOWN_COMMAND_KEYS = {
   allowShellExecution: true,
   allowedCommands: true,
   allowedBinaries: true,
   forbiddenPatterns: true,
   allowEnvPassthrough: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_SECRETS_KEYS: Record<string, true> = {
+const KNOWN_SECRETS_KEYS = {
   allowedSecretNames: true,
   allowedPrefixes: true,
   denyDirectRead: true,
   injectAsEnv: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_LIMITS_KEYS: Record<string, true> = {
+const KNOWN_LIMITS_KEYS = {
   maxConcurrentExecutions: true,
   maxConcurrentInvocations: true,
   maxCpuPercent: true,
@@ -95,73 +97,86 @@ const KNOWN_LIMITS_KEYS: Record<string, true> = {
   maxMemoryMb: true,
   memoryLimitMb: true,
   maxOutputSizeBytes: true,
-};
+} as const satisfies Record<string, true>;
 
-export function detectUnknownCapabilityKeys(obj: unknown): string[] {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+export function detectUnknownCapabilityKeys(
+  obj: CapabilityManifest | JsonValue | null | undefined,
+): string[] {
+  if (!obj || !(obj instanceof Object) || Array.isArray(obj)) {
     return [];
   }
 
   const unknownKeys: string[] = [];
-  const rec = obj as Record<string, unknown>;
+  // SAFETY: Object instance check confirms obj is a record.
+  const rec = obj as JsonObject;
 
   for (const k of Object.keys(rec)) {
     if (k === "__proto__" || k === "constructor" || k === "prototype") {
       unknownKeys.push(k);
       continue;
     }
-    if (!KNOWN_TOP_LEVEL_CAPABILITY_KEYS[k]) {
+    if (!Object.hasOwn(KNOWN_TOP_LEVEL_CAPABILITY_KEYS, k)) {
       unknownKeys.push(k);
     }
   }
 
-  if (rec.fs && typeof rec.fs === "object" && !Array.isArray(rec.fs)) {
-    for (const k of Object.keys(rec.fs as Record<string, unknown>)) {
+  if (rec.fs && rec.fs instanceof Object && !Array.isArray(rec.fs)) {
+    // SAFETY: Instance check confirms rec.fs is an object record.
+    const fsObj = rec.fs as JsonObject;
+    for (const k of Object.keys(fsObj)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`fs.${k}`);
         continue;
       }
-      if (!KNOWN_FS_KEYS[k]) unknownKeys.push(`fs.${k}`);
+      if (!Object.hasOwn(KNOWN_FS_KEYS, k)) unknownKeys.push(`fs.${k}`);
     }
   }
 
-  if (rec.net && typeof rec.net === "object" && !Array.isArray(rec.net)) {
-    for (const k of Object.keys(rec.net as Record<string, unknown>)) {
+  if (rec.net && rec.net instanceof Object && !Array.isArray(rec.net)) {
+    // SAFETY: Instance check confirms rec.net is an object record.
+    const netObj = rec.net as JsonObject;
+    for (const k of Object.keys(netObj)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`net.${k}`);
         continue;
       }
-      if (!KNOWN_NET_KEYS[k]) unknownKeys.push(`net.${k}`);
+      if (!Object.hasOwn(KNOWN_NET_KEYS, k)) unknownKeys.push(`net.${k}`);
     }
   }
 
-  if (rec.command && typeof rec.command === "object" && !Array.isArray(rec.command)) {
-    for (const k of Object.keys(rec.command as Record<string, unknown>)) {
+  if (rec.command && rec.command instanceof Object && !Array.isArray(rec.command)) {
+    // SAFETY: Instance check confirms rec.command is an object record.
+    const cmdObj = rec.command as JsonObject;
+    for (const k of Object.keys(cmdObj)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`command.${k}`);
         continue;
       }
-      if (!KNOWN_COMMAND_KEYS[k]) unknownKeys.push(`command.${k}`);
+      if (!Object.hasOwn(KNOWN_COMMAND_KEYS, k)) unknownKeys.push(`command.${k}`);
     }
   }
 
-  if (rec.secrets && typeof rec.secrets === "object" && !Array.isArray(rec.secrets)) {
-    for (const k of Object.keys(rec.secrets as Record<string, unknown>)) {
+  if (rec.secrets && rec.secrets instanceof Object && !Array.isArray(rec.secrets)) {
+    // SAFETY: Instance check confirms rec.secrets is an object record.
+    const secObj = rec.secrets as JsonObject;
+    for (const k of Object.keys(secObj)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`secrets.${k}`);
         continue;
       }
-      if (!KNOWN_SECRETS_KEYS[k]) unknownKeys.push(`secrets.${k}`);
+      if (!Object.hasOwn(KNOWN_SECRETS_KEYS, k)) unknownKeys.push(`secrets.${k}`);
     }
   }
 
-  if (rec.limits && typeof rec.limits === "object" && !Array.isArray(rec.limits)) {
-    for (const k of Object.keys(rec.limits as Record<string, unknown>)) {
+  if (rec.limits && rec.limits instanceof Object && !Array.isArray(rec.limits)) {
+    // SAFETY: Instance check confirms rec.limits is an object record.
+    const limObj = rec.limits as JsonObject;
+    for (const k of Object.keys(limObj)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`limits.${k}`);
         continue;
       }
-      if (!KNOWN_LIMITS_KEYS[k]) unknownKeys.push(`limits.${k}`);
+      if (!Object.hasOwn(KNOWN_LIMITS_KEYS, k)) unknownKeys.push(`limits.${k}`);
     }
   }
 
@@ -203,6 +218,11 @@ export function isDomainAllowed(domain: string, allowedPatterns: string[]): bool
   return false;
 }
 
+export interface PathPermissionCheckResult {
+  permitted: boolean;
+  reason?: string;
+}
+
 /**
  * Helper to check if a path is safe and permitted under base allowed/denied paths.
  */
@@ -211,7 +231,7 @@ export function isPathPermitted(
   allowedPaths: string[],
   denyPaths: string[],
   workspaceRoot?: string,
-): { permitted: boolean; reason?: string } {
+): PathPermissionCheckResult {
   const normalizedTarget = path.normalize(targetPath);
 
   // Check deny paths first (denials take strict precedence)
@@ -284,7 +304,7 @@ export class LocalPreactivationChecker {
   async checkPreactivation(context: PreactivationContext): Promise<PreactivationCheckResult> {
     const violations: PreactivationViolation[] = [];
     const warnings: string[] = [];
-    const metadata: Record<string, unknown> = {};
+    const metadata: JsonObject = {};
 
     const {
       manifest,
@@ -305,7 +325,7 @@ export class LocalPreactivationChecker {
     // -------------------------------------------------------------------------
     // 0. Manifest Schema Validation & Integrity
     // -------------------------------------------------------------------------
-    if (!manifest || typeof manifest !== "object") {
+    if (!manifest || !(manifest instanceof Object) || Array.isArray(manifest)) {
       violations.push({
         code: "INVALID_MANIFEST",
         subsystem: "manifest",
@@ -347,9 +367,8 @@ export class LocalPreactivationChecker {
       }
     }
 
-    const accountId = (context as unknown as Record<string, unknown>).accountId as
-      | string
-      | undefined;
+    // SAFETY: Context may optionally carry accountId property.
+    const accountId = (context as { accountId?: string }).accountId;
     if (
       accountId &&
       certificate?.subject?.accountId &&
@@ -426,10 +445,12 @@ export class LocalPreactivationChecker {
     // -------------------------------------------------------------------------
     // 3. Runtime & SDK Support
     // -------------------------------------------------------------------------
-    const runtimeReq = manifest.runtime as Record<string, unknown> | undefined;
+    const runtimeReq = manifest.runtime;
     if (runtimeReq) {
-      const engine =
-        typeof runtimeReq.engine === "string" ? runtimeReq.engine.toLowerCase() : "node";
+      const parsedRuntimeRecord = z.record(z.unknown()).safeParse(runtimeReq);
+      const runtimeFields = parsedRuntimeRecord.success ? parsedRuntimeRecord.data : {};
+      const engineParsed = z.string().safeParse(runtimeFields.engine);
+      const engine = engineParsed.success ? engineParsed.data.toLowerCase() : "node";
       if (!this.supportedEngines.has(engine)) {
         violations.push({
           code: "UNSUPPORTED_RUNTIME",
@@ -440,13 +461,14 @@ export class LocalPreactivationChecker {
         });
       }
 
-      if (typeof runtimeReq.sdkVersion === "string") {
+      const sdkVersionParsed = z.string().safeParse(runtimeFields.sdkVersion);
+      if (sdkVersionParsed.success) {
         if (
           this.supportedSdkVersions.size > 0 &&
-          !this.supportedSdkVersions.has(runtimeReq.sdkVersion)
+          !this.supportedSdkVersions.has(sdkVersionParsed.data)
         ) {
           warnings.push(
-            `Tool requested SDK version '${runtimeReq.sdkVersion}' may not be fully supported`,
+            `Tool requested SDK version '${sdkVersionParsed.data}' may not be fully supported`,
           );
         }
       }
@@ -630,11 +652,11 @@ export class LocalPreactivationChecker {
         }
       }
 
+      // SAFETY: Inspection result may carry legacy evidenceDigest property.
+      const legacyEvidence = (inspection as { evidenceDigest?: string } | null | undefined)
+        ?.evidenceDigest;
       const inspectionEvidenceDigest = normalizeDigest(
-        inspection?.qualificationEvidenceDigest ??
-          ((inspection as Record<string, unknown> | null | undefined)?.evidenceDigest as
-            | string
-            | undefined),
+        inspection?.qualificationEvidenceDigest ?? legacyEvidence,
       );
       if (inspectionEvidenceDigest) {
         const certEvidenceDigest = normalizeDigest(certificate.qualificationEvidenceDigest);
@@ -768,6 +790,7 @@ export class LocalPreactivationChecker {
         });
       }
 
+      // SAFETY: Manifest capabilities conform to Partial<CapabilityManifest>.
       const caps: Partial<CapabilityManifest> =
         (manifest?.capabilities as Partial<CapabilityManifest> | undefined) ?? {};
 
@@ -956,9 +979,9 @@ export class LocalPreactivationChecker {
         }
 
         // Dangerous environment variables
-        const envPassthrough =
-          toolCmd.allowEnvPassthrough ??
-          ((toolCmd as Record<string, unknown>).allowedEnvVars as string[] | undefined);
+        // SAFETY: Legacy command definitions may carry allowedEnvVars array.
+        const legacyEnvVars = (toolCmd as { allowedEnvVars?: string[] }).allowedEnvVars;
+        const envPassthrough = toolCmd.allowEnvPassthrough ?? legacyEnvVars;
         if (envPassthrough) {
           for (const envVar of envPassthrough) {
             if (DANGEROUS_ENV_VARS.includes(envVar.toUpperCase())) {
@@ -979,10 +1002,9 @@ export class LocalPreactivationChecker {
         const envSec = envelope.secrets;
         const toolSec = caps.secrets;
 
-        if (
-          toolSec.denyDirectRead === false ||
-          (toolSec as Record<string, unknown>).allowDirectRead === true
-        ) {
+        // SAFETY: Legacy secret definitions may carry allowDirectRead flag.
+        const legacyDirectRead = (toolSec as { allowDirectRead?: boolean }).allowDirectRead;
+        if (toolSec.denyDirectRead === false || legacyDirectRead === true) {
           violations.push({
             code: "DIRECT_READ_DISALLOWED",
             subsystem: "secrets",
@@ -992,9 +1014,9 @@ export class LocalPreactivationChecker {
           });
         }
 
-        const secretNames =
-          toolSec.allowedSecretNames ??
-          ((toolSec as Record<string, unknown>).requiredSecrets as string[] | undefined);
+        // SAFETY: Legacy secret definitions may carry requiredSecrets array.
+        const legacyReqSecrets = (toolSec as { requiredSecrets?: string[] }).requiredSecrets;
+        const secretNames = toolSec.allowedSecretNames ?? legacyReqSecrets;
         if (envSec.allowedSecretNames && envSec.allowedSecretNames.length > 0 && secretNames) {
           const allowedSecretsSet = new Set(envSec.allowedSecretNames);
           for (const secret of secretNames) {
@@ -1014,12 +1036,16 @@ export class LocalPreactivationChecker {
       // --- Limits ---
       if (envelope.limits) {
         const envLimits = envelope.limits;
-        const rawLimits = (manifest.limits ?? {}) as Record<string, unknown>;
+        const rawLimits = manifest.limits;
+        const parsedLimitRecord = z.record(z.unknown()).safeParse(rawLimits);
+        const limitFields = parsedLimitRecord.success ? parsedLimitRecord.data : {};
+        const maxMemoryMb = z.number().safeParse(limitFields.maxMemoryMb).data;
+        const maxMemoryBytes = z.number().safeParse(rawLimits?.maxMemoryBytes).data;
         const maxMem =
-          typeof rawLimits.maxMemoryMb === "number"
-            ? rawLimits.maxMemoryMb
-            : typeof rawLimits.maxMemoryBytes === "number"
-              ? Math.ceil(rawLimits.maxMemoryBytes / (1024 * 1024))
+          maxMemoryMb !== undefined
+            ? maxMemoryMb
+            : maxMemoryBytes !== undefined
+              ? Math.ceil(maxMemoryBytes / (1024 * 1024))
               : undefined;
 
         if (maxMem && envLimits.maxMemoryMb && maxMem > envLimits.maxMemoryMb) {
@@ -1032,14 +1058,10 @@ export class LocalPreactivationChecker {
           });
         }
 
-        const timeout =
-          typeof rawLimits.timeoutMs === "number"
-            ? rawLimits.timeoutMs
-            : typeof rawLimits.maxExecutionTimeMs === "number"
-              ? rawLimits.maxExecutionTimeMs
-              : typeof rawLimits.executionTimeoutMs === "number"
-                ? rawLimits.executionTimeoutMs
-                : undefined;
+        const timeoutMs = z.number().safeParse(rawLimits?.timeoutMs).data;
+        const maxExecutionTimeMs = z.number().safeParse(limitFields.maxExecutionTimeMs).data;
+        const executionTimeoutMs = z.number().safeParse(limitFields.executionTimeoutMs).data;
+        const timeout = timeoutMs ?? maxExecutionTimeMs ?? executionTimeoutMs;
 
         if (timeout && envLimits.maxExecutionTimeMs && timeout > envLimits.maxExecutionTimeMs) {
           violations.push({

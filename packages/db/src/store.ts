@@ -1,5 +1,9 @@
 import { LocalDatabaseConnection, type LocalDatabaseOptions } from "./connection.js";
-import { type DatabaseDiagnosticsReport, exportDatabaseDiagnostics } from "./diagnostics.js";
+import {
+  type DatabaseDiagnosticsReport,
+  type DiagnosticMetadataRecord,
+  exportDatabaseDiagnostics,
+} from "./diagnostics.js";
 import { type MigrationResult, MigrationRunner } from "./migrations.js";
 import { AuditRepository } from "./repositories/audit-repository.js";
 import { CapabilityRepository } from "./repositories/capability-repository.js";
@@ -83,7 +87,7 @@ export class LocalStateStore {
   /**
    * Exports sanitized database diagnostics report.
    */
-  getDiagnostics(extraMetadata?: Record<string, unknown>): DatabaseDiagnosticsReport {
+  getDiagnostics(extraMetadata?: DiagnosticMetadataRecord): DatabaseDiagnosticsReport {
     return exportDatabaseDiagnostics(this.conn, extraMetadata);
   }
 

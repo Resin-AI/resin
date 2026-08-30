@@ -4,6 +4,7 @@ import {
   type CatalogChangeSummary,
   type HarnessWorkspace,
   type RefreshCapability,
+  type RefreshDetailRecord,
   type RefreshResult,
   createRefreshResult,
 } from "@resin/harness-contracts";
@@ -99,13 +100,18 @@ export async function handleOmpCatalogRefresh(
       affectedToolCount: totalChanges,
       requiresRestart: false,
       appliedAt: now,
-      details: {
-        addedCount: changeSummary.addedToolIds?.length ?? 0,
-        updatedCount: changeSummary.updatedToolIds?.length ?? 0,
-        removedCount: changeSummary.removedToolIds?.length ?? 0,
-        workspaceId: workspace.workspaceId,
-        ...(instructionsAction ? { instructionsAction } : {}),
-      },
+      details: (() => {
+        const d: RefreshDetailRecord = {
+          addedCount: changeSummary.addedToolIds?.length ?? 0,
+          updatedCount: changeSummary.updatedToolIds?.length ?? 0,
+          removedCount: changeSummary.removedToolIds?.length ?? 0,
+          workspaceId: workspace.workspaceId,
+        };
+        if (instructionsAction) {
+          d.instructionsAction = instructionsAction;
+        }
+        return d;
+      })(),
     });
   } catch (err: unknown) {
     return createRefreshResult("failed", {

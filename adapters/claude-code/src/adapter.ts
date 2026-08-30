@@ -15,8 +15,15 @@ import type {
   SessionEventSource,
   SourceCursor,
   StrictHarnessAdapter,
+  ToolExecutionInputRecord,
+  ToolExecutionResult,
 } from "@resin/harness-contracts";
-import { TIER2_MEDIUM_FIDELITY, defaultFsBridge } from "@resin/harness-contracts";
+import {
+  InMemoryConfigFsBridge,
+  TIER2_MEDIUM_FIDELITY,
+  defaultFsBridge,
+} from "@resin/harness-contracts";
+import { z } from "zod";
 import {
   applyClaudeMcpConfig,
   planClaudeMcpConfig,
@@ -75,10 +82,8 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
     const sessions: HarnessSession[] = [];
     const seenSessionIds = new Set<string>();
     const claudeDir = path.normalize(path.join(workspace.rootPath, ".claude"));
-    const projectDir =
-      typeof workspace.metadata?.projectDir === "string"
-        ? path.normalize(workspace.metadata.projectDir)
-        : null;
+    const parsedProjectDir = z.string().safeParse(workspace.metadata?.projectDir);
+    const projectDir = parsedProjectDir.success ? path.normalize(parsedProjectDir.data) : null;
 
     // 1. If active session is specified
     if (workspace.activeSessionId) {
@@ -104,11 +109,8 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
     }
 
     // 2. Check in-memory fs bridge if applicable
-    if (
-      "dump" in this.fsBridge &&
-      typeof (this.fsBridge as { dump: unknown }).dump === "function"
-    ) {
-      const dump = (this.fsBridge as { dump: () => Record<string, string> }).dump();
+    if (this.fsBridge instanceof InMemoryConfigFsBridge) {
+      const dump = this.fsBridge.dump();
       for (const filePath of Object.keys(dump)) {
         const normalized = path.normalize(filePath);
         for (const dir of targetDirs) {
@@ -237,8 +239,8 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
    */
   async execute(
     tool: { id: string; name: string; version: string; description: string },
-    input: Record<string, unknown>,
-  ): Promise<unknown> {
+    input: ToolExecutionInputRecord,
+  ): Promise<ToolExecutionResult> {
     return {
       adapter: this.id,
       toolId: tool.id,

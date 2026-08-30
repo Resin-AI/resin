@@ -11,6 +11,23 @@ export interface CanonicalHashOptions {
   prefix?: boolean;
 }
 
+export type CanonicalJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | bigint
+  | symbol
+  | ((...args: never[]) => CanonicalJsonValue)
+  | { toJSON?: () => CanonicalJsonValue }
+  | CanonicalJsonRecord
+  | CanonicalJsonValue[];
+
+export interface CanonicalJsonRecord {
+  [key: string]: CanonicalJsonValue;
+}
+
 /**
  * Deterministically serializes a JavaScript value to a canonical JSON string.
  *
@@ -24,93 +41,106 @@ export interface CanonicalHashOptions {
  * 7. Cyclic object references are detected and throw a TypeError.
  * 8. Top-level `undefined`, `symbol`, or `function` returns `undefined`.
  */
-export function canonicalJsonStringify(value: unknown): string {
+export function canonicalJsonStringify<T>(value: T): string {
   const seen = new WeakSet<object>();
 
-  function serialize(val: unknown): string | undefined {
+  function serialize(val: CanonicalJsonValue): string | undefined {
     if (val === null) {
       return "null";
     }
 
-    if (val === undefined || typeof val === "symbol" || typeof val === "function") {
+    const valTag = Object.prototype.toString.call(val);
+    if (val === undefined || valTag === "[object Symbol]" || valTag === "[object Function]") {
       return undefined;
     }
 
-    if (typeof val === "boolean") {
+    if (valTag === "[object Boolean]") {
       return val ? "true" : "false";
     }
 
-    if (typeof val === "number") {
-      if (!Number.isFinite(val)) {
-        throw new TypeError(`Cannot canonically serialize non-finite number: ${val}`);
+    if (valTag === "[object Number]") {
+      if (!Number.isFinite(Number(val))) {
+        throw new TypeError(`Cannot canonically serialize non-finite number: ${String(val)}`);
       }
+      return String(val);
+    }
+
+    if (valTag === "[object BigInt]") {
+      throw new TypeError("Cannot canonically serialize BigInt value");
+    }
+
+    if (valTag === "[object String]") {
       return JSON.stringify(val);
     }
 
-    if (typeof val === "string") {
-      return JSON.stringify(val);
-    }
-
-    if (typeof val === "bigint") {
-      throw new TypeError("Cannot canonically serialize BigInt without explicit conversion");
-    }
-
-    if (typeof val === "object") {
-      // Invoke toJSON() if available (handles Date, custom wrappers)
-      const toJSONObj = val as { toJSON?: () => unknown };
-      if (typeof toJSONObj.toJSON === "function") {
-        return serialize(toJSONObj.toJSON());
-      }
-
+    if (Array.isArray(val)) {
       if (seen.has(val)) {
-        throw new TypeError("Cyclic reference detected during canonical JSON serialization");
+        throw new TypeError("Cannot canonically serialize cyclic structure");
       }
       seen.add(val);
-
       try {
-        if (Array.isArray(val)) {
-          const serializedElements: string[] = [];
-          for (let i = 0; i < val.length; i++) {
-            const itemStr = serialize(val[i]);
-            serializedElements.push(itemStr === undefined ? "null" : itemStr);
-          }
-          return `[${serializedElements.join(",")}]`;
-        }
-
-        // Plain object: sort keys lexicographically
-        const keys = Object.keys(val).sort();
-        const entries: string[] = [];
-
-        for (const key of keys) {
-          const propVal = (val as Record<string, unknown>)[key];
-          const serializedProp = serialize(propVal);
-          if (serializedProp !== undefined) {
-            entries.push(`${JSON.stringify(key)}:${serializedProp}`);
-          }
-        }
-
-        return `{${entries.join(",")}}`;
+        const elements = val.map((item) => serialize(item) ?? "null");
+        return `[${elements.join(",")}]`;
       } finally {
         seen.delete(val);
       }
     }
 
-    throw new TypeError(`Unsupported data type encountered: ${typeof val}`);
+    if (valTag === "[object Object]" && val !== null) {
+      // Handle .toJSON() serialization hook (e.g. Date instances)
+      // SAFETY: val is verified to be a non-null object record.
+      const obj = val as CanonicalJsonRecord;
+      if ("toJSON" in obj) {
+        const toJSONFn = obj.toJSON;
+        if (Object.prototype.toString.call(toJSONFn) === "[object Function]") {
+          // SAFETY: Object tag check confirms toJSONFn is a callable function.
+          const normalized = (toJSONFn as () => CanonicalJsonValue).call(obj);
+          if (Object.prototype.toString.call(normalized) !== "[object Object]") {
+            return serialize(normalized);
+          }
+        }
+      }
+
+      if (seen.has(obj)) {
+        throw new TypeError("Cannot canonically serialize cyclic structure");
+      }
+      seen.add(obj);
+      try {
+        // SAFETY: Object entries are extracted for key-sorted serialization.
+        const entries = Object.entries(obj);
+        // Sort keys lexicographically by UTF-16 code unit order
+        entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+        const serializedMembers: string[] = [];
+        for (const [k, v] of entries) {
+          const memberVal = serialize(v);
+          if (memberVal !== undefined) {
+            serializedMembers.push(`${JSON.stringify(k)}:${memberVal}`);
+          }
+        }
+        return `{${serializedMembers.join(",")}}`;
+      } finally {
+        seen.delete(obj);
+      }
+    }
+
+    return JSON.stringify(val);
   }
 
-  const result = serialize(value);
+  // SAFETY: serialize classifies every supported runtime value and rejects cycles before recursion.
+  const result = serialize(value as CanonicalJsonValue);
   return result === undefined ? "undefined" : result;
 }
 
 /**
- * Alias for canonicalJsonStringify.
+ * Public serializer contract for schema-derived values.
  */
 export const canonicalJson = canonicalJsonStringify;
 
 /**
  * Computes a deterministic SHA-256 hash over the canonical JSON representation of a value.
  */
-export function hashCanonicalContent(value: unknown, options: CanonicalHashOptions = {}): string {
+export function hashCanonicalContent<T>(value: T, options: CanonicalHashOptions = {}): string {
   const serialized = canonicalJsonStringify(value);
   const hashHex = createHash("sha256").update(serialized, "utf8").digest("hex");
   return options.prefix ? `sha256:${hashHex}` : hashHex;

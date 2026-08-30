@@ -136,7 +136,7 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
     },
   };
 
-  const sampleQualificationBundle = {
+  const sampleApproval: ToolQualificationApproval = {
     schemaVersion: "1.0.0",
     toolId: "tool_compiler",
     toolVersion: "1.0.0",
@@ -144,26 +144,49 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
     depDigest: canonicalEmptyLockGraphDigest,
     schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
     intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-    approval: {
-      schemaVersion: "1.0.0",
+    rawEvidenceDigest: "5555555555555555555555555555555555555555555555555555555555555555",
+    approvalDigest: "7777777777777777777777777777777777777777777777777777777777777777",
+    decision: "approved",
+    approver: "security_lead",
+    keyId: "key_prod_ed25519_1",
+    signedAt: new Date().toISOString(),
+    signature: {
+      keyId: "key_prod_ed25519_1",
+      algorithm: "ed25519",
+      signature: "sig_mock_signature_bytes",
+    },
+  };
+
+  const sampleRuns: QualificationRunRecord[] = [
+    {
+      runId: "run_linux_001",
       toolId: "tool_compiler",
       toolVersion: "1.0.0",
-      sourceDigest: "3333333333333333333333333333333333333333333333333333333333333333",
-      depDigest: canonicalEmptyLockGraphDigest,
-      schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-      intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-      rawEvidenceDigest: "5555555555555555555555555555555555555555555555555555555555555555",
-      approvalDigest: "7777777777777777777777777777777777777777777777777777777777777777",
-      decision: "approved",
-      approver: "security_lead",
-      keyId: "key_prod_ed25519_1",
-      signedAt: new Date().toISOString(),
-      signature: {
-        keyId: "key_prod_ed25519_1",
-        algorithm: "ed25519",
-        signature: "sig_mock_signature_bytes",
-      },
+      environmentDigest: "6666666666666666666666666666666666666666666666666666666666666666",
+      observedEffects: sampleObservedProfile,
+      replayedAt: new Date().toISOString(),
+      success: true,
     },
+  ];
+
+  const sampleManifest: ToolManifest = {
+    name: "tool_compiler",
+    version: "1.0.0",
+    entrypoint: "dist/index.js",
+    description: "Compiler tool",
+    capabilities: ["filesystem", "network", "command"],
+    dependencies: { esbuild: "^0.20.0" },
+  };
+
+  const sampleQualificationBundle: QualificationArtifactBundle = {
+    schemaVersion: "1.0.0",
+    toolId: "tool_compiler",
+    toolVersion: "1.0.0",
+    sourceDigest: "3333333333333333333333333333333333333333333333333333333333333333",
+    depDigest: canonicalEmptyLockGraphDigest,
+    schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+    intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
+    approval: sampleApproval,
     frozenIntent: {
       intentId: "intent_001",
       schemaVersion: "1.0.0",
@@ -174,25 +197,8 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
       capabilities: ["filesystem", "network", "command"],
       frozenAt: new Date().toISOString(),
     },
-    runs: [
-      {
-        runId: "run_linux_001",
-        toolId: "tool_compiler",
-        toolVersion: "1.0.0",
-        environmentDigest: "6666666666666666666666666666666666666666666666666666666666666666",
-        observedEffects: sampleObservedProfile,
-        replayedAt: new Date().toISOString(),
-        success: true,
-      },
-    ],
-    manifest: {
-      name: "tool_compiler",
-      version: "1.0.0",
-      entrypoint: "dist/index.js",
-      description: "Compiler tool",
-      capabilities: ["filesystem", "network", "command"],
-      dependencies: { esbuild: "^0.20.0" },
-    },
+    runs: sampleRuns,
+    manifest: sampleManifest,
     effectProfile: sampleObservedProfile,
   };
 
@@ -203,12 +209,12 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
     depDigest: canonicalEmptyLockGraphDigest,
     schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
     intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-    approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
-    runs: sampleQualificationBundle.runs as unknown as QualificationRunRecord[],
+    approval: sampleApproval,
+    runs: sampleRuns,
     effectProfile: sampleObservedProfile,
-    manifest: sampleQualificationBundle.manifest as unknown as ToolManifest,
-    dependencies: sampleQualificationBundle.manifest.dependencies,
-    rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+    manifest: sampleManifest,
+    dependencies: sampleManifest.dependencies ?? {},
+    rawBundle: sampleQualificationBundle,
   });
 
   const trustedKeyId = "key_trusted_auth_verifier_1";
@@ -240,7 +246,9 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         expect.unreachable("Should have thrown");
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("POLICY_VIOLATION");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("POLICY_VIOLATION");
+        }
       }
     });
 
@@ -250,7 +258,9 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         expect.unreachable("Should have thrown");
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("POLICY_VIOLATION");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("POLICY_VIOLATION");
+        }
       }
     });
 
@@ -263,7 +273,9 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         expect.unreachable("Should have thrown");
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        expect((err as BrokerSecurityError).code).toBe("POLICY_VIOLATION");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.code).toBe("POLICY_VIOLATION");
+        }
       }
     });
 
@@ -349,7 +361,8 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         monitor.registerInvocation({
           invocationId: "inv_fabricated_profile",
           toolId: "tool_compiler",
-          boundaries: sampleObservedProfile as unknown as VerifiedQualificationToken,
+          // SAFETY: negative test checking runtime rejection of unverified boundaries
+          boundaries: sampleObservedProfile as never,
         });
       }).toThrow(BrokerSecurityError);
 
@@ -357,7 +370,8 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         monitor.registerInvocation({
           invocationId: "inv_fabricated_bundle",
           toolId: "tool_compiler",
-          boundaries: sampleQualificationBundle as unknown as VerifiedQualificationToken,
+          // SAFETY: negative test checking runtime rejection of unverified boundaries
+          boundaries: sampleQualificationBundle as never,
         });
       }).toThrow(BrokerSecurityError);
     });
@@ -572,7 +586,7 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
     });
 
     it("denies external action if authorization record is unsigned (missing keyId or signature)", () => {
-      const unsignedAuthRecord = {
+      const unsignedAuthRecord: ExternalActionAuthorizationRecord = {
         toolId: "tool_compiler",
         toolVersion: "1.0.0",
         actionType: "publish",
@@ -582,7 +596,7 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         expiresAt: new Date(Date.now() + 3600000).toISOString(),
         keyId: "",
         signature: "",
-      } as unknown as ExternalActionAuthorizationRecord;
+      };
 
       const result = validateExternalActionAuthorization(
         unsignedAuthRecord,
@@ -641,7 +655,7 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         authorizationVerifier: sampleAuthVerifier,
       });
 
-      const unsignedAuthRecord = {
+      const unsignedAuthRecord: ExternalActionAuthorizationRecord = {
         toolId: "tool_compiler",
         toolVersion: "1.0.0",
         actionType: "publish",
@@ -649,7 +663,8 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         payloadDigest,
         approver: "security_officer_alice",
         expiresAt: new Date(Date.now() + 3600000).toISOString(),
-        // missing keyId and signature
+        keyId: "",
+        signature: "",
       };
 
       expect(() => {
@@ -658,9 +673,7 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
           toolId: "tool_compiler",
           toolVersion: "1.0.0",
           boundaries: sampleVerifiedToken,
-          externalAuthorizations: [
-            unsignedAuthRecord as unknown as ExternalActionAuthorizationRecord,
-          ],
+          externalAuthorizations: [unsignedAuthRecord],
         });
       }).toThrow(BrokerSecurityError);
 
@@ -848,9 +861,10 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         manager.registerInvocation({
           invocationId: "inv_fabricated_mgr",
           toolId: "tool_compiler",
+          // SAFETY: negative test checking runtime rejection of unverified boundaries
           boundaries: {
             filesRead: { observation: "complete", paths: ["/etc/passwd"] },
-          } as unknown as VerifiedQualificationToken,
+          } as never,
         });
       }).toThrow(BrokerSecurityError);
     });
@@ -1014,17 +1028,17 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
       depDigest: canonicalEmptyLockGraphDigest,
       schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
       intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-      approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
+      approval: sampleApproval,
       runs: [
         {
-          ...sampleQualificationBundle.runs[0],
+          ...sampleRuns[0]!,
           observedEffects: paymentProfile,
         },
-      ] as unknown as QualificationRunRecord[],
+      ],
       effectProfile: paymentProfile,
-      manifest: sampleQualificationBundle.manifest as unknown as ToolManifest,
+      manifest: sampleManifest,
       dependencies: {},
-      rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+      rawBundle: sampleQualificationBundle,
     });
 
     it("Finding 9: fails closed for unregistered invocations without verified boundaries", async () => {
@@ -1085,17 +1099,17 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: canonicalEmptyLockGraphDigest,
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
+        approval: sampleApproval,
         runs: [
           {
-            ...sampleQualificationBundle.runs[0],
+            ...sampleRuns[0]!,
             observedEffects: readOnlyProfile,
           },
-        ] as unknown as QualificationRunRecord[],
+        ],
         effectProfile: readOnlyProfile,
-        manifest: sampleQualificationBundle.manifest as unknown as ToolManifest,
+        manifest: sampleManifest,
         dependencies: {},
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const runtime = new ToolRuntime({
@@ -1266,17 +1280,17 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: canonicalEmptyLockGraphDigest,
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
+        approval: sampleApproval,
         runs: [
           {
-            ...sampleQualificationBundle.runs[0],
+            ...sampleRuns[0]!,
             observedEffects: profileWithConsequentialTargets,
           },
-        ] as unknown as QualificationRunRecord[],
+        ],
         effectProfile: profileWithConsequentialTargets,
-        manifest: sampleQualificationBundle.manifest as unknown as ToolManifest,
+        manifest: sampleManifest,
         dependencies: {},
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manager = new CapabilityBrokerManager({
@@ -1434,17 +1448,17 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: "4444444444444444444444444444444444444444444444444444444444444444",
         schemaDigest: "c0b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
+        approval: sampleApproval,
         runs: [
           {
-            ...sampleQualificationBundle.runs[0],
+            ...sampleRuns[0]!,
             observedEffects: profileWithDir,
           },
-        ] as unknown as QualificationRunRecord[],
+        ],
         effectProfile: profileWithDir,
-        manifest: sampleQualificationBundle.manifest as unknown as ToolManifest,
+        manifest: sampleManifest,
         dependencies: {},
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manager = new CapabilityBrokerManager({
@@ -1602,13 +1616,15 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
 
       expect(() => {
         new EffectMonitor({
-          defaultBoundaries: fabricatedRaw as unknown as VerifiedQualificationToken,
+          // SAFETY: negative test checking runtime rejection of unverified boundaries
+          defaultBoundaries: fabricatedRaw as never,
         });
       }).toThrow(BrokerSecurityError);
 
       expect(() => {
         new CapabilityBrokerManager({
-          defaultBoundaries: fabricatedRaw as unknown as VerifiedQualificationToken,
+          // SAFETY: negative test checking runtime rejection of unverified boundaries
+          defaultBoundaries: fabricatedRaw as never,
         });
       }).toThrow(BrokerSecurityError);
     });
@@ -1735,15 +1751,20 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: "4444444444444444444444444444444444444444444444444444444444444444",
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
-        runs: [] as unknown as QualificationRunRecord[],
+        approval: sampleApproval,
+        runs: [],
         effectProfile: {
           ...sampleObservedProfile,
           artifacts: { observation: "complete", items: [] },
         },
-        manifest: { name: "dynamic_tool", version: "1.0.0" } as unknown as ToolManifest,
+        manifest: {
+          name: "dynamic_tool",
+          version: "1.0.0",
+          entrypoint: "index.js",
+          description: "Dynamic tool",
+        },
         dependencies: {},
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manifest = {
@@ -1800,15 +1821,20 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: approvedLockGraphDigest,
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
-        runs: [] as unknown as QualificationRunRecord[],
+        approval: sampleApproval,
+        runs: [],
         effectProfile: {
           ...sampleObservedProfile,
           artifacts: { observation: "complete", items: [] },
         },
-        manifest: { name: "pkg_tool", version: "1.0.0" } as unknown as ToolManifest,
+        manifest: {
+          name: "pkg_tool",
+          version: "1.0.0",
+          entrypoint: "index.js",
+          description: "Pkg tool",
+        },
         dependencies: approvedPkg.dependencies,
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manifest = {
@@ -1861,15 +1887,20 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: "4444444444444444444444444444444444444444444444444444444444444444",
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
-        runs: [] as unknown as QualificationRunRecord[],
+        approval: sampleApproval,
+        runs: [],
         effectProfile: {
           ...sampleObservedProfile,
           artifacts: { observation: "complete", items: [] },
         },
-        manifest: { name: "missing_lock_tool", version: "1.0.0" } as unknown as ToolManifest,
+        manifest: {
+          name: "missing_lock_tool",
+          version: "1.0.0",
+          entrypoint: "index.js",
+          description: "Missing lock tool",
+        },
         dependencies: approvedPkg.dependencies,
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manifest = {
@@ -1928,15 +1959,20 @@ describe("EffectMonitor, Qualification Boundaries & External Authorizations", ()
         depDigest: approvedLockGraphDigest,
         schemaDigest: "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
         intentDigest: "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
-        approval: sampleQualificationBundle.approval as unknown as ToolQualificationApproval,
-        runs: [] as unknown as QualificationRunRecord[],
+        approval: sampleApproval,
+        runs: [],
         effectProfile: {
           ...sampleObservedProfile,
           artifacts: { observation: "complete", items: [] },
         },
-        manifest: { name: "lock_tool", version: "1.0.0" } as unknown as ToolManifest,
+        manifest: {
+          name: "lock_tool",
+          version: "1.0.0",
+          entrypoint: "index.js",
+          description: "Lock tool",
+        },
         dependencies: pkgObj.dependencies,
-        rawBundle: sampleQualificationBundle as unknown as QualificationArtifactBundle,
+        rawBundle: sampleQualificationBundle,
       });
 
       const manifest = {

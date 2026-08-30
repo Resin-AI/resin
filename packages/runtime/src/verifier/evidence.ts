@@ -18,6 +18,7 @@ import type {
   CreateEvidenceParams,
   EvidenceVerificationResult,
   ExpectedVerificationContext,
+  StandardComponentDigests,
 } from "./types.js";
 
 /**
@@ -68,12 +69,7 @@ export function computeStandardComponentDigests(
     policyVersion?: string;
     denoVersion?: string;
   } = {},
-): {
-  sdkDigest: string;
-  runtimeDigest: string;
-  policyDigest: string;
-  denoDigest: string;
-} {
+): StandardComponentDigests {
   const sdkVer = options.sdkVersion ?? CURRENT_SAFETY_GATE_VERSION;
   const runtimeVer = options.runtimeVersion ?? REQUIRED_RUNTIME_VERSION;
   const protocolVer = options.brokerProtocolVersion ?? REQUIRED_BROKER_PROTOCOL_VERSION;
@@ -181,7 +177,7 @@ export function verifyVerificationEvidence(
   record: VerificationEvidenceRecord | unknown,
   context: ExpectedVerificationContext = {},
 ): EvidenceVerificationResult {
-  if (!record || typeof record !== "object") {
+  if (!record || !(record instanceof Object)) {
     return {
       valid: false,
       errorCode: "MISSING_EVIDENCE",

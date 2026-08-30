@@ -4,13 +4,18 @@ import type {
   CatalogToolSummary,
   ToolArtifact,
   ToolManifest,
+  ToolOutputSchema,
+  ToolParameterSchema,
   ToolScope,
+  ToolVersion,
   V1LockedToolEntry,
   V1ToolLock,
 } from "@resin/contracts";
+import type { LocalDatabaseConnection } from "@resin/db";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { ToolInvocationRouter } from "../meta/router-contract.js";
-import type { CallToolResult } from "../protocol/types.js";
+import type { ProjectLockManager } from "../project/lock-manager.js";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 
@@ -59,13 +64,13 @@ export interface RegistryTool {
   accountId?: string;
   exposedName?: string;
   description?: string;
-  parameters?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  parameters?: ToolParameterSchema | JsonRpcParams;
+  outputSchema?: ToolOutputSchema | JsonRpcParams;
   handler?: ToolHandler;
   sourceCode?: string;
   isPinned?: boolean;
   isDisabled?: boolean;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonRpcParams;
   isSystem?: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -86,8 +91,8 @@ export interface CatalogEntry {
   status: ToolRegistryStatus;
   exposedName: string;
   description?: string;
-  parameters?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  parameters?: JsonRpcParams;
+  outputSchema?: JsonRpcParams;
   manifest: ToolManifest;
   artifact?: ToolArtifact;
   handler?: ToolHandler;
@@ -97,7 +102,7 @@ export interface CatalogEntry {
   isPinned?: boolean;
   isDisabled?: boolean;
   isSystem?: boolean;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonRpcParams;
 }
 
 /**
@@ -153,11 +158,60 @@ export interface CatalogChangeEvent {
 /**
  * Options for configuring ToolRegistry.
  */
+export interface ToolRepoLike {
+  saveManifest?(manifest: ToolManifest): Promise<void>;
+  getManifest?(toolId: string, version?: string): Promise<ToolManifest | null>;
+  listManifests?(options?: { scope?: string }): Promise<ToolManifest[]>;
+  saveToolVersion?(version: ToolVersion): Promise<void>;
+  getToolVersion?(toolId: string, version: string): Promise<ToolVersion | null>;
+  listToolVersions?(toolId?: string): Promise<ToolVersion[]>;
+  saveCatalogSnapshot?(snapshot: CatalogSnapshot): Promise<void>;
+  getCatalogSnapshot?(snapshotDigest: string): Promise<CatalogSnapshot | null>;
+  getLatestCatalogSnapshot?(workspaceId: string): Promise<CatalogSnapshot | null>;
+  listCatalogSnapshots?(workspaceId?: string): Promise<CatalogSnapshot[]>;
+  listDeployments?(options?: { workspaceId?: string; toolId?: string; state?: string }): Promise<
+    unknown[]
+  >;
+  listInstallations?(workspaceId?: string): Promise<unknown[]>;
+}
+
+export interface StateStoreLike {
+  getToolRepository?(): ToolRepoLike;
+  tools?: ToolRepoLike;
+  getConnection?(): DbConnectionLike | null;
+  conn?: DbConnectionLike | LocalDatabaseConnection | null;
+  db?: DbConnectionLike | LocalDatabaseConnection | null;
+}
+
+export interface DbConnectionLike {
+  run(
+    sql: string,
+    params?: (string | number | boolean | null)[],
+  ): { changes?: number; lastInsertRowid?: number | bigint } | undefined;
+  get<T = Record<string, string | number | boolean | null>>(
+    sql: string,
+    params?: (string | number | boolean | null)[],
+  ): T | undefined;
+  all<T = Record<string, string | number | boolean | null>>(
+    sql: string,
+    params?: (string | number | boolean | null)[],
+  ): T[];
+}
+
+export type ToolRegistryDatabaseOption =
+  | ToolRepoLike
+  | StateStoreLike
+  | LocalDatabaseConnection
+  | DbConnectionLike
+  | null;
+
+export type ControlsDatabaseSource = ToolRegistryDatabaseOption | undefined;
+
 export interface ToolRegistryOptions {
   /**
    * Database connection, state store, or repository for persistence.
    */
-  db?: unknown;
+  db?: ToolRegistryDatabaseOption;
   /**
    * Maximum entries in LRU cache (default: 100).
    */
@@ -186,4 +240,12 @@ export interface ToolRegistryOptions {
    * Whether to automatically hydrate tools from the database on startup (default: true).
    */
   autoHydrate?: boolean;
+  /**
+   * Optional lock manager instance or resolver.
+   */
+  lockManager?: ProjectLockManager | ((workspaceId: string) => ProjectLockManager | undefined);
+  /**
+   * Optional mapping of workspace IDs to lock managers.
+   */
+  lockManagers?: Map<string, ProjectLockManager> | Record<string, ProjectLockManager>;
 }

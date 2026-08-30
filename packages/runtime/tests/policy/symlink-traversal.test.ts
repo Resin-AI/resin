@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { FsCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrokerSecurityError, FilesystemBroker } from "../../src/brokers/index.js";
 import {
@@ -87,7 +88,7 @@ describe("Symlink Traversal, Escape, and Platform Aliases Security Corpus", () =
     } catch {}
   });
 
-  const createGrant = (overrides: Record<string, unknown> = {}) => {
+  const createGrant = (overrides: Partial<FsCapability> = {}) => {
     return createInvocationGrant({
       grantId: "grant_symlink_test",
       invocationId: "inv_symlink_001",

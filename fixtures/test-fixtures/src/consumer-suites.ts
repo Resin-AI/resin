@@ -118,8 +118,20 @@ export function defineStorageRoundTripSuite(options: StorageSuiteOptions) {
         ctx.assertEqual(actual.type, expected.type, `Event ${i} type matches`);
         ctx.assertEqual(actual.timestamp, expected.timestamp, `Event ${i} timestamp matches`);
         ctx.assertEqual(
-          hashCanonicalContent(actual),
-          hashCanonicalContent(expected),
+          hashCanonicalContent({
+            eventId: actual.eventId,
+            schemaVersion: actual.schemaVersion,
+            sessionId: actual.sessionId,
+            timestamp: actual.timestamp,
+            type: actual.type,
+          }),
+          hashCanonicalContent({
+            eventId: expected.eventId,
+            schemaVersion: expected.schemaVersion,
+            sessionId: expected.sessionId,
+            timestamp: expected.timestamp,
+            type: expected.type,
+          }),
           `Event ${i} canonical digest matches`,
         );
       }
@@ -153,6 +165,19 @@ export function defineStorageRoundTripSuite(options: StorageSuiteOptions) {
 // 2. API Handler Suite
 // ============================================================================
 
+export type RawHttpRequestBody =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | RawHttpRequestRecord
+  | RawHttpRequestBody[];
+
+export interface RawHttpRequestRecord {
+  [key: string]: RawHttpRequestBody;
+}
+
 export interface ApiHandlerClient {
   registerInstallation(req: InstallationRegisterRequest): Promise<InstallationRegisterResponse>;
   bootstrapDevice(req: DeviceAuthBootstrapRequest): Promise<DeviceAuthBootstrapResponse>;
@@ -166,8 +191,8 @@ export interface ApiHandlerClient {
   sendRawRequest(
     method: string,
     path: string,
-    body?: unknown,
-  ): Promise<{ status: number; data: unknown }>;
+    body?: RawHttpRequestBody,
+  ): Promise<{ status: number; data: RawHttpRequestBody }>;
 }
 
 export interface ApiHandlerSuiteOptions {

@@ -28,6 +28,19 @@ export const RefreshResultSchema = z.object({
 });
 export type RefreshResult = z.infer<typeof RefreshResultSchema>;
 
+export type RefreshDetailValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | RefreshDetailRecord
+  | RefreshDetailValue[];
+
+export interface RefreshDetailRecord {
+  [key: string]: RefreshDetailValue;
+}
+
 /**
  * Helper to construct a validated RefreshResult.
  */
@@ -39,7 +52,7 @@ export function createRefreshResult(
     affectedToolCount?: number;
     requiresRestart?: boolean;
     appliedAt?: string;
-    details?: Record<string, unknown>;
+    details?: RefreshDetailRecord;
   },
 ): RefreshResult {
   return RefreshResultSchema.parse({

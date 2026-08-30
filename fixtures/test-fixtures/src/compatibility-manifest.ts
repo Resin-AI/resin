@@ -108,12 +108,15 @@ export interface ManifestGenerationOptions {
   customSchemas?: Record<string, Partial<SchemaCompatibilityEntry>>;
   customAdapters?: AdapterCompatibilityEntry[];
 }
+interface SchemaCompatibilityRegistry {
+  [schemaName: string]: SchemaCompatibilityEntry;
+}
 
 // ============================================================================
 // Default Values & Standard Manifest Generation
 // ============================================================================
 
-const DEFAULT_CORE_SCHEMAS: Record<string, SchemaCompatibilityEntry> = {
+const DEFAULT_CORE_SCHEMAS: SchemaCompatibilityRegistry = {
   NormalizedSessionEvent: {
     schemaName: "NormalizedSessionEvent",
     version: "1.0.0",
@@ -126,16 +129,16 @@ const DEFAULT_CORE_SCHEMAS: Record<string, SchemaCompatibilityEntry> = {
     canonicalDigest: hashCanonicalContent({ type: "ToolManifest", version: "1.0.0" }),
     stability: "stable",
   },
+  ToolVersion: {
+    schemaName: "ToolVersion",
+    version: "1.0.0",
+    canonicalDigest: hashCanonicalContent({ type: "ToolVersion", version: "1.0.0" }),
+    stability: "stable",
+  },
   CapabilityEnvelope: {
     schemaName: "CapabilityEnvelope",
     version: "1.0.0",
     canonicalDigest: hashCanonicalContent({ type: "CapabilityEnvelope", version: "1.0.0" }),
-    stability: "stable",
-  },
-  EvolutionCandidate: {
-    schemaName: "EvolutionCandidate",
-    version: "1.0.0",
-    canonicalDigest: hashCanonicalContent({ type: "EvolutionCandidate", version: "1.0.0" }),
     stability: "stable",
   },
   DeploymentRecord: {
@@ -144,34 +147,34 @@ const DEFAULT_CORE_SCHEMAS: Record<string, SchemaCompatibilityEntry> = {
     canonicalDigest: hashCanonicalContent({ type: "DeploymentRecord", version: "1.0.0" }),
     stability: "stable",
   },
-  ProtocolEnvelope: {
-    schemaName: "ProtocolEnvelope",
+  CatalogSnapshot: {
+    schemaName: "CatalogSnapshot",
     version: "1.0.0",
-    canonicalDigest: hashCanonicalContent({ type: "ProtocolEnvelope", version: "1.0.0" }),
+    canonicalDigest: hashCanonicalContent({ type: "CatalogSnapshot", version: "1.0.0" }),
     stability: "stable",
   },
-  StreamMessage: {
-    schemaName: "StreamMessage",
+  InstallationRecord: {
+    schemaName: "InstallationRecord",
     version: "1.0.0",
-    canonicalDigest: hashCanonicalContent({ type: "StreamMessage", version: "1.0.0" }),
+    canonicalDigest: hashCanonicalContent({ type: "InstallationRecord", version: "1.0.0" }),
     stability: "stable",
   },
-  HarnessInstallation: {
-    schemaName: "HarnessInstallation",
+  OfflineRevocationRegistry: {
+    schemaName: "OfflineRevocationRegistry",
     version: "1.0.0",
-    canonicalDigest: hashCanonicalContent({ type: "HarnessInstallation", version: "1.0.0" }),
+    canonicalDigest: hashCanonicalContent({ type: "OfflineRevocationRegistry", version: "1.0.0" }),
     stability: "stable",
   },
 };
 
 /**
- * Generate a deterministic ReleaseCompatibilityManifest.
+ * Generates a complete ReleaseCompatibilityManifest for a release candidate.
  */
 export function generateCompatibilityManifest(
   options: ManifestGenerationOptions = {},
 ): ReleaseCompatibilityManifest {
   const releaseVersion = options.releaseVersion || "0.1.0";
-  const schemas = { ...DEFAULT_CORE_SCHEMAS };
+  const schemas: SchemaCompatibilityRegistry = { ...DEFAULT_CORE_SCHEMAS };
 
   if (options.customSchemas) {
     for (const [name, entry] of Object.entries(options.customSchemas)) {
@@ -246,21 +249,25 @@ export function generateCompatibilityManifest(
   };
 }
 
-/**
- * Validate a compatibility manifest against the schema.
- */
-export function validateCompatibilityManifest(manifest: unknown): {
+export type ReleaseCompatibilityManifestInput = z.input<typeof ReleaseCompatibilityManifestSchema>;
+
+export interface CompatibilityValidationResult {
   valid: boolean;
   manifest?: ReleaseCompatibilityManifest;
   errors?: string[];
-} {
+}
+
+/**
+ * Validate a compatibility manifest against the schema.
+ */
+export function validateCompatibilityManifest(
+  manifest: ReleaseCompatibilityManifestInput | null | undefined,
+): CompatibilityValidationResult {
   const result = ReleaseCompatibilityManifestSchema.safeParse(manifest);
   if (result.success) {
     return { valid: true, manifest: result.data };
   }
-  const errors = (result.error as z.ZodError).issues.map(
-    (i: z.ZodIssue) => `${i.path.join(".")}: ${i.message}`,
-  );
+  const errors = result.error.issues.map((i: z.ZodIssue) => `${i.path.join(".")}: ${i.message}`);
   return { valid: false, errors };
 }
 

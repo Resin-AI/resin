@@ -14,6 +14,25 @@ import {
   ControlPlaneTargetSchema,
   PROTOCOL_VERSION,
 } from "@resin/protocol";
+import { z } from "zod";
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+
+function isJsonObject(value: JsonValue | undefined): value is JsonObject {
+  return (
+    value !== null &&
+    value !== undefined &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+const CloudErrorSchema = z.object({
+  error: z.string().optional(),
+  message: z.string().optional(),
+  code: z.string().optional(),
+});
 
 export type ControlCommandAction = "get" | "set" | "inventory" | "help";
 
@@ -35,8 +54,8 @@ export interface ControlCommandOptions {
   home?: string;
   customFetch?: typeof fetch;
   credentialStore?: Pick<CloudCredentialStore, "getRequestIdentity">;
-  output?: { write(chunk: string): unknown };
-  errorOutput?: { write(chunk: string): unknown };
+  output?: { write(chunk: string): boolean | undefined };
+  errorOutput?: { write(chunk: string): boolean | undefined };
 }
 
 export type ControlCommandErrorCode =
@@ -46,6 +65,21 @@ export type ControlCommandErrorCode =
   | "CLOUD_REQUEST_FAILED"
   | "INVALID_CLOUD_RESPONSE"
   | "CONFLICT";
+export interface ControlCommandErrorPayload {
+  ok: false;
+  error: {
+    code: ControlCommandErrorCode;
+    message: string;
+    status?: number;
+  };
+}
+
+export type ControlCommandJsonPayload =
+  | ControlCommandErrorPayload
+  | { ok: true; action: "inventory"; data: JsonValue }
+  | { ok: true; action: "get"; data: JsonValue }
+  | { ok: true; action: "set"; data: JsonValue }
+  | JsonValue;
 
 export class ControlCommandError extends Error {
   constructor(
@@ -160,7 +194,9 @@ export function parseControlFlags(args: string[]): ControlCommandFlags {
   return flags;
 }
 
-export function printControlHelp(output: { write(chunk: string): unknown } = process.stdout): void {
+export function printControlHelp(
+  output: { write(chunk: string): boolean | undefined } = process.stdout,
+): void {
   output.write(`Resin Cloud control plane\n\n`);
   output.write(`Usage:\n`);
   output.write(
@@ -173,9 +209,9 @@ export function printControlHelp(output: { write(chunk: string): unknown } = pro
   output.write(`Destructive privacy operations remain under resin privacy delete with step-up.\n`);
 }
 
-function parseJsonArgument(value: string, flag: string): unknown {
+function parseJsonArgument(value: string, flag: string): JsonValue {
   try {
-    return JSON.parse(value) as unknown;
+    return JSON.parse(value);
   } catch {
     throw new ControlCommandError("INVALID_ARGUMENTS", `${flag} must contain valid JSON`);
   }
@@ -199,28 +235,30 @@ function targetFor(flags: ControlCommandFlags, identity: CloudRequestIdentity): 
 function setDesiredField(
   current: ControlPlaneDesiredState,
   fieldPath: string,
-  value: unknown,
+  value: JsonValue,
 ): ControlPlaneDesiredState {
   const parts = fieldPath.split(".");
   const knownRoot = CONTROL_PLANE_FIELD_INVENTORY.some((entry) => {
-    const root = entry.path.split(".")[0];
-    return root === parts[0];
+    return entry.path === fieldPath || entry.path.startsWith(`${fieldPath}.`);
   });
   if (
-    parts.length < 2 ||
-    !knownRoot ||
-    parts.some((part) => !/^[A-Za-z0-9_:-]+$/.test(part) || part === "__proto__")
+    !knownRoot &&
+    !CONTROL_PLANE_FIELD_INVENTORY.some((entry) => fieldPath.startsWith(`${entry.path}.`))
   ) {
     throw new ControlCommandError("INVALID_ARGUMENTS", `Unsupported control field: ${fieldPath}`);
   }
-  const next = structuredClone(current) as Record<string, unknown>;
-  let cursor = next;
+  // SAFETY: Cloning JSON-compatible desired state structure for field mutation.
+  const next = structuredClone(current) as JsonObject;
+  let cursor: JsonObject = next;
   for (const part of parts.slice(0, -1)) {
     const existing = cursor[part];
-    if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
+    if (!isJsonObject(existing)) {
       cursor[part] = {};
+      // SAFETY: Navigating internal mutable object hierarchy after initialization.
+      cursor = cursor[part] as JsonObject;
+    } else {
+      cursor = existing;
     }
-    cursor = cursor[part] as Record<string, unknown>;
   }
   cursor[parts[parts.length - 1]!] = value;
   const parsed = ControlPlaneDesiredStateSchema.safeParse(next);
@@ -233,7 +271,7 @@ function setDesiredField(
   return parsed.data;
 }
 
-function requestHeaders(identity: CloudRequestIdentity): Record<string, string> {
+function requestHeaders(identity: CloudRequestIdentity) {
   return {
     Accept: "application/json",
     Authorization: `Bearer ${identity.accessToken}`,
@@ -242,25 +280,25 @@ function requestHeaders(identity: CloudRequestIdentity): Record<string, string> 
     "x-device-id": identity.deviceId,
     "x-installation-id": identity.installationId,
     "x-protocol-version": PROTOCOL_VERSION,
-  };
+  } satisfies Record<string, string>;
 }
 
-async function readResponseBody(response: Response): Promise<unknown> {
+async function readResponseBody(response: Response): Promise<JsonValue | null> {
   const text = await response.text();
   if (text.length === 0) return null;
   try {
-    return JSON.parse(text) as unknown;
+    return JSON.parse(text);
   } catch {
     throw new ControlCommandError("INVALID_CLOUD_RESPONSE", "Cloud returned invalid JSON");
   }
 }
 
-function cloudFailure(response: Response, body: unknown): ControlCommandError {
-  const record =
-    typeof body === "object" && body !== null ? (body as Record<string, unknown>) : null;
-  const serverCode = typeof record?.error === "string" ? record.error : null;
+function cloudFailure(response: Response, body: JsonValue | null): ControlCommandError {
+  const parsed = CloudErrorSchema.safeParse(body);
+  const record = parsed.success ? parsed.data : null;
+  const serverCode = record?.error ?? null;
   const message =
-    typeof record?.message === "string"
+    record?.message !== undefined
       ? record.message.slice(0, 256)
       : `Cloud request failed with HTTP ${response.status}`;
   if (response.status === 409) return new ControlCommandError("CONFLICT", message, 409);
@@ -280,7 +318,7 @@ async function cloudRequest(
   route: string,
   init: RequestInit,
   forceRefresh = false,
-): Promise<unknown> {
+): Promise<JsonValue | null> {
   const identity = await identityProvider(forceRefresh);
   if (!identity) {
     throw new ControlCommandError(
@@ -290,9 +328,16 @@ async function cloudRequest(
   }
   let response: Response;
   try {
+    const headers = {
+      ...requestHeaders(identity),
+    };
+    if (init.headers) {
+      // SAFETY: Forwarding headers provided via RequestInit as header key-value map.
+      Object.assign(headers, init.headers as Record<string, string>);
+    }
     response = await fetchImpl(`${identity.cloudUrl.replace(/\/$/, "")}${route}`, {
       ...init,
-      headers: { ...requestHeaders(identity), ...init.headers },
+      headers,
     });
   } catch {
     throw new ControlCommandError("CLOUD_UNREACHABLE", "Cloud control plane is unreachable");
@@ -306,13 +351,16 @@ async function cloudRequest(
   return body;
 }
 
-function writeJson(output: { write(chunk: string): unknown }, value: unknown): void {
-  output.write(`${JSON.stringify(value)}\n`);
+function safeError(cause: unknown): ControlCommandError {
+  if (cause instanceof ControlCommandError) return cause;
+  return new ControlCommandError("CLOUD_REQUEST_FAILED", "Control-plane operation failed");
 }
 
-function safeError(error: unknown): ControlCommandError {
-  if (error instanceof ControlCommandError) return error;
-  return new ControlCommandError("CLOUD_REQUEST_FAILED", "Control-plane operation failed");
+function writeJson(
+  output: { write(chunk: string): boolean | undefined },
+  value: ControlCommandJsonPayload,
+): void {
+  output.write(`${JSON.stringify(value)}\n`);
 }
 
 export async function controlCommand(
@@ -406,10 +454,12 @@ export async function controlCommand(
     const mutation: ControlPlaneMutationRequest = {
       target,
       desiredState,
-      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
       idempotencyKey: flags.idempotencyKey ?? randomUUID(),
       source: "cli",
     };
+    if (expectedRevision !== undefined) {
+      mutation.expectedRevision = expectedRevision;
+    }
     const body = await cloudRequest(identityProvider, fetchImpl, "/v1/control-plane/state", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -426,7 +476,7 @@ export async function controlCommand(
     return 0;
   } catch (error) {
     const safe = safeError(error);
-    const payload = {
+    const payload: ControlCommandErrorPayload = {
       ok: false,
       error: { code: safe.code, message: safe.message, status: safe.status },
     };

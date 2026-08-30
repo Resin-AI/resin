@@ -1,11 +1,13 @@
 import {
+  type CanonicalJsonRecord,
+  type CanonicalJsonValue,
   type CapabilityEnvelope,
   CapabilityEnvelopeSchema,
   type CapabilityManifest,
   CapabilityManifestSchema,
   type ToolManifest,
+  canonicalJson,
 } from "@resin/contracts";
-import { canonicalJson } from "@resin/contracts";
 import { sha256 } from "@resin/crypto";
 import {
   type GrantActor,
@@ -13,12 +15,7 @@ import {
   createInvocationGrant,
   verifyInvocationGrant,
 } from "./grant.js";
-import {
-  type CapabilityIntersectionResult,
-  type PolicyViolation,
-  type PolicyViolationCode,
-  intersectCapabilities,
-} from "./intersection.js";
+import { type PolicyViolation, intersectCapabilities } from "./intersection.js";
 
 /**
  * Standard deny reason codes returned by the policy engine.
@@ -72,9 +69,15 @@ export type PolicyEvaluationResult =
       denyCode: PolicyDenyCode;
       reason: string;
       violations: PolicyViolation[];
-      details?: Record<string, unknown>;
+      details?: Record<string, CanonicalJsonValue>;
       cached?: boolean;
     };
+
+export interface CapabilityValidationResult {
+  valid: boolean;
+  unknownKeys: string[];
+  error?: string;
+}
 
 export interface CapabilityPolicyEngineOptions {
   workspaceRoot?: string;
@@ -86,7 +89,7 @@ export interface CapabilityPolicyEngineOptions {
   defaultActor?: GrantActor;
 }
 
-const KNOWN_TOP_LEVEL_CAPABILITY_KEYS: Record<string, true> = {
+const KNOWN_TOP_LEVEL_CAPABILITY_KEYS = {
   schemaVersion: true,
   manifestId: true,
   fs: true,
@@ -94,18 +97,18 @@ const KNOWN_TOP_LEVEL_CAPABILITY_KEYS: Record<string, true> = {
   command: true,
   secrets: true,
   limits: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_FS_KEYS: Record<string, true> = {
+const KNOWN_FS_KEYS = {
   readPaths: true,
   writePaths: true,
   allowWorkspaceRoot: true,
   allowTemp: true,
   denyPaths: true,
   maxFileSizeBytes: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_NET_KEYS: Record<string, true> = {
+const KNOWN_NET_KEYS = {
   allowOutbound: true,
   allowedDomains: true,
   allowedHosts: true,
@@ -113,24 +116,24 @@ const KNOWN_NET_KEYS: Record<string, true> = {
   allowedProtocols: true,
   allowLocalhost: true,
   denyPrivateRanges: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_COMMAND_KEYS: Record<string, true> = {
+const KNOWN_COMMAND_KEYS = {
   allowShellExecution: true,
   allowedCommands: true,
   allowedBinaries: true,
   forbiddenPatterns: true,
   allowEnvPassthrough: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_SECRETS_KEYS: Record<string, true> = {
+const KNOWN_SECRETS_KEYS = {
   allowedSecretNames: true,
   allowedPrefixes: true,
   denyDirectRead: true,
   injectAsEnv: true,
-};
+} as const satisfies Record<string, true>;
 
-const KNOWN_LIMITS_KEYS: Record<string, true> = {
+const KNOWN_LIMITS_KEYS = {
   maxConcurrentExecutions: true,
   maxConcurrentInvocations: true,
   maxCpuPercent: true,
@@ -142,18 +145,21 @@ const KNOWN_LIMITS_KEYS: Record<string, true> = {
   maxMemoryMb: true,
   memoryLimitMb: true,
   maxOutputSizeBytes: true,
-};
+} as const satisfies Record<string, true>;
 
 /**
  * Validates that an object contains only known capability schema keys.
  */
-export function detectUnknownCapabilityKeys(obj: unknown): string[] {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+export function detectUnknownCapabilityKeys(
+  obj: CapabilityManifest | ToolManifest | CanonicalJsonValue | null | undefined,
+): string[] {
+  if (!obj || !(obj instanceof Object) || Array.isArray(obj)) {
     return [];
   }
 
   const unknownKeys: string[] = [];
-  const rec = obj as Record<string, unknown>;
+  // SAFETY: Object tag check confirms obj is a record.
+  const rec = obj as CanonicalJsonRecord;
 
   // Check top-level keys
   for (const k of Object.keys(rec)) {
@@ -161,63 +167,83 @@ export function detectUnknownCapabilityKeys(obj: unknown): string[] {
       unknownKeys.push(k);
       continue;
     }
-    if (!KNOWN_TOP_LEVEL_CAPABILITY_KEYS[k]) {
+    if (!Object.hasOwn(KNOWN_TOP_LEVEL_CAPABILITY_KEYS, k)) {
       unknownKeys.push(k);
     }
   }
 
   // Check fs subsystem
-  if (rec.fs && typeof rec.fs === "object" && !Array.isArray(rec.fs)) {
-    for (const k of Object.keys(rec.fs as Record<string, unknown>)) {
+  if ("fs" in rec && rec.fs && rec.fs instanceof Object && !Array.isArray(rec.fs)) {
+    // SAFETY: Tag check confirms rec.fs is an object record.
+    const fsRec = rec.fs as CanonicalJsonRecord;
+    for (const k of Object.keys(fsRec)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`fs.${k}`);
         continue;
       }
-      if (!KNOWN_FS_KEYS[k]) unknownKeys.push(`fs.${k}`);
+      if (!Object.hasOwn(KNOWN_FS_KEYS, k)) unknownKeys.push(`fs.${k}`);
     }
   }
 
   // Check net subsystem
-  if (rec.net && typeof rec.net === "object" && !Array.isArray(rec.net)) {
-    for (const k of Object.keys(rec.net as Record<string, unknown>)) {
+  if ("net" in rec && rec.net && rec.net instanceof Object && !Array.isArray(rec.net)) {
+    // SAFETY: Tag check confirms rec.net is an object record.
+    const netRec = rec.net as CanonicalJsonRecord;
+    for (const k of Object.keys(netRec)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`net.${k}`);
         continue;
       }
-      if (!KNOWN_NET_KEYS[k]) unknownKeys.push(`net.${k}`);
+      if (!Object.hasOwn(KNOWN_NET_KEYS, k)) unknownKeys.push(`net.${k}`);
     }
   }
 
   // Check command subsystem
-  if (rec.command && typeof rec.command === "object" && !Array.isArray(rec.command)) {
-    for (const k of Object.keys(rec.command as Record<string, unknown>)) {
+  if (
+    "command" in rec &&
+    rec.command &&
+    rec.command instanceof Object &&
+    !Array.isArray(rec.command)
+  ) {
+    // SAFETY: Tag check confirms rec.command is an object record.
+    const cmdRec = rec.command as CanonicalJsonRecord;
+    for (const k of Object.keys(cmdRec)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`command.${k}`);
         continue;
       }
-      if (!KNOWN_COMMAND_KEYS[k]) unknownKeys.push(`command.${k}`);
+      if (!Object.hasOwn(KNOWN_COMMAND_KEYS, k)) unknownKeys.push(`command.${k}`);
     }
   }
 
   // Check secrets subsystem
-  if (rec.secrets && typeof rec.secrets === "object" && !Array.isArray(rec.secrets)) {
-    for (const k of Object.keys(rec.secrets as Record<string, unknown>)) {
+  if (
+    "secrets" in rec &&
+    rec.secrets &&
+    rec.secrets instanceof Object &&
+    !Array.isArray(rec.secrets)
+  ) {
+    // SAFETY: Tag check confirms rec.secrets is an object record.
+    const secretRec = rec.secrets as CanonicalJsonRecord;
+    for (const k of Object.keys(secretRec)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`secrets.${k}`);
         continue;
       }
-      if (!KNOWN_SECRETS_KEYS[k]) unknownKeys.push(`secrets.${k}`);
+      if (!Object.hasOwn(KNOWN_SECRETS_KEYS, k)) unknownKeys.push(`secrets.${k}`);
     }
   }
 
   // Check limits subsystem
-  if (rec.limits && typeof rec.limits === "object" && !Array.isArray(rec.limits)) {
-    for (const k of Object.keys(rec.limits as Record<string, unknown>)) {
+  if ("limits" in rec && rec.limits && rec.limits instanceof Object && !Array.isArray(rec.limits)) {
+    // SAFETY: Tag check confirms rec.limits is an object record.
+    const limitRec = rec.limits as CanonicalJsonRecord;
+    for (const k of Object.keys(limitRec)) {
       if (k === "__proto__" || k === "constructor" || k === "prototype") {
         unknownKeys.push(`limits.${k}`);
         continue;
       }
-      if (!KNOWN_LIMITS_KEYS[k]) unknownKeys.push(`limits.${k}`);
+      if (!Object.hasOwn(KNOWN_LIMITS_KEYS, k)) unknownKeys.push(`limits.${k}`);
     }
   }
 
@@ -241,7 +267,6 @@ function violationToDenyCode(violation: PolicyViolation): PolicyDenyCode {
     case "NET_OUTBOUND_FORBIDDEN":
       return "NET_OUTBOUND_FORBIDDEN";
     case "NET_DOMAIN_EXPANSION":
-      return "NET_DOMAIN_NOT_ALLOWED";
     case "NET_HOST_EXPANSION":
       return "NET_DOMAIN_NOT_ALLOWED";
     case "NET_PORT_EXPANSION":
@@ -351,14 +376,13 @@ export class CapabilityPolicyEngine {
       }
     }
   }
+
   /**
    * Validates capability manifest object for schema compliance and unknown properties.
    */
-  validateCapabilities(capabilities: unknown): {
-    valid: boolean;
-    unknownKeys: string[];
-    error?: string;
-  } {
+  validateCapabilities(
+    capabilities: CapabilityManifest | ToolManifest | CanonicalJsonValue | null | undefined,
+  ): CapabilityValidationResult {
     const unknownKeys = detectUnknownCapabilityKeys(capabilities);
     const parsed = CapabilityManifestSchema.safeParse(capabilities);
     return {
@@ -376,7 +400,12 @@ export class CapabilityPolicyEngine {
    * Evaluates a requested invocation against a workspace envelope.
    */
   evaluateInvocation(
-    manifestOrCapabilities: ToolManifest | CapabilityManifest | unknown,
+    manifestOrCapabilities:
+      | ToolManifest
+      | CapabilityManifest
+      | CanonicalJsonValue
+      | null
+      | undefined,
     envelopeOrWorkspaceId: CapabilityEnvelope | string,
     context: InvocationContext,
   ): PolicyEvaluationResult {
@@ -392,7 +421,7 @@ export class CapabilityPolicyEngine {
 
     // 2. Resolve Envelope
     let envelope: CapabilityEnvelope;
-    if (typeof envelopeOrWorkspaceId === "string") {
+    if (String(envelopeOrWorkspaceId) === envelopeOrWorkspaceId) {
       const found = this.envelopes.get(envelopeOrWorkspaceId);
       if (!found) {
         return {
@@ -430,38 +459,39 @@ export class CapabilityPolicyEngine {
       };
     }
 
-    if (
-      context.projectId &&
-      (envelope as unknown as Record<string, unknown>).projectId &&
-      (envelope as unknown as Record<string, unknown>).projectId !== context.projectId
-    ) {
+    const envProjectId =
+      "projectId" in envelope && String(envelope.projectId) === envelope.projectId
+        ? envelope.projectId
+        : undefined;
+    if (context.projectId && envProjectId && envProjectId !== context.projectId) {
       return {
         allowed: false,
         denyCode: "WORKSPACE_MISMATCH",
-        reason: `Project mismatch: envelope is bound to project '${(envelope as unknown as Record<string, unknown>).projectId}' but context requested '${context.projectId}'`,
+        reason: `Project mismatch: envelope is bound to project '${envProjectId}' but context requested '${context.projectId}'`,
         violations: [],
       };
     }
 
-    if (
-      context.accountId &&
-      (envelope as unknown as Record<string, unknown>).accountId &&
-      (envelope as unknown as Record<string, unknown>).accountId !== context.accountId
-    ) {
+    const envAccountId =
+      "accountId" in envelope && String(envelope.accountId) === envelope.accountId
+        ? envelope.accountId
+        : undefined;
+    if (context.accountId && envAccountId && envAccountId !== context.accountId) {
       return {
         allowed: false,
         denyCode: "WORKSPACE_MISMATCH",
-        reason: `Account mismatch: envelope is bound to account '${(envelope as unknown as Record<string, unknown>).accountId}' but context requested '${context.accountId}'`,
+        reason: `Account mismatch: envelope is bound to account '${envAccountId}' but context requested '${context.accountId}'`,
         violations: [],
       };
     }
 
     // 4. Extract & Validate CapabilityManifest
     let requestedCapabilities: CapabilityManifest;
-    let rawCapabilityObject: unknown = manifestOrCapabilities;
+    let rawCapabilityObject: CanonicalJsonValue | CapabilityManifest | ToolManifest =
+      manifestOrCapabilities;
     let toolVersion = context.toolVersion ?? "0.0.0";
 
-    if (!manifestOrCapabilities || typeof manifestOrCapabilities !== "object") {
+    if (!manifestOrCapabilities || !(manifestOrCapabilities instanceof Object)) {
       return {
         allowed: false,
         denyCode: "INVALID_MANIFEST",
@@ -470,10 +500,11 @@ export class CapabilityPolicyEngine {
       };
     }
 
-    const recManifest = manifestOrCapabilities as Record<string, unknown>;
+    // SAFETY: Tag check confirms manifestOrCapabilities is an object.
+    const recManifest = manifestOrCapabilities as CanonicalJsonRecord;
 
     if ("capabilities" in recManifest) {
-      if (typeof recManifest.id === "string" && recManifest.id !== context.toolId) {
+      if (String(recManifest.id) === recManifest.id && recManifest.id !== context.toolId) {
         return {
           allowed: false,
           denyCode: "INVALID_CONTEXT",
@@ -483,7 +514,7 @@ export class CapabilityPolicyEngine {
       }
       if (
         context.toolVersion &&
-        typeof recManifest.version === "string" &&
+        String(recManifest.version) === recManifest.version &&
         recManifest.version !== context.toolVersion
       ) {
         return {
@@ -493,11 +524,13 @@ export class CapabilityPolicyEngine {
           violations: [],
         };
       }
-      if (typeof recManifest.version === "string") {
-        toolVersion = recManifest.version;
+      if (String(recManifest.version) === recManifest.version) {
+        // SAFETY: String equality check confirms recManifest.version is a string primitive.
+        toolVersion = recManifest.version as string;
       }
 
-      rawCapabilityObject = recManifest.capabilities;
+      // SAFETY: Checked as non-null property for capability manifest parsing.
+      rawCapabilityObject = recManifest.capabilities as CanonicalJsonValue;
       const parsedCap = CapabilityManifestSchema.safeParse(recManifest.capabilities);
       if (!parsedCap.success) {
         return {

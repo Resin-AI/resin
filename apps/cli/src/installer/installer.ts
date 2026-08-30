@@ -53,7 +53,7 @@ import {
   type HarnessConfigResult,
   type SupportedHarnessId,
 } from "./harness-config.js";
-import { InstallationJournal, type JournalData } from "./journal.js";
+import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
 import {
   type ReleaseProvenance,
@@ -331,7 +331,9 @@ export class ResinInstaller {
             downloadDir: downloadsDir,
             sourceBuffer: Buffer.isBuffer(options.assetTarball) ? options.assetTarball : undefined,
             sourceUrlOrPath:
-              typeof options.assetTarball === "string" ? options.assetTarball : undefined,
+              String(options.assetTarball) === options.assetTarball
+                ? options.assetTarball
+                : undefined,
             fsBridge: this.fsBridge,
             logger: this.log.bind(this),
           });
@@ -489,16 +491,17 @@ export class ResinInstaller {
             },
           );
         }
-        pairingSummary = {
+        const summary: InstallationPairingSummary = {
           paired: Boolean(pairingMutation.paired),
           localOnly: Boolean(pairingMutation.localOnly),
-          ...(pairingMutation.reused !== undefined ? { reused: pairingMutation.reused } : {}),
-          ...(pairingMutation.accountId ? { accountId: pairingMutation.accountId } : {}),
-          ...(pairingMutation.workspaceId ? { workspaceId: pairingMutation.workspaceId } : {}),
-          ...(pairingMutation.deviceId ? { deviceId: pairingMutation.deviceId } : {}),
-          ...(pairingMutation.userId ? { userId: pairingMutation.userId } : {}),
-          ...(pairingMutation.cloudUrl ? { cloudUrl: pairingMutation.cloudUrl } : {}),
         };
+        if (pairingMutation.reused !== undefined) summary.reused = pairingMutation.reused;
+        if (pairingMutation.accountId) summary.accountId = pairingMutation.accountId;
+        if (pairingMutation.workspaceId) summary.workspaceId = pairingMutation.workspaceId;
+        if (pairingMutation.deviceId) summary.deviceId = pairingMutation.deviceId;
+        if (pairingMutation.userId) summary.userId = pairingMutation.userId;
+        if (pairingMutation.cloudUrl) summary.cloudUrl = pairingMutation.cloudUrl;
+        pairingSummary = summary;
         this.journal.completeStep("pairing", { ...pairingSummary });
       } else {
         pairingSummary = {
@@ -526,7 +529,9 @@ export class ResinInstaller {
         if (unsupported) {
           throw new Error(`Unsupported harness '${unsupported}'`);
         }
-        requestedHarnesses = values as SupportedHarnessId[];
+        requestedHarnesses = values.filter(
+          (h): h is SupportedHarnessId => h === "claude-code" || h === "codex-cli" || h === "omp",
+        );
       }
 
       this.journal.completeStep("harness_discovery", {
@@ -699,21 +704,22 @@ export class ResinInstaller {
       if (!allConfigured) {
         throw new Error("One or more detected editor harnesses are not ready for Resin.");
       }
-      this.journal.completeStep("verify", {
+      const verifyDetails: JournalDetails = {
         allConfigured,
         installedHarnessCount: installedHarnesses.length,
         onboardingReady:
           allConfigured &&
           (!options.setupService || dryRun || daemonReadinessResult?.ready === true),
-        ...(serviceSetupResult ? { serviceHealthy: serviceSetupResult.healthy } : {}),
-        ...(daemonReadinessResult
-          ? {
-              ipcReady: daemonReadinessResult.ipcReady,
-              cloudReady: daemonReadinessResult.cloudReady,
-              daemonHealthStatus: daemonReadinessResult.healthStatus,
-            }
-          : {}),
-      });
+      };
+      if (serviceSetupResult) {
+        verifyDetails.serviceHealthy = serviceSetupResult.healthy;
+      }
+      if (daemonReadinessResult) {
+        verifyDetails.ipcReady = daemonReadinessResult.ipcReady;
+        verifyDetails.cloudReady = daemonReadinessResult.cloudReady;
+        verifyDetails.daemonHealthStatus = daemonReadinessResult.healthStatus;
+      }
+      this.journal.completeStep("verify", verifyDetails);
 
       // Step 11: Finalizing & recording journal
       options.abortSignal?.throwIfAborted();

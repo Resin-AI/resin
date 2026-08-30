@@ -3,6 +3,8 @@
 import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { LocalDatabaseConnection } from "@resin/db";
+import { z } from "zod";
 import { McpStdioShim } from "../shim/stdio-bridge.js";
 
 function resolveVersion(): string {
@@ -12,11 +14,11 @@ function resolveVersion(): string {
   ];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")) as {
-        version?: unknown;
-      };
-      if (typeof parsed.version === "string" && parsed.version.length > 0) {
-        return parsed.version;
+      const parsed = z
+        .object({ version: z.string().min(1) })
+        .safeParse(JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")));
+      if (parsed.success) {
+        return parsed.data.version;
       }
     } catch {
       // Continue to the next enclosing package candidate.
@@ -87,7 +89,7 @@ async function main(): Promise<void> {
   }
   const shim = new McpStdioShim({
     standaloneFallback: args.standaloneFallback,
-    db: args.dbPath,
+    db: args.dbPath ? new LocalDatabaseConnection({ path: args.dbPath }) : undefined,
     socketPath: args.standaloneMode && !args.socketPath ? "" : args.socketPath,
     cwd: args.cwd,
     harnessId: args.harnessId,
@@ -116,7 +118,8 @@ async function main(): Promise<void> {
       });
     }
   } catch (err) {
-    process.stderr.write(`Fatal MCP Shim error: ${(err as Error).message}\n`);
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`Fatal MCP Shim error: ${message}\n`);
     process.exit(1);
   }
 }

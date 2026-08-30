@@ -916,11 +916,10 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
 
     // 2. Mock HTTP 404 error
     const mock404Fetch = async () =>
-      ({
-        ok: false,
+      new Response(null, {
         status: 404,
         statusText: "Not Found",
-      }) as Response;
+      });
 
     await expect(
       downloadAndVerifyAsset({
@@ -961,6 +960,7 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
         asset,
         downloadDir,
         sourceUrlOrPath: "https://example.com/slow-asset.tar.gz",
+        // SAFETY: Mock fetch implementing required interface for hanging fetch test.
         fetchImpl: mockHangingFetch as typeof globalThis.fetch,
         timeoutMs: 50,
       }),

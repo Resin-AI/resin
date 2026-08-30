@@ -2,7 +2,22 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { RedactionMeta, RedactionStrategy } from "@resin/contracts";
+import { z } from "zod";
 import { ContentScanner } from "./scanner.js";
+
+export type JsonPrimitive = string | number | boolean | null | undefined;
+export type JsonArray = JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+export type JsonValue = JsonPrimitive | JsonArray | JsonObject;
+
+export interface RedactedStringResult {
+  redactedText: string;
+  changed: boolean;
+  patterns: string[];
+  fingerprints: string[];
+}
 
 /**
  * Configuration options for RedactionEngine.
@@ -140,7 +155,10 @@ export class RedactionEngine {
     this.localOnlyFieldsSet = new Set(this.config.localOnlyFields);
 
     // Build ordered path replacements (longest path first to avoid prefix shadowing)
-    const rawPathMap: Record<string, string> = { ...this.config.pathAliases };
+    const rawPathMap: Record<string, string> = {};
+    if (this.config.pathAliases) {
+      Object.assign(rawPathMap, this.config.pathAliases);
+    }
 
     if (this.config.repoRoot && this.config.repoRoot.length > 1) {
       rawPathMap[this.config.repoRoot] = "$REPO_ROOT";
@@ -161,7 +179,7 @@ export class RedactionEngine {
     this.envSecretReplacements = [];
     for (const envVarName of this.config.sensitiveEnvVars ?? []) {
       const val = process.env[envVarName];
-      if (val && typeof val === "string" && val.trim().length >= 6) {
+      if (val && val.trim().length >= 6) {
         const fp = computeFingerprint(val);
         this.envSecretReplacements.push({
           secret: val,
@@ -173,7 +191,7 @@ export class RedactionEngine {
 
     // Build custom secrets list
     this.customSecretReplacements = (this.config.customSecrets ?? [])
-      .filter((s) => typeof s === "string" && s.trim().length >= 4)
+      .filter((s) => Boolean(s) && s.trim().length >= 4)
       .map((secret) => ({
         secret,
         fingerprint: computeFingerprint(secret),
@@ -183,16 +201,8 @@ export class RedactionEngine {
   /**
    * Redacts a single string according to privacy transforms.
    */
-  redactString(
-    text: string,
-    fieldPath = "",
-  ): {
-    redactedText: string;
-    changed: boolean;
-    patterns: string[];
-    fingerprints: string[];
-  } {
-    if (!text || typeof text !== "string") {
+  redactString(text: string, fieldPath = ""): RedactedStringResult {
+    if (!text) {
       return { redactedText: text, changed: false, patterns: [], fingerprints: [] };
     }
 
@@ -291,15 +301,16 @@ export class RedactionEngine {
     const patternsSet = new Set<string>();
     const fingerprintsSet = new Set<string>();
 
-    const transform = (current: unknown, currentPath: string): unknown => {
+    const transform = <V>(current: V, currentPath: string): JsonValue => {
       if (current === null || current === undefined) {
-        return current;
+        return current === null ? null : undefined;
       }
 
       // String transformation
-      if (typeof current === "string") {
+      const stringParsed = z.string().safeParse(current);
+      if (stringParsed.success) {
         const { redactedText, changed, patterns, fingerprints } = this.redactString(
-          current,
+          stringParsed.data,
           currentPath,
         );
         if (changed) {
@@ -320,14 +331,16 @@ export class RedactionEngine {
       }
 
       // Object transformation
-      if (typeof current === "object") {
-        const result: Record<string, unknown> = {};
-        for (const [key, val] of Object.entries(current as Record<string, unknown>)) {
+      const objectParsed = z.record(z.unknown()).safeParse(current);
+      if (objectParsed.success) {
+        const result: JsonObject = {};
+        for (const [key, val] of Object.entries(objectParsed.data)) {
           const fieldPath = currentPath ? `${currentPath}.${key}` : key;
 
           // Preserved identifier / keyword field check
           if (PRESERVED_IDENTIFIER_FIELDS.has(key)) {
-            result[key] = val;
+            // SAFETY: Preserved identifier fields are kept intact without redaction.
+            result[key] = val as JsonValue;
             continue;
           }
 
@@ -347,12 +360,18 @@ export class RedactionEngine {
         return result;
       }
 
-      return current;
+      const numParsed = z.number().safeParse(current);
+      if (numParsed.success) return numParsed.data;
+
+      const boolParsed = z.boolean().safeParse(current);
+      if (boolParsed.success) return boolParsed.data;
+
+      return null;
     };
 
+    // SAFETY: transform traverses and deep-clones the input structure while preserving type T.
     const transformedData = transform(value, "") as T;
     const isRedacted = redactedFieldsSet.size > 0 || patternsSet.size > 0;
-
     return {
       data: transformedData,
       isRedacted,

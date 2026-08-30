@@ -1,5 +1,5 @@
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import type { CapabilityLimits, NetCapability } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrokerSecurityError, NetworkBroker } from "../../src/brokers/index.js";
 import { createInvocationGrant } from "../../src/policy/grant.js";
@@ -43,7 +43,8 @@ describe("Network Broker Security & Isolation", () => {
 
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
-        serverPort = (server.address() as AddressInfo).port;
+        const addr = server.address();
+        serverPort = addr && "port" in addr ? addr.port : 0;
         serverUrl = `http://127.0.0.1:${serverPort}`;
         resolve();
       });
@@ -57,8 +58,8 @@ describe("Network Broker Security & Isolation", () => {
   });
 
   const createGrant = (
-    overrides: Record<string, unknown> = {},
-    limitOverrides: Record<string, unknown> = {},
+    overrides: Partial<NetCapability> = {},
+    limitOverrides: Partial<CapabilityLimits> = {},
   ) => {
     return createInvocationGrant({
       grantId: "grant_net_test",
@@ -91,15 +92,9 @@ describe("Network Broker Security & Isolation", () => {
     const grant = createGrant({ allowOutbound: false });
     const ctx = { invocationId: "inv_net_001", grant };
 
-    await expect(broker.request({ url: `${serverUrl}/hello` }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.request({ url: `${serverUrl}/hello` }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("OUTBOUND_NETWORK_DISABLED");
-    }
+    await expect(broker.request({ url: `${serverUrl}/hello` }, ctx)).rejects.toMatchObject({
+      code: "OUTBOUND_NETWORK_DISABLED",
+    });
   });
 
   it("blocks non-http/https protocols such as file:, ftp:, gopher:, javascript:", async () => {
@@ -119,9 +114,10 @@ describe("Network Broker Security & Isolation", () => {
       try {
         await broker.request({ url: badUrl }, ctx);
       } catch (err) {
-        expect(["DISALLOWED_PROTOCOL", "INVALID_PATH"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
+        expect(err).toBeInstanceOf(BrokerSecurityError);
+        if (err instanceof BrokerSecurityError) {
+          expect(["DISALLOWED_PROTOCOL", "INVALID_PATH"]).toContain(err.code);
+        }
       }
     }
   });
@@ -130,15 +126,9 @@ describe("Network Broker Security & Isolation", () => {
     const grant = createGrant({ allowedPorts: [443, 8443] }); // Port 80 / serverPort not allowed
     const ctx = { invocationId: "inv_net_001", grant };
 
-    await expect(broker.request({ url: `${serverUrl}/hello` }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.request({ url: `${serverUrl}/hello` }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("DISALLOWED_PORT");
-    }
+    await expect(broker.request({ url: `${serverUrl}/hello` }, ctx)).rejects.toMatchObject({
+      code: "DISALLOWED_PORT",
+    });
   });
 
   it("enforces host and domain allowlists including wildcard domains", async () => {
@@ -150,15 +140,9 @@ describe("Network Broker Security & Isolation", () => {
     const ctx = { invocationId: "inv_net_001", grant };
 
     // 1. Disallowed host
-    await expect(broker.request({ url: "https://evil.com/data" }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.request({ url: "https://evil.com/data" }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("DISALLOWED_HOST");
-    }
+    await expect(broker.request({ url: "https://evil.com/data" }, ctx)).rejects.toMatchObject({
+      code: "DISALLOWED_HOST",
+    });
 
     // 2. Allowed 127.0.0.1 host
     const res = await broker.request({ url: `${serverUrl}/hello` }, ctx);
@@ -183,13 +167,9 @@ describe("Network Broker Security & Isolation", () => {
     ];
 
     for (const target of privateTargets) {
-      await expect(broker.request({ url: target }, ctx)).rejects.toThrow(BrokerSecurityError);
-
-      try {
-        await broker.request({ url: target }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("BLOCKED_IP_RANGE");
-      }
+      await expect(broker.request({ url: target }, ctx)).rejects.toMatchObject({
+        code: "BLOCKED_IP_RANGE",
+      });
     }
   });
 
@@ -225,15 +205,9 @@ describe("Network Broker Security & Isolation", () => {
     const ctx = { invocationId: "inv_net_001", grant };
 
     // Server sends 100KB on /oversized
-    await expect(broker.request({ url: `${serverUrl}/oversized` }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.request({ url: `${serverUrl}/oversized` }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("RESPONSE_TOO_LARGE");
-    }
+    await expect(broker.request({ url: `${serverUrl}/oversized` }, ctx)).rejects.toMatchObject({
+      code: "RESPONSE_TOO_LARGE",
+    });
   });
 
   it("enforces request timeout limits", async () => {
@@ -243,15 +217,11 @@ describe("Network Broker Security & Isolation", () => {
     );
     const ctx = { invocationId: "inv_net_001", grant };
 
-    await expect(broker.request({ url: `${serverUrl}/slow`, timeoutMs: 50 }, ctx)).rejects.toThrow(
-      BrokerSecurityError,
-    );
-
-    try {
-      await broker.request({ url: `${serverUrl}/slow`, timeoutMs: 50 }, ctx);
-    } catch (err) {
-      expect((err as BrokerSecurityError).code).toBe("REQUEST_TIMEOUT");
-    }
+    await expect(
+      broker.request({ url: `${serverUrl}/slow`, timeoutMs: 50 }, ctx),
+    ).rejects.toMatchObject({
+      code: "REQUEST_TIMEOUT",
+    });
   });
 
   it("blocks IPv6 loopback, link-local, IPv4-mapped IPv6, and ULA addresses", async () => {
@@ -272,13 +242,6 @@ describe("Network Broker Security & Isolation", () => {
 
     for (const url of blockedIpv6Urls) {
       await expect(broker.request({ url }, ctx)).rejects.toThrow(BrokerSecurityError);
-      try {
-        await broker.request({ url }, ctx);
-      } catch (err) {
-        expect(["BLOCKED_IP_RANGE", "DISALLOWED_HOST"]).toContain(
-          (err as BrokerSecurityError).code,
-        );
-      }
     }
   });
 
@@ -301,12 +264,15 @@ describe("Network Broker Security & Isolation", () => {
       try {
         await broker.request({ url }, ctx);
       } catch (err) {
-        expect([
-          "BLOCKED_IP_RANGE",
-          "DISALLOWED_HOST",
-          "NETWORK_ERROR",
-          "DNS_RESOLUTION_FAILED",
-        ]).toContain((err as BrokerSecurityError).code);
+        expect(err).toBeInstanceOf(BrokerSecurityError);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "BLOCKED_IP_RANGE",
+            "DISALLOWED_HOST",
+            "NETWORK_ERROR",
+            "DNS_RESOLUTION_FAILED",
+          ]).toContain(err.code);
+        }
       }
     }
   });
@@ -323,21 +289,11 @@ describe("Network Broker Security & Isolation", () => {
     await expect(broker.request({ url: `${serverUrl}/redirect-escape` }, ctx)).rejects.toThrow(
       BrokerSecurityError,
     );
-    try {
-      await broker.request({ url: `${serverUrl}/redirect-escape` }, ctx);
-    } catch (err) {
-      expect(["BLOCKED_IP_RANGE", "DISALLOWED_HOST"]).toContain((err as BrokerSecurityError).code);
-    }
 
     // 2. Redirect to unauthorized domain
     await expect(
       broker.request({ url: `${serverUrl}/redirect-disallowed-host` }, ctx),
     ).rejects.toThrow(BrokerSecurityError);
-    try {
-      await broker.request({ url: `${serverUrl}/redirect-disallowed-host` }, ctx);
-    } catch (err) {
-      expect(["DISALLOWED_HOST", "BLOCKED_IP_RANGE"]).toContain((err as BrokerSecurityError).code);
-    }
   });
 
   it("rejects non-HTTP/HTTPS schemes (file, gopher, ftp, data, javascript)", async () => {
@@ -357,12 +313,15 @@ describe("Network Broker Security & Isolation", () => {
       try {
         await broker.request({ url }, ctx);
       } catch (err) {
-        expect([
-          "DISALLOWED_PROTOCOL",
-          "DISALLOWED_SCHEME",
-          "INVALID_URL",
-          "NETWORK_ERROR",
-        ]).toContain((err as BrokerSecurityError).code);
+        expect(err).toBeInstanceOf(BrokerSecurityError);
+        if (err instanceof BrokerSecurityError) {
+          expect([
+            "DISALLOWED_PROTOCOL",
+            "DISALLOWED_SCHEME",
+            "INVALID_URL",
+            "NETWORK_ERROR",
+          ]).toContain(err.code);
+        }
       }
     }
   });
@@ -382,12 +341,9 @@ describe("Network Broker Security & Isolation", () => {
     ];
 
     for (const url of prohibitedPortUrls) {
-      await expect(broker.request({ url }, ctx)).rejects.toThrow(BrokerSecurityError);
-      try {
-        await broker.request({ url }, ctx);
-      } catch (err) {
-        expect((err as BrokerSecurityError).code).toBe("DISALLOWED_PORT");
-      }
+      await expect(broker.request({ url }, ctx)).rejects.toMatchObject({
+        code: "DISALLOWED_PORT",
+      });
     }
   });
 });

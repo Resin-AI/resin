@@ -40,6 +40,28 @@ export interface VerifiedQualificationToken {
   readonly verifiedAt: number;
 }
 
+export interface QualificationHostTarget {
+  readonly toolId?: string;
+  readonly toolVersion?: string;
+  readonly manifest?: ToolManifest;
+  readonly digest?: string;
+  readonly entrypointPath?: string;
+}
+
+export type TokenVerificationCandidate =
+  | VerifiedQualificationToken
+  | TokenCarrier
+  | QualificationHostTarget
+  | QualificationArtifactBundle
+  | ObservedEffectProfile
+  | null
+  | undefined;
+
+export interface TokenCarrier {
+  readonly qualificationToken?: VerifiedQualificationToken | object | null;
+  readonly token?: VerifiedQualificationToken | object | null;
+}
+
 /**
  * Private module WeakMap backing verified qualification tokens.
  * WeakSet/WeakMap-backed guarantee: fabricated objects not in this WeakMap
@@ -68,8 +90,11 @@ export function createVerifiedQualificationToken(
 /**
  * Associates a host object (such as LoadedToolBundle) with verified qualification data.
  */
-export function registerVerifiedHostObject(host: object, data: VerifiedQualificationData): void {
-  if (host && typeof host === "object") {
+export function registerVerifiedHostObject(
+  host: QualificationHostTarget,
+  data: VerifiedQualificationData,
+): void {
+  if (host !== null && host !== undefined) {
     VERIFIED_QUALIFICATION_TOKENS.set(host, data);
   }
 }
@@ -78,23 +103,29 @@ export function registerVerifiedHostObject(host: object, data: VerifiedQualifica
  * Checks whether a candidate object is a verified qualification token or registered host object.
  */
 export function isVerifiedQualificationToken(
-  candidate: unknown,
+  candidate: TokenVerificationCandidate,
 ): candidate is VerifiedQualificationToken {
-  if (!candidate || typeof candidate !== "object") {
+  if (candidate === null || candidate === undefined || Array.isArray(candidate)) {
     return false;
   }
   if (VERIFIED_QUALIFICATION_TOKENS.has(candidate)) {
     return true;
   }
-  const tokenProp = (candidate as Record<string, unknown>).qualificationToken;
-  if (tokenProp && typeof tokenProp === "object" && VERIFIED_QUALIFICATION_TOKENS.has(tokenProp)) {
+  if (
+    "qualificationToken" in candidate &&
+    candidate.qualificationToken !== null &&
+    candidate.qualificationToken !== undefined &&
+    !Array.isArray(candidate.qualificationToken) &&
+    VERIFIED_QUALIFICATION_TOKENS.has(candidate.qualificationToken)
+  ) {
     return true;
   }
-  const tokenProp2 = (candidate as Record<string, unknown>).token;
   if (
-    tokenProp2 &&
-    typeof tokenProp2 === "object" &&
-    VERIFIED_QUALIFICATION_TOKENS.has(tokenProp2)
+    "token" in candidate &&
+    candidate.token !== null &&
+    candidate.token !== undefined &&
+    !Array.isArray(candidate.token) &&
+    VERIFIED_QUALIFICATION_TOKENS.has(candidate.token)
   ) {
     return true;
   }
@@ -106,25 +137,31 @@ export function isVerifiedQualificationToken(
  * Returns undefined if candidate is unverified or fabricated.
  */
 export function getVerifiedQualificationData(
-  candidate: unknown,
+  candidate: TokenVerificationCandidate,
 ): VerifiedQualificationData | undefined {
-  if (!candidate || typeof candidate !== "object") {
+  if (candidate === null || candidate === undefined || Array.isArray(candidate)) {
     return undefined;
   }
   if (VERIFIED_QUALIFICATION_TOKENS.has(candidate)) {
     return VERIFIED_QUALIFICATION_TOKENS.get(candidate);
   }
-  const tokenProp = (candidate as Record<string, unknown>).qualificationToken;
-  if (tokenProp && typeof tokenProp === "object" && VERIFIED_QUALIFICATION_TOKENS.has(tokenProp)) {
-    return VERIFIED_QUALIFICATION_TOKENS.get(tokenProp);
-  }
-  const tokenProp2 = (candidate as Record<string, unknown>).token;
   if (
-    tokenProp2 &&
-    typeof tokenProp2 === "object" &&
-    VERIFIED_QUALIFICATION_TOKENS.has(tokenProp2)
+    "qualificationToken" in candidate &&
+    candidate.qualificationToken !== null &&
+    candidate.qualificationToken !== undefined &&
+    !Array.isArray(candidate.qualificationToken) &&
+    VERIFIED_QUALIFICATION_TOKENS.has(candidate.qualificationToken)
   ) {
-    return VERIFIED_QUALIFICATION_TOKENS.get(tokenProp2);
+    return VERIFIED_QUALIFICATION_TOKENS.get(candidate.qualificationToken);
+  }
+  if (
+    "token" in candidate &&
+    candidate.token !== null &&
+    candidate.token !== undefined &&
+    !Array.isArray(candidate.token) &&
+    VERIFIED_QUALIFICATION_TOKENS.has(candidate.token)
+  ) {
+    return VERIFIED_QUALIFICATION_TOKENS.get(candidate.token);
   }
   return undefined;
 }

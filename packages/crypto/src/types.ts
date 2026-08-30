@@ -239,6 +239,23 @@ export interface RedactionOptions {
 }
 
 /**
+ * Primitive scalar value encountered during object redaction.
+ */
+export type RedactedScalar = string | number | boolean | null | undefined;
+
+/**
+ * Deeply redacted value type supporting primitives, arrays, and record dictionaries.
+ */
+export type RedactedValue = RedactedScalar | RedactedRecord | RedactedValue[];
+
+/**
+ * Redacted record dictionary mapping string keys to redacted values.
+ */
+export interface RedactedRecord {
+  [key: string]: RedactedValue;
+}
+
+/**
  * Options for SecretManager.
  */
 export interface SecretManagerOptions {

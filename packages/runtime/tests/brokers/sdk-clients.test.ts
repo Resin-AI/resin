@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CapabilityBrokerManager, createBrokerClients } from "../../src/brokers/index.js";
-import { createInvocationGrant } from "../../src/policy/grant.js";
+import { type CreateInvocationGrantParams, createInvocationGrant } from "../../src/policy/grant.js";
 import { ToolRuntime } from "../../src/worker/runner.js";
 import { defineTool } from "../../src/worker/sdk.js";
 
@@ -29,7 +29,7 @@ describe("Broker SDK Clients & ToolRuntime Integration", () => {
     } catch {}
   });
 
-  const createGrant = (overrides: Record<string, unknown> = {}) => {
+  const createGrant = (overrides: Partial<CreateInvocationGrantParams> = {}) => {
     return createInvocationGrant({
       grantId: "grant_sdk_test",
       invocationId: "inv_sdk_001",
@@ -209,13 +209,12 @@ describe("Broker SDK Clients & ToolRuntime Integration", () => {
     );
 
     expect(result.status).toBe("success");
-    const output = result.output as {
-      savedContent: string;
-      fileSize: number;
-      commandStdout: string;
-    };
-    expect(output.savedContent).toContain("Processed for invocation");
-    expect(output.fileSize).toBeGreaterThan(0);
-    expect(output.commandStdout).toBe("Running inside tool");
+    expect(result.output).toEqual(
+      expect.objectContaining({
+        savedContent: expect.stringContaining("Processed for invocation"),
+        fileSize: expect.any(Number),
+        commandStdout: "Running inside tool",
+      }),
+    );
   });
 });

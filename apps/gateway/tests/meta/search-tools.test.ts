@@ -7,9 +7,20 @@ import {
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
+import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
+
+function parseSearchResponse(result: CallToolResult): SearchToolsResponse {
+  const first = result.content[0];
+  const text =
+    first && "text" in first && Object.prototype.toString.call(first.text) === "[object String]"
+      ? String(first.text)
+      : "{}";
+  // SAFETY: Test helper parses JSON response into SearchToolsResponse domain object.
+  return JSON.parse(text) as SearchToolsResponse;
+}
 
 function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
   const raw = {
@@ -63,7 +74,7 @@ describe("search_tools Meta-Tool", () => {
     expect(result.isError).toBeFalsy();
     expect(result.content[0].type).toBe("text");
 
-    const data = JSON.parse(result.content[0].text as string) as SearchToolsResponse;
+    const data = parseSearchResponse(result);
     expect(data.total).toBe(4);
     expect(data.tools.map((t) => t.name)).toEqual(
       expect.arrayContaining(["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"]),
@@ -93,7 +104,7 @@ describe("search_tools Meta-Tool", () => {
     // Caller in workspace A searches
     const contextA = makeContext("ws-alpha");
     const resA = await handler(contextA, {});
-    const dataA = JSON.parse(resA.content[0].text as string) as SearchToolsResponse;
+    const dataA = parseSearchResponse(resA);
 
     const namesA = dataA.tools.map((t) => t.name);
     expect(namesA).toContain("alpha_exclusive_tool");
@@ -102,7 +113,7 @@ describe("search_tools Meta-Tool", () => {
     // Caller in workspace B searches
     const contextB = makeContext("ws-beta");
     const resB = await handler(contextB, {});
-    const dataB = JSON.parse(resB.content[0].text as string) as SearchToolsResponse;
+    const dataB = parseSearchResponse(resB);
 
     const namesB = dataB.tools.map((t) => t.name);
     expect(namesB).toContain("beta_secret_tool");
@@ -126,12 +137,12 @@ describe("search_tools Meta-Tool", () => {
 
     const contextSess1 = makeContext("ws-shared", "session-1");
     const res1 = await handler(contextSess1, {});
-    const data1 = JSON.parse(res1.content[0].text as string) as SearchToolsResponse;
+    const data1 = parseSearchResponse(res1);
     expect(data1.tools.some((t) => t.name === "session_1_tool")).toBe(true);
 
     const contextSess2 = makeContext("ws-shared", "session-2");
     const res2 = await handler(contextSess2, {});
-    const data2 = JSON.parse(res2.content[0].text as string) as SearchToolsResponse;
+    const data2 = parseSearchResponse(res2);
     expect(data2.tools.some((t) => t.name === "session_1_tool")).toBe(false);
   });
 
@@ -152,7 +163,7 @@ describe("search_tools Meta-Tool", () => {
 
     // Page 1: limit 5, offset 0
     const page1Res = await handler(context, { limit: 5, offset: 0 });
-    const page1Data = JSON.parse(page1Res.content[0].text as string) as SearchToolsResponse;
+    const page1Data = parseSearchResponse(page1Res);
     expect(page1Data.total).toBe(14); // 10 custom + 4 system
     expect(page1Data.tools).toHaveLength(5);
     expect(page1Data.limit).toBe(5);
@@ -161,14 +172,14 @@ describe("search_tools Meta-Tool", () => {
 
     // Page 2: limit 5, offset 5
     const page2Res = await handler(context, { limit: 5, offset: 5 });
-    const page2Data = JSON.parse(page2Res.content[0].text as string) as SearchToolsResponse;
+    const page2Data = parseSearchResponse(page2Res);
     expect(page2Data.tools).toHaveLength(5);
     expect(page2Data.offset).toBe(5);
     expect(page2Data.hasMore).toBe(true);
 
     // Page 3: limit 5, offset 10
     const page3Res = await handler(context, { limit: 5, offset: 10 });
-    const page3Data = JSON.parse(page3Res.content[0].text as string) as SearchToolsResponse;
+    const page3Data = parseSearchResponse(page3Res);
     expect(page3Data.tools).toHaveLength(4);
     expect(page3Data.hasMore).toBe(false);
   });
@@ -204,7 +215,7 @@ describe("search_tools Meta-Tool", () => {
     );
 
     const res = await handler(context, { query: "format_json" });
-    const data = JSON.parse(res.content[0].text as string) as SearchToolsResponse;
+    const data = parseSearchResponse(res);
 
     expect(data.tools[0].name).toBe("format_json");
     expect(data.tools[1].name).toBe("format_json_pretty");
@@ -260,13 +271,13 @@ describe("search_tools Meta-Tool", () => {
 
     // Filter by tag
     const tagRes = await handler(context, { tags: ["github"] });
-    const tagData = JSON.parse(tagRes.content[0].text as string) as SearchToolsResponse;
+    const tagData = parseSearchResponse(tagRes);
     expect(tagData.tools.map((t) => t.name)).toContain("github_fetcher");
     expect(tagData.tools.map((t) => t.name)).not.toContain("file_cleaner");
 
     // Filter by capability
     const capRes = await handler(context, { capabilities: ["filesystem"] });
-    const capData = JSON.parse(capRes.content[0].text as string) as SearchToolsResponse;
+    const capData = parseSearchResponse(capRes);
     expect(capData.tools.map((t) => t.name)).toContain("file_cleaner");
     expect(capData.tools.map((t) => t.name)).not.toContain("github_fetcher");
   });
@@ -299,7 +310,7 @@ describe("search_tools Meta-Tool", () => {
     );
 
     const res = await handler(context, { query: "s3_syncer" });
-    const data = JSON.parse(res.content[0].text as string) as SearchToolsResponse;
+    const data = parseSearchResponse(res);
     const tool = data.tools.find((t) => t.name === "s3_syncer");
     expect(tool).toBeDefined();
     expect(tool?.capabilities.types).toEqual(expect.arrayContaining(["network", "filesystem"]));

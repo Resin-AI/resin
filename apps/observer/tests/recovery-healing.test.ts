@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   RecoveryAwareDaemonSupervisor,
   type RecoveryAwareHealthReport,
@@ -97,19 +98,27 @@ async function startResponsiveIpcSocket(socketPath: string): Promise<net.Server>
     socket.once("close", () => connections.delete(socket));
     socket.on("error", () => undefined);
 
+    const pingFrameSchema = z.object({
+      id: z.string().optional(),
+      params: z
+        .object({
+          nonce: z.string().optional(),
+        })
+        .passthrough()
+        .optional(),
+    });
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       for (const frame of decoder.push(chunk)) {
-        const request = frame as {
-          id?: unknown;
-          params?: { nonce?: unknown };
-        };
+        const parsed = pingFrameSchema.safeParse(frame);
+        const id = parsed.success ? parsed.data.id : undefined;
+        const nonce = parsed.success ? parsed.data.params?.nonce : undefined;
         socket.write(
           encodeFrame({
-            id: request.id,
+            id,
             result: {
               pong: true,
-              nonce: request.params?.nonce,
+              nonce,
               timestamp: Date.now(),
             },
           }),
@@ -184,6 +193,7 @@ describe("runtime state healing", () => {
       expect(result.previousLockData).toEqual(stalePayload);
       expect(result.quarantinedLockPath).toMatch(/daemon\.lock\.stale\./);
       expect(
+        // SAFETY: Quarantined lock file path is non-null string in test assertion.
         JSON.parse(await fs.promises.readFile(result.quarantinedLockPath as string, "utf-8")),
       ).toEqual(stalePayload);
       expect(result.lockData?.pid).toBe(process.pid);
@@ -491,6 +501,7 @@ describe("recovery observability", () => {
       await server.start();
       try {
         await client.connect();
+        // SAFETY: Client getHealth response carries recovery metadata in test.
         const health = (await client.getHealth()) as RecoveryAwareHealthReport;
         expect(health.recovery).toMatchObject({
           restartCount: 6,
@@ -528,14 +539,7 @@ describe("recovery observability", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const exitCode = await handleIpcCommand("status", paths);
-    const rendered = JSON.parse(String(stdout.mock.calls.at(-1)?.[0])) as {
-      daemonReachable: boolean;
-      recovery: {
-        circuitBreaker: string;
-        circuitBreakerTripped: boolean;
-        lastFailure?: { remediation?: string };
-      };
-    };
+    const rendered = JSON.parse(String(stdout.mock.calls.at(-1)?.[0]));
 
     expect(exitCode).toBe(1);
     expect(rendered.daemonReachable).toBe(false);
@@ -611,6 +615,7 @@ describe("configuration healing", () => {
     });
     await ensureDaemonDirectories(paths);
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // SAFETY: Test warnings array has at least one valid warning element.
     await persistAndSurfaceConfigRecoveryWarning(paths, warnings[0] as ConfigRecoveryWarning);
 
     const visibleMessages = stderr.mock.calls.flat().join("\n");
@@ -628,6 +633,7 @@ describe("configuration healing", () => {
     const entries = await fs.promises.readdir(directory);
     const backups = entries.filter((entry) => /^config\.json\.corrupt\.\d+$/.test(entry));
     expect(backups).toHaveLength(1);
+    // SAFETY: Test backups array has at least one backup filename string.
     const backupPath = path.join(directory, backups[0] as string);
     expect(await fs.promises.readFile(backupPath, "utf-8")).toBe(malformedContent);
     expect((await fs.promises.stat(backupPath)).mode & 0o077).toBe(0);
@@ -648,7 +654,8 @@ describe("configuration healing", () => {
       remediation: "Inspect the backup, repair the config, then restart Resin.",
       message: "WARNING: malformed JSON; inspect the backup and restart Resin.",
     };
-    const fakeChild = new EventEmitter() as unknown as ChildProcess;
+    // SAFETY: Mock EventEmitter implements ChildProcess event surface for test.
+    const fakeChild = new EventEmitter() as ChildProcess;
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const startup = awaitBackgroundDaemonStartup(fakeChild, {
       timeoutMs: 500,

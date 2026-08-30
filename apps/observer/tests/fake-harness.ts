@@ -30,6 +30,7 @@ import {
   createRefreshResult,
   planConfigMutation,
 } from "@resin/harness-contracts";
+import type { JsonObject } from "../src/normalization/redaction.js";
 
 /**
  * Deterministic fake SessionEventSource for testing transcript streaming, checkpoints, and rotations.
@@ -108,7 +109,7 @@ export class FakeSessionEventSource implements SessionEventSource {
   // --- Testing Simulation Helpers ---
 
   appendRecord(
-    payload: unknown,
+    payload: JsonValue,
     recordType: RecordType = "transcript_line",
     harnessId = "fake",
   ): RawHarnessRecord {
@@ -188,6 +189,15 @@ export class FakeSessionEventSource implements SessionEventSource {
   }
 }
 
+export interface FakeHarnessSimulatedErrors {
+  missingHarness?: boolean;
+  unsupportedVersion?: boolean;
+  inaccessibleTranscript?: boolean;
+  ambiguousSession?: boolean;
+  permissionError?: boolean;
+  refreshError?: boolean;
+}
+
 /**
  * Deterministic fake HarnessAdapter for unit, contract, and integration tests.
  */
@@ -205,14 +215,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
   private fsBridge: ConfigFsBridge;
   private refreshOutcome: RefreshOutcome = "native_list_change";
 
-  public simulatedErrors: {
-    missingHarness?: boolean;
-    unsupportedVersion?: boolean;
-    inaccessibleTranscript?: boolean;
-    ambiguousSession?: boolean;
-    permissionError?: boolean;
-    refreshError?: boolean;
-  } = {};
+  public simulatedErrors: FakeHarnessSimulatedErrors = {};
 
   constructor(options?: {
     id?: string;
@@ -355,7 +358,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     gatewayUrl: string,
   ): Promise<ConfigMutationPlan> {
     const currentContent = await this.fsBridge.readFile(workspace.configPath);
-    let parsedConfig: Record<string, unknown> = {};
+    let parsedConfig: JsonObject = {};
 
     if (currentContent) {
       try {
@@ -365,7 +368,8 @@ export class FakeHarnessAdapter implements HarnessAdapter {
       }
     }
 
-    const mcpServers = (parsedConfig.mcpServers as Record<string, unknown>) ?? {};
+    // SAFETY: Parsed config mcpServers is a record dictionary.
+    const mcpServers = (parsedConfig.mcpServers as JsonObject) ?? {};
     mcpServers.resin = {
       url: gatewayUrl,
       transport: "sse",

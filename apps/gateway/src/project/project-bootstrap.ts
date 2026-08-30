@@ -2,10 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  type V1MetadataPayloadValue,
   type V1ProjectMetadata,
+  V1ProjectMetadataSchema,
   type V1ToolLock,
+  V1ToolLockSchema,
   V1_SCHEMA_KINDS,
   V1_SCHEMA_VERSION,
+  assertSafeCommittedMetadata,
   validateV1ProjectMetadata,
   validateV1ToolLock,
 } from "@resin/contracts";
@@ -18,10 +22,11 @@ import type {
 
 export type { ProjectBootstrapOptions, ProjectBootstrapResult, ProjectMetadataRecoveryState };
 
-function getErrorCode(err: unknown): string | undefined {
-  if (err && typeof err === "object" && "code" in err) {
-    const code = err.code;
-    return typeof code === "string" ? code : undefined;
+function getErrorCode(err: { code?: unknown } | Error | unknown): string | undefined {
+  if (err && err instanceof Object && "code" in err) {
+    // SAFETY: Verified err is an object containing 'code'.
+    const code = (err as { code?: unknown }).code;
+    return Object.prototype.toString.call(code) === "[object String]" ? String(code) : undefined;
   }
   return undefined;
 }
@@ -57,7 +62,7 @@ function checkCaseCollision(parentDir: string, expectedName: string): void {
         `Security violation: case collision detected for '${expectedName}' in '${parentDir}': found '${collisions.join(", ")}'`,
       );
     }
-  } catch (err: unknown) {
+  } catch (err) {
     if (getErrorCode(err) !== "ENOENT") {
       throw err;
     }
@@ -73,7 +78,7 @@ function assertNotSymlink(targetPath: string, label: string): void {
     if (lstat.isSymbolicLink()) {
       throw new Error(`Security violation: ${label} cannot be a symbolic link at '${targetPath}'`);
     }
-  } catch (err: unknown) {
+  } catch (err) {
     if (getErrorCode(err) !== "ENOENT") {
       throw err;
     }
@@ -87,7 +92,7 @@ export function isDirectoryReadOnly(dirPath: string): boolean {
   try {
     fs.accessSync(dirPath, fs.constants.W_OK);
     return false;
-  } catch (err: unknown) {
+  } catch (err) {
     const code = getErrorCode(err);
     if (code === "EACCES" || code === "EROFS" || code === "EPERM") {
       return true;
@@ -162,7 +167,7 @@ function acquireBootstrapLock(
           // Ignore lock release failure
         }
       };
-    } catch (err: unknown) {
+    } catch (err) {
       if (getErrorCode(err) === "EEXIST") {
         let isStale = false;
         try {
@@ -173,14 +178,16 @@ function acquireBootstrapLock(
           try {
             const raw = fs.readFileSync(lockPath, "utf8");
             const parsed = JSON.parse(raw);
-            if (typeof parsed.pid === "number") {
-              lockPid = parsed.pid;
-            }
-            if (
-              typeof parsed.createdAt === "number" &&
-              Date.now() - parsed.createdAt > staleLockThresholdMs
-            ) {
-              isStale = true;
+            if (parsed && parsed instanceof Object) {
+              if (Number.isFinite(parsed.pid)) {
+                lockPid = parsed.pid;
+              }
+              if (
+                Number.isFinite(parsed.createdAt) &&
+                Date.now() - parsed.createdAt > staleLockThresholdMs
+              ) {
+                isStale = true;
+              }
             }
           } catch {
             // Unparseable lock file payload
@@ -194,7 +201,7 @@ function acquireBootstrapLock(
             try {
               // Signal 0 tests if PID is alive
               process.kill(lockPid, 0);
-            } catch (killErr: unknown) {
+            } catch (killErr) {
               if (getErrorCode(killErr) === "ESRCH") {
                 // Process no longer exists -> lock is dead
                 isStale = true;
@@ -232,7 +239,10 @@ function acquireBootstrapLock(
  * Atomically writes JSON to target file using same-directory temp file, fsync,
  * atomic rename, directory fsync where supported, and immediate cleanup on failure.
  */
-export function atomicWriteJsonSync(targetPath: string, data: unknown): void {
+export function atomicWriteJsonSync(
+  targetPath: string,
+  data: V1ProjectMetadata | V1ToolLock,
+): void {
   const dir = path.dirname(targetPath);
   const base = path.basename(targetPath);
   const randomSuffix = crypto.randomBytes(6).toString("hex");
@@ -303,18 +313,20 @@ export function readProjectMetadata(projectRootOrResinDir: string): V1ProjectMet
   let raw: string;
   try {
     raw = fs.readFileSync(projectJsonPath, "utf8");
-  } catch (err: unknown) {
+  } catch (err) {
     throw new Error(`Failed to read project.json at '${projectJsonPath}': ${String(err)}`);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (err: unknown) {
+  } catch (err) {
     throw new Error(`Corrupt project.json: Invalid JSON at '${projectJsonPath}': ${String(err)}`);
   }
-
-  return validateV1ProjectMetadata(parsed);
+  // SAFETY: Parsed JSON payload is validated for safe committed metadata before schema parsing.
+  assertSafeCommittedMetadata(parsed as V1MetadataPayloadValue, "project.json");
+  const parsedData = V1ProjectMetadataSchema.parse(parsed);
+  return validateV1ProjectMetadata(parsedData);
 }
 
 /**
@@ -336,20 +348,20 @@ export function readToolLock(projectRootOrResinDir: string): V1ToolLock {
   let raw: string;
   try {
     raw = fs.readFileSync(lockPath, "utf8");
-  } catch (err: unknown) {
+  } catch (err) {
     throw new Error(`Failed to read resin.lock at '${lockPath}': ${String(err)}`);
   }
-
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (err: unknown) {
+  } catch (err) {
     throw new Error(`Corrupt resin.lock: Invalid JSON at '${lockPath}': ${String(err)}`);
   }
-
-  return validateV1ToolLock(parsed);
+  // SAFETY: Parsed JSON payload is validated for safe committed metadata before schema parsing.
+  assertSafeCommittedMetadata(parsed as V1MetadataPayloadValue, "resin.lock");
+  const parsedLock = V1ToolLockSchema.parse(parsed);
+  return validateV1ToolLock(parsedLock);
 }
-
 /**
  * Writes project metadata atomically to .resin/project.json.
  */
@@ -488,7 +500,7 @@ export function bootstrapProject(
   } else {
     try {
       fs.mkdirSync(resinDir, { recursive: true, mode: 0o755 });
-    } catch (mkdirErr: unknown) {
+    } catch (mkdirErr) {
       const code = getErrorCode(mkdirErr);
       if (code === "EACCES" || code === "EROFS" || code === "EPERM") {
         return loadExistingReadOnlyMetadata(projectRoot, resinDir);
@@ -511,7 +523,7 @@ export function bootstrapProject(
       options.lockTimeoutMs,
       options.staleLockThresholdMs,
     );
-  } catch (lockErr: unknown) {
+  } catch (lockErr) {
     const code = getErrorCode(lockErr);
     if (code === "EACCES" || code === "EROFS" || code === "EPERM") {
       return loadExistingReadOnlyMetadata(projectRoot, resinDir);

@@ -106,25 +106,33 @@ export class CodexSessionEventSource implements SessionEventSource {
         let recordType: RecordType = "transcript_line";
 
         try {
-          const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-          parsedPayload = parsed;
-          if (typeof parsed.timestamp === "string") {
-            recordTimestamp = new Date(parsed.timestamp).toISOString();
-          } else if (typeof parsed.created_at === "string") {
-            recordTimestamp = new Date(parsed.created_at).toISOString();
-          }
+          const parsed = JSON.parse(trimmed);
+          if (parsed instanceof Object && !Array.isArray(parsed)) {
+            // SAFETY: Parsed JSON object represents a structured Codex transcript record.
+            const recordObj = parsed as {
+              timestamp?: string;
+              created_at?: string;
+              type?: string;
+              role?: string;
+            };
+            parsedPayload = parsed;
+            const ts = recordObj.timestamp ?? recordObj.created_at;
+            if (ts && String(ts) === ts) {
+              recordTimestamp = new Date(ts).toISOString();
+            }
 
-          const rawType = String(parsed.type || parsed.role || "").toLowerCase();
-          if (rawType.includes("call")) {
-            recordType = "tool_call";
-          } else if (rawType.includes("result") || rawType.includes("response")) {
-            recordType = "tool_result";
-          } else if (rawType === "user" || rawType === "user_message") {
-            recordType = "prompt";
-          } else if (rawType === "assistant" || rawType === "assistant_message") {
-            recordType = "completion";
-          } else if (rawType === "system") {
-            recordType = "system";
+            const rawType = String(recordObj.type || recordObj.role || "").toLowerCase();
+            if (rawType.includes("call")) {
+              recordType = "tool_call";
+            } else if (rawType.includes("result") || rawType.includes("response")) {
+              recordType = "tool_result";
+            } else if (rawType === "user" || rawType === "user_message") {
+              recordType = "prompt";
+            } else if (rawType === "assistant" || rawType === "assistant_message") {
+              recordType = "completion";
+            } else if (rawType === "system") {
+              recordType = "system";
+            }
           }
         } catch {
           parsedPayload = trimmed;

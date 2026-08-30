@@ -1,18 +1,17 @@
 import type { V1LockedToolEntry } from "@resin/contracts";
 import type { ProjectLockManager } from "../project/lock-manager.js";
-import type { UserControls } from "./types.js";
+import type {
+  ControlsDatabaseSource,
+  DbConnectionLike,
+  StateStoreLike,
+  ToolRepoLike,
+  UserControls,
+} from "./types.js";
 
-interface DbConnectionLike {
-  run(sql: string, params?: unknown[]): unknown;
-  get<T = unknown>(sql: string, params?: unknown[]): T | undefined;
-  all<T = unknown>(sql: string, params?: unknown[]): T[];
-}
+export type { ControlsDatabaseSource, DbConnectionLike, StateStoreLike };
 
-interface StateStoreLike {
-  getConnection?(): DbConnectionLike;
-  conn?: DbConnectionLike;
-  db?: DbConnectionLike;
-}
+export type DbSqlParam = string | number | boolean | null | undefined | Uint8Array;
+export type DbRunResult = { changes?: number; lastInsertRowid?: number | bigint } | undefined;
 
 export interface UserControlsManagerOptions {
   lockManager?: ProjectLockManager | ((workspaceId: string) => ProjectLockManager | undefined);
@@ -34,22 +33,47 @@ export interface RollbackEntryOption {
 /**
  * Extracts a usable SQLite connection interface from various DB wrappers or stores.
  */
-function extractConnection(db: unknown): DbConnectionLike | null {
-  if (!db || typeof db !== "object") {
+export function isDbConnectionLike(db: ControlsDatabaseSource): db is DbConnectionLike {
+  if (!db || !(db instanceof Object)) {
+    return false;
+  }
+  return (
+    "run" in db &&
+    db.run instanceof Function &&
+    "get" in db &&
+    db.get instanceof Function &&
+    "all" in db &&
+    db.all instanceof Function
+  );
+}
+
+function isStateStoreLike(db: ControlsDatabaseSource): db is StateStoreLike {
+  return Boolean(
+    db && db instanceof Object && ("getConnection" in db || "conn" in db || "db" in db),
+  );
+}
+
+export function extractConnection(db?: ControlsDatabaseSource): DbConnectionLike | null {
+  if (!db || !(db instanceof Object)) {
     return null;
   }
-  const store = db as StateStoreLike;
-  if (typeof store.getConnection === "function") {
-    return store.getConnection() ?? null;
+  if (isDbConnectionLike(db)) {
+    return db;
   }
-  if (store.conn && typeof store.conn.run === "function") {
-    return store.conn;
+  if (!isStateStoreLike(db)) {
+    return null;
   }
-  if (store.db && typeof store.db.run === "function") {
-    return store.db;
+  if (db.getConnection instanceof Function) {
+    const conn = db.getConnection();
+    if (conn && isDbConnectionLike(conn)) {
+      return conn;
+    }
   }
-  if ("run" in db && typeof (db as DbConnectionLike).run === "function") {
-    return db as DbConnectionLike;
+  if (db.conn && isDbConnectionLike(db.conn)) {
+    return db.conn;
+  }
+  if (db.db && isDbConnectionLike(db.db)) {
+    return db.db;
   }
   return null;
 }
@@ -68,7 +92,7 @@ export class UserControlsManager {
   private onChange?: (workspaceId: string) => void;
 
   constructor(
-    db?: unknown,
+    db?: ControlsDatabaseSource,
     options?:
       | UserControlsManagerOptions
       | ProjectLockManager
@@ -78,15 +102,15 @@ export class UserControlsManager {
     this.initDb();
 
     if (options) {
-      if (typeof options === "function") {
+      if (options instanceof Function) {
         this.lockResolver = options;
       } else if ("lockPath" in options && "projectId" in options) {
         // Single lock manager instance passed directly
-        const lm = options as ProjectLockManager;
+        const lm: ProjectLockManager = options;
         this.lockResolver = () => lm;
-      } else if (typeof options === "object") {
-        const opts = options as UserControlsManagerOptions;
-        if (typeof opts.lockManager === "function") {
+      } else if (options instanceof Object) {
+        const opts = options;
+        if (opts.lockManager instanceof Function) {
           this.lockResolver = opts.lockManager;
         } else if (opts.lockManager) {
           const lm = opts.lockManager;

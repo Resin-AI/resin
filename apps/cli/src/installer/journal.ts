@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
+import type { ReleaseProvenance } from "./release-client.js";
 
 /**
  * Standard steps executed during a Resin installation transaction.
@@ -28,12 +29,24 @@ export interface RollbackAction {
   readonly execute: (fsBridge: ConfigFsBridge) => Promise<void> | void;
 }
 
+export type JournalDetailValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | readonly JournalDetailValue[]
+  | { readonly [key: string]: JournalDetailValue | undefined }
+  | ReleaseProvenance;
+
+export type JournalDetails = Record<string, JournalDetailValue>;
+
 export interface JournalStepRecord {
   readonly name: InstallationStepName;
   status: StepStatus;
   startedAt?: string;
   completedAt?: string;
-  details?: Record<string, unknown>;
+  details?: JournalDetails;
   error?: string;
 }
 
@@ -44,7 +57,7 @@ export interface JournalData {
   status: TransactionStatus;
   readonly steps: JournalStepRecord[];
   rollbackErrors?: string[];
-  metadata?: Record<string, unknown>;
+  metadata?: JournalDetails;
 }
 
 export interface RollbackResult {
@@ -65,7 +78,7 @@ export class InstallationJournal {
   readonly steps: JournalStepRecord[];
   private readonly rollbackActions: RollbackAction[] = [];
   private readonly rollbackErrors: string[] = [];
-  metadata: Record<string, unknown> = {};
+  metadata: JournalDetails = {};
 
   constructor(initialData?: Partial<JournalData>) {
     this.journalId = initialData?.journalId ?? crypto.randomUUID();
@@ -113,7 +126,7 @@ export class InstallationJournal {
   /**
    * Marks a step as running.
    */
-  startStep(stepName: InstallationStepName, details?: Record<string, unknown>): void {
+  startStep(stepName: InstallationStepName, details?: JournalDetails): void {
     const step = this.getStep(stepName);
     step.status = "running";
     step.startedAt = new Date().toISOString();
@@ -125,7 +138,7 @@ export class InstallationJournal {
   /**
    * Marks a step as completed successfully.
    */
-  completeStep(stepName: InstallationStepName, details?: Record<string, unknown>): void {
+  completeStep(stepName: InstallationStepName, details?: JournalDetails): void {
     const step = this.getStep(stepName);
     step.status = "completed";
     step.completedAt = new Date().toISOString();
@@ -137,7 +150,7 @@ export class InstallationJournal {
   /**
    * Marks a step as skipped (e.g. during dry-run or when optional).
    */
-  skipStep(stepName: InstallationStepName, details?: Record<string, unknown>): void {
+  skipStep(stepName: InstallationStepName, details?: JournalDetails): void {
     const step = this.getStep(stepName);
     step.status = "skipped";
     step.completedAt = new Date().toISOString();
@@ -149,15 +162,11 @@ export class InstallationJournal {
   /**
    * Marks a step as failed and marks transaction as failed.
    */
-  failStep(
-    stepName: InstallationStepName,
-    error: Error | string,
-    details?: Record<string, unknown>,
-  ): void {
+  failStep(stepName: InstallationStepName, error: Error | string, details?: JournalDetails): void {
     const step = this.getStep(stepName);
     step.status = "failed";
     step.completedAt = new Date().toISOString();
-    step.error = typeof error === "string" ? error : error.message;
+    step.error = error instanceof Error ? error.message : String(error);
     if (details) {
       step.details = { ...(step.details ?? {}), ...details };
     }
@@ -263,6 +272,7 @@ export class InstallationJournal {
     if (!content) {
       throw new Error(`Installation journal not found at ${journalPath}`);
     }
+    // SAFETY: Loaded journal payload matches serialized JournalData format.
     const data = JSON.parse(content) as JournalData;
     return new InstallationJournal(data);
   }

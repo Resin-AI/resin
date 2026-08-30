@@ -6,7 +6,7 @@ import { CloudCircuitBreaker } from "../../src/proxy/circuit-breaker.js";
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
-import { MockCloudMcpService } from "./mock-service.js";
+import { type CloudInvocationContext, MockCloudMcpService } from "./mock-service.js";
 
 function makeTool(id = "cloud_weather", name = "get_weather"): ToolManifest {
   const base = {
@@ -97,28 +97,30 @@ describe("Cloud Invocation Router & Forwarding", () => {
   it("forwards tool call with workspace context, trace context, and idempotencyKey", async () => {
     const mockService = new MockCloudMcpService();
     const tool = makeTool();
-    let capturedContext: unknown = null;
+    let capturedContext: CloudInvocationContext | null = null;
 
     mockService.addTool(tool, undefined, async (params, ctx) => {
       capturedContext = ctx;
       return {
-        content: [{ type: "text", text: `Weather for ${params.city}: 72F sunny` }],
+        content: [{ type: "text", text: `Weather in ${params.city}: 72F Sunny` }],
       };
     });
 
     const router = new CloudInvocationRouter({ mockService });
-    const result = await router.forwardInvocation(
+
+    await router.forwardInvocation(
       "cloud_weather",
       { city: "San Francisco" },
       mockWorkspaceContext,
     );
-    const ctx = capturedContext as Record<string, unknown>;
-    const wsCtx = ctx.workspaceContext as Record<string, unknown>;
+    expect(capturedContext).not.toBeNull();
+    const ctx = capturedContext!;
+    const wsCtx = ctx.workspaceContext;
     expect(wsCtx.workspaceId).toBe("ws_test");
     expect(wsCtx.sessionId).toBe("sess_test");
     expect(ctx.idempotencyKey).toBeDefined();
-    expect((ctx.traceContext as Record<string, unknown>)?.traceId).toBeDefined();
-    expect(typeof ctx.deadline === "number" && ctx.deadline > Date.now()).toBe(true);
+    expect(ctx.traceContext?.traceId).toBeDefined();
+    expect(Number.isFinite(ctx.deadline) && (ctx.deadline ?? 0) > Date.now()).toBe(true);
   });
 
   it("handles cancellation via AbortSignal", async () => {
@@ -129,7 +131,6 @@ describe("Cloud Invocation Router & Forwarding", () => {
 
     const router = new CloudInvocationRouter({ mockService });
     const abortController = new AbortController();
-
     // Trigger abort immediately
     abortController.abort();
 
@@ -156,10 +157,11 @@ describe("Cloud Invocation Router & Forwarding", () => {
       expect.unreachable("Should have timed out");
     } catch (err) {
       expect(err).toBeInstanceOf(McpProtocolError);
-      expect((err as McpProtocolError).code).toBe(MCP_ERROR_CODES.REQUEST_TIMEOUT);
+      if (err instanceof McpProtocolError) {
+        expect(err.code).toBe(MCP_ERROR_CODES.REQUEST_TIMEOUT);
+      }
     }
   });
-
   it("forwards progress notifications to onProgress callback", async () => {
     const mockService = new MockCloudMcpService();
     const tool = makeTool();
@@ -199,9 +201,10 @@ describe("Cloud Invocation Router & Forwarding", () => {
       expect.unreachable("Should throw unauthorized");
     } catch (err) {
       expect(err).toBeInstanceOf(McpProtocolError);
-      expect((err as McpProtocolError).code).toBe(MCP_ERROR_CODES.UNAUTHORIZED);
+      if (err instanceof McpProtocolError) {
+        expect(err.code).toBe(MCP_ERROR_CODES.UNAUTHORIZED);
+      }
     }
-
     // 3. Rate Limited
     router.getCircuitBreaker().reset();
     mockService.simulateOnline();
@@ -211,6 +214,7 @@ describe("Cloud Invocation Router & Forwarding", () => {
       expect.unreachable("Should throw rate limited");
     } catch (err) {
       expect(err).toBeInstanceOf(McpProtocolError);
+      // SAFETY: err is verified to be an McpProtocolError instance by the assertion above.
       expect((err as McpProtocolError).code).toBe(MCP_ERROR_CODES.RATE_LIMITED);
     }
   });
@@ -247,7 +251,9 @@ describe("Cloud Invocation Router & Forwarding", () => {
       expect.unreachable("Should reject while circuit is open");
     } catch (err) {
       expect(err).toBeInstanceOf(McpProtocolError);
-      expect((err as McpProtocolError).code).toBe(MCP_ERROR_CODES.CONNECTION_CLOSED);
+      if (err instanceof McpProtocolError) {
+        expect(err.code).toBe(MCP_ERROR_CODES.CONNECTION_CLOSED);
+      }
     }
   });
 });

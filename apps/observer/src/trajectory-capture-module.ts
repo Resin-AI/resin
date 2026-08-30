@@ -8,6 +8,7 @@ import type {
   HarnessAdapter,
   HarnessRecordDecoder,
   HarnessSession,
+  RawHarnessRecord,
 } from "@resin/harness-contracts";
 import { z } from "zod";
 import {
@@ -25,6 +26,7 @@ import type {
   ModuleLifecycleState,
 } from "./lifecycle.js";
 import { NormalizationPipeline } from "./normalization/pipeline.js";
+import type { JsonObject } from "./normalization/redaction.js";
 import { ObserverCoordinator } from "./tailing/coordinator.js";
 import { SourceCursorManager } from "./tailing/cursor-manager.js";
 
@@ -63,6 +65,11 @@ const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
 
 type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
 
+export interface ReconcileRemoteTelemetryConsentResult {
+  valid: boolean;
+  changed: boolean;
+  cutoffAdvanced: boolean;
+}
 /**
  * Resolves trajectory attribution context strictly from session metadata.
  * Missing or schema-invalid metadata returns undefined and is skipped.
@@ -71,7 +78,7 @@ export function resolveSessionAttribution(
   session: HarnessSession,
 ): TrajectoryAttributionContext | undefined {
   const rawAttribution = session.metadata?.resinTrajectoryAttribution;
-  if (!rawAttribution || typeof rawAttribution !== "object") {
+  if (!rawAttribution || !z.record(z.unknown()).safeParse(rawAttribution).success) {
     return undefined;
   }
   const parsed = TrajectoryAttributionContextSchema.safeParse(rawAttribution);
@@ -291,13 +298,14 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     const attributionResolver = options.attributionResolver ?? resolveSessionAttribution;
 
     // 4. Delegating Observation Client Proxy
+    // SAFETY: Proxy wraps dynamically resolved observation client methods.
     const clientProxy =
       this.resolvedObservationClient ??
       new Proxy({} as CloudObservationClient, {
-        get: (_target, prop, receiver) => {
+        get: (_target, prop: keyof CloudObservationClient) => {
           const client = this.getEffectiveObservationClient();
-          const value = Reflect.get(client, prop, receiver);
-          if (typeof value === "function") {
+          const value = client[prop];
+          if (value instanceof Function) {
             return value.bind(client);
           }
           return value;
@@ -324,7 +332,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       });
     }
 
-    if (typeof this.captureCoordinator.setPrivacyCutoff === "function") {
+    if (
+      "setPrivacyCutoff" in this.captureCoordinator &&
+      this.captureCoordinator.setPrivacyCutoff instanceof Function
+    ) {
       this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
     }
 
@@ -352,8 +363,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       );
     } catch (error) {
       const errorCode =
-        error instanceof Error && "code" in error && typeof error.code === "string"
-          ? error.code
+        error instanceof Error && "code" in error && z.string().safeParse(error.code).success
+          ? String(error.code)
           : undefined;
       if (errorCode !== "ENOENT") {
         this.logger?.warn(
@@ -413,11 +424,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     return true;
   }
 
-  private reconcileRemoteTelemetryConsent(snapshot: RemoteTelemetryConsentSnapshot): {
-    valid: boolean;
-    changed: boolean;
-    cutoffAdvanced: boolean;
-  } {
+  private reconcileRemoteTelemetryConsent(
+    snapshot: RemoteTelemetryConsentSnapshot | null | undefined,
+  ): ReconcileRemoteTelemetryConsentResult {
     const parsed = RemoteTelemetryConsentSnapshotSchema.safeParse(snapshot);
     const previousHistoryAvailable = this.remoteConsentHistoryAvailable;
     let cutoffAdvanced = false;
@@ -575,7 +584,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         this.unsubscribeRecords = undefined;
       }
       this.privacyCutoffMs = Math.max(this.privacyCutoffMs, this.now());
-      if (typeof this.captureCoordinator.setPrivacyCutoff === "function") {
+      if (
+        "setPrivacyCutoff" in this.captureCoordinator &&
+        this.captureCoordinator.setPrivacyCutoff instanceof Function
+      ) {
         this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
       }
       this.skipBackfillOnNextStart = true;
@@ -588,7 +600,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
 
     this.privacyCutoffMs = Math.max(this.privacyCutoffMs, this.now());
-    if (typeof this.captureCoordinator.setPrivacyCutoff === "function") {
+    if (
+      "setPrivacyCutoff" in this.captureCoordinator &&
+      this.captureCoordinator.setPrivacyCutoff instanceof Function
+    ) {
       this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
     }
     this.skipBackfillOnNextStart = true;
@@ -652,7 +667,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     // Resolve observation client from cloud-runtime if not already injected
     if (!this.resolvedObservationClient && !this.getObservationClientFn) {
       const cloudModule = context.getModule<CloudRuntimeModule>("cloud-runtime");
-      if (cloudModule && typeof cloudModule.getObservationClient === "function") {
+      if (
+        cloudModule &&
+        "getObservationClient" in cloudModule &&
+        cloudModule.getObservationClient instanceof Function
+      ) {
         this.resolvedObservationClient = cloudModule.getObservationClient();
       }
     }
@@ -693,7 +712,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         this.unsubscribeRecords();
         this.unsubscribeRecords = undefined;
       }
-      if (typeof this.captureCoordinator.waitForIdle === "function") {
+      if (
+        "waitForIdle" in this.captureCoordinator &&
+        this.captureCoordinator.waitForIdle instanceof Function
+      ) {
         await this.captureCoordinator.waitForIdle();
       }
       await this.observerCoordinator.stop();
@@ -737,7 +759,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     };
   }
 
-  async getDiagnostics(): Promise<Record<string, unknown>> {
+  async getDiagnostics(): Promise<JsonObject> {
     return {
       id: this.id,
       state: this.state,

@@ -3,7 +3,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CapabilityManifest, ToolManifest } from "@resin/contracts";
+import type {
+  CanonicalJsonRecord,
+  CanonicalJsonValue,
+  CapabilityManifest,
+  ToolManifest,
+} from "@resin/contracts";
 import { DENO_WORKER_BOOTSTRAP_SOURCE } from "./bootstrap.js";
 import {
   type BrokerRequestMessage,
@@ -29,10 +34,10 @@ import type { BrokerRequestHandlerFn } from "./sdk.js";
  * Options for launching and executing a tool inside a WorkerProcess.
  */
 export interface WorkerProcessOptions {
-  manifest: ToolManifest | Record<string, unknown>;
+  manifest: ToolManifest | CanonicalJsonRecord;
   bundleEntrypoint: string;
   workspaceRoot?: string;
-  capabilities?: CapabilityManifest | Record<string, unknown>;
+  capabilities?: CapabilityManifest | CanonicalJsonRecord;
   environment?: Record<string, string>;
   timeoutMs?: number;
   memoryLimitMb?: number;
@@ -90,7 +95,7 @@ export class WorkerProcess {
    */
   async execute(
     invocationId: string,
-    input: unknown,
+    input: CanonicalJsonValue,
     context?: { sessionId?: string; workspaceId?: string; toolId?: string; version?: string },
   ): Promise<WorkerExecutionResult> {
     const startTime = Date.now();

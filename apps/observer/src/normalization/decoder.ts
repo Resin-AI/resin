@@ -43,6 +43,8 @@ import {
   type RawHarnessRecord,
   type RecordDecoderContext,
 } from "@resin/harness-contracts";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "./redaction.js";
 
 export {
   type BaseIntermediateEventFields,
@@ -62,8 +64,91 @@ export {
   type IntermediateToolDiscoveryEvent,
   type IntermediateToolResultEvent,
   type IntermediateUnknownPassthroughEvent,
+  type RawHarnessRecord,
   type RecordDecoderContext,
 };
+
+function asString<T>(val: T): string | undefined {
+  return z.string().safeParse(val).data;
+}
+
+function asNumber<T>(val: T): number | undefined {
+  return z.number().safeParse(val).data;
+}
+
+function asRecord<T>(val: T): JsonObject | undefined {
+  const parsed = z.record(z.unknown()).safeParse(val);
+  // SAFETY: z.record validates val is a non-null object record dictionary compatible with JsonObject.
+  return parsed.success ? (parsed.data as JsonObject) : undefined;
+}
+
+function asRole<T>(val: T): "user" | "assistant" | "system" | "tool" {
+  const s = asString(val);
+  if (s === "assistant" || s === "system" || s === "tool") return s;
+  return "user";
+}
+
+function asSessionAction<T>(val: T): "start" | "pause" | "resume" | "end" | "crash" {
+  const s = asString(val);
+  if (s === "start" || s === "pause" || s === "resume" || s === "crash") return s;
+  return "end";
+}
+
+function asToolSource<T>(val: T): "mcp" | "builtin" | "dynamic" | "harness" {
+  const s = asString(val);
+  if (s === "mcp" || s === "builtin" || s === "dynamic") return s;
+  return "harness";
+}
+
+function asFileOperation<T>(val: T): "create" | "update" | "delete" | "patch" {
+  const s = asString(val);
+  if (s === "create" || s === "update" || s === "delete") return s;
+  return "patch";
+}
+
+function asCompactionTrigger<T>(
+  val: T,
+): "context_limit" | "manual" | "scheduled" | "turn_threshold" {
+  const s = asString(val);
+  if (s === "context_limit" || s === "manual" || s === "scheduled" || s === "turn_threshold") {
+    return s;
+  }
+  if (s === "token_limit") return "context_limit";
+  if (s === "turn_limit") return "turn_threshold";
+  return "manual";
+}
+
+function asSubagentLifecycleType<T>(
+  val: T,
+): "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" | "end" | "crash" {
+  const s = asString(val);
+  if (
+    s === "spawn" ||
+    s === "start" ||
+    s === "pause" ||
+    s === "resume" ||
+    s === "terminate" ||
+    s === "settle" ||
+    s === "end" ||
+    s === "crash"
+  ) {
+    return s;
+  }
+  if (s === "complete") return "settle";
+  if (s === "error") return "crash";
+  if (s === "kill") return "terminate";
+  return "spawn";
+}
+
+function parseProviderUsage<T>(candidateUsage: T): ProviderReportedUsage | undefined {
+  if (candidateUsage && z.record(z.unknown()).safeParse(candidateUsage).success) {
+    const parsed = ProviderReportedUsageSchema.safeParse(candidateUsage);
+    if (parsed.success) {
+      return parsed.data;
+    }
+  }
+  return undefined;
+}
 
 const KNOWN_EVENT_TYPES: Set<string> = new Set([
   "message",
@@ -113,86 +198,46 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
     const sequence = record.sequenceNumber ?? record.cursor?.sequence ?? 0;
 
     // 1. If rawPayload is already a typed intermediate or normalized event structure
-    if (typeof rawPayload === "object" && rawPayload !== null) {
-      const p = rawPayload as Record<string, unknown>;
-      if (typeof p.type === "string" && KNOWN_EVENT_TYPES.has(p.type)) {
-        return this.normalizeTypedObject(p, sessionId, timestamp, sequence);
+    const pObj = asRecord(rawPayload);
+    if (pObj) {
+      const typeStr = asString(pObj.type);
+      if (typeStr && KNOWN_EVENT_TYPES.has(typeStr)) {
+        return this.normalizeTypedObject(pObj, sessionId, timestamp, sequence);
       }
     }
 
     // 2. Map based on recordType
     switch (record.recordType) {
+      case "prompt":
+      case "system":
       case "transcript_line": {
-        if (typeof rawPayload === "string") {
-          try {
-            const parsed = JSON.parse(rawPayload);
-            if (
-              typeof parsed === "object" &&
-              parsed !== null &&
-              typeof parsed.type === "string" &&
-              KNOWN_EVENT_TYPES.has(parsed.type)
-            ) {
-              return this.normalizeTypedObject(parsed, sessionId, timestamp, sequence);
-            }
-          } catch {
-            // Not a JSON string, treat as text message
-          }
+        const p = asRecord(rawPayload);
+        if (p) {
+          const role = record.recordType === "system" ? "system" : asRole(p.role);
+          const contentStr = asString(p.content) ?? asString(p.text);
+          // SAFETY: contentParts array is preserved as structured MessageContentPart items.
+          const contentParts = Array.isArray(p.contentParts)
+            ? (p.contentParts as MessageContentPart[])
+            : undefined;
+          const content = contentStr ?? String(p.content ?? "");
+          const model = asString(p.model);
+
           return {
             type: "message",
-            role: "user",
-            content: rawPayload,
+            role,
+            content,
+            contentParts,
+            model,
             sessionId,
             timestamp,
             causalRef: { causalSequence: sequence },
           };
         }
 
-        if (typeof rawPayload === "object" && rawPayload !== null) {
-          const payload = rawPayload as Record<string, unknown>;
-          return {
-            type: "message",
-            role: (payload.role as "user" | "assistant" | "system" | "tool") || "user",
-            content:
-              typeof payload.content === "string"
-                ? payload.content
-                : typeof payload.text === "string"
-                  ? payload.text
-                  : JSON.stringify(payload),
-            contentParts: Array.isArray(payload.contentParts)
-              ? (payload.contentParts as MessageContentPart[])
-              : undefined,
-            model: typeof payload.model === "string" ? payload.model : undefined,
-            sessionId,
-            timestamp,
-            causalRef: { causalSequence: sequence },
-          };
-        }
-
+        const content = asString(rawPayload) ?? JSON.stringify(rawPayload);
         return {
           type: "message",
-          role: "user",
-          content: String(rawPayload ?? ""),
-          sessionId,
-          timestamp,
-          causalRef: { causalSequence: sequence },
-        };
-      }
-
-      case "prompt": {
-        let content = "";
-        let role: "user" | "system" = "user";
-        if (typeof rawPayload === "string") {
-          content = rawPayload;
-        } else if (typeof rawPayload === "object" && rawPayload !== null) {
-          const p = rawPayload as Record<string, unknown>;
-          content = String(p.content ?? p.prompt ?? p.text ?? JSON.stringify(p));
-          if (p.role === "system") {
-            role = "system";
-          }
-        }
-        return {
-          type: "message",
-          role,
+          role: record.recordType === "system" ? "system" : "user",
           content,
           sessionId,
           timestamp,
@@ -201,56 +246,51 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
       }
 
       case "completion": {
-        if (typeof rawPayload === "object" && rawPayload !== null) {
-          const p = rawPayload as Record<string, unknown>;
-          let providerUsage: ProviderReportedUsage | undefined;
-          const candidateUsage = p.providerUsage ?? p.usage;
-          if (typeof candidateUsage === "object" && candidateUsage !== null) {
-            const parsed = ProviderReportedUsageSchema.safeParse(candidateUsage);
-            if (parsed.success) {
-              providerUsage = parsed.data;
-            }
-          }
+        const p = asRecord(rawPayload);
+        if (p) {
+          const candidateUsage = asRecord(p.providerUsage) ?? asRecord(p.usage);
+          const providerUsage = parseProviderUsage(candidateUsage);
 
-          const reasoning =
-            typeof p.reasoningContent === "string"
-              ? p.reasoningContent
-              : typeof p.reasoning === "string"
-                ? p.reasoning
-                : typeof p.thought === "string"
-                  ? p.thought
-                  : undefined;
-          if (reasoning) {
-            return {
+          const reasoningContent =
+            asString(p.reasoningContent) ?? asString(p.reasoning) ?? asString(p.thought);
+
+          if (reasoningContent !== undefined) {
+            const event: IntermediateModelReasoningEvent = {
               type: "model_reasoning",
-              reasoningContent: reasoning,
-              model: typeof p.model === "string" ? p.model : undefined,
-              signature: typeof p.signature === "string" ? p.signature : undefined,
-              tokenCount: typeof p.tokenCount === "number" ? p.tokenCount : undefined,
-              durationMs: typeof p.durationMs === "number" ? p.durationMs : undefined,
+              reasoningContent,
+              model: asString(p.model),
+              signature: asString(p.signature),
+              tokenCount: asNumber(p.tokenCount),
+              durationMs: asNumber(p.durationMs),
               sessionId,
               timestamp,
               causalRef: { causalSequence: sequence },
-              ...(providerUsage ? { providerUsage } : {}),
             };
+            if (providerUsage) {
+              event.providerUsage = providerUsage;
+            }
+            return event;
           }
 
-          return {
+          const event: IntermediateMessageEvent = {
             type: "message",
             role: "assistant",
             content: String(p.content ?? p.text ?? p.completion ?? JSON.stringify(p)),
-            model: typeof p.model === "string" ? p.model : undefined,
+            model: asString(p.model),
             sessionId,
             timestamp,
             causalRef: { causalSequence: sequence },
-            ...(providerUsage ? { providerUsage } : {}),
           };
+          if (providerUsage) {
+            event.providerUsage = providerUsage;
+          }
+          return event;
         }
 
         return {
           type: "message",
           role: "assistant",
-          content: String(rawPayload ?? ""),
+          content: asString(rawPayload) ?? JSON.stringify(rawPayload),
           sessionId,
           timestamp,
           causalRef: { causalSequence: sequence },
@@ -258,24 +298,25 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
       }
 
       case "tool_call": {
-        if (typeof rawPayload !== "object" || rawPayload === null) {
-          throw new DecodeError("Malformed tool_call payload: expected object", {
+        const p = asRecord(rawPayload);
+        if (!p) {
+          throw new DecodeError("Tool call payload must be an object", {
             recordId: record.recordId,
             recordType: record.recordType,
           });
         }
-        const p = rawPayload as Record<string, unknown>;
-        const rawArgs = p.parameters ?? p.arguments ?? p.params;
-        const parameters =
-          typeof rawArgs === "object" && rawArgs !== null
-            ? (rawArgs as Record<string, unknown>)
-            : {};
+
+        const rawArgs = p.arguments ?? p.input ?? p.args ?? {};
+        const argsObj = asRecord(rawArgs) ?? {};
+
         return {
           type: "tool_call",
-          toolName: String(p.toolName ?? p.tool_name ?? p.name ?? "unknown_tool"),
-          callId: String(p.callId ?? p.call_id ?? p.id ?? `call_${record.recordId}`),
-          parameters,
-          candidateRef: typeof p.candidateRef === "string" ? p.candidateRef : undefined,
+          toolName: String(p.name ?? p.toolName ?? "unknown"),
+          toolCallId: String(p.id ?? p.toolCallId ?? `call_${sequence}`),
+          callId: String(p.id ?? p.toolCallId ?? p.callId ?? `call_${sequence}`),
+          parameters: argsObj,
+          input: argsObj,
+          candidateRef: asString(p.candidateRef),
           sessionId,
           timestamp,
           causalRef: { causalSequence: sequence },
@@ -283,73 +324,39 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
       }
 
       case "tool_result": {
-        if (typeof rawPayload !== "object" || rawPayload === null) {
-          throw new DecodeError("Malformed tool_result payload: expected object", {
+        const p = asRecord(rawPayload);
+        if (!p) {
+          throw new DecodeError("Tool result payload must be an object", {
             recordId: record.recordId,
             recordType: record.recordType,
           });
         }
-        const p = rawPayload as Record<string, unknown>;
+
+        const isError = Boolean(p.isError ?? p.error);
+
         return {
           type: "tool_result",
-          toolName: String(p.toolName ?? p.tool_name ?? p.name ?? "unknown_tool"),
-          callId: String(p.callId ?? p.call_id ?? p.id ?? `call_${record.recordId}`),
-          result: p.result !== undefined ? p.result : p.output,
-          isError: Boolean(p.isError ?? p.is_error ?? p.error),
-          executionDurationMs:
-            typeof p.executionDurationMs === "number"
-              ? p.executionDurationMs
-              : typeof p.durationMs === "number"
-                ? p.durationMs
-                : 0,
-          outputSizeBytes: typeof p.outputSizeBytes === "number" ? p.outputSizeBytes : undefined,
-          isShadow: Boolean(p.isShadow ?? false),
-          sessionId,
-          timestamp,
-          causalRef: { causalSequence: sequence },
-        };
-      }
-
-      case "system": {
-        if (typeof rawPayload === "object" && rawPayload !== null) {
-          const p = rawPayload as Record<string, unknown>;
-          const action = p.lifecycleType ?? p.action;
-          if (action && ["start", "pause", "resume", "end", "crash"].includes(String(action))) {
-            return {
-              type: "session_lifecycle",
-              lifecycleType: action as "start" | "pause" | "resume" | "end" | "crash",
-              exitReason:
-                typeof p.exitReason === "string"
-                  ? p.exitReason
-                  : typeof p.endReason === "string"
-                    ? p.endReason
-                    : undefined,
-              harnessName: typeof p.harnessName === "string" ? p.harnessName : undefined,
-              workspaceId: typeof p.workspaceId === "string" ? p.workspaceId : undefined,
-              sessionId,
-              timestamp,
-              causalRef: { causalSequence: sequence },
-            };
-          }
-        }
-        return {
-          type: "message",
-          role: "system",
-          content: typeof rawPayload === "string" ? rawPayload : JSON.stringify(rawPayload),
+          toolCallId: String(p.toolCallId ?? p.id ?? `call_${sequence}`),
+          callId: String(p.toolCallId ?? p.id ?? p.callId ?? `call_${sequence}`),
+          toolName: p.toolName ? String(p.toolName) : undefined,
+          result: p.result ?? p.output ?? p.content ?? null,
+          output: p.result ?? p.output ?? p.content ?? null,
+          isError,
+          executionDurationMs: asNumber(p.executionDurationMs) ?? asNumber(p.durationMs),
+          outputSizeBytes: asNumber(p.outputSizeBytes),
           sessionId,
           timestamp,
           causalRef: { causalSequence: sequence },
         };
       }
       default: {
-        const payloadObj =
-          typeof rawPayload === "object" && rawPayload !== null
-            ? (rawPayload as Record<string, unknown>)
-            : { value: rawPayload };
+        const rawStr = asString(rawPayload);
+        const content = rawStr ?? JSON.stringify(rawPayload);
+        const payloadObj = asRecord(rawPayload) ?? { content };
 
         return {
           type: "unknown_passthrough",
-          rawEventType: String(payloadObj.rawEventType ?? record.recordType ?? "custom"),
+          rawEventType: record.recordType,
           rawPayload: payloadObj,
           sessionId,
           timestamp,
@@ -360,159 +367,157 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
   }
 
   private normalizeTypedObject(
-    p: Record<string, unknown>,
+    p: JsonObject,
     sessionId: string,
     timestamp: string,
     sequence: number,
   ): IntermediateSessionEvent {
-    let providerUsage: ProviderReportedUsage | undefined;
-    const candidateUsage = p.providerUsage ?? p.usage;
-    if (typeof candidateUsage === "object" && candidateUsage !== null) {
-      const parsed = ProviderReportedUsageSchema.safeParse(candidateUsage);
-      if (parsed.success) {
-        providerUsage = parsed.data;
-      }
-    }
+    const candidateUsage = asRecord(p.providerUsage) ?? asRecord(p.usage);
+    const providerUsage = parseProviderUsage(candidateUsage);
 
+    // SAFETY: causalRef from payload is validated as object or falls back to new CausalRef.
+    const causalRefRecord = asRecord(p.causalRef);
+    // SAFETY: causalRef payload is an object matching CausalRef shape or defaults to sequence.
+    const causalRefVal: CausalRef = causalRefRecord
+      ? (causalRefRecord as CausalRef)
+      : { causalSequence: sequence };
     const baseFields = {
       sessionId: String(p.sessionId ?? sessionId),
       timestamp: String(p.timestamp ?? timestamp),
-      causalRef: (p.causalRef as CausalRef) ?? { causalSequence: sequence },
-      metadata:
-        typeof p.metadata === "object" && p.metadata !== null
-          ? (p.metadata as Record<string, unknown>)
-          : undefined,
-      ...(providerUsage ? { providerUsage } : {}),
+      causalRef: causalRefVal,
+      metadata: asRecord(p.metadata),
     };
 
     switch (p.type) {
-      case "message":
-        return {
+      case "message": {
+        // SAFETY: Passes role from raw payload to be validated by schema.
+        const role = (p.role as "user" | "assistant" | "system" | "tool") || "user";
+        // SAFETY: contentParts array is preserved as structured MessageContentPart items.
+        const contentParts = Array.isArray(p.contentParts)
+          ? (p.contentParts as MessageContentPart[])
+          : undefined;
+        // SAFETY: Content is passed through to schema validation.
+        const content = asString(p.content) ?? "";
+        const event: IntermediateMessageEvent = {
           ...baseFields,
           type: "message",
-          role: (p.role as "user" | "assistant" | "system" | "tool") || "user",
-          content: String(p.content ?? ""),
-          contentParts: Array.isArray(p.contentParts)
-            ? (p.contentParts as MessageContentPart[])
-            : undefined,
-          model: typeof p.model === "string" ? p.model : undefined,
+          role,
+          content,
+          contentParts,
+          model: asString(p.model),
         };
+        if (providerUsage) {
+          event.providerUsage = providerUsage;
+        }
+        return event;
+      }
 
-      case "model_reasoning":
-        return {
+      case "model_reasoning": {
+        const reasoningContent =
+          asString(p.reasoningContent) ?? asString(p.reasoning) ?? asString(p.thought) ?? "";
+        const event: IntermediateModelReasoningEvent = {
           ...baseFields,
           type: "model_reasoning",
-          reasoningContent: String(p.reasoningContent ?? p.reasoning ?? p.thought ?? ""),
-          signature: typeof p.signature === "string" ? p.signature : undefined,
-          tokenCount: typeof p.tokenCount === "number" ? p.tokenCount : undefined,
-          model: typeof p.model === "string" ? p.model : undefined,
-          durationMs: typeof p.durationMs === "number" ? p.durationMs : undefined,
+          reasoningContent,
+          signature: asString(p.signature),
+          tokenCount: asNumber(p.tokenCount),
+          model: asString(p.model),
+          durationMs: asNumber(p.durationMs),
         };
+        if (providerUsage) {
+          event.providerUsage = providerUsage;
+        }
+        return event;
+      }
 
       case "tool_discovery": {
-        const rawTools = Array.isArray(p.tools)
-          ? p.tools
-          : Array.isArray(p.discoveredTools)
-            ? p.discoveredTools
-            : [];
-        const tools: DiscoveredToolEntry[] = rawTools.map((t: Record<string, unknown>) => ({
-          name: String(t.name ?? t.toolId ?? "unknown_tool"),
-          description: typeof t.description === "string" ? t.description : undefined,
-          inputSchema: (typeof t.inputSchema === "object" && t.inputSchema !== null
-            ? t.inputSchema
-            : typeof t.schema === "object" && t.schema !== null
-              ? t.schema
-              : {}) as Record<string, unknown>,
-          provider: typeof t.provider === "string" ? t.provider : undefined,
-        }));
+        const rawTools = Array.isArray(p.tools) ? p.tools : [];
+        const tools: DiscoveredToolEntry[] = rawTools.map((rawTool) => {
+          const t = asRecord(rawTool) ?? {};
+          const schemaObj = asRecord(t.inputSchema) ?? asRecord(t.schema) ?? {};
+          return {
+            name: String(t.name ?? "unknown"),
+            description: asString(t.description),
+            inputSchema: schemaObj,
+            provider: asString(t.provider),
+          };
+        });
+
         return {
           ...baseFields,
           type: "tool_discovery",
           tools,
-          provider: typeof p.provider === "string" ? p.provider : undefined,
-          source: (["mcp", "builtin", "dynamic", "harness"].includes(String(p.source))
-            ? p.source
-            : "mcp") as "mcp" | "builtin" | "dynamic" | "harness",
+          provider: asString(p.provider),
+          source: asToolSource(p.source),
         };
       }
 
       case "tool_call": {
-        const rawArgs = p.parameters ?? p.arguments ?? p.params;
-        const parameters =
-          typeof rawArgs === "object" && rawArgs !== null
-            ? (rawArgs as Record<string, unknown>)
-            : {};
+        const rawArgs = p.arguments ?? p.input ?? p.args ?? {};
+        const argsObj = asRecord(rawArgs) ?? {};
+
         return {
           ...baseFields,
           type: "tool_call",
-          toolName: String(p.toolName ?? p.tool_name ?? p.name ?? "unknown_tool"),
-          callId: String(p.callId ?? p.call_id ?? p.id ?? `call_${sequence}`),
-          parameters,
-          candidateRef: typeof p.candidateRef === "string" ? p.candidateRef : undefined,
+          toolCallId: String(p.toolCallId ?? p.id ?? `call_${sequence}`),
+          callId: String(p.callId ?? p.toolCallId ?? p.id ?? `call_${sequence}`),
+          toolName: String(p.toolName ?? p.name ?? "unknown"),
+          parameters: argsObj,
+          input: argsObj,
+          candidateRef: asString(p.candidateRef),
+          isShadow: Boolean(p.isShadow),
         };
       }
-
       case "tool_result":
         return {
           ...baseFields,
           type: "tool_result",
           toolName: String(p.toolName ?? p.tool_name ?? p.name ?? "unknown_tool"),
-          callId: String(p.callId ?? p.call_id ?? p.id ?? `call_${sequence}`),
+          callId: String(p.callId ?? p.toolCallId ?? p.id ?? `call_${sequence}`),
           result: p.result !== undefined ? p.result : p.output,
           isError: Boolean(p.isError ?? p.is_error ?? p.error),
-          executionDurationMs:
-            typeof p.executionDurationMs === "number"
-              ? p.executionDurationMs
-              : typeof p.durationMs === "number"
-                ? p.durationMs
-                : 0,
-          outputSizeBytes: typeof p.outputSizeBytes === "number" ? p.outputSizeBytes : undefined,
+          executionDurationMs: asNumber(p.executionDurationMs) ?? asNumber(p.durationMs) ?? 0,
+          outputSizeBytes: asNumber(p.outputSizeBytes),
           isShadow: Boolean(p.isShadow ?? false),
         };
-
       case "command_exec":
         return {
           ...baseFields,
           type: "command_exec",
           command: String(p.command ?? ""),
           args: Array.isArray(p.args) ? p.args.map(String) : [],
-          cwd:
-            typeof p.cwd === "string"
-              ? p.cwd
-              : typeof p.workingDirectory === "string"
-                ? p.workingDirectory
-                : undefined,
-          exitCode: typeof p.exitCode === "number" ? p.exitCode : 0,
-          stdout: typeof p.stdout === "string" ? p.stdout : undefined,
-          stderr: typeof p.stderr === "string" ? p.stderr : undefined,
-          durationMs: typeof p.durationMs === "number" ? p.durationMs : 0,
+          cwd: asString(p.cwd) ?? asString(p.workingDirectory) ?? undefined,
+          exitCode: asNumber(p.exitCode) ?? 0,
+          stdout: asString(p.stdout),
+          stderr: asString(p.stderr),
+          durationMs: asNumber(p.durationMs) ?? 0,
         };
 
-      case "file_edit":
+      case "file_edit": {
+        const diffStatsObj = asRecord(p.diffStats);
+        // SAFETY: diffStats object matches FileDiffStats structure if provided.
+        // SAFETY: diffStats object matches FileDiffStats structure if provided.
+        const diffStats = diffStatsObj ? (diffStatsObj as FileDiffStats) : undefined;
         return {
           ...baseFields,
           type: "file_edit",
           filePath: String(p.filePath ?? p.path ?? ""),
-          operation: (["create", "update", "delete", "patch"].includes(String(p.operation))
-            ? p.operation
-            : "update") as "create" | "update" | "delete" | "patch",
-          patch:
-            typeof p.patch === "string" ? p.patch : typeof p.diff === "string" ? p.diff : undefined,
-          beforeHash: typeof p.beforeHash === "string" ? p.beforeHash : undefined,
-          afterHash: typeof p.afterHash === "string" ? p.afterHash : undefined,
-          diffStats:
-            typeof p.diffStats === "object" && p.diffStats !== null
-              ? (p.diffStats as FileDiffStats)
-              : undefined,
+          operation: asFileOperation(p.operation),
+          patch: asString(p.patch) ?? asString(p.diff) ?? undefined,
+          beforeHash: asString(p.beforeHash),
+          afterHash: asString(p.afterHash),
+          diffStats,
         };
+      }
 
       case "error":
         return {
           ...baseFields,
           type: "error",
-          errorType: String(p.errorType ?? "Error"),
+          errorType: String(p.errorType ?? p.name ?? "Error"),
           message: String(p.message ?? "Unknown error"),
-          stackTrace: typeof p.stackTrace === "string" ? p.stackTrace : undefined,
+          stackTrace: asString(p.stackTrace),
+          isFatal: Boolean(p.isFatal),
           recoverable:
             p.recoverable !== undefined
               ? Boolean(p.recoverable)
@@ -522,124 +527,69 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
         };
 
       case "compaction": {
-        const triggerReason = ["context_limit", "manual", "scheduled", "turn_threshold"].includes(
-          String(p.triggerReason ?? p.reason),
-        )
-          ? (p.triggerReason ?? p.reason)
-          : "context_limit";
+        const triggerReason = asCompactionTrigger(p.triggerReason ?? p.trigger);
+
         return {
           ...baseFields,
           type: "compaction",
-          triggerReason: triggerReason as
-            | "context_limit"
-            | "manual"
-            | "scheduled"
-            | "turn_threshold",
-          tokensBefore:
-            typeof p.tokensBefore === "number"
-              ? p.tokensBefore
-              : typeof p.originalEventCount === "number"
-                ? p.originalEventCount
-                : 1000,
-          tokensAfter:
-            typeof p.tokensAfter === "number"
-              ? p.tokensAfter
-              : typeof p.compactedEventCount === "number"
-                ? p.compactedEventCount
-                : 100,
-          preservedContextSummary:
-            typeof p.preservedContextSummary === "string"
-              ? p.preservedContextSummary
-              : typeof p.summary === "string"
-                ? p.summary
-                : undefined,
+          triggerReason,
+          tokensBefore: asNumber(p.tokensBefore) ?? asNumber(p.originalEventCount),
+          tokensAfter: asNumber(p.tokensAfter) ?? asNumber(p.compactedEventCount),
+          preservedContextSummary: asString(p.preservedContextSummary) ?? asString(p.summary),
         };
       }
 
-      case "branch_fork":
+      case "branch_fork": {
         return {
           ...baseFields,
           type: "branch_fork",
-          sourceSessionId: String(p.sourceSessionId ?? p.parentSessionId ?? sessionId),
-          branchPointEventId: String(
-            p.branchPointEventId ?? p.branchSessionId ?? `evt_branch_${sequence}`,
+          sourceSessionId: String(
+            p.sourceSessionId ?? p.parentSessionId ?? p.parentId ?? sessionId,
           ),
-          forkReason:
-            typeof p.forkReason === "string"
-              ? p.forkReason
-              : typeof p.reason === "string"
-                ? p.reason
-                : undefined,
-          branchName: typeof p.branchName === "string" ? p.branchName : undefined,
+          branchPointEventId: String(
+            p.branchPointEventId ??
+              p.forkPointEventId ??
+              p.branchSessionId ??
+              `evt_branch_${sequence}`,
+          ),
+          forkReason: asString(p.forkReason) ?? asString(p.reason),
+          branchName: asString(p.branchName),
         };
+      }
 
       case "subagent_lifecycle": {
-        const lifecycleType = ["spawn", "start", "pause", "resume", "terminate", "settle"].includes(
-          String(p.lifecycleType ?? p.action),
-        )
-          ? (p.lifecycleType ?? p.action)
-          : "spawn";
+        const lifecycleType = asSubagentLifecycleType(p.lifecycleType ?? p.action ?? p.event);
+
         return {
           ...baseFields,
           type: "subagent_lifecycle",
-          subagentId: String(p.subagentId ?? `sub_${sequence}`),
-          lifecycleType: lifecycleType as
-            | "spawn"
-            | "start"
-            | "pause"
-            | "resume"
-            | "terminate"
-            | "settle",
-          parentId:
-            typeof p.parentId === "string"
-              ? p.parentId
-              : typeof p.parentAgentId === "string"
-                ? p.parentAgentId
-                : undefined,
-          role:
-            typeof p.role === "string"
-              ? p.role
-              : typeof p.agentType === "string"
-                ? p.agentType
-                : undefined,
-          reason:
-            typeof p.reason === "string"
-              ? p.reason
-              : typeof p.resultSummary === "string"
-                ? p.resultSummary
-                : undefined,
+          subagentId: String(p.subagentId ?? p.subagentSessionId ?? p.agentId ?? ""),
+          lifecycleType,
+          parentId: asString(p.parentId) ?? asString(p.parentSessionId),
+          role: asString(p.role),
+          reason: asString(p.reason),
         };
       }
 
       case "session_lifecycle": {
-        const lifecycleType = ["start", "pause", "resume", "end", "crash"].includes(
-          String(p.lifecycleType ?? p.action),
-        )
-          ? (p.lifecycleType ?? p.action)
-          : "start";
+        const lifecycleType = asSessionAction(p.lifecycleType ?? p.action ?? p.event);
+
         return {
           ...baseFields,
           type: "session_lifecycle",
-          lifecycleType: lifecycleType as "start" | "pause" | "resume" | "end" | "crash",
-          exitReason:
-            typeof p.exitReason === "string"
-              ? p.exitReason
-              : typeof p.endReason === "string"
-                ? p.endReason
-                : undefined,
-          harnessName: typeof p.harnessName === "string" ? p.harnessName : undefined,
-          workspaceId: typeof p.workspaceId === "string" ? p.workspaceId : undefined,
+          lifecycleType,
+          exitReason: asString(p.exitReason) ?? asString(p.endReason),
+          harnessName: asString(p.harnessName),
+          workspaceId: asString(p.workspaceId),
         };
       }
+
       default:
         return {
           ...baseFields,
           type: "unknown_passthrough",
-          rawEventType: String(p.rawEventType ?? p.originalRecordType ?? p.type ?? "unknown"),
-          rawPayload:
-            typeof p.rawPayload === "object" && p.rawPayload !== null
-              ? (p.rawPayload as Record<string, unknown>)
-              : { value: p.rawPayload },
+          rawEventType: String(p.rawEventType ?? p.rawRecordType ?? p.type ?? "unknown"),
+          rawPayload: asRecord(p.rawPayload) ?? { value: p.rawPayload },
         };
     }
   }
@@ -656,14 +606,16 @@ export class DecoderRegistry {
     this.defaultDecoder = defaultDecoder ?? new UniversalHarnessRecordDecoder();
   }
 
+  /**
+   * Registers a decoder for a specific harness type.
+   */
   register(decoder: HarnessRecordDecoder): void {
     this.decoders.set(decoder.harnessId, decoder);
   }
 
-  getDecoder(harnessId: string): HarnessRecordDecoder | undefined {
-    return this.decoders.get(harnessId);
-  }
-
+  /**
+   * Finds the best decoder for a given record.
+   */
   findDecoder(record: RawHarnessRecord): HarnessRecordDecoder {
     if (record.harnessId && this.decoders.has(record.harnessId)) {
       const decoder = this.decoders.get(record.harnessId)!;
@@ -681,6 +633,9 @@ export class DecoderRegistry {
     return this.defaultDecoder;
   }
 
+  /**
+   * Decodes a record using the appropriate registered or default decoder.
+   */
   async decode(
     record: RawHarnessRecord,
     context?: RecordDecoderContext,

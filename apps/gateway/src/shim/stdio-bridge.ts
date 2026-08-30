@@ -7,6 +7,7 @@ import { LocalMcpGateway } from "../gateway.js";
 import { createSystemMetaTools } from "../meta/index.js";
 import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../proxy/runtime.js";
 import { ToolRegistry } from "../registry/registry.js";
+import type { ToolRegistryDatabaseOption } from "../registry/types.js";
 import { type GatewayRouter, createRegistryGatewayRouter } from "../router.js";
 import { withResolvers } from "../utils/deferred.js";
 export interface McpStdioShimOptions {
@@ -19,9 +20,9 @@ export interface McpStdioShimOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
-  db?: unknown;
-  stateStore?: unknown;
-  toolRepo?: unknown;
+  db?: ToolRegistryDatabaseOption;
+  stateStore?: ToolRegistryDatabaseOption;
+  toolRepo?: ToolRegistryDatabaseOption;
   registry?: ToolRegistry;
   router?: GatewayRouter;
   secretManager?: SecretManager;
@@ -171,7 +172,7 @@ export class McpStdioShim {
         };
       } catch (err) {
         if (!this.standaloneFallback) {
-          const errMsg = `Failed to bridge to daemon at ${this.socketPath}: ${(err as Error).message}`;
+          const errMsg = `Failed to bridge to daemon at ${this.socketPath}: ${err instanceof Error ? err.message : String(err)}`;
           this.writeStderr(`${errMsg}\n`);
           return {
             mode: "failed",

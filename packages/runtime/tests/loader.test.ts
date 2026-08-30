@@ -279,6 +279,10 @@ function createTestQualificationBundle(
     ...replayRaw,
     recordDigest: computeIndependentReplayDigest(replayRaw),
   };
+  const metadata: Record<string, string> = {};
+  if (options?.toolId) metadata.toolId = options.toolId;
+  if (options?.toolVersion) metadata.toolVersion = options.toolVersion;
+
   const unsignedBundle: Omit<QualificationArtifactBundle, "approval"> = {
     bundleId: "bundle-001",
     schemaVersion: CURRENT_QUALIFICATION_VERSION,
@@ -290,10 +294,7 @@ function createTestQualificationBundle(
     reviewers: [verdict0, verdict1],
     replay,
     createdAt: "2026-08-20T10:08:00.000Z",
-    metadata: {
-      ...(options?.toolId ? { toolId: options.toolId } : {}),
-      ...(options?.toolVersion ? { toolVersion: options.toolVersion } : {}),
-    },
+    metadata,
   };
 
   if (customizer) {
@@ -465,7 +466,7 @@ describe("tool bundle loader", () => {
       expect(vData?.approval.decision).toBe("approved");
       expect(vData?.runs).toEqual(qualificationBundle.runs);
       expect(() => {
-        (loaded.approval as unknown as Record<string, unknown>).decision = "rejected";
+        Object.assign(loaded.approval, { decision: "rejected" });
       }).toThrow();
 
       // Verify cached load retains approval and effect profile

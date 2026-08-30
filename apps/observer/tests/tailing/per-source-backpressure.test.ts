@@ -75,6 +75,7 @@ describe("Independent Per-Source Backpressure and Queue Isolation", () => {
     // Session B must finish fast without being blocked by Session A
     await fastDonePromise;
     expect(receivedB).toHaveLength(10);
+    // SAFETY: Test rawPayload contains item string.
     expect(receivedB.map((r) => (r.rawPayload as { item: string }).item)).toEqual([
       "B-1",
       "B-2",

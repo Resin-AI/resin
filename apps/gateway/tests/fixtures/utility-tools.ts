@@ -6,6 +6,7 @@ import {
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
 import { MCP_ERROR_CODES, McpProtocolError } from "../../src/protocol/errors.js";
+import type { JsonRpcParams } from "../../src/protocol/types.js";
 import type { RegistryTool } from "../../src/registry/types.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { withResolvers } from "../../src/utils/deferred.js";
@@ -18,7 +19,7 @@ function utilityManifest(raw: {
   id: string;
   name: string;
   description: string;
-  parameters: Record<string, unknown>;
+  parameters?: JsonRpcParams;
 }): ToolManifest {
   const parameters = ToolParameterSchema.parse(raw.parameters);
   const digest = computeManifestDigest({
@@ -70,16 +71,23 @@ export function createDefaultUtilityTools(): RegistryTool[] {
     scope: "global",
     status: "active",
     description: echoManifest.description,
-    parameters: echoManifest.parameters as Record<string, unknown>,
+    // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: echoManifest.parameters as JsonRpcParams,
     manifest: echoManifest,
-    handler: async (_context, params) => ({
-      content: [
-        {
-          type: "text",
-          text: `Echo: ${typeof params.message === "string" ? params.message : JSON.stringify(params)}`,
-        },
-      ],
-    }),
+    handler: async (_context, params) => {
+      const text =
+        Object.prototype.toString.call(params.message) === "[object String]"
+          ? `Echo: ${String(params.message)}`
+          : `Echo: ${JSON.stringify(params)}`;
+      return {
+        content: [
+          {
+            type: "text",
+            text,
+          },
+        ],
+      };
+    },
   };
 
   const workspaceInfoManifest = utilityManifest({
@@ -100,7 +108,8 @@ export function createDefaultUtilityTools(): RegistryTool[] {
     scope: "global",
     status: "active",
     description: workspaceInfoManifest.description,
-    parameters: workspaceInfoManifest.parameters as Record<string, unknown>,
+    // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: workspaceInfoManifest.parameters as JsonRpcParams,
     manifest: workspaceInfoManifest,
     handler: async (context) => ({
       content: [
@@ -140,11 +149,14 @@ export function createDefaultUtilityTools(): RegistryTool[] {
     scope: "global",
     status: "active",
     description: failManifest.description,
-    parameters: failManifest.parameters as Record<string, unknown>,
+    // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: failManifest.parameters as JsonRpcParams,
     manifest: failManifest,
     handler: async (_context, params) => {
       const msg =
-        typeof params.errorMessage === "string" ? params.errorMessage : "Intentional tool failure";
+        Object.prototype.toString.call(params.errorMessage) === "[object String]"
+          ? String(params.errorMessage)
+          : "Intentional tool failure";
       if (params.isToolResultError) {
         return {
           isError: true,
@@ -176,12 +188,12 @@ export function createDefaultUtilityTools(): RegistryTool[] {
     scope: "global",
     status: "active",
     description: slowManifest.description,
-    parameters: slowManifest.parameters as Record<string, unknown>,
+    // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: slowManifest.parameters as JsonRpcParams,
     manifest: slowManifest,
     handler: async (_context, params, options) => {
-      const durationMs = typeof params.durationMs === "number" ? params.durationMs : 100;
-      const steps = typeof params.steps === "number" ? Math.max(1, params.steps) : 1;
-      const stepDuration = durationMs / steps;
+      const durationMs = Number.isFinite(params.durationMs) ? Number(params.durationMs) : 100;
+      const steps = Number.isFinite(params.steps) ? Number(params.steps) : 2;
 
       for (let i = 1; i <= steps; i++) {
         if (options?.signal?.aborted) {

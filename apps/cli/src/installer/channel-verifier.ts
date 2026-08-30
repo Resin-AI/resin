@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { CanonicalJsonRecord, CanonicalJsonValue } from "@resin/contracts";
 import type { PlatformInfo } from "./platform.js";
 
 /**
@@ -45,7 +46,7 @@ export interface ChannelMetadata {
   readonly schemaVersion: string;
   readonly metadataVersion?: number;
   readonly expiresAt?: string;
-  readonly releaseIdentity?: unknown;
+  readonly releaseIdentity?: CanonicalJsonValue;
   readonly revokedKeyIds?: string[];
   readonly minSupportedVersion?: string;
   readonly currentVersion: string;
@@ -54,6 +55,35 @@ export interface ChannelMetadata {
   readonly rollbackReferences?: RollbackReferences;
   readonly revokedVersions?: string[];
   readonly signatures?: SignatureEntry[];
+}
+
+export interface ChannelMetadataSignaturePayload {
+  schemaVersion: string;
+  currentVersion: string;
+  updatedAt: string;
+  channels: Record<string, ChannelInfo>;
+  metadataVersion?: number;
+  expiresAt?: string;
+  minSupportedVersion?: string;
+  releaseIdentity?: CanonicalJsonValue;
+  rollbackReferences?: RollbackReferences;
+  revokedVersions?: string[];
+  revokedKeyIds?: string[];
+}
+
+export interface SignedManifestSignaturePayload {
+  schemaVersion: string;
+  version: string;
+  releaseDate: string;
+  assets: Record<string, ManifestAsset>;
+  metadataVersion?: number;
+  expiresAt?: string;
+  releaseIdentity?: CanonicalJsonValue;
+  packages?: Record<string, ManifestPackage>;
+  runtimes?: {
+    [name: string]: RuntimeAssetEntry | undefined;
+  };
+  evidence?: CanonicalJsonValue;
 }
 
 export interface ManifestAsset {
@@ -77,19 +107,57 @@ export interface ManifestPackage {
   readonly filesCount?: number;
 }
 
+export type ChannelVerifierJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ChannelVerifierJsonValue[]
+  | { [key: string]: ChannelVerifierJsonValue };
+
+export type RuntimeAssetEntry =
+  | Record<string, ChannelVerifierJsonValue>
+  | {
+      readonly version: string;
+      readonly required?: boolean;
+      readonly assets: Record<
+        string,
+        | ChannelVerifierJsonValue
+        | ManifestAsset
+        | ManifestPackage
+        | {
+            readonly url: string;
+            readonly sha256: string;
+            readonly sizeBytes?: number;
+            readonly archive: string;
+            readonly executable: string;
+          }
+      >;
+    };
+
 export interface SignedManifest {
   readonly schemaVersion: string;
   readonly metadataVersion?: number;
   readonly expiresAt?: string;
-  readonly releaseIdentity?: unknown;
-  readonly evidence?: unknown;
+  readonly releaseIdentity?: CanonicalJsonValue;
+  readonly evidence?: CanonicalJsonValue;
   readonly version: string;
   readonly releaseDate: string;
   readonly packages?: Record<string, ManifestPackage>;
   readonly assets: Record<string, ManifestAsset>;
-  readonly runtimes?: Record<string, unknown>;
+  readonly runtimes?: {
+    readonly [name: string]: RuntimeAssetEntry | undefined;
+  };
   readonly signatures?: SignatureEntry[];
 }
+
+export type VerifiableSignaturePayload =
+  | CanonicalJsonValue
+  | ChannelMetadataSignaturePayload
+  | SignedManifestSignaturePayload
+  | SignedManifest
+  | ChannelMetadata
+  | ChannelVerifierJsonValue;
 
 export interface ChannelVerificationOptions {
   readonly channel?: ReleaseChannel;
@@ -138,14 +206,20 @@ export interface ManifestVerificationResult {
 /**
  * Deterministically serialize any JavaScript object into canonical JSON format.
  */
-export function canonicalJson(val: unknown): string {
-  if (val === null || typeof val !== "object") {
+export function canonicalJson(val: VerifiableSignaturePayload | undefined): string {
+  if (
+    val === null ||
+    val === undefined ||
+    Array.isArray(val) ||
+    Object.prototype.toString.call(val) !== "[object Object]"
+  ) {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
     return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
   }
-  const obj = val as Record<string, unknown>;
+  // SAFETY: Value narrowed to record object.
+  const obj = val as Record<string, CanonicalJsonValue | undefined>;
   const keys = Object.keys(obj)
     .filter((key) => obj[key] !== undefined)
     .sort();
@@ -157,7 +231,7 @@ export function canonicalJson(val: unknown): string {
  * Creates a Node.js crypto.KeyObject from an Ed25519 public key (hex or PEM).
  */
 export function createPublicKeyFromInput(key: string | crypto.KeyObject): crypto.KeyObject {
-  if (typeof key !== "string") {
+  if (key instanceof crypto.KeyObject) {
     return key;
   }
   const trimmed = key.trim();
@@ -183,7 +257,7 @@ export function createPublicKeyFromInput(key: string | crypto.KeyObject): crypto
  * Verifies an Ed25519 digital signature over a canonical JSON payload.
  */
 export function verifyEd25519Signature(
-  payload: unknown,
+  payload: VerifiableSignaturePayload,
   signatureHex: string,
   publicKey: string | crypto.KeyObject,
 ): boolean {
@@ -257,14 +331,18 @@ export function isVersionRevoked(version: string, revokedVersions?: string[]): b
  * Verifies release channel metadata against security and versioning policies.
  */
 export function verifyChannelMetadata(
-  channelData: unknown,
+  channelData: ChannelMetadata | ChannelVerifierJsonValue | undefined,
   options: ChannelVerificationOptions = {},
 ): ChannelVerificationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const requestedChannel = options.channel || "stable";
 
-  if (!channelData || typeof channelData !== "object") {
+  if (
+    !channelData ||
+    Array.isArray(channelData) ||
+    Object.prototype.toString.call(channelData) !== "[object Object]"
+  ) {
     return {
       valid: false,
       channel: requestedChannel,
@@ -273,6 +351,7 @@ export function verifyChannelMetadata(
     };
   }
 
+  // SAFETY: channelData is validated field-by-field throughout verifyChannelMetadata.
   const meta = channelData as ChannelMetadata;
 
   // Validate Schema Version
@@ -283,11 +362,7 @@ export function verifyChannelMetadata(
   // Validate Metadata Version
   if (meta.metadataVersion === undefined || meta.metadataVersion === null) {
     errors.push("Channel metadata is missing required 'metadataVersion'.");
-  } else if (
-    typeof meta.metadataVersion !== "number" ||
-    !Number.isInteger(meta.metadataVersion) ||
-    meta.metadataVersion < 1
-  ) {
+  } else if (!Number.isInteger(meta.metadataVersion) || meta.metadataVersion < 1) {
     errors.push(`Invalid channel metadataVersion '${String(meta.metadataVersion)}'.`);
   } else if (meta.metadataVersion > 1) {
     errors.push(
@@ -296,7 +371,7 @@ export function verifyChannelMetadata(
   }
 
   // Validate Expiration (expiresAt)
-  if (!meta.expiresAt || typeof meta.expiresAt !== "string") {
+  if (!meta.expiresAt || String(meta.expiresAt) !== meta.expiresAt) {
     errors.push("Channel metadata is missing required 'expiresAt'.");
   } else {
     const expiresAtMs = Date.parse(meta.expiresAt);
@@ -305,14 +380,13 @@ export function verifyChannelMetadata(
         `Channel metadata 'expiresAt' is not a valid ISO timestamp: '${meta.expiresAt}'.`,
       );
     } else {
-      const nowMs =
-        typeof options.now === "number"
-          ? options.now
-          : options.now instanceof Date
-            ? options.now.getTime()
-            : typeof options.now === "string"
-              ? Date.parse(options.now)
-              : Date.now();
+      const nowMs = Number.isFinite(options.now)
+        ? Number(options.now)
+        : options.now instanceof Date
+          ? options.now.getTime()
+          : String(options.now) === options.now
+            ? Date.parse(String(options.now))
+            : Date.now();
       if (!Number.isNaN(nowMs) && nowMs > expiresAtMs) {
         errors.push(
           `Channel metadata has expired (expiresAt: '${meta.expiresAt}', current: '${new Date(nowMs).toISOString()}').`,
@@ -322,7 +396,11 @@ export function verifyChannelMetadata(
   }
 
   // Validate Channels Map
-  if (!meta.channels || typeof meta.channels !== "object") {
+  if (
+    !meta.channels ||
+    Array.isArray(meta.channels) ||
+    Object.prototype.toString.call(meta.channels) !== "[object Object]"
+  ) {
     errors.push("Channel metadata is missing required 'channels' mapping.");
   } else {
     const channelInfo = meta.channels[requestedChannel];
@@ -387,23 +465,33 @@ export function verifyChannelMetadata(
       );
     }
     if (meta.signatures && meta.signatures.length > 0 && trustedKeys.length > 0) {
-      const payloadToVerify = {
+      const payloadToVerify: ChannelMetadataSignaturePayload = {
         schemaVersion: meta.schemaVersion,
-        ...(meta.metadataVersion !== undefined ? { metadataVersion: meta.metadataVersion } : {}),
-        ...(meta.expiresAt !== undefined ? { expiresAt: meta.expiresAt } : {}),
-        ...(meta.minSupportedVersion !== undefined
-          ? { minSupportedVersion: meta.minSupportedVersion }
-          : {}),
         currentVersion: meta.currentVersion,
         updatedAt: meta.updatedAt,
-        ...(meta.releaseIdentity !== undefined ? { releaseIdentity: meta.releaseIdentity } : {}),
         channels: meta.channels,
-        ...(meta.rollbackReferences !== undefined
-          ? { rollbackReferences: meta.rollbackReferences }
-          : {}),
-        ...(meta.revokedVersions !== undefined ? { revokedVersions: meta.revokedVersions } : {}),
-        ...(meta.revokedKeyIds !== undefined ? { revokedKeyIds: meta.revokedKeyIds } : {}),
       };
+      if (meta.metadataVersion !== undefined) {
+        payloadToVerify.metadataVersion = meta.metadataVersion;
+      }
+      if (meta.expiresAt !== undefined) {
+        payloadToVerify.expiresAt = meta.expiresAt;
+      }
+      if (meta.minSupportedVersion !== undefined) {
+        payloadToVerify.minSupportedVersion = meta.minSupportedVersion;
+      }
+      if (meta.releaseIdentity !== undefined) {
+        payloadToVerify.releaseIdentity = meta.releaseIdentity;
+      }
+      if (meta.rollbackReferences !== undefined) {
+        payloadToVerify.rollbackReferences = meta.rollbackReferences;
+      }
+      if (meta.revokedVersions !== undefined) {
+        payloadToVerify.revokedVersions = meta.revokedVersions;
+      }
+      if (meta.revokedKeyIds !== undefined) {
+        payloadToVerify.revokedKeyIds = meta.revokedKeyIds;
+      }
 
       const revokedSet = new Set<string>([
         ...REVOKED_RELEASE_KEY_IDS,
@@ -481,13 +569,17 @@ export function verifyChannelMetadata(
  * Verifies a signed release manifest.
  */
 export function verifyManifest(
-  manifestData: unknown,
+  manifestData: SignedManifest | ChannelVerifierJsonValue | undefined,
   options: ManifestVerificationOptions = {},
 ): ManifestVerificationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (!manifestData || typeof manifestData !== "object") {
+  if (
+    !manifestData ||
+    Array.isArray(manifestData) ||
+    Object.prototype.toString.call(manifestData) !== "[object Object]"
+  ) {
     return {
       valid: false,
       assets: {},
@@ -496,6 +588,7 @@ export function verifyManifest(
     };
   }
 
+  // SAFETY: manifestData is validated field-by-field throughout verifyManifest.
   const manifest = manifestData as SignedManifest;
 
   if (!manifest.schemaVersion) {
@@ -503,32 +596,27 @@ export function verifyManifest(
   }
   if (manifest.metadataVersion === undefined || manifest.metadataVersion === null) {
     errors.push("Manifest missing required 'metadataVersion'.");
-  } else if (
-    typeof manifest.metadataVersion !== "number" ||
-    !Number.isInteger(manifest.metadataVersion) ||
-    manifest.metadataVersion < 1
-  ) {
+  } else if (!Number.isInteger(manifest.metadataVersion) || manifest.metadataVersion < 1) {
     errors.push(`Invalid manifest metadataVersion '${String(manifest.metadataVersion)}'.`);
   } else if (manifest.metadataVersion > 1) {
     errors.push(
       `Unsupported manifest metadataVersion ${manifest.metadataVersion}. Expected metadataVersion 1.`,
     );
   }
-  if (!manifest.expiresAt || typeof manifest.expiresAt !== "string") {
+  if (!manifest.expiresAt || String(manifest.expiresAt) !== manifest.expiresAt) {
     errors.push("Manifest missing required 'expiresAt'.");
   } else {
     const expiresAtMs = Date.parse(manifest.expiresAt);
     if (Number.isNaN(expiresAtMs)) {
       errors.push(`Manifest 'expiresAt' is not a valid ISO timestamp: '${manifest.expiresAt}'.`);
     } else {
-      const nowMs =
-        typeof options.now === "number"
-          ? options.now
-          : options.now instanceof Date
-            ? options.now.getTime()
-            : typeof options.now === "string"
-              ? Date.parse(options.now)
-              : Date.now();
+      const nowMs = Number.isFinite(options.now)
+        ? Number(options.now)
+        : options.now instanceof Date
+          ? options.now.getTime()
+          : String(options.now) === options.now
+            ? Date.parse(String(options.now))
+            : Date.now();
       if (!Number.isNaN(nowMs) && nowMs > expiresAtMs) {
         errors.push(
           `Manifest has expired (expiresAt: '${manifest.expiresAt}', current: '${new Date(nowMs).toISOString()}').`,
@@ -552,19 +640,23 @@ export function verifyManifest(
       );
     }
   }
-  if (!manifest.assets || typeof manifest.assets !== "object") {
+  if (
+    !manifest.assets ||
+    Array.isArray(manifest.assets) ||
+    Object.prototype.toString.call(manifest.assets) !== "[object Object]"
+  ) {
     errors.push("Manifest missing required 'assets' object.");
   } else {
     for (const [key, asset] of Object.entries(manifest.assets)) {
-      if (!asset || typeof asset !== "object") {
+      if (
+        !asset ||
+        Array.isArray(asset) ||
+        Object.prototype.toString.call(asset) !== "[object Object]"
+      ) {
         errors.push(`Manifest asset '${key}' is invalid.`);
         continue;
       }
-      if (
-        typeof asset.sizeBytes !== "number" ||
-        !Number.isSafeInteger(asset.sizeBytes) ||
-        asset.sizeBytes <= 0
-      ) {
+      if (!Number.isSafeInteger(asset.sizeBytes) || Number(asset.sizeBytes) <= 0) {
         errors.push(`Manifest asset '${key}' has invalid sizeBytes.`);
       } else if (asset.sizeBytes > 2 * 1024 * 1024 * 1024) {
         errors.push(`Manifest asset '${key}' exceeds maximum allowed release size of 2 GiB.`);
@@ -600,22 +692,30 @@ export function verifyManifest(
       );
     }
     if (manifest.signatures && manifest.signatures.length > 0 && trustedKeys.length > 0) {
-      const payloadToVerify = {
+      const payloadToVerify: SignedManifestSignaturePayload = {
         schemaVersion: manifest.schemaVersion,
-        ...(manifest.metadataVersion !== undefined
-          ? { metadataVersion: manifest.metadataVersion }
-          : {}),
-        ...(manifest.expiresAt !== undefined ? { expiresAt: manifest.expiresAt } : {}),
         version: manifest.version,
         releaseDate: manifest.releaseDate,
-        ...(manifest.releaseIdentity !== undefined
-          ? { releaseIdentity: manifest.releaseIdentity }
-          : {}),
-        ...(manifest.packages !== undefined ? { packages: manifest.packages } : {}),
         assets: manifest.assets,
-        ...(manifest.runtimes !== undefined ? { runtimes: manifest.runtimes } : {}),
-        ...(manifest.evidence !== undefined ? { evidence: manifest.evidence } : {}),
       };
+      if (manifest.metadataVersion !== undefined) {
+        payloadToVerify.metadataVersion = manifest.metadataVersion;
+      }
+      if (manifest.expiresAt !== undefined) {
+        payloadToVerify.expiresAt = manifest.expiresAt;
+      }
+      if (manifest.releaseIdentity !== undefined) {
+        payloadToVerify.releaseIdentity = manifest.releaseIdentity;
+      }
+      if (manifest.packages !== undefined) {
+        payloadToVerify.packages = manifest.packages;
+      }
+      if (manifest.runtimes !== undefined) {
+        payloadToVerify.runtimes = manifest.runtimes;
+      }
+      if (manifest.evidence !== undefined) {
+        payloadToVerify.evidence = manifest.evidence;
+      }
 
       const revokedSet = new Set<string>([
         ...REVOKED_RELEASE_KEY_IDS,
@@ -690,7 +790,11 @@ export function selectPlatformAsset(
   manifest: SignedManifest,
   platform: PlatformInfo | { os: string; arch: string; isWsl?: boolean },
 ): ManifestAsset {
-  if (!manifest.assets || typeof manifest.assets !== "object") {
+  if (
+    !manifest.assets ||
+    Array.isArray(manifest.assets) ||
+    Object.prototype.toString.call(manifest.assets) !== "[object Object]"
+  ) {
     throw new Error("Release manifest has no assets available.");
   }
 

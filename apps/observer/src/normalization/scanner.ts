@@ -167,7 +167,7 @@ export class ContentScanner {
    * Scans a text string and returns all matched secrets sorted by starting offset.
    */
   scan(text: string): SecretMatch[] {
-    if (!text || typeof text !== "string") {
+    if (!text) {
       return [];
     }
 

@@ -1,7 +1,12 @@
 import { type ToolVersion, isSafetyGateBypassTool } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import { MCP_ERROR_CODES, McpProtocolError } from "../../src/protocol/errors.js";
-import type { CallToolResult, McpTool, McpToolInput } from "../../src/protocol/types.js";
+import type {
+  CallToolResult,
+  JsonRpcParams,
+  McpTool,
+  McpToolInput,
+} from "../../src/protocol/types.js";
 import {
   type CatalogSnapshotRecord,
   type ToolRegistry,
@@ -13,18 +18,17 @@ import type { GatewayRouter, ToolCallOptions, ToolHandler } from "../../src/rout
 import { withResolvers } from "../../src/utils/deferred.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
-export interface RegisteredTool {
-  tool: McpTool;
-  handler: ToolHandler;
-  workspaceId?: string;
-  isSystem?: boolean;
+export interface FakeGatewayRouterOptions {
+  safetyGateEvaluator?: SafetyGateEvaluator;
+  db?: unknown;
+  toolRepo?: ToolRepoLike;
+  autoHydrate?: boolean;
 }
 
-export interface FakeGatewayRouterOptions {
-  db?: unknown;
-  toolRepo?: unknown;
-  safetyGateEvaluator?: SafetyGateEvaluator;
-  autoHydrate?: boolean;
+interface RegisteredTool {
+  tool: McpTool;
+  handler?: ToolHandler;
+  workspaceId?: string;
 }
 
 /**
@@ -37,10 +41,11 @@ export class FakeGatewayRouter implements GatewayRouter {
   private safetyGateEvaluator?: SafetyGateEvaluator;
   private readonly toolRepo: ToolRepoLike | null = null;
   private hydrationPromise?: Promise<number>;
+
   constructor(optionsOrEvaluator?: SafetyGateEvaluator | FakeGatewayRouterOptions) {
     if (optionsOrEvaluator && "canExecuteTool" in optionsOrEvaluator) {
       this.safetyGateEvaluator = optionsOrEvaluator;
-    } else if (optionsOrEvaluator && typeof optionsOrEvaluator === "object") {
+    } else if (optionsOrEvaluator && optionsOrEvaluator instanceof Object) {
       this.safetyGateEvaluator = optionsOrEvaluator.safetyGateEvaluator;
       this.toolRepo = extractToolRepo(optionsOrEvaluator.db ?? optionsOrEvaluator.toolRepo);
       if (this.toolRepo && optionsOrEvaluator.autoHydrate !== false) {
@@ -72,7 +77,10 @@ export class FakeGatewayRouter implements GatewayRouter {
         content: [
           {
             type: "text",
-            text: `Echo: ${typeof params.message === "string" ? params.message : JSON.stringify(params)}`,
+            text:
+              Object.prototype.toString.call(params.message) === "[object String]"
+                ? `Echo: ${String(params.message)}`
+                : `Echo: ${JSON.stringify(params)}`,
           },
         ],
       }),
@@ -110,7 +118,7 @@ export class FakeGatewayRouter implements GatewayRouter {
       }),
     );
 
-    // 3. Fail tool (for testing error handling & redaction)
+    // 2. Intentional failure tool
     this.registerTool(
       {
         name: "fail_tool",
@@ -124,18 +132,38 @@ export class FakeGatewayRouter implements GatewayRouter {
         },
       },
       async (_ctx, params) => {
-        const msg =
-          typeof params.errorMessage === "string"
-            ? params.errorMessage
-            : "Intentional tool failure";
+        const msg = params.errorMessage ? String(params.errorMessage) : "Intentional tool failure";
         if (params.isToolResultError) {
           return {
-            content: [{ type: "text", text: msg }],
             isError: true,
+            content: [{ type: "text", text: msg }],
           };
         }
         throw new Error(msg);
       },
+    );
+
+    // 3. Resin Echo (standard fixture tool)
+    this.registerTool(
+      {
+        name: "resin_echo",
+        description: "Echoes back provided parameters with extra metadata",
+        inputSchema: {
+          type: "object",
+          properties: {
+            message: { type: "string" },
+          },
+          required: ["message"],
+        },
+      },
+      async (_ctx, params) => ({
+        content: [
+          {
+            type: "text",
+            text: `Resin Echo: ${params.message ? String(params.message) : ""}`,
+          },
+        ],
+      }),
     );
 
     // 4. Slow tool (for testing progress and cancellation)
@@ -152,9 +180,9 @@ export class FakeGatewayRouter implements GatewayRouter {
         },
       },
       async (_ctx, params, options) => {
-        const durationMs = typeof params.durationMs === "number" ? params.durationMs : 300;
-        const steps = typeof params.steps === "number" ? params.steps : 3;
-        const stepDelay = Math.max(10, Math.floor(durationMs / steps));
+        const durationMs = Number(params.durationMs) || 1000;
+        const steps = Number(params.steps) || 5;
+        const stepDelay = durationMs / steps;
 
         for (let i = 1; i <= steps; i++) {
           if (options?.signal?.aborted) {
@@ -167,7 +195,8 @@ export class FakeGatewayRouter implements GatewayRouter {
             resolve();
           }, stepDelay);
 
-          const onAbort = () => {
+          const abortHandler = () => {
+            clearTimeout(timeout);
             cleanup();
             reject(
               new McpProtocolError(MCP_ERROR_CODES.CANCELLED, "Operation cancelled by client"),
@@ -175,21 +204,22 @@ export class FakeGatewayRouter implements GatewayRouter {
           };
 
           const cleanup = () => {
-            clearTimeout(timeout);
-            options?.signal?.removeEventListener("abort", onAbort);
+            options?.signal?.removeEventListener("abort", abortHandler);
           };
 
-          options?.signal?.addEventListener("abort", onAbort);
+          options?.signal?.addEventListener("abort", abortHandler);
           await promise;
 
-          options?.onProgress?.(i, steps);
+          if (options?.onProgress) {
+            options.onProgress(i, steps);
+          }
         }
 
         return {
           content: [
             {
               type: "text",
-              text: `Completed ${steps} steps in ${durationMs}ms`,
+              text: `Completed slow execution in ${durationMs}ms over ${steps} steps`,
             },
           ],
         };
@@ -197,12 +227,71 @@ export class FakeGatewayRouter implements GatewayRouter {
     );
   }
 
-  registerTool(tool: McpTool, handler: ToolHandler, workspaceId?: string): void {
-    const key = workspaceId ? `${workspaceId}:${tool.name}` : tool.name;
-    this.tools.set(key, { tool, handler, workspaceId });
+  registerTool(
+    toolOrName: McpTool | string,
+    handlerOrOptions?:
+      | ToolHandler
+      | {
+          inputSchema?: McpToolInput;
+          handler?: ToolHandler;
+          description?: string;
+          workspaceId?: string;
+        },
+    explicitHandlerOrWorkspaceId?: ToolHandler | string,
+    workspaceId?: string,
+  ): void {
+    const isFn = handlerOrOptions instanceof Function;
+    let handler: ToolHandler | undefined;
+    let resolvedWorkspaceId: string | undefined;
+
+    if (isFn) {
+      handler = handlerOrOptions;
+      if (Object.prototype.toString.call(explicitHandlerOrWorkspaceId) === "[object String]") {
+        resolvedWorkspaceId = explicitHandlerOrWorkspaceId;
+      } else if (workspaceId) {
+        resolvedWorkspaceId = workspaceId;
+      }
+    } else {
+      if (explicitHandlerOrWorkspaceId instanceof Function) {
+        handler = explicitHandlerOrWorkspaceId;
+      } else if (
+        handlerOrOptions &&
+        "handler" in handlerOrOptions &&
+        handlerOrOptions.handler instanceof Function
+      ) {
+        handler = handlerOrOptions.handler;
+      }
+      resolvedWorkspaceId =
+        workspaceId ??
+        (handlerOrOptions && "workspaceId" in handlerOrOptions
+          ? handlerOrOptions.workspaceId
+          : undefined);
+    }
+
+    let tool: McpTool;
+    let name: string;
+    if (Object.prototype.toString.call(toolOrName) === "[object String]") {
+      name = String(toolOrName);
+      const opts =
+        !isFn &&
+        handlerOrOptions &&
+        Object.prototype.toString.call(handlerOrOptions) === "[object Object]"
+          ? handlerOrOptions
+          : {};
+      tool = {
+        name,
+        description: opts.description ?? `Fake Tool ${name}`,
+        inputSchema: opts.inputSchema ?? { type: "object", properties: {} },
+      };
+      resolvedWorkspaceId = resolvedWorkspaceId ?? opts.workspaceId;
+    } else {
+      tool = toolOrName;
+      name = toolOrName.name;
+    }
+    const key = resolvedWorkspaceId ? `${resolvedWorkspaceId}:${name}` : name;
+    this.tools.set(key, { tool, handler, workspaceId: resolvedWorkspaceId });
     this.triggerToolListChanged();
   }
-
   unregisterTool(name: string, workspaceId?: string): boolean {
     const key = workspaceId ? `${workspaceId}:${name}` : name;
     const deleted = this.tools.delete(key);
@@ -217,54 +306,69 @@ export class FakeGatewayRouter implements GatewayRouter {
   }
 
   async listTools(context: WorkspaceContext): Promise<McpTool[]> {
-    if (this.toolRepo && (!this.tools.size || this.hydrationPromise)) {
+    if (this.toolRepo && !this.hydrationPromise) {
       await this.loadFromStore();
+    } else if (this.hydrationPromise) {
+      await this.hydrationPromise;
     }
+
     const result: McpTool[] = [];
-    for (const entry of this.tools.values()) {
-      if (!entry.workspaceId || entry.workspaceId === context.workspaceId) {
-        result.push(entry.tool);
+    const seen = new Set<string>();
+
+    for (const [key, reg] of this.tools.entries()) {
+      if (reg.workspaceId && reg.workspaceId !== context.workspaceId) {
+        continue;
+      }
+      if (!seen.has(reg.tool.name)) {
+        seen.add(reg.tool.name);
+        result.push(reg.tool);
       }
     }
+
     return result;
   }
 
   async callTool(
     context: WorkspaceContext,
     name: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     options?: ToolCallOptions,
   ): Promise<CallToolResult> {
-    // Check workspace-specific first, then global
     const wsKey = `${context.workspaceId}:${name}`;
-    const entry = this.tools.get(wsKey) ?? this.tools.get(name);
+    const registered = this.tools.get(wsKey) ?? this.tools.get(name);
 
-    if (!entry) {
+    if (!registered) {
       throw new McpProtocolError(MCP_ERROR_CODES.TOOL_NOT_FOUND, `Tool '${name}' not found`);
     }
-    if (this.safetyGateEvaluator && !entry.isSystem && !isSafetyGateBypassTool(name)) {
-      const gateCheck = this.safetyGateEvaluator.canExecuteTool(
-        name,
-        name,
-        Boolean(entry.isSystem),
+
+    if (
+      this.safetyGateEvaluator &&
+      !isSafetyGateBypassTool(name) &&
+      !this.safetyGateEvaluator.canExecuteTool(name, params)
+    ) {
+      throw new McpProtocolError(
+        MCP_ERROR_CODES.UNAUTHORIZED,
+        `Safety gate blocked execution of tool '${name}'`,
       );
-      if (!gateCheck.allowed && gateCheck.refusal) {
-        return {
-          isError: true,
-          content: gateCheck.refusal.content,
-          _meta: { refusal: gateCheck.refusal },
-        };
-      }
     }
 
-    const delay = this.delays.get(name);
-    if (delay && delay > 0) {
-      const { promise, resolve } = withResolvers<void>();
-      setTimeout(resolve, delay);
-      await promise;
+    const delayMs = this.delays.get(name);
+    if (delayMs && delayMs > 0) {
+      await new Promise((res) => setTimeout(res, delayMs));
     }
 
-    return entry.handler(context, params, options);
+    if (registered.handler) {
+      return registered.handler(context, params, options);
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Executed ${name} with params: ${JSON.stringify(params)}`,
+        },
+      ],
+    };
   }
 
   onToolListChanged(listener: () => void): () => void {
@@ -274,17 +378,14 @@ export class FakeGatewayRouter implements GatewayRouter {
     };
   }
 
-  triggerToolListChanged(): void {
+  private triggerToolListChanged(): void {
     for (const listener of this.listeners) {
       try {
         listener();
       } catch {
-        // Ignore listener errors
+        // Ignore listener error
       }
     }
-  }
-  getToolRepo(): ToolRepoLike | null {
-    return this.toolRepo;
   }
 
   async loadFromStore(): Promise<number> {
@@ -298,12 +399,12 @@ export class FakeGatewayRouter implements GatewayRouter {
     this.hydrationPromise = (async () => {
       let count = 0;
       try {
-        if (typeof repo.listManifests === "function") {
+        if ("listManifests" in repo && repo.listManifests instanceof Function) {
           const manifests = await repo.listManifests();
           for (const manifest of manifests) {
             const toolId = manifest.id;
             let versionObj: ToolVersion | null = null;
-            if (typeof repo.getToolVersion === "function") {
+            if ("getToolVersion" in repo && repo.getToolVersion instanceof Function) {
               try {
                 versionObj = await repo.getToolVersion(toolId, manifest.version);
               } catch {
@@ -313,15 +414,16 @@ export class FakeGatewayRouter implements GatewayRouter {
             if (versionObj) {
               if (
                 versionObj.status === "deprecated" ||
-                (versionObj.status as string) === "revoked" ||
-                (versionObj.status as string) === "quarantined"
+                versionObj.status === "revoked" ||
+                versionObj.status === "disabled"
               ) {
                 continue;
               }
               const handler = createEvolvedToolHandler(versionObj);
+              // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
               const inputSchema = toMcpInputSchema(
-                manifest.parameters && typeof manifest.parameters === "object"
-                  ? (manifest.parameters as Record<string, unknown>)
+                manifest.parameters && manifest.parameters instanceof Object
+                  ? (manifest.parameters as JsonRpcParams)
                   : undefined,
               );
               this.registerTool(
@@ -335,9 +437,10 @@ export class FakeGatewayRouter implements GatewayRouter {
               count++;
             } else {
               const handler = createEvolvedToolHandler({ manifest });
+              // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
               const inputSchema = toMcpInputSchema(
-                manifest.parameters && typeof manifest.parameters === "object"
-                  ? (manifest.parameters as Record<string, unknown>)
+                manifest.parameters && manifest.parameters instanceof Object
+                  ? (manifest.parameters as JsonRpcParams)
                   : undefined,
               );
               this.registerTool(
@@ -359,6 +462,7 @@ export class FakeGatewayRouter implements GatewayRouter {
       }
       return count;
     })();
+
     return this.hydrationPromise;
   }
 
@@ -368,28 +472,44 @@ export class FakeGatewayRouter implements GatewayRouter {
     return count;
   }
 }
+function isParamsObject(value: JsonRpcParamValue | undefined): value is JsonRpcParams {
+  return Object.prototype.toString.call(value) === "[object Object]";
+}
 
-function toMcpInputSchema(rawSchema?: Record<string, unknown>): McpToolInput {
-  if (!rawSchema || typeof rawSchema !== "object") {
+function toMcpInputSchema(rawSchema?: JsonRpcParams): McpToolInput {
+  if (!rawSchema || Object.prototype.toString.call(rawSchema) !== "[object Object]") {
     return { type: "object", properties: {} };
   }
-  const properties =
-    rawSchema.properties && typeof rawSchema.properties === "object"
-      ? (rawSchema.properties as Record<string, unknown>)
-      : undefined;
-  const required = Array.isArray(rawSchema.required) ? (rawSchema.required as string[]) : undefined;
+  const properties = isParamsObject(rawSchema.properties) ? rawSchema.properties : undefined;
+  const required = Array.isArray(rawSchema.required)
+    ? rawSchema.required.filter(
+        (item): item is string => Object.prototype.toString.call(item) === "[object String]",
+      )
+    : undefined;
   const additionalProperties =
-    typeof rawSchema.additionalProperties === "boolean" ||
-    (rawSchema.additionalProperties && typeof rawSchema.additionalProperties === "object")
-      ? (rawSchema.additionalProperties as boolean | Record<string, unknown>)
+    rawSchema.additionalProperties === true || rawSchema.additionalProperties === false
+      ? rawSchema.additionalProperties
+      : isParamsObject(rawSchema.additionalProperties)
+        ? rawSchema.additionalProperties
+        : undefined;
+  const description =
+    rawSchema.description &&
+    Object.prototype.toString.call(rawSchema.description) === "[object String]"
+      ? String(rawSchema.description)
       : undefined;
-  const description = typeof rawSchema.description === "string" ? rawSchema.description : undefined;
 
-  return {
+  const result: McpToolInput = {
     type: "object",
-    properties,
-    required,
-    additionalProperties,
-    description,
+    properties: properties ?? {},
   };
+  if (required !== undefined) {
+    result.required = required;
+  }
+  if (additionalProperties !== undefined) {
+    result.additionalProperties = additionalProperties;
+  }
+  if (description !== undefined) {
+    result.description = description;
+  }
+  return result;
 }

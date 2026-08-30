@@ -36,51 +36,64 @@ export function canonicalJsonStringify(value) {
   const seen = new WeakSet();
 
   function serialize(val) {
-    if (val === null || typeof val === "boolean" || typeof val === "string") {
+    if (
+      val === null ||
+      val === true ||
+      val === false ||
+      Object.prototype.toString.call(val) === "[object Boolean]" ||
+      Object.prototype.toString.call(val) === "[object String]"
+    ) {
       return JSON.stringify(val);
     }
 
-    if (typeof val === "number") {
-      if (!Number.isFinite(val)) {
-        throw new TypeError(`Cannot canonically serialize non-finite number: ${val}`);
-      }
+    if (Number.isFinite(val) && Object.prototype.toString.call(val) === "[object Number]") {
       return JSON.stringify(val);
     }
+    if (Object.prototype.toString.call(val) === "[object Number]") {
+      throw new TypeError(`Cannot canonically serialize non-finite number: ${val}`);
+    }
 
-    if (typeof val === "bigint") {
+    if (Object.prototype.toString.call(val) === "[object BigInt]") {
       return JSON.stringify(Number(val));
     }
 
-    if (typeof val === "undefined" || typeof val === "symbol" || typeof val === "function") {
+    if (
+      val === undefined ||
+      Object.prototype.toString.call(val) === "[object Symbol]" ||
+      val instanceof Function ||
+      Object.prototype.toString.call(val) === "[object Function]"
+    ) {
       return undefined;
     }
 
-    if (val instanceof Date) {
-      return JSON.stringify(val.toISOString());
+    if (Array.isArray(val)) {
+      const items = val.map((elem) => {
+        const res = serialize(elem);
+        return res === undefined ? "null" : res;
+      });
+      return `[${items.join(",")}]`;
     }
 
-    if (typeof val === "object") {
+    if (val && Object.prototype.toString.call(val) === "[object Object]") {
       if (seen.has(val)) {
-        throw new TypeError("Cannot canonically serialize circular object reference");
+        throw new TypeError("Cannot canonically serialize cyclic structures");
       }
       seen.add(val);
 
       try {
-        if (Array.isArray(val)) {
-          const elements = val.map((elem) => {
-            const res = serialize(elem);
-            return res === undefined ? "null" : res;
-          });
-          return `[${elements.join(",")}]`;
+        if (
+          val.toJSON instanceof Function ||
+          Object.prototype.toString.call(val.toJSON) === "[object Function]"
+        ) {
+          return serialize(val.toJSON());
         }
 
-        const sortedKeys = Object.keys(val).sort();
+        const keys = Object.keys(val).sort();
         const entries = [];
-        for (const key of sortedKeys) {
-          const v = val[key];
-          const serializedV = serialize(v);
-          if (serializedV !== undefined) {
-            entries.push(`${JSON.stringify(key)}:${serializedV}`);
+        for (const key of keys) {
+          const serialized = serialize(val[key]);
+          if (serialized !== undefined) {
+            entries.push(`${JSON.stringify(key)}:${serialized}`);
           }
         }
         return `{${entries.join(",")}}`;
@@ -100,7 +113,8 @@ export function canonicalJsonStringify(value) {
  * Computes SHA-256 hex digest for a string or buffer.
  */
 export function computeSha256(data) {
-  const buffer = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  const buffer =
+    Object.prototype.toString.call(data) === "[object String]" ? Buffer.from(data, "utf8") : data;
   return createHash("sha256").update(buffer).digest("hex");
 }
 
@@ -201,14 +215,14 @@ const FORBIDDEN_RAW_INPUT_KEYS = new Set([
  * or credentials exist in the input evidence object before de-identification.
  */
 export function assertNoForbiddenRawContent(obj, pathContext = "evidence") {
-  if (!obj || typeof obj !== "object") return;
-
+  if (!obj) return;
   if (Array.isArray(obj)) {
     for (let i = 0; i < obj.length; i++) {
       assertNoForbiddenRawContent(obj[i], `${pathContext}[${i}]`);
     }
     return;
   }
+  if (Object.prototype.toString.call(obj) !== "[object Object]") return;
 
   for (const [key, value] of Object.entries(obj)) {
     const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -217,7 +231,10 @@ export function assertNoForbiddenRawContent(obj, pathContext = "evidence") {
         `Forbidden private content key '${key}' found at '${pathContext}.${key}' (prompts, transcripts, source code, session content, and credentials violate evidence boundaries)`,
       );
     }
-    if (value && typeof value === "object") {
+    if (
+      value &&
+      (Array.isArray(value) || Object.prototype.toString.call(value) === "[object Object]")
+    ) {
       assertNoForbiddenRawContent(value, `${pathContext}.${key}`);
     }
   }
@@ -237,7 +254,7 @@ const EXACT_SEMVER_REGEX =
  * Enforces correctness gates, accounting consistency, and row integrity.
  */
 export function validateSavingsEvidence(evidence) {
-  if (!evidence || typeof evidence !== "object") {
+  if (!evidence || Object.prototype.toString.call(evidence) !== "[object Object]") {
     throw new SavingsProofValidationError("Savings evidence must be a non-null object");
   }
 
@@ -257,17 +274,20 @@ export function validateSavingsEvidence(evidence) {
     );
   }
 
-  if (!evidence.evidenceId || typeof evidence.evidenceId !== "string") {
+  if (
+    !evidence.evidenceId ||
+    Object.prototype.toString.call(evidence.evidenceId) !== "[object String]"
+  ) {
     throw new SavingsProofValidationError("Missing or invalid 'evidenceId'");
   }
 
-  if (!evidence.toolId || typeof evidence.toolId !== "string") {
+  if (!evidence.toolId || Object.prototype.toString.call(evidence.toolId) !== "[object String]") {
     throw new SavingsProofValidationError("Missing or invalid 'toolId'");
   }
 
   if (
     !evidence.toolVersion ||
-    typeof evidence.toolVersion !== "string" ||
+    Object.prototype.toString.call(evidence.toolVersion) !== "[object String]" ||
     !EXACT_SEMVER_REGEX.test(evidence.toolVersion)
   ) {
     throw new SavingsProofValidationError(
@@ -286,13 +306,13 @@ export function validateSavingsEvidence(evidence) {
     throw new SavingsProofValidationError("'calibrationRows' must be an array");
   }
 
-  if (!evidence.summary || typeof evidence.summary !== "object") {
+  if (!evidence.summary || Object.prototype.toString.call(evidence.summary) !== "[object Object]") {
     throw new SavingsProofValidationError("Missing or invalid 'summary' object");
   }
 
   if (
     !evidence.evidenceDigest ||
-    typeof evidence.evidenceDigest !== "string" ||
+    Object.prototype.toString.call(evidence.evidenceDigest) !== "[object String]" ||
     !SHA256_HEX_REGEX.test(evidence.evidenceDigest.replace(/^sha256:/, ""))
   ) {
     throw new SavingsProofValidationError(`Invalid 'evidenceDigest': '${evidence.evidenceDigest}'`);
@@ -351,35 +371,41 @@ export function validateSavingsEvidence(evidence) {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (!row || typeof row !== "object") {
+    if (!row || Object.prototype.toString.call(row) !== "[object Object]") {
       throw new SavingsProofValidationError(
         `Calibration row at index ${i} must be a non-null object`,
       );
     }
 
-    if (!row.rowId || typeof row.rowId !== "string") {
+    if (!row.rowId || Object.prototype.toString.call(row.rowId) !== "[object String]") {
       throw new SavingsProofValidationError(`Row at index ${i} is missing 'rowId'`);
     }
 
-    if (!row.workloadId || typeof row.workloadId !== "string") {
+    if (!row.workloadId || Object.prototype.toString.call(row.workloadId) !== "[object String]") {
       throw new SavingsProofValidationError(`Row '${row.rowId}' is missing 'workloadId'`);
     }
 
-    if (!row.benchmarkId || typeof row.benchmarkId !== "string") {
+    if (!row.benchmarkId || Object.prototype.toString.call(row.benchmarkId) !== "[object String]") {
       throw new SavingsProofValidationError(`Row '${row.rowId}' is missing 'benchmarkId'`);
     }
 
-    if (!row.baselineModel || typeof row.baselineModel !== "string") {
+    if (
+      !row.baselineModel ||
+      Object.prototype.toString.call(row.baselineModel) !== "[object String]"
+    ) {
       throw new SavingsProofValidationError(`Row '${row.rowId}' is missing 'baselineModel'`);
     }
 
-    if (!row.candidateModel || typeof row.candidateModel !== "string") {
+    if (
+      !row.candidateModel ||
+      Object.prototype.toString.call(row.candidateModel) !== "[object String]"
+    ) {
       throw new SavingsProofValidationError(`Row '${row.rowId}' is missing 'candidateModel'`);
     }
 
     if (
       !row.runtimeVersion ||
-      typeof row.runtimeVersion !== "string" ||
+      Object.prototype.toString.call(row.runtimeVersion) !== "[object String]" ||
       !EXACT_SEMVER_REGEX.test(row.runtimeVersion)
     ) {
       throw new SavingsProofValidationError(
@@ -389,7 +415,7 @@ export function validateSavingsEvidence(evidence) {
 
     if (
       !row.candidateVersion ||
-      typeof row.candidateVersion !== "string" ||
+      Object.prototype.toString.call(row.candidateVersion) !== "[object String]" ||
       !EXACT_SEMVER_REGEX.test(row.candidateVersion)
     ) {
       throw new SavingsProofValidationError(
@@ -431,8 +457,7 @@ export function validateSavingsEvidence(evidence) {
         `Row '${row.rowId}' has invalid status '${row.status}'`,
       );
     }
-
-    if (typeof row.isEquivalent !== "boolean") {
+    if (row.isEquivalent !== true && row.isEquivalent !== false) {
       throw new SavingsProofValidationError(`Row '${row.rowId}' is missing boolean 'isEquivalent'`);
     }
 
@@ -443,7 +468,7 @@ export function validateSavingsEvidence(evidence) {
       candidateTotalTokens === null || candidateTotalTokens === undefined;
     if (
       (!baselineTokensMissing &&
-        (typeof baselineTotalTokens !== "number" || baselineTotalTokens < 0)) ||
+        (!Number.isFinite(baselineTotalTokens) || baselineTotalTokens < 0)) ||
       (baselineTokensMissing && row.status !== "unavailable")
     ) {
       throw new SavingsProofValidationError(
@@ -452,7 +477,7 @@ export function validateSavingsEvidence(evidence) {
     }
     if (
       (!candidateTokensMissing &&
-        (typeof candidateTotalTokens !== "number" || candidateTotalTokens < 0)) ||
+        (!Number.isFinite(candidateTotalTokens) || candidateTotalTokens < 0)) ||
       (candidateTokensMissing && row.status !== "unavailable")
     ) {
       throw new SavingsProofValidationError(
@@ -544,10 +569,28 @@ export function validateSavingsEvidence(evidence) {
 // ============================================================================
 
 /**
- * Removes tenant identifiers from savings evidence and calibration rows.
- * Validates that no prompt texts or sensitive secrets are leaked.
+ * Strips private identifiers and outputs clean V1SavingsEvidence ready for public proof packaging.
  */
 export function deidentifySavingsEvidence(evidence) {
+  const summary = {
+    status: evidence.summary.status,
+    totalSamples: evidence.summary.totalSamples,
+    equivalentSamples: evidence.summary.equivalentSamples,
+    tokenSavingsNet: evidence.summary.tokenSavingsNet,
+    tokenSavingsPercentage: evidence.summary.tokenSavingsPercentage,
+    catalogExposureTokenSum: evidence.summary.catalogExposureTokenSum,
+  };
+  if (evidence.summary.costSavingsMicroUsdNet !== undefined) {
+    summary.costSavingsMicroUsdNet = evidence.summary.costSavingsMicroUsdNet;
+  }
+  if (evidence.summary.confidenceInterval) {
+    summary.confidenceInterval = {
+      low: evidence.summary.confidenceInterval.low,
+      high: evidence.summary.confidenceInterval.high,
+      confidenceLevel: evidence.summary.confidenceInterval.confidenceLevel,
+    };
+  }
+
   const deidentified = {
     schemaKind: "resin.v1.savings_evidence",
     schemaVersion: "1.0.0",
@@ -557,27 +600,36 @@ export function deidentifySavingsEvidence(evidence) {
     status: evidence.status,
     createdAt: evidence.createdAt,
     evidenceDigest: evidence.evidenceDigest,
-    summary: {
-      status: evidence.summary.status,
-      totalSamples: evidence.summary.totalSamples,
-      equivalentSamples: evidence.summary.equivalentSamples,
-      tokenSavingsNet: evidence.summary.tokenSavingsNet,
-      tokenSavingsPercentage: evidence.summary.tokenSavingsPercentage,
-      catalogExposureTokenSum: evidence.summary.catalogExposureTokenSum,
-      ...(evidence.summary.costSavingsMicroUsdNet !== undefined
-        ? { costSavingsMicroUsdNet: evidence.summary.costSavingsMicroUsdNet }
-        : {}),
-      ...(evidence.summary.confidenceInterval
-        ? {
-            confidenceInterval: {
-              low: evidence.summary.confidenceInterval.low,
-              high: evidence.summary.confidenceInterval.high,
-              confidenceLevel: evidence.summary.confidenceInterval.confidenceLevel,
-            },
-          }
-        : {}),
-    },
-    calibrationRows: (evidence.calibrationRows || []).map((row) => {
+    summary,
+    calibrationRows: evidence.calibrationRows.map((row) => {
+      const baselineUsage = {};
+      if (row.baselineUsage.inputTokens !== undefined)
+        baselineUsage.inputTokens = row.baselineUsage.inputTokens;
+      if (row.baselineUsage.outputTokens !== undefined)
+        baselineUsage.outputTokens = row.baselineUsage.outputTokens;
+      if (row.baselineUsage.reasoningTokens !== undefined)
+        baselineUsage.reasoningTokens = row.baselineUsage.reasoningTokens;
+      if (row.baselineUsage.cachedInputTokens !== undefined)
+        baselineUsage.cachedInputTokens = row.baselineUsage.cachedInputTokens;
+      if (row.baselineUsage.costMicroUsd !== undefined)
+        baselineUsage.costMicroUsd = row.baselineUsage.costMicroUsd;
+      if (row.baselineUsage.durationMs !== undefined)
+        baselineUsage.durationMs = row.baselineUsage.durationMs;
+
+      const candidateUsage = {};
+      if (row.candidateUsage.inputTokens !== undefined)
+        candidateUsage.inputTokens = row.candidateUsage.inputTokens;
+      if (row.candidateUsage.outputTokens !== undefined)
+        candidateUsage.outputTokens = row.candidateUsage.outputTokens;
+      if (row.candidateUsage.reasoningTokens !== undefined)
+        candidateUsage.reasoningTokens = row.candidateUsage.reasoningTokens;
+      if (row.candidateUsage.cachedInputTokens !== undefined)
+        candidateUsage.cachedInputTokens = row.candidateUsage.cachedInputTokens;
+      if (row.candidateUsage.costMicroUsd !== undefined)
+        candidateUsage.costMicroUsd = row.candidateUsage.costMicroUsd;
+      if (row.candidateUsage.durationMs !== undefined)
+        candidateUsage.durationMs = row.candidateUsage.durationMs;
+
       const cleanRow = {
         rowId: row.rowId,
         workloadId: row.workloadId,
@@ -586,49 +638,8 @@ export function deidentifySavingsEvidence(evidence) {
         candidateModel: row.candidateModel,
         runtimeVersion: row.runtimeVersion,
         candidateVersion: row.candidateVersion,
-        toolId: row.toolId || evidence.toolId,
-        baselineUsage: {
-          totalTokens: row.baselineUsage.totalTokens,
-          ...(row.baselineUsage.inputTokens !== undefined
-            ? { inputTokens: row.baselineUsage.inputTokens }
-            : {}),
-          ...(row.baselineUsage.outputTokens !== undefined
-            ? { outputTokens: row.baselineUsage.outputTokens }
-            : {}),
-          ...(row.baselineUsage.reasoningTokens !== undefined
-            ? { reasoningTokens: row.baselineUsage.reasoningTokens }
-            : {}),
-          ...(row.baselineUsage.cachedInputTokens !== undefined
-            ? { cachedInputTokens: row.baselineUsage.cachedInputTokens }
-            : {}),
-          ...(row.baselineUsage.costMicroUsd !== undefined
-            ? { costMicroUsd: row.baselineUsage.costMicroUsd }
-            : {}),
-          ...(row.baselineUsage.durationMs !== undefined
-            ? { durationMs: row.baselineUsage.durationMs }
-            : {}),
-        },
-        candidateUsage: {
-          totalTokens: row.candidateUsage.totalTokens,
-          ...(row.candidateUsage.inputTokens !== undefined
-            ? { inputTokens: row.candidateUsage.inputTokens }
-            : {}),
-          ...(row.candidateUsage.outputTokens !== undefined
-            ? { outputTokens: row.candidateUsage.outputTokens }
-            : {}),
-          ...(row.candidateUsage.reasoningTokens !== undefined
-            ? { reasoningTokens: row.candidateUsage.reasoningTokens }
-            : {}),
-          ...(row.candidateUsage.cachedInputTokens !== undefined
-            ? { cachedInputTokens: row.candidateUsage.cachedInputTokens }
-            : {}),
-          ...(row.candidateUsage.costMicroUsd !== undefined
-            ? { costMicroUsd: row.candidateUsage.costMicroUsd }
-            : {}),
-          ...(row.candidateUsage.durationMs !== undefined
-            ? { durationMs: row.candidateUsage.durationMs }
-            : {}),
-        },
+        baselineUsage,
+        candidateUsage,
         catalogExposureTokens: row.catalogExposureTokens,
         isEquivalent: row.isEquivalent,
         status: row.status,
@@ -730,26 +741,27 @@ export function generateSavingsProof(rawEvidence, options = {}) {
     runtimeVersion,
     candidateVersion: validated.toolVersion,
     status: validated.status,
-    summary: {
-      status: validated.summary.status,
-      totalSamples: validated.summary.totalSamples,
-      equivalentSamples: validated.summary.equivalentSamples,
-      tokenSavingsNet: validated.summary.tokenSavingsNet,
-      tokenSavingsPercentage: validated.summary.tokenSavingsPercentage,
-      catalogExposureTokenSum: validated.summary.catalogExposureTokenSum,
-      ...(validated.summary.costSavingsMicroUsdNet !== undefined
-        ? { costSavingsMicroUsdNet: validated.summary.costSavingsMicroUsdNet }
-        : {}),
-      ...(validated.summary.confidenceInterval
-        ? {
-            confidenceInterval: {
-              low: validated.summary.confidenceInterval.low,
-              high: validated.summary.confidenceInterval.high,
-              confidenceLevel: validated.summary.confidenceInterval.confidenceLevel,
-            },
-          }
-        : {}),
-    },
+    summary: (() => {
+      const s = {
+        status: validated.summary.status,
+        totalSamples: validated.summary.totalSamples,
+        equivalentSamples: validated.summary.equivalentSamples,
+        tokenSavingsNet: validated.summary.tokenSavingsNet,
+        tokenSavingsPercentage: validated.summary.tokenSavingsPercentage,
+        catalogExposureTokenSum: validated.summary.catalogExposureTokenSum,
+      };
+      if (validated.summary.costSavingsMicroUsdNet !== undefined) {
+        s.costSavingsMicroUsdNet = validated.summary.costSavingsMicroUsdNet;
+      }
+      if (validated.summary.confidenceInterval) {
+        s.confidenceInterval = {
+          low: validated.summary.confidenceInterval.low,
+          high: validated.summary.confidenceInterval.high,
+          confidenceLevel: validated.summary.confidenceInterval.confidenceLevel,
+        };
+      }
+      return s;
+    })(),
     calibrationRows: sortedRows,
     generatedAt: deterministicTimestamp,
   };
@@ -804,7 +816,7 @@ export function formatSavingsProofMarkdown(proof, proofDigest) {
   lines.push(`| Status | \`${proof.summary.status}\` |`);
   lines.push(`| Total Qualification Samples | ${proof.summary.totalSamples} |`);
   lines.push(`| Equivalent Samples | ${proof.summary.equivalentSamples} |`);
-  if (typeof proof.summary.tokenSavingsNet === "number") {
+  if (Number.isFinite(proof.summary.tokenSavingsNet)) {
     lines.push(
       `| Net Token Savings | ${proof.summary.tokenSavingsNet > 0 ? "+" : ""}${proof.summary.tokenSavingsNet.toLocaleString()} tokens |`,
     );

@@ -408,8 +408,35 @@ export function printLoginHelp(): void {
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
 }
+export interface LoginVerificationPayload {
+  type: "verification";
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  expiresIn: number;
+}
 
-function writeJson(payload: unknown): void {
+export interface LoginErrorPayload {
+  type: "error";
+  success: false;
+  error: string;
+}
+
+export type LoginJsonPayload =
+  | LoginSuccessResult
+  | LoginVerificationPayload
+  | LoginErrorPayload
+  | Record<
+      string,
+      | string
+      | number
+      | boolean
+      | null
+      | undefined
+      | Record<string, string | number | boolean | null | undefined>
+    >;
+
+function writeJson(payload: LoginJsonPayload): void {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 

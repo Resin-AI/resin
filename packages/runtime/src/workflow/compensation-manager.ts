@@ -1,3 +1,5 @@
+import type { CanonicalJsonRecord, CanonicalJsonValue } from "@resin/contracts";
+import type { BrokerRequestPayload, BrokerRequestPayloadValue } from "../brokers/manager.js";
 import { BindingResolver } from "./binding-resolver.js";
 import type {
   WorkflowCompensationResult,
@@ -10,7 +12,37 @@ interface RegisteredCompensation {
   stepId: string;
   stepName: string;
   compensation: WorkflowStepCompensation;
-  stepOutput: unknown;
+  stepOutput: CanonicalJsonValue;
+}
+
+function toBrokerPayload(record: CanonicalJsonRecord): BrokerRequestPayload {
+  const payload: BrokerRequestPayload = {};
+  for (const [key, value] of Object.entries(record)) {
+    payload[key] = toBrokerPayloadValue(value);
+  }
+  return payload;
+}
+
+function toBrokerPayloadValue(value: CanonicalJsonValue): BrokerRequestPayloadValue | undefined {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const arr: BrokerRequestPayloadValue[] = [];
+    for (const item of value) {
+      const converted = toBrokerPayloadValue(item);
+      if (converted !== undefined) {
+        arr.push(converted);
+      }
+    }
+    return arr;
+  }
+  if (Object.prototype.toString.call(value) === "[object Object]") {
+    // SAFETY: Tag check confirms value is a record object.
+    return toBrokerPayload(value as CanonicalJsonRecord);
+  }
+  // SAFETY: Primitive string, number, or boolean value is a valid BrokerRequestPayloadValue.
+  return value as BrokerRequestPayloadValue;
 }
 
 /**
@@ -27,7 +59,7 @@ export class CompensationManager {
   /**
    * Registers a successfully completed step onto the compensation stack if it declares a compensation action.
    */
-  registerStep(step: WorkflowStep, stepOutput: unknown): void {
+  registerStep(step: WorkflowStep, stepOutput: CanonicalJsonValue): void {
     if (step.compensation && step.compensation.action) {
       this.stack.push({
         stepId: step.id,
@@ -58,8 +90,8 @@ export class CompensationManager {
   async executeCompensation(
     options: WorkflowExecutionOptions,
     context: {
-      workflowInputs: Record<string, unknown>;
-      stepResults: Record<string, unknown>;
+      workflowInputs: CanonicalJsonRecord;
+      stepResults: CanonicalJsonRecord;
     },
   ): Promise<WorkflowCompensationResult[]> {
     const results: WorkflowCompensationResult[] = [];
@@ -96,6 +128,7 @@ export class CompensationManager {
           compensation.service && compensation.service !== "compute"
             ? compensation.service
             : this.inferService(compensation.action);
+        // SAFETY: Inferred or explicit service is validated against known broker services with fallback to "fs"
         const service: "fs" | "net" | "cmd" | "secret" =
           (rawService as "fs" | "net" | "cmd" | "secret") || "fs";
 
@@ -107,11 +140,16 @@ export class CompensationManager {
         if (options.brokerHandler) {
           await options.brokerHandler(service, compensation.action, resolvedInputs);
         } else if (options.brokerManager) {
-          await options.brokerManager.handleRequest(service, actionName, resolvedInputs, {
-            invocationId: options.grant?.invocationId ?? options.sessionId ?? `comp_${stepId}`,
-            workspaceRoot: options.workspaceRoot ?? process.cwd(),
-            source: "worker",
-          });
+          await options.brokerManager.handleRequest(
+            service,
+            actionName,
+            toBrokerPayload(resolvedInputs),
+            {
+              invocationId: options.grant?.invocationId ?? options.sessionId ?? `comp_${stepId}`,
+              workspaceRoot: options.workspaceRoot ?? process.cwd(),
+              source: "worker",
+            },
+          );
         }
 
         results.push({

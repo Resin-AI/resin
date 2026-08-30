@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { CanonicalJsonRecord, CanonicalJsonValue } from "@resin/contracts";
+import type {
+  BrokerExecutionResult,
+  BrokerRequestPayload,
+  BrokerRequestPayloadValue,
+} from "../brokers/manager.js";
 import { withResolvers } from "../worker/protocol.js";
 import { BindingResolver } from "./binding-resolver.js";
 import { CompensationManager } from "./compensation-manager.js";
@@ -11,7 +17,39 @@ import type {
   WorkflowStep,
   WorkflowStepResult,
 } from "./types.js";
+function isRecordResult(val: BrokerExecutionResult): val is Extract<BrokerExecutionResult, object> {
+  return val !== null && !Array.isArray(val) && Object(val) === val;
+}
 
+function toBrokerPayload(record: CanonicalJsonRecord): BrokerRequestPayload {
+  const payload: BrokerRequestPayload = {};
+  for (const [key, value] of Object.entries(record)) {
+    payload[key] = toBrokerPayloadValue(value);
+  }
+  return payload;
+}
+
+function toBrokerPayloadValue(value: CanonicalJsonValue): BrokerRequestPayloadValue | undefined {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const arr: BrokerRequestPayloadValue[] = [];
+    for (const item of value) {
+      const converted = toBrokerPayloadValue(item);
+      if (converted !== undefined) {
+        arr.push(converted);
+      }
+    }
+    return arr;
+  }
+  if (Object.prototype.toString.call(value) === "[object Object]") {
+    // SAFETY: Tag check confirms value is a record object.
+    return toBrokerPayload(value as CanonicalJsonRecord);
+  }
+  // SAFETY: Primitive string, number, or boolean value is a valid BrokerRequestPayloadValue.
+  return value as BrokerRequestPayloadValue;
+}
 /**
  * Robust workflow execution engine executing step graphs with real brokers,
  * bounded concurrency, cancellation, progress events, and safe compensation rollback.
@@ -36,9 +74,9 @@ export class WorkflowExecutor {
     const inputs = options.inputs ?? {};
 
     const stepResults: Record<string, WorkflowStepResult> = {};
-    const rawStepOutputs: Record<string, unknown> = {};
+    const rawStepOutputs: CanonicalJsonRecord = {};
     const compensationManager = new CompensationManager(this.bindingResolver);
-    const auditEvents: Record<string, unknown>[] = [];
+    const auditEvents: CanonicalJsonRecord[] = [];
 
     const emitProgress = async (
       type: WorkflowProgressEvent["type"],
@@ -46,7 +84,7 @@ export class WorkflowExecutor {
       message: string,
       stepId?: string,
       action?: string,
-      metadata?: Record<string, unknown>,
+      metadata?: CanonicalJsonRecord,
     ) => {
       const event: WorkflowProgressEvent = {
         type,
@@ -63,11 +101,11 @@ export class WorkflowExecutor {
       }
     };
 
-    const emitAudit = (
+    const logAudit = (
       status: "allowed" | "denied" | "error" | "success",
       action: string,
       service: string,
-      details: Record<string, unknown>,
+      details: CanonicalJsonRecord,
     ) => {
       const auditEvent = {
         auditId: `aud_${randomUUID()}`,
@@ -195,7 +233,7 @@ export class WorkflowExecutor {
         }
 
         // Resolve dynamic step inputs
-        let resolvedInputs: Record<string, unknown> = {};
+        let resolvedInputs: CanonicalJsonRecord = {};
         try {
           resolvedInputs = this.bindingResolver.resolveInputs(step.inputs, {
             workflowInputs: inputs,
@@ -228,17 +266,17 @@ export class WorkflowExecutor {
         let attempts = 0;
         let stepSucceeded = false;
         let lastError: string | undefined;
-        let stepOutput: unknown;
+        let stepOutput: CanonicalJsonValue = null;
 
         while (attempts <= maxRetries && !stepSucceeded && !options.signal?.aborted) {
           attempts++;
           try {
             stepOutput = await this.executeStepAction(step, resolvedInputs, options);
             stepSucceeded = true;
-            emitAudit("success", step.action, step.service ?? "fs", { stepId: step.id, attempts });
+            logAudit("success", step.action, step.service ?? "fs", { stepId: step.id, attempts });
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err);
-            emitAudit("error", step.action, step.service ?? "fs", {
+            logAudit("error", step.action, step.service ?? "fs", {
               stepId: step.id,
               attempts,
               error: lastError,
@@ -401,9 +439,9 @@ export class WorkflowExecutor {
    */
   private async executeStepAction(
     step: WorkflowStep,
-    inputs: Record<string, unknown>,
+    inputs: CanonicalJsonRecord,
     options: WorkflowExecutionOptions,
-  ): Promise<unknown> {
+  ): Promise<CanonicalJsonValue> {
     if (options.dryRun) {
       return { dryRun: true, action: step.action, inputs };
     }
@@ -421,11 +459,35 @@ export class WorkflowExecutor {
     }
 
     if (options.brokerManager) {
-      return await options.brokerManager.handleRequest(service, actionName, inputs, {
-        invocationId: options.grant?.invocationId ?? options.sessionId ?? `wf_step_${step.id}`,
-        workspaceRoot: options.workspaceRoot ?? process.cwd(),
-        source: "worker",
-      });
+      const brokerRes = await options.brokerManager.handleRequest(
+        service,
+        actionName,
+        toBrokerPayload(inputs),
+        {
+          invocationId: options.grant?.invocationId ?? options.sessionId ?? `wf_step_${step.id}`,
+          workspaceRoot: options.workspaceRoot ?? process.cwd(),
+          source: "worker",
+        },
+      );
+      if (brokerRes === null || brokerRes === undefined) {
+        return null;
+      }
+      if (Array.isArray(brokerRes)) {
+        // SAFETY: Array result is a valid CanonicalJsonValue.
+        return brokerRes as CanonicalJsonValue;
+      }
+      if (isRecordResult(brokerRes)) {
+        if ("content" in brokerRes && Buffer.isBuffer(brokerRes.content)) {
+          return {
+            ...brokerRes,
+            content: brokerRes.content.toString("utf-8"),
+          };
+        }
+        // SAFETY: Tag check confirms brokerRes is a record object.
+        return brokerRes as CanonicalJsonRecord;
+      }
+      // SAFETY: Primitive boolean or number is a valid CanonicalJsonValue.
+      return brokerRes as CanonicalJsonValue;
     }
 
     // Direct simulated execution for unit test and mock environments
@@ -434,15 +496,15 @@ export class WorkflowExecutor {
 
   private async executeSimulatedAction(
     action: string,
-    inputs: Record<string, unknown>,
-  ): Promise<unknown> {
-    if (action.includes("readFile")) {
-      return { path: inputs.path, content: `Mock content of ${inputs.path}`, size: 1024 };
-    }
+    inputs: CanonicalJsonRecord,
+  ): Promise<CanonicalJsonValue> {
     if (action.includes("writeFile")) {
+      const isStringContent = Object.prototype.toString.call(inputs.content) === "[object String]";
+      // SAFETY: Tag check confirms inputs.content is a string primitive.
+      const content = isStringContent ? (inputs.content as string) : undefined;
       return {
         path: inputs.path,
-        writtenBytes: typeof inputs.content === "string" ? inputs.content.length : 128,
+        writtenBytes: content ? content.length : 128,
       };
     }
     if (action.includes("createDirectory") || action.includes("mkdir")) {

@@ -14,7 +14,6 @@ import {
 import {
   type AuthClaims,
   type AuthScope,
-  AuthScopeSchema,
   type DeviceAuthBootstrapRequest,
   DeviceAuthBootstrapRequestSchema,
   type DeviceAuthBootstrapResponse,
@@ -25,6 +24,7 @@ import {
   DeviceTokenExchangeResponseSchema,
   areClaimsExpired,
 } from "@resin/protocol";
+import { z } from "zod";
 
 export {
   type CloudCredentialLoadResult,
@@ -55,7 +55,7 @@ export const DEFAULT_DEVICE_AUTH_SCOPES = Object.freeze([
  * Only HTTPS or loopback HTTP origins without credentials, query parameters, or fragments are permitted.
  */
 export function validateCloudUrl(value: string): string {
-  if (!value || typeof value !== "string") {
+  if (!value || String(value) !== value) {
     throw new Error("Cloud URL must be a non-empty string");
   }
 
@@ -281,23 +281,28 @@ export class DeviceAuthClient {
     if (!res.ok) {
       let errorText: string | undefined;
       try {
-        if (typeof res.json === "function") {
-          const rawJson: unknown = await res.json();
-          if (rawJson && typeof rawJson === "object" && rawJson !== null) {
-            const maybe = rawJson as Record<string, unknown>;
-            if (typeof maybe.error_description === "string" && maybe.error_description.length > 0) {
-              errorText = maybe.error_description;
-            } else if (typeof maybe.error === "string" && maybe.error.length > 0) {
-              errorText = maybe.error;
-            } else if (typeof maybe.message === "string" && maybe.message.length > 0) {
-              errorText = maybe.message;
-            }
-          }
+        const rawJson: unknown = await res.json();
+        const parsed = z
+          .object({
+            error_description: z.string().optional(),
+            error: z.string().optional(),
+            message: z.string().optional(),
+          })
+          .safeParse(rawJson);
+        if (parsed.success) {
+          errorText =
+            (parsed.data.error_description && parsed.data.error_description.length > 0
+              ? parsed.data.error_description
+              : undefined) ??
+            (parsed.data.error && parsed.data.error.length > 0 ? parsed.data.error : undefined) ??
+            (parsed.data.message && parsed.data.message.length > 0
+              ? parsed.data.message
+              : undefined);
         }
       } catch {
         // ignore
       }
-      if (!errorText && typeof res.text === "function") {
+      if (!errorText && "text" in res && res.text instanceof Function) {
         try {
           const text = await res.text();
           if (text.length > 0) {
@@ -311,10 +316,7 @@ export class DeviceAuthClient {
       throw new Error(`Device code request failed (${res.status}): ${desc}`);
     }
 
-    let raw: unknown;
-    if (typeof res.json === "function") {
-      raw = await res.json();
-    }
+    const raw: unknown = await res.json();
     return DeviceAuthBootstrapResponseSchema.parse(raw);
   }
 
@@ -383,36 +385,29 @@ export class DeviceAuthClient {
       }
 
       if (!res.ok) {
-        let errBody: {
-          error?: string;
-          error_description?: string;
-          interval?: number;
-          message?: string;
-        } = {};
+        const AuthDeviceErrorSchema = z.object({
+          error: z.string().optional(),
+          error_description: z.string().optional(),
+          interval: z.number().optional(),
+          message: z.string().optional(),
+        });
+        type AuthDeviceError = z.infer<typeof AuthDeviceErrorSchema>;
+        let errBody: AuthDeviceError = {};
         try {
-          if (typeof res.json === "function") {
-            const rawErr: unknown = await res.json();
-            if (rawErr && typeof rawErr === "object" && rawErr !== null) {
-              const maybeErr = rawErr as Record<string, unknown>;
-              errBody = {
-                error: typeof maybeErr.error === "string" ? maybeErr.error : undefined,
-                error_description:
-                  typeof maybeErr.error_description === "string"
-                    ? maybeErr.error_description
-                    : undefined,
-                interval: typeof maybeErr.interval === "number" ? maybeErr.interval : undefined,
-                message: typeof maybeErr.message === "string" ? maybeErr.message : undefined,
-              };
-            }
+          const rawErr = await res.json();
+          const parsedErr = AuthDeviceErrorSchema.safeParse(rawErr);
+          if (parsedErr.success) {
+            errBody = parsedErr.data;
           }
         } catch {
-          // ignore
+          // Continue to fallback
         }
 
-        const errorCode = errBody.error ?? "";
+        const errorCode = errBody.error;
+
         if (errorCode === "authorization_pending") {
-          if (typeof errBody.interval === "number" && errBody.interval > 0) {
-            currentInterval = errBody.interval * 1000;
+          if (Number.isFinite(errBody.interval) && Number(errBody.interval) > 0) {
+            currentInterval = Number(errBody.interval) * 1000;
           }
           continue;
         }
@@ -432,13 +427,12 @@ export class DeviceAuthClient {
 
         let text = "";
         try {
-          if (typeof res.text === "function") {
+          if ("text" in res && res.text instanceof Function) {
             text = await res.text();
           }
         } catch {
           // ignore
         }
-
         const desc =
           errBody.error_description ||
           errBody.message ||
@@ -449,10 +443,7 @@ export class DeviceAuthClient {
         throw new Error(`Device token exchange failed: ${desc}`);
       }
 
-      let raw: unknown;
-      if (typeof res.json === "function") {
-        raw = await res.json();
-      }
+      const raw: unknown = await res.json();
       const tokenResponse = DeviceTokenExchangeResponseSchema.parse(raw);
       if (
         tokenResponse.claims.deviceId !== requestPayload.deviceId ||
@@ -679,18 +670,36 @@ export class DeviceAuthClient {
       let workspaceId: string | undefined;
       let deviceId: string | undefined;
 
-      if (typeof credsOrToken === "string") {
-        tokenToRevoke = credsOrToken;
-      } else if (credsOrToken) {
-        tokenToRevoke = credsOrToken.accessToken;
-        refreshToken = credsOrToken.refreshToken;
-        familyId = credsOrToken.claims?.familyId;
-        accountId = credsOrToken.claims?.accountId;
-        workspaceId = credsOrToken.claims?.workspaceId;
-        deviceId = credsOrToken.claims?.deviceId ?? credsOrToken.deviceId;
-        if (credsOrToken.cloudUrl) {
+      const stringParse = z.string().safeParse(credsOrToken);
+      const RevokeCredentialsSchema = z.object({
+        accessToken: z.string(),
+        refreshToken: z.string().optional(),
+        claims: z
+          .object({
+            familyId: z.string().optional(),
+            accountId: z.string().optional(),
+            workspaceId: z.string().optional(),
+            deviceId: z.string().optional(),
+          })
+          .passthrough()
+          .optional(),
+        cloudUrl: z.string().optional(),
+        deviceId: z.string().optional(),
+      });
+      const credsParse = RevokeCredentialsSchema.safeParse(credsOrToken);
+
+      if (stringParse.success) {
+        tokenToRevoke = stringParse.data;
+      } else if (credsParse.success) {
+        tokenToRevoke = credsParse.data.accessToken;
+        refreshToken = credsParse.data.refreshToken;
+        familyId = credsParse.data.claims?.familyId;
+        accountId = credsParse.data.claims?.accountId;
+        workspaceId = credsParse.data.claims?.workspaceId;
+        deviceId = credsParse.data.claims?.deviceId ?? credsParse.data.deviceId;
+        if (credsParse.data.cloudUrl) {
           try {
-            targetCloudUrl = validateCloudUrl(credsOrToken.cloudUrl);
+            targetCloudUrl = validateCloudUrl(credsParse.data.cloudUrl);
           } catch {
             targetCloudUrl = this.cloudUrl;
           }
@@ -719,21 +728,24 @@ export class DeviceAuthClient {
       }
 
       const endpoint = `${targetCloudUrl}/v1/auth/logout`;
-      const headers: Record<string, string> = {
+      const headers = {
         "Content-Type": "application/json",
       };
-
       if (tokenToRevoke) {
-        headers.Authorization = `Bearer ${tokenToRevoke}`;
+        // SAFETY: Attaching Bearer auth token header on logout request.
+        Object.assign(headers, { Authorization: `Bearer ${tokenToRevoke}` });
       }
       if (accountId) {
-        headers["x-resin-account-id"] = accountId;
+        // SAFETY: Attaching account ID header on logout request.
+        Object.assign(headers, { "x-resin-account-id": accountId });
       }
       if (workspaceId) {
-        headers["x-resin-workspace-id"] = workspaceId;
+        // SAFETY: Attaching workspace ID header on logout request.
+        Object.assign(headers, { "x-resin-workspace-id": workspaceId });
       }
       if (deviceId) {
-        headers["x-resin-device-id"] = deviceId;
+        // SAFETY: Attaching device ID header on logout request.
+        Object.assign(headers, { "x-resin-device-id": deviceId });
       }
 
       const bodyPayload = refreshToken

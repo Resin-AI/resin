@@ -33,6 +33,50 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   };
 }
 
+interface MockIpcPingResult {
+  pong: boolean;
+  timestamp: number;
+}
+
+interface MockIpcHealthResult {
+  status: string;
+  modules?: Record<string, { status: string }>;
+}
+class MockIpcClient {
+  constructor(
+    private readonly overrides: {
+      ping?: () => Promise<MockIpcPingResult>;
+      getHealth?: () => Promise<MockIpcHealthResult>;
+      close?: () => Promise<void>;
+    } = {},
+  ) {}
+
+  async connect(): Promise<void> {}
+  async close(): Promise<void> {
+    if (this.overrides.close) {
+      await this.overrides.close();
+    }
+  }
+  async ping(): Promise<MockIpcPingResult> {
+    if (this.overrides.ping) {
+      return await this.overrides.ping();
+    }
+    return { pong: true, timestamp: Date.now() };
+  }
+  async getHealth(): Promise<MockIpcHealthResult> {
+    if (this.overrides.getHealth) {
+      return await this.overrides.getHealth();
+    }
+    return {
+      status: "healthy",
+      modules: {
+        "trajectory-capture": { status: "running" },
+        "cloud-runtime": { status: "ready" },
+      },
+    };
+  }
+}
+
 describe("VerificationSuite", () => {
   const homeDir = "/home/testuser";
   const resinHome = path.join(homeDir, ".resin");
@@ -49,7 +93,7 @@ describe("VerificationSuite", () => {
       [unitPath]: "unit content",
     });
 
-    const mockIpcClient = {
+    const mockIpcClient = new MockIpcClient({
       ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
       getHealth: vi.fn().mockResolvedValue({
         status: "fully-ready",
@@ -58,19 +102,17 @@ describe("VerificationSuite", () => {
         version: "0.1.0",
       }),
       close: vi.fn().mockResolvedValue(undefined),
-    };
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: "ok" }),
-    } as Response);
+    });
+    const mockFetch: typeof fetch = vi.fn().mockResolvedValue(Response.json({ status: "ok" }));
 
     const suite = new VerificationSuite({
       homeDir,
       resinHome,
       socketPath,
       fsBridge,
-      ipcClient: mockIpcClient as unknown as IpcClient,
-      customFetch: mockFetch as unknown as typeof fetch,
+      // SAFETY: Mock ipcClient implements IpcClient subset required for verification suite tests.
+      ipcClient: mockIpcClient as IpcClient,
+      customFetch: mockFetch,
       allowOffline: true,
     });
     const report = await suite.runAll();
@@ -134,7 +176,8 @@ describe("VerificationSuite", () => {
 
 describe("onboarding daemon readiness", () => {
   it("requires a responsive IPC ping and ready Cloud runtime", async () => {
-    const ipcClient = {
+    // SAFETY: Mock ipcClient implements IpcClient ping and getHealth methods for readiness verification tests.
+    const ipcClient = new MockIpcClient({
       ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
       getHealth: vi.fn().mockResolvedValue({
         status: "fully-ready",
@@ -142,7 +185,7 @@ describe("onboarding daemon readiness", () => {
           "cloud-runtime": { status: "ready" },
         },
       }),
-    } as unknown as IpcClient;
+    }) as IpcClient;
 
     const result = await verifyDaemonReadiness({
       homeDir: "/home/test",
@@ -161,7 +204,8 @@ describe("onboarding daemon readiness", () => {
   });
 
   it("fails closed when Cloud is offline but permits explicit local-only readiness", async () => {
-    const ipcClient = {
+    // SAFETY: Mock ipcClient implements IpcClient ping and getHealth methods for offline readiness verification tests.
+    const offlineIpcClient = new MockIpcClient({
       ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
       getHealth: vi.fn().mockResolvedValue({
         status: "cloud-offline",
@@ -169,11 +213,10 @@ describe("onboarding daemon readiness", () => {
           "cloud-runtime": { status: "offline" },
         },
       }),
-    } as unknown as IpcClient;
-
+    }) as IpcClient;
     const cloudResult = await verifyDaemonReadiness({
       homeDir: "/home/test",
-      ipcClient,
+      ipcClient: offlineIpcClient,
       cloudRequired: true,
       timeoutMs: 0,
     });
@@ -186,7 +229,7 @@ describe("onboarding daemon readiness", () => {
 
     const localResult = await verifyDaemonReadiness({
       homeDir: "/home/test",
-      ipcClient,
+      ipcClient: offlineIpcClient,
       cloudRequired: false,
       timeoutMs: 0,
     });

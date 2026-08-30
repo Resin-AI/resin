@@ -1,4 +1,5 @@
 import type { DaemonConfig } from "./config.js";
+import type { JsonObject } from "./normalization/redaction.js";
 import type { DaemonPaths } from "./paths.js";
 
 export type ModuleLifecycleState =
@@ -15,15 +16,15 @@ export type ModuleHealthStatus = "ready" | "degraded" | "failed" | "offline";
 export interface ModuleHealth {
   status: ModuleHealthStatus;
   message?: string;
-  details?: Record<string, unknown>;
+  details?: JsonObject;
   lastCheckTime?: number;
 }
 
 export interface Logger {
-  debug(msg: string, meta?: Record<string, unknown>): void;
-  info(msg: string, meta?: Record<string, unknown>): void;
-  warn(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
+  debug(msg: string, meta?: JsonObject): void;
+  info(msg: string, meta?: JsonObject): void;
+  warn(msg: string, meta?: JsonObject): void;
+  error(msg: string, meta?: JsonObject): void;
 }
 
 export interface ModuleContext {
@@ -52,10 +53,10 @@ export interface DaemonModule {
   stop(context: ModuleContext): Promise<void>;
   healthCheck?(): Promise<ModuleHealth>;
   reloadConfig?(newConfig: DaemonConfig): Promise<void>;
-  getDiagnostics?(): Promise<Record<string, unknown>>;
+  getDiagnostics?(): Promise<JsonObject>;
 }
 
-const VALID_TRANSITIONS: Record<ModuleLifecycleState, readonly ModuleLifecycleState[]> = {
+const VALID_TRANSITIONS = {
   uninitialized: ["starting"],
   starting: ["ready", "degraded", "failed", "stopping"],
   ready: ["degraded", "stopping", "failed"],
@@ -63,7 +64,7 @@ const VALID_TRANSITIONS: Record<ModuleLifecycleState, readonly ModuleLifecycleSt
   stopping: ["stopped", "failed"],
   stopped: ["starting"],
   failed: ["starting", "stopped"],
-};
+} satisfies Record<ModuleLifecycleState, readonly ModuleLifecycleState[]>;
 
 /**
  * Validates whether a lifecycle state transition is allowed.
@@ -72,8 +73,8 @@ export function isValidStateTransition(
   from: ModuleLifecycleState,
   to: ModuleLifecycleState,
 ): boolean {
-  const allowed = VALID_TRANSITIONS[from];
-  return allowed ? allowed.includes(to) : false;
+  const allowed: readonly ModuleLifecycleState[] = VALID_TRANSITIONS[from];
+  return allowed.includes(to);
 }
 
 /**

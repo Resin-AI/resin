@@ -100,6 +100,7 @@ describe("harness adapter operations", () => {
         gatewayUrl,
         fsBridge: bridge,
       });
+      // SAFETY: Planned JSON content preserves original configuration structure.
       const planned = JSON.parse(plan.plannedContent) as typeof original;
 
       expect(planned.settings).toEqual(original.settings);

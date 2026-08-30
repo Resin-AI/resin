@@ -2,11 +2,13 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import { z } from "zod";
 import type { VerificationReport } from "../service/verification.js";
 import {
   UpdateEngine,
   type UpdateEngineOptions,
   type UpdateEngineResult,
+  type UpdateEngineRunRequest,
   type UpdateRunStatus,
 } from "../updates/engine.js";
 
@@ -126,15 +128,16 @@ export class UpgradeOrchestrator {
       };
     }
 
-    const result = await this.engine.run({
+    const runRequest: UpdateEngineRunRequest = {
       mode: "manual",
-      ...(flags.channel === undefined ? {} : { channel: flags.channel }),
-      ...(flags.targetVersion === undefined ? {} : { targetVersion: flags.targetVersion }),
-      ...(flags.force === undefined ? {} : { force: flags.force }),
-      ...(flags.rollback === undefined ? {} : { rollback: flags.rollback }),
       rollbackOnFailure: !flags.noRollback,
-      ...(flags.signal === undefined ? {} : { signal: flags.signal }),
-    });
+      channel: flags.channel,
+      targetVersion: flags.targetVersion,
+      force: flags.force,
+      rollback: flags.rollback,
+      signal: flags.signal,
+    };
+    const result = await this.engine.run(runRequest);
     return this.mapEngineResult(result);
   }
 
@@ -142,14 +145,9 @@ export class UpgradeOrchestrator {
     const raw = await this.fsBridge.readFile(path.join(this.resinHome, "version.json"));
     if (raw === null) return CURRENT_VERSION;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        "version" in parsed &&
-        typeof parsed.version === "string"
-      ) {
-        return parsed.version.replace(/^v/, "");
+      const parsed = z.object({ version: z.string() }).safeParse(JSON.parse(raw));
+      if (parsed.success) {
+        return parsed.data.version.replace(/^v/, "");
       }
     } catch {}
     return CURRENT_VERSION;
@@ -210,10 +208,11 @@ export async function upgradeCommand(
     engine: options.engine,
   });
   try {
-    const result = await orchestrator.runUpgrade({
-      ...flags,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    const upgradeFlags: UpgradeCommandFlags = { ...flags };
+    if (options.signal !== undefined) {
+      upgradeFlags.signal = options.signal;
+    }
+    const result = await orchestrator.runUpgrade(upgradeFlags);
     if (flags.json) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else if (result.status === "activation-deferred") {

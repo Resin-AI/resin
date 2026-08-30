@@ -1,11 +1,11 @@
 import type { ToolManifest } from "@resin/contracts";
 import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { JsonRpcParams } from "../../src/protocol/types.js";
 import { CanaryRouter } from "../../src/registry/canary-router.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { RegistryGatewayRouter } from "../../src/router.js";
-import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
 function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
   const base = {
@@ -67,7 +67,7 @@ describe("Automatic Rollback, Health Monitoring & Quarantine Suite", () => {
   let registry: ToolRegistry;
   let canaryRouter: CanaryRouter;
   let router: RegistryGatewayRouter;
-  const emittedIncidents: Record<string, unknown>[] = [];
+  const emittedIncidents: JsonRpcParams[] = [];
 
   const workspaceId = "ws-rollback-test";
   const context: WorkspaceContext = {

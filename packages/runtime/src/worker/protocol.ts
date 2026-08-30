@@ -1,4 +1,9 @@
-import type { CapabilityManifest, ToolManifest } from "@resin/contracts";
+import type {
+  CanonicalJsonRecord,
+  CanonicalJsonValue,
+  CapabilityManifest,
+  ToolManifest,
+} from "@resin/contracts";
 import { z } from "zod";
 
 /**
@@ -83,7 +88,7 @@ export const BrokerRequestMessageSchema = BaseWorkerMessageSchema.extend({
   requestId: z.string().min(1),
   service: z.enum(["fs", "net", "cmd", "secret"]),
   action: z.string().min(1),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.custom<CanonicalJsonValue>()).default({}),
 });
 export type BrokerRequestMessage = z.infer<typeof BrokerRequestMessageSchema>;
 
@@ -94,7 +99,7 @@ export const BrokerResponseMessageSchema = BaseWorkerMessageSchema.extend({
   type: z.literal("broker_response"),
   requestId: z.string().min(1),
   success: z.boolean(),
-  payload: z.unknown().optional(),
+  payload: z.custom<CanonicalJsonValue>().optional(),
   error: z
     .object({
       code: z.string().min(1),
@@ -220,20 +225,17 @@ export type WorkerMessage = z.infer<typeof WorkerMessageSchema>;
  * Helper to generate random UUIDs for message IDs.
  */
 function generateMessageId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  return crypto.randomUUID();
 }
 
 // Factory functions for creating typed messages
 
 export function createInitializeMessage(params: {
-  manifest: ToolManifest | Record<string, unknown>;
+  manifest: ToolManifest | CanonicalJsonRecord;
   bundleEntrypoint: string;
   workspaceRoot?: string;
   scratchDir?: string;
-  capabilities?: CapabilityManifest | Record<string, unknown>;
+  capabilities?: CapabilityManifest | CanonicalJsonRecord;
   environment?: Record<string, string>;
   limits?: { timeoutMs?: number; memoryLimitMb?: number; maxOutputSizeBytes?: number };
 }): InitializeMessage {
@@ -242,11 +244,13 @@ export function createInitializeMessage(params: {
     type: "initialize",
     timestamp: Date.now(),
     version: WORKER_PROTOCOL_VERSION,
-    manifest: params.manifest as Record<string, unknown>,
+    // SAFETY: ToolManifest or record conforms to CanonicalJsonRecord structure.
+    manifest: params.manifest as CanonicalJsonRecord,
     bundleEntrypoint: params.bundleEntrypoint,
     workspaceRoot: params.workspaceRoot,
     scratchDir: params.scratchDir,
-    capabilities: params.capabilities as Record<string, unknown> | undefined,
+    // SAFETY: CapabilityManifest or record conforms to CanonicalJsonRecord structure.
+    capabilities: params.capabilities as CanonicalJsonRecord | undefined,
     environment: params.environment ?? {},
     limits: {
       timeoutMs: params.limits?.timeoutMs ?? 30000,
@@ -264,7 +268,7 @@ export function createInvokeMessage(params: {
     workspaceId?: string;
     toolId?: string;
     toolVersion?: string;
-    metadata?: Record<string, unknown>;
+    metadata?: CanonicalJsonRecord;
   };
 }): InvokeMessage {
   return {
@@ -282,7 +286,7 @@ export function createBrokerRequestMessage(params: {
   requestId?: string;
   service: "fs" | "net" | "cmd" | "secret";
   action: string;
-  payload: Record<string, unknown>;
+  payload: CanonicalJsonRecord;
 }): BrokerRequestMessage {
   return {
     id: generateMessageId(),
@@ -299,7 +303,7 @@ export function createBrokerRequestMessage(params: {
 export function createBrokerResponseMessage(params: {
   requestId: string;
   success: boolean;
-  payload?: unknown;
+  payload?: CanonicalJsonValue;
   error?: { code: string; message: string; details?: unknown };
 }): BrokerResponseMessage {
   return {
@@ -489,11 +493,10 @@ export class WorkerFrameDecoder {
    */
   push(chunk: Buffer | string): WorkerMessage[] {
     if (this.format === "ndjson") {
-      return this.pushNDJSON(typeof chunk === "string" ? chunk : chunk.toString("utf-8"));
+      return this.pushNDJSON(Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : chunk);
     }
-    return this.pushLengthPrefixed(typeof chunk === "string" ? Buffer.from(chunk, "utf-8") : chunk);
+    return this.pushLengthPrefixed(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf-8"));
   }
-
   private pushNDJSON(text: string): WorkerMessage[] {
     this.textBuffer += text;
     const messages: WorkerMessage[] = [];
@@ -575,12 +578,12 @@ export class WorkerFrameDecoder {
 export interface PromiseWithResolvers<T> {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
+  reject: (reason?: Error | CanonicalJsonValue) => void;
 }
 
 export function withResolvers<T>(): PromiseWithResolvers<T> {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
+  let reject!: (reason?: Error | CanonicalJsonValue) => void;
   const promise = new Promise<T>((res, rej) => {
     resolve = res;
     reject = rej;

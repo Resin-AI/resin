@@ -33,7 +33,10 @@ const TRUSTED_TEST_KEY: TrustedReleaseKey = {
   publicKeyHex: TEST_KEYPAIR.publicKeyHex,
 };
 
-function signPayload(payload: unknown, privateKeyPem = TEST_KEYPAIR.privateKeyPkcs8Pem): string {
+function signPayload(
+  payload: Parameters<typeof canonicalJson>[0],
+  privateKeyPem = TEST_KEYPAIR.privateKeyPkcs8Pem,
+): string {
   const canonical = canonicalJson(payload);
   const dataBuf = Buffer.from(canonical, "utf8");
   const privKey = crypto.createPrivateKey(privateKeyPem);

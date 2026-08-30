@@ -15,6 +15,54 @@ export const HarnessErrorCode = {
   INTERNAL_ERROR: "INTERNAL_ERROR",
 } as const;
 
+export type HarnessErrorDetailValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | HarnessErrorDetailRecord
+  | HarnessErrorDetailValue[];
+
+export interface HarnessErrorDetailRecord {
+  [key: string]: HarnessErrorDetailValue;
+}
+
+/**
+ * Normalizes an arbitrary value into the HarnessErrorDetailValue contract.
+ */
+export function toHarnessErrorDetailValue(cause: unknown): HarnessErrorDetailValue {
+  if (cause === null || cause === undefined) {
+    return cause;
+  }
+  const tag = Object.prototype.toString.call(cause);
+  if (tag === "[object String]" || tag === "[object Number]" || tag === "[object Boolean]") {
+    // SAFETY: Tag verification confirms cause is a primitive string, number, or boolean.
+    return cause as string | number | boolean;
+  }
+  if (Array.isArray(cause)) {
+    return cause.map((item) => toHarnessErrorDetailValue(item));
+  }
+  if (cause instanceof Error) {
+    const errorRecord: HarnessErrorDetailRecord = {
+      name: cause.name,
+      message: cause.message,
+    };
+    if (cause.stack) {
+      errorRecord.stack = cause.stack;
+    }
+    return errorRecord;
+  }
+  if (tag === "[object Object]") {
+    const record: HarnessErrorDetailRecord = {};
+    for (const [k, v] of Object.entries(cause)) {
+      record[k] = toHarnessErrorDetailValue(v);
+    }
+    return record;
+  }
+  return String(cause);
+}
+
 export type HarnessErrorCode = (typeof HarnessErrorCode)[keyof typeof HarnessErrorCode];
 
 /**
@@ -23,15 +71,14 @@ export type HarnessErrorCode = (typeof HarnessErrorCode)[keyof typeof HarnessErr
 export class HarnessError extends Error {
   readonly code: HarnessErrorCode;
   readonly harnessId?: string;
-  readonly details?: Record<string, unknown>;
+  readonly details?: HarnessErrorDetailRecord;
   readonly isHarnessError = true;
-
   constructor(
     code: HarnessErrorCode,
     message: string,
     options?: {
       harnessId?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -52,7 +99,11 @@ export class HarnessError extends Error {
 export class MissingHarnessError extends HarnessError {
   constructor(
     message: string,
-    options?: { harnessId?: string; details?: Record<string, unknown>; cause?: unknown },
+    options?: {
+      harnessId?: string;
+      details?: HarnessErrorDetailRecord;
+      cause?: unknown;
+    },
   ) {
     super(HarnessErrorCode.MISSING_HARNESS, message, options);
   }
@@ -71,7 +122,7 @@ export class UnsupportedVersionError extends HarnessError {
       harnessId?: string;
       detectedVersion?: string;
       supportedVersions?: readonly string[];
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -80,7 +131,7 @@ export class UnsupportedVersionError extends HarnessError {
       details: {
         ...options?.details,
         detectedVersion: options?.detectedVersion,
-        supportedVersions: options?.supportedVersions,
+        supportedVersions: options?.supportedVersions ? [...options.supportedVersions] : undefined,
       },
     });
     this.detectedVersion = options?.detectedVersion;
@@ -99,7 +150,7 @@ export class InaccessibleTranscriptError extends HarnessError {
     options?: {
       harnessId?: string;
       path?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -122,13 +173,19 @@ export class MalformedRecordError extends HarnessError {
     options?: {
       harnessId?: string;
       rawRecord?: unknown;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
     super(HarnessErrorCode.MALFORMED_RECORD, message, {
       ...options,
-      details: { ...options?.details, rawRecord: options?.rawRecord },
+      details: {
+        ...options?.details,
+        rawRecord:
+          options?.rawRecord !== undefined
+            ? toHarnessErrorDetailValue(options.rawRecord)
+            : undefined,
+      },
     });
     this.rawRecord = options?.rawRecord;
   }
@@ -145,13 +202,18 @@ export class AmbiguousActiveSessionError extends HarnessError {
     options?: {
       harnessId?: string;
       candidateSessionIds?: readonly string[];
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
     super(HarnessErrorCode.AMBIGUOUS_ACTIVE_SESSION, message, {
       ...options,
-      details: { ...options?.details, candidateSessionIds: options?.candidateSessionIds },
+      details: {
+        ...options?.details,
+        candidateSessionIds: options?.candidateSessionIds
+          ? [...options.candidateSessionIds]
+          : undefined,
+      },
     });
     this.candidateSessionIds = options?.candidateSessionIds;
   }
@@ -168,7 +230,7 @@ export class HarnessPermissionError extends HarnessError {
     options?: {
       harnessId?: string;
       targetPath?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -195,7 +257,7 @@ export class ConcurrentConfigMutationError extends HarnessError {
       targetPath?: string;
       expectedHash?: string;
       actualHash?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -229,7 +291,7 @@ export class ConfigPreconditionFailedError extends HarnessError {
       targetPath?: string;
       expectedHash?: string;
       actualHash?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -259,7 +321,7 @@ export class TranscriptRotatedError extends HarnessError {
     options?: {
       harnessId?: string;
       transcriptPath?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -279,7 +341,7 @@ export class CatalogRefreshError extends HarnessError {
     message: string,
     options?: {
       harnessId?: string;
-      details?: Record<string, unknown>;
+      details?: HarnessErrorDetailRecord;
       cause?: unknown;
     },
   ) {
@@ -290,10 +352,6 @@ export class CatalogRefreshError extends HarnessError {
 /**
  * Type guard to check if an unknown error is a HarnessError.
  */
-export function isHarnessError(error: unknown): error is HarnessError {
-  return (
-    error instanceof Error &&
-    "isHarnessError" in error &&
-    (error as HarnessError).isHarnessError === true
-  );
+export function isHarnessError(error: Error | null | undefined): error is HarnessError {
+  return error instanceof Error && "isHarnessError" in error && Boolean(error.isHarnessError);
 }

@@ -74,6 +74,7 @@ describe("Gateway Refresh Coordinator End-to-End Integration", () => {
         cwd: tmpDir,
         sendMessage: (msg: JsonRpcMessage) => {
           if (!("id" in msg) || msg.id === undefined) {
+            // SAFETY: Notification message has no id.
             notificationsReceived.push(msg as JsonRpcNotification);
           }
         },

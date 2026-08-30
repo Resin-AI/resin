@@ -58,7 +58,9 @@ describe("Historical Backfill Bounded Window Policy", () => {
     await donePromise;
 
     expect(received).toHaveLength(10);
+    // SAFETY: Test record rawPayload contains index number.
     expect((received[0].rawPayload as { index: number }).index).toBe(1);
+    // SAFETY: Test record rawPayload contains index number.
     expect((received[9].rawPayload as { index: number }).index).toBe(10);
 
     await tailer.close();
@@ -112,7 +114,9 @@ describe("Historical Backfill Bounded Window Policy", () => {
 
     // Must only receive lines 6 and 7 (old lines 1..5 were skipped)
     expect(received).toHaveLength(2);
+    // SAFETY: Test record rawPayload contains index number.
     expect((received[0].rawPayload as { index: number }).index).toBe(6);
+    // SAFETY: Test record rawPayload contains index number.
     expect((received[1].rawPayload as { index: number }).index).toBe(7);
 
     await tailer.close();
@@ -160,6 +164,7 @@ describe("Historical Backfill Bounded Window Policy", () => {
 
     // Must receive lines 8, 9, 10
     expect(received).toHaveLength(3);
+    // SAFETY: Test record rawPayload contains index number.
     const indices = received.map((r) => (r.rawPayload as { index: number }).index);
     expect(indices).toEqual([8, 9, 10]);
 

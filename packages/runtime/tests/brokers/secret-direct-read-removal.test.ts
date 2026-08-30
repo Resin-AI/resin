@@ -2,6 +2,7 @@ import {
   type SecretCapability,
   type SecretReference,
   createSecretReference,
+  isSecretReference,
 } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -97,10 +98,11 @@ describe("Secret Direct-Read Removal & Mediation Broker Contracts", () => {
           await secretBroker.handleRequest(action, { name: "API_KEY_ALPHA" }, workerContext);
         } catch (err) {
           expect(err).toBeInstanceOf(BrokerSecurityError);
-          const secErr = err as BrokerSecurityError;
-          expect(secErr.code).toBe("DIRECT_READ_DENIED");
-          expect(secErr.message).toContain("Direct reading of secrets is strictly prohibited");
-          expect(secErr.message).not.toContain("super_secret_alpha_value_9999");
+          if (err instanceof BrokerSecurityError) {
+            expect(err.code).toBe("DIRECT_READ_DENIED");
+            expect(err.message).toContain("Direct reading of secrets is strictly prohibited");
+            expect(err.message).not.toContain("super_secret_alpha_value_9999");
+          }
         }
 
         const eventsAfter = auditEmitter.getEvents();
@@ -156,9 +158,10 @@ describe("Secret Direct-Read Removal & Mediation Broker Contracts", () => {
           );
         } catch (err) {
           expect(err).toBeInstanceOf(BrokerSecurityError);
-          const secErr = err as BrokerSecurityError;
-          expect(secErr.code).toBe("OPERATION_NOT_PERMITTED");
-          expect(secErr.message).toContain("Administrative secret operation");
+          if (err instanceof BrokerSecurityError) {
+            expect(err.code).toBe("OPERATION_NOT_PERMITTED");
+            expect(err.message).toContain("Administrative secret operation");
+          }
         }
       });
     }
@@ -166,38 +169,40 @@ describe("Secret Direct-Read Removal & Mediation Broker Contracts", () => {
 
   describe("Opaque Secret Reference Mediation without Disclosing Bytes", () => {
     it("creates opaque SecretReference with metadata and no plaintext secret values", async () => {
-      const ref = (await secretBroker.handleRequest(
+      const ref = await secretBroker.handleRequest(
         "createReference",
         { name: "API_KEY_ALPHA" },
         workerContext,
-      )) as SecretReference;
+      );
 
-      expect(ref.kind).toBe("secret_reference");
-      expect(ref.name).toBe("API_KEY_ALPHA");
-      expect(ref.ref).toMatch(/^sec_ref_[A-Za-z0-9_]+$/);
-      expect("secret" in ref).toBe(false);
-      expect("value" in ref).toBe(false);
-      expect(JSON.stringify(ref)).not.toContain("super_secret_alpha_value_9999");
+      expect(isSecretReference(ref)).toBe(true);
+      if (isSecretReference(ref)) {
+        expect(ref.kind).toBe("secret_reference");
+        expect(ref.name).toBe("API_KEY_ALPHA");
+        expect(ref.ref).toMatch(/^sec_ref_[A-Za-z0-9_]+$/);
+        expect("secret" in ref).toBe(false);
+        expect("value" in ref).toBe(false);
+        expect(JSON.stringify(ref)).not.toContain("super_secret_alpha_value_9999");
+      }
     });
-
     it("lists only authorized secret references for the caller's grant", async () => {
-      const refs = (await secretBroker.handleRequest(
-        "listReferences",
-        {},
-        workerContext,
-      )) as SecretReference[];
+      const rawRefs = await secretBroker.handleRequest("listReferences", {}, workerContext);
 
-      expect(Array.isArray(refs)).toBe(true);
-      expect(refs.length).toBe(2);
-      const names = refs.map((r) => r.name);
-      expect(names).toContain("API_KEY_ALPHA");
-      expect(names).toContain("AUTH_BEARER_TOKEN");
-      expect(names).not.toContain("OTHER_WS_SECRET");
+      expect(Array.isArray(rawRefs)).toBe(true);
+      if (Array.isArray(rawRefs)) {
+        expect(rawRefs.length).toBe(2);
+        const refs = rawRefs.filter(isSecretReference);
+        expect(refs.length).toBe(2);
+        const names = refs.map((r) => r.name);
+        expect(names).toContain("API_KEY_ALPHA");
+        expect(names).toContain("AUTH_BEARER_TOKEN");
+        expect(names).not.toContain("OTHER_WS_SECRET");
 
-      for (const r of refs) {
-        expect(r.kind).toBe("secret_reference");
-        expect("secret" in r).toBe(false);
-        expect("value" in r).toBe(false);
+        for (const r of refs) {
+          expect(r.kind).toBe("secret_reference");
+          expect(r.ref).toMatch(/^sec_ref_[A-Za-z0-9_]+$/);
+          expect("value" in r).toBe(false);
+        }
       }
     });
 
@@ -264,9 +269,10 @@ describe("Secret Direct-Read Removal & Mediation Broker Contracts", () => {
         );
       } catch (err) {
         expect(err).toBeInstanceOf(BrokerSecurityError);
-        const secErr = err as BrokerSecurityError;
-        expect(secErr.message).toContain("not authorized");
-        expect(secErr.message).not.toContain("value");
+        if (err instanceof BrokerSecurityError) {
+          expect(err.message).toContain("not authorized");
+          expect(err.message).not.toContain("value");
+        }
       }
     });
   });

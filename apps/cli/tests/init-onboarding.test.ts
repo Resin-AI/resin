@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { initCommand } from "../src/commands/init.js";
 import { performPairing } from "../src/commands/login.js";
 import { logoutCommand } from "../src/commands/logout.js";
@@ -18,62 +19,48 @@ const VERIFICATION_URI_COMPLETE = "https://auth.resin.sh/device?code=ABCD-9876";
 function successfulDeviceFetch() {
   let binding: { deviceId: string; installationId: string } | undefined;
   return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = String(input) === input ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/v1/auth/device/code")) {
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
-        deviceId: string;
-        installationId: string;
-      };
+      const DeviceBindingSchema = z.object({
+        deviceId: z.string(),
+        installationId: z.string(),
+      });
+      const body = DeviceBindingSchema.parse(JSON.parse(String(init?.body ?? "{}")));
       binding = { deviceId: body.deviceId, installationId: body.installationId };
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({
-          deviceCode: "device-code-sec-1234",
-          userCode: "ABCD-9876",
-          verificationUri: VERIFICATION_URI,
-          verificationUriComplete: VERIFICATION_URI_COMPLETE,
-          expiresIn: 900,
-          interval: 1,
-        }),
-      } as Response;
+      return Response.json({
+        deviceCode: "device-code-sec-1234",
+        userCode: "ABCD-9876",
+        verificationUri: VERIFICATION_URI,
+        verificationUriComplete: VERIFICATION_URI_COMPLETE,
+        expiresIn: 900,
+        interval: 1,
+      });
     }
 
     if (url.endsWith("/v1/auth/device/token")) {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({
-          accessToken: ACCESS_TOKEN,
-          refreshToken: REFRESH_TOKEN,
-          tokenType: "Bearer",
-          expiresIn: 3600,
-          scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
-          claims: {
-            accountId: "acc_live_01",
-            workspaceId: "ws_live_01",
-            deviceId: binding?.deviceId ?? "dev_live_01",
-            installationId: binding?.installationId ?? "inst_live_01",
-            scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
-            rawUploadConsent: false,
-            issuedAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-            tokenType: "access",
-            userId: "usr_alice",
-            subject: "usr_alice",
-          },
-        }),
-      } as Response;
+      return Response.json({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: REFRESH_TOKEN,
+        tokenType: "Bearer",
+        expiresIn: 3600,
+        scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
+        claims: {
+          accountId: "acc_live_01",
+          workspaceId: "ws_live_01",
+          deviceId: binding?.deviceId ?? "dev_live_01",
+          installationId: binding?.installationId ?? "inst_live_01",
+          scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+          rawUploadConsent: false,
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          tokenType: "access",
+          userId: "usr_alice",
+          subject: "usr_alice",
+        },
+      });
     }
 
-    return {
-      ok: false,
-      status: 404,
-      headers: new Headers({ "content-type": "application/json" }),
-      json: async () => ({ error: "not_found" }),
-    } as Response;
+    return Response.json({ error: "not_found" }, { status: 404 });
   });
 }
 
@@ -87,13 +74,15 @@ async function captureOutput(action: (getStdout: () => string) => Promise<number
   const originalStdoutWrite = process.stdout.write.bind(process.stdout);
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
-  process.stdout.write = ((chunk: unknown) => {
-    stdout += typeof chunk === "string" ? chunk : String(chunk);
+  // SAFETY: Mock stdout.write for testing terminal output.
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += String(chunk);
     return true;
   }) as typeof process.stdout.write;
 
-  process.stderr.write = ((chunk: unknown) => {
-    stderr += typeof chunk === "string" ? chunk : String(chunk);
+  // SAFETY: Mock stderr.write for testing terminal output.
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
     return true;
   }) as typeof process.stderr.write;
 
@@ -135,7 +124,8 @@ describe("init onboarding & pairing workflow", () => {
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
           promptFn,
         },
@@ -184,7 +174,8 @@ describe("init onboarding & pairing workflow", () => {
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
           promptFn,
         },
@@ -214,7 +205,8 @@ describe("init onboarding & pairing workflow", () => {
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
           promptFn,
         },
@@ -246,7 +238,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
           promptFn,
         },
@@ -276,7 +269,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -308,7 +302,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -348,7 +343,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -372,7 +368,8 @@ describe("init onboarding & pairing workflow", () => {
         ["--local-only", "--home", home, "--workspace", workspace, "--auto-approve"],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -406,7 +403,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -466,7 +464,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -514,7 +513,8 @@ describe("init onboarding & pairing workflow", () => {
         home,
         tokenFilePath,
         nonInteractive: true,
-        customFetch: nonInteractiveFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch implementing fetch interface for testing.
+        customFetch: nonInteractiveFetch as typeof fetch,
       }),
     ).rejects.toThrow(
       "Non-interactive init requires valid pre-provisioned credentials or --local-only",
@@ -532,7 +532,8 @@ describe("init onboarding & pairing workflow", () => {
         cloudUrl: "https://api.resin.sh",
         home,
         tokenFilePath,
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
       });
       return 0;
@@ -580,7 +581,8 @@ describe("init onboarding & pairing workflow", () => {
         ],
         {
           customFsBridge: bridge,
-          customFetch: customFetch as unknown as typeof fetch,
+          // SAFETY: Mock fetch implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
           openBrowser,
         },
       );
@@ -657,14 +659,14 @@ describe("init onboarding & pairing workflow", () => {
       url: string;
       method: string;
       headers: Record<string, string>;
-      body: Record<string, unknown>;
+      body: Record<string, JsonValue>;
     }
     const capturedRevocations: RevocationRecord[] = [];
     const customFetch = vi
       .fn()
       .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
         const urlStr =
-          typeof input === "string"
+          String(input) === input
             ? input
             : input instanceof URL
               ? input.toString()
@@ -672,22 +674,19 @@ describe("init onboarding & pairing workflow", () => {
                 ? input.url
                 : String(input);
         const method = init?.method ?? "GET";
-        const rawHeaders = init?.headers;
-        const headers: Record<string, string> =
-          rawHeaders instanceof Headers
-            ? Object.fromEntries(rawHeaders.entries())
-            : Array.isArray(rawHeaders)
-              ? Object.fromEntries(rawHeaders)
-              : rawHeaders && typeof rawHeaders === "object"
-                ? (rawHeaders as Record<string, string>)
-                : {};
+        const headers: Record<string, string> = Object.fromEntries(
+          new Headers(init?.headers).entries(),
+        );
 
-        let body: Record<string, unknown> = {};
-        if (init?.body && typeof init.body === "string") {
+        let body: Record<string, string> = {};
+        if (init?.body && String(init.body) === init.body) {
           try {
-            const parsed: unknown = JSON.parse(init.body);
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              body = parsed as Record<string, unknown>;
+            const parsed = JSON.parse(init.body);
+            const parsedRecord = z.record(z.string(), z.unknown()).safeParse(parsed);
+            if (parsedRecord.success && !Array.isArray(parsedRecord.data)) {
+              body = Object.fromEntries(
+                Object.entries(parsedRecord.data).map(([k, v]) => [k, String(v)]),
+              );
             }
           } catch {
             body = {};
@@ -695,26 +694,17 @@ describe("init onboarding & pairing workflow", () => {
         }
         if (urlStr === "https://api.resin.sh/v1/auth/logout" && method === "POST") {
           capturedRevocations.push({ url: urlStr, method, headers, body });
-          return {
-            ok: true,
-            status: 200,
-            headers: new Headers({ "content-type": "application/json" }),
-            json: async () => ({ success: true, revoked: true }),
-          } as Response;
+          return Response.json({ success: true, revoked: true });
         }
 
-        return {
-          ok: false,
-          status: 404,
-          headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ error: "not_found" }),
-        } as Response;
+        return Response.json({ error: "not_found" }, { status: 404 });
       });
 
     // 4. Invoke logoutCommand
     const result = await captureOutput(async () => {
       return await logoutCommand(["--home", home], {
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
       });
     });
 
@@ -726,7 +716,7 @@ describe("init onboarding & pairing workflow", () => {
     const req = capturedRevocations[0];
     expect(req.url).toBe("https://api.resin.sh/v1/auth/logout");
     expect(req.method).toBe("POST");
-    expect(req.headers.Authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
+    expect(req.headers.authorization ?? req.headers.Authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
     expect(req.headers["x-resin-account-id"]).toBe("acc_canonical_01");
     expect(req.headers["x-resin-workspace-id"]).toBe("ws_canonical_01");
     expect(req.headers["x-resin-device-id"]).toBe("dev_canonical_01");

@@ -70,10 +70,11 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("message");
-    expect((projected as NormalizedMessageEvent).content).toBe("");
-    expect((projected as NormalizedMessageEvent).contentParts).toBeUndefined();
-    expect((projected as NormalizedMessageEvent).role).toBe("user");
-    expect((projected as NormalizedMessageEvent).model).toBe("claude-3-5-sonnet");
+    if (projected.type !== "message") throw new Error("Expected message event");
+    expect(projected.content).toBe("");
+    expect(projected.contentParts).toBeUndefined();
+    expect(projected.role).toBe("user");
+    expect(projected.model).toBe("claude-3-5-sonnet");
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("content");
@@ -99,11 +100,12 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("model_reasoning");
-    expect((projected as NormalizedModelReasoningEvent).reasoningContent).toBe("");
-    expect((projected as NormalizedModelReasoningEvent).signature).toBeUndefined();
-    expect((projected as NormalizedModelReasoningEvent).tokenCount).toBe(280);
-    expect((projected as NormalizedModelReasoningEvent).model).toBe("claude-3-7-sonnet");
-    expect((projected as NormalizedModelReasoningEvent).durationMs).toBe(850);
+    if (projected.type !== "model_reasoning") throw new Error("Expected model_reasoning event");
+    expect(projected.reasoningContent).toBe("");
+    expect(projected.signature).toBeUndefined();
+    expect(projected.tokenCount).toBe(280);
+    expect(projected.model).toBe("claude-3-7-sonnet");
+    expect(projected.durationMs).toBe(850);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("reasoningContent");
@@ -136,7 +138,8 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("tool_discovery");
-    const tools = (projected as NormalizedToolDiscoveryEvent).tools;
+    if (projected.type !== "tool_discovery") throw new Error("Expected tool_discovery event");
+    const tools = projected.tools;
     expect(tools.length).toBe(2);
     expect(tools[0].name).toBe("bash");
     expect(tools[0].description).toBeUndefined();
@@ -171,11 +174,12 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("tool_call");
-    expect((projected as NormalizedToolCallEvent).callId).toBe("call_abc_123");
-    expect((projected as NormalizedToolCallEvent).toolName).toBe("curl");
-    expect((projected as NormalizedToolCallEvent).parameters).toEqual({});
-    expect((projected as NormalizedToolCallEvent).candidateRef).toBe("cand_1");
-    expect((projected as NormalizedToolCallEvent).isShadow).toBe(false);
+    if (projected.type !== "tool_call") throw new Error("Expected tool_call event");
+    expect(projected.callId).toBe("call_abc_123");
+    expect(projected.toolName).toBe("curl");
+    expect(projected.parameters).toEqual({});
+    expect(projected.candidateRef).toBe("cand_1");
+    expect(projected.isShadow).toBe(false);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("parameters");
@@ -202,12 +206,13 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("tool_result");
-    expect((projected as NormalizedToolResultEvent).callId).toBe("call_abc_123");
-    expect((projected as NormalizedToolResultEvent).toolName).toBe("curl");
-    expect((projected as NormalizedToolResultEvent).result).toBeUndefined();
-    expect((projected as NormalizedToolResultEvent).isError).toBe(false);
-    expect((projected as NormalizedToolResultEvent).executionDurationMs).toBe(310);
-    expect((projected as NormalizedToolResultEvent).outputSizeBytes).toBe(4096);
+    if (projected.type !== "tool_result") throw new Error("Expected tool_result event");
+    expect(projected.callId).toBe("call_abc_123");
+    expect(projected.toolName).toBe("curl");
+    expect(projected.result).toBeUndefined();
+    expect(projected.isError).toBe(false);
+    expect(projected.executionDurationMs).toBe(310);
+    expect(projected.outputSizeBytes).toBe(4096);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("result");
@@ -231,13 +236,14 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("command_exec");
-    expect((projected as NormalizedCommandExecEvent).command).toBe("");
-    expect((projected as NormalizedCommandExecEvent).args).toEqual([]);
-    expect((projected as NormalizedCommandExecEvent).cwd).toBeUndefined();
-    expect((projected as NormalizedCommandExecEvent).stdout).toBeUndefined();
-    expect((projected as NormalizedCommandExecEvent).stderr).toBeUndefined();
-    expect((projected as NormalizedCommandExecEvent).exitCode).toBe(0);
-    expect((projected as NormalizedCommandExecEvent).durationMs).toBe(1250);
+    if (projected.type !== "command_exec") throw new Error("Expected command_exec event");
+    expect(projected.command).toBe("");
+    expect(projected.args).toEqual([]);
+    expect(projected.cwd).toBeUndefined();
+    expect(projected.stdout).toBeUndefined();
+    expect(projected.stderr).toBeUndefined();
+    expect(projected.exitCode).toBe(0);
+    expect(projected.durationMs).toBe(1250);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("command");
@@ -263,12 +269,13 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("file_edit");
-    expect((projected as NormalizedFileEditEvent).filePath).toBe("src/auth/keys.ts");
-    expect((projected as NormalizedFileEditEvent).operation).toBe("update");
-    expect((projected as NormalizedFileEditEvent).patch).toBeUndefined();
-    expect((projected as NormalizedFileEditEvent).beforeHash).toBe(original.beforeHash);
-    expect((projected as NormalizedFileEditEvent).afterHash).toBe(original.afterHash);
-    expect((projected as NormalizedFileEditEvent).diffStats).toEqual(original.diffStats);
+    if (projected.type !== "file_edit") throw new Error("Expected file_edit event");
+    expect(projected.filePath).toBe("src/auth/keys.ts");
+    expect(projected.operation).toBe("update");
+    expect(projected.patch).toBeUndefined();
+    expect(projected.beforeHash).toBe(original.beforeHash);
+    expect(projected.afterHash).toBe(original.afterHash);
+    expect(projected.diffStats).toEqual(original.diffStats);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("patch");
@@ -294,11 +301,12 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("error");
-    expect((projected as NormalizedErrorEvent).errorType).toBe("ConnectionTimeoutError");
-    expect((projected as NormalizedErrorEvent).message).toBe("");
-    expect((projected as NormalizedErrorEvent).stack).toBeUndefined();
-    expect((projected as NormalizedErrorEvent).details).toBeUndefined();
-    expect((projected as NormalizedErrorEvent).recoverable).toBe(true);
+    if (projected.type !== "error") throw new Error("Expected error event");
+    expect(projected.errorType).toBe("ConnectionTimeoutError");
+    expect(projected.message).toBe("");
+    expect(projected.stack).toBeUndefined();
+    expect(projected.details).toBeUndefined();
+    expect(projected.recoverable).toBe(true);
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("message");
@@ -322,10 +330,11 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("compaction");
-    expect((projected as NormalizedCompactionEvent).triggerReason).toBe("context_limit");
-    expect((projected as NormalizedCompactionEvent).tokensBefore).toBe(180000);
-    expect((projected as NormalizedCompactionEvent).tokensAfter).toBe(45000);
-    expect((projected as NormalizedCompactionEvent).preservedContextSummary).toBeUndefined();
+    if (projected.type !== "compaction") throw new Error("Expected compaction event");
+    expect(projected.triggerReason).toBe("context_limit");
+    expect(projected.tokensBefore).toBe(180000);
+    expect(projected.tokensAfter).toBe(45000);
+    expect(projected.preservedContextSummary).toBeUndefined();
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("preservedContextSummary");
@@ -346,13 +355,12 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("branch_fork");
-    expect((projected as NormalizedBranchForkEvent).sourceSessionId).toBe("sess_parent_1");
-    expect((projected as NormalizedBranchForkEvent).branchPointEventId).toBe(
-      "evt_0000000000000005",
-    );
-    expect((projected as NormalizedBranchForkEvent).forkReason).toBeUndefined();
-    expect((projected as NormalizedBranchForkEvent).branchName).toBe("experiment-alpha");
-    expect(projected.redaction.isRedacted).toBe(true);
+    if (projected.type === "branch_fork") {
+      expect(projected.sourceSessionId).toBe("sess_parent_1");
+      expect(projected.branchPointEventId).toBe("evt_0000000000000005");
+      expect(projected.branchName).toBe("experiment-alpha");
+      expect(projected.forkReason).toBeUndefined();
+    }
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("forkReason");
 
@@ -373,11 +381,13 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("subagent_lifecycle");
-    expect((projected as NormalizedSubagentLifecycleEvent).subagentId).toBe("sub_agent_99");
-    expect((projected as NormalizedSubagentLifecycleEvent).lifecycleType).toBe("spawn");
-    expect((projected as NormalizedSubagentLifecycleEvent).parentId).toBe("sub_agent_root");
-    expect((projected as NormalizedSubagentLifecycleEvent).role).toBe("code_reviewer");
-    expect((projected as NormalizedSubagentLifecycleEvent).reason).toBeUndefined();
+    if (projected.type !== "subagent_lifecycle")
+      throw new Error("Expected subagent_lifecycle event");
+    expect(projected.subagentId).toBe("sub_agent_99");
+    expect(projected.lifecycleType).toBe("spawn");
+    expect(projected.parentId).toBe("sub_agent_root");
+    expect(projected.role).toBe("code_reviewer");
+    expect(projected.reason).toBeUndefined();
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("reason");
@@ -398,9 +408,10 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("session_lifecycle");
-    expect((projected as NormalizedSessionLifecycleEvent).lifecycleType).toBe("start");
-    expect((projected as NormalizedSessionLifecycleEvent).harnessName).toBe("claude-code");
-    expect((projected as NormalizedSessionLifecycleEvent).workspaceId).toBe("ws_my_workspace");
+    if (projected.type !== "session_lifecycle") throw new Error("Expected session_lifecycle event");
+    expect(projected.lifecycleType).toBe("start");
+    expect(projected.harnessName).toBe("claude-code");
+    expect(projected.workspaceId).toBe("ws_my_workspace");
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
 
@@ -421,10 +432,10 @@ describe("projectEventToMetadataOnly", () => {
     const projected = projectEventToMetadataOnly(original);
 
     expect(projected.type).toBe("unknown_passthrough");
-    expect((projected as NormalizedUnknownPassthroughEvent).rawEventType).toBe(
-      "custom_harness_telemetry",
-    );
-    expect((projected as NormalizedUnknownPassthroughEvent).rawPayload).toEqual({});
+    if (projected.type === "unknown_passthrough") {
+      expect(projected.rawEventType).toBe("custom_harness_telemetry");
+      expect(projected.rawPayload).toEqual({});
+    }
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
     expect(projected.redaction.redactedFields).toContain("rawPayload");

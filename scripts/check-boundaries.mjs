@@ -111,7 +111,11 @@ export function loadManifest(rootDir = process.cwd(), manifestPath = undefined) 
 export function validateManifest(manifest, allPackages, rootDir) {
   const violations = [];
 
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+  if (
+    !manifest ||
+    Array.isArray(manifest) ||
+    Object.prototype.toString.call(manifest) !== "[object Object]"
+  ) {
     violations.push({
       file: MANIFEST_FILENAME,
       line: 1,
@@ -132,12 +136,12 @@ export function validateManifest(manifest, allPackages, rootDir) {
     } else {
       const seen = new Set();
       for (const entry of manifest[field]) {
-        if (typeof entry !== "string") {
+        if (Object.prototype.toString.call(entry) !== "[object String]") {
           violations.push({
             file: MANIFEST_FILENAME,
             line: 1,
             rule: "invalid-manifest-structure",
-            message: `Manifest array "${field}" must contain only strings, received ${typeof entry}.`,
+            message: `Manifest array "${field}" must contain only strings, received ${entry?.constructor?.name ?? entry}.`,
           });
         } else if (seen.has(entry)) {
           violations.push({
@@ -278,10 +282,10 @@ export function extractImports(content) {
 export function isValidExportMatch(importPath, pkgName, exports) {
   if (!exports) return true;
   if (importPath === pkgName) {
-    return "." in exports || typeof exports === "string";
+    return "." in exports || Object.prototype.toString.call(exports) === "[object String]";
   }
 
-  if (typeof exports === "string") {
+  if (Object.prototype.toString.call(exports) === "[object String]") {
     return false;
   }
 

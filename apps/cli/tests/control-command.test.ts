@@ -61,6 +61,7 @@ describe("resin control", () => {
           { status: 200 },
         );
       }
+      // SAFETY: Request body JSON parsed in test mock matches expected mutation payload.
       const mutation = JSON.parse(String(init?.body)) as {
         target: { scope: "device"; deviceId: string };
         desiredState: { configuration: { logLevel: string } };

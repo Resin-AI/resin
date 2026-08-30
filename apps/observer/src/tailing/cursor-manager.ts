@@ -1,6 +1,7 @@
 import type { SyncCursor } from "@resin/contracts";
 import type { LocalDatabaseConnection, LocalStateStore, SessionRepository } from "@resin/db";
 import { type SourceCursor, SourceCursorSchema } from "@resin/harness-contracts";
+import { z } from "zod";
 
 /**
  * Options for committing a checkpoint.
@@ -47,11 +48,12 @@ export class SourceCursorManager {
       this.sessionRepo = options.sessionRepository;
     } else if (options.store) {
       if ("sessions" in options.store) {
-        // LocalStateStore
-        this.sessionRepo = (options.store as LocalStateStore).sessions;
-        this.conn = (options.store as LocalStateStore).conn;
+        // SAFETY: store with sessions property conforms to LocalStateStore.
+        const store = options.store as LocalStateStore;
+        this.sessionRepo = store.sessions;
+        this.conn = store.conn;
       } else {
-        // LocalDatabaseConnection
+        // SAFETY: store without sessions conforms directly to LocalDatabaseConnection.
         this.conn = options.store as LocalDatabaseConnection;
       }
     }
@@ -73,13 +75,15 @@ export class SourceCursorManager {
     fallbackSeq?: number,
   ): SourceCursor | null {
     try {
-      const parsed = JSON.parse(syncToken) as Record<string, unknown>;
+      const parsed = JSON.parse(syncToken);
+      const parsedObj = z.record(z.unknown()).safeParse(parsed);
+      const record = parsedObj.success ? parsedObj.data : {};
       return SourceCursorSchema.parse({
-        offset: parsed.offset ?? 0,
-        line: parsed.line ?? 1,
-        sequence: parsed.sequence ?? fallbackSeq ?? 0,
-        checkpoint: parsed.checkpoint ?? undefined,
-        timestamp: parsed.timestamp ?? fallbackTimestamp ?? new Date().toISOString(),
+        offset: record.offset ?? 0,
+        line: record.line ?? 1,
+        sequence: record.sequence ?? fallbackSeq ?? 0,
+        checkpoint: record.checkpoint ?? undefined,
+        timestamp: record.timestamp ?? fallbackTimestamp ?? new Date().toISOString(),
       });
     } catch {
       return null;

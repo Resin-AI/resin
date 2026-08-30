@@ -26,6 +26,12 @@ export interface DeadLetterRecord {
   retryAttempts: number;
 }
 
+export interface EnqueueBatchResult {
+  accepted: number;
+  rejected: number;
+  backpressured: boolean;
+}
+
 /**
  * Metrics describing the state of a BoundedRecordQueue.
  */
@@ -195,11 +201,7 @@ export class BoundedRecordQueue extends EventEmitter {
   /**
    * Enqueues a batch of records. Returns count of accepted vs rejected records.
    */
-  enqueueBatch(records: RawHarnessRecord[]): {
-    accepted: number;
-    rejected: number;
-    backpressured: boolean;
-  } {
+  enqueueBatch(records: RawHarnessRecord[]): EnqueueBatchResult {
     let accepted = 0;
     let rejected = 0;
 
@@ -443,6 +445,7 @@ export class BoundedRecordQueue extends EventEmitter {
     try {
       stat = fs.lstatSync(pendingPath);
     } catch (error) {
+      // SAFETY: fs.lstatSync error exposes standard Node.js ErrnoException code.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return;
       }
@@ -457,6 +460,7 @@ export class BoundedRecordQueue extends EventEmitter {
     }
 
     try {
+      // SAFETY: Reads and parses pending serialized JSON state from disk.
       const parsed = JSON.parse(fs.readFileSync(pendingPath, "utf8")) as {
         version?: unknown;
         sessionId?: unknown;
@@ -609,8 +613,8 @@ export class BoundedRecordQueue extends EventEmitter {
       this.persistenceHealthy = true;
       return true;
     } catch (error) {
+      // SAFETY: fs.unlinkSync error exposes standard Node.js ErrnoException code.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.pendingFileIdentity = null;
         return true;
       }
       this.markPersistenceFailure("delete_failed");

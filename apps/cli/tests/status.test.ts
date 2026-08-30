@@ -1,6 +1,21 @@
 import path from "node:path";
 import process from "node:process";
+import * as claudeAdapter from "@resin/adapter-claude-code";
+import * as codexAdapter from "@resin/adapter-codex";
+import * as ompAdapter from "@resin/adapter-omp";
+import { type DaemonHealthReport, IpcClient } from "@resin/observer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  STATUS_SCHEMA_VERSION,
+  collectStatus,
+  formatStatusForTerminal,
+  statusCommand,
+} from "../src/commands/status.js";
+import * as serviceManagerModule from "../src/service/manager.js";
+
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
 
 const runtime = vi.hoisted(() => ({
   service: {
@@ -11,6 +26,7 @@ const runtime = vi.hoisted(() => ({
     pid: 4242,
   },
   serviceError: false,
+  // SAFETY: Typed union for test mock runtime state.
   ipcMode: "healthy" as "healthy" | "timeout" | "protocol_error",
   health: {
     status: "fully-ready",
@@ -29,7 +45,7 @@ const runtime = vi.hoisted(() => ({
       captureActive: true,
       failClosed: false,
     },
-  } as Record<string, unknown>,
+  },
   installedHarnesses: {
     "claude-code": true,
     "codex-cli": true,
@@ -37,77 +53,54 @@ const runtime = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../src/service/manager.js", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    createUserServiceManager: () => ({
-      platform: "systemd",
-      getUnitPath: () => "/private/service/path",
-      status: async () => {
-        if (runtime.serviceError) throw new Error("private service failure");
-        return { ...runtime.service };
-      },
-    }),
-  };
-});
+vi.spyOn(serviceManagerModule, "createUserServiceManager").mockImplementation(() => ({
+  platform: "systemd",
+  getUnitPath: () => "/private/service/path",
+  status: async () => {
+    if (runtime.serviceError) throw new Error("private service failure");
+    return { ...runtime.service };
+  },
+  install: async () => undefined,
+  uninstall: async () => undefined,
+  start: async () => undefined,
+  stop: async () => undefined,
+  restart: async () => undefined,
+  enable: async () => undefined,
+  disable: async () => undefined,
+  isActive: async () => runtime.service.active,
+  isEnabled: async () => runtime.service.enabled,
+  isInstalled: async () => runtime.service.installed,
+}));
 
-vi.mock("@resin/observer", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  class MockIpcClient {
-    async connect() {
-      if (runtime.ipcMode === "timeout") {
-        throw Object.assign(new Error("timed out with IPC_ERROR_SECRET"), { code: "ETIMEDOUT" });
-      }
-    }
-
-    async ping() {
-      return { pong: runtime.ipcMode !== "protocol_error", timestamp: Date.now() };
-    }
-
-    async getHealth() {
-      return runtime.health;
-    }
-
-    async close() {}
+vi.spyOn(IpcClient.prototype, "connect").mockImplementation(async () => {
+  if (runtime.ipcMode === "timeout") {
+    throw Object.assign(new Error("timed out with IPC_ERROR_SECRET"), { code: "ETIMEDOUT" });
   }
-  return { ...actual, IpcClient: MockIpcClient };
 });
 
-vi.mock("@resin/adapter-claude-code", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    probeClaudeInstallation: async () => ({
-      isInstalled: runtime.installedHarnesses["claude-code"],
-    }),
-  };
+vi.spyOn(IpcClient.prototype, "ping").mockImplementation(async () => ({
+  pong: runtime.ipcMode !== "protocol_error",
+  timestamp: Date.now(),
+}));
+
+vi.spyOn(IpcClient.prototype, "getHealth").mockImplementation(async () => {
+  // SAFETY: Mock runtime health object conforms to DaemonHealthReport for test fixture.
+  return runtime.health as DaemonHealthReport;
 });
 
-vi.mock("@resin/adapter-codex", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    probeCodexInstallation: async () => ({
-      isInstalled: runtime.installedHarnesses["codex-cli"],
-    }),
-  };
-});
+vi.spyOn(IpcClient.prototype, "close").mockImplementation(async () => {});
 
-vi.mock("@resin/adapter-omp", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    probeOmpInstallation: async () => ({ isInstalled: runtime.installedHarnesses.omp }),
-  };
-});
+vi.spyOn(claudeAdapter, "probeClaudeInstallation").mockImplementation(async () => ({
+  isInstalled: runtime.installedHarnesses["claude-code"],
+}));
 
-import {
-  STATUS_SCHEMA_VERSION,
-  collectStatus,
-  formatStatusForTerminal,
-  statusCommand,
-} from "../src/commands/status.js";
+vi.spyOn(codexAdapter, "probeCodexInstallation").mockImplementation(async () => ({
+  isInstalled: runtime.installedHarnesses["codex-cli"],
+}));
+
+vi.spyOn(ompAdapter, "probeOmpInstallation").mockImplementation(async () => ({
+  isInstalled: runtime.installedHarnesses.omp,
+}));
 
 const NOW = 1_800_000_000_000;
 const HOME = "/home/status-user";
@@ -145,7 +138,7 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}, failReads
   };
 }
 
-function validCredentials(overrides: Record<string, unknown> = {}) {
+function validCredentials(overrides: JsonObject = {}) {
   return {
     cloudUrl: "https://api.resin.sh",
     accessToken: "ACCESS_TOKEN_SECRET",
@@ -170,7 +163,7 @@ function validCredentials(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function updateSnapshot(overrides: Record<string, unknown> = {}) {
+function updateSnapshot(overrides: JsonObject = {}) {
   return {
     schemaVersion: 1,
     channel: "stable",
@@ -186,7 +179,7 @@ function updateSnapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function recoverySnapshot(overrides: Record<string, unknown> = {}) {
+function recoverySnapshot(overrides: JsonObject = {}) {
   return {
     version: 1,
     status: "HEALTHY",
@@ -196,7 +189,7 @@ function recoverySnapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function harnessSnapshot(overrides: Record<string, unknown> = {}) {
+function harnessSnapshot(overrides: JsonObject = {}) {
   return {
     format: "resin-harness-health/v1",
     checkedAt: "2027-01-03T00:00:00.000Z",
@@ -542,7 +535,8 @@ describe("unified status schema", () => {
     runtime.health = {};
     const expired = validCredentials({
       claims: {
-        ...(validCredentials().claims as Record<string, unknown>),
+        // SAFETY: Spreading valid claims for test credential construction.
+        ...validCredentials().claims,
         rawUploadConsent: false,
         expiresAt: "2000-01-01T00:00:00.000Z",
       },
@@ -704,7 +698,8 @@ describe("unified status schema", () => {
         env: ENV,
         now: () => NOW,
         fsBridge: createMockFsBridge(files),
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Vitest mock function implementing fetch interface.
+        customFetch: customFetch as typeof fetch,
       });
       const result = JSON.parse(chunks.join(""));
       expect(exitCode).toBe(0);

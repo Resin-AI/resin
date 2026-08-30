@@ -31,6 +31,23 @@ function makeTestIdentity(overrides: Partial<CloudRequestIdentity> = {}): CloudR
   };
 }
 
+function makeFetch(
+  fn: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  // SAFETY: Test mock wrapper conforms to global fetch function signature.
+  return fn as typeof fetch;
+}
+
+function jsonResponse<T>(
+  data: T,
+  init: { status?: number; headers?: Record<string, string> } = {},
+): Response {
+  return new Response(JSON.stringify(data), {
+    status: init.status ?? 200,
+    headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+  });
+}
+
 describe("CloudJobClient & Helpers", () => {
   it("normalizes sha256 digests correctly", () => {
     expect(normalizeSha256Digest(undefined)).toBeUndefined();
@@ -61,20 +78,19 @@ describe("CloudJobClient & Helpers", () => {
 
   it("fetches job status with authentication headers and returns validated response", async () => {
     const identity = makeTestIdentity();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({
-        jobId: "job-100",
-        status: "running",
-        progress: 45,
-      }),
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          jobId: "job-100",
+          status: "running",
+          progress: 45,
+        }),
+      ),
+    );
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const status = await client.getJobStatus("/v1/jobs/job-100");
@@ -104,28 +120,18 @@ describe("CloudJobClient & Helpers", () => {
       callCount++;
       const authHeader = init?.headers?.Authorization;
       if (authHeader === "Bearer expired-token") {
-        return {
-          ok: false,
-          status: 401,
-          headers: new Headers(),
-          text: async () => "Unauthorized",
-        } as unknown as Response;
+        return new Response("Unauthorized", { status: 401 });
       }
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        json: async () => ({
-          jobId: "job-101",
-          status: "completed",
-          downloadUrl: "https://s3.amazonaws.com/results/101.json",
-        }),
-      } as unknown as Response;
+      return jsonResponse({
+        jobId: "job-101",
+        status: "completed",
+        downloadUrl: "https://s3.amazonaws.com/results/101.json",
+      });
     });
 
     const client = new CloudJobClient({
       identityProvider: identityProviderMock,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const status = await client.getJobStatus("job-101");
@@ -136,84 +142,93 @@ describe("CloudJobClient & Helpers", () => {
 
   it("throws ProtocolError(unauthorized) when 401 persists after forced token refresh", async () => {
     const identity = makeTestIdentity();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 401,
-      headers: new Headers(),
-      text: async () => "Unauthorized",
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockImplementation(async () => new Response("Unauthorized", { status: 401 })),
+    );
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
-    await expect(client.getJobStatus("job-102")).rejects.toSatisfy(
-      (err) => err instanceof ProtocolError && err.code === "unauthorized" && err.status === 401,
-    );
+    try {
+      await client.getJobStatus("job-102");
+      expect.unreachable("Should have thrown ProtocolError");
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(ProtocolError);
+      // SAFETY: err is verified as ProtocolError by the preceding assertion.
+      const protoErr = err as ProtocolError;
+      expect(protoErr.code).toBe("unauthorized");
+      expect(protoErr.status).toBe(401);
+    }
   });
 
   it("throws ProtocolError(not_found) on 404 and RateLimitedError on 429", async () => {
     const identity = makeTestIdentity();
-    const notFoundFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 404,
-      headers: new Headers(),
-    } as unknown as Response);
+    const notFoundFetch = makeFetch(
+      vi.fn().mockImplementation(async () => new Response("Not Found", { status: 404 })),
+    );
 
     const client404 = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: notFoundFetch as unknown as typeof fetch,
+      fetchImpl: notFoundFetch,
     });
-    await expect(client404.getJobStatus("job-missing")).rejects.toSatisfy(
-      (err) => err instanceof ProtocolError && err.code === "not_found" && err.status === 404,
+    try {
+      await client404.getJobStatus("job-missing");
+      expect.unreachable("Should have thrown ProtocolError");
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(ProtocolError);
+      // SAFETY: err is verified as ProtocolError by the preceding assertion.
+      const protoErr = err as ProtocolError;
+      expect(protoErr.code).toBe("not_found");
+      expect(protoErr.status).toBe(404);
+    }
+    const rateLimitFetch = makeFetch(
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }),
+        ),
     );
-
-    const rateLimitFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 429,
-      headers: new Headers({ "retry-after": "10" }),
-    } as unknown as Response);
 
     const client429 = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: rateLimitFetch as unknown as typeof fetch,
+      fetchImpl: rateLimitFetch,
     });
     await expect(client429.getJobStatus("job-limited")).rejects.toThrow(RateLimitedError);
   });
 
   it("throws JobMalformedResponseError when response JSON or schema is invalid", async () => {
     const identity = makeTestIdentity();
-    const invalidJsonFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => {
-        throw new Error("Syntax error in JSON");
-      },
-    } as unknown as Response);
+    const invalidJsonFetch = makeFetch(
+      vi.fn().mockResolvedValue(
+        new Response("INVALID_JSON{", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
 
     const clientBadJson = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: invalidJsonFetch as unknown as typeof fetch,
+      fetchImpl: invalidJsonFetch,
     });
     await expect(clientBadJson.getJobStatus("job-bad-json")).rejects.toThrow(
       JobMalformedResponseError,
     );
 
-    const invalidSchemaFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({
-        // missing required jobId and invalid status
-        status: "not-a-valid-status",
-      }),
-    } as unknown as Response);
+    const invalidSchemaFetch = makeFetch(
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          // missing required jobId and invalid status
+          status: "not-a-valid-status",
+        }),
+      ),
+    );
 
     const clientBadSchema = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: invalidSchemaFetch as unknown as typeof fetch,
+      fetchImpl: invalidSchemaFetch,
     });
     await expect(clientBadSchema.getJobStatus("job-bad-schema")).rejects.toThrow(
       JobMalformedResponseError,
@@ -230,11 +245,8 @@ describe("CloudJobClient & Helpers", () => {
       if (pollCount === 2) status = "running";
       if (pollCount >= 3) status = "completed";
 
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ "retry-after": "0.01" }), // 10ms
-        json: async () => ({
+      return jsonResponse(
+        {
           jobId: "job-poll-1",
           status,
           downloadUrl:
@@ -243,13 +255,14 @@ describe("CloudJobClient & Helpers", () => {
             status === "completed"
               ? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
               : undefined,
-        }),
-      } as unknown as Response;
+        },
+        { headers: { "retry-after": "0.01" } },
+      );
     });
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
       defaultPollOptions: {
         initialIntervalMs: 10,
         maxIntervalMs: 50,
@@ -263,22 +276,21 @@ describe("CloudJobClient & Helpers", () => {
 
   it("throws JobFailedError when polling observes a failed job status", async () => {
     const identity = makeTestIdentity();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({
-        jobId: "job-fail",
-        status: "failed",
-        error: "Memory allocation failed in worker Lambda",
-        errorCode: "terminal",
-        details: { exitCode: 137 },
-      }),
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          jobId: "job-fail",
+          status: "failed",
+          error: "Memory allocation failed in worker Lambda",
+          errorCode: "terminal",
+          details: { exitCode: 137 },
+        }),
+      ),
+    );
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     await expect(client.pollJob("job-fail", { maxWaitMs: 1000 })).rejects.toThrow(JobFailedError);
@@ -286,24 +298,25 @@ describe("CloudJobClient & Helpers", () => {
 
   it("throws JobTimeoutError when polling duration exceeds maxWaitMs", async () => {
     const identity = makeTestIdentity();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({ "retry-after": "0.05" }),
-      json: async () => ({
-        jobId: "job-timeout",
-        status: "running",
-      }),
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockImplementation(async () =>
+        jsonResponse(
+          {
+            jobId: "job-timeout",
+            status: "running",
+          },
+          { headers: { "retry-after": "0.05" } },
+        ),
+      ),
+    );
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
       defaultPollOptions: {
         initialIntervalMs: 50,
       },
     });
-
     await expect(client.pollJob("job-timeout", { maxWaitMs: 100 })).rejects.toThrow(
       JobTimeoutError,
     );
@@ -316,7 +329,7 @@ describe("CloudJobClient & Helpers", () => {
 
     const client = new CloudJobClient({
       identityProvider: async () => identity,
-      fetchImpl: vi.fn() as unknown as typeof fetch,
+      fetchImpl: makeFetch(vi.fn()),
     });
 
     await expect(client.pollJob("job-aborted", { signal: controller.signal })).rejects.toThrow(
@@ -329,18 +342,20 @@ describe("CloudJobClient & Helpers", () => {
     const sampleBytes = new TextEncoder().encode(samplePayload);
     const expectedSha256 = createHash("sha256").update(sampleBytes).digest("hex");
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({
-        "content-type": "application/json",
-        "content-length": String(sampleBytes.byteLength),
-      }),
-      arrayBuffer: async () => sampleBytes.buffer,
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockResolvedValue(
+        new Response(sampleBytes, {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(sampleBytes.byteLength),
+          },
+        }),
+      ),
+    );
 
     const client = new CloudJobClient({
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const downloaded = await client.downloadArtifact(
@@ -363,17 +378,17 @@ describe("CloudJobClient & Helpers", () => {
     const samplePayload = "tampered or corrupted content";
     const sampleBytes = new TextEncoder().encode(samplePayload);
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({
-        "content-type": "application/octet-stream",
-      }),
-      arrayBuffer: async () => sampleBytes.buffer,
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockResolvedValue(
+        new Response(sampleBytes, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+      ),
+    );
 
     const client = new CloudJobClient({
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     await expect(
@@ -384,17 +399,17 @@ describe("CloudJobClient & Helpers", () => {
   });
 
   it("rejects artifact download when declared Content-Length or payload exceeds maxSizeBytes", async () => {
-    const oversizedFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({
-        "content-length": "100000000", // 100MB declared
-      }),
-      arrayBuffer: async () => new ArrayBuffer(10),
-    } as unknown as Response);
+    const oversizedFetch = makeFetch(
+      vi.fn().mockResolvedValue(
+        new Response(new ArrayBuffer(10), {
+          status: 200,
+          headers: { "content-length": "100000000" },
+        }),
+      ),
+    );
 
     const client = new CloudJobClient({
-      fetchImpl: oversizedFetch as unknown as typeof fetch,
+      fetchImpl: oversizedFetch,
     });
 
     await expect(
@@ -412,33 +427,31 @@ describe("CloudJobClient & Helpers", () => {
     const toolPayload = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]); // gzip header bytes
     const toolSha = createHash("sha256").update(toolPayload).digest("hex");
 
-    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
-      if (url.includes("result.json")) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ "content-type": "application/json" }),
-          arrayBuffer: async () => resultBytes.buffer,
-        } as unknown as Response;
-      }
-      if (url.includes("tool.tar.gz")) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ "content-type": "application/gzip" }),
-          arrayBuffer: async () => toolPayload.buffer,
-        } as unknown as Response;
-      }
-      throw new Error(`Unexpected URL: ${url}`);
-    });
+    const fetchMock = makeFetch(
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes("result.json")) {
+          return new Response(resultBytes, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("tool.tar.gz")) {
+          return new Response(toolPayload, {
+            status: 200,
+            headers: { "content-type": "application/gzip" },
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      }),
+    );
 
     const client = new CloudJobClient({
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const statusResponse = {
       jobId: "job-with-tools",
-      status: "completed" as const,
+      status: "completed",
       downloadUrl: "https://s3.amazonaws.com/results/result.json",
       sha256: resultSha,
       tool: {
@@ -464,21 +477,20 @@ describe("CloudJobClient & Helpers", () => {
 describe("CloudObservationClient End-to-End sendBatchAndFetchResult", () => {
   it("handles synchronous batch response without async job fields", async () => {
     const identity = makeTestIdentity();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => ({
-        batchId: "batch-sync-1",
-        status: "accepted",
-        acceptedCount: 5,
-        rejectedCount: 0,
-      }),
-    } as unknown as Response);
+    const fetchMock = makeFetch(
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          batchId: "batch-sync-1",
+          status: "accepted",
+          acceptedCount: 5,
+          rejectedCount: 0,
+        }),
+      ),
+    );
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const result = await client.sendBatchAndFetchResult({
@@ -501,61 +513,54 @@ describe("CloudObservationClient End-to-End sendBatchAndFetchResult", () => {
     const resultSha = createHash("sha256").update(resultBytes).digest("hex");
 
     let pollStep = 0;
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      // 1. Ingestion POST
-      if (url.endsWith("/v1/observations/batch")) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers(),
-          json: async () => ({
+    const fetchMock = makeFetch(
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        // 1. Ingestion POST
+        if (url.endsWith("/v1/observations/batch")) {
+          return jsonResponse({
             batchId: "batch-async-1",
             status: "accepted",
             acceptedCount: 10,
             rejectedCount: 0,
             jobId: "job-async-777",
             statusUrl: "https://api.resin.local/v1/jobs/job-async-777",
-          }),
-        } as unknown as Response;
-      }
+          });
+        }
 
-      // 2. Job Polling GET
-      if (url.includes("/v1/jobs/job-async-777")) {
-        pollStep++;
-        const status = pollStep < 2 ? "running" : "completed";
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ "retry-after": "0.01" }),
-          json: async () => ({
-            jobId: "job-async-777",
-            status,
-            downloadUrl:
-              status === "completed"
-                ? "https://s3.amazonaws.com/results/res-777.json?sig=123"
-                : undefined,
-            sha256: status === "completed" ? resultSha : undefined,
-            sizeBytes: status === "completed" ? resultBytes.byteLength : undefined,
-          }),
-        } as unknown as Response;
-      }
+        // 2. Job Polling GET
+        if (url.includes("/v1/jobs/job-async-777")) {
+          pollStep++;
+          const status = pollStep < 2 ? "running" : "completed";
+          return jsonResponse(
+            {
+              jobId: "job-async-777",
+              status,
+              downloadUrl:
+                status === "completed"
+                  ? "https://s3.amazonaws.com/results/res-777.json?sig=123"
+                  : undefined,
+              sha256: status === "completed" ? resultSha : undefined,
+              sizeBytes: status === "completed" ? resultBytes.byteLength : undefined,
+            },
+            { headers: { "retry-after": "0.01" } },
+          );
+        }
 
-      // 3. Presigned S3 GET
-      if (url.includes("res-777.json")) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ "content-type": "application/json" }),
-          arrayBuffer: async () => resultBytes.buffer,
-        } as unknown as Response;
-      }
+        // 3. Presigned S3 GET
+        if (url.includes("res-777.json")) {
+          return new Response(resultBytes, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
 
-      throw new Error(`Unexpected request: ${url}`);
-    });
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
 
     const client = new CloudObservationClient({
       identityProvider: async () => identity,
-      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchImpl: fetchMock,
     });
 
     const result = await client.sendBatchAndFetchResult({

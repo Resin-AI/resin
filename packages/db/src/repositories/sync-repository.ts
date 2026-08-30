@@ -1,6 +1,19 @@
 import crypto from "node:crypto";
 import { type DeadLetterRecord, DeadLetterRecordSchema, canonicalJson } from "@resin/contracts";
-import type { LocalDatabaseConnection } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
+
+export type SyncMessagePayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SyncMessagePayloadRecord
+  | SyncMessagePayloadValue[];
+
+export interface SyncMessagePayloadRecord {
+  [key: string]: SyncMessagePayloadValue;
+}
 
 /**
  * Outbox message queue item.
@@ -8,7 +21,7 @@ import type { LocalDatabaseConnection } from "../connection.js";
 export interface OutboxItem {
   outboxId: string;
   topic: string;
-  payload: Record<string, unknown>;
+  payload: SyncMessagePayloadRecord;
   status: "pending" | "processing" | "delivered" | "failed";
   retryCount: number;
   lastError?: string;
@@ -24,7 +37,7 @@ export interface InboxItem {
   inboxId: string;
   source: string;
   messageId: string;
-  payload: Record<string, unknown>;
+  payload: SyncMessagePayloadRecord;
   status: "pending" | "processing" | "processed" | "failed" | "ignored";
   receivedAt: string;
   processedAt?: string;
@@ -71,7 +84,7 @@ export class SyncRepository {
   async enqueueOutbox(item: {
     outboxId?: string;
     topic: string;
-    payload: Record<string, unknown>;
+    payload: SyncMessagePayloadRecord;
   }): Promise<string> {
     const id = item.outboxId ?? crypto.randomUUID();
     const now = new Date().toISOString();
@@ -146,7 +159,7 @@ export class SyncRepository {
     inboxId?: string;
     source: string;
     messageId: string;
-    payload: Record<string, unknown>;
+    payload: SyncMessagePayloadRecord;
   }): Promise<string> {
     const id = item.inboxId ?? crypto.randomUUID();
     const now = new Date().toISOString();
@@ -258,7 +271,7 @@ export class SyncRepository {
     limit?: number;
   }): Promise<UploadBatch[]> {
     let sql = "SELECT * FROM upload_batches";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (options?.status) {
       sql += " WHERE status = ?";
       params.push(options.status);
@@ -412,7 +425,7 @@ export class SyncRepository {
     limit?: number;
   }): Promise<DeadLetterRecord[]> {
     let sql = "SELECT * FROM dead_letters";
-    const params: unknown[] = [];
+    const params: SQLBindValue[] = [];
     if (options?.status) {
       sql += " WHERE status = ?";
       params.push(options.status);

@@ -1,8 +1,18 @@
-import { isSafetyGateBypassTool } from "@resin/contracts";
+import {
+  type SafetyGateRefusal,
+  type ToolParameterSchema,
+  isSafetyGateBypassTool,
+} from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import { MCP_ERROR_CODES, McpProtocolError } from "./protocol/errors.js";
-import type { CallToolResult, McpTool, McpToolInput } from "./protocol/types.js";
+import type {
+  CallToolResult,
+  JsonRpcParamValue,
+  JsonRpcParams,
+  McpTool,
+  McpToolInput,
+} from "./protocol/types.js";
 import { CanaryRouter } from "./registry/canary-router.js";
 import {
   type CatalogSnapshotRecord,
@@ -21,7 +31,7 @@ export interface ToolCallOptions {
 
 export type ToolHandler = (
   context: WorkspaceContext,
-  params: Record<string, unknown>,
+  params: JsonRpcParams,
   options?: ToolCallOptions,
 ) => Promise<CallToolResult>;
 
@@ -30,36 +40,76 @@ export interface GatewayRouter {
   callTool(
     context: WorkspaceContext,
     name: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     options?: ToolCallOptions,
   ): Promise<CallToolResult>;
   onToolListChanged?(listener: () => void): () => void;
 }
-function toMcpInputSchema(rawSchema?: Record<string, unknown>): McpToolInput {
-  if (!rawSchema || typeof rawSchema !== "object") {
-    return { type: "object", properties: {} };
-  }
-  const properties =
-    rawSchema.properties && typeof rawSchema.properties === "object"
-      ? (rawSchema.properties as Record<string, unknown>)
-      : undefined;
-  const required = Array.isArray(rawSchema.required) ? (rawSchema.required as string[]) : undefined;
-  const additionalProperties =
-    typeof rawSchema.additionalProperties === "boolean" ||
-    (rawSchema.additionalProperties && typeof rawSchema.additionalProperties === "object")
-      ? (rawSchema.additionalProperties as boolean | Record<string, unknown>)
-      : undefined;
-  const description = typeof rawSchema.description === "string" ? rawSchema.description : undefined;
-
-  return {
-    type: "object",
-    properties,
-    required,
-    additionalProperties,
-    description,
-  };
+function isParamsObject<TInput>(value: TInput): value is TInput & JsonRpcParams {
+  return Boolean(value) && Object.prototype.toString.call(value) === "[object Object]";
 }
 
+function formatRefusalMeta(refusal: SafetyGateRefusal): JsonRpcParams {
+  const contentList: readonly JsonRpcParamValue[] = refusal.content.map((c) => ({
+    type: c.type,
+    text: c.text,
+  }));
+  const unmetList: readonly JsonRpcParamValue[] = refusal.unmetGates;
+  const result: JsonRpcParams = {
+    isError: refusal.isError,
+    refusalCode: refusal.refusalCode,
+    refusalReason: refusal.refusalReason,
+    remediation: refusal.remediation,
+    unmetGates: unmetList,
+    evaluatedAt: refusal.evaluatedAt,
+    content: contentList,
+  };
+  if (refusal.details) {
+    const detailsRecord: Record<string, JsonRpcParamValue> = {};
+    for (const [key, value] of Object.entries(refusal.details)) {
+      if (
+        Object.prototype.toString.call(value) === "[object String]" ||
+        Object.prototype.toString.call(value) === "[object Number]" ||
+        Object.prototype.toString.call(value) === "[object Boolean]" ||
+        value === null ||
+        value === undefined
+      ) {
+        detailsRecord[key] = String(value);
+      }
+    }
+    result.details = detailsRecord;
+  }
+  return result;
+}
+
+function toMcpInputSchema(rawSchema?: JsonRpcParams | ToolParameterSchema): McpToolInput {
+  if (!rawSchema || Object.prototype.toString.call(rawSchema) !== "[object Object]") {
+    return { type: "object", properties: {} };
+  }
+  const properties = isParamsObject(rawSchema.properties) ? rawSchema.properties : undefined;
+  const required = Array.isArray(rawSchema.required)
+    ? rawSchema.required.filter(
+        (item): item is string => Object.prototype.toString.call(item) === "[object String]",
+      )
+    : undefined;
+  const additionalProperties =
+    rawSchema.additionalProperties === true || rawSchema.additionalProperties === false
+      ? rawSchema.additionalProperties
+      : isParamsObject(rawSchema.additionalProperties)
+        ? rawSchema.additionalProperties
+        : undefined;
+  const result: McpToolInput = {
+    type: "object",
+    properties: properties ?? {},
+  };
+  if (required !== undefined) {
+    result.required = required;
+  }
+  if (additionalProperties !== undefined) {
+    result.additionalProperties = additionalProperties;
+  }
+  return result;
+}
 /**
  * Dynamic GatewayRouter implementation backed by a ToolRegistry.
  */
@@ -106,9 +156,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
   async listTools(context: WorkspaceContext): Promise<McpTool[]> {
     const snapshot = await this.registry.resolveCatalog(context.workspaceId, context.sessionId);
     const mcpTools: McpTool[] = [];
-    const record = snapshot as CatalogSnapshotRecord;
-
-    if (record.entries && Object.keys(record.entries).length > 0) {
+    const record = "entries" in snapshot ? snapshot : undefined;
+    if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
         const schema = toMcpInputSchema(entry.parameters ?? entry.manifest?.parameters);
         mcpTools.push({
@@ -139,7 +188,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
   async callTool(
     context: WorkspaceContext,
     name: string,
-    params: Record<string, unknown>,
+    params: JsonRpcParams,
     options?: ToolCallOptions,
   ): Promise<CallToolResult> {
     const tool = await this.registry.getTool(name, context.workspaceId, context.sessionId);
@@ -174,7 +223,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         return {
           isError: true,
           content: gateCheck.refusal.content,
-          _meta: { refusal: gateCheck.refusal },
+          _meta: { refusal: formatRefusalMeta(gateCheck.refusal) },
         };
       }
     }

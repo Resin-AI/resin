@@ -5,6 +5,7 @@ import process from "node:process";
 import { probeClaudeInstallation, verifyClaudeMcpConfig } from "@resin/adapter-claude-code";
 import { probeCodexInstallation, verifyCodexMcpConfig } from "@resin/adapter-codex";
 import { probeOmpInstallation, verifyOmpMcpConfig } from "@resin/adapter-omp";
+import { z } from "zod";
 export const SYSTEM_META_TOOL_NAMES = [
   "search_tools",
   "get_tool_schema",
@@ -20,6 +21,29 @@ import { type UserServiceManager, createUserServiceManager } from "./manager.js"
 
 export type VerificationCheckStatus = "pass" | "fail" | "warn";
 
+export type VerificationDetailPrimitive = string | number | boolean | null | undefined;
+
+export type VerificationDetailValue =
+  | VerificationDetailPrimitive
+  | readonly VerificationDetailValue[]
+  | VerificationDetailValue[]
+  | { readonly [key: string]: VerificationDetailValue }
+  | { [key: string]: VerificationDetailValue };
+
+export const VerificationDetailValueSchema: z.ZodType<VerificationDetailValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.undefined(),
+    z.array(VerificationDetailValueSchema),
+    z.record(z.string(), VerificationDetailValueSchema),
+  ]),
+);
+
+export type VerificationDetails = Record<string, VerificationDetailValue>;
+
 export interface VerificationCheckResult {
   name: string;
   displayName: string;
@@ -27,7 +51,7 @@ export interface VerificationCheckResult {
   message: string;
   durationMs: number;
   remediation?: string;
-  details?: Record<string, unknown>;
+  details?: VerificationDetails;
 }
 
 export interface VerificationReport {
@@ -133,7 +157,7 @@ export class VerificationSuite {
         status: VerificationCheckStatus;
         message: string;
         remediation?: string;
-        details?: Record<string, unknown>;
+        details?: VerificationDetails;
       }>;
     }> = [
       {
@@ -235,7 +259,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const daemonPaths = resolvePaths({ home: this.homeDir });
     const binDir = path.join(this.resinHome, "bin");
@@ -261,7 +285,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const status = await this.serviceManager.status();
 
@@ -299,7 +323,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const daemonPaths = resolvePaths({ home: this.homeDir });
     const socketPath = daemonPaths.socketPath;
@@ -350,7 +374,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const daemonPaths = resolvePaths({ home: this.homeDir });
     const dbPath = path.join(daemonPaths.dataDir, "state.db");
@@ -376,7 +400,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     try {
       const res = await this.customFetch(`${this.gatewayUrl}/health`, {
@@ -384,7 +408,16 @@ export class VerificationSuite {
       });
 
       if (res.ok) {
-        const body = await res.json().catch(() => ({}));
+        let body: VerificationDetailValue = {};
+        try {
+          const rawJson = await res.json();
+          const parsed = VerificationDetailValueSchema.safeParse(rawJson);
+          if (parsed.success) {
+            body = parsed.data;
+          }
+        } catch {
+          // ignore
+        }
         return {
           status: "pass",
           message: `MCP Gateway responsive at ${this.gatewayUrl}`,
@@ -426,7 +459,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const requiredTools = [...SYSTEM_META_TOOL_NAMES];
 
@@ -442,7 +475,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     return {
       status: "pass",
@@ -456,7 +489,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const [claudeInstalled, codexInstalled, ompInstalled] = await Promise.all([
       probeClaudeInstallation(),
@@ -495,7 +528,7 @@ export class VerificationSuite {
     status: VerificationCheckStatus;
     message: string;
     remediation?: string;
-    details?: Record<string, unknown>;
+    details?: VerificationDetails;
   }> {
     const authClient = new DeviceAuthClient({
       cloudUrl: this.cloudUrl,

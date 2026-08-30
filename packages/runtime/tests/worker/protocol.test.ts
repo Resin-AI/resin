@@ -155,8 +155,10 @@ describe("Worker Protocol", () => {
 
       const messages = decoder.push(encoded);
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.type).toBe("invoke");
-      expect((messages[0] as typeof msg).invocationId).toBe("inv-1");
+      expect(messages[0]).toMatchObject({
+        type: "invoke",
+        invocationId: "inv-1",
+      });
     });
 
     it("handles multiple messages across chunks and partial lines", () => {
@@ -208,8 +210,10 @@ describe("Worker Protocol", () => {
 
       const messages = decoder.push(frame);
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.type).toBe("invoke");
-      expect((messages[0] as typeof msg).invocationId).toBe("inv-lp-1");
+      expect(messages[0]).toMatchObject({
+        type: "invoke",
+        invocationId: "inv-lp-1",
+      });
     });
 
     it("handles chunked length-prefixed stream", () => {

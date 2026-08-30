@@ -111,6 +111,16 @@ export interface RefreshAdapterHandler {
   getCapabilities?(): RefreshCapability;
 }
 
+export type RefreshLogMeta =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | Error
+  | readonly (string | number | boolean | null | undefined)[]
+  | { readonly [key: string]: string | number | boolean | null | undefined };
+
 /**
  * Options for configuring the CatalogRefreshCoordinator.
  */
@@ -137,7 +147,7 @@ export interface RefreshCoordinatorOptions {
   /**
    * Custom logger callback.
    */
-  logger?: (level: string, message: string, meta?: unknown) => void;
+  logger?: (level: string, message: string, meta?: RefreshLogMeta) => void;
   /**
    * Custom invariant meta-tools reminder text.
    */

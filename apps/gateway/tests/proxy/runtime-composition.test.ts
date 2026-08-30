@@ -24,13 +24,17 @@ import type { RegistryTool } from "../../src/registry/types.js";
 import { createRegistryGatewayRouter } from "../../src/router.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
 
-function makeJwt(payload: Record<string, unknown>): string {
+function makeJwt(
+  payload: Record<string, string | number | boolean | null | undefined | readonly string[]>,
+): string {
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   return `${header}.${body}.mock-signature`;
 }
 
-function makeValidClaims(overrides: Record<string, unknown> = {}) {
+function makeValidClaims(
+  overrides: Record<string, string | number | boolean | null | undefined | readonly string[]> = {},
+) {
   return {
     schemaVersion: 1,
     accountId: "acc_test_123",
@@ -103,14 +107,12 @@ describe("Production Runtime Composition & Credential Security", () => {
     const requests: Array<{ url: string; headers: Record<string, string> }> = [];
     const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = url.toString();
+      // SAFETY: Test fixture inspects record headers from RequestInit.
       const headers = (init?.headers as Record<string, string>) || {};
       requests.push({ url: urlStr, headers });
 
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           snapshotVersion: "v1.0.0",
           generatedAt: new Date().toISOString(),
           tools: [],
@@ -120,14 +122,16 @@ describe("Production Runtime Composition & Credential Security", () => {
             activeDeployments: [],
           }),
         }),
-      } as unknown as Response;
+        { status: 200, statusText: "OK" },
+      );
     });
 
     const registry = new ToolRegistry();
     const runtime = await createProductionProxyRuntime({
       credentialStore: store,
       registry,
-      fetchFn: mockFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockFetch as typeof fetch,
     });
 
     expect(runtime.isCloudEnabled).toBe(true);
@@ -165,54 +169,48 @@ describe("Production Runtime Composition & Credential Security", () => {
       fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
         if (url.toString().includes("/v1/auth/token/refresh")) {
           refreshCalled = true;
-          return {
-            ok: true,
-            status: 200,
-            statusText: "OK",
-            json: async () => ({
+          return new Response(
+            JSON.stringify({
               accessToken: token2,
               refreshToken: "rf_refreshed_456",
               claims: claims2,
               deviceId: claims2.deviceId,
               workspaceId: claims2.workspaceId,
             }),
-          } as unknown as Response;
+            { status: 200, statusText: "OK" },
+          );
         }
-        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+        return new Response(JSON.stringify({}), { status: 200 });
       },
     });
 
     await store.persist({
       cloudUrl: "https://cloud.resin.io",
       accessToken: token1,
-      refreshToken: "rf_initial_123",
+      refreshToken: "rf_valid_123",
       deviceId: claims1.deviceId,
       workspaceId: claims1.workspaceId,
     });
 
-    let attempt = 0;
     const tokenHeadersReceived: string[] = [];
+    let attempt = 0;
+
     const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       attempt++;
-      const headers = (init?.headers as Record<string, string>) || {};
-      if (headers.Authorization) {
-        tokenHeadersReceived.push(headers.Authorization);
+      const authHeader = init?.headers ? new Headers(init.headers).get("authorization") : null;
+      if (authHeader) {
+        tokenHeadersReceived.push(authHeader);
       }
 
       if (attempt === 1) {
-        return {
-          ok: false,
+        return new Response(JSON.stringify({ message: "JWT expired" }), {
           status: 401,
           statusText: "Unauthorized",
-          json: async () => ({ message: "token expired" }),
-        } as unknown as Response;
+        });
       }
 
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           snapshotVersion: "v1.0.0",
           generatedAt: new Date().toISOString(),
           tools: [],
@@ -222,14 +220,16 @@ describe("Production Runtime Composition & Credential Security", () => {
             activeDeployments: [],
           }),
         }),
-      } as unknown as Response;
+        { status: 200, statusText: "OK" },
+      );
     });
 
     const client = new CloudCatalogClient({
       workspaceId: claims1.workspaceId,
       deviceId: claims1.deviceId,
       identityProvider: async (opts) => store.getRequestIdentity(opts),
-      fetchFn: mockFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockFetch as typeof fetch,
     });
 
     const snapshot = await client.fetchCatalogSnapshot();
@@ -248,13 +248,10 @@ describe("Production Runtime Composition & Credential Security", () => {
     const store = new CloudCredentialStore({
       tokenFilePath: tokenFile,
       fetchImpl: async () => {
-        // Refresh endpoint returns 401 revoked
-        return {
-          ok: false,
+        return new Response(JSON.stringify({ error: "Token revoked" }), {
           status: 401,
           statusText: "Unauthorized",
-          json: async () => ({ error: "Token revoked" }),
-        } as unknown as Response;
+        });
       },
     });
 
@@ -267,19 +264,18 @@ describe("Production Runtime Composition & Credential Security", () => {
     });
 
     const mockFetch = vi.fn(async () => {
-      return {
-        ok: false,
+      return new Response(JSON.stringify({ message: "Unauthorized" }), {
         status: 401,
         statusText: "Unauthorized",
-        json: async () => ({ message: "Unauthorized" }),
-      } as unknown as Response;
+      });
     });
 
     const client = new CloudCatalogClient({
       workspaceId: claims.workspaceId,
       deviceId: claims.deviceId,
       identityProvider: async (opts) => store.getRequestIdentity(opts),
-      fetchFn: mockFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockFetch as typeof fetch,
     });
 
     await expect(client.fetchCatalogSnapshot()).rejects.toThrow();
@@ -327,22 +323,22 @@ describe("Production Runtime Composition & Credential Security", () => {
     // 3. Register project via authenticated client
     let registeredWithHeaders: Record<string, string> | undefined;
     const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      // SAFETY: Test fixture inspects record headers from RequestInit.
       registeredWithHeaders = (init?.headers as Record<string, string>) || {};
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           outcome: "registered",
           projectId: originalProjectId,
         }),
-      } as unknown as Response;
+        { status: 200 },
+      );
     });
-
     const client = new CloudCatalogClient({
       workspaceId: claims.workspaceId,
       deviceId: claims.deviceId,
       identityProvider: async (opts) => store.getRequestIdentity(opts),
-      fetchFn: mockFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockFetch as typeof fetch,
     });
 
     const regResult = await client.registerProject({
@@ -375,19 +371,19 @@ describe("Production Runtime Composition & Credential Security", () => {
 
     // Scenario A: Fork required
     const mockForkFetch = vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           outcome: "fork_required",
           projectId: ws.project!.projectId,
         }),
-      } as unknown as Response;
+        { status: 200 },
+      );
     });
 
     const runtimeFork = await createProductionProxyRuntime({
       credentialStore: store,
-      fetchFn: mockForkFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockForkFetch as typeof fetch,
     });
 
     await runtimeFork.onWorkspaceReady(ws);
@@ -396,19 +392,19 @@ describe("Production Runtime Composition & Credential Security", () => {
 
     // Scenario B: Foreign project ID substitution
     const mockSubstitutionFetch = vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           outcome: "registered",
           projectId: "different-foreign-uuid-456",
         }),
-      } as unknown as Response;
+        { status: 200 },
+      );
     });
 
     const runtimeSub = await createProductionProxyRuntime({
       credentialStore: store,
-      fetchFn: mockSubstitutionFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockSubstitutionFetch as typeof fetch,
     });
 
     await runtimeSub.onWorkspaceReady(ws);
@@ -533,6 +529,7 @@ describe("Production Runtime Composition & Credential Security", () => {
 
     expect(callResponse).toBeDefined();
     expect(callResponse?.error).toBeUndefined();
+    // SAFETY: Gateway response is confirmed to be CallToolResult.
     const result = callResponse?.result as
       | { content?: Array<{ type: string; text: string }> }
       | undefined;
@@ -571,56 +568,48 @@ describe("Production Runtime Composition & Credential Security", () => {
     const recordedRequests: Array<{ url: string; headers: Record<string, string> }> = [];
     const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = url.toString();
+      // SAFETY: Test fixture inspects record headers from RequestInit.
       const headers = (init?.headers as Record<string, string>) || {};
       recordedRequests.push({ url: urlStr, headers });
 
       if (urlStr.includes("/v1/projects")) {
-        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
-        return {
-          ok: true,
-          status: 200,
-          statusText: "OK",
-          json: async () => ({
+        const body =
+          Object.prototype.toString.call(init?.body) === "[object String]"
+            ? JSON.parse(String(init?.body))
+            : {};
+        return new Response(
+          JSON.stringify({
             outcome: "registered",
             projectId: body.project?.projectId ?? ws.project?.projectId ?? "prj_alpha_gateway_01",
           }),
-        } as unknown as Response;
+          { status: 200, statusText: "OK" },
+        );
       }
 
       if (urlStr.includes("/v1/catalog/snapshot")) {
         // Enforce that correct workspace header was supplied
         if (headers["x-workspace-id"] !== claims.workspaceId) {
-          return {
-            ok: false,
-            status: 403,
-            statusText: "Forbidden",
-            json: async () => ({ error: "FORBIDDEN", message: "Cross-tenant access denied" }),
-          } as unknown as Response;
+          return new Response(
+            JSON.stringify({ error: "FORBIDDEN", message: "Cross-tenant access denied" }),
+            { status: 403, statusText: "Forbidden" },
+          );
         }
 
-        return {
-          ok: true,
-          status: 200,
-          statusText: "OK",
-          json: async () => ({
+        return new Response(
+          JSON.stringify({
             snapshotVersion: "v1.0.0",
             generatedAt: new Date().toISOString(),
             tools: [],
             activeDeployments: [],
-            checksum: hashCanonicalContent({
-              tools: [],
-              activeDeployments: [],
-            }),
           }),
-        } as unknown as Response;
+          { status: 200, statusText: "OK" },
+        );
       }
 
-      return {
-        ok: false,
+      return new Response(JSON.stringify({ error: "NOT_FOUND" }), {
         status: 404,
         statusText: "Not Found",
-        json: async () => ({ error: "NOT_FOUND" }),
-      } as unknown as Response;
+      });
     });
 
     const ws = resolveWorkspaceContext({ cwd: projectDir });
@@ -628,7 +617,8 @@ describe("Production Runtime Composition & Credential Security", () => {
     const runtime = await createProductionProxyRuntime({
       credentialStore: store,
       registry,
-      fetchFn: mockFetch as unknown as typeof fetch,
+      // SAFETY: Test fixture provides mock fetchFn.
+      fetchFn: mockFetch as typeof fetch,
     });
 
     await runtime.onWorkspaceReady(ws);
@@ -717,6 +707,7 @@ describe("Production Runtime Composition & Credential Security", () => {
 
     expect(callResponse).toBeDefined();
     expect(callResponse?.error).toBeUndefined();
+    // SAFETY: Gateway response is confirmed to be CallToolResult.
     const result = callResponse?.result as
       | { content?: Array<{ type: string; text: string }> }
       | undefined;

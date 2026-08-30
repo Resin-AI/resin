@@ -1,5 +1,5 @@
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "./errors.js";
-import type { JsonRpcMessage } from "./types.js";
+import type { JsonRpcMessage, JsonRpcParams } from "./types.js";
 
 export interface FrameDecoderOptions {
   maxMessageSizeBytes?: number;
@@ -23,7 +23,7 @@ export class McpFrameDecoder {
    * Push incoming data chunk and extract any complete JSON-RPC messages.
    */
   push(chunk: Buffer | string): JsonRpcMessage[] {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     this.buffer += text;
 
     if (this.buffer.length > this.maxMessageSize * 2) {
@@ -136,32 +136,30 @@ export class McpFrameDecoder {
     try {
       parsed = JSON.parse(rawJson);
     } catch (err) {
-      throw new McpProtocolError(
-        JSON_RPC_ERROR_CODES.PARSE_ERROR,
-        `Malformed JSON: ${(err as Error).message}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      throw new McpProtocolError(JSON_RPC_ERROR_CODES.PARSE_ERROR, `Malformed JSON: ${message}`);
     }
 
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (!parsed || !(parsed instanceof Object) || Array.isArray(parsed)) {
       throw new McpProtocolError(
         JSON_RPC_ERROR_CODES.INVALID_REQUEST,
         "JSON-RPC 2.0 payload must be a JSON object",
       );
     }
 
-    const obj = parsed as Record<string, unknown>;
+    // SAFETY: Input was confirmed to be a non-null object from JSON.parse.
+    const obj = parsed as JsonRpcParams;
     if (obj.jsonrpc !== "2.0") {
       throw new McpProtocolError(
         JSON_RPC_ERROR_CODES.INVALID_REQUEST,
-        "Invalid or missing 'jsonrpc': '2.0' attribute",
+        "Missing or invalid 'jsonrpc' field (expected '2.0')",
       );
     }
 
-    // Must be either a request/notification (has string method) or a response (has id + result or error)
-    const hasMethod = typeof obj.method === "string";
+    const hasMethod =
+      "method" in obj && Object.prototype.toString.call(obj.method) === "[object String]";
     const hasResult = "result" in obj;
     const hasError = "error" in obj;
-    const hasId = "id" in obj;
 
     if (!hasMethod && !hasResult && !hasError) {
       throw new McpProtocolError(
@@ -170,9 +168,17 @@ export class McpFrameDecoder {
       );
     }
 
-    if (hasId) {
-      const id = obj.id;
-      if (typeof id !== "string" && typeof id !== "number" && id !== null) {
+    if ("method" in obj && !hasMethod) {
+      throw new McpProtocolError(
+        JSON_RPC_ERROR_CODES.INVALID_REQUEST,
+        "Message 'method' must be a string",
+      );
+    }
+
+    if ("id" in obj && obj.id !== undefined && obj.id !== null) {
+      const isString = Object.prototype.toString.call(obj.id) === "[object String]";
+      const isNumber = Number.isFinite(obj.id);
+      if (!isString && !isNumber) {
         throw new McpProtocolError(
           JSON_RPC_ERROR_CODES.INVALID_REQUEST,
           "Message 'id' must be a string, number, or null",
@@ -180,7 +186,8 @@ export class McpFrameDecoder {
       }
     }
 
-    return obj as unknown as JsonRpcMessage;
+    // SAFETY: Framing parser verified JSON object structure, jsonrpc 2.0 version, and valid id/method types.
+    return obj as JsonRpcMessage;
   }
 }
 

@@ -13,6 +13,11 @@ export interface RateLimiterOptions {
   refillRatePerSec?: number;
 }
 
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfterMs?: number;
+}
+
 /**
  * Token Bucket Rate Limiter for request throttling.
  */
@@ -29,7 +34,7 @@ export class TokenBucketRateLimiter {
     this.lastRefillTimestamp = Date.now();
   }
 
-  tryConsume(cost = 1): { allowed: boolean; retryAfterMs?: number } {
+  tryConsume(cost = 1): RateLimitResult {
     const now = Date.now();
     const elapsedSec = (now - this.lastRefillTimestamp) / 1000;
     this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.refillRatePerSec);

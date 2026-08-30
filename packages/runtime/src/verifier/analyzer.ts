@@ -16,7 +16,7 @@ import type {
 /**
  * Standard allowlist of import module specifiers.
  */
-const DEFAULT_ALLOWED_IMPORT_SPECIFIERS: Record<string, true> = {
+const DEFAULT_ALLOWED_IMPORT_SPECIFIERS = {
   "@resin/runtime": true,
   zod: true,
   "node:path": true,
@@ -27,7 +27,7 @@ const DEFAULT_ALLOWED_IMPORT_SPECIFIERS: Record<string, true> = {
   util: true,
   "node:buffer": true,
   buffer: true,
-};
+} as const;
 
 /**
  * Patterns for forbidden imports.
@@ -72,12 +72,17 @@ const FORBIDDEN_IMPORT_PATTERNS: RegExp[] = [
 /**
  * Supported runtimes for tools.
  */
-const SUPPORTED_RUNTIMES: Record<string, true> = {
+const SUPPORTED_RUNTIMES = {
   deno: true,
   "deno-sandboxed": true,
   node: true,
   "node-vm": true,
-};
+} as const;
+
+export interface SourceLocation {
+  line: number;
+  column: number;
+}
 
 /**
  * AST-level static analyzer for candidate tool source code.
@@ -92,7 +97,7 @@ export function staticAnalyzeCandidate(
   let hasDynamicImports = false;
   let hasRawHostApis = false;
 
-  const allowedImports = options.allowedImports
+  const allowedImports: Readonly<Record<string, boolean>> = options.allowedImports
     ? Object.fromEntries(options.allowedImports.map((i) => [i, true as const]))
     : DEFAULT_ALLOWED_IMPORT_SPECIFIERS;
 
@@ -101,7 +106,7 @@ export function staticAnalyzeCandidate(
 
   const sourceFile = ts.createSourceFile("candidate.ts", sourceCode, ts.ScriptTarget.Latest, true);
 
-  function getLineCol(node: ts.Node): { line: number; column: number } {
+  function getLineCol(node: ts.Node): SourceLocation {
     const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart());
     return { line: pos.line + 1, column: pos.character + 1 };
   }
@@ -373,14 +378,7 @@ export function staticAnalyzeCandidate(
   visit(sourceFile);
 
   if (manifest) {
-    const manifestObj: Record<string, unknown> =
-      typeof manifest === "object" && manifest !== null
-        ? (manifest as unknown as Record<string, unknown>)
-        : {};
-    const declaredCaps: Partial<CapabilityManifest> =
-      typeof manifestObj.capabilities === "object" && manifestObj.capabilities !== null
-        ? (manifestObj.capabilities as CapabilityManifest)
-        : (manifest.capabilities ?? {});
+    const declaredCaps: Partial<CapabilityManifest> = manifest.capabilities ?? {};
     if (inferredCapabilities.fs && !declaredCaps.fs) {
       findings.push({
         severity: "error",
@@ -427,8 +425,8 @@ export function staticAnalyzeCandidate(
       }
     }
 
-    const runtime = typeof manifestObj.runtime === "string" ? manifestObj.runtime : undefined;
-    if (runtime && !SUPPORTED_RUNTIMES[runtime]) {
+    const runtime = manifest.runtime?.runtime;
+    if (runtime && !(runtime in SUPPORTED_RUNTIMES)) {
       findings.push({
         severity: "error",
         category: "unsupported_runtime",

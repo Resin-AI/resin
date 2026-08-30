@@ -14,7 +14,13 @@ export type IpcMethod =
   | "getDiagnostics"
   | "gracefulShutdown";
 
-export interface IpcRequest<TParams = unknown> {
+export type IpcMethodParams =
+  | PingParams
+  | GetModuleStatusParams
+  | ReloadConfigParams
+  | GracefulShutdownParams;
+
+export interface IpcRequest<TParams = IpcMethodParams> {
   id: string;
   token?: string;
   method: IpcMethod | string;

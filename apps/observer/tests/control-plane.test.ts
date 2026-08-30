@@ -117,7 +117,7 @@ describe("observer desired-state reconciliation", () => {
         path.join(context.paths.stateDir, CONTROL_PLANE_DEVICE_STATE_FILE_NAME),
         "utf8",
       ),
-    ) as { revisionToken: string };
+    );
     expect(staged.revisionToken).toBe("w:2:d:1");
   });
 

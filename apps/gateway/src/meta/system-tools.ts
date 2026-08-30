@@ -6,6 +6,7 @@ import {
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
+import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import { computeManifestDigest } from "../registry/validator.js";
@@ -29,7 +30,7 @@ export const SYSTEM_META_TOOL_NAMES = {
   MANAGE_TOOLS: "manage_tools",
 } as const;
 
-const SYSTEM_TOOL_IDENTIFIERS: Record<string, true> = {
+const SYSTEM_TOOL_IDENTIFIERS = {
   sys_search_tools: true,
   sys_get_tool_schema: true,
   sys_invoke_tool: true,
@@ -38,16 +39,22 @@ const SYSTEM_TOOL_IDENTIFIERS: Record<string, true> = {
   get_tool_schema: true,
   invoke_tool: true,
   manage_tools: true,
-};
+} as const;
+
+type SystemToolIdentifier = keyof typeof SYSTEM_TOOL_IDENTIFIERS;
+
+function isSystemToolIdentifier(value: string): value is SystemToolIdentifier {
+  return Object.prototype.hasOwnProperty.call(SYSTEM_TOOL_IDENTIFIERS, value);
+}
 
 /**
  * Returns true if the identifier refers to one of the 4 invariant system meta-tools.
  */
 export function isSystemMetaTool(toolIdOrName: string): boolean {
-  if (!toolIdOrName || typeof toolIdOrName !== "string") {
+  if (!toolIdOrName || Object.prototype.toString.call(toolIdOrName) !== "[object String]") {
     return false;
   }
-  return Boolean(SYSTEM_TOOL_IDENTIFIERS[toolIdOrName.trim().toLowerCase()]);
+  return isSystemToolIdentifier(toolIdOrName.trim().toLowerCase());
 }
 
 const DEFAULT_SYSTEM_RUNTIME = ToolRuntimeRequirementSchema.parse({
@@ -57,7 +64,7 @@ const DEFAULT_SYSTEM_RUNTIME = ToolRuntimeRequirementSchema.parse({
 const DEFAULT_SYSTEM_CAPABILITIES = CapabilityManifestSchema.parse({});
 const DEFAULT_SYSTEM_LIMITS = ToolLimitConfigSchema.parse({});
 
-const SEARCH_TOOLS_RAW = {
+const SEARCH_TOOLS_RAW: ToolManifest = {
   id: SYSTEM_META_TOOL_IDS.SEARCH_TOOLS,
   name: SYSTEM_META_TOOL_NAMES.SEARCH_TOOLS,
   version: "1.0.0",
@@ -110,6 +117,7 @@ const SEARCH_TOOLS_RAW = {
   capabilities: DEFAULT_SYSTEM_CAPABILITIES,
   limits: DEFAULT_SYSTEM_LIMITS,
   scope: "global" as const,
+  digest: "",
   metadata: {
     isSystem: true,
     immutable: true,
@@ -123,7 +131,7 @@ export const SEARCH_TOOLS_MANIFEST: ToolManifest = {
   digest: computeManifestDigest(SEARCH_TOOLS_RAW),
 };
 
-const GET_TOOL_SCHEMA_RAW = {
+const GET_TOOL_SCHEMA_RAW: ToolManifest = {
   id: SYSTEM_META_TOOL_IDS.GET_TOOL_SCHEMA,
   name: SYSTEM_META_TOOL_NAMES.GET_TOOL_SCHEMA,
   version: "1.0.0",
@@ -157,6 +165,7 @@ const GET_TOOL_SCHEMA_RAW = {
   capabilities: DEFAULT_SYSTEM_CAPABILITIES,
   limits: DEFAULT_SYSTEM_LIMITS,
   scope: "global" as const,
+  digest: "",
   metadata: {
     isSystem: true,
     immutable: true,
@@ -170,7 +179,7 @@ export const GET_TOOL_SCHEMA_MANIFEST: ToolManifest = {
   digest: computeManifestDigest(GET_TOOL_SCHEMA_RAW),
 };
 
-const INVOKE_TOOL_RAW = {
+const INVOKE_TOOL_RAW: ToolManifest = {
   id: SYSTEM_META_TOOL_IDS.INVOKE_TOOL,
   name: SYSTEM_META_TOOL_NAMES.INVOKE_TOOL,
   version: "1.0.0",
@@ -216,6 +225,7 @@ const INVOKE_TOOL_RAW = {
   capabilities: DEFAULT_SYSTEM_CAPABILITIES,
   limits: DEFAULT_SYSTEM_LIMITS,
   scope: "global" as const,
+  digest: "",
   metadata: {
     isSystem: true,
     immutable: true,
@@ -229,7 +239,7 @@ export const INVOKE_TOOL_MANIFEST: ToolManifest = {
   digest: computeManifestDigest(INVOKE_TOOL_RAW),
 };
 
-const MANAGE_TOOLS_RAW = {
+const MANAGE_TOOLS_RAW: ToolManifest = {
   id: SYSTEM_META_TOOL_IDS.MANAGE_TOOLS,
   name: SYSTEM_META_TOOL_NAMES.MANAGE_TOOLS,
   version: "1.0.0",
@@ -277,6 +287,7 @@ const MANAGE_TOOLS_RAW = {
   capabilities: DEFAULT_SYSTEM_CAPABILITIES,
   limits: DEFAULT_SYSTEM_LIMITS,
   scope: "global" as const,
+  digest: "",
   metadata: {
     isSystem: true,
     immutable: true,
@@ -308,7 +319,8 @@ export function createSystemMetaTools(
     scope: "system",
     status: "active",
     description: SEARCH_TOOLS_MANIFEST.description,
-    parameters: SEARCH_TOOLS_MANIFEST.parameters as Record<string, unknown>,
+    // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: SEARCH_TOOLS_MANIFEST.parameters as JsonRpcParams,
     manifest: SEARCH_TOOLS_MANIFEST,
     handler: createSearchToolsHandler(registry),
     isSystem: true,
@@ -322,7 +334,8 @@ export function createSystemMetaTools(
     scope: "system",
     status: "active",
     description: GET_TOOL_SCHEMA_MANIFEST.description,
-    parameters: GET_TOOL_SCHEMA_MANIFEST.parameters as Record<string, unknown>,
+    // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: GET_TOOL_SCHEMA_MANIFEST.parameters as JsonRpcParams,
     manifest: GET_TOOL_SCHEMA_MANIFEST,
     handler: createGetToolSchemaHandler(registry),
     isSystem: true,
@@ -336,7 +349,8 @@ export function createSystemMetaTools(
     scope: "system",
     status: "active",
     description: INVOKE_TOOL_MANIFEST.description,
-    parameters: INVOKE_TOOL_MANIFEST.parameters as Record<string, unknown>,
+    // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: INVOKE_TOOL_MANIFEST.parameters as JsonRpcParams,
     manifest: INVOKE_TOOL_MANIFEST,
     handler: createInvokeToolHandler(registry, router, safetyGateEvaluator),
     isSystem: true,
@@ -350,7 +364,8 @@ export function createSystemMetaTools(
     scope: "system",
     status: "active",
     description: MANAGE_TOOLS_MANIFEST.description,
-    parameters: MANAGE_TOOLS_MANIFEST.parameters as Record<string, unknown>,
+    // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
+    parameters: MANAGE_TOOLS_MANIFEST.parameters as JsonRpcParams,
     manifest: MANAGE_TOOLS_MANIFEST,
     handler: createManageToolsHandler(registry, safetyGateEvaluator),
     isSystem: true,

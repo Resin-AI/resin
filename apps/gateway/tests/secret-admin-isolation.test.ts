@@ -2,6 +2,7 @@ import {
   CapabilityManifestSchema,
   ToolLimitConfigSchema,
   type ToolManifest,
+  ToolManifestSchema,
   ToolParameterSchema,
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
@@ -50,10 +51,10 @@ function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
     createdAt: overrides?.createdAt ?? "2026-08-17T00:00:00.000Z",
   };
 
-  return {
+  return ToolManifestSchema.parse({
     ...raw,
     digest: computeManifestDigest(raw),
-  } as ToolManifest;
+  });
 }
 
 function makeContext(workspaceId = "ws-admin-iso-test"): WorkspaceContext {
@@ -90,8 +91,7 @@ describe("Secret Administration Isolation from Gateway & MCP Surfaces", () => {
     ];
 
     for (const action of adminActions) {
-      const res = await handler(context, { action: action as unknown as "pin" });
-
+      const res = await handler(context, { action, toolId: "tool_secret_worker" });
       expect(res.isError).toBe(true);
       const text = res.content[0]?.text ?? "";
       expect(text).toContain("Unknown management action");

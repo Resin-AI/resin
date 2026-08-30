@@ -9,7 +9,9 @@ export function embedCliReleaseTrust(options = {}) {
   const rootDir = options.rootDir || process.cwd();
   const env = options.env || process.env;
   const activeKeyId =
-    typeof env.RESIN_RELEASE_KEY_ID === "string" ? env.RESIN_RELEASE_KEY_ID.trim() : "";
+    Object.prototype.toString.call(env.RESIN_RELEASE_KEY_ID) === "[object String]"
+      ? env.RESIN_RELEASE_KEY_ID.trim()
+      : "";
   const trusted = loadTrustedReleaseKeysFromEnv(env);
 
   if (!activeKeyId || !trusted[activeKeyId]) {

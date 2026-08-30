@@ -12,9 +12,14 @@ import {
 import { SecretRedactor } from "@resin/crypto";
 import type { ToolInvocationRequest } from "../meta/router-contract.js";
 import { MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
-import type { UserControlsManager } from "./controls.js";
+import {
+  type ControlsDatabaseSource,
+  type DbConnectionLike,
+  type UserControlsManager,
+  extractConnection,
+} from "./controls.js";
 import type { ToolRegistry } from "./registry.js";
 
 export type { AutoRollbackThresholds, CanaryConfig };
@@ -29,7 +34,7 @@ export interface CanaryCandidate {
   activatedAt: string;
   deploymentId?: string;
   manifest?: ToolManifest;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonRpcParams;
 }
 
 export interface CanaryHealthMetrics {
@@ -56,7 +61,8 @@ export interface RollbackExecutionResult {
   switchDurationMs: number;
   quarantined: boolean;
   timestamp: string;
-  incidentDetails?: Record<string, unknown>;
+  incidentDetails?: JsonRpcParams;
+  metadata?: JsonRpcParams;
 }
 
 export interface QuarantinedCandidateRecord {
@@ -72,41 +78,10 @@ export interface QuarantinedCandidateRecord {
 export interface CanaryRouterOptions {
   registry?: ToolRegistry;
   userControls?: UserControlsManager;
-  db?: unknown;
-  auditCallback?: (incident: Record<string, unknown>) => void | Promise<void>;
+  db?: ControlsDatabaseSource;
+  auditCallback?: (incident: JsonRpcParams) => void | Promise<void>;
+  parameters?: JsonRpcParams;
   defaultThresholds?: Partial<AutoRollbackThresholds>;
-}
-
-interface DbConnectionLike {
-  run(sql: string, params?: unknown[]): unknown;
-  get<T = unknown>(sql: string, params?: unknown[]): T | undefined;
-  all<T = unknown>(sql: string, params?: unknown[]): T[];
-}
-
-interface StateStoreLike {
-  getConnection?(): DbConnectionLike;
-  conn?: DbConnectionLike;
-  db?: DbConnectionLike;
-}
-
-function extractConnection(db: unknown): DbConnectionLike | null {
-  if (!db || typeof db !== "object") {
-    return null;
-  }
-  const store = db as StateStoreLike;
-  if (typeof store.getConnection === "function") {
-    return store.getConnection() ?? null;
-  }
-  if (store.conn && typeof store.conn.run === "function") {
-    return store.conn;
-  }
-  if (store.db && typeof store.db.run === "function") {
-    return store.db;
-  }
-  if ("run" in db && typeof (db as DbConnectionLike).run === "function") {
-    return db as DbConnectionLike;
-  }
-  return null;
 }
 
 /**
@@ -149,7 +124,7 @@ export class CanaryRouter {
   private readonly quarantineRecords = new Map<string, QuarantinedCandidateRecord>();
   private readonly userControls?: UserControlsManager;
   private readonly registry?: ToolRegistry;
-  private readonly auditCallback?: (incident: Record<string, unknown>) => void | Promise<void>;
+  private readonly auditCallback?: (incident: JsonRpcParams) => void | Promise<void>;
   private readonly redactor: SecretRedactor;
   private readonly conn: DbConnectionLike | null;
   private readonly defaultThresholds: AutoRollbackThresholds;
@@ -275,11 +250,19 @@ export class CanaryRouter {
           toolId: row.tool_id,
           candidateVersion: row.candidate_version,
           stableVersion: row.stable_version,
-          status: row.status as "active" | "promoted" | "rolled_back" | "quarantined",
+          status:
+            row.status === "promoted" ||
+            row.status === "rolled_back" ||
+            row.status === "quarantined"
+              ? row.status
+              : "active",
           activatedAt: row.activated_at,
           deploymentId: row.deployment_id,
           config: {
-            strategy: (row.strategy as "shadow" | "traffic_split" | "developer_opt_in") ?? "shadow",
+            strategy:
+              row.strategy === "traffic_split" || row.strategy === "developer_opt_in"
+                ? row.strategy
+                : "shadow",
             trafficPercentage: row.traffic_percentage ?? 10,
             durationMinutes: row.duration_minutes ?? 30,
             maxShadowWorkers: row.max_shadow_workers ?? 2,
@@ -325,7 +308,7 @@ export class CanaryRouter {
     config?: Partial<CanaryConfig>;
     deploymentId?: string;
     manifest?: ToolManifest;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonRpcParams;
   }): Promise<CanaryCandidate> {
     const { workspaceId, toolId, candidateVersion } = params;
 
@@ -429,7 +412,7 @@ export class CanaryRouter {
             config.maxShadowWorkers,
             JSON.stringify(config.autoRollbackThresholds),
             candidate.activatedAt,
-            candidate.deploymentId,
+            candidate.deploymentId ?? null,
             JSON.stringify(candidate.metadata),
           ],
         );
@@ -552,10 +535,13 @@ export class CanaryRouter {
     }
 
     if (candidate.config.strategy === "developer_opt_in") {
-      const optIn = Boolean(
-        request.parameters?.__canary_opt_in ??
-          (context as unknown as { metadata?: { canaryOptIn?: boolean } }).metadata?.canaryOptIn,
-      );
+      const contextMeta =
+        "metadata" in context && context.metadata && context.metadata instanceof Object
+          ? context.metadata
+          : undefined;
+      const contextOptIn =
+        contextMeta && "canaryOptIn" in contextMeta && Boolean(contextMeta.canaryOptIn);
+      const optIn = Boolean(request.parameters?.__canary_opt_in ?? contextOptIn);
       if (optIn) {
         return {
           version: candidate.candidateVersion,
@@ -641,14 +627,9 @@ export class CanaryRouter {
         const isSchemaMismatch = Boolean(
           result.isError &&
             result.content?.some(
-              (c) =>
-                c.type === "text" &&
-                "text" in c &&
-                typeof c.text === "string" &&
-                c.text.toLowerCase().includes("schema"),
+              (c) => c.type === "text" && c.text.toLowerCase().includes("schema"),
             ),
         );
-
         await this.recordInvocation(toolId, workspaceId, {
           success: !result.isError,
           latencyMs: durationMs,
@@ -875,19 +856,22 @@ export class CanaryRouter {
     const switchDurationMs = performance.now() - switchStart;
 
     // 5. Build and redact audit incident
-    const rawIncident = {
+    const rawIncident: JsonRpcParams = {
       eventType: "canary_automatic_rollback",
+      incidentId: crypto.randomUUID(),
       timestamp,
       workspaceId,
       toolId,
       rolledBackVersion,
-      restoredVersion,
+      restoredVersion: restoredVersion ?? null,
       reason,
       switchDurationMs,
-      error: options?.error ? String(options.error) : undefined,
     };
+    if (options?.error !== undefined) {
+      rawIncident.error = String(options.error);
+    }
 
-    const redactedIncident = this.redactor.redactObject(rawIncident) as Record<string, unknown>;
+    const redactedIncident = this.redactor.redactObject(rawIncident);
 
     // 6. Emit audit incident
     if (this.auditCallback) {

@@ -1,4 +1,5 @@
 import type {
+  CanonicalJsonValue,
   CapabilityEnvelope,
   CapabilityManifest,
   ProbeResultEntry,
@@ -143,7 +144,7 @@ export interface ProbeExecutionResult {
   name: string;
   passed: boolean;
   error?: string;
-  details?: Record<string, unknown>;
+  details?: Record<string, CanonicalJsonValue>;
   durationMs?: number;
 }
 
@@ -192,7 +193,7 @@ export interface CreateEvidenceParams {
     deterministicPackaging: boolean;
   };
   probeResults?: ProbeExecutionResult[];
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, CanonicalJsonValue>;
   ttlSeconds?: number;
   signature?: SignatureMetadata;
 }
@@ -217,5 +218,15 @@ export interface EvidenceVerificationResult {
   valid: boolean;
   error?: string;
   errorCode?: string;
-  details?: Record<string, unknown>;
+  details?: Record<string, CanonicalJsonValue>;
+}
+
+/**
+ * Standard component digests computed for SDK, Runtime, Policy, and Deno.
+ */
+export interface StandardComponentDigests {
+  sdkDigest: string;
+  runtimeDigest: string;
+  policyDigest: string;
+  denoDigest: string;
 }

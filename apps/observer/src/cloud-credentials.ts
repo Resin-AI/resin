@@ -191,6 +191,7 @@ export class CloudCredentialStore {
     try {
       fileContent = await fs.readFile(this.tokenFilePath, "utf8");
     } catch (err: unknown) {
+      // SAFETY: fs.readFile error carries standard NodeJS.ErrnoException code.
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         return { status: "missing" };
       }
@@ -312,12 +313,14 @@ export class CloudCredentialStore {
     const credsToStore: StoredCloudCredentials = {
       cloudUrl: input.cloudUrl,
       accessToken: input.accessToken,
-      ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
       claims,
       deviceId,
       workspaceId,
       storedAt: input.storedAt ?? new Date().toISOString(),
     };
+    if (input.refreshToken) {
+      credsToStore.refreshToken = input.refreshToken;
+    }
 
     // Strict schema check before disk write
     StoredCloudCredentialsSchema.parse(credsToStore);

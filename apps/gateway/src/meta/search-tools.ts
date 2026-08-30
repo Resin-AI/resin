@@ -1,5 +1,5 @@
 import type { CapabilityManifest } from "@resin/contracts";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -147,13 +147,14 @@ export function summarizeCapabilities(caps?: CapabilityManifest): CapabilitySumm
 function extractTags(tool: RegistryTool): string[] {
   const tags = new Set<string>();
 
-  if (tool.manifest.metadata && typeof tool.manifest.metadata === "object") {
-    const rawTags = (tool.manifest.metadata as Record<string, unknown>).tags;
-    if (Array.isArray(rawTags)) {
-      for (const t of rawTags) {
-        if (typeof t === "string" && t.trim()) {
-          tags.add(t.trim().toLowerCase());
-        }
+  const meta =
+    tool.manifest.metadata && tool.manifest.metadata instanceof Object
+      ? tool.manifest.metadata
+      : undefined;
+  if (meta && "tags" in meta && Array.isArray(meta.tags)) {
+    for (const t of meta.tags) {
+      if (t && Object.prototype.toString.call(t) === "[object String]" && String(t).trim()) {
+        tags.add(String(t).trim().toLowerCase());
       }
     }
   }
@@ -269,11 +270,13 @@ function computeToolScore(
 export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
   return async (
     context: WorkspaceContext,
-    rawParams: Record<string, unknown>,
+    params: JsonRpcParams,
     _options?: ToolCallOptions,
   ): Promise<CallToolResult> => {
-    const params = (rawParams || {}) as SearchToolsParams;
-    const query = typeof params.query === "string" ? params.query.trim().toLowerCase() : "";
+    const query =
+      params.query && Object.prototype.toString.call(params.query) === "[object String]"
+        ? String(params.query).trim().toLowerCase()
+        : "";
     const requestedTags = Array.isArray(params.tags)
       ? params.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean)
       : [];

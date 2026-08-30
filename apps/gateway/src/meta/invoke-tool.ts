@@ -1,6 +1,6 @@
 import { isSafetyGateBypassTool } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -13,14 +13,18 @@ export interface InvokeToolParams {
   toolId?: string;
   name?: string;
   tool_name?: string;
-  parameters?: Record<string, unknown>;
-  arguments?: Record<string, unknown>;
+  parameters?: JsonRpcParams;
+  arguments?: JsonRpcParams;
   version?: string;
   timeout_ms?: number;
 }
 
-function normalizeIdentifier(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+function normalizeIdentifier(value: JsonRpcParamValue | undefined): string | undefined {
+  return value &&
+    Object.prototype.toString.call(value) === "[object String]" &&
+    String(value).trim()
+    ? String(value).trim()
+    : undefined;
 }
 
 function isSameLogicalTool(left: RegistryTool, right: RegistryTool): boolean {
@@ -43,10 +47,9 @@ export function createInvokeToolHandler(
 ): ToolHandler {
   return async (
     context: WorkspaceContext,
-    rawParams: Record<string, unknown>,
+    params: JsonRpcParams,
     options?: ToolCallOptions,
   ): Promise<CallToolResult> => {
-    const params = (rawParams || {}) as InvokeToolParams;
     const publicName = normalizeIdentifier(params.name) ?? normalizeIdentifier(params.tool_name);
     const toolId = normalizeIdentifier(params.toolId);
     const displayIdentifier = publicName ?? toolId;
@@ -62,10 +65,12 @@ export function createInvokeToolHandler(
         ],
       };
     }
-
-    const targetParams = (params.parameters ?? params.arguments ?? {}) as Record<string, unknown>;
-
-    if (typeof targetParams !== "object" || targetParams === null || Array.isArray(targetParams)) {
+    const rawTargetParams = params.parameters ?? params.arguments ?? {};
+    if (
+      !rawTargetParams ||
+      !(rawTargetParams instanceof Object) ||
+      Array.isArray(rawTargetParams)
+    ) {
       return {
         isError: true,
         content: [
@@ -76,6 +81,8 @@ export function createInvokeToolHandler(
         ],
       };
     }
+    // SAFETY: Verified rawTargetParams is a non-null, non-array object record.
+    const targetParams = rawTargetParams as JsonRpcParams;
 
     // Use the canonical catalog resolver used by native invocation. It applies scope
     // precedence, active versions, pins, disables, and exposed-name collision handling.
@@ -134,8 +141,8 @@ export function createInvokeToolHandler(
       };
     }
 
-    if (params.version && typeof params.version === "string") {
-      const requestedVersion = params.version.trim();
+    const requestedVersion = normalizeIdentifier(params.version);
+    if (requestedVersion) {
       const explicitVersion =
         registry.getToolVersion(resolvedTool.toolId, requestedVersion) ??
         (publicName ? registry.getToolVersion(publicName, requestedVersion) : undefined);
@@ -179,10 +186,19 @@ export function createInvokeToolHandler(
         Boolean(resolvedTool.isSystem),
       );
       if (!gateCheck.allowed && gateCheck.refusal) {
+        const refusal = {
+          isError: gateCheck.refusal.isError,
+          refusalCode: gateCheck.refusal.refusalCode,
+          refusalReason: gateCheck.refusal.refusalReason,
+          remediation: gateCheck.refusal.remediation,
+          unmetGates: gateCheck.refusal.unmetGates,
+          evaluatedAt: gateCheck.refusal.evaluatedAt,
+          content: gateCheck.refusal.content,
+        };
         return {
           isError: true,
           content: gateCheck.refusal.content,
-          _meta: { refusal: gateCheck.refusal },
+          _meta: { refusal },
         };
       }
     }
@@ -202,8 +218,8 @@ export function createInvokeToolHandler(
     }
 
     const timeoutMs =
-      (typeof params.timeout_ms === "number" && params.timeout_ms > 0
-        ? params.timeout_ms
+      (Number.isFinite(params.timeout_ms) && Number(params.timeout_ms) > 0
+        ? Number(params.timeout_ms)
         : undefined) ??
       options?.timeoutMs ??
       resolvedTool.manifest?.limits?.timeoutMs ??

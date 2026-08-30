@@ -5,7 +5,7 @@ import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { type Mock, describe, expect, it, vi } from "vitest";
 import {
-  type CloudObservationClient,
+  CloudObservationClient,
   NormalizationPipeline,
   type TrajectoryAttributionContextInput,
   type TrajectoryAttributionResolver,
@@ -13,6 +13,7 @@ import {
   type TrajectoryObservation,
   TrajectoryObservationSchema,
 } from "../../src/index.js";
+import type { JsonObject } from "../../src/normalization/redaction.js";
 
 // ============================================================================
 // Test Helpers & Boundary Fakes
@@ -22,23 +23,23 @@ function createFakeCloudObservationClient(opts?: { failFirstCount?: number }) {
   let failRemaining = opts?.failFirstCount ?? 0;
   const submittedBatches: Array<{ observations: TrajectoryObservation[] }> = [];
 
-  const client: CloudObservationClient = {
-    sendTrajectoryObservationBatch: vi.fn(
-      async (input: { observations: TrajectoryObservation[] }) => {
-        if (failRemaining > 0) {
-          failRemaining--;
-          throw new Error("Simulated transient upstream 503 Service Unavailable");
-        }
-        submittedBatches.push(input);
-        return {
-          batchId: `batch_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
-          accepted: input.observations.length,
-          rejected: 0,
-          errors: [],
-        };
-      },
-    ),
-  } as unknown as CloudObservationClient;
+  // SAFETY: Fake cloud observation client implements sendTrajectoryObservationBatch for integration tests.
+  const client = Object.create(CloudObservationClient.prototype) as CloudObservationClient;
+  client.sendTrajectoryObservationBatch = vi.fn(
+    async (input: { observations: TrajectoryObservation[] }) => {
+      if (failRemaining > 0) {
+        failRemaining--;
+        throw new Error("Simulated transient upstream 503 Service Unavailable");
+      }
+      submittedBatches.push(input);
+      return {
+        batchId: `batch_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        accepted: input.observations.length,
+        rejected: 0,
+        errors: [],
+      };
+    },
+  );
 
   return {
     client,
@@ -134,7 +135,7 @@ describe("Provider Capture Integration", () => {
       providerName: string;
       harnessId: string;
       description: string;
-      rawPayload: Record<string, unknown>;
+      rawPayload: JsonObject;
       expectedProvider: string;
       expectedModel: string;
       expectedAccountingVersion: string;
@@ -746,6 +747,7 @@ describe("Provider Capture Integration", () => {
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
 
       // Inspect the observation passed to the first failed call
+      // SAFETY: sendTrajectoryObservationBatch is a Vitest Mock in tests.
       const clientMock = fakeCloud.client.sendTrajectoryObservationBatch as Mock;
       expect(clientMock).toHaveBeenCalledTimes(1);
       const firstCallObservation: TrajectoryObservation =

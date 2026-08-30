@@ -18,10 +18,27 @@ export interface ProbeInstallationOptions {
   customExecutablePath?: string;
   customConfigPath?: string;
   checkPermissions?: boolean;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  executablePath?: string;
 }
 
+export type ToolExecutionInputValue =
+  | string
+  | boolean
+  | null
+  | undefined
+  | ToolExecutionInputRecord
+  | ToolExecutionInputValue[];
+
+export interface ToolExecutionInputRecord {
+  [key: string]: ToolExecutionInputValue;
+}
+
+export type ToolExecutionResult = ToolExecutionInputValue;
+
 /**
- * Primary interface implemented by all AI agent harness adapters.
+ * Core contract that every AI harness adapter must implement.
  */
 export interface HarnessAdapter {
   /**
@@ -107,8 +124,8 @@ export interface HarnessAdapter {
   initialize?(): Promise<void>;
   execute?(
     tool: { id: string; name: string; version: string; description: string },
-    input: Record<string, unknown>,
-  ): Promise<unknown>;
+    input: ToolExecutionInputRecord,
+  ): Promise<ToolExecutionResult>;
 }
 
 /**

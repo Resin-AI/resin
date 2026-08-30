@@ -2,6 +2,7 @@ import {
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
   type ConfigFsBridge,
+  type ConfigMetadataValue,
   type ConfigMutationPlan,
   type HarnessWorkspace,
   applyConfigMutation,
@@ -21,14 +22,14 @@ export interface ClaudeMcpServerConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  [key: string]: ConfigMetadataValue;
 }
 
 /**
  * Standard shape of Claude Code config JSON (claude.json, mcp_settings.json, etc.).
  */
 export interface ClaudeConfigDoc {
-  mcpServers?: Record<string, ClaudeMcpServerConfig | Record<string, unknown>>;
-  [key: string]: unknown;
+  mcpServers?: Record<string, ClaudeMcpServerConfig>;
 }
 
 /**
@@ -43,15 +44,19 @@ export function generatePlannedClaudeConfig(
 
   if (currentContent && currentContent.trim().length > 0) {
     try {
-      doc = JSON.parse(currentContent);
+      const parsed = JSON.parse(currentContent);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        // SAFETY: The JSON document is an object container preserved across configuration planning.
+        doc = parsed as ClaudeConfigDoc;
+      }
     } catch {
       // If parsing fails, preserve content under fallback or start fresh
       doc = {};
     }
   }
 
-  const existingServers: Record<string, ClaudeMcpServerConfig | Record<string, unknown>> =
-    doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers)
+  const existingServers: Record<string, ClaudeMcpServerConfig> =
+    doc.mcpServers && doc.mcpServers instanceof Object && !Array.isArray(doc.mcpServers)
       ? { ...doc.mcpServers }
       : {};
 
@@ -125,11 +130,16 @@ export async function verifyClaudeMcpConfig(
   try {
     const content = await fsBridge.readFile(targetPath);
     if (content === null) return false;
-    const doc: ClaudeConfigDoc = JSON.parse(content);
-    if (!doc.mcpServers || typeof doc.mcpServers !== "object") {
+    const parsed = JSON.parse(content);
+    if (!(parsed instanceof Object) || Array.isArray(parsed)) {
       return false;
     }
-    const entry = doc.mcpServers.resin as ClaudeMcpServerConfig | undefined;
+    // SAFETY: The parsed configuration file is verified as an object before reading mcpServers.
+    const doc = parsed as ClaudeConfigDoc;
+    if (!doc.mcpServers || !(doc.mcpServers instanceof Object) || Array.isArray(doc.mcpServers)) {
+      return false;
+    }
+    const entry = doc.mcpServers.resin;
     if (!entry) return false;
 
     return entry.url === expectedGatewayUrl;

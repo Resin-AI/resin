@@ -288,52 +288,44 @@ describe("npm-auto-onboard: fail-safe npm lifecycle & first-run onboarding", () 
         .mockImplementation(async (url: string | URL, init?: RequestInit) => {
           const urlStr = String(url);
           if (urlStr.includes("/device/code")) {
-            return {
-              ok: true,
-              status: 200,
-              json: async () => ({
-                deviceCode: "device_code_1234567890abcdef",
-                userCode: "ABCD-9876",
-                verificationUri: "https://auth.resin.sh/device",
-                verificationUriComplete: "https://auth.resin.sh/device?code=ABCD-9876",
-                expiresIn: 900,
-                interval: 1,
-              }),
-            } as Response;
+            return Response.json({
+              deviceCode: "device_code_1234567890abcdef",
+              userCode: "ABCD-9876",
+              verificationUri: "https://auth.resin.sh/device",
+              verificationUriComplete: "https://auth.resin.sh/device?code=ABCD-9876",
+              expiresIn: 900,
+              interval: 1,
+            });
           }
           if (urlStr.includes("/device/token")) {
-            const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+            const body = init?.body && String(init.body) === init.body ? JSON.parse(init.body) : {};
             const deviceId = body.deviceId ?? "dev_789";
             const installationId = body.installationId ?? `inst_${deviceId}`;
-            return {
-              ok: true,
-              status: 200,
-              json: async () => ({
-                accessToken: ACCESS_TOKEN,
-                refreshToken: REFRESH_TOKEN,
-                tokenType: "Bearer",
-                expiresIn: 3600,
-                scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
+            return Response.json({
+              accessToken: ACCESS_TOKEN,
+              refreshToken: REFRESH_TOKEN,
+              tokenType: "Bearer",
+              expiresIn: 3600,
+              scope: DEFAULT_DEVICE_AUTH_SCOPES.join(" "),
+              accountId: "acc_123",
+              workspaceId: "ws_456",
+              deviceId,
+              claims: {
                 accountId: "acc_123",
                 workspaceId: "ws_456",
                 deviceId,
-                claims: {
-                  accountId: "acc_123",
-                  workspaceId: "ws_456",
-                  deviceId,
-                  installationId,
-                  scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
-                  rawUploadConsent: false,
-                  issuedAt: new Date().toISOString(),
-                  expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
-                  tokenType: "access",
-                  subject: "usr_alice",
-                  userId: "usr_alice",
-                },
-              }),
-            } as Response;
+                installationId,
+                scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+                rawUploadConsent: false,
+                issuedAt: new Date().toISOString(),
+                expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+                tokenType: "access",
+                subject: "usr_alice",
+                userId: "usr_alice",
+              },
+            });
           }
-          return { ok: false, status: 404 } as Response;
+          return new Response(null, { status: 404 });
         });
 
       const openBrowser = vi.fn().mockResolvedValue(true);
@@ -343,7 +335,8 @@ describe("npm-auto-onboard: fail-safe npm lifecycle & first-run onboarding", () 
         stdin: { isTTY: true },
         stdout,
         home: homeDir,
-        customFetch: customFetch as unknown as typeof fetch,
+        // SAFETY: Mock fetch matching fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
         openBrowser,
         fsBridge: bridge,
       });

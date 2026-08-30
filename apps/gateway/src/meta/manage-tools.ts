@@ -1,5 +1,6 @@
+import type { ProductionSafetyGateStatus } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
-import type { CallToolResult } from "../protocol/types.js";
+import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -50,13 +51,15 @@ export function createManageToolsHandler(
 ): ToolHandler {
   return async (
     context: WorkspaceContext,
-    rawParams: Record<string, unknown>,
+    params: JsonRpcParams,
     _options?: ToolCallOptions,
   ): Promise<CallToolResult> => {
-    const params = (rawParams || {}) as unknown as ManageToolsParams;
-    const action = params.action;
+    const action =
+      params.action && Object.prototype.toString.call(params.action) === "[object String]"
+        ? String(params.action)
+        : undefined;
 
-    if (!action || typeof action !== "string") {
+    if (!action) {
       return {
         isError: true,
         content: [
@@ -69,7 +72,12 @@ export function createManageToolsHandler(
     }
 
     const rawId = params.toolId ?? params.name ?? params.tool_name;
-    const toolId = typeof rawId === "string" ? rawId.trim() : undefined;
+    const toolId =
+      params.toolId && Object.prototype.toString.call(params.toolId) === "[object String]"
+        ? String(params.toolId)
+        : params.name && Object.prototype.toString.call(params.name) === "[object String]"
+          ? String(params.name)
+          : undefined;
     const workspaceId = context.workspaceId;
 
     // Load controls for the workspace
@@ -209,25 +217,33 @@ export function createManageToolsHandler(
         }
 
         const gateStatus = safetyGateEvaluator ? safetyGateEvaluator.getStatus() : undefined;
+        const statusPayload = gateStatus
+          ? {
+              toolId: primaryId,
+              name: primaryTool.exposedName || primaryTool.name,
+              activeVersion,
+              pinnedVersion: pinnedVer,
+              isDisabled,
+              isSystem: Boolean(primaryTool.isSystem),
+              installedVersions: matching.map((t) => t.version),
+              rollbacks: controls.rollbacks ?? [],
+              safetyGate: gateStatus,
+            }
+          : {
+              toolId: primaryId,
+              name: primaryTool.exposedName || primaryTool.name,
+              activeVersion,
+              pinnedVersion: pinnedVer,
+              isDisabled,
+              isSystem: Boolean(primaryTool.isSystem),
+              installedVersions: matching.map((t) => t.version),
+              rollbacks: controls.rollbacks ?? [],
+            };
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  toolId: primaryId,
-                  name: primaryTool.exposedName || primaryTool.name,
-                  activeVersion,
-                  pinnedVersion: pinnedVer,
-                  isDisabled,
-                  isSystem: Boolean(primaryTool.isSystem),
-                  installedVersions: matching.map((t) => t.version),
-                  rollbacks: controls.rollbacks ?? [],
-                  ...(gateStatus ? { safetyGate: gateStatus } : {}),
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(statusPayload, null, 2),
             },
           ],
         };
@@ -242,7 +258,10 @@ export function createManageToolsHandler(
             ],
           };
         }
-        if (!params.version || typeof params.version !== "string") {
+        if (
+          !params.version ||
+          Object.prototype.toString.call(params.version) !== "[object String]"
+        ) {
           return {
             isError: true,
             content: [{ type: "text", text: "Parameter 'version' is required for action 'pin'." }],
@@ -256,7 +275,7 @@ export function createManageToolsHandler(
           };
         }
 
-        const versionToPin = params.version.trim();
+        const versionToPin = String(params.version).trim();
         const allInstalled = registry.getAllRegisteredTools();
         const matching = allInstalled.filter(
           (t) =>
@@ -469,7 +488,10 @@ export function createManageToolsHandler(
             ],
           };
         }
-        if (!params.version || typeof params.version !== "string") {
+        if (
+          !params.version ||
+          Object.prototype.toString.call(params.version) !== "[object String]"
+        ) {
           return {
             isError: true,
             content: [
@@ -487,7 +509,7 @@ export function createManageToolsHandler(
           };
         }
 
-        const versionToRollback = params.version.trim();
+        const versionToRollback = String(params.version).trim();
         const allInstalled = registry.getAllRegisteredTools();
         const matching = allInstalled.filter(
           (t) =>

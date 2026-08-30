@@ -174,7 +174,7 @@ describe("doctor & repair commands", () => {
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;
     process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
-      stdoutChunks.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdoutChunks.push(String(chunk));
       return true;
     });
 

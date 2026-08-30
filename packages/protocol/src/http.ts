@@ -171,6 +171,8 @@ export const ArtifactDownloadMetadataSchema = z.object({
 });
 
 export type ArtifactDownloadMetadata = z.infer<typeof ArtifactDownloadMetadataSchema>;
+export const ArtifactMetadataResponseSchema = ArtifactDownloadMetadataSchema;
+export type ArtifactMetadataResponse = ArtifactDownloadMetadata;
 
 /**
  * 6. Deployment Status Report & Sync.

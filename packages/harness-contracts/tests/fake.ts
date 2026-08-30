@@ -30,6 +30,29 @@ import type {
   RecordType,
   SourceCursor,
 } from "../src/types.js";
+export type FakeRecordPayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | FakeRecordPayloadRecord
+  | FakeRecordPayloadValue[];
+
+export interface FakeRecordPayloadRecord {
+  [key: string]: FakeRecordPayloadValue;
+}
+
+export type FakeRecordPayload = FakeRecordPayloadValue;
+
+export interface FakeSimulatedErrors {
+  missingHarness?: boolean;
+  unsupportedVersion?: boolean;
+  inaccessibleTranscript?: boolean;
+  ambiguousSession?: boolean;
+  permissionError?: boolean;
+  refreshError?: boolean;
+}
 
 /**
  * Deterministic fake SessionEventSource for testing transcript streaming, checkpoints, and rotations.
@@ -108,7 +131,7 @@ export class FakeSessionEventSource implements SessionEventSource {
   // --- Testing Simulation Helpers ---
 
   appendRecord(
-    payload: unknown,
+    payload: FakeRecordPayload,
     recordType: RecordType = "transcript_line",
     harnessId = "fake",
   ): RawHarnessRecord {
@@ -205,14 +228,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
   private fsBridge: ConfigFsBridge;
   private refreshOutcome: RefreshOutcome = "native_list_change";
 
-  public simulatedErrors: {
-    missingHarness?: boolean;
-    unsupportedVersion?: boolean;
-    inaccessibleTranscript?: boolean;
-    ambiguousSession?: boolean;
-    permissionError?: boolean;
-    refreshError?: boolean;
-  } = {};
+  public simulatedErrors: FakeSimulatedErrors = {};
 
   constructor(options?: {
     id?: string;
@@ -355,7 +371,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     gatewayUrl: string,
   ): Promise<ConfigMutationPlan> {
     const currentContent = await this.fsBridge.readFile(workspace.configPath);
-    let parsedConfig: Record<string, unknown> = {};
+    let parsedConfig: Record<string, FakeRecordPayloadValue> = {};
 
     if (currentContent) {
       try {
@@ -365,12 +381,15 @@ export class FakeHarnessAdapter implements HarnessAdapter {
       }
     }
 
-    const mcpServers = (parsedConfig.mcpServers as Record<string, unknown>) ?? {};
+    const rawMcpServers = parsedConfig.mcpServers;
+    const mcpServers: Record<string, FakeRecordPayloadValue> = {};
+    if (rawMcpServers && Object.prototype.toString.call(rawMcpServers) === "[object Object]") {
+      Object.assign(mcpServers, rawMcpServers);
+    }
     mcpServers.resin = {
       url: gatewayUrl,
       transport: "sse",
     };
-
     const plannedContent = JSON.stringify(
       {
         ...parsedConfig,

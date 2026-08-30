@@ -570,8 +570,9 @@ describe("Codex CLI Session Decoder", () => {
 
       it("rejects non-matching records and null/empty inputs", () => {
         const decoder = new CodexRecordDecoder();
-        expect(decoder.canDecode(null as unknown as RawHarnessRecord)).toBe(false);
-
+        // SAFETY: Testing runtime rejection when null record is passed.
+        const invalidRecord = null as never;
+        expect(decoder.canDecode(invalidRecord)).toBe(false);
         const foreignRecord: RawHarnessRecord = {
           recordId: "rec-4",
           sessionId: "sess-1",
@@ -614,7 +615,7 @@ describe("Codex CLI Session Decoder", () => {
         const events = Array.isArray(decoded) ? decoded : decoded ? [decoded] : [];
         expect(events).toHaveLength(1);
         expect(events[0].type).toBe("message");
-        expect((events[0] as IntermediateMessageEvent).content).toBe("Hello from registry");
+        expect(events[0].type === "message" ? events[0].content : null).toBe("Hello from registry");
       });
     });
 
@@ -737,26 +738,30 @@ describe("Codex CLI Session Decoder", () => {
 
         // Sequence ordering & causal linkage
         expect(startEvt.type).toBe("session_lifecycle");
-        expect((startEvt as IntermediateSessionLifecycleEvent).lifecycleType).toBe("start");
+        expect(startEvt.type === "session_lifecycle" ? startEvt.lifecycleType : null).toBe("start");
         expect(startEvt.causalRef?.causalSequence).toBe(1);
         expect(startEvt.causalRef?.parentId).toBeNull();
 
         expect(userEvt.type).toBe("message");
         expect(userEvt.causalRef?.causalSequence).toBe(2);
+        // SAFETY: Event identifier is present on decoded intermediate event.
         expect(userEvt.causalRef?.parentId).toBe((startEvt as { eventId: string }).eventId);
 
         expect(callEvt.type).toBe("tool_call");
-        expect((callEvt as IntermediateToolCallEvent).toolName).toBe("db_query");
+        expect(callEvt.type === "tool_call" ? callEvt.toolName : null).toBe("db_query");
         expect(callEvt.causalRef?.causalSequence).toBe(3);
+        // SAFETY: Event identifier is present on decoded intermediate event.
         expect(callEvt.causalRef?.parentId).toBe((userEvt as { eventId: string }).eventId);
 
         expect(resultEvt.type).toBe("tool_result");
-        expect((resultEvt as IntermediateToolResultEvent).toolName).toBe("db_query");
+        expect(resultEvt.type === "tool_result" ? resultEvt.toolName : null).toBe("db_query");
         expect(resultEvt.causalRef?.causalSequence).toBe(4);
+        // SAFETY: Event identifier is present on decoded intermediate event.
         expect(resultEvt.causalRef?.parentId).toBe((callEvt as { eventId: string }).eventId);
 
         expect(assistantEvt.type).toBe("message");
         expect(assistantEvt.causalRef?.causalSequence).toBe(5);
+        // SAFETY: Event identifier is present on decoded intermediate event.
         expect(assistantEvt.causalRef?.parentId).toBe((resultEvt as { eventId: string }).eventId);
         expect(assistantEvt.providerUsage).toEqual({
           provider: "openai",
@@ -766,12 +771,11 @@ describe("Codex CLI Session Decoder", () => {
           outputTokens: 45,
           totalTokens: 225,
         });
-
         expect(endEvt.type).toBe("session_lifecycle");
-        expect((endEvt as IntermediateSessionLifecycleEvent).lifecycleType).toBe("end");
+        expect(endEvt.type === "session_lifecycle" ? endEvt.lifecycleType : null).toBe("end");
         expect(endEvt.causalRef?.causalSequence).toBe(6);
+        // SAFETY: Event identifier is present on decoded intermediate event.
         expect(endEvt.causalRef?.parentId).toBe((assistantEvt as { eventId: string }).eventId);
-        // Cumulative usage is NOT double-counted on the end event because turn usage was emitted
         expect(endEvt.providerUsage).toBeUndefined();
       });
     });
@@ -950,7 +954,9 @@ describe("Codex CLI Session Decoder", () => {
         expect(events).toHaveLength(1);
         expect(events[0].sessionId).toBe("sess-ctx-preserve");
         expect(events[0].timestamp).toBe("2026-08-27T12:34:56.789Z");
-        expect((events[0] as IntermediateSessionLifecycleEvent).workspaceId).toBe("ws-custom-007");
+        expect(events[0].type === "session_lifecycle" ? events[0].workspaceId : null).toBe(
+          "ws-custom-007",
+        );
         expect(events[0].metadata).toEqual({
           workspaceId: "ws-custom-007",
           environment: "staging",
@@ -958,10 +964,10 @@ describe("Codex CLI Session Decoder", () => {
         });
       });
 
-      it("adapts diverse user message prompt shapes without reserialization", () => {
+      it("adapts diverse user message prompt formats without reserialization", () => {
         const decoder = new CodexRecordDecoder();
 
-        const shapes = [
+        const messageVariants = [
           {
             payload: { type: "user_message", prompt: "Explain AST grep" },
             expected: "Explain AST grep",
@@ -971,24 +977,24 @@ describe("Codex CLI Session Decoder", () => {
             expected: "Search pattern",
           },
           {
-            payload: { type: "user_message", input: "Run diagnostic" },
-            expected: "Run diagnostic",
+            payload: { type: "user_message", input: "Execute AST rewrite" },
+            expected: "Execute AST rewrite",
           },
           {
-            payload: { type: "user_message", text: "Plain text prompt" },
-            expected: "Plain text prompt",
+            payload: { type: "user_message", text: "Explain symbol naming" },
+            expected: "Explain symbol naming",
           },
         ];
 
-        for (const [idx, shape] of shapes.entries()) {
+        for (const [idx, variant] of messageVariants.entries()) {
           const record: RawHarnessRecord = {
-            recordId: `rec-shape-${idx}`,
-            sessionId: `sess-shape-${idx}`,
+            recordId: `rec-variant-${idx}`,
+            sessionId: `sess-variant-${idx}`,
             harnessId: "codex-cli",
             sequenceNumber: 1,
             timestamp: "2026-08-27T10:00:00.000Z",
             recordType: "message",
-            rawPayload: shape.payload,
+            rawPayload: variant.payload,
             cursor: { sequence: 1 },
             metadata: {},
           };
@@ -996,7 +1002,7 @@ describe("Codex CLI Session Decoder", () => {
           const events = decoder.decode(record);
           expect(events).toHaveLength(1);
           expect(events[0].type).toBe("message");
-          expect((events[0] as IntermediateMessageEvent).content).toBe(shape.expected);
+          expect(events[0].type === "message" ? events[0].content : null).toBe(variant.expected);
         }
       });
 

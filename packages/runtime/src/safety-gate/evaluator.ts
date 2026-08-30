@@ -7,6 +7,7 @@ import {
   REQUIRED_RUNTIME_VERSION,
   SAFETY_GATE_ERROR_CODES,
   type SafetyAttestationRecord,
+  SafetyAttestationRecordSchema,
   type SafetyGateRefusal,
   type ToolManifest,
   UNSAFE_DEV_OVERRIDE_ENV_VAR,
@@ -16,6 +17,16 @@ import {
 import { verifyVerificationEvidence } from "../verifier/evidence.js";
 import { AttestationVerifier } from "./verifier.js";
 
+type BundleVerifierArtifact =
+  | { archiveBuffer?: Buffer; digest?: string; manifest?: ToolManifest }
+  | Buffer
+  | string
+  | undefined;
+
+function isString(val: BundleVerifierArtifact): val is string {
+  return Object.prototype.toString.call(val) === "[object String]";
+}
+
 export class SafetyGateRefusalError extends Error {
   readonly refusal: SafetyGateRefusal;
 
@@ -24,6 +35,17 @@ export class SafetyGateRefusalError extends Error {
     this.name = "SafetyGateRefusalError";
     this.refusal = refusal;
   }
+}
+
+export interface SafetyGateToolExecutionResult {
+  allowed: boolean;
+  refusal?: SafetyGateRefusal;
+}
+
+export interface InvariantVerificationResult {
+  valid: boolean;
+  errorCode?: string;
+  error?: string;
 }
 
 export interface SafetyGateEvaluatorOptions {
@@ -104,8 +126,13 @@ export class SafetyGateEvaluator {
       }
       const raw = fs.readFileSync(this.attestationPath, "utf8");
       const parsed = JSON.parse(raw);
-      this.attestation = parsed as SafetyAttestationRecord;
-      return true;
+      const parsedRecord = SafetyAttestationRecordSchema.safeParse(parsed);
+      if (parsedRecord.success) {
+        this.attestation = parsedRecord.data;
+        return true;
+      }
+      this.attestation = null;
+      return false;
     } catch {
       this.attestation = null;
       return false;
@@ -215,7 +242,7 @@ export class SafetyGateEvaluator {
     toolName: string,
     isSystem = false,
     now = new Date(),
-  ): { allowed: boolean; refusal?: SafetyGateRefusal } {
+  ): SafetyGateToolExecutionResult {
     if (isSystem || isSafetyGateBypassTool(toolId) || isSafetyGateBypassTool(toolName)) {
       return { allowed: true };
     }
@@ -273,7 +300,7 @@ export class SafetyGateEvaluator {
    * Ensures that workspace filesystem access is mediated strictly through the broker
    * and that direct Deno worker access is prevented.
    */
-  verifyFilesystemBrokerBoundary(now = new Date()): { valid: boolean; error?: string } {
+  verifyFilesystemBrokerBoundary(now = new Date()): InvariantVerificationResult {
     const status = this.getStatus(now);
     if (!status.isOpen) {
       return {
@@ -302,7 +329,7 @@ export class SafetyGateEvaluator {
    * Ensures that secrets are never directly read or resolved by worker processes
    * and that opaque secret references and trusted broker mediation are strictly enforced.
    */
-  verifySecretNonDisclosureInvariant(now = new Date()): { valid: boolean; error?: string } {
+  verifySecretNonDisclosureInvariant(now = new Date()): InvariantVerificationResult {
     const status = this.getStatus(now);
     if (!status.isOpen) {
       return {
@@ -335,7 +362,7 @@ export class SafetyGateEvaluator {
    * Ensures that subprocess execution is bound to canonical verified absolute binary identities,
    * vector arguments with shell=false, and strict environment policies.
    */
-  verifyCommandBrokerBoundary(now = new Date()): { valid: boolean; error?: string } {
+  verifyCommandBrokerBoundary(now = new Date()): InvariantVerificationResult {
     const status = this.getStatus(now);
     if (!status.isOpen) {
       return {
@@ -364,7 +391,7 @@ export class SafetyGateEvaluator {
    * Ensures that child environments contain only safe fixed defaults and approved passthroughs,
    * with dangerous dynamic loader variables and unmediated secrets strictly blocked.
    */
-  verifyStrictEnvironmentPolicy(now = new Date()): { valid: boolean; error?: string } {
+  verifyStrictEnvironmentPolicy(now = new Date()): InvariantVerificationResult {
     const status = this.getStatus(now);
     if (!status.isOpen) {
       return {
@@ -391,7 +418,7 @@ export class SafetyGateEvaluator {
   /**
    * Verifies complete command identity and environment invariants.
    */
-  verifyCommandExecutionInvariants(now = new Date()): { valid: boolean; error?: string } {
+  verifyCommandExecutionInvariants(now = new Date()): InvariantVerificationResult {
     const cmdCheck = this.verifyCommandBrokerBoundary(now);
     if (!cmdCheck.valid) return cmdCheck;
 
@@ -405,7 +432,7 @@ export class SafetyGateEvaluator {
    * Verifies the bundle verifier invariant.
    * Ensures that autonomous tool activation requires bundle verifier validation.
    */
-  verifyBundleVerifierInvariant(now = new Date()): { valid: boolean; error?: string } {
+  verifyBundleVerifierInvariant(now = new Date()): InvariantVerificationResult {
     const status = this.getStatus(now);
     if (!status.isOpen) {
       return {
@@ -444,7 +471,7 @@ export class SafetyGateEvaluator {
       | string;
     evidence?: VerificationEvidenceRecord;
     now?: Date;
-  }): { valid: boolean; error?: string; errorCode?: string } {
+  }): InvariantVerificationResult {
     const now = options.now ?? new Date();
 
     // 1. Verify bundle verifier attestation invariant
@@ -472,13 +499,14 @@ export class SafetyGateEvaluator {
     }
 
     let targetDigest: string | undefined;
-    if (typeof options.artifact === "string") {
-      targetDigest = options.artifact;
-    } else if (Buffer.isBuffer(options.artifact)) {
+    const artifact = options.artifact;
+    if (isString(artifact)) {
+      targetDigest = artifact;
+    } else if (Buffer.isBuffer(artifact)) {
       // calculate sha256
       targetDigest = options.evidence.digests.artifactDigest;
-    } else if (options.artifact && typeof options.artifact === "object") {
-      targetDigest = options.artifact.digest;
+    } else if (artifact && "digest" in artifact && isString(artifact.digest)) {
+      targetDigest = artifact.digest;
     }
 
     const evidenceCheck = verifyVerificationEvidence(options.evidence, {
@@ -512,7 +540,7 @@ export class SafetyGateEvaluator {
       evidence?: VerificationEvidenceRecord;
       now?: Date;
     } = {},
-  ): { valid: boolean; error?: string } {
+  ): InvariantVerificationResult {
     const now = options.now ?? new Date();
 
     const secretCheck = this.verifySecretNonDisclosureInvariant(now);
