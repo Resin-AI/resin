@@ -198,10 +198,10 @@ describe("HarnessReconciler", () => {
       mcpServers: { resin: { type: "sse", url: GATEWAY_URL } },
     });
     expect(await bridge.readFile(`${HOME}/.codex/config.toml`)).toContain(
-      `[mcp_servers.resin]\nurl = "${GATEWAY_URL}"`,
+      `[mcp_servers.resin]\ncommand = "resin-mcp"`,
     );
     expect(JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "")).toMatchObject({
-      mcpServers: { resin: { type: "sse", url: GATEWAY_URL } },
+      mcpServers: { resin: { command: "resin-mcp", args: [] } },
     });
 
     const backupCount = Object.keys(bridge.dump()).filter(
@@ -296,9 +296,11 @@ describe("HarnessReconciler", () => {
       command: "user-mcp",
       env: { TOKEN: "keep" },
     });
+    expect(omp.mcpServers.resin.command).toBe("resin-mcp");
     expect(omp.mcpServers.resin.env).toEqual({
       RESIN_USER_TOKEN: "keep-owned-env",
     });
+    expect(omp.mcpServers.resin.url).toBeUndefined();
   });
 
   it("reports corrupt configuration without replacing or backing it up", async () => {
@@ -530,8 +532,8 @@ describe("HarnessReconciler", () => {
     });
     const repaired = JSON.parse((await bridge.readFile(targetPath)) ?? "");
     expect(repaired.mcpServers.resin).toEqual({
-      type: "sse",
-      url: GATEWAY_URL,
+      command: "resin-mcp",
+      args: [],
       env: { RESIN_TOKEN: "keep" },
     });
   });
@@ -776,7 +778,7 @@ describe("HarnessReconciler", () => {
       });
 
       expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-      expect(await fs.readFile(targetPath, "utf8")).toContain(`url = "${GATEWAY_URL}"`);
+      expect(await fs.readFile(targetPath, "utf8")).toContain('command = "resin-mcp"');
       await expect(fs.access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await fs.rm(home, { recursive: true, force: true });
@@ -816,7 +818,7 @@ describe("HarnessReconciler", () => {
     }
   });
 
-  it("inserts a missing Codex URL after an EOF table header", async () => {
+  it("inserts a missing canonical Codex command after an EOF table header", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const targetPath = `${HOME}/.codex/config.toml`;
     await bridge.writeFile(targetPath, "[mcp_servers.resin]");
@@ -832,7 +834,9 @@ describe("HarnessReconciler", () => {
     });
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    expect(await bridge.readFile(targetPath)).toBe(`[mcp_servers.resin]\nurl = "${GATEWAY_URL}"\n`);
+    const repaired = await bridge.readFile(targetPath);
+    expect(repaired).toContain('[mcp_servers.resin]\ncommand = "resin-mcp"');
+    expect(repaired).not.toContain("url =");
   });
 
   it("removes complete multiline owned Codex args while retaining adjacent user TOML", async () => {
@@ -865,7 +869,7 @@ describe("HarnessReconciler", () => {
     const repaired = await bridge.readFile(targetPath);
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    expect(repaired).toContain(`url = "${GATEWAY_URL}"`);
+    expect(repaired).toContain('command = "resin-mcp"');
     expect(repaired).toContain('user_note = "preserve me"');
     expect(repaired).not.toContain("legacy-command");
     expect(repaired).not.toContain("--legacy");
@@ -1162,11 +1166,12 @@ describe("HarnessReconciler", () => {
       expect(claude.mcpServers.resin_gateway).toBeUndefined();
 
       const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
-      expect(codex).toContain(`[mcp_servers.resin]\nurl = "${GATEWAY_URL}"`);
+      expect(codex).toContain("[mcp_servers.resin]");
+      expect(codex).toContain('command = "resin-mcp"');
       expect(codex).not.toContain("[mcp_servers.resin_gateway]");
 
       const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
-      expect(omp.mcpServers.resin).toEqual({ type: "sse", url: GATEWAY_URL });
+      expect(omp.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
 
@@ -1251,11 +1256,63 @@ describe("HarnessReconciler", () => {
       expect(omp.settings).toEqual({ compact: true });
       expect(omp.mcpServers.user_srv).toEqual({ command: "user-bin" });
       expect(omp.mcpServers.resin).toEqual({
-        type: "sse",
-        url: GATEWAY_URL,
+        command: "resin-mcp",
+        args: [],
         env: { CUSTOM_VAR: "keep-me" },
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
+    });
+
+    it("converges legacy localhost SSE entries for OMP and Codex to canonical stdio", async () => {
+      const bridge = new InMemoryConfigFsBridge();
+      const reconciler = new HarnessReconciler();
+
+      // OMP with localhost SSE entry
+      await bridge.writeFile(
+        `${HOME}/.omp/agent/mcp.json`,
+        JSON.stringify({
+          mcpServers: {
+            resin: {
+              type: "sse",
+              url: "http://127.0.0.1:9400/mcp/sse",
+              env: { TOKEN: "user-tok" },
+            },
+          },
+        }),
+      );
+
+      // Codex with localhost SSE entry
+      await bridge.writeFile(
+        `${HOME}/.codex/config.toml`,
+        [
+          "[mcp_servers.resin]",
+          'url = "http://localhost:9400/mcp/sse"',
+          'env.CUSTOM = "preserve"',
+        ].join("\n"),
+      );
+
+      const report = await reconciler.reconcile({
+        customHome: HOME,
+        workspacePath: WORKSPACE,
+        fsBridge: bridge,
+        installedHarnesses: ["omp", "codex-cli"],
+        probeHarness: NO_INSTALLATION_PROBE,
+      });
+
+      expect(report.success).toBe(true);
+
+      const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
+      expect(omp.mcpServers.resin).toEqual({
+        command: "resin-mcp",
+        args: [],
+        env: { TOKEN: "user-tok" },
+      });
+
+      const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
+      expect(codex).toContain("[mcp_servers.resin]");
+      expect(codex).toContain('command = "resin-mcp"');
+      expect(codex).not.toContain("localhost:9400");
+      expect(codex).toContain('env.CUSTOM = "preserve"');
     });
   });
 });

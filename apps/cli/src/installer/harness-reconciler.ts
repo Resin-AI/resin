@@ -57,7 +57,7 @@ const HarnessJsonValueSchema: z.ZodType<HarnessJsonValue> = z.lazy(() =>
 
 const HarnessJsonObjectSchema: z.ZodType<HarnessJsonObject> = z.record(HarnessJsonValueSchema);
 
-const RESIN_OWNED_SERVER_FIELDS = ["type", "url", "command", "args"] as const;
+const RESIN_OWNED_SERVER_FIELDS = ["type", "url", "command", "args", "endpoint"] as const;
 const BACKUP_FORMAT = "resin-harness-backup/v1" as const;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const OwnedBackupMetadataSchema = z

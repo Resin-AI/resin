@@ -254,4 +254,137 @@ describe("Daemon Configuration Persistence & Telemetry Integration", () => {
     const daemonPaths = resolvePaths({ home, resinHome: path.join(home, ".resin") });
     expect(fs.existsSync(daemonPaths.configFile)).toBe(false);
   });
+
+  it("preserves pre-existing explicit telemetryEnabled=false during re-install", async () => {
+    const home = createTempTestHome();
+    const resinHome = path.join(home, ".resin");
+    const workspace = path.join(home, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(resinHome, { recursive: true });
+
+    const daemonPaths = resolvePaths({ home, resinHome });
+    fs.mkdirSync(daemonPaths.configDir, { recursive: true });
+    fs.writeFileSync(
+      daemonPaths.configFile,
+      JSON.stringify({
+        version: "0.1.0",
+        logLevel: "info",
+        host: "127.0.0.1",
+        port: 9400,
+        cloudUrl: "https://api.resin.sh",
+        telemetryEnabled: false,
+        storageDir: daemonPaths.dataDir,
+        moduleConfigs: {},
+        custom: {},
+      }),
+    );
+
+    const installer = new ResinInstaller({
+      logger: () => {},
+    });
+
+    const summary = await installer.run({
+      customHome: home,
+      workspace,
+      nonInteractive: true,
+      autoApprove: true,
+      setupService: false,
+    });
+
+    expect(summary.success).toBe(true);
+    const loaded = loadDaemonConfig({ configPath: daemonPaths.configFile });
+    expect(loaded.telemetryEnabled).toBe(false);
+  });
+
+  it("heals missing/invalid telemetryEnabled in pre-existing config to true during re-install", async () => {
+    const home = createTempTestHome();
+    const resinHome = path.join(home, ".resin");
+    const workspace = path.join(home, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(resinHome, { recursive: true });
+
+    const daemonPaths = resolvePaths({ home, resinHome });
+    fs.mkdirSync(daemonPaths.configDir, { recursive: true });
+    fs.writeFileSync(
+      daemonPaths.configFile,
+      JSON.stringify({
+        version: "0.1.0",
+        logLevel: "info",
+        host: "127.0.0.1",
+        port: 9400,
+        cloudUrl: "https://api.resin.sh",
+        telemetryEnabled: "invalid-string",
+        storageDir: daemonPaths.dataDir,
+        moduleConfigs: {},
+        custom: {},
+      }),
+    );
+
+    const installer = new ResinInstaller({
+      logger: () => {},
+    });
+
+    const summary = await installer.run({
+      customHome: home,
+      workspace,
+      nonInteractive: true,
+      autoApprove: true,
+      setupService: false,
+    });
+
+    expect(summary.success).toBe(true);
+    const loaded = loadDaemonConfig({ configPath: daemonPaths.configFile });
+    expect(loaded.telemetryEnabled).toBe(true);
+  });
+
+  it("cleans up stale IPC tokens during install while preserving device-token.json", async () => {
+    const home = createTempTestHome();
+    const resinHome = path.join(home, ".resin");
+    const daemonPaths = resolvePaths({ home, resinHome });
+    const workspace = path.join(home, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(resinHome, { recursive: true });
+    fs.mkdirSync(daemonPaths.stateDir, { recursive: true });
+    fs.mkdirSync(daemonPaths.configDir, { recursive: true });
+
+    const staleAuthToken = path.join(resinHome, "auth.token");
+    const staleDaemonToken = path.join(daemonPaths.stateDir, "daemon.token");
+    const staleConfigAuthToken = path.join(daemonPaths.configDir, "auth.token");
+    const staleConfigDaemonToken = path.join(daemonPaths.configDir, "daemon.token");
+    const staleHomeDaemonToken = path.join(resinHome, "daemon.token");
+    const staleStateAuthToken = path.join(daemonPaths.stateDir, "auth.token");
+    const deviceTokenPath = path.join(daemonPaths.stateDir, "device-token.json");
+
+    fs.writeFileSync(staleAuthToken, "stale-auth");
+    fs.writeFileSync(staleDaemonToken, "stale-daemon");
+    fs.writeFileSync(staleConfigAuthToken, "stale-cfg-auth");
+    fs.writeFileSync(staleConfigDaemonToken, "stale-cfg-daemon");
+    fs.writeFileSync(staleHomeDaemonToken, "stale-home-daemon");
+    fs.writeFileSync(staleStateAuthToken, "stale-state-auth");
+    fs.writeFileSync(deviceTokenPath, JSON.stringify({ token: "cloud-dev-tok" }));
+
+    const installer = new ResinInstaller({
+      logger: () => {},
+    });
+
+    const summary = await installer.run({
+      customHome: home,
+      workspace,
+      nonInteractive: true,
+      autoApprove: true,
+      setupService: false,
+    });
+
+    expect(summary.success).toBe(true);
+    expect(fs.existsSync(staleAuthToken)).toBe(false);
+    expect(fs.existsSync(staleDaemonToken)).toBe(false);
+    expect(fs.existsSync(staleConfigAuthToken)).toBe(false);
+    expect(fs.existsSync(staleConfigDaemonToken)).toBe(false);
+    expect(fs.existsSync(staleHomeDaemonToken)).toBe(false);
+    expect(fs.existsSync(staleStateAuthToken)).toBe(false);
+    expect(fs.existsSync(deviceTokenPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(deviceTokenPath, "utf8"))).toEqual({
+      token: "cloud-dev-tok",
+    });
+  });
 });

@@ -192,7 +192,143 @@ describe("doctor & repair commands", () => {
     // Confirm no legacy IPC token files were created or expected
     expect(await fsBridge.readFile(path.join(resinHome, "daemon.token"))).toBeNull();
     expect(await fsBridge.readFile(path.join(resinHome, "auth.token"))).toBeNull();
-    expect(await fsBridge.readFile(path.join(resinHome, "state", "daemon.token"))).toBeNull();
+    expect(await fsBridge.readFile(path.join(daemonPaths.stateDir, "daemon.token"))).toBeNull();
+  });
+
+  it("safely cleans only stale IPC files without removing device-token.json or credentials", async () => {
+    const deviceTokenContent = JSON.stringify({
+      token: "cloud-device-cred-123",
+      deviceId: "dev-abc",
+    });
+    const fsBridge = createMockFsBridge({
+      [path.join(resinHome, "auth.token")]: "stale-ipc-auth",
+      [path.join(resinHome, "daemon.token")]: "stale-ipc-daemon",
+      [path.join(daemonPaths.stateDir, "auth.token")]: "stale-ipc-state-auth",
+      [path.join(daemonPaths.stateDir, "daemon.token")]: "stale-ipc-state-daemon",
+      [path.join(daemonPaths.configDir, "auth.token")]: "stale-ipc-config-auth",
+      [path.join(daemonPaths.configDir, "daemon.token")]: "stale-ipc-config-daemon",
+      [path.join(daemonPaths.stateDir, "device-token.json")]: deviceTokenContent,
+    });
+
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: createMockServiceManager(),
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(actions.some((a) => a.includes("Removed stale IPC token"))).toBe(true);
+
+    // Stale tokens removed
+    expect(await fsBridge.exists(path.join(resinHome, "auth.token"))).toBe(false);
+    expect(await fsBridge.exists(path.join(resinHome, "daemon.token"))).toBe(false);
+    expect(await fsBridge.exists(path.join(daemonPaths.stateDir, "auth.token"))).toBe(false);
+    expect(await fsBridge.exists(path.join(daemonPaths.stateDir, "daemon.token"))).toBe(false);
+    expect(await fsBridge.exists(path.join(daemonPaths.configDir, "auth.token"))).toBe(false);
+    expect(await fsBridge.exists(path.join(daemonPaths.configDir, "daemon.token"))).toBe(false);
+
+    // device-token.json strictly preserved!
+    expect(await fsBridge.exists(path.join(daemonPaths.stateDir, "device-token.json"))).toBe(true);
+    expect(await fsBridge.readFile(path.join(daemonPaths.stateDir, "device-token.json"))).toBe(
+      deviceTokenContent,
+    );
+  });
+
+  it("heals missing and invalid telemetryEnabled to true while preserving explicit false", async () => {
+    // 1. Missing telemetryEnabled in config.json
+    const missingBridge = createMockFsBridge({
+      [daemonPaths.configFile]: JSON.stringify({ version: "0.1.0", logLevel: "info" }),
+    });
+    await repairState({
+      home: homeDir,
+      fsBridge: missingBridge,
+      serviceManager: createMockServiceManager(),
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+    const missingParsed = JSON.parse(
+      (await missingBridge.readFile(daemonPaths.configFile)) ?? "{}",
+    );
+    expect(missingParsed.telemetryEnabled).toBe(true);
+
+    // 2. Invalid telemetryEnabled in config.json
+    const invalidBridge = createMockFsBridge({
+      [daemonPaths.configFile]: JSON.stringify({
+        version: "0.1.0",
+        telemetryEnabled: "invalid-value",
+      }),
+    });
+    await repairState({
+      home: homeDir,
+      fsBridge: invalidBridge,
+      serviceManager: createMockServiceManager(),
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+    const invalidParsed = JSON.parse(
+      (await invalidBridge.readFile(daemonPaths.configFile)) ?? "{}",
+    );
+    expect(invalidParsed.telemetryEnabled).toBe(true);
+
+    // 3. Explicit false preserved
+    const explicitFalseBridge = createMockFsBridge({
+      [daemonPaths.configFile]: JSON.stringify({ version: "0.1.0", telemetryEnabled: false }),
+    });
+    await repairState({
+      home: homeDir,
+      fsBridge: explicitFalseBridge,
+      serviceManager: createMockServiceManager(),
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+    const explicitFalseParsed = JSON.parse(
+      (await explicitFalseBridge.readFile(daemonPaths.configFile)) ?? "{}",
+    );
+    expect(explicitFalseParsed.telemetryEnabled).toBe(false);
+  });
+
+  it("repairs and converges legacy localhost SSE entries to canonical stdio", async () => {
+    const ompConfigPath = path.join(homeDir, ".omp", "agent", "mcp.json");
+    const codexConfigPath = path.join(homeDir, ".codex", "config.toml");
+    const fsBridge = createMockFsBridge({
+      [ompConfigPath]: JSON.stringify({
+        mcpServers: {
+          resin: { type: "sse", url: "http://localhost:9400/mcp/sse" },
+          custom: { command: "custom-cmd" },
+        },
+      }),
+      [codexConfigPath]: [
+        "[mcp_servers.resin]",
+        'url = "http://127.0.0.1:9400/mcp/sse"',
+        "",
+        "[mcp_servers.other]",
+        'command = "other-tool"',
+      ].join("\n"),
+    });
+
+    await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: createMockServiceManager(),
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    const omp = JSON.parse((await fsBridge.readFile(ompConfigPath)) ?? "{}");
+    expect(omp.mcpServers.resin).toEqual({ command: "resin-mcp", args: [] });
+    expect(omp.mcpServers.custom).toEqual({ command: "custom-cmd" });
+
+    const codex = await fsBridge.readFile(codexConfigPath);
+    expect(codex).toContain("[mcp_servers.resin]");
+    expect(codex).toContain('command = "resin-mcp"');
+    expect(codex).not.toContain("9400/mcp/sse");
+    expect(codex).toContain("[mcp_servers.other]");
   });
 
   it("formats terminal doctor report with proper icons and summary", () => {

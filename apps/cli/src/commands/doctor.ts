@@ -632,6 +632,46 @@ export async function repairState(options: {
     await fsBridge.unlink(daemonPaths.lockFilePath);
     actions.push(`Removed stale lockfile: ${daemonPaths.lockFilePath}`);
   }
+  // Clean stale local IPC token files under Resin state/config/home paths
+  const staleTokenCandidates = [
+    path.join(resinHome, "auth.token"),
+    path.join(resinHome, "daemon.token"),
+    path.join(daemonPaths.stateDir, "auth.token"),
+    path.join(daemonPaths.stateDir, "daemon.token"),
+    path.join(daemonPaths.configDir, "auth.token"),
+    path.join(daemonPaths.configDir, "daemon.token"),
+  ];
+
+  for (const tokenPath of staleTokenCandidates) {
+    if (await fsBridge.exists(tokenPath)) {
+      await fsBridge.unlink(tokenPath);
+      actions.push(`Removed stale IPC token: ${tokenPath}`);
+    }
+  }
+
+  // Heal missing or invalid telemetry setting in daemon config, preserving explicit false
+  if (await fsBridge.exists(daemonPaths.configFile)) {
+    try {
+      const rawConfig = await fsBridge.readFile(daemonPaths.configFile);
+      if (rawConfig && rawConfig.trim().length > 0) {
+        const parsed = JSON.parse(rawConfig);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          if (typeof parsed.telemetryEnabled !== "boolean") {
+            parsed.telemetryEnabled = true;
+            await fsBridge.writeFile(
+              daemonPaths.configFile,
+              `${JSON.stringify(parsed, null, 2)}\n`,
+            );
+            actions.push(
+              `Healed missing/invalid telemetryEnabled to true: ${daemonPaths.configFile}`,
+            );
+          }
+        }
+      }
+    } catch {
+      // Best-effort config healing
+    }
+  }
 
   // 3. Install / repair background service unit
   if (!svcStatus.installed) {

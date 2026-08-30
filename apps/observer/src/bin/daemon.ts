@@ -503,7 +503,10 @@ export function resolveDeviceTelemetryEnabled<T>(value: T, failClosed = false): 
   if (failClosed) {
     return false;
   }
-  return value === true;
+  if (value === false) {
+    return false;
+  }
+  return value === true || value === undefined;
 }
 
 /**
