@@ -509,9 +509,9 @@ jobs:
             const installerResultsPath = process.argv[2];
 
             const canonicalAssets = [
-              { name: "install.sh", url: "https://resin.sh/install.sh", candidatePath: "installers/install.sh" },
-              { name: "install.ps1", url: "https://resin.sh/install.ps1", candidatePath: "installers/install.ps1" },
-              { name: "install-helper-v1.mjs", url: "https://resin.sh/install-helper-v1.mjs", candidatePath: "installers/install-helper-v1.mjs" },
+              { name: "install.sh", url: "https://dist.resin.sh/releases/v1/installers/install.sh", candidatePath: "installers/install.sh" },
+              { name: "install.ps1", url: "https://dist.resin.sh/releases/v1/installers/install.ps1", candidatePath: "installers/install.ps1" },
+              { name: "install-helper-v1.mjs", url: "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs", candidatePath: "installers/install-helper-v1.mjs" },
             ];
 
             async function fetchAnonymousNoRedirect(url) {
