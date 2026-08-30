@@ -1,6 +1,9 @@
+import fs from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { resolvePaths } from "@resin/observer";
+import { FrameDecoder, encodeFrame, resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import {
   doctorCommand,
@@ -115,6 +118,54 @@ describe("doctor & repair commands", () => {
     expect(lockItem?.fixable).toBe(true);
   });
 
+  it("diagnoses responsive IPC socket through local socket without requiring auth token", async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-home-"));
+    const paths = resolvePaths({ home: tempHome });
+    await fs.mkdir(paths.stateDir, { recursive: true });
+
+    const server = net.createServer((socket) => {
+      const decoder = new FrameDecoder();
+      socket.on("data", (chunk) => {
+        for (const message of decoder.push(chunk)) {
+          const req = message as { id?: string; method?: string; params?: { nonce?: string } };
+          if (req.method === "ping") {
+            socket.write(
+              encodeFrame({
+                id: req.id,
+                result: {
+                  pong: true,
+                  nonce: req.params?.nonce ?? "test-nonce",
+                  timestamp: Date.now(),
+                },
+              }),
+            );
+          }
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(paths.socketPath, resolve));
+
+    try {
+      const items = await runDiagnostics({
+        home: tempHome,
+        fsBridge: createMockFsBridge({
+          [paths.socketPath]: "socket",
+        }),
+        serviceManager: createMockServiceManager(),
+      });
+
+      const ipcItem = items.find((i) => i.id === "ipc_ping");
+      expect(ipcItem).toBeDefined();
+      expect(ipcItem?.status).toBe("pass");
+      expect(ipcItem?.message).toContain("Daemon responded to IPC ping");
+      expect(ipcItem?.fixable).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it("repairs state by creating directories and removing stale lockfile", async () => {
     const fsBridge = createMockFsBridge({
       [lockFilePath]: "12345",
@@ -137,6 +188,11 @@ describe("doctor & repair commands", () => {
 
     // Verify directories were created
     expect(await fsBridge.exists(resinHome)).toBe(true);
+
+    // Confirm no legacy IPC token files were created or expected
+    expect(await fsBridge.readFile(path.join(resinHome, "daemon.token"))).toBeNull();
+    expect(await fsBridge.readFile(path.join(resinHome, "auth.token"))).toBeNull();
+    expect(await fsBridge.readFile(path.join(resinHome, "state", "daemon.token"))).toBeNull();
   });
 
   it("formats terminal doctor report with proper icons and summary", () => {

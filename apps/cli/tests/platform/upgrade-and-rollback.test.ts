@@ -892,7 +892,6 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     const server = new IpcServer({
       supervisor,
       socketPath: platformPaths.socketPath,
-      tokenFilePath: platformPaths.tokenFilePath,
     });
     try {
       await fs.mkdir(resinHome, { recursive: true });

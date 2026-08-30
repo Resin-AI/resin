@@ -1,6 +1,7 @@
 import path from "node:path";
 import process from "node:process";
-import { describe, expect, it } from "vitest";
+import type { IpcClient } from "@resin/observer";
+import { describe, expect, it, vi } from "vitest";
 import {
   generateLaunchdPlist,
   generateSystemdUnit,
@@ -15,6 +16,7 @@ import {
   WslUserServiceManager,
   createUserServiceManager,
 } from "../../src/service/manager.js";
+import { verifyDaemonReadiness } from "../../src/service/verification.js";
 
 function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   const files = new Map<string, string>(Object.entries(initialFiles));
@@ -88,6 +90,9 @@ describe("Cross-Platform Service Lifecycle Suite", () => {
       expect(unitContent).toContain("NoNewPrivileges=yes");
       expect(unitContent).toContain('Environment="RESIN_ENV=staging"');
       expect(unitContent).toContain("WantedBy=default.target");
+      expect(unitContent).not.toContain("daemon.token");
+      expect(unitContent).not.toContain("auth.token");
+      expect(unitContent).not.toContain("RESIN_AUTH_TOKEN");
 
       const validation = validateServiceDefinition("systemd", unitContent);
       expect(validation.valid).toBe(true);
@@ -116,6 +121,9 @@ describe("Cross-Platform Service Lifecycle Suite", () => {
       expect(plistContent).toContain("/Users/test/Library/Logs/resin/daemon.log");
       expect(plistContent).toContain("<key>RESIN_STAGE</key>");
 
+      expect(plistContent).not.toContain("daemon.token");
+      expect(plistContent).not.toContain("auth.token");
+      expect(plistContent).not.toContain("RESIN_AUTH_TOKEN");
       const validation = validateServiceDefinition("launchd", plistContent);
       expect(validation.valid).toBe(true);
       expect(validation.errors).toHaveLength(0);
@@ -139,6 +147,9 @@ describe("Cross-Platform Service Lifecycle Suite", () => {
       expect(scriptContent).toContain('nohup "$NODE_PATH" "$DAEMON_PATH"');
       expect(scriptContent).toContain('export WSL_ENV_VAR="fallback"');
 
+      expect(scriptContent).not.toContain("daemon.token");
+      expect(scriptContent).not.toContain("auth.token");
+      expect(scriptContent).not.toContain("RESIN_AUTH_TOKEN");
       const validation = validateServiceDefinition("wsl-fallback", scriptContent);
       expect(validation.valid).toBe(true);
       expect(validation.errors).toHaveLength(0);
@@ -295,6 +306,50 @@ describe("Cross-Platform Service Lifecycle Suite", () => {
         platform: "wsl",
       });
       expect(wslManager.name).toBe("wsl");
+    });
+  });
+
+  describe("Service Readiness and Verification Tokenless Behavior", () => {
+    it("verifies daemon service readiness via direct local socket ping without requiring or supplying auth.token/daemon.token", async () => {
+      const mockIpcClient = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
+        getHealth: vi.fn().mockResolvedValue({
+          status: "healthy",
+          modules: {},
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const result = await verifyDaemonReadiness({
+        homeDir: "/home/testuser",
+        ipcClient: mockIpcClient as unknown as IpcClient,
+        cloudRequired: false,
+        timeoutMs: 1000,
+      });
+      expect(result.cloudReady).toBe(true);
+      expect(mockIpcClient.connect).not.toHaveBeenCalled();
+      expect(mockIpcClient.ping).toHaveBeenCalled();
+    });
+
+    it("verifies offline socket produces expected readiness failure without attempting token auth", async () => {
+      const offlineIpcClient = {
+        connect: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED /mock/socket")),
+        ping: vi.fn().mockRejectedValue(new Error("not connected")),
+        getHealth: vi.fn().mockRejectedValue(new Error("not connected")),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const result = await verifyDaemonReadiness({
+        homeDir: "/home/testuser",
+        ipcClient: offlineIpcClient as unknown as IpcClient,
+        cloudRequired: false,
+        timeoutMs: 0,
+      });
+
+      expect(result.ready).toBe(false);
+      expect(result.ipcReady).toBe(false);
+      expect(result.error).toContain("not connected");
     });
   });
 });

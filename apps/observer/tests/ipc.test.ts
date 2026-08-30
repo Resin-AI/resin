@@ -11,6 +11,7 @@ import { IPC_ERROR_CODES, type IpcRequest, type IpcResponse } from "../src/ipc/p
 import { IpcServer } from "../src/ipc/server.js";
 import { createInMemoryIpcPair } from "../src/ipc/transport.js";
 import type { DaemonModule, ModuleContext, ModuleLifecycleState } from "../src/lifecycle.js";
+import type { JsonObject } from "../src/normalization/redaction.js";
 import { DaemonSupervisor } from "../src/supervisor.js";
 
 function createDummyModule(id: string): DaemonModule {
@@ -84,13 +85,18 @@ describe("ipc", () => {
   });
 
   describe("In-Memory Transport RPC Operations", () => {
-    async function setupInMemoryIpc(token = "test-token") {
-      const config = DaemonConfigSchema.parse({ logLevel: "silent", authToken: token });
+    async function setupInMemoryIpc() {
+      const config = DaemonConfigSchema.parse({
+        logLevel: "silent",
+        custom: {
+          authToken: "test-token",
+        },
+      });
       const mod = createDummyModule("core");
       const supervisor = new DaemonSupervisor({ config, modules: [mod] });
       await supervisor.start();
 
-      const server = new IpcServer({ supervisor, authToken: token });
+      const server = new IpcServer({ supervisor });
       await server.start();
 
       const { serverTransport, clientTransport } = createInMemoryIpcPair();
@@ -98,7 +104,6 @@ describe("ipc", () => {
 
       const client = new IpcClient({
         transport: clientTransport,
-        authToken: token,
       });
 
       return { supervisor, server, client };
@@ -158,7 +163,7 @@ describe("ipc", () => {
       const { supervisor, server, client } = await setupInMemoryIpc();
 
       const diag = await client.getDiagnostics();
-      expect(diag.config.authToken).toBe("[REDACTED]");
+      expect((diag.config.custom as JsonObject).authToken).toBe("[REDACTED]");
       expect(diag.modules.core).toEqual({ status: "ok" });
 
       await client.close();
@@ -181,41 +186,14 @@ describe("ipc", () => {
     });
   });
 
-  describe("Authentication", () => {
-    it("rejects unauthorized client with incorrect auth token", async () => {
-      const config = DaemonConfigSchema.parse({ logLevel: "silent", authToken: "correct-token" });
-      const supervisor = new DaemonSupervisor({ config });
-      await supervisor.start();
-
-      const server = new IpcServer({ supervisor, authToken: "correct-token" });
-      await server.start();
-
-      const { serverTransport, clientTransport } = createInMemoryIpcPair();
-      server.attachTransport(serverTransport);
-
-      const unauthorizedClient = new IpcClient({
-        transport: clientTransport,
-        authToken: "wrong-token",
-      });
-
-      await expect(unauthorizedClient.ping()).rejects.toThrow(/Unauthorized/);
-
-      await unauthorizedClient.close();
-      await server.stop();
-      await supervisor.stop();
-    });
-  });
-
   describe("Unix Domain Socket Transport", () => {
-    it("communicates successfully over a real Unix domain socket file", async () => {
+    it("communicates successfully over a real Unix domain socket file without credentials", async () => {
       const tempDir = path.join(os.tmpdir(), `resin-ipc-uds-${Date.now()}`);
       await fs.promises.mkdir(tempDir, { recursive: true });
       const socketPath = path.join(tempDir, "daemon.sock");
-      const token = "uds-secret-token";
 
       const config = DaemonConfigSchema.parse({
         logLevel: "silent",
-        authToken: token,
         socketPath,
       });
       const supervisor = new DaemonSupervisor({ config });
@@ -224,13 +202,11 @@ describe("ipc", () => {
       const server = new IpcServer({
         supervisor,
         socketPath,
-        authToken: token,
       });
       await server.start();
 
       const client = new IpcClient({
         socketPath,
-        authToken: token,
       });
 
       await client.connect();
@@ -250,18 +226,15 @@ describe("ipc", () => {
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
 
-    it("rejects unauthenticated requests and requests with invalid authentication token", async () => {
+    it("connects and executes requests over local socket without credentials", async () => {
       const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-auth-test-"));
       const socketPath =
         process.platform === "win32"
           ? `\\\\.\\pipe\\uds-auth-test-${Date.now()}`
           : path.join(tempDir, "observer.sock");
-      const validToken = "valid_secret_token_1234567890";
-      const invalidToken = "invalid_secret_token_0000000000";
 
       const config = DaemonConfigSchema.parse({
         instanceId: "uds-auth-test-inst",
-        authToken: validToken,
       });
       const supervisor = new DaemonSupervisor({ config });
       await supervisor.start();
@@ -269,49 +242,30 @@ describe("ipc", () => {
       const server = new IpcServer({
         supervisor,
         socketPath,
-        authToken: validToken,
       });
       await server.start();
 
-      // 1. Client with invalid token is rejected
-      const badClient = new IpcClient({
+      const client = new IpcClient({
         socketPath,
-        authToken: invalidToken,
       });
-      await badClient.connect();
-      await expect(badClient.ping()).rejects.toThrow(/Unauthorized/i);
-      await badClient.close();
+      await client.connect();
+      expect(client.connected).toBe(true);
 
-      // 2. Client with no token is rejected
-      const noTokenClient = new IpcClient({
-        socketPath,
-        authToken: "",
-      });
-      await noTokenClient.connect();
-      await expect(noTokenClient.ping()).rejects.toThrow(/Unauthorized/i);
-      await noTokenClient.close();
-
-      // 3. Client with valid token succeeds
-      const goodClient = new IpcClient({
-        socketPath,
-        authToken: validToken,
-      });
-      await goodClient.connect();
-      const res = await goodClient.ping("authorized-nonce");
+      const res = await client.ping("unauthenticated-nonce");
       expect(res.pong).toBe(true);
-      await goodClient.close();
+      expect(res.nonce).toBe("unauthenticated-nonce");
+      await client.close();
 
       await server.stop();
       await supervisor.stop();
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
 
-    it("enforces strict filesystem permission bits (0o600) on POSIX domain socket and token file", async () => {
+    it("enforces strict filesystem permission bits (0o600) on POSIX domain socket", async () => {
       if (process.platform === "win32") return;
 
       const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-perm-test-"));
       const socketPath = path.join(tempDir, "observer.sock");
-      const tokenFilePath = path.join(tempDir, "ipc.token");
 
       const config = DaemonConfigSchema.parse({
         instanceId: "uds-perm-test-inst",
@@ -322,7 +276,6 @@ describe("ipc", () => {
       const server = new IpcServer({
         supervisor,
         socketPath,
-        tokenFilePath,
       });
       await server.start();
 
@@ -330,26 +283,24 @@ describe("ipc", () => {
       const socketStat = await fs.promises.stat(socketPath);
       expect(socketStat.mode & 0o777).toBe(0o600);
 
-      // Check generated token file permissions (0o600)
-      const tokenStat = await fs.promises.stat(tokenFilePath);
-      expect(tokenStat.mode & 0o777).toBe(0o600);
-
       await server.stop();
       await supervisor.stop();
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
 
-    it("redacts authentication tokens and secrets from diagnostics, logs, and error responses", async () => {
+    it("redacts sensitive data from diagnostics, logs, and error responses", async () => {
       const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-redact-test-"));
       const socketPath =
         process.platform === "win32"
           ? `\\\\.\\pipe\\uds-redact-test-${Date.now()}`
           : path.join(tempDir, "observer.sock");
-      const secretToken = "very_secret_token_must_not_leak_in_logs";
+      const secretValue = "very_secret_token_must_not_leak_in_logs";
 
       const config = DaemonConfigSchema.parse({
         instanceId: "uds-redact-test-inst",
-        authToken: secretToken,
+        custom: {
+          apiSecret: secretValue,
+        },
       });
       const supervisor = new DaemonSupervisor({ config });
       await supervisor.start();
@@ -357,25 +308,24 @@ describe("ipc", () => {
       const server = new IpcServer({
         supervisor,
         socketPath,
-        authToken: secretToken,
       });
       await server.start();
 
       const client = new IpcClient({
         socketPath,
-        authToken: secretToken,
       });
       await client.connect();
 
-      // Diagnostics should not leak unredacted token or sensitive auth secrets in plain text
+      // Diagnostics should not leak sensitive keys in plain text
       const diagnostics = await client.getDiagnostics();
       const diagStr = JSON.stringify(diagnostics);
-      expect(diagStr).not.toContain(secretToken);
+      expect(diagStr).not.toContain(secretValue);
+      expect((diagnostics.config.custom as JsonObject).apiSecret).toBe("[REDACTED]");
 
-      // Health report should not expose raw secret token
+      // Health report should not expose sensitive keys
       const health = await client.getHealth();
       const healthStr = JSON.stringify(health);
-      expect(healthStr).not.toContain(secretToken);
+      expect(healthStr).not.toContain(secretValue);
 
       await client.close();
       await server.stop();
@@ -389,11 +339,9 @@ describe("ipc", () => {
         process.platform === "win32"
           ? `\\\\.\\pipe\\uds-malformed-test-${Date.now()}`
           : path.join(tempDir, "observer.sock");
-      const validToken = "valid_token_test_abc";
 
       const config = DaemonConfigSchema.parse({
         instanceId: "uds-malformed-test-inst",
-        authToken: validToken,
       });
       const supervisor = new DaemonSupervisor({ config });
       await supervisor.start();
@@ -401,46 +349,31 @@ describe("ipc", () => {
       const server = new IpcServer({
         supervisor,
         socketPath,
-        authToken: validToken,
       });
       await server.start();
 
-      // Connect raw client socket and send malformed JSON frame
-      const netSocket = await new Promise<net.Socket>((resolve) => {
-        const s = net.createConnection(socketPath, () => resolve(s));
-      });
+      const netSocket = net.createConnection(socketPath);
+      await new Promise<void>((res) => netSocket.once("connect", res));
 
-      const malformedPayload = Buffer.from("{ this is not valid json }");
-      const malformedFrame = encodeFrame(malformedPayload);
+      const malformedPayload = Buffer.from("NOT_A_VALID_JSON_OBJECT");
+      const malformedFrame = encodeFrame(malformedPayload as unknown as IpcRequest);
 
-      const ipcResponseSchema = z.object({
-        id: z.string().default(""),
-        result: z.unknown().optional(),
-        error: z
-          .object({
-            code: z.string().default(""),
-            message: z.string().default(""),
-            details: z.unknown().optional(),
-          })
-          .optional(),
-      });
-
-      const responseReceived = new Promise<IpcResponse>((resolve) => {
-        const decoder = new FrameDecoder();
+      const responsePromise = new Promise<Buffer>((res) => {
+        const chunks: Buffer[] = [];
         netSocket.on("data", (chunk) => {
-          const frames = decoder.push(chunk);
-          for (const frame of frames) {
-            const parsed = ipcResponseSchema.safeParse(frame);
-            if (parsed.success) {
-              resolve(parsed.data);
-            }
-          }
+          chunks.push(chunk);
+          if (chunks.length >= 1) res(Buffer.concat(chunks));
         });
       });
 
       netSocket.write(malformedFrame);
+      const responseRaw = await responsePromise;
 
-      const parsedResponse = await responseReceived;
+      const decoder = new FrameDecoder();
+      const decodedFrames = decoder.push(responseRaw);
+      expect(decodedFrames.length).toBeGreaterThan(0);
+
+      const parsedResponse = decodedFrames[0] as IpcResponse;
       expect(parsedResponse.error).toBeDefined();
       expect(parsedResponse.error?.code).toBe(IPC_ERROR_CODES.INVALID_REQUEST);
 

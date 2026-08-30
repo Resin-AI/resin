@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +11,6 @@ export interface DaemonPaths {
   readonly socketPath: string;
   readonly lockFilePath: string;
   readonly pidFilePath: string;
-  readonly tokenFilePath: string;
   readonly configFile: string;
 }
 export interface PathResolutionOptions {
@@ -27,7 +25,6 @@ export interface PathResolutionOptions {
   socketPath?: string;
   lockFilePath?: string;
   pidFilePath?: string;
-  tokenFilePath?: string;
   configFile?: string;
 }
 
@@ -136,9 +133,6 @@ export function resolvePaths(options: PathResolutionOptions = {}): DaemonPaths {
   const pidFilePath = path.resolve(
     options.pidFilePath ?? env.RESIN_PID_FILE ?? path.join(stateDir, "daemon.pid"),
   );
-  const tokenFilePath = path.resolve(
-    options.tokenFilePath ?? env.RESIN_TOKEN_FILE ?? path.join(stateDir, "auth.token"),
-  );
   const configFile = path.resolve(
     options.configFile ?? env.RESIN_CONFIG_FILE ?? path.join(configDir, "config.json"),
   );
@@ -152,7 +146,6 @@ export function resolvePaths(options: PathResolutionOptions = {}): DaemonPaths {
     socketPath,
     lockFilePath,
     pidFilePath,
-    tokenFilePath,
     configFile,
   };
 }

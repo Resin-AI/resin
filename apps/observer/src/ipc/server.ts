@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -24,8 +23,6 @@ import type { IpcTransport } from "./transport.js";
 export interface IpcServerOptions {
   supervisor: DaemonSupervisor;
   socketPath?: string;
-  authToken?: string;
-  tokenFilePath?: string;
   logger?: Logger;
   /**
    * Daemon-owned reload hook for applying runtime lifecycle changes after config validation.
@@ -36,14 +33,12 @@ export interface IpcServerOptions {
 }
 
 /**
- * Local authenticated IPC server supporting Unix Domain Sockets,
+ * Local IPC server supporting Unix Domain Sockets,
  * Windows Named Pipes, and in-memory transports for testing.
  */
 export class IpcServer {
   readonly supervisor: DaemonSupervisor;
   readonly socketPath?: string;
-  readonly tokenFilePath?: string;
-  private authToken: string;
   private logger?: Logger;
   private netServer: net.Server | null = null;
   private activeSockets = new Set<net.Socket>();
@@ -55,14 +50,8 @@ export class IpcServer {
   constructor(options: IpcServerOptions) {
     this.supervisor = options.supervisor;
     this.socketPath = options.socketPath ?? options.supervisor.getPaths().socketPath;
-    this.tokenFilePath = options.tokenFilePath ?? options.supervisor.getPaths().tokenFilePath;
     this.logger = options.logger;
     this.reloadConfigHandler = options.reloadConfig;
-    this.authToken = options.authToken ?? options.supervisor.getConfig().authToken ?? "";
-  }
-
-  get token(): string {
-    return this.authToken;
   }
 
   get listening(): boolean {
@@ -70,34 +59,10 @@ export class IpcServer {
   }
 
   /**
-   * Starts the IPC server and prepares the authentication token.
+   * Starts the IPC server.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
-
-    // Ensure authentication token exists
-    if (!this.authToken) {
-      if (this.tokenFilePath && fs.existsSync(this.tokenFilePath)) {
-        try {
-          this.authToken = (await fs.promises.readFile(this.tokenFilePath, "utf-8")).trim();
-        } catch {
-          this.authToken = crypto.randomBytes(32).toString("hex");
-        }
-      } else {
-        this.authToken = crypto.randomBytes(32).toString("hex");
-        if (this.tokenFilePath) {
-          try {
-            await fs.promises.mkdir(path.dirname(this.tokenFilePath), {
-              recursive: true,
-              mode: 0o700,
-            });
-            await fs.promises.writeFile(this.tokenFilePath, this.authToken, { mode: 0o600 });
-          } catch {
-            // Ignore error writing token file if directory is unwritable
-          }
-        }
-      }
-    }
 
     if (this.socketPath) {
       await this.startNetServer(this.socketPath);
@@ -257,18 +222,6 @@ export class IpcServer {
       return;
     }
 
-    // Verify authentication token
-    if (this.authToken && request.token !== this.authToken) {
-      sendResponse({
-        id: request.id,
-        error: {
-          code: IPC_ERROR_CODES.UNAUTHORIZED,
-          message: "Unauthorized: missing or invalid authentication token",
-        },
-      });
-      return;
-    }
-
     try {
       const result = await this.dispatchMethod(request.method, request.params);
       sendResponse({
@@ -282,7 +235,7 @@ export class IpcServer {
         error.code === IPC_ERROR_CODES.METHOD_NOT_FOUND
           ? IPC_ERROR_CODES.METHOD_NOT_FOUND
           : IPC_ERROR_CODES.INTERNAL_ERROR;
-      this.logger?.error("Authenticated IPC request failed", {
+      this.logger?.error("IPC request failed", {
         method: request.method,
         code,
         error: error.message,

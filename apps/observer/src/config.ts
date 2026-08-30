@@ -9,7 +9,6 @@ export const DaemonConfigSchema = z.object({
   host: z.string().default("127.0.0.1"),
   port: z.number().int().min(1).max(65535).default(9400),
   socketPath: z.string().optional(),
-  authToken: z.string().optional(),
   cloudUrl: z.string().url().default("https://api.resin.sh"),
   telemetryEnabled: z.boolean().default(true),
   storageDir: z.string().optional(),
@@ -128,10 +127,6 @@ export function parseEnvConfig(
 
   if (env.RESIN_SOCKET_PATH) {
     result.socketPath = env.RESIN_SOCKET_PATH;
-  }
-
-  if (env.RESIN_AUTH_TOKEN) {
-    result.authToken = env.RESIN_AUTH_TOKEN;
   }
 
   if (env.RESIN_CLOUD_URL) {

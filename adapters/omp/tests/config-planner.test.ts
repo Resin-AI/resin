@@ -132,7 +132,6 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       env: { FOO: "bar" },
     });
     expect(parsed.mcpServers.resin).toEqual({
-      type: "stdio",
       command: "resin-mcp",
       args: ["--stdio"],
       env: { PORT: "4000" },
@@ -286,20 +285,19 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       await fsBridge.writeFile(configPath, JSON.stringify(initialConfig, null, 2));
 
       const plan = await planOmpMcpConfig({
-        gatewayUrl: "http://127.0.0.1:9400/mcp/sse",
         customConfigPath: configPath,
         fsBridge,
       });
 
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
-      expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+      expect(parsed.mcpServers?.resin).toEqual({
+        command: "resin-mcp",
+        args: [],
       });
-      expect(parsed.mcpServers["resin-gateway"]).toBeUndefined();
-      expect(parsed.mcpServers.resin_gateway).toBeUndefined();
-      expect(parsed.mcpServers.user_tool).toEqual({ command: "user-binary" });
+      expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
+      expect(parsed.mcpServers?.resin_gateway).toBeUndefined();
+      expect(parsed.mcpServers?.user_tool).toEqual({ command: "user-binary" });
     });
 
     it("resolves coexistence by keeping canonical resin and deleting recognized legacy alias", async () => {
@@ -320,18 +318,17 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       await fsBridge.writeFile(configPath, JSON.stringify(initialConfig, null, 2));
 
       const plan = await planOmpMcpConfig({
-        gatewayUrl: "http://127.0.0.1:9400/mcp/sse",
         customConfigPath: configPath,
         fsBridge,
       });
 
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
-      expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+      expect(parsed.mcpServers?.resin).toEqual({
+        command: "resin-mcp",
+        args: [],
       });
-      expect(parsed.mcpServers["resin-gateway"]).toBeUndefined();
+      expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
     });
 
     it("preserves unrecognized same-named legacy alias when not Resin-owned", async () => {
@@ -348,18 +345,17 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       await fsBridge.writeFile(configPath, JSON.stringify(initialConfig, null, 2));
 
       const plan = await planOmpMcpConfig({
-        gatewayUrl: "http://127.0.0.1:9400/mcp/sse",
         customConfigPath: configPath,
         fsBridge,
       });
 
       // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
-      expect(parsed.mcpServers.resin).toEqual({
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+      expect(parsed.mcpServers?.resin).toEqual({
+        command: "resin-mcp",
+        args: [],
       });
-      expect(parsed.mcpServers["resin-gateway"]).toEqual({
+      expect(parsed.mcpServers?.["resin-gateway"]).toEqual({
         type: "sse",
         url: "http://custom-external-host.corp/sse",
       });

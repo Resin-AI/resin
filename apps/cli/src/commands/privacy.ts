@@ -464,7 +464,6 @@ async function defaultReloadDaemon(
   const paths = resolvePaths({ home, env });
   const client = new IpcClient({
     socketPath: paths.socketPath,
-    tokenFilePath: paths.tokenFilePath,
     timeoutMs: 3_000,
   });
   try {

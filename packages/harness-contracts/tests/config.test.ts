@@ -3,9 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CANONICAL_RESIN_MCP_COMMAND,
   CANONICAL_RESIN_MCP_SERVER_KEY,
   DEFAULT_RESIN_GATEWAY_URL,
+  DEFAULT_RESIN_MCP_COMMAND,
   InMemoryConfigFsBridge,
+  LEGACY_RESIN_GATEWAY_URL,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   NodeConfigFsBridge,
   applyConfigMutation,
@@ -173,10 +176,13 @@ describe("Configuration Mutation, Preconditions & Atomic Rollback", () => {
   });
 
   describe("Canonical MCP Server Naming and Safe Migration", () => {
-    it("defines canonical resin key and legacy aliases", () => {
+    it("defines canonical resin key, stdio command, and legacy aliases", () => {
       expect(CANONICAL_RESIN_MCP_SERVER_KEY).toBe("resin");
+      expect(CANONICAL_RESIN_MCP_COMMAND).toBe("resin-mcp");
+      expect(DEFAULT_RESIN_MCP_COMMAND).toBe("resin-mcp");
       expect(LEGACY_RESIN_MCP_SERVER_ALIASES).toEqual(["resin_gateway", "resin-gateway"]);
       expect(DEFAULT_RESIN_GATEWAY_URL).toBe("http://127.0.0.1:9400/mcp/sse");
+      expect(LEGACY_RESIN_GATEWAY_URL).toBe("http://127.0.0.1:9400/mcp/sse");
     });
 
     it("identifies resin-mcp commands correctly", () => {
@@ -191,30 +197,20 @@ describe("Configuration Mutation, Preconditions & Atomic Rollback", () => {
     it("identifies recognized Resin-owned MCP entries by URL or command", () => {
       expect(isRecognizedResinMcpEntry({ url: "http://127.0.0.1:9400/mcp/sse" })).toBe(true);
       expect(isRecognizedResinMcpEntry({ endpoint: "http://127.0.0.1:9400/mcp/sse" })).toBe(true);
+      expect(isRecognizedResinMcpEntry({ url: "http://localhost:9400/mcp/sse" })).toBe(true);
+      expect(isRecognizedResinMcpEntry({ command: "resin-mcp" })).toBe(true);
+      expect(isRecognizedResinMcpEntry({ command: "/usr/bin/resin-mcp" })).toBe(true);
+      expect(isRecognizedResinMcpEntry({ command: "node", args: ["resin-mcp"] })).toBe(true);
       expect(
         isRecognizedResinMcpEntry(
-          { url: "http://127.0.0.1:4000/sse" },
-          "http://127.0.0.1:4000/sse",
+          { url: "http://custom-host:9999/mcp/sse" },
+          "http://custom-host:9999/mcp/sse",
         ),
       ).toBe(true);
-      expect(isRecognizedResinMcpEntry({ command: "resin-mcp" })).toBe(true);
-      expect(isRecognizedResinMcpEntry({ command: "/opt/bin/resin-mcp" })).toBe(true);
-
-      // Unrecognized entries
-      expect(isRecognizedResinMcpEntry({ url: "http://user-server.local/mcp" })).toBe(false);
-      expect(isRecognizedResinMcpEntry({ command: "user-tool" })).toBe(false);
+      expect(isRecognizedResinMcpEntry({ url: "http://other-service.internal" })).toBe(false);
+      expect(isRecognizedResinMcpEntry({ command: "custom-tool" })).toBe(false);
       expect(isRecognizedResinMcpEntry(null)).toBe(false);
-      expect(isRecognizedResinMcpEntry("not an object")).toBe(false);
-    });
-
-    it("migrates new install to canonical resin entry only", () => {
-      const migrated = migrateJsonMcpServers(
-        {},
-        { type: "sse", url: "http://127.0.0.1:9400/mcp/sse" },
-      );
-      expect(migrated).toEqual({
-        resin: { type: "sse", url: "http://127.0.0.1:9400/mcp/sse" },
-      });
+      expect(isRecognizedResinMcpEntry(undefined)).toBe(false);
     });
 
     it("migrates recognized legacy alias to canonical resin entry", () => {
@@ -223,25 +219,25 @@ describe("Configuration Mutation, Preconditions & Atomic Rollback", () => {
         other_server: { command: "other" },
       };
       const migrated = migrateJsonMcpServers(initial, {
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin-mcp",
+        args: [],
       });
       expect(migrated.resin_gateway).toBeUndefined();
-      expect(migrated.resin).toEqual({ type: "sse", url: "http://127.0.0.1:9400/mcp/sse" });
+      expect(migrated.resin).toEqual({ command: "resin-mcp", args: [] });
       expect(migrated.other_server).toEqual({ command: "other" });
     });
 
     it("resolves coexistence by keeping canonical resin and removing owned legacy alias", () => {
       const initial = {
-        resin: { type: "sse", url: "http://127.0.0.1:9400/mcp/sse" },
-        "resin-gateway": { command: "resin-mcp" },
+        resin: { command: "resin-mcp", args: [] },
+        "resin-gateway": { url: "http://127.0.0.1:9400/mcp/sse" },
       };
       const migrated = migrateJsonMcpServers(initial, {
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin-mcp",
+        args: [],
       });
       expect(migrated["resin-gateway"]).toBeUndefined();
-      expect(migrated.resin).toEqual({ type: "sse", url: "http://127.0.0.1:9400/mcp/sse" });
+      expect(migrated.resin).toEqual({ command: "resin-mcp", args: [] });
     });
 
     it("preserves unrecognized same-named legacy alias when not Resin-owned", () => {
@@ -250,12 +246,12 @@ describe("Configuration Mutation, Preconditions & Atomic Rollback", () => {
         "resin-gateway": { command: "my-custom-gateway" },
       };
       const migrated = migrateJsonMcpServers(initial, {
-        type: "sse",
-        url: "http://127.0.0.1:9400/mcp/sse",
+        command: "resin-mcp",
+        args: [],
       });
       expect(migrated.resin_gateway).toEqual({ url: "http://user-internal-tools.corp/sse" });
       expect(migrated["resin-gateway"]).toEqual({ command: "my-custom-gateway" });
-      expect(migrated.resin).toEqual({ type: "sse", url: "http://127.0.0.1:9400/mcp/sse" });
+      expect(migrated.resin).toEqual({ command: "resin-mcp", args: [] });
     });
   });
 });

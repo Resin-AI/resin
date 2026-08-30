@@ -802,7 +802,6 @@ export async function handleIpcCommand(
 ): Promise<number> {
   const client = new IpcClient({
     socketPath: paths.socketPath,
-    tokenFilePath: paths.tokenFilePath,
     timeoutMs: 5000,
   });
 
@@ -1146,8 +1145,6 @@ async function runForeground(options: {
   const ipcServer = new IpcServer({
     supervisor,
     socketPath: paths.socketPath,
-    tokenFilePath: paths.tokenFilePath,
-    authToken: config.authToken,
     logger,
     reloadConfig,
   });
@@ -1212,7 +1209,7 @@ async function runForeground(options: {
   const shutdownWatcher = setInterval(() => {
     if (supervisor.currentState === "stopped") {
       clearInterval(shutdownWatcher);
-      exitAfterCleanup("authenticated IPC graceful shutdown");
+      exitAfterCleanup("IPC graceful shutdown");
     }
   }, 100);
   shutdownWatcher.unref();

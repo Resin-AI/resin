@@ -1,10 +1,10 @@
 import path from "node:path";
 import {
+  CANONICAL_RESIN_MCP_COMMAND,
   CANONICAL_RESIN_MCP_SERVER_KEY,
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMutationPlan,
-  DEFAULT_RESIN_GATEWAY_URL,
   type HarnessWorkspace,
   NodeConfigFsBridge,
   applyConfigMutation,
@@ -138,10 +138,12 @@ export async function planOmpMcpConfig(
 
   if (options.command !== undefined) {
     serverEntry = {
-      type: explicitType ?? "stdio",
       command: options.command,
       args: options.args ?? [],
     };
+    if (explicitType !== undefined) {
+      serverEntry.type = explicitType;
+    }
     if (options.env !== undefined) {
       serverEntry.env = options.env;
     }
@@ -161,17 +163,21 @@ export async function planOmpMcpConfig(
     }
   } else {
     serverEntry = {
-      type: explicitType ?? "sse",
-      url: DEFAULT_RESIN_GATEWAY_URL,
+      command: CANONICAL_RESIN_MCP_COMMAND,
+      args: options.args ?? [],
     };
+    if (explicitType !== undefined) {
+      serverEntry.type = explicitType;
+    }
     if (options.env !== undefined) {
       serverEntry.env = options.env;
     }
   }
+
   const updatedServers = migrateJsonMcpServers(
     existingServers,
     serverEntry,
-    options.gatewayUrl,
+    options.gatewayUrl ?? options.url,
     serverName,
   );
 
@@ -187,7 +193,7 @@ export async function planOmpMcpConfig(
     targetPath,
     currentContent,
     plannedContent,
-    description: `Register Resin Gateway MCP server "${serverName}" in OMP configuration`,
+    description: `Register Resin MCP server "${serverName}" in OMP configuration`,
     metadata: {
       changesSummary: `Add/update mcpServers.${serverName}`,
     },

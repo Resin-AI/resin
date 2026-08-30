@@ -25,6 +25,7 @@ import {
 import { CodexHarnessAdapter } from "../src/adapter.js";
 import {
   DEFAULT_GATEWAY_SERVER_NAME,
+  DEFAULT_RESIN_MCP_COMMAND,
   applyCodexMcpConfig,
   planCodexMcpConfig,
   rollbackCodexMcpConfig,
@@ -134,7 +135,7 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
       // Verify written file contains both new server and old settings
       const writtenContent = await fsBridge.readFile(configPath);
       expect(writtenContent).toContain("[mcp_servers.resin]");
-      expect(writtenContent).toContain(`url = "${gatewayUrl}"`);
+      expect(writtenContent).toContain(`command = "${DEFAULT_RESIN_MCP_COMMAND}"`);
       expect(writtenContent).toContain("[mcp_servers.existing_custom_server]");
       expect(writtenContent).toContain('model = "code-davinci-002"');
 
@@ -193,7 +194,7 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
 
       expect(parsed.model).toBe("gpt-4o");
       expect(parsed.mcp_servers.existing_lsp).toBeDefined();
-      expect(parsed.mcp_servers.resin).toEqual({ url: gatewayUrl });
+      expect(parsed.mcp_servers.resin).toEqual({ command: DEFAULT_RESIN_MCP_COMMAND, args: [] });
 
       await rollbackCodexMcpConfig(backup, fsBridge);
       const restored = await fsBridge.readFile(configPath);

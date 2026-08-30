@@ -719,4 +719,35 @@ describe("doctor repair harness integration", () => {
     expect(actions).toContain("Reconciled Resin MCP registration for Claude Code CLI");
     expect(await bridge.readFile(configPath)).toContain("resin");
   });
+
+  it("executes state repair tokenlessly without creating or requiring daemon.token/auth.token", async () => {
+    const bridge = new MtimeMemoryBridge();
+    const coordinator = new HarnessHealthCoordinator({
+      home: HOME,
+      workspacePath: WORKSPACE,
+      harnesses: ["claude-code"],
+      installedHarnesses: ["claude-code"],
+      fsBridge: bridge,
+      statFile: bridge.statFile.bind(bridge),
+      now: () => new Date(START_MS),
+    });
+
+    const actions = await repairState({
+      home: HOME,
+      fsBridge: bridge,
+      harnessHealthCoordinator: coordinator,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(actions).toBeDefined();
+    // Confirm no legacy IPC token files were generated in state or config directories
+    const daemonTokenPath = path.join(HOME, ".resin", "daemon.token");
+    const authTokenPath = path.join(HOME, ".resin", "auth.token");
+    const stateTokenPath = path.join(HOME, ".resin", "state", "daemon.token");
+    expect(await bridge.readFile(daemonTokenPath)).toBeNull();
+    expect(await bridge.readFile(authTokenPath)).toBeNull();
+    expect(await bridge.readFile(stateTokenPath)).toBeNull();
+  });
 });

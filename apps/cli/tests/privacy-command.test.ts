@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { StoredCloudCredentials } from "@resin/observer";
-import { resolvePaths } from "@resin/observer";
+import { IpcClient, type StoredCloudCredentials, resolvePaths } from "@resin/observer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin/cli.js";
 import {
@@ -298,7 +297,7 @@ describe("privacy status precedence and offline behavior", () => {
   });
 });
 
-describe("atomic telemetry configuration and authenticated reload", () => {
+describe("atomic telemetry configuration and socket-only IPC reload", () => {
   it.each([
     { initial: true, requested: false },
     { initial: false, requested: true },
@@ -396,7 +395,7 @@ describe("atomic telemetry configuration and authenticated reload", () => {
     expect(reloadDaemon).toHaveBeenNthCalledWith(2, { telemetryEnabled: false });
   });
 
-  it("reports runtime divergence when authenticated IPC rejects rollback and redacts its error", async () => {
+  it("reports runtime divergence when socket-only IPC rejects rollback and redacts its error", async () => {
     const home = await createTemporaryHome();
     const configFile = await writeDaemonConfig(home, true);
     const stderr = captureOutput();
@@ -414,6 +413,33 @@ describe("atomic telemetry configuration and authenticated reload", () => {
     expect(JSON.parse(await fs.readFile(configFile, "utf8")).telemetryEnabled).toBe(true);
     expect(JSON.parse(stderr.text()).error.code).toBe("DAEMON_ROLLBACK_FAILED");
     expect(stderr.text()).not.toContain(PRIVATE_ERROR_SENTINEL);
+  });
+
+  it("reloads daemon using socket-only IPC without token authentication when no custom reload function is provided", async () => {
+    const home = await createTemporaryHome();
+    await writeDaemonConfig(home, false);
+    const connectSpy = vi.spyOn(IpcClient.prototype, "connect").mockResolvedValue();
+    const reloadConfigSpy = vi
+      .spyOn(IpcClient.prototype, "reloadConfig")
+      .mockResolvedValue({ success: true, errors: [] });
+    const closeSpy = vi.spyOn(IpcClient.prototype, "close").mockResolvedValue();
+
+    try {
+      const result = await setDeviceTelemetry(true, {
+        home,
+        env: {},
+      });
+
+      expect(result.configuredMetadataTelemetryEnabled).toBe(true);
+      expect(result.reloaded).toBe(true);
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+      expect(reloadConfigSpy).toHaveBeenCalledWith({ telemetryEnabled: true });
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      connectSpy.mockRestore();
+      reloadConfigSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
   });
 });
 

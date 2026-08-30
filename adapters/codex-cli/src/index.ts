@@ -30,15 +30,20 @@ export {
 // MCP Configuration Planner (TOML & JSON)
 export {
   DEFAULT_GATEWAY_SERVER_NAME,
+  DEFAULT_RESIN_MCP_COMMAND,
+  type CodexMcpServerConfig,
+  type CodexJsonConfigDoc,
   type PlanCodexMcpConfigOptions,
+  type VerifyCodexMcpConfigOptions,
   updateTomlMcpConfig,
   updateJsonMcpConfig,
   planCodexMcpConfig,
   applyCodexMcpConfig,
   rollbackCodexMcpConfig,
   verifyCodexMcpConfig,
+  parseCodexTomlServerConfig,
+  parseCodexJsonServerConfig,
 } from "./config-planner.js";
-
 // Rollout and Transcript Event Decoder
 export {
   DEFAULT_SCHEMA_VERSION,

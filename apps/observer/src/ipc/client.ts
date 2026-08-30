@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import net from "node:net";
 import type { DaemonConfig } from "../config.js";
 import type {
@@ -24,8 +23,6 @@ import type { IpcTransport } from "./transport.js";
 
 export interface IpcClientOptions {
   socketPath?: string;
-  authToken?: string;
-  tokenFilePath?: string;
   transport?: IpcTransport;
   timeoutMs?: number;
 }
@@ -37,12 +34,10 @@ interface PendingRequest {
 }
 
 /**
- * Client for communicating with the Resin background daemon over authenticated IPC.
+ * Client for communicating with the Resin background daemon over IPC.
  */
 export class IpcClient {
   readonly socketPath?: string;
-  readonly tokenFilePath?: string;
-  private authToken: string;
   private transport: IpcTransport | null = null;
   private socket: net.Socket | null = null;
   private defaultTimeoutMs: number;
@@ -52,8 +47,6 @@ export class IpcClient {
 
   constructor(options: IpcClientOptions = {}) {
     this.socketPath = options.socketPath;
-    this.tokenFilePath = options.tokenFilePath;
-    this.authToken = options.authToken ?? "";
     this.defaultTimeoutMs = options.timeoutMs ?? 10000;
 
     if (options.transport) {
@@ -72,15 +65,6 @@ export class IpcClient {
    */
   async connect(): Promise<void> {
     if (this.isConnected) return;
-
-    // Load auth token from file if not provided
-    if (!this.authToken && this.tokenFilePath && fs.existsSync(this.tokenFilePath)) {
-      try {
-        this.authToken = (await fs.promises.readFile(this.tokenFilePath, "utf-8")).trim();
-      } catch {
-        // Ignore read failure
-      }
-    }
 
     const targetSocket = this.socketPath;
     if (!targetSocket) {
@@ -194,7 +178,6 @@ export class IpcClient {
     const id = crypto.randomUUID();
     const request: IpcRequest<TParams> = {
       id,
-      token: this.authToken,
       method,
       params,
     };
