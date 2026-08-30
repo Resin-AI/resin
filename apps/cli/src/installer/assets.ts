@@ -81,7 +81,7 @@ export async function findDenoExecutable(
   for (const candidate of candidatePaths) {
     if (candidate === "deno") {
       try {
-        const { stdout } = await execFileAsync("deno", ["--version"]);
+        const { stdout } = await execFileAsync("deno", ["--version"], { env });
         const match = stdout.match(/deno\s+([\d.]+)/i);
         return { path: "deno", version: match ? match[1] : undefined };
       } catch {
@@ -91,7 +91,7 @@ export async function findDenoExecutable(
       const exists = await fsBridge.exists(candidate);
       if (exists) {
         try {
-          const { stdout } = await execFileAsync(candidate, ["--version"]);
+          const { stdout } = await execFileAsync(candidate, ["--version"], { env });
           const match = stdout.match(/deno\s+([\d.]+)/i);
           if (match?.[1]) return { path: candidate, version: match[1] };
         } catch {
