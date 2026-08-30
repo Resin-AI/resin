@@ -1,9 +1,13 @@
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+const execFileAsync = promisify(execFile);
 
 import {
   PINNED_DENO_RUNTIME,
@@ -170,6 +174,11 @@ describe("publish-public-release", () => {
       testOnly: true,
     });
     fs.writeFileSync(path.join(releaseDir, "channels.json"), JSON.stringify(channels, null, 2));
+    const installersDir = path.join(releaseDir, "installers");
+    fs.mkdirSync(installersDir, { recursive: true });
+    fs.writeFileSync(path.join(installersDir, "install.sh"), "#!/bin/sh\necho install.sh\n");
+    fs.writeFileSync(path.join(installersDir, "install.ps1"), "Write-Host 'install.ps1'\n");
+    fs.writeFileSync(path.join(installersDir, "install-helper-v1.mjs"), "console.log('helper');\n");
 
     return { manifest, manifestSha256, channels, assets, releaseIdentity };
   }
@@ -354,17 +363,86 @@ describe("publish-public-release", () => {
       const plan = createUploadPlan({ releaseDir });
 
       expect(plan.version).toBe(RELEASE_VERSION);
-      expect(plan.immutableUploads.length).toBeGreaterThanOrEqual(11);
+      expect(plan.immutableUploads.length).toBeGreaterThanOrEqual(14);
 
       const manifestItem = plan.immutableUploads.find((u) => u.type === "manifest");
       expect(manifestItem.key).toBe(`releases/v1/manifests/manifest-${RELEASE_VERSION}.json`);
       expect(manifestItem.cacheControl).toBe(IMMUTABLE_CACHE_CONTROL);
       expect(manifestItem.contentType).toBe("application/json");
 
+      // Verify immutable versioned installer assets
+      const versionedSh = plan.immutableUploads.find(
+        (u) => u.key === `releases/v1/installers/v${RELEASE_VERSION}/install.sh`,
+      );
+      expect(versionedSh).toBeDefined();
+      expect(versionedSh.cacheControl).toBe(IMMUTABLE_CACHE_CONTROL);
+      expect(versionedSh.isImmutable).toBe(true);
+      expect(versionedSh.contentType).toBe("text/x-shellscript");
+
+      const versionedPs1 = plan.immutableUploads.find(
+        (u) => u.key === `releases/v1/installers/v${RELEASE_VERSION}/install.ps1`,
+      );
+      expect(versionedPs1).toBeDefined();
+      expect(versionedPs1.cacheControl).toBe(IMMUTABLE_CACHE_CONTROL);
+      expect(versionedPs1.isImmutable).toBe(true);
+      expect(versionedPs1.contentType).toBe("text/plain");
+
+      const versionedHelper = plan.immutableUploads.find(
+        (u) => u.key === `releases/v1/installers/v${RELEASE_VERSION}/install-helper-v1.mjs`,
+      );
+      expect(versionedHelper).toBeDefined();
+      expect(versionedHelper.cacheControl).toBe(IMMUTABLE_CACHE_CONTROL);
+      expect(versionedHelper.contentType).toBe("application/javascript");
+
+      // Verify mutable installer entrypoints
+      expect(plan.mutableInstallerUploads).toBeDefined();
+      expect(plan.mutableInstallerUploads.length).toBe(3);
+
+      const mutableSh = plan.mutableInstallerUploads.find(
+        (u) => u.key === "releases/v1/installers/install.sh",
+      );
+      expect(mutableSh).toBeDefined();
+      expect(mutableSh.cacheControl).toBe(CHANNELS_CACHE_CONTROL);
+      expect(mutableSh.isImmutable).toBe(false);
+      expect(mutableSh.invalidationPath).toBe("/releases/v1/installers/install.sh");
+
+      const mutablePs1 = plan.mutableInstallerUploads.find(
+        (u) => u.key === "releases/v1/installers/install.ps1",
+      );
+      expect(mutablePs1).toBeDefined();
+      expect(mutablePs1.cacheControl).toBe(CHANNELS_CACHE_CONTROL);
+
+      const mutableHelper = plan.mutableInstallerUploads.find(
+        (u) => u.key === "releases/v1/installers/install-helper-v1.mjs",
+      );
+      expect(mutableHelper).toBeDefined();
+      expect(mutableHelper.cacheControl).toBe(CHANNELS_CACHE_CONTROL);
+      expect(mutableHelper.contentType).toBe("application/javascript");
+
       const channelItem = plan.mutableChannelUpload;
       expect(channelItem.key).toBe(CHANNELS_S3_KEY);
       expect(channelItem.cacheControl).toBe(CHANNELS_CACHE_CONTROL);
       expect(channelItem.isImmutable).toBe(false);
+    });
+
+    it("resolves custom --installers-dir option correctly", () => {
+      setupFixtureReleaseDir();
+      const customInstallersDir = path.join(tempRoot, "custom-installers");
+      fs.mkdirSync(customInstallersDir, { recursive: true });
+      fs.writeFileSync(path.join(customInstallersDir, "install.sh"), "#!/bin/sh\n# custom\n");
+      fs.writeFileSync(path.join(customInstallersDir, "install.ps1"), "# custom\n");
+      fs.writeFileSync(path.join(customInstallersDir, "install-helper-v1.mjs"), "// custom\n");
+
+      const plan = createUploadPlan({
+        releaseDir,
+        installersDir: customInstallersDir,
+      });
+
+      const shItem = plan.mutableInstallerUploads.find((u) => u.name === "install.sh");
+      expect(shItem.filePath).toBe(path.join(customInstallersDir, "install.sh"));
+      expect(shItem.sha256).toBe(
+        crypto.createHash("sha256").update("#!/bin/sh\n# custom\n").digest("hex"),
+      );
     });
 
     it("rejects object clobbering when existing S3 object size differs", async () => {
@@ -567,11 +645,11 @@ describe("publish-public-release", () => {
           verified: true,
         })),
       };
-
-      let invalidatedPath = null;
-      let promotedChannelContent = null;
       let putCount = 0;
       let invalidationCount = 0;
+      const putKeys = [];
+      const invalidatedPaths = [];
+      let promotedChannelContent = null;
 
       const mockRunner = async (cmd, args) => {
         if (args[1] === "head-object") {
@@ -581,18 +659,48 @@ describe("publish-public-release", () => {
         }
         if (args[1] === "put-object") {
           putCount++;
+          const key = args[args.indexOf("--key") + 1];
+          putKeys.push(key);
           const bodyPath = args[args.indexOf("--body") + 1];
-          promotedChannelContent = fs.readFileSync(bodyPath, "utf8");
+          if (key === CHANNELS_S3_KEY) {
+            promotedChannelContent = fs.readFileSync(bodyPath, "utf8");
+          }
           return { stdout: "{}" };
         }
         if (args[0] === "cloudfront" && args[1] === "create-invalidation") {
           invalidationCount++;
-          invalidatedPath = args[args.indexOf("--paths") + 1];
+          const pathsIdx = args.indexOf("--paths");
+          const paths = args.slice(pathsIdx + 1);
+          invalidatedPaths.push(...paths);
           return {
             stdout: JSON.stringify({ Invalidation: { Id: "INV-TEST-1", Status: "InProgress" } }),
           };
         }
         return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        for (const item of plan.mutableInstallerUploads) {
+          if (url.endsWith(`/${item.key}`)) {
+            const content = fs.readFileSync(item.filePath);
+            return {
+              ok: true,
+              status: 200,
+              arrayBuffer: async () =>
+                content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+            };
+          }
+        }
+        if (url.endsWith("/releases/v1/channels.json")) {
+          const content = fs.readFileSync(path.join(releaseDir, "channels.json"));
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
       };
 
       const result = await promote({
@@ -601,19 +709,200 @@ describe("publish-public-release", () => {
         distributionId: "EDIST123",
         verificationReceipt: validReceipt,
         runner: mockRunner,
+        fetch: mockFetch,
         keyPair: testSigningKey,
       });
 
       expect(result.status).toBe("success");
       expect(result.uploadStatus).toBe("uploaded");
       expect(result.promotedVersion).toBe(RELEASE_VERSION);
-      expect(putCount).toBe(1);
-      expect(invalidationCount).toBe(1);
-      expect(invalidatedPath).toBe("/releases/v1/channels.json");
+      expect(putCount).toBe(4); // 3 mutable installers + 1 channel
+      expect(invalidationCount).toBe(2); // 1 for installers, 1 for channels
+      expect(invalidatedPaths).toContain("/releases/v1/channels.json");
+      expect(invalidatedPaths).toContain("/releases/v1/installers/install.sh");
+      expect(invalidatedPaths).toContain("/releases/v1/installers/install.ps1");
+      expect(invalidatedPaths).toContain("/releases/v1/installers/install-helper-v1.mjs");
       expect(promotedChannelContent).toContain(`"currentVersion": "${RELEASE_VERSION}"`);
     });
 
-    it("idempotently skips S3 put-object and CloudFront invalidation when identical channels already promoted", async () => {
+    it("publishes mutable installers first, invalidates their paths, and anonymously verifies before channels PUT", async () => {
+      setupFixtureReleaseDir();
+      const plan = createUploadPlan({ releaseDir });
+
+      const validReceipt = {
+        phase: "verify-public",
+        status: "verified",
+        verifiedObjects: plan.immutableUploads.map((item) => ({
+          key: item.key,
+          sha256: item.sha256,
+          sizeBytes: item.sizeBytes,
+          verified: true,
+        })),
+      };
+
+      const eventLog = [];
+
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "head-object") {
+          const key = args[args.indexOf("--key") + 1];
+          eventLog.push(`head:${key}`);
+          const err = new Error("404 NotFound");
+          err.exitCode = 254;
+          throw err;
+        }
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          eventLog.push(`put:${key}`);
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront" && args[1] === "create-invalidation") {
+          const paths = args.slice(args.indexOf("--paths") + 1);
+          eventLog.push(`invalidation:${paths.join(",")}`);
+          return {
+            stdout: JSON.stringify({ Invalidation: { Id: "INV-1", Status: "InProgress" } }),
+          };
+        }
+        return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        eventLog.push(`fetch:${url}`);
+        for (const item of plan.mutableInstallerUploads) {
+          if (url.endsWith(`/${item.key}`)) {
+            const content = fs.readFileSync(item.filePath);
+            return {
+              ok: true,
+              status: 200,
+              arrayBuffer: async () =>
+                content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+            };
+          }
+        }
+        if (url.endsWith("/releases/v1/channels.json")) {
+          const content = fs.readFileSync(path.join(releaseDir, "channels.json"));
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      const result = await promote({
+        releaseDir,
+        bucket: "my-bucket",
+        distributionId: "EDIST123",
+        verificationReceipt: validReceipt,
+        runner: mockRunner,
+        fetch: mockFetch,
+        keyPair: testSigningKey,
+      });
+
+      expect(result.status).toBe("success");
+      expect(result.verifiedInstallers).toBeDefined();
+      expect(result.verifiedInstallers.length).toBe(3);
+
+      // Verify strict ordering: installer PUTs -> installer invalidation -> installer anonymous verification -> channels PUT -> channels invalidation
+      const installerPutIndex = eventLog.indexOf("put:releases/v1/installers/install.sh");
+      const installerInvIndex = eventLog.findIndex((e) =>
+        e.startsWith("invalidation:/releases/v1/installers/"),
+      );
+      const installerFetchIndex = eventLog.indexOf(
+        "fetch:https://dist.resin.sh/releases/v1/installers/install.sh",
+      );
+      const channelPutIndex = eventLog.indexOf("put:releases/v1/channels.json");
+      const channelInvIndex = eventLog.indexOf("invalidation:/releases/v1/channels.json");
+
+      expect(installerPutIndex).toBeGreaterThan(-1);
+      expect(installerInvIndex).toBeGreaterThan(installerPutIndex);
+      expect(installerFetchIndex).toBeGreaterThan(installerInvIndex);
+      expect(channelPutIndex).toBeGreaterThan(installerFetchIndex);
+      expect(channelInvIndex).toBeGreaterThan(channelPutIndex);
+    });
+
+    it("fails closed and leaves channels.json untouched if installer anonymous verification fails", async () => {
+      setupFixtureReleaseDir();
+      const plan = createUploadPlan({ releaseDir });
+
+      const validReceipt = {
+        phase: "verify-public",
+        status: "verified",
+        verifiedObjects: plan.immutableUploads.map((item) => ({
+          key: item.key,
+          sha256: item.sha256,
+          sizeBytes: item.sizeBytes,
+          verified: true,
+        })),
+      };
+
+      const putKeys = [];
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "head-object") {
+          const err = new Error("404 NotFound");
+          err.exitCode = 254;
+          throw err;
+        }
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          putKeys.push(key);
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront" && args[1] === "create-invalidation") {
+          return {
+            stdout: JSON.stringify({ Invalidation: { Id: "INV-1", Status: "InProgress" } }),
+          };
+        }
+        return { stdout: "{}" };
+      };
+
+      // Mock fetch that returns bad hash for installer
+      const mockFetch = async (url) => {
+        if (url.includes("install.sh")) {
+          const corrupted = Buffer.from("corrupted-installer");
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              corrupted.buffer.slice(
+                corrupted.byteOffset,
+                corrupted.byteOffset + corrupted.byteLength,
+              ),
+          };
+        }
+        for (const item of plan.mutableInstallerUploads) {
+          if (url.endsWith(`/${item.key}`)) {
+            const content = fs.readFileSync(item.filePath);
+            return {
+              ok: true,
+              status: 200,
+              arrayBuffer: async () =>
+                content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+            };
+          }
+        }
+        return { ok: false, status: 404 };
+      };
+
+      await expect(
+        promote({
+          releaseDir,
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          verificationReceipt: validReceipt,
+          runner: mockRunner,
+          fetch: mockFetch,
+          keyPair: testSigningKey,
+        }),
+      ).rejects.toThrow(/Anonymous installer verification failed.*expected digest/s);
+
+      // Verify channels.json was NEVER uploaded
+      expect(putKeys).not.toContain(CHANNELS_S3_KEY);
+      expect(putKeys).not.toContain("releases/v1/channels.json");
+    });
+
+    it("idempotently skips S3 put-object and CloudFront invalidation when identical channels and installers already promoted", async () => {
       setupFixtureReleaseDir();
       const plan = createUploadPlan({ releaseDir });
       const channelsPath = plan.mutableChannelUpload.filePath;
@@ -636,6 +925,16 @@ describe("publish-public-release", () => {
 
       const mockRunner = async (cmd, args) => {
         if (args[1] === "head-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const matchedInstaller = plan.mutableInstallerUploads.find((i) => i.key === key);
+          if (matchedInstaller) {
+            return {
+              stdout: JSON.stringify({
+                ContentLength: matchedInstaller.sizeBytes,
+                Metadata: { sha256: matchedInstaller.sha256 },
+              }),
+            };
+          }
           return {
             stdout: JSON.stringify({
               ContentLength: channelsBuffer.length,
@@ -657,6 +956,17 @@ describe("publish-public-release", () => {
       };
 
       const mockFetch = async (url) => {
+        for (const item of plan.mutableInstallerUploads) {
+          if (url.endsWith(`/${item.key}`)) {
+            const content = fs.readFileSync(item.filePath);
+            return {
+              ok: true,
+              status: 200,
+              arrayBuffer: async () =>
+                content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+            };
+          }
+        }
         if (url.endsWith("/releases/v1/channels.json")) {
           return {
             ok: true,
@@ -689,15 +999,12 @@ describe("publish-public-release", () => {
       expect(invalidationCount).toBe(0);
     });
 
-    it("puts object and invalidates CloudFront when remote channels has same size but different bytes", async () => {
+    it("promotes when channels exist but differ from current candidate", async () => {
       setupFixtureReleaseDir();
       const plan = createUploadPlan({ releaseDir });
       const channelsPath = plan.mutableChannelUpload.filePath;
       const channelsBuffer = fs.readFileSync(channelsPath);
-
-      // Create differing content of exact same byte length
-      const differingBuffer = Buffer.alloc(channelsBuffer.length, 0x20);
-      const differingSha256 = crypto.createHash("sha256").update(differingBuffer).digest("hex");
+      const staleSha256 = "0000000000000000000000000000000000000000000000000000000000000000";
 
       const validReceipt = {
         phase: "verify-public",
@@ -716,10 +1023,20 @@ describe("publish-public-release", () => {
 
       const mockRunner = async (cmd, args) => {
         if (args[1] === "head-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const matchedInstaller = plan.mutableInstallerUploads.find((i) => i.key === key);
+          if (matchedInstaller) {
+            return {
+              stdout: JSON.stringify({
+                ContentLength: matchedInstaller.sizeBytes,
+                Metadata: { sha256: matchedInstaller.sha256 },
+              }),
+            };
+          }
           return {
             stdout: JSON.stringify({
               ContentLength: channelsBuffer.length,
-              Metadata: { sha256: differingSha256 },
+              Metadata: { sha256: staleSha256 },
             }),
           };
         }
@@ -739,16 +1056,24 @@ describe("publish-public-release", () => {
       };
 
       const mockFetch = async (url) => {
+        for (const item of plan.mutableInstallerUploads) {
+          if (url.endsWith(`/${item.key}`)) {
+            const content = fs.readFileSync(item.filePath);
+            return {
+              ok: true,
+              status: 200,
+              arrayBuffer: async () =>
+                content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+            };
+          }
+        }
         if (url.endsWith("/releases/v1/channels.json")) {
-          const content =
-            putCount > 0
-              ? fs.readFileSync(path.join(releaseDir, "channels.json"))
-              : differingBuffer;
+          const staleBuf = Buffer.from(JSON.stringify({ stale: true }));
           return {
             ok: true,
             status: 200,
             arrayBuffer: async () =>
-              content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength),
+              staleBuf.buffer.slice(staleBuf.byteOffset, staleBuf.byteOffset + staleBuf.byteLength),
           };
         }
         return { ok: false, status: 404 };
@@ -768,11 +1093,12 @@ describe("publish-public-release", () => {
       expect(result.status).toBe("success");
       expect(result.uploadStatus).toBe("uploaded");
       expect(result.invalidationId).toBe("INV-UPDATE-1");
-      expect(putCount).toBe(1);
-      expect(invalidationCount).toBe(1);
+      expect(putCount).toBe(1); // installers skipped identical, channel uploaded
+      expect(invalidationCount).toBe(1); // installers skipped invalidation, channel invalidated
       expect(uploadedContent).toContain(`"currentVersion": "${RELEASE_VERSION}"`);
     });
   });
+
   describe("signed freeze & revocation", () => {
     it("publishes signed immutable freeze notice, revokes version in channels, and verifies anonymously", async () => {
       setupFixtureReleaseDir();
@@ -2239,7 +2565,16 @@ describe("publish-public-release", () => {
       expect(promoteReceipt.uploadStatus).toBe("uploaded");
       expect(promoteReceipt.keyPrefix).toBe(keyPrefix);
       expect(promoteReceipt.s3Key).toBe(`${keyPrefix}/releases/v1/channels.json`);
-      expect(promoteReceipt.invalidationPaths).toEqual([`/${keyPrefix}/releases/v1/channels.json`]);
+      expect(promoteReceipt.invalidationPaths).toContain(`/${keyPrefix}/releases/v1/channels.json`);
+      expect(promoteReceipt.invalidationPaths).toContain(
+        `/${keyPrefix}/releases/v1/installers/install.sh`,
+      );
+      expect(promoteReceipt.invalidationPaths).toContain(
+        `/${keyPrefix}/releases/v1/installers/install.ps1`,
+      );
+      expect(promoteReceipt.invalidationPaths).toContain(
+        `/${keyPrefix}/releases/v1/installers/install-helper-v1.mjs`,
+      );
 
       // 6. record-smoke with keyPrefix
       const smokeResult = await recordSmoke({
@@ -2371,6 +2706,112 @@ describe("publish-public-release", () => {
       expect(parseCliArgs(["freeze", "--prefix=dry-runs/abc"]).options.keyPrefix).toBe(
         "dry-runs/abc",
       );
+    });
+  });
+  describe("CLI parsing and execution behavior", () => {
+    it("parses --installers-dir option with space or equal delimiter", () => {
+      expect(
+        parseCliArgs(["publish-immutable", "--installers-dir", "custom/installers"]).options
+          .installersDir,
+      ).toBe("custom/installers");
+      expect(
+        parseCliArgs(["promote", "--installers-dir=candidate/installers"]).options.installersDir,
+      ).toBe("candidate/installers");
+      expect(
+        parseCliArgs(["verify-public", "--installers-dir", "dist/installers"]).options
+          .installersDir,
+      ).toBe("dist/installers");
+    });
+
+    it("causes CLI to exit with code 1 when post-promotion smoke qualification fails", async () => {
+      setupFixtureReleaseDir();
+      const receiptDir = path.join(tempRoot, "cli-smoke-receipts");
+      const resultsFile = path.join(tempRoot, "failed-installers.json");
+      const failedResults = [
+        {
+          installer: "posix",
+          status: "FAILED",
+          installedVersion: null,
+          entrypointUrl: "https://dist.resin.sh/releases/v1/installers/install.sh",
+          durationMs: 1200,
+          error: "Syntax error in install.sh",
+        },
+        {
+          installer: "powershell",
+          status: "PASSED",
+          installedVersion: RELEASE_VERSION,
+          entrypointUrl: "https://dist.resin.sh/releases/v1/installers/install.ps1",
+          durationMs: 900,
+          error: null,
+        },
+      ];
+      fs.writeFileSync(resultsFile, JSON.stringify(failedResults, null, 2));
+
+      const server = http.createServer((req, res) => {
+        if (req.url.endsWith("/channels.json")) {
+          const content = fs.readFileSync(path.join(releaseDir, "channels.json"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(content);
+        } else if (req.url.includes("/manifests/")) {
+          const content = fs.readFileSync(path.join(releaseDir, "manifest.json"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(content);
+        } else if (req.url.includes("/evidence/")) {
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Cache-Control": "public,max-age=31536000,immutable",
+          });
+          res.end("{}");
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = server.address().port;
+      const baseUrl = `http://127.0.0.1:${port}`;
+
+      try {
+        const cliPath = path.resolve(process.cwd(), "scripts/publish-public-release.mjs");
+        let exitCode = 0;
+        try {
+          await execFileAsync(
+            process.execPath,
+            [
+              cliPath,
+              "record-smoke",
+              "--dist-dir",
+              releaseDir,
+              "--receipt-dir",
+              receiptDir,
+              "--installer-results-file",
+              resultsFile,
+              "--base-url",
+              baseUrl,
+              "--test-only",
+            ],
+            {
+              env: {
+                ...process.env,
+                RESIN_DISTRIBUTION_BUCKET: "",
+                RESIN_DISTRIBUTION_ID: "EDIST1",
+              },
+            },
+          );
+        } catch (err) {
+          exitCode = err.code || err.exitCode || 1;
+        }
+
+        expect(exitCode).toBe(1);
+        // Verify evidence receipt was still written before exiting 1
+        const receiptFile = path.join(receiptDir, "record-smoke-receipt.json");
+        expect(fs.existsSync(receiptFile)).toBe(true);
+        const receipt = JSON.parse(fs.readFileSync(receiptFile, "utf8"));
+        expect(receipt.passed).toBe(false);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
     });
   });
 });
