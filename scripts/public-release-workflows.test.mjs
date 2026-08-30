@@ -580,6 +580,9 @@ describe("Public Release Workflows Contract", () => {
       expect(verifyStep.run).toContain("--receipt-dir");
       expect(promoteStep.run).toContain("--receipt-dir");
 
+      expect(publishStep.run).toContain('--installers-dir "installers"');
+      expect(verifyStep.run).toContain('--installers-dir "installers"');
+      expect(promoteStep.run).toContain('--installers-dir "installers"');
       // Verify that every step after promote either performs smoke testing or is a conditional freeze handler
       const postPromoteSteps = steps.slice(promoteIndex + 1);
 

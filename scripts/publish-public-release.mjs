@@ -78,6 +78,12 @@ export const PUBLISHER_MODES = Object.freeze([
   "freeze",
 ]);
 
+export const INSTALLER_FILENAMES = Object.freeze([
+  "install.sh",
+  "install.ps1",
+  "install-helper-v1.mjs",
+]);
+
 export const CONTRACTED_INSTALLERS = Object.freeze(["posix", "powershell"]);
 
 /**
@@ -413,6 +419,9 @@ export function determineContentType(filePathOrKey) {
   if (ext === ".zip") return "application/zip";
   if (ext === ".md") return "text/markdown";
   if (ext === ".txt") return "text/plain";
+  if (ext === ".sh") return "text/x-shellscript";
+  if (ext === ".ps1") return "text/plain";
+  if (ext === ".mjs" || ext === ".js") return "application/javascript";
   return "application/octet-stream";
 }
 
@@ -721,7 +730,83 @@ export function createUploadPlan(options = {}) {
     }
   }
 
-  // 5. Candidate channel metadata
+  // 5. Installer assets (versioned immutable assets and mutable entrypoints)
+  const candidateInstallerDirs = [
+    options.installersDir
+      ? path.isAbsolute(options.installersDir)
+        ? options.installersDir
+        : path.resolve(rootDir, options.installersDir)
+      : null,
+    path.resolve(releaseDir, "installers"),
+    path.resolve(rootDir, "installers"),
+    path.resolve(rootDir, "apps/cli/install"),
+    path.resolve(process.cwd(), "apps/cli/install"),
+    path.resolve(process.cwd(), "installers"),
+  ].filter(Boolean);
+
+  const installersDir =
+    candidateInstallerDirs.find((d) => fs.existsSync(d)) ||
+    (options.installersDir
+      ? path.isAbsolute(options.installersDir)
+        ? options.installersDir
+        : path.resolve(rootDir, options.installersDir)
+      : path.resolve(rootDir, "apps/cli/install"));
+
+  const mutableInstallerUploads = [];
+  for (const filename of INSTALLER_FILENAMES) {
+    const candidatePaths = [
+      options.installerAssets?.[filename]?.filePath,
+      path.join(installersDir, filename),
+      path.join(releaseDir, "installers", filename),
+      path.join(rootDir, "installers", filename),
+      path.join(rootDir, "apps/cli/install", filename),
+      path.join(process.cwd(), "apps/cli/install", filename),
+    ].filter(Boolean);
+
+    const installerPath = candidatePaths.find((p) => fs.existsSync(p)) || candidatePaths[0];
+
+    let sizeBytes = 0;
+    let digest = "";
+    if (options.installerAssets?.[filename]?.buffer) {
+      const buf = options.installerAssets[filename].buffer;
+      sizeBytes = buf.length;
+      digest = sha256Hex(buf);
+    } else if (fs.existsSync(installerPath)) {
+      sizeBytes = fs.statSync(installerPath).size;
+      digest = fileSha256(installerPath);
+    } else {
+      throw new Error(`Installer asset '${filename}' not found at '${installerPath}'.`);
+    }
+
+    // Immutable versioned installer asset
+    immutableUploads.push({
+      type: "installer",
+      name: filename,
+      key: applyKeyPrefix(`releases/v1/installers/v${version}/${filename}`, keyPrefix),
+      filePath: installerPath,
+      sha256: digest,
+      sizeBytes,
+      contentType: determineContentType(filename),
+      cacheControl: IMMUTABLE_CACHE_CONTROL,
+      isImmutable: true,
+    });
+
+    // Mutable installer entrypoint
+    mutableInstallerUploads.push({
+      type: "installer",
+      name: filename,
+      key: applyKeyPrefix(`releases/v1/installers/${filename}`, keyPrefix),
+      filePath: installerPath,
+      sha256: digest,
+      sizeBytes,
+      contentType: determineContentType(filename),
+      cacheControl: CHANNELS_CACHE_CONTROL,
+      isImmutable: false,
+      invalidationPath: deriveInvalidationPath(`releases/v1/installers/${filename}`, keyPrefix),
+    });
+  }
+
+  // 6. Candidate channel metadata
   const candidateChannelUpload = {
     type: "candidate-channel",
     key: applyKeyPrefix(`releases/v1/candidates/${manifestSha256}/channels.json`, keyPrefix),
@@ -734,7 +819,7 @@ export function createUploadPlan(options = {}) {
   };
   immutableUploads.push(candidateChannelUpload);
 
-  // 6. Promoted mutable channel
+  // 7. Promoted mutable channel
   const mutableChannelUpload = {
     type: "channel",
     key: applyKeyPrefix(CHANNELS_S3_KEY, keyPrefix),
@@ -753,11 +838,13 @@ export function createUploadPlan(options = {}) {
     manifestSha256,
     channelsSha256,
     immutableUploads,
+    mutableInstallerUploads,
     candidateChannelUpload,
     mutableChannelUpload,
     totalImmutableCount: immutableUploads.length,
   };
 }
+
 export async function mirrorRuntimes(options = {}) {
   const rootDir = options.rootDir || process.cwd();
   const denoVersion = options.denoVersion || PINNED_DENO_RUNTIME.version;
@@ -1343,6 +1430,130 @@ export async function promote(options = {}) {
   }
 
   const plan = options.uploadPlan || createUploadPlan({ ...options, keyPrefix });
+
+  // 1. Publish and anonymously verify mutable installer assets first before touching channels.json
+  const mutableInstallers = plan.mutableInstallerUploads || [];
+  const installerInvalidationPaths = [];
+  const verifiedInstallers = [];
+
+  for (const item of mutableInstallers) {
+    const installerHead = await s3HeadObject({ bucket, key: item.key }, options);
+    let installerIdentical = false;
+    if (installerHead.exists) {
+      const existingSha = installerHead.metadata?.sha256 || installerHead.eTag;
+      if (existingSha && existingSha === item.sha256) {
+        installerIdentical = true;
+      }
+    }
+
+    if (!installerIdentical) {
+      await s3PutObject(
+        {
+          bucket,
+          key: item.key,
+          filePath: item.filePath,
+          cacheControl: item.cacheControl || CHANNELS_CACHE_CONTROL,
+          contentType: item.contentType || determineContentType(item.key),
+          metadata: {
+            sha256: item.sha256,
+          },
+        },
+        options,
+      );
+      const invPath = item.invalidationPath || deriveInvalidationPath(item.key, keyPrefix);
+      installerInvalidationPaths.push(invPath);
+    }
+  }
+
+  // Invalidate mutable installer paths in CloudFront
+  let installerInvalidationId = null;
+  if (installerInvalidationPaths.length > 0) {
+    const invalidation = await cloudFrontCreateInvalidation(
+      {
+        distributionId,
+        paths: installerInvalidationPaths,
+      },
+      options,
+    );
+    installerInvalidationId = invalidation.invalidationId;
+  }
+
+  // Anonymously verify exact SHA-256 and bytes for each mutable installer entrypoint before touching channels.json
+  const baseUrl = (
+    options.baseUrl ||
+    process.env.RESIN_DISTRIBUTION_BASE_URL ||
+    PRODUCTION_BASE_URL
+  ).replace(/\/$/, "");
+
+  const fetchFn = options.fetch || globalThis.fetch;
+  if (
+    !(
+      fetchFn instanceof Function || Object.prototype.toString.call(fetchFn) === "[object Function]"
+    )
+  ) {
+    throw new Error("A valid fetch implementation is required for promotion verification.");
+  }
+
+  const installerVerificationAttempts =
+    options.installerVerificationAttempts ?? (isProduction ? 30 : 1);
+  const installerVerificationDelayMs = options.installerVerificationDelayMs ?? 2_000;
+  const sleep =
+    options.sleep || ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+
+  for (const item of mutableInstallers) {
+    const url = derivePublicUrl(baseUrl, item.key);
+    let verifiedBody = null;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= installerVerificationAttempts; attempt += 1) {
+      try {
+        const response = await fetchFn(url, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            Accept: "*/*",
+          },
+        });
+
+        if (!response.ok || response.status !== 200) {
+          throw new Error(`HTTP ${response.status} ${response.statusText || ""}`.trim());
+        }
+
+        const bodyBuffer = Buffer.from(await response.arrayBuffer());
+        const actualSha256 = sha256Hex(bodyBuffer);
+        if (actualSha256 !== item.sha256) {
+          throw new Error(`expected digest ${item.sha256}, got ${actualSha256}`);
+        }
+        if (bodyBuffer.length !== item.sizeBytes) {
+          throw new Error(`expected size ${item.sizeBytes}, got ${bodyBuffer.length}`);
+        }
+
+        verifiedBody = bodyBuffer;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < installerVerificationAttempts) {
+          await sleep(installerVerificationDelayMs);
+        }
+      }
+    }
+
+    if (!verifiedBody) {
+      throw new Error(
+        `Anonymous installer verification failed for '${url}' after ${installerVerificationAttempts} attempt(s): ${lastError?.message || String(lastError)}`,
+      );
+    }
+
+    verifiedInstallers.push({
+      key: item.key,
+      url,
+      sha256: sha256Hex(verifiedBody),
+      sizeBytes: verifiedBody.length,
+      verified: true,
+    });
+  }
+
+  // 2. NOW upload and promote channels.json
   const channelsPath = plan.mutableChannelUpload.filePath;
   const newChannelsBuffer = fs.readFileSync(channelsPath);
   const newChannelsSha256 = sha256Hex(newChannelsBuffer);
@@ -1355,8 +1566,6 @@ export async function promote(options = {}) {
 
   let isIdentical = false;
   if (head.exists) {
-    const baseUrl = options.baseUrl || process.env.RESIN_DISTRIBUTION_BASE_URL;
-    const fetchFn = options.fetch || globalThis.fetch;
     let fetchedAuthoritativeBytes = false;
 
     if (
@@ -1369,22 +1578,22 @@ export async function promote(options = {}) {
           method: "GET",
           redirect: "manual",
         });
-        if (resp.ok) {
-          fetchedAuthoritativeBytes = true;
-          const currentBytes = Buffer.from(await resp.arrayBuffer());
-          if (sha256Hex(currentBytes) === newChannelsSha256) {
+        if (resp.status === 200) {
+          const arrBuf = await resp.arrayBuffer();
+          const fetchedSha = sha256Hex(Buffer.from(arrBuf));
+          if (fetchedSha === newChannelsSha256) {
             isIdentical = true;
+            fetchedAuthoritativeBytes = true;
           }
         }
       } catch {
-        // If fetch fails, fallback to metadata check
+        // Fall back to head metadata
       }
     }
 
     if (!fetchedAuthoritativeBytes) {
-      const remoteSha256 =
-        head.metadata?.sha256 || head.metadata?.["sha-256"] || head.metadata?.SHA256;
-      if (remoteSha256 && remoteSha256 === newChannelsSha256) {
+      const existingSha = head.metadata?.sha256 || head.eTag;
+      if (existingSha && existingSha === newChannelsSha256) {
         isIdentical = true;
       }
     }
@@ -1407,7 +1616,6 @@ export async function promote(options = {}) {
       },
       options,
     );
-
     const invalidation = await cloudFrontCreateInvalidation(
       {
         distributionId,
@@ -1417,6 +1625,11 @@ export async function promote(options = {}) {
     );
     invalidationId = invalidation.invalidationId;
   }
+
+  const allInvalidationPaths = [
+    ...installerInvalidationPaths,
+    ...(invalidationId ? [invalidationPath] : []),
+  ];
 
   const receipt = {
     phase: "promote",
@@ -1431,7 +1644,8 @@ export async function promote(options = {}) {
     channelsSha256: newChannelsSha256,
     invalidationId,
     distributionId,
-    invalidationPaths: [invalidationPath],
+    invalidationPaths: allInvalidationPaths,
+    verifiedInstallers,
   };
 
   return writeReceipt(options.receiptDir, "promote", receipt);
@@ -2251,6 +2465,10 @@ export function parseCliArgs(argv) {
       options.releaseDir = argv[++i];
     } else if (arg.startsWith("--release-dir=")) {
       options.releaseDir = arg.slice(14);
+    } else if (arg === "--installers-dir") {
+      options.installersDir = argv[++i];
+    } else if (arg.startsWith("--installers-dir=")) {
+      options.installersDir = arg.slice(17);
     } else if (arg === "--dist-dir") {
       options.distDir = argv[++i];
       options.releaseDir = options.distDir;
@@ -2333,6 +2551,9 @@ if (
   publishPublicRelease(mode, options)
     .then((result) => {
       console.log(JSON.stringify(result, null, 2));
+      if (result && result.success === false) {
+        process.exit(1);
+      }
     })
     .catch((err) => {
       console.error(`❌ Publisher error [${mode}]:`, err.message);

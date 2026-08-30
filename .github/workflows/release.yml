@@ -348,6 +348,7 @@ jobs:
           mkdir -p "$receipt_dir"
           node tools/publish-public-release.mjs publish-immutable \
             --dist-dir "release/${RELEASE_TAG}" \
+            --installers-dir "installers" \
             --bucket "$RESIN_DISTRIBUTION_BUCKET" \
             --distribution-id "$RESIN_DISTRIBUTION_ID" \
             --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
@@ -362,10 +363,10 @@ jobs:
           receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
           node tools/publish-public-release.mjs verify-public \
             --dist-dir "release/${RELEASE_TAG}" \
+            --installers-dir "installers" \
             --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
             --key-prefix "$KEY_PREFIX" \
             --receipt-dir "$receipt_dir"
-
       - name: Install pinned PowerShell for installer smoke tests
         shell: bash
         run: |
@@ -474,6 +475,7 @@ jobs:
           receipt_dir="${RUNNER_TEMP:-/tmp}/resin-release-receipts"
           node tools/publish-public-release.mjs promote \
             --dist-dir "release/${RELEASE_TAG}" \
+            --installers-dir "installers" \
             --bucket "$RESIN_DISTRIBUTION_BUCKET" \
             --distribution-id "$RESIN_DISTRIBUTION_ID" \
             --base-url "$RESIN_DISTRIBUTION_BASE_URL" \
