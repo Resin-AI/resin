@@ -28,7 +28,6 @@ describe("paths", () => {
       expect(paths.logDir).toBe("/home/testuser/.local/state/resin/logs");
       expect(paths.socketPath).toBe("/home/testuser/.local/state/resin/daemon.sock");
       expect(paths.lockFilePath).toBe("/home/testuser/.local/state/resin/daemon.lock");
-      expect(paths.tokenFilePath).toBe("/home/testuser/.local/state/resin/auth.token");
     });
 
     it("respects explicit XDG environment variables on Linux", () => {
@@ -107,7 +106,6 @@ describe("paths", () => {
         RESIN_LOG_DIR: "/override/logs",
         RESIN_SOCKET_PATH: "/override/socket.sock",
         RESIN_LOCK_FILE: "/override/my.lock",
-        RESIN_TOKEN_FILE: "/override/my.token",
       };
 
       const paths = resolvePaths({ env: mockEnv });
@@ -118,7 +116,6 @@ describe("paths", () => {
       expect(paths.logDir).toBe(path.resolve("/override/logs"));
       expect(paths.socketPath).toBe(path.resolve("/override/socket.sock"));
       expect(paths.lockFilePath).toBe(path.resolve("/override/my.lock"));
-      expect(paths.tokenFilePath).toBe(path.resolve("/override/my.token"));
     });
 
     it("getDaemonPaths aliases resolvePaths", () => {
