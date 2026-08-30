@@ -2,7 +2,7 @@
 # Resin Standalone Installer Bootstrap Script
 # Portable POSIX sh script for Linux, macOS, and Windows WSL2.
 #
-# Helper URL: https://resin.sh/install-helper-v1.mjs
+# Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
 # Pinned SHA-256: 3218802b9a9f5ca18398b1cb56705e0b28ea3eb831c6b15d6af70a1db4705ac6
 #
 # Inspect-First Workflow:
@@ -15,7 +15,7 @@ set -eu
 umask 077
 
 # Constants
-PINNED_HELPER_URL="https://resin.sh/install-helper-v1.mjs"
+PINNED_HELPER_URL="https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
 PINNED_HELPER_SHA256="3218802b9a9f5ca18398b1cb56705e0b28ea3eb831c6b15d6af70a1db4705ac6"
 REQUIRED_NODE_MAJOR=22
 
@@ -124,7 +124,7 @@ Inspect-First Workflow:
     node ./install-helper.mjs [options]
 
   Or manually download and verify using curl:
-    curl -fsSL https://resin.sh/install-helper-v1.mjs -o install-helper.mjs
+    curl -fsSL https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs -o install-helper.mjs
     # Verify SHA-256: 3218802b9a9f5ca18398b1cb56705e0b28ea3eb831c6b15d6af70a1db4705ac6
     node ./install-helper.mjs
 
