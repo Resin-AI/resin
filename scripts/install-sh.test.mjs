@@ -702,7 +702,7 @@ process.exit(0);
     );
   });
 
-  it("accepts execution when helper exits 0 and outputs valid JSON success result", async () => {
+  it("keeps successful default output concise and emits details with --json", async () => {
     const successResult = {
       success: true,
       version: "1.0.0",
@@ -735,7 +735,18 @@ process.exit(0);
 
     expect(res.status).toBe(0);
     expect(res.stderr).toContain("Platform qualified: linux-arm64");
-    const parsed = JSON.parse(res.stdout);
+    expect(res.stdout).toBe("");
+
+    const jsonRes = await runInstallSh(["--json"], {
+      env: {
+        RESIN_INSTALL_TEST_ONLY: "1",
+        RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+        RESIN_TEST_HELPER_SHA256: successSha,
+      },
+    });
+
+    expect(jsonRes.status).toBe(0);
+    const parsed = JSON.parse(jsonRes.stdout);
     expect(parsed.success).toBe(true);
     expect(parsed.version).toBe("1.0.0");
   });
@@ -800,7 +811,7 @@ process.exit(0);
     await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
     serverPort = mockServer.address().port;
 
-    const res = await runInstallSh(["--verbose", "--no-path-update"], {
+    const res = await runInstallSh(["--verbose", "--json", "--no-path-update"], {
       env: {
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -809,7 +820,7 @@ process.exit(0);
     });
 
     expect(res.status).toBe(0);
-    expect(res.stderr).toContain("Received args: --verbose --no-path-update");
+    expect(res.stderr).toContain("Received args: --verbose --json --no-path-update");
     const parsed = JSON.parse(res.stdout);
     expect(parsed.success).toBe(true);
   });

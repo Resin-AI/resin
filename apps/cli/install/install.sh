@@ -148,6 +148,7 @@ EOF
 # Parse and validate arguments
 DOWNLOAD_ONLY=""
 ALLOW_LOOPBACK="0"
+JSON_OUTPUT="0"
 
 # Inspect arguments without mutating "$@"
 for ARG in "$@"; do
@@ -156,7 +157,10 @@ for ARG in "$@"; do
       show_help
       exit 0
       ;;
-    -v|--verbose|--json|--no-path-update|--skip-path-setup|--no-onboarding|--skip-onboarding|--auto-onboard|--local-only|--non-interactive)
+    -v|--verbose|--no-path-update|--skip-path-setup|--no-onboarding|--skip-onboarding|--auto-onboard|--local-only|--non-interactive)
+      ;;
+    --json)
+      JSON_OUTPUT="1"
       ;;
     --download-only)
       # Checked in positional loop below
@@ -628,5 +632,7 @@ try {
   exit 1
 fi
 
-printf '%s\n' "$HELPER_STDOUT"
+if [ "$JSON_OUTPUT" = "1" ]; then
+  printf '%s\n' "$HELPER_STDOUT"
+fi
 exit 0

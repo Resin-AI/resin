@@ -146,89 +146,82 @@ export function canonicalizePlatformPath(
     isTraversalSafe,
   };
 }
+function normalizeCandidate(value?: string | null): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 /**
- * Resolves platform paths according to OS and WSL conventions:
- * - macOS: ~/Library/Application Support/Resin, ~/Library/Caches/resin, ~/Library/Logs/resin
- * - Linux: ~/.local/share/resin, ~/.config/resin, ~/.local/state/resin
- * - WSL: XDG base directories within Linux guest + Windows host interop paths (/mnt/c/...)
+ * Resolves platform paths for the Resin standalone runtime and CLI:
+ * - Canonical root precedence: explicit resinHome option -> env.RESIN_HOME -> <userHome>/.resin
+ * - Subdirectories default beneath that canonical root:
+ *   - configDir: <resinHome>/config
+ *   - dataDir: <resinHome>/data
+ *   - stateDir: <resinHome>/state
+ *   - logDir: <resinHome>/logs
+ *   - socketPath: <stateDir>/daemon.sock (or named pipe on Windows)
+ * - Granular directory/socket environment variables and options retain precedence.
+ * - XDG variables alone do not displace the canonical default.
+ * - WSL: Windows host interop paths (/mnt/c/...)
  */
 export function resolvePlatformPaths(options: PlatformPathOptions = {}): PlatformPaths {
   const env = options.env ?? process.env;
   const platform = options.platformInfo ?? detectPlatform({ env });
-  const userHome = options.home ?? env.HOME ?? env.USERPROFILE ?? os.homedir();
-  const explicitHome = options.resinHome ?? env.RESIN_HOME;
+  const userHome =
+    normalizeCandidate(options.home) ??
+    normalizeCandidate(env.HOME) ??
+    normalizeCandidate(env.USERPROFILE) ??
+    os.homedir();
+  const explicitHome = normalizeCandidate(options.resinHome) ?? normalizeCandidate(env.RESIN_HOME);
 
-  let baseHomeDir: string;
-  let baseConfigDir: string;
-  let baseDataDir: string;
-  let baseStateDir: string;
-  let baseLogDir: string;
-  let defaultSocketPath: string;
+  const baseHomeDir = path.resolve(explicitHome ?? path.join(userHome, ".resin"));
+  const baseConfigDir = path.join(baseHomeDir, "config");
+  const baseDataDir = path.join(baseHomeDir, "data");
+  const baseStateDir = path.join(baseHomeDir, "state");
+  const baseLogDir = path.join(baseHomeDir, "logs");
 
-  if (explicitHome) {
-    baseHomeDir = path.resolve(explicitHome);
-    baseConfigDir = path.join(baseHomeDir, "config");
-    baseDataDir = path.join(baseHomeDir, "data");
-    baseStateDir = path.join(baseHomeDir, "state");
-    baseLogDir = path.join(baseHomeDir, "logs");
-    defaultSocketPath = path.join(baseStateDir, "daemon.sock");
-  } else if (platform.os === "darwin") {
-    // macOS Platform Standards
-    baseHomeDir = path.join(userHome, ".resin");
-    // Standard macOS Library locations (supporting Resin and resin)
-    baseConfigDir = path.join(userHome, "Library", "Application Support", "Resin");
-    baseDataDir = path.join(userHome, "Library", "Application Support", "Resin");
-    baseStateDir = path.join(userHome, "Library", "Caches", "resin");
-    baseLogDir = path.join(userHome, "Library", "Logs", "resin");
-    defaultSocketPath = path.join(baseStateDir, "daemon.sock");
-  } else if (platform.platform === "win32") {
-    // Native Windows (if inspected)
-    const appData = env.APPDATA ?? path.join(userHome, "AppData", "Roaming");
-    const localAppData = env.LOCALAPPDATA ?? path.join(userHome, "AppData", "Local");
-    baseHomeDir = path.join(userHome, ".resin");
-    baseConfigDir = path.join(appData, "Resin");
-    baseDataDir = path.join(localAppData, "Resin");
-    baseStateDir = path.join(localAppData, "Resin", "state");
-    baseLogDir = path.join(localAppData, "Resin", "logs");
-    defaultSocketPath = "\\\\.\\pipe\\resin-daemon";
-  } else {
-    // Linux and WSL (XDG Base Directory Specification)
-    const xdgConfig = env.XDG_CONFIG_HOME;
-    const xdgData = env.XDG_DATA_HOME;
-    const xdgState = env.XDG_STATE_HOME;
-    const xdgRuntime = env.XDG_RUNTIME_DIR;
-
-    baseHomeDir = path.join(userHome, ".resin");
-    baseConfigDir = xdgConfig
-      ? path.join(xdgConfig, "resin")
-      : path.join(userHome, ".config", "resin");
-    baseDataDir = xdgData
-      ? path.join(xdgData, "resin")
-      : path.join(userHome, ".local", "share", "resin");
-    baseStateDir = xdgState
-      ? path.join(xdgState, "resin")
-      : path.join(userHome, ".local", "state", "resin");
-    baseLogDir = path.join(baseStateDir, "logs");
-
-    if (xdgRuntime) {
-      defaultSocketPath = path.join(xdgRuntime, "resin.sock");
-    } else {
-      defaultSocketPath = path.join(baseStateDir, "daemon.sock");
-    }
-  }
+  const defaultSocketPath =
+    platform.platform === "win32"
+      ? "\\\\.\\pipe\\resin-daemon"
+      : path.join(baseStateDir, "daemon.sock");
 
   // Apply overrides if supplied
   const homeDir = baseHomeDir;
-  const configDir = path.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
-  const dataDir = path.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
-  const stateDir = path.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
-  const logDir = path.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
-  const socketPath = path.resolve(options.socketPath ?? env.RESIN_SOCKET_PATH ?? defaultSocketPath);
+  const configDir = path.resolve(
+    normalizeCandidate(options.configDir) ??
+      normalizeCandidate(env.RESIN_CONFIG_DIR) ??
+      baseConfigDir,
+  );
+  const dataDir = path.resolve(
+    normalizeCandidate(options.dataDir) ?? normalizeCandidate(env.RESIN_DATA_DIR) ?? baseDataDir,
+  );
+  const stateDir = path.resolve(
+    normalizeCandidate(options.stateDir) ?? normalizeCandidate(env.RESIN_STATE_DIR) ?? baseStateDir,
+  );
+  const logDir = path.resolve(
+    normalizeCandidate(options.logDir) ?? normalizeCandidate(env.RESIN_LOG_DIR) ?? baseLogDir,
+  );
 
-  const lockFilePath = path.join(stateDir, "daemon.lock");
-  const pidFilePath = path.join(stateDir, "daemon.pid");
-  const configFile = options.configFile ?? path.join(configDir, "config.json");
+  let socketPath =
+    normalizeCandidate(options.socketPath) ??
+    normalizeCandidate(env.RESIN_SOCKET_PATH) ??
+    defaultSocketPath;
+  if (platform.platform !== "win32" || !socketPath.startsWith("\\\\.\\pipe\\")) {
+    socketPath = path.resolve(socketPath);
+  }
+
+  const lockFilePath = path.resolve(
+    normalizeCandidate(env.RESIN_LOCK_FILE) ?? path.join(stateDir, "daemon.lock"),
+  );
+  const pidFilePath = path.resolve(
+    normalizeCandidate(env.RESIN_PID_FILE) ?? path.join(stateDir, "daemon.pid"),
+  );
+  const configFile = path.resolve(
+    normalizeCandidate(options.configFile) ??
+      normalizeCandidate(env.RESIN_CONFIG_FILE) ??
+      path.join(configDir, "config.json"),
+  );
   const artifactsDir = path.join(dataDir, "artifacts");
   const versionsDir = path.join(homeDir, "versions");
   const currentVersionLink = path.join(homeDir, "current");
