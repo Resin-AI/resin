@@ -23,6 +23,7 @@ import {
   REVOKED_RELEASE_KEY_IDS,
   createTestReleaseSigningKey,
   loadReleaseSigningKeyFromEnv,
+  loadTrustedReleaseKeysFromEnv,
   publicTrustRecord,
   signReleasePayload,
   trustedKeysFromSigningKey,
@@ -565,12 +566,13 @@ export function isProductionDistFile(pkgDir, distRelPath) {
   return candidateSources.some((candidate) => fs.existsSync(candidate));
 }
 
-export function assertCleanProductionDist(rootDir, pkgDir) {
+export function assertCleanProductionDist(rootDir, pkgDir, options = {}) {
   const distDir = path.join(pkgDir, "dist");
   if (!fs.existsSync(distDir)) return;
 
   const rawFiles = collectFilesRecursively(distDir, pkgDir);
   const staleOrForbidden = [];
+  const allowedGeneratedFiles = new Set(options.allowedGeneratedFiles || []);
 
   for (const file of rawFiles) {
     const insideDistRel = path.relative("dist", file.relPath).replace(/\\/g, "/");
@@ -583,7 +585,10 @@ export function assertCleanProductionDist(rootDir, pkgDir) {
     }
     if (isForbiddenReleasePath(insideDistRel) || isForbiddenReleasePath(file.relPath)) {
       staleOrForbidden.push({ file: file.relPath, reason: "forbidden release artifact" });
-    } else if (!isProductionDistFile(pkgDir, insideDistRel)) {
+    } else if (
+      !allowedGeneratedFiles.has(insideDistRel) &&
+      !isProductionDistFile(pkgDir, insideDistRel)
+    ) {
       staleOrForbidden.push({
         file: file.relPath,
         reason: "stale orphan output with no corresponding source file in src/",
@@ -607,15 +612,16 @@ export function collectPackageProductionDistFiles(rootDir, pkgDir, options = {})
   if (!fs.existsSync(distDir)) return [];
 
   if (options.rejectStale === true) {
-    assertCleanProductionDist(rootDir, pkgDir);
+    assertCleanProductionDist(rootDir, pkgDir, options);
   }
 
   const rawFiles = collectFilesRecursively(distDir, pkgDir);
   const productionFiles = [];
+  const allowedGeneratedFiles = new Set(options.allowedGeneratedFiles || []);
 
   for (const file of rawFiles) {
     const insideDistRel = path.relative("dist", file.relPath).replace(/\\/g, "/");
-    if (isProductionDistFile(pkgDir, insideDistRel)) {
+    if (isProductionDistFile(pkgDir, insideDistRel) || allowedGeneratedFiles.has(insideDistRel)) {
       productionFiles.push(file);
     }
   }
@@ -819,7 +825,10 @@ export function generatePackageDigests(rootDir = process.cwd(), options = {}) {
       : { version: RELEASE_VERSION };
     const entryPath = path.join(pkgDir, pkg.entry);
     const entrySha256 = fs.existsSync(entryPath) ? fileSha256(entryPath) : sha256Hex(pkg.name);
-    const distFiles = collectPackageProductionDistFiles(rootDir, pkgDir, { rejectStale: true });
+    const distFiles = collectPackageProductionDistFiles(rootDir, pkgDir, {
+      rejectStale: true,
+      allowedGeneratedFiles: options.allowedGeneratedFilesByPackage?.[pkg.path],
+    });
     assertNoForbiddenReleaseArtifacts(distFiles, `package ${pkg.name} dist files`);
     const distFileHashes = distFiles
       .map((f) => fileSha256(f.fullPath))
@@ -908,8 +917,12 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
 
   for (const pkg of publicPackages) {
     const pkgDir = path.resolve(rootDir, pkg.path);
-    assertCleanProductionDist(rootDir, pkgDir);
-    for (const file of collectPackageProductionDistFiles(rootDir, pkgDir, { rejectStale: true })) {
+    const distOptions = {
+      rejectStale: true,
+      allowedGeneratedFiles: options.allowedGeneratedFilesByPackage?.[pkg.path],
+    };
+    assertCleanProductionDist(rootDir, pkgDir, distOptions);
+    for (const file of collectPackageProductionDistFiles(rootDir, pkgDir, distOptions)) {
       if (file.relPath.endsWith(".map")) continue;
       baseEntries.push({
         path: `resin/${pkg.path}/${file.relPath}`,
@@ -1028,6 +1041,32 @@ function resolveSigningKey(options = {}) {
   if (options.keyPair) return options.keyPair;
   if (options.testOnly === true) return createTestReleaseSigningKey();
   return loadReleaseSigningKeyFromEnv();
+}
+
+export function writeCliReleaseTrustBundle(rootDir, keyPair, options = {}) {
+  const trustedKeys =
+    options.testOnly === true
+      ? trustedKeysFromSigningKey(keyPair)
+      : loadTrustedReleaseKeysFromEnv(options.env || process.env);
+  const activeRecord = trustedKeys[keyPair.keyId];
+  if (!activeRecord) {
+    throw new Error(`Active release key '${keyPair.keyId}' is missing from CLI trust roots.`);
+  }
+  const trustedRecords = [
+    activeRecord,
+    ...Object.entries(trustedKeys)
+      .filter(([keyId]) => keyId !== keyPair.keyId)
+      .map(([, record]) => record),
+  ];
+  const payload = {
+    schemaVersion: "2.0.0",
+    trustDomain: keyPair.trustDomain,
+    trustedKeys: trustedRecords,
+  };
+  const outputPath = path.resolve(rootDir, "apps/cli/dist/release-trust.json");
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return { outputPath, payload };
 }
 
 export function generateSignedManifest(packageDigests, assetDigests, options = {}) {
@@ -1473,9 +1512,18 @@ export function packageRelease(options = {}) {
   }
 
   if (!skipBuild) buildWorkspacePackages(rootDir);
+  const cliTrust = writeCliReleaseTrustBundle(rootDir, keyPair, { testOnly });
+  const allowedGeneratedFilesByPackage = { "apps/cli": ["release-trust.json"] };
 
-  const packageDigests = generatePackageDigests(rootDir, { publicPackages });
-  const assetDigests = createPlatformReleaseTarballs(rootDir, distDir, { publicPackages });
+  const packageDigests = generatePackageDigests(rootDir, {
+    publicPackages,
+    allowedGeneratedFilesByPackage,
+  });
+  const assetDigests = createPlatformReleaseTarballs(rootDir, distDir, {
+    publicPackages,
+    allowedGeneratedFilesByPackage,
+  });
+  fs.rmSync(cliTrust.outputPath, { force: true });
   const evidenceResult = writeReleaseEvidence({
     rootDir,
     distDir,
