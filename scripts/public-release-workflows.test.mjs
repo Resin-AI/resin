@@ -140,7 +140,7 @@ describe("Public Release Workflows Contract", () => {
     const jobs = candidate.doc.jobs;
     const inputs = candidate.doc.on?.workflow_dispatch?.inputs;
 
-    it("defines workflow_dispatch trigger with required commit_sha and all five upstream run IDs", () => {
+    it("defines workflow_dispatch trigger with commit_sha and four public release gate run IDs", () => {
       expect(inputs).toBeDefined();
       expect(inputs.commit_sha?.required).toBe(true);
       expect(inputs.release_tag?.default).toBe("v1.0.3");
@@ -148,7 +148,7 @@ describe("Public Release Workflows Contract", () => {
       expect(inputs.platform_qualification_run_id?.required).toBe(true);
       expect(inputs.system_qualification_run_id?.required).toBe(true);
       expect(inputs.security_scan_run_id?.required).toBe(true);
-      expect(inputs.operational_evidence_run_id?.required).toBe(true);
+      expect(inputs.operational_evidence_run_id).toBeUndefined();
       expect(
         inputs.allow_uncommitted_worktree,
         "allow_uncommitted_worktree must be removed",
@@ -249,7 +249,7 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain(".github/workflows/platform-qualification.yml");
       expect(script).toContain(".github/workflows/system-qualification.yml");
       expect(script).toContain(".github/workflows/security-scan.yml");
-      expect(script).toContain(".github/workflows/production-operational-evidence.yml");
+      expect(script).not.toContain("production-operational-evidence");
       expect(script).toContain("vulnerability-scan-evidence.json");
       expect(script).toContain("REVOKED_RELEASE_KEY_IDS");
       expect(script, "Must not contain sleep polling loops").not.toMatch(/sleep\s+\d+/);
