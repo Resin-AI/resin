@@ -44,6 +44,13 @@ export interface CausalRefInput {
 export function asString(value: OmpTranscriptValue | undefined | null): string | undefined {
   return value !== undefined && value !== null && String(value) === value ? value : undefined;
 }
+function normalizeCallId(value: string | undefined, fallback: string): string {
+  const normalized = (value ?? fallback).replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 128);
+  if (/^[a-zA-Z0-9_-]/.test(normalized)) {
+    return normalized;
+  }
+  return `_${normalized}`.slice(0, 128);
+}
 
 export function asNumber(value: OmpTranscriptValue | undefined | null): number | undefined {
   return value !== undefined && value !== null && Number.isFinite(value)
@@ -1039,13 +1046,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         "unknown_tool",
     );
 
-    const callId = String(
+    const callId = normalizeCallId(
       asString(toolCallObj.callId) ??
         asString(toolCallObj.call_id) ??
         asString(toolCallObj.toolCallId) ??
         asString(toolCallObj.tool_call_id) ??
-        asString(toolCallObj.id) ??
-        `call_${causalRef.causalSequence}`,
+        asString(toolCallObj.id),
+      `call_${causalRef.causalSequence}`,
     );
 
     const rawParams =
@@ -1106,13 +1113,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         "unknown_tool",
     );
 
-    const callId = String(
+    const callId = normalizeCallId(
       asString(toolResultObj.callId) ??
         asString(toolResultObj.call_id) ??
         asString(toolResultObj.toolCallId) ??
         asString(toolResultObj.tool_call_id) ??
-        asString(toolResultObj.id) ??
-        `call_${causalRef.causalSequence}`,
+        asString(toolResultObj.id),
+      `call_${causalRef.causalSequence}`,
     );
 
     let rawResult =
@@ -1144,11 +1151,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asString(toolResultObj.error_message) ??
       (isError && typeof rawResult === "string" ? rawResult : undefined);
 
+    const details = asObject(toolResultObj.details);
     const executionDurationMs =
       asNumber(toolResultObj.executionDurationMs) ??
       asNumber(toolResultObj.execution_duration_ms) ??
       asNumber(toolResultObj.durationMs) ??
-      asNumber(toolResultObj.duration_ms);
+      asNumber(toolResultObj.duration_ms) ??
+      asNumber(details?.wallTimeMs) ??
+      asNumber(details?.durationMs) ??
+      0;
 
     const providerUsage = this.extractProviderUsage(obj, metadata);
 

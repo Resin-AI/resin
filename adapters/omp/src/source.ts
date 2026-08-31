@@ -145,6 +145,7 @@ export class OmpSessionEventSource implements SessionEventSource {
             // SAFETY: Parsed JSON represents a structured transcript record object.
             const obj = parsed as {
               timestamp?: string | number;
+              updatedAt?: string | number;
               time?: string | number;
               ts?: string | number;
               role?: string;
@@ -157,7 +158,7 @@ export class OmpSessionEventSource implements SessionEventSource {
               tool_result?: object;
             };
             parsedPayload = parsed;
-            const ts = obj.timestamp ?? obj.time ?? obj.ts;
+            const ts = obj.timestamp ?? obj.updatedAt ?? obj.time ?? obj.ts;
             if (ts !== undefined) {
               timestamp = String(ts);
             }

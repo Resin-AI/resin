@@ -958,7 +958,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           type: "custom",
           customType: "tool_execution_start",
           data: {
-            toolCallId: "call-read",
+            toolCallId: "call-read|fc_abc",
             toolName: "read",
             args: { path: "input.csv" },
             intent: "Inspect input",
@@ -970,10 +970,11 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           type: "message",
           message: {
             role: "toolResult",
-            toolCallId: "call-read",
+            toolCallId: "call-read|fc_abc",
             toolName: "read",
             content: [{ type: "text", text: "sku,quantity" }],
             isError: false,
+            details: { wallTimeMs: 12.5 },
           },
         }),
       ) as IntermediateToolResultEvent;
@@ -981,18 +982,19 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(toolCall).toMatchObject({
         type: "tool_call",
         toolName: "read",
-        callId: "call-read",
-        toolCallId: "call-read",
+        callId: "call-read_fc_abc",
+        toolCallId: "call-read_fc_abc",
         parameters: { path: "input.csv" },
         metadata: { intent: "Inspect input" },
       });
       expect(toolResult).toMatchObject({
         type: "tool_result",
         toolName: "read",
-        callId: "call-read",
-        toolCallId: "call-read",
+        callId: "call-read_fc_abc",
+        toolCallId: "call-read_fc_abc",
         result: "sku,quantity",
         isError: false,
+        executionDurationMs: 12.5,
       });
     });
 
@@ -1045,6 +1047,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         "tool_result",
       ]);
       expect(decoded.filter((event) => event.type === "tool_call")).toHaveLength(2);
+      expect(decoded[1]).toMatchObject({ executionDurationMs: 0 });
       expect(decoded[3]).toMatchObject({
         type: "tool_result",
         toolName: "bash",
