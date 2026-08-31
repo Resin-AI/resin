@@ -11,7 +11,10 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
     try {
       const transcriptPath = path.join(tmpDir, "session.jsonl");
 
-      const line1 = JSON.stringify({ type: "session_lifecycle", lifecycleType: "start" });
+      const line1 = JSON.stringify({
+        type: "title",
+        updatedAt: "2026-08-31T19:49:42.203Z",
+      });
       const line2 = JSON.stringify({ type: "message", role: "user", content: "hi" });
       const line3 = JSON.stringify({ type: "message", role: "assistant", content: "hello" });
 
@@ -35,6 +38,7 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       expect(batch1.length).toBe(2);
       expect(batch1[0].recordType).toBe("transcript_line");
       expect(batch1[1].recordType).toBe("prompt");
+      expect(batch1[0].timestamp).toBe("2026-08-31T19:49:42.203Z");
 
       const cursor1 = source.getCursor();
       expect(cursor1.line).toBe(3);
