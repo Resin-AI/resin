@@ -22,6 +22,12 @@ describe("build-install-helper", () => {
     expect(Buffer.compare(build1.bytes, build2.bytes)).toBe(0);
   });
 
+  it("does not recreate the removed version-local resin-mcp launcher", async () => {
+    const result = await buildInstallHelper({ rootDir, write: false });
+
+    expect(result.code).not.toContain("expectedMcp");
+  });
+
   it("embeds the production trust root record in the bundled output", async () => {
     const result = await buildInstallHelper({ rootDir, write: false });
 

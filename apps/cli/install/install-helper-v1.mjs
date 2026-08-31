@@ -7712,10 +7712,8 @@ async function installReleaseVersion(options) {
     });
     const expectedCli = path2.join(stagingDir, "bin", "resin");
     const expectedDaemon = path2.join(stagingDir, "bin", "resin-daemon");
-    const expectedMcp = path2.join(stagingDir, "bin", "resin-mcp");
     trustedExecutablePaths.add(path2.resolve(expectedCli));
     trustedExecutablePaths.add(path2.resolve(expectedDaemon));
-    trustedExecutablePaths.add(path2.resolve(expectedMcp));
     if (!fs2.existsSync(expectedCli)) {
       await fsPromises.writeFile(
         expectedCli,
@@ -7755,20 +7753,6 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       );
       extractedFiles.push(expectedDaemon);
       await fsPromises.chmod(expectedDaemon, 493);
-    }
-    if (!fs2.existsSync(expectedMcp)) {
-      await fsPromises.writeFile(
-        expectedMcp,
-        `#!/usr/bin/env node
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-await import(path.resolve(__dirname, "../apps/gateway/dist/bin/mcp-shim.js"));
-`,
-        { mode: 493 }
-      );
-      extractedFiles.push(expectedMcp);
-      await fsPromises.chmod(expectedMcp, 493);
     }
     const versionMetadataPath = path2.join(stagingDir, "version.json");
     const versionInfo = {
@@ -7824,7 +7808,6 @@ await import(path.resolve(__dirname, "../apps/gateway/dist/bin/mcp-shim.js"));
         installedFiles: installedFilePaths,
         entryPoints: {
           daemon: path2.join(targetVersionDir, "bin", "resin-daemon"),
-          mcpShim: path2.join(targetVersionDir, "bin", "resin-mcp"),
           cli: path2.join(targetVersionDir, "bin", "resin"),
           deno: fs2.existsSync(
             path2.join(targetVersionDir, "deno", process2.platform === "win32" ? "deno.exe" : "deno")
@@ -7864,7 +7847,6 @@ await import(path.resolve(__dirname, "../apps/gateway/dist/bin/mcp-shim.js"));
       installedFiles: extractedFiles.map((f) => f.replace(stagingDir, targetVersionDir)),
       entryPoints: {
         daemon: path2.join(targetVersionDir, "bin", "resin-daemon"),
-        mcpShim: path2.join(targetVersionDir, "bin", "resin-mcp"),
         cli: path2.join(targetVersionDir, "bin", "resin"),
         deno: fs2.existsSync(
           path2.join(targetVersionDir, "deno", process2.platform === "win32" ? "deno.exe" : "deno")
@@ -8002,11 +7984,13 @@ async function switchActiveVersion(options) {
     await fsPromises.chmod(stagingBinDir, 493).catch(() => {
     });
     const targetBinDir = path2.join(targetVersionDir, "bin");
-    const binNames = /* @__PURE__ */ new Set(["resin", "resin-daemon", "resin-mcp"]);
+    const binNames = /* @__PURE__ */ new Set(["resin", "resin-daemon"]);
     if (fs2.existsSync(targetBinDir)) {
       const files = fs2.readdirSync(targetBinDir);
       for (const f of files) {
-        binNames.add(f);
+        if (f !== "resin-mcp") {
+          binNames.add(f);
+        }
       }
     }
     for (const binName of binNames) {
