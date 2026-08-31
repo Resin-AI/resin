@@ -890,4 +890,168 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(decoded.providerUsage?.accountingVersion).toBe("omp-v2-experimental");
     });
   });
+
+  describe("OMP v18 transcript wrappers", () => {
+    function v18Record(sequenceNumber: number, payload: Record<string, unknown>): RawHarnessRecord {
+      return {
+        recordId: `v18-${sequenceNumber}`,
+        sessionId: "session-v18",
+        harnessId: "omp",
+        sequenceNumber,
+        recordType: "transcript_line",
+        timestamp: `2026-08-31T12:00:${String(sequenceNumber).padStart(2, "0")}.000Z`,
+        cursor: {
+          offset: sequenceNumber * 100,
+          line: sequenceNumber,
+          sequence: sequenceNumber,
+          timestamp: `2026-08-31T12:00:${String(sequenceNumber).padStart(2, "0")}.000Z`,
+        },
+        rawPayload: JSON.stringify(payload),
+        metadata: {},
+      };
+    }
+
+    it("unwraps nested user and assistant messages without duplicating embedded tool calls", () => {
+      const user = decoder.decode(
+        v18Record(1, {
+          type: "message",
+          message: {
+            role: "USER",
+            content: [{ type: "text", text: "Inspect the fixture." }],
+          },
+        }),
+      ) as IntermediateMessageEvent;
+      const assistant = decoder.decode(
+        v18Record(2, {
+          type: "message",
+          message: {
+            role: "Assistant",
+            content: [
+              { type: "text", text: "Inspecting." },
+              {
+                type: "toolCall",
+                id: "call-read",
+                name: "read",
+                arguments: { path: "input.csv" },
+              },
+            ],
+          },
+        }),
+      ) as IntermediateMessageEvent;
+
+      expect(user).toMatchObject({
+        type: "message",
+        role: "user",
+        content: "Inspect the fixture.",
+      });
+      expect(assistant).not.toBeInstanceOf(Array);
+      expect(assistant).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: "Inspecting.\n",
+      });
+    });
+
+    it("decodes canonical tool starts and nested tool results", () => {
+      const toolCall = decoder.decode(
+        v18Record(3, {
+          type: "custom",
+          customType: "tool_execution_start",
+          data: {
+            toolCallId: "call-read",
+            toolName: "read",
+            args: { path: "input.csv" },
+            intent: "Inspect input",
+          },
+        }),
+      ) as IntermediateToolCallEvent;
+      const toolResult = decoder.decode(
+        v18Record(4, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call-read",
+            toolName: "read",
+            content: [{ type: "text", text: "sku,quantity" }],
+            isError: false,
+          },
+        }),
+      ) as IntermediateToolResultEvent;
+
+      expect(toolCall).toMatchObject({
+        type: "tool_call",
+        toolName: "read",
+        callId: "call-read",
+        toolCallId: "call-read",
+        parameters: { path: "input.csv" },
+        metadata: { intent: "Inspect input" },
+      });
+      expect(toolResult).toMatchObject({
+        type: "tool_result",
+        toolName: "read",
+        callId: "call-read",
+        toolCallId: "call-read",
+        result: "sku,quantity",
+        isError: false,
+      });
+    });
+
+    it("emits repeated actionable calls and preserves failed results", () => {
+      const payloads = [
+        {
+          type: "custom",
+          customType: "tool_execution_start",
+          data: { toolCallId: "call-read", toolName: "read", args: { path: "input.csv" } },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call-read",
+            toolName: "read",
+            content: [{ type: "text", text: "ok" }],
+            isError: false,
+          },
+        },
+        {
+          type: "custom",
+          customType: "tool_execution_start",
+          data: {
+            toolCallId: "call-bash",
+            toolName: "bash",
+            args: { command: "python report.py" },
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "tool_result",
+            toolCallId: "call-bash",
+            toolName: "bash",
+            content: [{ type: "text", text: "exit 1" }],
+            isError: true,
+            error: "command failed",
+          },
+        },
+      ];
+      const decoded = payloads.map((payload, index) =>
+        decoder.decode(v18Record(index + 5, payload)),
+      ) as Array<IntermediateToolCallEvent | IntermediateToolResultEvent>;
+
+      expect(decoded.map((event) => event.type)).toEqual([
+        "tool_call",
+        "tool_result",
+        "tool_call",
+        "tool_result",
+      ]);
+      expect(decoded.filter((event) => event.type === "tool_call")).toHaveLength(2);
+      expect(decoded[3]).toMatchObject({
+        type: "tool_result",
+        toolName: "bash",
+        callId: "call-bash",
+        isError: true,
+        error: "command failed",
+      });
+    });
+  });
 });

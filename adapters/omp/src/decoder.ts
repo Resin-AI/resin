@@ -569,7 +569,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       obj.harnessName === "omp" ||
       asString(obj.type) !== undefined ||
       asString(obj.event) !== undefined ||
-      asString(obj.role) !== undefined
+      asString(obj.role) !== undefined ||
+      asString(obj.customType) !== undefined ||
+      asString(obj.custom_type) !== undefined ||
+      asObject(obj.message) !== undefined
     );
   }
 
@@ -615,6 +618,62 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const rawType = String(
       asString(obj.type) ?? asString(obj.event) ?? asString(obj.kind) ?? asString(obj.action) ?? "",
     ).toLowerCase();
+
+    // 0. Pre-dispatch handling for OMP v18 wrappers
+    const customType = String(
+      asString(obj.customType) ?? asString(obj.custom_type) ?? "",
+    ).toLowerCase();
+    if (
+      (rawType === "custom" &&
+        (customType === "tool_execution_start" ||
+          customType === "tool_start" ||
+          customType === "toolexecutionstart")) ||
+      rawType === "tool_execution_start"
+    ) {
+      const dataObj = asObject(obj.data) ?? {};
+      const toolCallPayload: OmpTranscriptPayload = { ...obj, ...dataObj };
+      return this.normalizeToolCall(toolCallPayload, sessionId, timestamp, causalRef, metadata);
+    }
+
+    const nestedMsg = asObject(obj.message);
+    if (nestedMsg) {
+      const nestedRole = asString(nestedMsg.role)?.toLowerCase().trim();
+      const mergedPayload: OmpTranscriptPayload = { ...obj, ...nestedMsg };
+
+      if (nestedRole === "user") {
+        return this.normalizeMessage(
+          mergedPayload,
+          "user",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      if (nestedRole === "assistant") {
+        return this.normalizeMessage(
+          mergedPayload,
+          "assistant",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      if (nestedRole === "system") {
+        return this.normalizeMessage(
+          mergedPayload,
+          "system",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      if (nestedRole === "toolresult" || nestedRole === "tool_result" || nestedRole === "tool") {
+        return this.normalizeToolResult(mergedPayload, sessionId, timestamp, causalRef, metadata);
+      }
+    }
 
     // 1. Session Lifecycle Events
     if (
@@ -997,8 +1056,20 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       toolCallObj.args ??
       {};
 
-    const rawParamsObj = asObject(rawParams) ?? {};
-    const parameters = rawParamsObj;
+    let rawParamsObj = asObject(rawParams);
+    if (!rawParamsObj && typeof rawParams === "string") {
+      try {
+        rawParamsObj = asObject(JSON.parse(rawParams));
+      } catch {
+        // ignore JSON parse failure
+      }
+    }
+    const parameters = rawParamsObj ?? {};
+
+    if (toolCallObj.intent !== undefined && metadata.intent === undefined) {
+      metadata.intent = toolCallObj.intent;
+    }
+
     const providerUsage = this.extractProviderUsage(obj, metadata);
     const evt: IntermediateToolCallEvent = {
       sessionId,
@@ -1009,6 +1080,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       type: "tool_call",
       toolName,
       callId,
+      toolCallId: callId,
       parameters,
     };
     if (providerUsage) {
@@ -1043,12 +1115,21 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         `call_${causalRef.causalSequence}`,
     );
 
-    const rawResult =
+    let rawResult =
       toolResultObj.result ??
       toolResultObj.output ??
       toolResultObj.content ??
       toolResultObj.data ??
       toolResultObj.response;
+
+    if (Array.isArray(rawResult)) {
+      const allText = rawResult
+        .map((p) => asString(asObject(p)?.text) ?? asString(asObject(p)?.content) ?? "")
+        .filter((t) => t.length > 0);
+      if (allText.length > 0 && allText.length === rawResult.length) {
+        rawResult = allText.join("\n");
+      }
+    }
 
     const isError = Boolean(
       toolResultObj.isError ||
@@ -1056,6 +1137,12 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         toolResultObj.error ||
         asString(toolResultObj.status)?.toLowerCase() === "error",
     );
+
+    const errorStr =
+      asString(toolResultObj.error) ??
+      asString(toolResultObj.errorMessage) ??
+      asString(toolResultObj.error_message) ??
+      (isError && typeof rawResult === "string" ? rawResult : undefined);
 
     const executionDurationMs =
       asNumber(toolResultObj.executionDurationMs) ??
@@ -1074,11 +1161,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       type: "tool_result",
       toolName,
       callId,
+      toolCallId: callId,
       result: rawResult,
       isError,
-      error: isError
-        ? (asString(toolResultObj.error) ?? asString(toolResultObj.errorMessage) ?? undefined)
-        : undefined,
+      error: isError ? errorStr : undefined,
       executionDurationMs,
     };
     if (providerUsage) {
