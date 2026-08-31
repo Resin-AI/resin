@@ -482,6 +482,22 @@ describe("observer telemetry gating", () => {
       await fixture.cleanup();
     }
   });
+  it("reports the packaged release version instead of a persisted config version", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-release-version-"));
+    temporaryDirectories.push(home);
+    const configPath = path.join(home, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ version: "0.1.0" }), { mode: 0o600 });
+
+    const loaded = loadTelemetrySafeDaemonConfig({
+      configPath,
+      version: "1.0.19",
+      env: {},
+    });
+
+    expect(loaded.warning).toBeUndefined();
+    expect(loaded.config.version).toBe("1.0.19");
+  });
+
   it("fails closed for malformed or schema-invalid config without starting a tailer", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-invalid-telemetry-"));
     temporaryDirectories.push(home);
@@ -511,9 +527,11 @@ describe("observer telemetry gating", () => {
 
     const invalidRecovery = loadTelemetrySafeDaemonConfig({
       configPath: invalidSchemaPath,
+      version: "1.0.19",
       env: {},
       now: () => 123,
     });
+    expect(invalidRecovery.config.version).toBe("1.0.19");
     expect(invalidRecovery.config.telemetryEnabled).toBe(false);
     expect(invalidRecovery.warning).toMatchObject({
       category: "MALFORMED_CONFIG",
@@ -525,8 +543,10 @@ describe("observer telemetry gating", () => {
     fs.mkdirSync(unreadablePath);
     const unreadableRecovery = loadTelemetrySafeDaemonConfig({
       configPath: unreadablePath,
+      version: "1.0.19",
       env: {},
     });
+    expect(unreadableRecovery.config.version).toBe("1.0.19");
     expect(unreadableRecovery.config.telemetryEnabled).toBe(false);
     expect(unreadableRecovery.warning?.message).toContain("local-only mode");
   });
