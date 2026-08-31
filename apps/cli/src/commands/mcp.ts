@@ -42,7 +42,7 @@ export interface McpCommandFlags {
 }
 
 export function parseMcpArgs(args: string[]): McpCommandFlags {
-  let standaloneMode = false;
+  let standaloneMode = true;
   let standaloneFallback = true;
   let socketPath: string | undefined;
   let cwd: string | undefined;
@@ -58,14 +58,18 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
       standaloneMode = true;
       standaloneFallback = true;
     } else if (arg === "--no-standalone") {
+      standaloneMode = false;
       standaloneFallback = false;
     } else if (arg === "--socket" || arg === "-S") {
+      standaloneMode = false;
       if (i + 1 < args.length) {
         socketPath = args[++i];
       }
     } else if (arg?.startsWith("--socket=")) {
+      standaloneMode = false;
       socketPath = arg.slice(9);
     } else if (arg?.startsWith("-S=")) {
+      standaloneMode = false;
       socketPath = arg.slice(3);
     } else if (arg === "--cwd" || arg === "-C") {
       if (i + 1 < args.length) {
@@ -115,8 +119,8 @@ Usage:
   resin mcp [options]
 
 Options:
-  -s, --standalone       Enable standalone fallback (default)
-  --no-standalone        Disable standalone fallback
+  -s, --standalone       Run the in-process MCP gateway (default)
+  --no-standalone        Require a daemon socket connection
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
