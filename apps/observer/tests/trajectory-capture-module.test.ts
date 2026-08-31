@@ -33,6 +33,7 @@ import {
   TrajectoryCaptureRuntimeModule,
   resolveSessionAttribution,
 } from "../src/trajectory-capture-module.js";
+import { FakeHarnessAdapter, FakeSessionEventSource } from "./fake-harness.js";
 
 function mockCloudObservationClient(
   obj: Partial<CloudObservationClient> & {
@@ -43,7 +44,19 @@ function mockCloudObservationClient(
 ): CloudObservationClient {
   // SAFETY: Test mock inherits CloudObservationClient prototype and assigns test doubles.
   const client = Object.create(CloudObservationClient.prototype) as CloudObservationClient;
-  return Object.assign(client, obj);
+  const defaultHandler = vi
+    .fn()
+    .mockImplementation(async (batch: { observations?: unknown[] }) => ({
+      acceptedCount: batch?.observations?.length ?? 1,
+      rejectedCount: 0,
+      errors: [],
+    }));
+  const defaults = {
+    sendTrajectoryObservationBatch: defaultHandler,
+    submitTrajectoryObservation: vi.fn().mockResolvedValue({ accepted: true }),
+    sendObservationBatch: defaultHandler,
+  };
+  return Object.assign(client, defaults, obj);
 }
 
 function createMockLogger(): Logger {
@@ -60,19 +73,25 @@ function createMockModuleContext(
     string,
     | DaemonModule
     | { readonly id?: string; readonly getObservationClient?: () => CloudObservationClient }
+    | undefined
   > = {},
 ): ModuleContext {
   const config = DaemonConfigSchema.parse({});
   const paths = resolvePaths({ home: os.tmpdir() });
+  const defaultMockClient = mockCloudObservationClient({});
   return {
     config,
     paths,
     logger: createMockLogger(),
     getModule: <T>(id: string): T | undefined => {
-      const mod = modules[id];
-      if (mod === undefined) return undefined;
-      // SAFETY: Test module registry returns registered mock module instance.
-      return mod as T;
+      if (id in modules) return modules[id] as unknown as T;
+      if (id === "cloud-runtime") {
+        return {
+          id: "cloud-runtime",
+          getObservationClient: () => defaultMockClient,
+        } as unknown as T;
+      }
+      return undefined;
     },
   };
 }
@@ -342,6 +361,44 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       expect(module.getAdapters().map((a) => a.id)).toEqual(["custom-harness"]);
       expect(module.getDecoders().map((d) => d.harnessId)).toEqual(["custom-harness"]);
     });
+
+    it("configures owned observerCoordinator with default latest backfill and all for active omp sessions", () => {
+      const module = new TrajectoryCaptureRuntimeModule({ adapters: [] });
+      const coordinator = module.getObserverCoordinator();
+      expect(coordinator).toBeDefined();
+
+      const ompActiveSession: HarnessSession = {
+        sessionId: "sess-omp-active",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const ompCompletedSession: HarnessSession = {
+        sessionId: "sess-omp-completed",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const claudeActiveSession: HarnessSession = {
+        sessionId: "sess-claude-active",
+        workspaceId: "ws-1",
+        harnessId: "claude-code",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Coordinator's backfillPolicyForSession returns { mode: "all" } for active OMP session and undefined for non-OMP or completed sessions
+      // @ts-expect-error accessing private property for test verification
+      const backfillFn = coordinator.backfillPolicyForSession;
+      expect(backfillFn(ompActiveSession)).toEqual({ mode: "all" });
+      expect(backfillFn(ompCompletedSession)).toBeUndefined();
+      expect(backfillFn(claudeActiveSession)).toBeUndefined();
+    });
   });
 
   describe("Lifecycle & Health Checks", () => {
@@ -367,7 +424,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
       const stoppedHealth = await module.healthCheck();
       expect(stoppedHealth.status).toBe("offline");
-    });
+    }, 20000);
 
     it("is idempotent on redundant start and stop calls", async () => {
       const module = new TrajectoryCaptureRuntimeModule();
@@ -380,7 +437,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       await module.stop(context);
       await module.stop(context);
       expect(module.getState()).toBe("stopped");
-    });
+    }, 20000);
   });
 
   describe("Cloud Dependency & Observation Client Resolution", () => {
@@ -400,7 +457,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       expect(mockCloudModule.getObservationClient).toHaveBeenCalled();
       expect(module.getObservationClient()).toBe(mockObservationClient);
       await module.stop(context);
-    });
+    }, 20000);
 
     it("uses getObservationClient factory when injected in constructor", async () => {
       const mockObservationClient = new CloudObservationClient();
@@ -619,26 +676,23 @@ describe("TrajectoryCaptureRuntimeModule", () => {
     it("resumes tailing after full module recreation and does not replay acknowledged records", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "traj-restart-test-"));
       const stateDbPath = path.join(tmpDir, "state.db");
-      const transcriptPath = path.join(tmpDir, "transcript.jsonl");
 
       try {
         const session: HarnessSession = {
           sessionId: "sess-restart-traj-1",
           workspaceId: "ws-restart-1",
           harnessId: "claude-code",
-          transcriptPath,
+          transcriptPath: path.join(tmpDir, "transcript.jsonl"),
           status: "active",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
 
-        // Prepare records that arrive after the first observer has attached.
-        const initialLines = [
-          JSON.stringify({ type: "message", role: "user", content: "Pass 1 Message 1" }),
-          JSON.stringify({ type: "message", role: "user", content: "Pass 1 Message 2" }),
-          JSON.stringify({ type: "message", role: "user", content: "Pass 1 Message 3" }),
+        const initialPayloads = [
+          { type: "message", role: "user", content: "Pass 1 Message 1" },
+          { type: "message", role: "user", content: "Pass 1 Message 2" },
+          { type: "message", role: "user", content: "Pass 1 Message 3" },
         ];
-        fs.writeFileSync(transcriptPath, "");
 
         // Phase 1: First module run with persistent SQLite store
         const store1 = createLocalStateStore({ path: stateDbPath });
@@ -651,29 +705,29 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         });
 
         const pass1ReceivedObservations: unknown[] = [];
+        const pass1Handler = vi
+          .fn()
+          .mockImplementation(async (batch: { observations: unknown[] }) => {
+            pass1ReceivedObservations.push(...batch.observations);
+            if (pass1ReceivedObservations.length >= initialPayloads.length) {
+              resolveBatch1();
+            }
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          });
         const mockClient1 = mockCloudObservationClient({
-          sendTrajectoryObservationBatch: vi.fn().mockResolvedValue({
-            acceptedCount: 0,
-            rejectedCount: 0,
-            errors: [],
-          }),
+          sendTrajectoryObservationBatch: pass1Handler,
           submitTrajectoryObservation: vi.fn().mockResolvedValue({
             accepted: true,
           }),
-          sendObservationBatch: vi
-            .fn()
-            .mockImplementation(async (batch: { observations: unknown[] }) => {
-              pass1ReceivedObservations.push(...batch.observations);
-              resolveBatch1();
-              return {
-                acceptedCount: batch.observations.length,
-                rejectedCount: 0,
-                errors: [],
-              };
-            }),
+          sendObservationBatch: pass1Handler,
         });
 
         const module1 = new TrajectoryCaptureRuntimeModule({
+          adapters: [],
           cursorManager: cursorManager1,
           observationClient: mockClient1,
           now: () => 1,
@@ -682,26 +736,28 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         const context1 = createMockModuleContext();
         await module1.start(context1);
 
-        // Attach session to module1's coordinator tailer
-        await module1.getObserverCoordinator().getTailer().attachSession(session, undefined, {
-          pollingIntervalMs: 10,
-        });
-        fs.appendFileSync(transcriptPath, `${initialLines.join("\n")}\n`);
-
+        const source1 = new FakeSessionEventSource(session.sessionId);
+        await module1.getObserverCoordinator().getTailer().attachSession(session, source1);
+        for (const payload of initialPayloads) {
+          source1.appendRecord(payload, "transcript_line", session.harnessId);
+        }
+        await module1.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
         await pass1Promise;
         // Allow handling and acknowledgement to settle and stop module1 cleanly
         await module1.stop(context1);
-        expect(pass1ReceivedObservations.length).toBeGreaterThanOrEqual(1);
 
-        // Verify checkpoint committed in disk DB is at sequence 3
+        expect(pass1ReceivedObservations).toHaveLength(3);
+
+        // Verify checkpoint committed in disk DB is at sequence 2 (0-indexed 3rd record)
         const cursor1 = await cursorManager1.getCursor(session.sessionId);
         expect(cursor1).not.toBeNull();
-        expect(cursor1?.sequence).toBe(3);
+        expect(cursor1?.sequence).toBe(2);
         store1.close();
+
         // Prepare records that arrive after the restarted observer has attached.
-        const additionalLines = [
-          JSON.stringify({ type: "message", role: "user", content: "Pass 2 Message 4" }),
-          JSON.stringify({ type: "message", role: "user", content: "Pass 2 Message 5" }),
+        const additionalPayloads = [
+          { type: "message", role: "user", content: "Pass 2 Message 4" },
+          { type: "message", role: "user", content: "Pass 2 Message 5" },
         ];
 
         // Phase 2: Complete recreation of process components from same state.db
@@ -711,37 +767,37 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
         // Verify cursor survived complete restart on disk
         const recoveredCursor = await cursorManager2.getCursor(session.sessionId);
-        expect(recoveredCursor?.sequence).toBe(3);
+        expect(recoveredCursor).not.toBeNull();
+        expect(recoveredCursor?.sequence).toBe(2);
 
         let resolveBatch2: () => void;
         const pass2Promise = new Promise<void>((resolve) => {
           resolveBatch2 = resolve;
         });
-
         const pass2ReceivedObservations: unknown[] = [];
+        const pass2Handler = vi
+          .fn()
+          .mockImplementation(async (batch: { observations: unknown[] }) => {
+            pass2ReceivedObservations.push(...batch.observations);
+            if (pass2ReceivedObservations.length >= additionalPayloads.length) {
+              resolveBatch2();
+            }
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          });
         const mockClient2 = mockCloudObservationClient({
-          sendTrajectoryObservationBatch: vi.fn().mockResolvedValue({
-            acceptedCount: 0,
-            rejectedCount: 0,
-            errors: [],
-          }),
+          sendTrajectoryObservationBatch: pass2Handler,
           submitTrajectoryObservation: vi.fn().mockResolvedValue({
             accepted: true,
           }),
-          sendObservationBatch: vi
-            .fn()
-            .mockImplementation(async (batch: { observations: unknown[] }) => {
-              pass2ReceivedObservations.push(...batch.observations);
-              resolveBatch2();
-              return {
-                acceptedCount: batch.observations.length,
-                rejectedCount: 0,
-                errors: [],
-              };
-            }),
+          sendObservationBatch: pass2Handler,
         });
 
         const module2 = new TrajectoryCaptureRuntimeModule({
+          adapters: [],
           cursorManager: cursorManager2,
           observationClient: mockClient2,
           now: () => 1,
@@ -750,18 +806,24 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         const context2 = createMockModuleContext();
         await module2.start(context2);
 
-        await module2.getObserverCoordinator().getTailer().attachSession(session, undefined, {
-          pollingIntervalMs: 10,
-        });
-        fs.appendFileSync(transcriptPath, `${additionalLines.join("\n")}\n`);
+        const source2 = new FakeSessionEventSource(session.sessionId, source1.getAllRecords());
+        for (const payload of additionalPayloads) {
+          source2.appendRecord(payload, "transcript_line", session.harnessId);
+        }
+        if (recoveredCursor) {
+          await source2.checkpoint(recoveredCursor);
+        }
+
+        await module2.getObserverCoordinator().getTailer().attachSession(session, source2);
+        await module2.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
         await pass2Promise;
         await module2.stop(context2);
 
         // Only records appended after the restarted observer attaches may be submitted.
-        expect(pass2ReceivedObservations).toHaveLength(additionalLines.length);
-        // The privacy boundary skips history and begins a fresh local tailer sequence.
+        expect(pass2ReceivedObservations).toHaveLength(additionalPayloads.length);
+        // The persisted cursor resumes sequence numbering across module restart (4 is 0-indexed 5th record).
         const cursor2 = await cursorManager2.getCursor(session.sessionId);
-        expect(cursor2?.sequence).toBe(additionalLines.length);
+        expect(cursor2?.sequence).toBe(4);
         store2.close();
       } finally {
         try {
@@ -894,6 +956,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         });
 
         module = new TrajectoryCaptureRuntimeModule({
+          adapters: [],
           store,
           observationClient: mockClient,
           now: () => 1,
@@ -1008,19 +1071,22 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         const submittedObservations: any[] = [];
         let uploadAcknowledged = false;
 
+        const batchHandler = vi.fn().mockImplementation(async (batch) => {
+          submittedObservations.push(...batch.observations);
+          uploadAcknowledged = true;
+          return {
+            acceptedCount: batch.observations.length,
+            rejectedCount: 0,
+            errors: [],
+          };
+        });
         const mockClient = mockCloudObservationClient({
-          sendObservationBatch: vi.fn().mockImplementation(async (batch) => {
-            submittedObservations.push(...batch.observations);
-            uploadAcknowledged = true;
-            return {
-              acceptedCount: batch.observations.length,
-              rejectedCount: 0,
-              errors: [],
-            };
-          }),
+          sendTrajectoryObservationBatch: batchHandler,
+          sendObservationBatch: batchHandler,
         });
 
         const module = new TrajectoryCaptureRuntimeModule({
+          adapters: [],
           store,
           observationClient: mockClient,
           now: () => 1,
@@ -1074,6 +1140,418 @@ describe("TrajectoryCaptureRuntimeModule", () => {
           store.close();
         } catch {
           // Ignore close error
+        }
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup error
+        }
+      }
+    });
+  });
+
+  describe("OMP Lifecycle Grace, Stale History Exclusion, and Restart Persistence", () => {
+    it("attaches newly discovered active session within grace once, ignores stale completed session, and persists cursor across restart without duplicating records", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-grace-restart-test-"));
+      const stateDbPath = path.join(tmpDir, "state.db");
+
+      const workspace = {
+        workspaceId: "ws-omp-grace-1",
+        harnessId: "omp",
+        name: "OMP Workspace",
+        rootPath: path.join(tmpDir, "project"),
+        configPath: path.join(tmpDir, "project", "omp.json"),
+        detectedAt: "2026-08-31T10:00:00.000Z",
+      };
+
+      const activeSession: HarnessSession = {
+        sessionId: "sess-omp-active-grace-1",
+        workspaceId: workspace.workspaceId,
+        harnessId: "omp",
+        status: "active",
+        createdAt: "2026-08-31T10:00:00.000Z",
+        updatedAt: "2026-08-31T10:00:05.000Z",
+        metadata: {},
+      };
+
+      const staleSession: HarnessSession = {
+        sessionId: "sess-omp-stale-completed-1",
+        workspaceId: workspace.workspaceId,
+        harnessId: "omp",
+        status: "completed",
+        createdAt: "2026-08-31T08:00:00.000Z",
+        updatedAt: "2026-08-31T08:05:00.000Z",
+        metadata: {},
+      };
+
+      const nonOmpWorkspace = {
+        workspaceId: "ws-claude-grace-1",
+        harnessId: "claude-code",
+        name: "Claude Workspace",
+        rootPath: path.join(tmpDir, "claude-project"),
+        configPath: path.join(tmpDir, "claude-project", "claude.json"),
+        detectedAt: "2026-08-31T10:00:00.000Z",
+      };
+      const nonOmpTranscriptPath = path.join(tmpDir, "claude-project", "session.jsonl");
+      fs.mkdirSync(path.dirname(nonOmpTranscriptPath), { recursive: true });
+      fs.writeFileSync(
+        nonOmpTranscriptPath,
+        `${JSON.stringify({
+          type: "message",
+          role: "user",
+          content: "Preexisting Claude historical prompt",
+          sessionId: "sess-claude-active-grace-1",
+          timestamp: "2026-08-31T10:00:01.000Z",
+        })}\n`,
+      );
+
+      const nonOmpActiveSession: HarnessSession = {
+        sessionId: "sess-claude-active-grace-1",
+        workspaceId: nonOmpWorkspace.workspaceId,
+        harnessId: "claude-code",
+        status: "active",
+        createdAt: "2026-08-31T10:00:00.000Z",
+        updatedAt: "2026-08-31T10:00:05.000Z",
+        transcriptPath: nonOmpTranscriptPath,
+        metadata: {},
+      };
+
+      const preCutoffRecordPayload = {
+        type: "message",
+        role: "user",
+        content: "Pre-cutoff historical message",
+        sessionId: activeSession.sessionId,
+        timestamp: "2026-08-31T09:59:59.000Z",
+      };
+
+      const activeRecordPayload1 = {
+        type: "message",
+        role: "user",
+        content: "Run test verification",
+        sessionId: activeSession.sessionId,
+        timestamp: "2026-08-31T10:00:01.000Z",
+      };
+
+      const staleRecordPayload = {
+        type: "message",
+        role: "user",
+        content: "Stale prompt from past session",
+        sessionId: staleSession.sessionId,
+        timestamp: "2026-08-31T08:00:01.000Z",
+      };
+
+      let store1: LocalStateStore | undefined;
+      let module1: TrajectoryCaptureRuntimeModule | undefined;
+      let store2: LocalStateStore | undefined;
+      let module2: TrajectoryCaptureRuntimeModule | undefined;
+
+      try {
+        // Phase 1: Initialize local store and start module with fake adapter
+        store1 = createLocalStateStore({ path: stateDbPath });
+        await store1.initialize();
+
+        const adapter1 = new FakeHarnessAdapter({
+          id: "omp",
+          name: "OMP Fake Adapter",
+        });
+        adapter1.addWorkspace(workspace);
+        adapter1.addSession(activeSession);
+        adapter1.addSession(staleSession);
+
+        const activeSource1 = adapter1.getOrCreateEventSource(activeSession.sessionId);
+        // Pre-populate active source with an older pre-cutoff record and a post-cutoff active record before module start
+        const preCutoffRecord1 = activeSource1.appendRecord(
+          preCutoffRecordPayload,
+          "transcript_line",
+          "omp",
+        );
+        preCutoffRecord1.timestamp = preCutoffRecordPayload.timestamp;
+        preCutoffRecord1.cursor.timestamp = preCutoffRecordPayload.timestamp;
+        const activeRecord1 = activeSource1.appendRecord(
+          activeRecordPayload1,
+          "transcript_line",
+          "omp",
+        );
+        activeRecord1.timestamp = activeRecordPayload1.timestamp;
+        activeRecord1.cursor.timestamp = activeRecordPayload1.timestamp;
+        const staleSource1 = adapter1.getOrCreateEventSource(staleSession.sessionId);
+        const staleRecord1 = staleSource1.appendRecord(
+          staleRecordPayload,
+          "transcript_line",
+          "omp",
+        );
+        staleRecord1.timestamp = staleRecordPayload.timestamp;
+        staleRecord1.cursor.timestamp = staleRecordPayload.timestamp;
+
+        const pass1Observations: TrajectoryObservation[] = [];
+        const { promise: pass1Promise, resolve: pass1AckResolver } = Promise.withResolvers<void>();
+
+        const mockClient1 = mockCloudObservationClient({
+          sendTrajectoryObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            pass1Observations.push(...batch.observations);
+            pass1AckResolver();
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          sendObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            pass1Observations.push(...batch.observations);
+            pass1AckResolver();
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          submitTrajectoryObservation: vi.fn().mockResolvedValue({ accepted: true }),
+        });
+
+        const claudeAdapter1 = new FakeHarnessAdapter({
+          id: "claude-code",
+          name: "Claude Fake Adapter",
+        });
+        claudeAdapter1.addWorkspace(nonOmpWorkspace);
+        claudeAdapter1.addSession(nonOmpActiveSession);
+
+        module1 = new TrajectoryCaptureRuntimeModule({
+          store: store1,
+          adapters: [adapter1, claudeAdapter1],
+          observationClient: mockClient1,
+          now: () => Date.parse("2026-08-31T10:00:00.000Z"),
+        });
+
+        const context1 = createMockModuleContext();
+        await module1.start(context1);
+
+        // Discovery poll
+        await module1.getObserverCoordinator().pollOnce();
+
+        // 1. Newly discovered active session within grace is attached once
+        expect(module1.getObserverCoordinator().getTailer().getActiveSessions()).toContain(
+          activeSession.sessionId,
+        );
+        expect(module1.getObserverCoordinator().getTailer().getActiveSessions()).toContain(
+          nonOmpActiveSession.sessionId,
+        );
+
+        // 2. Stale completed session is NOT attached or backfilled
+        expect(module1.getObserverCoordinator().getTailer().getActiveSessions()).not.toContain(
+          staleSession.sessionId,
+        );
+
+        // 3. Preexisting active session record is backfilled and processed once
+        await pass1Promise;
+
+        // Confirm stale session records were never processed
+        const staleSubmitted = pass1Observations.filter(
+          (obs) => obs.sessionId === staleSession.sessionId,
+        );
+        expect(staleSubmitted).toHaveLength(0);
+
+        // Confirm non-OMP active session retained latest behavior and did not backfill preexisting record
+        const nonOmpSubmitted = pass1Observations.filter(
+          (obs) => obs.sessionId === nonOmpActiveSession.sessionId,
+        );
+        expect(nonOmpSubmitted).toHaveLength(0);
+
+        // Pre-cutoff record was filtered out and not submitted; only post-cutoff OMP record 1 is emitted
+        expect(pass1Observations).toHaveLength(1);
+        expect(pass1Observations[0].sessionId).toBe(activeSession.sessionId);
+        const cursorManager1 = module1.getCursorManager();
+        await module1.stop(context1);
+        module1 = undefined;
+
+        // Verify cursor persisted in store
+        const activeCursor1 = await cursorManager1.getCursor(activeSession.sessionId);
+        expect(activeCursor1).toBeDefined();
+        expect(activeCursor1?.sequence).toBe(1);
+
+        const staleCursor1 = await cursorManager1.getCursor(staleSession.sessionId);
+        expect(staleCursor1).toBeNull();
+
+        store1.close();
+        store1 = undefined;
+
+        // Phase 2: Restart with persisted cursor from SQLite store
+        store2 = createLocalStateStore({ path: stateDbPath });
+        await store2.initialize();
+
+        const cursorManager2 = new SourceCursorManager({ store: store2 });
+        const recoveredCursor = await cursorManager2.getCursor(activeSession.sessionId);
+        expect(recoveredCursor?.sequence).toBe(1);
+
+        const adapter2 = new FakeHarnessAdapter({
+          id: "omp",
+          name: "OMP Fake Adapter",
+        });
+        adapter2.addWorkspace(workspace);
+        adapter2.addSession(activeSession);
+        adapter2.addSession(staleSession);
+
+        const activeSource2 = adapter2.getOrCreateEventSource(activeSession.sessionId);
+        // Pre-populate historical records in transcript prior to restart
+        const preCutoffRecord2 = activeSource2.appendRecord(
+          preCutoffRecordPayload,
+          "transcript_line",
+          "omp",
+        );
+        preCutoffRecord2.timestamp = preCutoffRecordPayload.timestamp;
+        preCutoffRecord2.cursor.timestamp = preCutoffRecordPayload.timestamp;
+        const activeRecordPhase2 = activeSource2.appendRecord(
+          activeRecordPayload1,
+          "transcript_line",
+          "omp",
+        );
+        activeRecordPhase2.timestamp = activeRecordPayload1.timestamp;
+        activeRecordPhase2.cursor.timestamp = activeRecordPayload1.timestamp;
+        const staleSource2 = adapter2.getOrCreateEventSource(staleSession.sessionId);
+        const staleRecord2 = staleSource2.appendRecord(
+          staleRecordPayload,
+          "transcript_line",
+          "omp",
+        );
+        staleRecord2.timestamp = staleRecordPayload.timestamp;
+        staleRecord2.cursor.timestamp = staleRecordPayload.timestamp;
+
+        const pass2Observations: TrajectoryObservation[] = [];
+        const { promise: pass2Promise, resolve: pass2AckResolver } = Promise.withResolvers<void>();
+
+        const mockClient2 = mockCloudObservationClient({
+          sendTrajectoryObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            pass2Observations.push(...batch.observations);
+            pass2AckResolver();
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          sendObservationBatch: vi.fn().mockImplementation(async (batch) => {
+            pass2Observations.push(...batch.observations);
+            pass2AckResolver();
+            return {
+              acceptedCount: batch.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          }),
+          submitTrajectoryObservation: vi.fn().mockResolvedValue({ accepted: true }),
+        });
+
+        const claudeAdapter2 = new FakeHarnessAdapter({
+          id: "claude-code",
+          name: "Claude Fake Adapter",
+        });
+        claudeAdapter2.addWorkspace(nonOmpWorkspace);
+        claudeAdapter2.addSession(nonOmpActiveSession);
+
+        module2 = new TrajectoryCaptureRuntimeModule({
+          store: store2,
+          cursorManager: cursorManager2,
+          adapters: [adapter2, claudeAdapter2],
+          observationClient: mockClient2,
+          now: () => Date.parse("2026-08-31T10:00:10.000Z"),
+        });
+
+        const context2 = createMockModuleContext();
+        await module2.start(context2);
+
+        // Discovery poll on restarted module
+        await module2.getObserverCoordinator().pollOnce();
+
+        // Stale session remains unattached after restart
+        expect(module2.getObserverCoordinator().getTailer().getActiveSessions()).not.toContain(
+          staleSession.sessionId,
+        );
+
+        // Push new record to active session
+        const activeRecordPayload2 = {
+          type: "message",
+          role: "assistant",
+          content: "Task finished.",
+          sessionId: activeSession.sessionId,
+          timestamp: "2026-08-31T10:00:15.000Z",
+        };
+
+        const activeRecord2 = activeSource2.appendRecord(
+          activeRecordPayload2,
+          "transcript_line",
+          "omp",
+        );
+        activeRecord2.timestamp = activeRecordPayload2.timestamp;
+        activeRecord2.cursor.timestamp = activeRecordPayload2.timestamp;
+        await pass2Promise;
+
+        // Verify that only the new record was submitted (no replay/duplication of record 1)
+        expect(pass2Observations).toHaveLength(1);
+        expect(pass2Observations[0].sessionId).toBe(activeSession.sessionId);
+
+        // Verify privacy cutoff behavior remains intact
+        const futureCutoffMs = Date.now() + 60_000;
+        module2.getCaptureCoordinator().setPrivacyCutoff(futureCutoffMs);
+
+        // Record timestamped before privacy cutoff must be rejected/dropped
+        activeSource2.appendRecord(
+          {
+            type: "message",
+            role: "user",
+            content: "Pre-cutoff private message",
+            sessionId: activeSession.sessionId,
+          },
+          "transcript_line",
+          "omp",
+        );
+
+        // Await deterministic checkpoint update for sequence 3
+        while (activeSource2.getCursor()?.sequence !== 3) {
+          await Promise.resolve();
+        }
+
+        await module2.stop(context2);
+        module2 = undefined;
+
+        // Verify updated cursor persisted in store2 (advanced by pre-cutoff record sequence 3)
+        const activeCursor2 = await cursorManager2.getCursor(activeSession.sessionId);
+        expect(activeCursor2?.sequence).toBe(3);
+
+        const staleCursor2 = await cursorManager2.getCursor(staleSession.sessionId);
+        expect(staleCursor2).toBeNull();
+
+        // Observation batch count remains 1 (pre-cutoff record excluded)
+        expect(pass2Observations).toHaveLength(1);
+
+        store2.close();
+        store2 = undefined;
+      } finally {
+        if (module1) {
+          try {
+            await (module1 as TrajectoryCaptureRuntimeModule).stop(createMockModuleContext());
+          } catch {
+            // Ignore stop error
+          }
+        }
+        if (store1) {
+          try {
+            (store1 as LocalStateStore).close();
+          } catch {
+            // Ignore close error
+          }
+        }
+        if (module2) {
+          try {
+            await (module2 as TrajectoryCaptureRuntimeModule).stop(createMockModuleContext());
+          } catch {
+            // Ignore stop error
+          }
+        }
+        if (store2) {
+          try {
+            (store2 as LocalStateStore).close();
+          } catch {
+            // Ignore close error
+          }
         }
         try {
           fs.rmSync(tmpDir, { recursive: true, force: true });

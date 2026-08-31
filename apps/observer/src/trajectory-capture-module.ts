@@ -233,7 +233,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private remoteConsentHistoryAvailable: boolean;
   private remoteConsentAuthorizationQueue: Promise<void> = Promise.resolve();
   private privacyCheckpointHealthy: boolean;
-  private skipBackfillOnNextStart = true;
+  private skipBackfillOnNextStart = false;
   private logger?: Logger;
 
   constructor(options: TrajectoryCaptureRuntimeModuleOptions = {}) {
@@ -321,6 +321,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       new ObserverCoordinator({
         cursorManager: this.cursorManager,
         defaultBackfillPolicy: { mode: "latest" },
+        backfillPolicyForSession: (session: HarnessSession) =>
+          session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
       });
     for (const adapter of this.adapters) {
       this.observerCoordinator.registerAdapter(adapter);
@@ -662,7 +664,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
     this.observerCoordinator = new ObserverCoordinator({
       cursorManager: this.cursorManager,
-      defaultBackfillPolicy: this.skipBackfillOnNextStart ? { mode: "latest" } : undefined,
+      defaultBackfillPolicy: { mode: "latest" },
+      backfillPolicyForSession: (session: HarnessSession) =>
+        session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
     });
     for (const adapter of this.adapters) {
       this.observerCoordinator.registerAdapter(adapter);

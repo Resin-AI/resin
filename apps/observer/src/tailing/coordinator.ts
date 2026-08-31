@@ -51,6 +51,7 @@ export interface ObserverCoordinatorOptions {
   pollIntervalMs?: number;
   defaultBackfillPolicy?: BackfillPolicy;
   autoStart?: boolean;
+  backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
 }
 
 /**
@@ -63,9 +64,12 @@ export class ObserverCoordinator extends EventEmitter {
   private readonly pollIntervalMs: number;
   private readonly trackedWorkspaces = new Map<string, HarnessWorkspace>();
   private readonly activeSessionStates = new Map<string, HarnessSession>();
-
+  private readonly backfillPolicyForSession?: (
+    session: HarnessSession,
+  ) => BackfillPolicy | undefined;
   private isRunning = false;
   private pollTimer?: NodeJS.Timeout;
+  private inFlightPoll?: Promise<PollSummary>;
   private pollCyclesCompleted = 0;
   private totalRecordsObserved = 0;
   private totalRecordsAcknowledged = 0;
@@ -73,7 +77,8 @@ export class ObserverCoordinator extends EventEmitter {
 
   constructor(options: ObserverCoordinatorOptions = {}) {
     super();
-    this.pollIntervalMs = options.pollIntervalMs ?? 1000;
+    this.pollIntervalMs = options.pollIntervalMs ?? 10_000;
+    this.backfillPolicyForSession = options.backfillPolicyForSession;
     this.tailer =
       options.tailer ??
       new TranscriptTailer({
@@ -148,22 +153,58 @@ export class ObserverCoordinator extends EventEmitter {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    // Run initial discovery poll immediately
-    await this.pollOnce();
+    try {
+      await this.pollOnce();
+    } catch {
+      // errors handled per-adapter; catch unexpected errors so startup finishes
+    }
 
-    this.pollTimer = setInterval(() => {
-      if (this.isRunning) {
-        void this.pollOnce();
-      }
-    }, this.pollIntervalMs);
+    if (!this.isRunning) {
+      return;
+    }
 
     this.emit("started");
+    this.schedulePoll();
+  }
+
+  private schedulePoll(): void {
+    if (!this.isRunning) return;
+    this.pollTimer = setTimeout(async () => {
+      this.pollTimer = undefined;
+      if (!this.isRunning) return;
+
+      try {
+        await this.pollOnce();
+      } catch {
+        // preserve recurring polling despite unexpected errors
+      } finally {
+        if (this.isRunning) {
+          this.schedulePoll();
+        }
+      }
+    }, this.pollIntervalMs);
   }
 
   /**
    * Executes a single discovery and sync cycle across all registered adapters.
+   * If a poll cycle is already in progress, coalesces onto the in-flight promise.
    */
   async pollOnce(): Promise<PollSummary> {
+    if (this.inFlightPoll) {
+      return this.inFlightPoll;
+    }
+
+    const inFlight = this.executePollOnce().finally(() => {
+      if (this.inFlightPoll === inFlight) {
+        this.inFlightPoll = undefined;
+      }
+    });
+
+    this.inFlightPoll = inFlight;
+    return inFlight;
+  }
+
+  private async executePollOnce(): Promise<PollSummary> {
     const summary: PollSummary = {
       timestamp: new Date().toISOString(),
       adaptersPolled: this.adapters.size,
@@ -225,8 +266,11 @@ export class ObserverCoordinator extends EventEmitter {
                   }
                 }
 
+                const backfillPolicy = this.backfillPolicyForSession?.(session);
+
                 await this.tailer.attachSession(session, source, {
                   workspaceId: workspace.workspaceId,
+                  ...(backfillPolicy ? { backfillPolicy } : {}),
                 });
                 summary.sessionsAttached++;
               }
@@ -290,8 +334,16 @@ export class ObserverCoordinator extends EventEmitter {
   async stop(): Promise<void> {
     this.isRunning = false;
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      clearTimeout(this.pollTimer);
       this.pollTimer = undefined;
+    }
+
+    if (this.inFlightPoll) {
+      try {
+        await this.inFlightPoll;
+      } catch {
+        // ignore errors from in-flight poll during shutdown
+      }
     }
 
     await this.tailer.close();

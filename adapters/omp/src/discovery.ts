@@ -30,10 +30,68 @@ export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
   cwd?: string;
+  customHome?: string;
+  ompHome?: string;
   searchPaths?: string[];
   customExecutablePath?: string;
   customConfigPath?: string;
   checkPermissions?: boolean;
+  now?: number | Date;
+  catalog?: OmpDiscoveryCatalog;
+  activeOnly?: boolean;
+  inspectTranscript?: (
+    filePath: string,
+    options?: {
+      now?: number | Date;
+      activeOnly?: boolean;
+      onInspectTranscript?: (filePath: string) => void;
+    },
+  ) => Promise<ParsedTranscript | null>;
+  onInspectTranscript?: (filePath: string) => void;
+}
+
+/**
+ * Parses an ISO-8601 timestamp from standard OMP transcript filenames or date-named directories.
+ * Returns unix epoch milliseconds or null if no valid timestamp pattern matches.
+ */
+export function parseIsoTimestampFromFilename(name: string): number | null {
+  const baseName = name.replace(/\.jsonl$/i, "");
+
+  // 1. Standard ISO timestamp: YYYY-MM-DDTHH-MM-SS(.sss)(Z) or YYYY-MM-DDTHH:MM:SS
+  const isoMatch = baseName.match(
+    /(\d{4}-\d{2}-\d{2})[T_\s](\d{2})[-:_](\d{2})[-:_](\d{2})(?:[\._-](\d{1,3}))?(?:Z|[+-]\d{2}(?::?\d{2})?)?/i,
+  );
+  if (isoMatch) {
+    const [, datePart, hh, mm, ss, msPart] = isoMatch;
+    const ms = msPart ? msPart.padEnd(3, "0").slice(0, 3) : "000";
+    const isoString = `${datePart}T${hh}:${mm}:${ss}.${ms}Z`;
+    const parsed = Date.parse(isoString);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+
+  // 2. Date only: YYYY-MM-DD (e.g. daily session or date directory)
+  const dateOnlyMatch = baseName.match(/^(\d{4}-\d{2}-\d{2})$/);
+  if (dateOnlyMatch) {
+    const parsed = Date.parse(`${dateOnlyMatch[1]}T23:59:59.999Z`);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+
+  // 3. Compact ISO: YYYYMMDDTHHMMSS...
+  const compactMatch = baseName.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/i);
+  if (compactMatch) {
+    const [, yyyy, mm, dd, hh, min, ss] = compactMatch;
+    const isoString = `${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}.000Z`;
+    const parsed = Date.parse(isoString);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -41,12 +99,16 @@ export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
  */
 export function resolveOmpHome(options?: {
   customHome?: string;
+  ompHome?: string;
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
 }): string {
   const env = options?.env ?? process.env;
   if (options?.customHome) {
     return path.resolve(options.customHome);
+  }
+  if (options?.ompHome) {
+    return path.resolve(options.ompHome);
   }
   if (env.OMP_HOME) {
     return path.resolve(env.OMP_HOME);
@@ -420,9 +482,9 @@ const OmpWorkspaceEntrySchema = z.union([
     const metadata: Record<string, string | number | boolean | null | undefined> = {};
     return {
       path: entryPath,
-      rootPath: undefined,
-      workspaceId: undefined,
-      name: undefined,
+      rootPath: entryPath,
+      workspaceId: undefined as string | undefined,
+      name: undefined as string | undefined,
       metadata,
     };
   }),
@@ -439,7 +501,7 @@ const OmpWorkspaceEntrySchema = z.union([
       const metadata = obj as Record<string, string | number | boolean | null | undefined>;
       return {
         path: obj.path,
-        rootPath: obj.rootPath,
+        rootPath: obj.rootPath ?? obj.path,
         workspaceId: obj.workspaceId,
         name: obj.name,
         metadata,
@@ -456,12 +518,400 @@ const OmpWorkspacesRegistrySchema = z.union([
     .passthrough(),
 ]);
 
+const MAX_CHUNK_BYTES = 64 * 1024; // 64 KiB
+
 /**
- * Discovers OMP workspaces from ~/.omp, session directories, breadcrumbs, and current directory.
+ * Parsed transcript metadata extracted via bounded inspection.
  */
-export async function discoverOmpWorkspaces(
+export interface ParsedTranscript {
+  sessionId: string;
+  headerSessionId: string | null;
+  headerCwd: string | null;
+  canonicalCwd: string | null;
+  filePath: string;
+  canonicalPath: string;
+  status: SessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  fileSize: number;
+  fileMtime: string;
+  totalLines: number;
+  hasExplicitLifecycle: boolean;
+  inspectedBytes: number;
+}
+
+/**
+ * Inspects a single .jsonl session transcript using bounded prefix/tail chunk reads (max 64 KiB).
+ * Never performs whole-file readFile.
+ */
+export async function inspectTranscriptFile(
+  filePath: string,
+  options?: {
+    now?: number | Date;
+    activeOnly?: boolean;
+    onInspectTranscript?: (filePath: string) => void;
+  },
+): Promise<ParsedTranscript | null> {
+  let fileHandle: fsp.FileHandle | null = null;
+  try {
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile() || stat.size === 0) {
+      return null;
+    }
+
+    const mtimeMs = stat.mtimeMs || stat.mtime.getTime();
+    const now =
+      options?.now instanceof Date
+        ? options.now.getTime()
+        : typeof options?.now === "number"
+          ? options.now
+          : Date.now();
+    const ageMs = now - mtimeMs;
+
+    if (options?.activeOnly && ageMs > 60_000) {
+      return null;
+    }
+
+    options?.onInspectTranscript?.(filePath);
+    let canonicalPath: string;
+    try {
+      canonicalPath = await fsp.realpath(filePath);
+    } catch {
+      canonicalPath = path.resolve(filePath);
+    }
+
+    fileHandle = await fsp.open(filePath, "r");
+
+    const prefixBytesToRead = Math.min(stat.size, MAX_CHUNK_BYTES);
+    const prefixBuffer = Buffer.alloc(prefixBytesToRead);
+    const { bytesRead: prefixBytesRead } = await fileHandle.read(
+      prefixBuffer,
+      0,
+      prefixBytesToRead,
+      0,
+    );
+    let totalBytesInspected = prefixBytesRead;
+    const prefixText = prefixBuffer.subarray(0, prefixBytesRead).toString("utf8");
+
+    let tailText = "";
+    if (stat.size > MAX_CHUNK_BYTES) {
+      const tailOffset = Math.max(0, stat.size - MAX_CHUNK_BYTES);
+      const tailBytesToRead = Math.min(stat.size - tailOffset, MAX_CHUNK_BYTES);
+      const tailBuffer = Buffer.alloc(tailBytesToRead);
+      const { bytesRead: tailBytesRead } = await fileHandle.read(
+        tailBuffer,
+        0,
+        tailBytesToRead,
+        tailOffset,
+      );
+      totalBytesInspected += tailBytesRead;
+      tailText = tailBuffer.subarray(0, tailBytesRead).toString("utf8");
+    }
+
+    let createdAt = stat.birthtime?.getTime()
+      ? stat.birthtime.toISOString()
+      : stat.mtime.toISOString();
+    let updatedAt = stat.mtime.toISOString();
+    let headerSessionId: string | null = null;
+    let headerCwd: string | null = null;
+    let explicitStatus: SessionStatus | null = null;
+    let totalLinesCount = 0;
+    let validJsonObjectCount = 0;
+
+    if (stat.size <= MAX_CHUNK_BYTES) {
+      const lines = prefixText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      totalLinesCount = lines.length;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            validJsonObjectCount++;
+            if (i === 0 && (parsed.timestamp || parsed.time || parsed.ts)) {
+              createdAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+            if (parsed.type === "session") {
+              if (typeof parsed.id === "string" && parsed.id) {
+                headerSessionId = parsed.id;
+              }
+              if (typeof parsed.cwd === "string" && parsed.cwd) {
+                headerCwd = path.resolve(parsed.cwd);
+              }
+              if (parsed.timestamp) {
+                createdAt = String(parsed.timestamp);
+              }
+            }
+            if (parsed.timestamp || parsed.time || parsed.ts) {
+              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+            const eventType = String(parsed.type ?? parsed.event ?? "");
+            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
+              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
+              if (
+                action === "end" ||
+                action === "complete" ||
+                action === "finish" ||
+                action === "settle"
+              ) {
+                explicitStatus = "completed";
+              } else if (action === "crash" || action === "error" || action === "fatal") {
+                explicitStatus = "failed";
+              } else if (action === "pause" || action === "suspend") {
+                explicitStatus = "idle";
+              } else if (action === "start" || action === "resume") {
+                explicitStatus = "active";
+              }
+            }
+          }
+        } catch {
+          // ignore unparseable line
+        }
+      }
+    } else {
+      const rawPrefixLines = prefixText.split("\n");
+      const prefixLines = prefixText.endsWith("\n") ? rawPrefixLines : rawPrefixLines.slice(0, -1);
+
+      for (let i = 0; i < prefixLines.length; i++) {
+        const line = prefixLines[i].trim();
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            validJsonObjectCount++;
+            if (i === 0 && (parsed.timestamp || parsed.time || parsed.ts)) {
+              createdAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+            if (parsed.type === "session") {
+              if (typeof parsed.id === "string" && parsed.id) {
+                headerSessionId = parsed.id;
+              }
+              if (typeof parsed.cwd === "string" && parsed.cwd) {
+                headerCwd = path.resolve(parsed.cwd);
+              }
+              if (parsed.timestamp) {
+                createdAt = String(parsed.timestamp);
+              }
+            }
+            if (parsed.timestamp || parsed.time || parsed.ts) {
+              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+          }
+        } catch {
+          // ignore unparseable line
+        }
+      }
+
+      const rawTailLines = tailText.split("\n");
+      const tailLines = rawTailLines.slice(1);
+      for (const rawLine of tailLines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            validJsonObjectCount++;
+            if (parsed.timestamp || parsed.time || parsed.ts) {
+              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
+            }
+            const eventType = String(parsed.type ?? parsed.event ?? "");
+            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
+              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
+              if (
+                action === "end" ||
+                action === "complete" ||
+                action === "finish" ||
+                action === "settle"
+              ) {
+                explicitStatus = "completed";
+              } else if (action === "crash" || action === "error" || action === "fatal") {
+                explicitStatus = "failed";
+              } else if (action === "pause" || action === "suspend") {
+                explicitStatus = "idle";
+              } else if (action === "start" || action === "resume") {
+                explicitStatus = "active";
+              }
+            }
+          }
+        } catch {
+          // ignore unparseable line
+        }
+      }
+      totalLinesCount = Math.max(prefixLines.length + tailLines.length, 1);
+    }
+
+    if (validJsonObjectCount === 0) {
+      return null;
+    }
+
+    const hasExplicitLifecycle = explicitStatus !== null;
+    let status: SessionStatus;
+    if (explicitStatus !== null) {
+      status = explicitStatus;
+    } else {
+      const now =
+        options?.now instanceof Date
+          ? options.now.getTime()
+          : typeof options?.now === "number"
+            ? options.now
+            : Date.now();
+      const mtimeMs = stat.mtimeMs || stat.mtime.getTime();
+      const ageMs = now - mtimeMs;
+      if (ageMs <= 60_000) {
+        status = "active";
+      } else {
+        status = "completed";
+      }
+    }
+
+    let canonicalCwd: string | null = null;
+    if (headerCwd) {
+      try {
+        canonicalCwd = await fsp.realpath(headerCwd);
+      } catch {
+        canonicalCwd = path.resolve(headerCwd);
+      }
+    }
+
+    const fileName = path.basename(filePath, ".jsonl");
+    const fallbackSessionId = fileName.startsWith("session-")
+      ? fileName.slice(8)
+      : fileName === "transcript" || fileName === "session"
+        ? "session-main"
+        : fileName;
+
+    const sessionId = headerSessionId || fallbackSessionId;
+
+    return {
+      sessionId,
+      headerSessionId,
+      headerCwd,
+      canonicalCwd,
+      filePath,
+      canonicalPath,
+      status,
+      createdAt,
+      updatedAt,
+      fileSize: stat.size,
+      fileMtime: stat.mtime.toISOString(),
+      totalLines: totalLinesCount,
+      hasExplicitLifecycle,
+      inspectedBytes: totalBytesInspected,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fileHandle) {
+      await fileHandle.close().catch(() => {});
+    }
+  }
+}
+
+interface TraversalTask {
+  dir: string;
+  depth: number;
+}
+
+/**
+ * Traverses directory roots with bounded concurrency (breadth-first in waves) up to depth 4
+ * to collect .jsonl transcript files without cyclic loops.
+ */
+export async function collectTranscriptFiles(roots: string[], concurrency = 32): Promise<string[]> {
+  const discoveredFiles: string[] = [];
+  const discoveredFileSet = new Set<string>();
+  const visitedDirs = new Set<string>();
+
+  let currentLevel: TraversalTask[] = roots.map((dir) => ({ dir, depth: 0 }));
+
+  while (currentLevel.length > 0) {
+    const nextLevel: TraversalTask[] = [];
+    let nextIndex = 0;
+
+    async function worker() {
+      while (nextIndex < currentLevel.length) {
+        const item = currentLevel[nextIndex++];
+        if (item.depth > 4) continue;
+
+        try {
+          const realDir = await fsp.realpath(item.dir).catch(() => null);
+          if (!realDir) continue;
+          if (visitedDirs.has(realDir)) continue;
+          visitedDirs.add(realDir);
+
+          const entries = await fsp.readdir(item.dir, { withFileTypes: true });
+          entries.sort((a, b) => a.name.localeCompare(b.name));
+
+          for (const entry of entries) {
+            const fullPath = path.join(item.dir, entry.name);
+            if (entry.isDirectory()) {
+              if (item.depth + 1 <= 4) {
+                nextLevel.push({ dir: fullPath, depth: item.depth + 1 });
+              }
+            } else if (entry.isFile()) {
+              if (entry.name.endsWith(".jsonl")) {
+                if (!discoveredFileSet.has(fullPath)) {
+                  discoveredFileSet.add(fullPath);
+                  discoveredFiles.push(fullPath);
+                }
+              }
+            } else if (entry.isSymbolicLink()) {
+              if (entry.name.endsWith(".jsonl")) {
+                if (!discoveredFileSet.has(fullPath)) {
+                  discoveredFileSet.add(fullPath);
+                  discoveredFiles.push(fullPath);
+                }
+              } else if (item.depth + 1 <= 4) {
+                try {
+                  const st = await fsp.stat(fullPath);
+                  if (st.isDirectory()) {
+                    nextLevel.push({ dir: fullPath, depth: item.depth + 1 });
+                  }
+                } catch {
+                  // ignore broken symlink or inaccessible target
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore unreadable directory (fail-closed)
+        }
+      }
+    }
+
+    const workerCount = Math.min(concurrency, currentLevel.length);
+    if (workerCount > 0) {
+      const workers = Array.from({ length: workerCount }, () => worker());
+      await Promise.all(workers);
+    }
+
+    currentLevel = nextLevel;
+  }
+
+  discoveredFiles.sort((a, b) => a.localeCompare(b));
+  return discoveredFiles;
+}
+
+/**
+ * Catalog of discovered OMP workspaces and sessions from a single scan.
+ */
+export interface OmpDiscoveryCatalog {
+  readonly scannedAt: number;
+  readonly ompHome: string;
+  readonly workspaces: HarnessWorkspace[];
+  readonly inspectedFilePaths: readonly string[];
+  getSessionsForWorkspace(workspace: HarnessWorkspace): HarnessSession[];
+  getAllSessions(): HarnessSession[];
+}
+
+/**
+ * Builds a per-refresh OMP transcript catalog scanning the OMP home once.
+ */
+export async function buildOmpDiscoveryCatalog(
   options?: OmpDiscoveryOptions,
-): Promise<HarnessWorkspace[]> {
+): Promise<OmpDiscoveryCatalog> {
   const ompHome = resolveOmpHome(options);
   const workspacesMap = new Map<string, HarnessWorkspace>();
 
@@ -471,14 +921,15 @@ export async function discoverOmpWorkspaces(
   try {
     const cwdOmpStat = await fsp.stat(path.join(cwd, ".omp"));
     if (cwdOmpStat.isDirectory()) {
-      const workspaceId = createWorkspaceIdFromPath(cwd);
-      workspacesMap.set(cwd, {
+      const realCwd = await fsp.realpath(cwd).catch(() => cwd);
+      const workspaceId = createWorkspaceIdFromPath(realCwd);
+      workspacesMap.set(realCwd, {
         workspaceId,
-        rootPath: cwd,
-        name: path.basename(cwd),
+        rootPath: realCwd,
+        name: path.basename(realCwd),
         harnessId: "omp",
-        configPath: path.join(cwd, ".omp", "agent", "mcp.json"),
-        mcpConfigPath: path.join(cwd, ".omp", "agent", "mcp.json"),
+        configPath: path.join(realCwd, ".omp", "agent", "mcp.json"),
+        mcpConfigPath: path.join(realCwd, ".omp", "agent", "mcp.json"),
         metadata: { source: "cwd" },
       });
     }
@@ -487,22 +938,25 @@ export async function discoverOmpWorkspaces(
   }
 
   // 2. Check searchPaths if provided
-  if (options?.searchPaths) {
+  if (options?.searchPaths && Array.isArray(options.searchPaths)) {
     for (const searchPath of options.searchPaths) {
-      const absPath = path.resolve(searchPath);
       try {
-        const ompDirStat = await fsp.stat(path.join(absPath, ".omp"));
-        if (ompDirStat.isDirectory()) {
-          const workspaceId = createWorkspaceIdFromPath(absPath);
-          workspacesMap.set(absPath, {
-            workspaceId,
-            rootPath: absPath,
-            name: path.basename(absPath),
-            harnessId: "omp",
-            configPath: path.join(absPath, ".omp", "agent", "mcp.json"),
-            mcpConfigPath: path.join(absPath, ".omp", "agent", "mcp.json"),
-            metadata: { source: "searchPath" },
-          });
+        const absPath = path.resolve(searchPath);
+        const stat = await fsp.stat(absPath);
+        if (stat.isDirectory()) {
+          const realPath = await fsp.realpath(absPath).catch(() => absPath);
+          const workspaceId = createWorkspaceIdFromPath(realPath);
+          if (!workspacesMap.has(realPath)) {
+            workspacesMap.set(realPath, {
+              workspaceId,
+              rootPath: realPath,
+              name: path.basename(realPath),
+              harnessId: "omp",
+              configPath: path.join(realPath, ".omp", "agent", "mcp.json"),
+              mcpConfigPath: path.join(realPath, ".omp", "agent", "mcp.json"),
+              metadata: { source: "searchPath" },
+            });
+          }
         }
       } catch {
         // ignore
@@ -517,99 +971,331 @@ export async function discoverOmpWorkspaces(
     const parsed = JSON.parse(content);
     const parsedRegistry = OmpWorkspacesRegistrySchema.safeParse(parsed);
     if (parsedRegistry.success) {
-      const data = parsedRegistry.data;
-      const list = Array.isArray(data) ? data : (data.workspaces ?? []);
-      for (const ws of list) {
-        const wsPath = ws.path ?? ws.rootPath;
-        if (wsPath) {
-          const absWsPath = path.resolve(wsPath);
-          const workspaceId = ws.workspaceId ?? createWorkspaceIdFromPath(absWsPath);
-          workspacesMap.set(absWsPath, {
-            workspaceId,
-            rootPath: absWsPath,
-            name: ws.name ?? path.basename(absWsPath),
+      const entries = Array.isArray(parsedRegistry.data)
+        ? parsedRegistry.data
+        : (parsedRegistry.data.workspaces ?? []);
+      for (const entry of entries) {
+        const entryPath = entry.rootPath || entry.path;
+        if (entryPath) {
+          const realRoot = await fsp.realpath(entryPath).catch(() => entryPath);
+          workspacesMap.set(realRoot, {
+            workspaceId: entry.workspaceId || createWorkspaceIdFromPath(realRoot),
+            rootPath: realRoot,
+            name: entry.name || path.basename(realRoot),
             harnessId: "omp",
-            configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-            mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-            metadata: ws.metadata,
+            configPath: path.join(realRoot, ".omp", "agent", "mcp.json"),
+            mcpConfigPath: path.join(realRoot, ".omp", "agent", "mcp.json"),
+            metadata: { source: "workspaces.json", ...(entry.metadata ?? {}) },
           });
         }
       }
     }
   } catch {
-    // registry does not exist
+    // ignore missing registry
   }
 
-  // 4. Inspect session roots to infer workspaces
-  const sessionRoots = [path.join(ompHome, "agent", "sessions"), path.join(ompHome, "sessions")];
-  for (const sessionsDir of sessionRoots) {
+  // 4. Breadcrumbs
+  const breadcrumbs = await inspectBreadcrumbs(ompHome);
+  for (const bc of breadcrumbs) {
+    if (bc.workspacePath) {
+      const realPath = await fsp.realpath(bc.workspacePath).catch(() => bc.workspacePath);
+      const workspaceId = createWorkspaceIdFromPath(realPath);
+      if (!workspacesMap.has(realPath)) {
+        workspacesMap.set(realPath, {
+          workspaceId,
+          rootPath: realPath,
+          name: path.basename(realPath),
+          harnessId: "omp",
+          configPath: path.join(realPath, ".omp", "agent", "mcp.json"),
+          mcpConfigPath: path.join(realPath, ".omp", "agent", "mcp.json"),
+          metadata: { source: "breadcrumb", ...bc.metadata },
+        });
+      }
+    }
+  }
+
+  // 5. Scan session subdirectories for legacy workspace names
+  for (const root of [path.join(ompHome, "agent", "sessions"), path.join(ompHome, "sessions")]) {
     try {
-      const entries = await fsp.readdir(sessionsDir, { withFileTypes: true });
+      const entries = await fsp.readdir(root, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          const wsMarkerFile = path.join(sessionsDir, entry.name, "workspace.json");
-          try {
-            const wsContent = await fsp.readFile(wsMarkerFile, "utf8");
-            const parsedObj = JSON.parse(wsContent);
-            if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
-              // SAFETY: Workspace marker JSON contains workspace identity properties.
-              const parsed = parsedObj as {
-                path?: string;
-                rootPath?: string;
-                name?: string;
-                workspaceId?: string;
-              };
-              const wsPath = parsed.path ?? parsed.rootPath;
-              if (wsPath && String(wsPath) === wsPath) {
-                const absWsPath = path.resolve(wsPath);
-                if (!workspacesMap.has(absWsPath)) {
-                  workspacesMap.set(absWsPath, {
-                    workspaceId:
-                      parsed.workspaceId && String(parsed.workspaceId) === parsed.workspaceId
-                        ? parsed.workspaceId
-                        : createWorkspaceIdFromPath(absWsPath),
-                    rootPath: absWsPath,
-                    name:
-                      parsed.name && String(parsed.name) === parsed.name
-                        ? parsed.name
-                        : path.basename(absWsPath),
-                    harnessId: "omp",
-                    configPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-                    mcpConfigPath: path.join(absWsPath, ".omp", "agent", "mcp.json"),
-                    metadata: parsed,
-                  });
-                }
-              }
-            }
-          } catch {
-            // ignore unparseable workspace marker
+          const workspaceKey = entry.name;
+          let rootPath = workspaceKey;
+          if (workspaceKey.startsWith("-")) {
+            rootPath = `/${workspaceKey.slice(1).replace(/-/g, "/")}`;
+          }
+          const realRoot = await fsp.realpath(rootPath).catch(() => rootPath);
+          if (!workspacesMap.has(realRoot)) {
+            const workspaceId = createWorkspaceIdFromPath(realRoot);
+            workspacesMap.set(realRoot, {
+              workspaceId,
+              rootPath: realRoot,
+              name: path.basename(realRoot),
+              harnessId: "omp",
+              configPath: path.join(realRoot, ".omp", "agent", "mcp.json"),
+              mcpConfigPath: path.join(realRoot, ".omp", "agent", "mcp.json"),
+              metadata: { source: "session-directory" },
+            });
           }
         }
       }
     } catch {
-      // sessionsDir does not exist
-    }
-  }
-  // 5. Breadcrumbs
-  const breadcrumbs = await inspectBreadcrumbs(ompHome);
-  for (const bc of breadcrumbs) {
-    if (bc.workspacePath && !workspacesMap.has(bc.workspacePath)) {
-      const absPath = path.resolve(bc.workspacePath);
-      const workspaceId = createWorkspaceIdFromPath(absPath);
-      workspacesMap.set(absPath, {
-        workspaceId,
-        rootPath: absPath,
-        name: path.basename(absPath),
-        harnessId: "omp",
-        activeSessionId: bc.sessionId,
-        configPath: path.join(absPath, ".omp", "agent", "mcp.json"),
-        mcpConfigPath: path.join(absPath, ".omp", "agent", "mcp.json"),
-        metadata: { source: "breadcrumb", ...bc.metadata },
-      });
+      // ignore
     }
   }
 
-  return Array.from(workspacesMap.values());
+  // 6. Collect candidate roots and transcripts
+  const candidateRoots: string[] = [
+    path.join(ompHome, "agent", "sessions"),
+    path.join(ompHome, "sessions"),
+  ];
+  for (const ws of workspacesMap.values()) {
+    candidateRoots.push(path.join(ws.rootPath, ".omp", "sessions"));
+    candidateRoots.push(path.join(ws.rootPath, ".omp"));
+  }
+
+  const transcriptFiles = await collectTranscriptFiles(candidateRoots);
+
+  const inspectedFilePaths: string[] = [];
+  const inspectedTranscripts: ParsedTranscript[] = [];
+  const seenCanonicalPaths = new Set<string>();
+
+  const CONCURRENCY = 32;
+  const inspectionResults = new Array<ParsedTranscript | null>(transcriptFiles.length).fill(null);
+
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < transcriptFiles.length) {
+      const idx = nextIndex++;
+      const filePath = transcriptFiles[idx];
+      try {
+        const inspected = options?.inspectTranscript
+          ? await options.inspectTranscript(filePath, options)
+          : await inspectTranscriptFile(filePath, options);
+        inspectionResults[idx] = inspected;
+      } catch {
+        inspectionResults[idx] = null;
+      }
+    }
+  }
+
+  const workerCount = Math.min(CONCURRENCY, transcriptFiles.length);
+  if (workerCount > 0) {
+    const workers = Array.from({ length: workerCount }, () => worker());
+    await Promise.all(workers);
+  }
+
+  for (let i = 0; i < transcriptFiles.length; i++) {
+    const inspected = inspectionResults[i];
+    if (!inspected) continue;
+
+    const filePath = transcriptFiles[i];
+    inspectedFilePaths.push(filePath);
+
+    if (seenCanonicalPaths.has(inspected.canonicalPath)) {
+      continue;
+    }
+    seenCanonicalPaths.add(inspected.canonicalPath);
+    inspectedTranscripts.push(inspected);
+
+    // Add header-cwd workspaces
+    const headerCwd =
+      inspected.canonicalCwd ?? (inspected.headerCwd ? path.resolve(inspected.headerCwd) : null);
+    if (headerCwd) {
+      const realHeaderCwd = headerCwd;
+      if (!workspacesMap.has(realHeaderCwd)) {
+        const workspaceId = createWorkspaceIdFromPath(realHeaderCwd);
+        workspacesMap.set(realHeaderCwd, {
+          workspaceId,
+          rootPath: realHeaderCwd,
+          name: path.basename(realHeaderCwd),
+          harnessId: "omp",
+          configPath: path.join(realHeaderCwd, ".omp", "agent", "mcp.json"),
+          mcpConfigPath: path.join(realHeaderCwd, ".omp", "agent", "mcp.json"),
+          metadata: { source: "header-cwd" },
+        });
+      }
+    }
+  }
+
+  const allWorkspaces = Array.from(workspacesMap.values());
+  const sessionsByWorkspaceKey = new Map<string, HarnessSession[]>();
+  const globalSeenSessionIds = new Set<string>();
+  const allDeduplicatedSessions: HarnessSession[] = [];
+
+  for (const workspace of allWorkspaces) {
+    const realWsRoot = await fsp
+      .realpath(workspace.rootPath)
+      .catch(() => path.resolve(workspace.rootPath));
+    const matchingTranscripts = inspectedTranscripts.filter((t) => {
+      if (t.canonicalCwd || t.headerCwd) {
+        const tCwd = t.canonicalCwd ?? (t.headerCwd ? path.resolve(t.headerCwd) : null);
+        return (
+          tCwd === realWsRoot ||
+          tCwd === path.resolve(workspace.rootPath) ||
+          t.headerCwd === realWsRoot ||
+          t.headerCwd === path.resolve(workspace.rootPath)
+        );
+      }
+      if (
+        t.canonicalPath.startsWith(path.join(realWsRoot, ".omp")) ||
+        t.canonicalPath.startsWith(path.join(workspace.rootPath, ".omp")) ||
+        t.filePath.startsWith(path.join(realWsRoot, ".omp")) ||
+        t.filePath.startsWith(path.join(workspace.rootPath, ".omp"))
+      ) {
+        return true;
+      }
+      const dirName = path.basename(path.dirname(t.filePath));
+      const parentDirName = path.basename(path.dirname(path.dirname(t.filePath)));
+      return matchesWorkspace(dirName, workspace) || matchesWorkspace(parentDirName, workspace);
+    });
+
+    const sessionMap = new Map<string, HarnessSession>();
+    for (const t of matchingTranscripts) {
+      const effectiveSessionId =
+        !t.headerSessionId && (t.sessionId === "session-main" || t.sessionId === "transcript-main")
+          ? `${workspace.workspaceId}-main`
+          : t.sessionId;
+      const session: HarnessSession = {
+        sessionId: effectiveSessionId,
+        workspaceId: workspace.workspaceId,
+        harnessId: "omp",
+        transcriptPath: t.filePath,
+        status: t.status,
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+        metadata: {
+          fileSize: t.fileSize,
+          totalLines: t.totalLines,
+          hasExplicitLifecycle: t.hasExplicitLifecycle,
+          inspectedBytes: t.inspectedBytes,
+          source: "omp-discovery",
+        },
+      };
+
+      const existing = sessionMap.get(session.sessionId);
+      if (!existing) {
+        sessionMap.set(session.sessionId, session);
+      } else {
+        if (existing.status !== "active" && session.status === "active") {
+          sessionMap.set(session.sessionId, session);
+        } else if (new Date(session.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
+          sessionMap.set(session.sessionId, session);
+        }
+      }
+    }
+
+    const sortedSessions = Array.from(sessionMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+
+    sessionsByWorkspaceKey.set(workspace.workspaceId, sortedSessions);
+    sessionsByWorkspaceKey.set(realWsRoot, sortedSessions);
+    sessionsByWorkspaceKey.set(path.resolve(workspace.rootPath), sortedSessions);
+    sessionsByWorkspaceKey.set(workspace.rootPath, sortedSessions);
+
+    for (const s of sortedSessions) {
+      if (!globalSeenSessionIds.has(s.sessionId)) {
+        globalSeenSessionIds.add(s.sessionId);
+        allDeduplicatedSessions.push(s);
+      }
+    }
+  }
+
+  const catalog: OmpDiscoveryCatalog = {
+    scannedAt: Date.now(),
+    ompHome,
+    workspaces: allWorkspaces,
+    inspectedFilePaths,
+    getSessionsForWorkspace(workspace: HarnessWorkspace): HarnessSession[] {
+      const realRoot = path.resolve(workspace.rootPath);
+      const cached =
+        sessionsByWorkspaceKey.get(workspace.workspaceId) ??
+        sessionsByWorkspaceKey.get(realRoot) ??
+        sessionsByWorkspaceKey.get(workspace.rootPath);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      // Dynamic fallback matching for workspaces not pre-registered in workspacesMap
+      const realWsRoot = realRoot;
+      const matchingTranscripts = inspectedTranscripts.filter((t) => {
+        if (t.canonicalCwd || t.headerCwd) {
+          const tCwd = t.canonicalCwd ?? (t.headerCwd ? path.resolve(t.headerCwd) : null);
+          return (
+            tCwd === realWsRoot ||
+            tCwd === path.resolve(workspace.rootPath) ||
+            t.headerCwd === realWsRoot ||
+            t.headerCwd === path.resolve(workspace.rootPath)
+          );
+        }
+        if (
+          t.canonicalPath.startsWith(path.join(realWsRoot, ".omp")) ||
+          t.canonicalPath.startsWith(path.join(workspace.rootPath, ".omp")) ||
+          t.filePath.startsWith(path.join(realWsRoot, ".omp")) ||
+          t.filePath.startsWith(path.join(workspace.rootPath, ".omp"))
+        ) {
+          return true;
+        }
+        const dirName = path.basename(path.dirname(t.filePath));
+        const parentDirName = path.basename(path.dirname(path.dirname(t.filePath)));
+        return matchesWorkspace(dirName, workspace) || matchesWorkspace(parentDirName, workspace);
+      });
+
+      const sessionMap = new Map<string, HarnessSession>();
+      for (const t of matchingTranscripts) {
+        const effectiveSessionId =
+          !t.headerSessionId &&
+          (t.sessionId === "session-main" || t.sessionId === "transcript-main")
+            ? `${workspace.workspaceId}-main`
+            : t.sessionId;
+        const session: HarnessSession = {
+          sessionId: effectiveSessionId,
+          workspaceId: workspace.workspaceId,
+          harnessId: "omp",
+          transcriptPath: t.filePath,
+          status: t.status,
+          createdAt: t.createdAt,
+          updatedAt: t.updatedAt,
+          metadata: {
+            fileSize: t.fileSize,
+            totalLines: t.totalLines,
+            hasExplicitLifecycle: t.hasExplicitLifecycle,
+            inspectedBytes: t.inspectedBytes,
+            source: "omp-discovery",
+          },
+        };
+        sessionMap.set(effectiveSessionId, session);
+      }
+
+      const sortedSessions = Array.from(sessionMap.values()).sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
+
+      sessionsByWorkspaceKey.set(workspace.workspaceId, sortedSessions);
+      sessionsByWorkspaceKey.set(realWsRoot, sortedSessions);
+      sessionsByWorkspaceKey.set(path.resolve(workspace.rootPath), sortedSessions);
+      sessionsByWorkspaceKey.set(workspace.rootPath, sortedSessions);
+
+      return sortedSessions;
+    },
+    getAllSessions(): HarnessSession[] {
+      return allDeduplicatedSessions;
+    },
+  };
+
+  return catalog;
+}
+
+/**
+ * Discovers OMP workspaces from ~/.omp, session directories, breadcrumbs, and current directory.
+ */
+export async function discoverOmpWorkspaces(
+  options?: OmpDiscoveryOptions,
+): Promise<HarnessWorkspace[]> {
+  const catalog = options?.catalog ?? (await buildOmpDiscoveryCatalog(options));
+  return catalog.workspaces;
 }
 
 /**
@@ -617,168 +1303,15 @@ export async function discoverOmpWorkspaces(
  */
 export async function discoverOmpSessions(
   workspace: HarnessWorkspace,
-  options?: { ompHome?: string },
+  options?: OmpDiscoveryOptions,
 ): Promise<HarnessSession[]> {
-  const ompHome = resolveOmpHome({ customHome: options?.ompHome });
-  const sessionsMap = new Map<string, HarnessSession>();
-  const visitedFiles = new Set<string>();
-
-  const candidateDirs: string[] = [
-    path.join(workspace.rootPath, ".omp", "sessions"),
-    path.join(workspace.rootPath, ".omp"),
-    path.join(ompHome, "agent", "sessions", workspace.workspaceId),
-    path.join(ompHome, "sessions", workspace.workspaceId),
-    path.join(ompHome, "sessions"),
-  ];
-
-  if (options?.ompHome) {
-    candidateDirs.push(path.join(ompHome, "agent", "sessions"));
-  }
-  // Bounded scan of workspace subdirectories under current and legacy session roots
-  const sessionRoots = [path.join(ompHome, "agent", "sessions"), path.join(ompHome, "sessions")];
-
-  const searchDirs = new Set<string>(candidateDirs);
-
-  for (const root of sessionRoots) {
-    try {
-      const entries = await fsp.readdir(root, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          // In custom test homes or when directory matches workspace, include subdirectory
-          if (Boolean(options?.ompHome) || matchesWorkspace(entry.name, workspace)) {
-            searchDirs.add(path.join(root, entry.name));
-          }
-        }
-      }
-    } catch {
-      // directory does not exist
-    }
-  }
-
-  for (const dir of searchDirs) {
-    try {
-      const entries = await fsp.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-          const filePath = path.join(dir, entry.name);
-          if (visitedFiles.has(filePath)) {
-            continue;
-          }
-          visitedFiles.add(filePath);
-          const session = await inspectSessionFile(filePath, workspace);
-          if (session && !sessionsMap.has(session.sessionId)) {
-            sessionsMap.set(session.sessionId, session);
-          }
-        }
-      }
-    } catch {
-      // directory does not exist
-    }
-  }
-
-  return Array.from(sessionsMap.values()).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-  );
+  const mergedOptions: OmpDiscoveryOptions = {
+    ...options,
+    searchPaths: Array.from(new Set([...(options?.searchPaths ?? []), workspace.rootPath])),
+  };
+  const catalog = options?.catalog ?? (await buildOmpDiscoveryCatalog(mergedOptions));
+  return catalog.getSessionsForWorkspace(workspace);
 }
-
-/**
- * Inspects a single .jsonl session transcript file.
- */
-async function inspectSessionFile(
-  filePath: string,
-  workspace: HarnessWorkspace,
-): Promise<HarnessSession | null> {
-  try {
-    const stat = await fsp.stat(filePath);
-    const fileName = path.basename(filePath, ".jsonl");
-    const sessionId = fileName.startsWith("session-")
-      ? fileName.slice(8)
-      : fileName === "transcript" || fileName === "session"
-        ? `${workspace.workspaceId}-main`
-        : fileName;
-
-    let createdAt = stat.birthtime.toISOString();
-    let updatedAt = stat.mtime.toISOString();
-    let status: SessionStatus = "active";
-    let totalLines = 0;
-
-    // Read lines to parse header, timestamps, and lifecycle transitions
-    const content = await fsp.readFile(filePath, "utf8");
-    const lines = content
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    totalLines = lines.length;
-    if (lines.length > 0) {
-      try {
-        const firstObj = JSON.parse(lines[0]);
-        if (firstObj instanceof Object && !Array.isArray(firstObj)) {
-          // SAFETY: First transcript line is parsed as an object containing timestamp metadata.
-          const first = firstObj as { timestamp?: string; time?: string; ts?: string };
-          if (first.timestamp || first.time || first.ts) {
-            createdAt = String(first.timestamp ?? first.time ?? first.ts);
-          }
-        }
-      } catch {
-        // ignore first line parse error
-      }
-
-      for (const line of lines) {
-        try {
-          const parsedObj = JSON.parse(line);
-          if (parsedObj instanceof Object && !Array.isArray(parsedObj)) {
-            // SAFETY: Transcript record lines are objects containing timestamp and event action types.
-            const parsed = parsedObj as {
-              timestamp?: string;
-              time?: string;
-              ts?: string;
-              action?: string;
-              event?: string;
-              type?: string;
-              lifecycleType?: string;
-            };
-            if (parsed.timestamp || parsed.time || parsed.ts) {
-              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
-            }
-            const eventType = String(parsed.type ?? parsed.event ?? "");
-            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
-              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
-              if (action === "end" || action === "complete" || action === "finish") {
-                status = "completed";
-              } else if (action === "crash" || action === "error" || action === "fatal") {
-                status = "failed";
-              } else if (action === "pause" || action === "suspend") {
-                status = "idle";
-              } else if (action === "start" || action === "resume") {
-                status = "active";
-              }
-            }
-          }
-        } catch {
-          // ignore unparseable line
-        }
-      }
-    }
-
-    return {
-      sessionId,
-      workspaceId: workspace.workspaceId,
-      harnessId: "omp",
-      transcriptPath: filePath,
-      status,
-      createdAt,
-      updatedAt,
-      metadata: {
-        fileSize: stat.size,
-        totalLines,
-        fileMtime: stat.mtime.toISOString(),
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Computes normalized candidate directory keys for a workspace.
  */
