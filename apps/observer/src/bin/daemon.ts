@@ -904,6 +904,7 @@ function sanitizeStartupError<T>(error: T): string {
 
 export interface TelemetrySafeDaemonConfigLoadOptions {
   configPath: string;
+  version?: string;
   port?: number;
   socketPath?: string;
   env?: Record<string, string | undefined>;
@@ -923,6 +924,7 @@ export function loadTelemetrySafeDaemonConfig(
       configPath: options.configPath,
       env: options.env,
       overrides: {
+        version: options.version,
         port: options.port,
         socketPath: options.socketPath,
       },
@@ -946,6 +948,7 @@ export function loadTelemetrySafeDaemonConfig(
     });
     return {
       config: DaemonConfigSchema.parse({
+        version: options.version,
         port: options.port,
         socketPath: options.socketPath,
         telemetryEnabled: false,
@@ -986,6 +989,7 @@ async function runForeground(options: {
   await ensureDaemonDirectories(paths);
 
   const loadedConfig = loadTelemetrySafeDaemonConfig({
+    version: VERSION,
     configPath: paths.configFile,
     port: options.port,
     socketPath: paths.socketPath,
@@ -1104,6 +1108,7 @@ async function runForeground(options: {
     loadConfig: () =>
       loadTelemetrySafeDaemonConfig({
         configPath: paths.configFile,
+        version: VERSION,
         port: options.port,
         socketPath: paths.socketPath,
       }),
