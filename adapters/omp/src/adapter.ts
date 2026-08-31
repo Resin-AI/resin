@@ -22,7 +22,14 @@ import {
   rollbackOmpMcpConfig,
   verifyOmpMcpConfig,
 } from "./config-planner.js";
-import { discoverOmpSessions, discoverOmpWorkspaces, probeOmpInstallation } from "./discovery.js";
+import {
+  type OmpDiscoveryCatalog,
+  type OmpDiscoveryOptions,
+  buildOmpDiscoveryCatalog,
+  discoverOmpSessions,
+  discoverOmpWorkspaces,
+  probeOmpInstallation,
+} from "./discovery.js";
 import { getOmpRefreshCapability, handleOmpCatalogRefresh } from "./refresh.js";
 import { OmpSessionEventSource } from "./source.js";
 
@@ -32,6 +39,16 @@ import { OmpSessionEventSource } from "./source.js";
  */
 export interface OmpHarnessAdapterOptions {
   fsBridge?: ConfigFsBridge;
+  discoveryOptions?: OmpDiscoveryOptions;
+  customHome?: string;
+  ompHome?: string;
+  searchPaths?: string[];
+  customExecutablePath?: string;
+  customConfigPath?: string;
+  checkPermissions?: boolean;
+  now?: number | Date;
+  activeOnly?: boolean;
+  onInspectTranscript?: (filePath: string) => void;
 }
 
 export class OmpHarnessAdapter implements StrictHarnessAdapter {
@@ -41,24 +58,44 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   readonly supportedHarnessVersions: readonly string[] = ["^0.1.0", ">=0.1.0", ">=0.0.1", "*"];
 
   private readonly fsBridge?: ConfigFsBridge;
-
-  constructor(options?: OmpHarnessAdapterOptions) {
+  private discoveryOptions?: OmpDiscoveryOptions;
+  private cachedCatalog?: OmpDiscoveryCatalog;
+  constructor(options?: OmpHarnessAdapterOptions & OmpDiscoveryOptions) {
     this.fsBridge = options?.fsBridge;
+    this.discoveryOptions = {
+      activeOnly: true,
+      ...options?.discoveryOptions,
+      ...options,
+    };
+  }
+
+  get catalog(): OmpDiscoveryCatalog | undefined {
+    return this.cachedCatalog;
+  }
+
+  get inspectedFilePaths(): readonly string[] {
+    return this.cachedCatalog?.inspectedFilePaths ?? [];
   }
   /**
    * Probes the system for an OMP installation and checks its readiness.
    */
   async probeInstallation(options?: ProbeInstallationOptions): Promise<HarnessInstallation | null> {
-    return probeOmpInstallation(options);
+    if (options) {
+      this.discoveryOptions = { ...this.discoveryOptions, ...options };
+    }
+    return probeOmpInstallation({ ...this.discoveryOptions, ...options });
   }
 
   /**
    * Discovers registered and active OMP workspaces.
+   * Scans OMP home once per refresh cycle and caches the catalog.
    */
   async listWorkspaces(): Promise<HarnessWorkspace[]> {
-    return discoverOmpWorkspaces();
+    if (!this.cachedCatalog) {
+      this.cachedCatalog = await buildOmpDiscoveryCatalog(this.discoveryOptions);
+    }
+    return this.cachedCatalog.workspaces;
   }
-
   /**
    * Convenience alias for listWorkspaces.
    */
@@ -70,7 +107,10 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
    * Discovers sessions and JSONL transcripts within a given OMP workspace.
    */
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
-    return discoverOmpSessions(workspace);
+    if (!this.cachedCatalog) {
+      this.cachedCatalog = await buildOmpDiscoveryCatalog(this.discoveryOptions);
+    }
+    return this.cachedCatalog.getSessionsForWorkspace(workspace);
   }
 
   /**
@@ -153,6 +193,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     workspace: HarnessWorkspace,
     changeSummary: CatalogChangeSummary,
   ): Promise<RefreshResult> {
+    this.cachedCatalog = undefined;
     return handleOmpCatalogRefresh(workspace, changeSummary);
   }
 

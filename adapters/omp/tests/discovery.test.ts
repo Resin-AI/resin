@@ -1,8 +1,10 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  buildOmpDiscoveryCatalog,
+  collectTranscriptFiles,
   createWorkspaceIdFromPath,
   detectOmpVersion,
   discoverOmpSessions,
@@ -328,9 +330,629 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });
+  it("marks recent no-lifecycle v18 transcript as active within 60s mtime grace", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-v18-active-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "v18-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-v18-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "recent.jsonl");
+      const now = new Date();
+      await fsp.writeFile(
+        transcriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "v18-active-sess-1",
+            cwd: wsPath,
+            timestamp: now.toISOString(),
+          }),
+          JSON.stringify({ type: "message", role: "user", content: "Working on active task" }),
+        ].join("\n")}\n`,
+      );
+
+      const workspace = {
+        workspaceId: "ws-v18-app",
+        rootPath: wsPath,
+        name: "v18-app",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome, now });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("v18-active-sess-1");
+      expect(sessions[0].status).toBe("active");
+      expect(sessions[0].transcriptPath).toBe(transcriptPath);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks no-lifecycle v18 transcript as completed when mtime is older than 60s", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-v18-stale-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "v18-stale-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-v18-stale-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "stale.jsonl");
+      const staleTime = new Date(Date.now() - 120_000); // 2 minutes ago
+      await fsp.writeFile(
+        transcriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "v18-stale-sess-1",
+            cwd: wsPath,
+            timestamp: staleTime.toISOString(),
+          }),
+          JSON.stringify({ type: "message", role: "user", content: "Done earlier" }),
+        ].join("\n")}\n`,
+      );
+
+      // Set mtime to 120 seconds in the past
+      await fsp.utimes(transcriptPath, staleTime, staleTime);
+
+      const workspace = {
+        workspaceId: "ws-v18-stale-app",
+        rootPath: wsPath,
+        name: "v18-stale-app",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("v18-stale-sess-1");
+      expect(sessions[0].status).toBe("completed");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ensures explicit lifecycle records override mtime status", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-explicit-lifecycle-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "explicit-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-explicit-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      // 1. Session with explicit start but old mtime (10 hours ago) -> active
+      const startTranscript = path.join(sessionsDir, "session-start.jsonl");
+      const tenHoursAgo = new Date(Date.now() - 36_000_000);
+      await fsp.writeFile(
+        startTranscript,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "sess-explicit-start",
+            cwd: wsPath,
+            timestamp: tenHoursAgo.toISOString(),
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: tenHoursAgo.toISOString(),
+          }),
+          JSON.stringify({ type: "message", role: "user", content: "Working..." }),
+        ].join("\n")}\n`,
+      );
+      await fsp.utimes(startTranscript, tenHoursAgo, tenHoursAgo);
+
+      // 2. Session with explicit end but brand new mtime (now) -> completed
+      const endTranscript = path.join(sessionsDir, "session-end.jsonl");
+      const now = new Date();
+      await fsp.writeFile(
+        endTranscript,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "sess-explicit-end",
+            cwd: wsPath,
+            timestamp: now.toISOString(),
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "end",
+            timestamp: now.toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const workspace = {
+        workspaceId: "ws-explicit-app",
+        rootPath: wsPath,
+        name: "explicit-app",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome });
+      const startSession = sessions.find((s) => s.sessionId === "sess-explicit-start");
+      const endSession = sessions.find((s) => s.sessionId === "sess-explicit-end");
+
+      expect(startSession).toBeDefined();
+      expect(startSession?.status).toBe("active");
+
+      expect(endSession).toBeDefined();
+      expect(endSession?.status).toBe("completed");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("assigns sessions only to the exact workspace owning the header cwd", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-workspace-isolation-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPathA = path.join(tmpDir, "project-alpha");
+      const wsPathB = path.join(tmpDir, "project-beta");
+      await fsp.mkdir(wsPathA, { recursive: true });
+      await fsp.mkdir(wsPathB, { recursive: true });
+
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "shared-parent");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPathA = path.join(sessionsDir, "session-a.jsonl");
+      await fsp.writeFile(
+        transcriptPathA,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "sess-for-alpha",
+            cwd: wsPathA,
+            timestamp: new Date().toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const workspaceA = {
+        workspaceId: "ws-alpha",
+        rootPath: wsPathA,
+        name: "project-alpha",
+        harnessId: "omp",
+      };
+
+      const workspaceB = {
+        workspaceId: "ws-beta",
+        rootPath: wsPathB,
+        name: "project-beta",
+        harnessId: "omp",
+      };
+
+      const sessionsA = await discoverOmpSessions(workspaceA, { ompHome });
+      const sessionsB = await discoverOmpSessions(workspaceB, { ompHome });
+
+      expect(sessionsA.map((s) => s.sessionId)).toContain("sess-for-alpha");
+      expect(sessionsB.map((s) => s.sessionId)).not.toContain("sess-for-alpha");
+      expect(sessionsB.length).toBe(0);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates alias symlinks and duplicate session IDs to yield exactly one session", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-dedupe-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "dedupe-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-dedupe-project");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const canonicalFile = path.join(sessionsDir, "canonical.jsonl");
+      await fsp.writeFile(
+        canonicalFile,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "deduped-sess-1",
+            cwd: wsPath,
+            timestamp: "2026-08-31T10:00:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      // Symlink pointing to canonical
+      const symlinkFile = path.join(sessionsDir, "current.jsonl");
+      await fsp.symlink(canonicalFile, symlinkFile);
+
+      // Sibling file with same header session id
+      const duplicateFile = path.join(sessionsDir, "copy.jsonl");
+      await fsp.writeFile(
+        duplicateFile,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "deduped-sess-1",
+            cwd: wsPath,
+            timestamp: "2026-08-31T10:00:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const workspace = {
+        workspaceId: "ws-dedupe",
+        rootPath: wsPath,
+        name: "dedupe-project",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("deduped-sess-1");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("inspects large transcripts via bounded chunks without calling whole-file readFile", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-bounded-reads-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "large-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-large-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "large-session.jsonl");
+      // Construct a >100 KiB file with session header at top and end lifecycle at bottom
+      const rows: string[] = [
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "large-session-id",
+          cwd: wsPath,
+          timestamp: "2026-08-30T10:00:00.000Z",
+        }),
+      ];
+      const filler = "X".repeat(500);
+      for (let i = 0; i < 300; i++) {
+        rows.push(JSON.stringify({ type: "message", role: "assistant", content: filler, i }));
+      }
+      rows.push(
+        JSON.stringify({
+          type: "session_lifecycle",
+          lifecycleType: "end",
+          timestamp: "2026-08-30T12:00:00.000Z",
+        }),
+      );
+      await fsp.writeFile(transcriptPath, `${rows.join("\n")}\n`);
+
+      const stat = await fsp.stat(transcriptPath);
+      expect(stat.size).toBeGreaterThan(100 * 1024); // > 100 KiB
+
+      const workspace = {
+        workspaceId: "ws-large-app",
+        rootPath: wsPath,
+        name: "large-app",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome });
+
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("large-session-id");
+      expect(sessions[0].status).toBe("completed");
+      expect(sessions[0].createdAt).toBe("2026-08-30T10:00:00.000Z");
+      expect(sessions[0].updatedAt).toBe("2026-08-30T12:00:00.000Z");
+      expect(sessions[0].metadata.inspectedBytes).toBeDefined();
+      expect(Number(sessions[0].metadata.inspectedBytes)).toBeLessThan(stat.size);
+      expect(Number(sessions[0].metadata.inspectedBytes)).toBeLessThanOrEqual(128 * 1024);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds and reuses OmpDiscoveryCatalog scanning OMP home in a single pass", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-catalog-scan-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "catalog-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-catalog-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "session.jsonl");
+      await fsp.writeFile(
+        transcriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "catalog-sess-1",
+            cwd: wsPath,
+            timestamp: "2026-08-31T09:00:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const catalog = await buildOmpDiscoveryCatalog({ customHome: ompHome });
+      expect(catalog.workspaces.length).toBeGreaterThanOrEqual(1);
+      expect(catalog.workspaces.some((w) => w.rootPath === wsPath)).toBe(true);
+
+      const targetWs = catalog.workspaces.find((w) => w.rootPath === wsPath)!;
+      const sessions = catalog.getSessionsForWorkspace(targetWs);
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("catalog-sess-1");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+  it("skips full inspection and does not open stale transcript files in activeOnly mode", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-active-only-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "active-only-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-active-only-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const staleTranscriptPath = path.join(sessionsDir, "stale-session.jsonl");
+      const staleTime = new Date(Date.now() - 300_000);
+      await fsp.writeFile(
+        staleTranscriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "stale-sess-1",
+            cwd: wsPath,
+            timestamp: staleTime.toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
+      await fsp.utimes(staleTranscriptPath, staleTime, staleTime);
+
+      const activeTranscriptPath = path.join(sessionsDir, "active-session.jsonl");
+      const activeTime = new Date();
+      await fsp.writeFile(
+        activeTranscriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "active-sess-1",
+            cwd: wsPath,
+            timestamp: activeTime.toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
+      // Active-only build
+      const activeCatalog = await buildOmpDiscoveryCatalog({
+        customHome: ompHome,
+        activeOnly: true,
+      });
+
+      const openedPaths = activeCatalog.inspectedFilePaths;
+      expect(openedPaths).toContain(activeTranscriptPath);
+      expect(openedPaths).not.toContain(staleTranscriptPath);
+
+      const ws = activeCatalog.workspaces.find((w) => w.rootPath === wsPath)!;
+      const activeSessions = activeCatalog.getSessionsForWorkspace(ws);
+      expect(activeSessions.length).toBe(1);
+      expect(activeSessions[0].sessionId).toBe("active-sess-1");
+
+      // Standalone/explicit discoverOmpSessions still returns completed/stale sessions
+      const allSessions = await discoverOmpSessions(ws, { ompHome });
+      expect(allSessions.length).toBe(2);
+      expect(allSessions.some((s) => s.sessionId === "stale-sess-1")).toBe(true);
+      expect(allSessions.some((s) => s.sessionId === "active-sess-1")).toBe(true);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+  it("discovers active long-running transcript with old ISO timestamp filename but recent mtime while skipping old-mtime peers", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-long-running-reg-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "long-running-app");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-long-running-app");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      // 1. Long-running session started 2 hours ago (filename: 2 hours ago), but recently appended (mtime: now)
+      const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000);
+      const longRunningFileName = `${twoHoursAgo.toISOString().replace(/:/g, "-")}.jsonl`;
+      const longRunningPath = path.join(sessionsDir, longRunningFileName);
+      const recentTime = new Date();
+      await fsp.writeFile(
+        longRunningPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "long-running-sess-1",
+            cwd: wsPath,
+            timestamp: twoHoursAgo.toISOString(),
+          }),
+          JSON.stringify({
+            type: "message",
+            timestamp: recentTime.toISOString(),
+            content: "still going",
+          }),
+        ].join("\n")}\n`,
+      );
+      await fsp.utimes(longRunningPath, recentTime, recentTime);
+
+      // 2. Old-mtime peer created 2 hours ago, last modified 2 hours ago
+      const oldPeerFileName = `${new Date(twoHoursAgo.getTime() + 1000).toISOString().replace(/:/g, "-")}.jsonl`;
+      const oldPeerPath = path.join(sessionsDir, oldPeerFileName);
+      await fsp.writeFile(
+        oldPeerPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "old-peer-sess-2",
+            cwd: wsPath,
+            timestamp: twoHoursAgo.toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
+      await fsp.utimes(oldPeerPath, twoHoursAgo, twoHoursAgo);
+
+      // 3. Active-only discovery
+      const catalog = await buildOmpDiscoveryCatalog({
+        customHome: ompHome,
+        activeOnly: true,
+      });
+
+      // Assertions
+      const openedPaths = catalog.inspectedFilePaths;
+      expect(openedPaths).toContain(longRunningPath);
+      expect(openedPaths).not.toContain(oldPeerPath);
+      expect(openedPaths.length).toBe(1);
+
+      const ws = catalog.workspaces.find((w) => w.rootPath === wsPath)!;
+      expect(ws).toBeDefined();
+      const sessions = catalog.getSessionsForWorkspace(ws);
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("long-running-sess-1");
+      expect(sessions[0].status).toBe("active");
+
+      // Standalone discovery without activeOnly still returns both
+      const allSessions = await discoverOmpSessions(ws, { ompHome });
+      expect(allSessions.length).toBe(2);
+      expect(allSessions.some((s) => s.sessionId === "long-running-sess-1")).toBe(true);
+      expect(allSessions.some((s) => s.sessionId === "old-peer-sess-2")).toBe(true);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 
   it("creates clean workspace IDs from paths", () => {
     expect(createWorkspaceIdFromPath("/home/user/project-1")).toBe("home-user-project-1");
     expect(createWorkspaceIdFromPath("C:\\Users\\User\\Workspace")).toBe("C-Users-User-Workspace");
+  });
+
+  it("collects nested directories, ignores cycles/aliases, respects max depth, and preserves deterministic ordering and catalog dedupe", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-nested-traversal-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "nested-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+
+      // Build a nested directory tree inside ompHome/agent/sessions/-nested-project
+      // Root (depth 0): ompHome/agent/sessions/-nested-project
+      const rootSessionsDir = path.join(ompHome, "agent", "sessions", "-nested-project");
+      const level1 = path.join(rootSessionsDir, "level1"); // depth 1
+      const level2 = path.join(level1, "level2"); // depth 2
+      const level3 = path.join(level2, "level3"); // depth 3
+      const level4 = path.join(level3, "level4"); // depth 4
+      const level5 = path.join(level4, "level5"); // depth 5 (exceeds max depth 4)
+
+      await fsp.mkdir(level5, { recursive: true });
+
+      // Create transcripts at various depths
+      const fileL0 = path.join(rootSessionsDir, "session_l0.jsonl");
+      const fileL1 = path.join(level1, "session_l1.jsonl");
+      const fileL2 = path.join(level2, "session_l2.jsonl");
+      const fileL3 = path.join(level3, "session_l3.jsonl");
+      const fileL4 = path.join(level4, "session_l4.jsonl");
+      const fileL5 = path.join(level5, "session_l5_exceeds.jsonl");
+
+      const makeSessionRow = (id: string) =>
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id,
+            cwd: wsPath,
+            timestamp: "2026-08-31T12:00:00.000Z",
+          }),
+        ].join("\n")}\n`;
+
+      await fsp.writeFile(fileL0, makeSessionRow("sess-l0"));
+      await fsp.writeFile(fileL1, makeSessionRow("sess-l1"));
+      await fsp.writeFile(fileL2, makeSessionRow("sess-l2"));
+      await fsp.writeFile(fileL3, makeSessionRow("sess-l3"));
+      await fsp.writeFile(fileL4, makeSessionRow("sess-l4"));
+      await fsp.writeFile(fileL5, makeSessionRow("sess-l5"));
+
+      // Non-jsonl files should be ignored
+      await fsp.writeFile(path.join(level1, "ignored.txt"), "some text");
+      await fsp.writeFile(path.join(level2, "ignored.json"), "{}");
+
+      // File alias: symlink pointing to fileL0
+      const symlinkFile = path.join(level2, "alias_l0.jsonl");
+      await fsp.symlink(fileL0, symlinkFile);
+
+      // Directory cycle: symlink from level2 pointing to rootSessionsDir
+      const cycleDir = path.join(level2, "cycle_to_root");
+      await fsp.symlink(rootSessionsDir, cycleDir);
+
+      // Sibling directory symlink
+      const siblingDir = path.join(rootSessionsDir, "sibling");
+      await fsp.mkdir(siblingDir, { recursive: true });
+      const siblingFile = path.join(siblingDir, "sibling_session.jsonl");
+      await fsp.writeFile(siblingFile, makeSessionRow("sess-sibling"));
+      const siblingCycle = path.join(siblingDir, "loop_to_level1");
+      await fsp.symlink(level1, siblingCycle);
+
+      // Broken symlink
+      const brokenSymlink = path.join(siblingDir, "broken_link");
+      await fsp.symlink(path.join(tmpDir, "non_existent_target"), brokenSymlink);
+
+      // 1. Test collectTranscriptFiles directly
+      const run1 = await collectTranscriptFiles([rootSessionsDir]);
+      const run2 = await collectTranscriptFiles([rootSessionsDir]);
+
+      // Prove deterministic ordering across runs
+      expect(run1).toEqual(run2);
+
+      // Verify all valid unique files up to depth 4 are collected
+      expect(run1).toContain(fileL0);
+      expect(run1).toContain(fileL1);
+      expect(run1).toContain(fileL2);
+      expect(run1).toContain(fileL3);
+      expect(run1).toContain(fileL4);
+      expect(run1).toContain(siblingFile);
+      expect(run1).toContain(symlinkFile);
+
+      // Verify depth > 4 is excluded
+      expect(run1).not.toContain(fileL5);
+
+      // Verify non-jsonl and broken links are excluded
+      expect(run1).not.toContain(path.join(level1, "ignored.txt"));
+      expect(run1).not.toContain(path.join(level2, "ignored.json"));
+      expect(run1).not.toContain(brokenSymlink);
+
+      // Verify files list is strictly sorted
+      const sorted = [...run1].sort((a, b) => a.localeCompare(b));
+      expect(run1).toEqual(sorted);
+
+      // 2. Test catalog building and deduplication
+      const workspace = {
+        workspaceId: "ws-nested",
+        rootPath: wsPath,
+        name: "nested-project",
+        harnessId: "omp",
+      };
+
+      const catalog = await buildOmpDiscoveryCatalog({ ompHome, customHome: ompHome });
+      const sessions = catalog.getSessionsForWorkspace(workspace);
+
+      // sess-l0 is pointed to by both fileL0 and symlinkFile (alias_l0.jsonl)
+      // Catalog deduplication must ensure sess-l0 appears exactly once
+      // Note: from ompHome/agent/sessions (depth 0), level3 is depth 4, so sess-l0..sess-l3 + sess-sibling are discovered.
+      const sessionIds = sessions.map((s) => s.sessionId).sort();
+      expect(sessionIds).toEqual(["sess-l0", "sess-l1", "sess-l2", "sess-l3", "sess-sibling"]);
+      expect(sessions.length).toBe(5);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
