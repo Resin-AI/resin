@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
 import {
   type LaunchdUserServiceManager,
@@ -14,6 +17,11 @@ import {
   createUserServiceManager,
   defaultServiceCommandRunner,
 } from "../service/manager.js";
+import {
+  type DaemonReadinessResult,
+  type DaemonReadinessVerifier,
+  verifyDaemonReadiness,
+} from "../service/verification.js";
 
 export { createUserServiceManager, defaultServiceCommandRunner };
 export type {
@@ -44,6 +52,10 @@ export interface SetupDaemonServiceOptions {
   readonly maxHealthRetries?: number;
   readonly healthRetryIntervalMs?: number;
   readonly logger?: (msg: string) => void;
+  readonly expectedVersion?: string;
+  readonly daemonVerifier?: DaemonReadinessVerifier;
+  readonly readinessVerifier?: DaemonReadinessVerifier;
+  readonly forceRestart?: boolean;
 }
 
 export interface SetupDaemonServiceResult {
@@ -81,6 +93,22 @@ function delay(ms: number): Promise<void> {
     setTimeout(resolve, ms);
   });
 }
+function resolveHomeDirs(options: { homeDir?: string; resinHome?: string }): {
+  homeDir: string;
+  resinHome: string;
+} {
+  const homeDir =
+    options.homeDir ??
+    (options.resinHome
+      ? path.basename(options.resinHome) === ".resin"
+        ? path.dirname(options.resinHome)
+        : options.resinHome
+      : undefined) ??
+    process.env.HOME ??
+    os.homedir();
+  const resinHome = options.resinHome ?? path.join(homeDir, ".resin");
+  return { homeDir, resinHome };
+}
 
 /**
  * Sets up and starts the Resin daemon as a user-level service without root.
@@ -90,9 +118,10 @@ export async function setupAndStartDaemonService(
 ): Promise<SetupDaemonServiceResult> {
   const log = options.logger ?? (() => {});
   const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const { homeDir, resinHome } = resolveHomeDirs(options);
   const manager = createUserServiceManager({
-    homeDir: options.homeDir,
-    resinHome: options.resinHome,
+    homeDir,
+    resinHome,
     daemonPath: options.daemonPath,
     nodePath: options.nodePath,
     env: options.env,
@@ -107,11 +136,15 @@ export async function setupAndStartDaemonService(
   let priorInstalled = false;
   let priorUnitContent: string | null = null;
   let priorActive = false;
+  let priorEnabled = false;
   let priorPid: number | undefined;
   const unitPath = manager.getUnitPath();
 
   try {
-    priorInstalled = await manager.isInstalled();
+    const unitExists = await fsBridge.exists(unitPath);
+    if (unitExists) {
+      priorInstalled = await manager.isInstalled();
+    }
   } catch {
     priorInstalled = false;
   }
@@ -122,14 +155,15 @@ export async function setupAndStartDaemonService(
     } catch {
       priorUnitContent = null;
     }
-  }
-
-  try {
-    const priorStatus = await manager.status();
-    priorActive = Boolean(priorStatus.active);
-    priorPid = priorStatus.pid;
-  } catch {
-    priorActive = false;
+    try {
+      const priorStatus = await manager.status();
+      priorActive = Boolean(priorStatus.active);
+      priorEnabled = Boolean(priorStatus.enabled);
+      priorPid = priorStatus.pid;
+    } catch {
+      priorActive = false;
+      priorEnabled = false;
+    }
   }
 
   let rollbackExecuted = false;
@@ -144,8 +178,24 @@ export async function setupAndStartDaemonService(
         if (priorUnitContent !== null) {
           await fsBridge.writeFile(unitPath, priorUnitContent).catch(() => {});
         }
+        if (typeof manager.reload === "function") {
+          await manager.reload().catch(() => {});
+        }
+        if (priorEnabled) {
+          if (typeof manager.enable === "function") {
+            await manager.enable().catch(() => {});
+          }
+        } else {
+          if (typeof manager.disable === "function") {
+            await manager.disable().catch(() => {});
+          }
+        }
         if (priorActive) {
-          await manager.start().catch(() => {});
+          try {
+            await manager.restart();
+          } catch {
+            await manager.start().catch(() => {});
+          }
         } else {
           await manager.stop().catch(() => {});
         }
@@ -168,7 +218,7 @@ export async function setupAndStartDaemonService(
       priorUnitContent !== null &&
       priorUnitContent.trim() === targetUnitDefinition.trim();
 
-    if (isMatchingUnit && priorActive) {
+    if (isMatchingUnit && priorActive && !options.forceRestart) {
       const maxRetries = options.maxHealthRetries ?? 5;
       const retryInterval = options.healthRetryIntervalMs ?? 100;
       let healthy = false;
@@ -345,9 +395,10 @@ export async function setupAndStartDaemonService(
 export async function healthCheckDaemonService(
   options: HealthCheckDaemonOptions = {},
 ): Promise<HealthCheckDaemonResult> {
+  const { homeDir, resinHome } = resolveHomeDirs(options);
   const manager = createUserServiceManager({
-    homeDir: options.homeDir,
-    resinHome: options.resinHome,
+    homeDir,
+    resinHome,
     fsBridge: options.fsBridge,
     runner: options.runner,
   });
@@ -369,9 +420,10 @@ export async function healthCheckDaemonService(
  * Stops the daemon service.
  */
 export async function stopDaemonService(options: SetupDaemonServiceOptions = {}): Promise<void> {
+  const { homeDir, resinHome } = resolveHomeDirs(options);
   const manager = createUserServiceManager({
-    homeDir: options.homeDir,
-    resinHome: options.resinHome,
+    homeDir,
+    resinHome,
     fsBridge: options.fsBridge,
     runner: options.runner,
   });
@@ -382,9 +434,10 @@ export async function stopDaemonService(options: SetupDaemonServiceOptions = {})
  * Restarts the daemon service.
  */
 export async function restartDaemonService(options: SetupDaemonServiceOptions = {}): Promise<void> {
+  const { homeDir, resinHome } = resolveHomeDirs(options);
   const manager = createUserServiceManager({
-    homeDir: options.homeDir,
-    resinHome: options.resinHome,
+    homeDir,
+    resinHome,
     daemonPath: options.daemonPath,
     nodePath: options.nodePath,
     env: options.env,
@@ -400,9 +453,10 @@ export async function restartDaemonService(options: SetupDaemonServiceOptions = 
 export async function uninstallDaemonService(
   options: SetupDaemonServiceOptions = {},
 ): Promise<ServiceUninstallResult> {
+  const { homeDir, resinHome } = resolveHomeDirs(options);
   const manager = createUserServiceManager({
-    homeDir: options.homeDir,
-    resinHome: options.resinHome,
+    homeDir,
+    resinHome,
     fsBridge: options.fsBridge,
     runner: options.runner,
   });

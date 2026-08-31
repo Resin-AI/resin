@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { defaultFsBridge } from "@resin/harness-contracts";
 import { getActiveVersion } from "../../src/installer/asset-downloader.js";
 import {
   DEFAULT_HEALTH_CHECK_MAX_OUTPUT_BYTES,
@@ -28,6 +29,7 @@ import {
 } from "../../src/installer/bootstrap-entry.js";
 import { canonicalJson } from "../../src/installer/channel-verifier.js";
 import { type PlatformInfo, UnsupportedPlatformError } from "../../src/platform/index.js";
+import type { UserServiceManager } from "../../src/service/manager.js";
 
 interface ReleaseSignatureItem {
   keyId: string;
@@ -2018,6 +2020,849 @@ describe("bootstrap-entry", () => {
         expect(verboseOutput).toContain("==> Resolving release metadata");
         expect(verboseOutput).toContain("==> Fetching release asset");
         expect(verboseOutput).toContain("==> Installing release");
+      } finally {
+        server.close();
+      }
+    });
+  });
+
+  describe("existing user service activation & skip-onboarding handling", () => {
+    it("successfully rewrites, reloads, and restarts existing service under --skip-onboarding", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-svc-home-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-svc",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr1 = server.address();
+      const port = typeof addr1 === "object" && addr1 !== null && "port" in addr1 ? addr1.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+
+      const unitPath = path.join(resinHome, "services", "resin-daemon.service");
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, "OldServiceDefinition v0.9.0\n");
+
+      let reloaded = false;
+      let restarted = false;
+      let verifiedExpectedVersion: string | undefined;
+
+      const mockServiceManager: UserServiceManager = {
+        name: "mock-systemd",
+        platform: "systemd",
+        install: async () => ({ success: true, unitPath, enabled: true, started: true }),
+        uninstall: async () => ({
+          success: true,
+          unitPath,
+          stopped: true,
+          disabled: true,
+          removed: true,
+        }),
+        start: async () => {},
+        stop: async () => {},
+        restart: async () => {
+          restarted = true;
+        },
+        reload: async () => {
+          reloaded = true;
+        },
+        status: async () => ({
+          installed: true,
+          active: true,
+          enabled: true,
+          serviceName: "resin-daemon",
+          unitPath,
+          pid: 4321,
+          state: "active",
+        }),
+        isInstalled: async () => true,
+        getUnitDefinition: () => "NewServiceDefinition v1.0.0\n",
+        getUnitPath: () => unitPath,
+      };
+
+      try {
+        const result = await bootstrapInstall({
+          channelUrl,
+          allowOverrides: true,
+          allowInsecureHttpForTests: true,
+          trustedReleaseKeys: [trustedKey],
+          resinHome,
+          customHome: home,
+          env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+          platform: defaultTestPlatform,
+          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+          skipOnboarding: true,
+          userServiceManager: mockServiceManager,
+          daemonReadinessVerifier: async (opts) => {
+            verifiedExpectedVersion = opts.expectedVersion;
+            return {
+              ready: true,
+              ipcReady: true,
+              cloudReady: true,
+              attempts: 1,
+              socketPath: path.join(resinHome, "run", "daemon.sock"),
+              healthStatus: "healthy",
+              version: opts.expectedVersion,
+            };
+          },
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.version).toBe("1.0.0");
+        expect(reloaded).toBe(true);
+        expect(restarted).toBe(true);
+        expect(verifiedExpectedVersion).toBe("1.0.0");
+        expect(fs.readFileSync(unitPath, "utf-8")).toBe("NewServiceDefinition v1.0.0\n");
+        expect(result.onboarding?.skipped).toBe(true);
+      } finally {
+        server.close();
+      }
+    });
+
+    it("does not create or start service on fresh install with --skip-onboarding", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-fresh-skip-home-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-fresh-skip",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr2 = server.address();
+      const port = typeof addr2 === "object" && addr2 !== null && "port" in addr2 ? addr2.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+      let installCalled = false;
+      let startCalled = false;
+      let restartCalled = false;
+      let reloadCalled = false;
+
+      const mockServiceManager: UserServiceManager = {
+        name: "mock-systemd",
+        platform: "systemd",
+        install: async () => {
+          installCalled = true;
+          return { success: true, unitPath: "/tmp/unit", enabled: true, started: true };
+        },
+        uninstall: async () => ({
+          success: true,
+          unitPath: "/tmp/unit",
+          stopped: true,
+          disabled: true,
+          removed: true,
+        }),
+        start: async () => {
+          startCalled = true;
+        },
+        stop: async () => {},
+        restart: async () => {
+          restartCalled = true;
+        },
+        reload: async () => {
+          reloadCalled = true;
+        },
+        status: async () => ({
+          installed: false,
+          active: false,
+          enabled: false,
+          serviceName: "resin-daemon",
+          unitPath: "/tmp/unit",
+          state: "not_installed",
+        }),
+        isInstalled: async () => false,
+        getUnitDefinition: () => "unit content",
+        getUnitPath: () => "/tmp/unit",
+      };
+
+      try {
+        const result = await bootstrapInstall({
+          channelUrl,
+          allowOverrides: true,
+          allowInsecureHttpForTests: true,
+          trustedReleaseKeys: [trustedKey],
+          resinHome,
+          customHome: home,
+          env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+          platform: defaultTestPlatform,
+          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+          skipOnboarding: true,
+          userServiceManager: mockServiceManager,
+        });
+
+        expect(result.success).toBe(true);
+        expect(installCalled).toBe(false);
+        expect(startCalled).toBe(false);
+        expect(restartCalled).toBe(false);
+        expect(reloadCalled).toBe(false);
+        expect(result.onboarding?.skipped).toBe(true);
+      } finally {
+        server.close();
+      }
+    });
+
+    it("fails and rolls back on new-version health / version mismatch", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-mismatch-home-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      // Set up prior version 0.9.0
+      const v090Dir = path.join(resinHome, "versions", "v0.9.0");
+      fs.mkdirSync(path.join(v090Dir, "bin"), { recursive: true });
+      fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
+      const currentSymlink = path.join(resinHome, "current");
+      fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
+      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-mismatch",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr3 = server.address();
+      const port = typeof addr3 === "object" && addr3 !== null && "port" in addr3 ? addr3.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+
+      const unitPath = path.join(resinHome, "services", "resin-daemon.service");
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, "PriorUnitDefinition v0.9.0\n");
+
+      let restartCount = 0;
+
+      const mockServiceManager: UserServiceManager = {
+        name: "mock-systemd",
+        platform: "systemd",
+        install: async () => ({ success: true, unitPath, enabled: true, started: true }),
+        uninstall: async () => ({
+          success: true,
+          unitPath,
+          stopped: true,
+          disabled: true,
+          removed: true,
+        }),
+        start: async () => {},
+        stop: async () => {},
+        restart: async () => {
+          restartCount++;
+        },
+        reload: async () => {},
+        status: async () => ({
+          installed: true,
+          active: true,
+          enabled: true,
+          serviceName: "resin-daemon",
+          unitPath,
+          pid: 5678,
+          state: "active",
+        }),
+        isInstalled: async () => true,
+        getUnitDefinition: () => "NewUnitDefinition v1.0.0\n",
+        getUnitPath: () => unitPath,
+      };
+
+      try {
+        await expect(
+          bootstrapInstall({
+            channelUrl,
+            allowOverrides: true,
+            allowInsecureHttpForTests: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            userServiceManager: mockServiceManager,
+            daemonReadinessVerifier: async (opts) => {
+              if (opts.expectedVersion === "1.0.0") {
+                return {
+                  ready: false,
+                  ipcReady: true,
+                  cloudReady: true,
+                  attempts: 1,
+                  socketPath: path.join(resinHome, "run", "daemon.sock"),
+                  healthStatus: "healthy",
+                  version: "0.9.0",
+                  error: "Daemon version mismatch: expected 1.0.0, got 0.9.0",
+                };
+              }
+              // Prior daemon verification on rollback
+              return {
+                ready: true,
+                ipcReady: true,
+                cloudReady: true,
+                attempts: 1,
+                socketPath: path.join(resinHome, "run", "daemon.sock"),
+                healthStatus: "healthy",
+                version: "0.9.0",
+              };
+            },
+          }),
+        ).rejects.toThrow(/Daemon version mismatch|Daemon service activation failed/);
+
+        // Verify rollback restored symlink and prior unit definition
+        expect(getActiveVersion(resinHome)).toBe("0.9.0");
+        expect(fs.readFileSync(unitPath, "utf-8")).toBe("PriorUnitDefinition v0.9.0\n");
+        // Initial restart + rollback restart
+        expect(restartCount).toBe(2);
+      } finally {
+        server.close();
+      }
+    });
+
+    it("rolls back and restores/restarts prior release after service restart failure", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-restart-fail-home-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      // Prior version 0.9.0
+      const v090Dir = path.join(resinHome, "versions", "v0.9.0");
+      fs.mkdirSync(path.join(v090Dir, "bin"), { recursive: true });
+      fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
+      const currentSymlink = path.join(resinHome, "current");
+      fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
+      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-restart-fail",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr4 = server.address();
+      const port = typeof addr4 === "object" && addr4 !== null && "port" in addr4 ? addr4.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+
+      const unitPath = path.join(resinHome, "services", "resin-daemon.service");
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, "PriorUnitDefinition v0.9.0\n");
+
+      let restartCalls = 0;
+
+      const mockServiceManager: UserServiceManager = {
+        name: "mock-systemd",
+        platform: "systemd",
+        install: async () => ({ success: true, unitPath, enabled: true, started: true }),
+        uninstall: async () => ({
+          success: true,
+          unitPath,
+          stopped: true,
+          disabled: true,
+          removed: true,
+        }),
+        start: async () => {},
+        stop: async () => {},
+        restart: async () => {
+          restartCalls++;
+          if (restartCalls === 1) {
+            throw new Error("systemctl restart mock failure for v1.0.0");
+          }
+        },
+        reload: async () => {},
+        status: async () => ({
+          installed: true,
+          active: true,
+          enabled: true,
+          serviceName: "resin-daemon",
+          unitPath,
+          pid: 9999,
+          state: "active",
+        }),
+        isInstalled: async () => true,
+        getUnitDefinition: () => "NewUnitDefinition v1.0.0\n",
+        getUnitPath: () => unitPath,
+      };
+
+      let priorDaemonVerified = false;
+
+      try {
+        await expect(
+          bootstrapInstall({
+            channelUrl,
+            allowOverrides: true,
+            allowInsecureHttpForTests: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            userServiceManager: mockServiceManager,
+            daemonReadinessVerifier: async (opts) => {
+              if (opts.expectedVersion === "0.9.0") {
+                priorDaemonVerified = true;
+              }
+              return {
+                ready: true,
+                ipcReady: true,
+                cloudReady: true,
+                attempts: 1,
+                socketPath: path.join(resinHome, "run", "daemon.sock"),
+                healthStatus: "healthy",
+                version: opts.expectedVersion,
+              };
+            },
+          }),
+        ).rejects.toThrow(/Daemon service activation failed.*systemctl restart mock failure/);
+
+        expect(getActiveVersion(resinHome)).toBe("0.9.0");
+        expect(fs.readFileSync(unitPath, "utf-8")).toBe("PriorUnitDefinition v0.9.0\n");
+        expect(restartCalls).toBe(2);
+        expect(priorDaemonVerified).toBe(true);
+      } finally {
+        server.close();
+      }
+    });
+
+    it("refuses default service activation for non-login home without injected supervisor and rolls back", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-bootstrap-customhome-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      // Pre-install prior version 0.9.0
+      const v090Dir = path.join(resinHome, "versions", "v0.9.0");
+      fs.mkdirSync(v090Dir, { recursive: true });
+      fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
+      const currentSymlink = path.join(resinHome, "current");
+      fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
+      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-customhome",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null && "port" in addr ? addr.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+
+      const isDarwin = process.platform === "darwin";
+      const unitPath = isDarwin
+        ? path.join(home, "Library", "LaunchAgents", "com.resin.daemon.plist")
+        : path.join(home, ".config", "systemd", "user", "resin.service");
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, "PriorUnitDefinition v0.9.0\n");
+
+      try {
+        await expect(
+          bootstrapInstall({
+            channelUrl,
+            allowOverrides: true,
+            allowInsecureHttpForTests: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+          }),
+        ).rejects.toThrow(/Daemon service activation failed/);
+
+        expect(getActiveVersion(resinHome)).toBe("0.9.0");
+        expect(fs.readFileSync(unitPath, "utf-8")).toBe("PriorUnitDefinition v0.9.0\n");
+      } finally {
+        server.close();
+      }
+    });
+
+    it("rolls back release and restores prior unit when replacement unit write fails", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-bootstrap-unit-write-fail-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+
+      // Pre-install prior version 0.9.0
+      const v090Dir = path.join(resinHome, "versions", "v0.9.0");
+      fs.mkdirSync(v090Dir, { recursive: true });
+      fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
+      const currentSymlink = path.join(resinHome, "current");
+      fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
+      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
+
+      const releaseBytes = tarGz();
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyHex = publicKey
+        .export({ type: "spki", format: "der" })
+        .subarray(-32)
+        .toString("hex");
+
+      const trustedKey = {
+        keyId: "test-key-write-fail",
+        algorithm: "Ed25519" as const,
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        publicKeyHex,
+        publicKeyFingerprintSha256: crypto
+          .createHash("sha256")
+          .update(Buffer.from(publicKeyHex, "hex"))
+          .digest("hex"),
+      };
+
+      const fixtures = createSignedReleaseFixtures({
+        version: "1.0.0",
+        keyId: trustedKey.keyId,
+        publicKeyHex,
+        privateKey,
+        releaseBytes,
+      });
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/channels.json") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.channelBytes);
+          return;
+        }
+        if (req.url === fixtures.manifestPath) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(fixtures.manifestBytes);
+          return;
+        }
+        if (req.url === fixtures.tarballPath) {
+          res.writeHead(200, { "content-type": "application/gzip" });
+          res.end(releaseBytes);
+          return;
+        }
+        if (req.url === fixtures.denoPath) {
+          res.writeHead(200, { "content-type": "application/zip" });
+          res.end(fixtures.denoBytes);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null && "port" in addr ? addr.port : 0;
+      const channelUrl = `http://127.0.0.1:${port}/channels.json`;
+
+      const unitPath = path.join(resinHome, "services", "resin-daemon.service");
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, "PriorUnitDefinition v0.9.0\n");
+      let restartCalls = 0;
+      let reloadCalled = false;
+      let priorDaemonVerified = false;
+
+      const mockServiceManager: UserServiceManager = {
+        name: "mock-systemd",
+        platform: "systemd",
+        install: async () => ({ success: true, unitPath, enabled: true, started: true }),
+        uninstall: async () => ({
+          success: true,
+          unitPath,
+          stopped: true,
+          disabled: true,
+          removed: true,
+        }),
+        start: async () => {},
+        stop: async () => {},
+        restart: async () => {
+          restartCalls += 1;
+        },
+        reload: async () => {
+          reloadCalled = true;
+        },
+        status: async () => ({
+          installed: true,
+          active: true,
+          enabled: true,
+          serviceName: "resin-daemon",
+          unitPath,
+          pid: 5678,
+          state: "active",
+        }),
+        isInstalled: async () => true,
+        getUnitDefinition: () => "NewUnitDefinition v1.0.0\n",
+        getUnitPath: () => unitPath,
+      };
+
+      const failingFsBridge = Object.assign(Object.create(defaultFsBridge), {
+        writeFile: async (targetPath: string, content: string | Buffer) => {
+          if (targetPath === unitPath && typeof content === "string" && content.includes("1.0.0")) {
+            throw new Error("EACCES: simulated unit write permission denied");
+          }
+          return defaultFsBridge.writeFile(targetPath, content);
+        },
+      });
+
+      try {
+        await expect(
+          bootstrapInstall({
+            channelUrl,
+            allowOverrides: true,
+            allowInsecureHttpForTests: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            env: { HOME: home, PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            userServiceManager: mockServiceManager,
+            fsBridge: failingFsBridge,
+            daemonReadinessVerifier: async (opts) => {
+              if (opts.expectedVersion === "0.9.0") {
+                priorDaemonVerified = true;
+              }
+              return {
+                ready: true,
+                ipcReady: true,
+                cloudReady: true,
+                attempts: 1,
+                socketPath: path.join(resinHome, "run", "daemon.sock"),
+                healthStatus: "healthy",
+                version: opts.expectedVersion,
+              };
+            },
+          }),
+        ).rejects.toThrow(
+          /Daemon service activation failed:.*simulated unit write permission denied/,
+        );
+
+        expect(getActiveVersion(resinHome)).toBe("0.9.0");
+        expect(fs.readFileSync(unitPath, "utf-8")).toBe("PriorUnitDefinition v0.9.0\n");
+        expect(restartCalls).toBe(1);
+        expect(priorDaemonVerified).toBe(true);
       } finally {
         server.close();
       }

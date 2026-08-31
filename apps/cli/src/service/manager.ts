@@ -478,6 +478,9 @@ export interface UserServiceManager {
   start(): Promise<void>;
   stop(): Promise<void>;
   restart(): Promise<void>;
+  reload?(): Promise<void>;
+  enable?(): Promise<void>;
+  disable?(): Promise<void>;
   status(): Promise<ServiceStatusInfo>;
   isInstalled(): Promise<boolean>;
   getUnitDefinition(options?: ServiceInstallOptions): string;
@@ -509,6 +512,16 @@ export class SystemdUserServiceManager implements UserServiceManager {
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
+  }
+  protected ensureLoginHomeForCommands(): void {
+    if (
+      this.runner === defaultServiceCommandRunner &&
+      path.resolve(this.homeDir) !== path.resolve(os.homedir())
+    ) {
+      throw new Error(
+        `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`,
+      );
+    }
   }
 
   getUnitPath(): string {
@@ -572,6 +585,7 @@ WantedBy=default.target
     const autoStart = options.autoStart ?? true;
 
     try {
+      this.ensureLoginHomeForCommands();
       await this.fsBridge.mkdirp(path.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
 
@@ -625,6 +639,7 @@ WantedBy=default.target
     let removed = false;
 
     try {
+      this.ensureLoginHomeForCommands();
       // Stop service
       const stopResult = await this.runner.run("systemctl", ["--user", "stop", this.serviceName]);
       stopped = stopResult.exitCode === 0;
@@ -666,7 +681,24 @@ WantedBy=default.target
     }
   }
 
+  async enable(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    const res = await this.runner.run("systemctl", ["--user", "enable", this.serviceName]);
+    if (res.exitCode !== 0) {
+      throw new Error(`Failed to enable systemd service ${this.serviceName}: ${res.stderr}`);
+    }
+  }
+
+  async disable(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    const res = await this.runner.run("systemctl", ["--user", "disable", this.serviceName]);
+    if (res.exitCode !== 0) {
+      throw new Error(`Failed to disable systemd service ${this.serviceName}: ${res.stderr}`);
+    }
+  }
+
   async start(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     const res = await this.runner.run("systemctl", ["--user", "start", this.serviceName]);
     if (res.exitCode !== 0) {
       throw new Error(`Failed to start systemd service ${this.serviceName}: ${res.stderr}`);
@@ -674,6 +706,7 @@ WantedBy=default.target
   }
 
   async stop(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     const res = await this.runner.run("systemctl", ["--user", "stop", this.serviceName]);
     if (res.exitCode !== 0) {
       throw new Error(`Failed to stop systemd service ${this.serviceName}: ${res.stderr}`);
@@ -681,9 +714,18 @@ WantedBy=default.target
   }
 
   async restart(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     const res = await this.runner.run("systemctl", ["--user", "restart", this.serviceName]);
     if (res.exitCode !== 0) {
       throw new Error(`Failed to restart systemd service ${this.serviceName}: ${res.stderr}`);
+    }
+  }
+
+  async reload(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    const res = await this.runner.run("systemctl", ["--user", "daemon-reload"]);
+    if (res.exitCode !== 0) {
+      throw new Error(`Failed to reload systemd user daemon: ${res.stderr}`);
     }
   }
 
@@ -700,6 +742,7 @@ WantedBy=default.target
       };
     }
 
+    this.ensureLoginHomeForCommands();
     const [activeRes, enabledRes, statusRes] = await Promise.all([
       this.runner.run("systemctl", ["--user", "is-active", this.serviceName]),
       this.runner.run("systemctl", ["--user", "is-enabled", this.serviceName]),
@@ -753,6 +796,16 @@ export class LaunchdUserServiceManager implements UserServiceManager {
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
+  }
+  protected ensureLoginHomeForCommands(): void {
+    if (
+      this.runner === defaultServiceCommandRunner &&
+      path.resolve(this.homeDir) !== path.resolve(os.homedir())
+    ) {
+      throw new Error(
+        `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`,
+      );
+    }
   }
 
   getUnitPath(): string {
@@ -830,6 +883,7 @@ ${envXml}
     const autoStart = options.autoStart ?? true;
 
     try {
+      this.ensureLoginHomeForCommands();
       await this.fsBridge.mkdirp(path.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
 
@@ -869,6 +923,7 @@ ${envXml}
     let removed = false;
 
     try {
+      this.ensureLoginHomeForCommands();
       const unloadRes = await this.runner.run("launchctl", ["unload", "-w", unitPath]);
       stopped = unloadRes.exitCode === 0;
 
@@ -898,6 +953,7 @@ ${envXml}
   }
 
   async start(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     const unitPath = this.getUnitPath();
     const res = await this.runner.run("launchctl", ["load", "-w", unitPath]);
     if (res.exitCode !== 0) {
@@ -910,6 +966,7 @@ ${envXml}
   }
 
   async stop(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     const unitPath = this.getUnitPath();
     const res = await this.runner.run("launchctl", ["unload", "-w", unitPath]);
     if (res.exitCode !== 0) {
@@ -918,8 +975,13 @@ ${envXml}
   }
 
   async restart(): Promise<void> {
+    this.ensureLoginHomeForCommands();
     await this.stop().catch(() => {});
     await this.start();
+  }
+
+  async reload(): Promise<void> {
+    // launchd does not require an explicit daemon reload; configuration reloads on load/restart
   }
 
   async status(): Promise<ServiceStatusInfo> {
@@ -935,6 +997,7 @@ ${envXml}
       };
     }
 
+    this.ensureLoginHomeForCommands();
     const listRes = await this.runner.run("launchctl", ["list", this.serviceName]);
     const active = listRes.exitCode === 0;
 
@@ -1191,6 +1254,27 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
   async restart(): Promise<void> {
     await this.stop().catch(() => {});
     await this.start();
+  }
+
+  async reload(): Promise<void> {
+    const hasSystemd = await this.checkSystemdAvailable();
+    if (hasSystemd) {
+      return this.systemdDelegate.reload();
+    }
+  }
+
+  async enable(): Promise<void> {
+    const hasSystemd = await this.checkSystemdAvailable();
+    if (hasSystemd) {
+      return this.systemdDelegate.enable?.();
+    }
+  }
+
+  async disable(): Promise<void> {
+    const hasSystemd = await this.checkSystemdAvailable();
+    if (hasSystemd) {
+      return this.systemdDelegate.disable?.();
+    }
   }
 
   async status(): Promise<ServiceStatusInfo> {

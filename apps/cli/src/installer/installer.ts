@@ -715,6 +715,10 @@ export class ResinInstaller {
       if (options.setupService) {
         this.log("==> Step 10/11: Registering and starting non-root user daemon service...");
         if (!dryRun) {
+          const forceRestart = Boolean(
+            versionSwitchResult &&
+              versionSwitchResult.activeVersion !== versionSwitchResult.previousVersion,
+          );
           serviceSetupResult = await setupAndStartDaemonService({
             homeDir: customHome,
             resinHome,
@@ -722,6 +726,7 @@ export class ResinInstaller {
             fsBridge: this.fsBridge,
             runner: options.serviceRunner,
             logger: this.log.bind(this),
+            forceRestart,
           });
 
           if (serviceSetupResult.rollback) {
@@ -752,6 +757,7 @@ export class ResinInstaller {
             resinHome,
             fsBridge: this.fsBridge,
             cloudRequired: pairingSummary?.localOnly !== true,
+            expectedVersion: versionSwitchResult?.activeVersion ?? options.targetVersion,
             timeoutMs: options.readinessTimeoutMs,
             retryIntervalMs: options.readinessRetryIntervalMs,
           });
