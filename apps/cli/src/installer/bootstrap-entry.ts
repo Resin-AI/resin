@@ -22,6 +22,16 @@ import {
   detectPlatform,
 } from "../platform/platform.js";
 import {
+  type ServiceCommandRunner,
+  type UserServiceManager,
+  createUserServiceManager,
+} from "../service/manager.js";
+import {
+  type DaemonReadinessResult,
+  type DaemonReadinessVerifier,
+  verifyDaemonReadiness,
+} from "../service/verification.js";
+import {
   type DownloadedAssetResult,
   type VersionInstallResult,
   downloadAndVerifyAsset,
@@ -184,6 +194,13 @@ export interface BootstrapInstallOptions {
   readonly sourceAssetBuffer?: Buffer;
   readonly sourceDenoBuffer?: Buffer;
   readonly now?: Date | string | number;
+  readonly userServiceManager?: UserServiceManager;
+  readonly serviceRunner?: ServiceCommandRunner;
+  readonly serviceCommandRunner?: ServiceCommandRunner;
+  readonly daemonReadinessVerifier?: DaemonReadinessVerifier;
+  readonly readinessVerifier?: DaemonReadinessVerifier;
+  readonly daemonReadinessTimeoutMs?: number;
+  readonly daemonReadinessRetryIntervalMs?: number;
 }
 
 export interface BootstrapInstallResult {
@@ -761,7 +778,16 @@ export async function configureShellPath(
   const isPosix = options.isPosix ?? process.platform !== "win32";
   const resinHome = path.resolve(options.resinHome);
   const binDir = path.join(resinHome, "bin");
-  const homeDir = path.resolve(options.homeDir ?? env.HOME ?? os.homedir());
+  const homeDir = path.resolve(
+    options.homeDir ??
+      (options.resinHome
+        ? path.basename(options.resinHome) === ".resin"
+          ? path.dirname(options.resinHome)
+          : options.resinHome
+        : undefined) ??
+      env.HOME ??
+      os.homedir(),
+  );
 
   if (!isPosix) {
     return {
@@ -960,10 +986,74 @@ export async function bootstrapInstall(
     });
   }
 
-  const homeDir = options.customHome ?? env.HOME ?? os.homedir();
+  const homeDir =
+    options.customHome ??
+    (options.resinHome
+      ? path.basename(options.resinHome) === ".resin"
+        ? path.dirname(options.resinHome)
+        : options.resinHome
+      : undefined) ??
+    env.HOME ??
+    os.homedir();
   const resinHome = options.resinHome ?? env.RESIN_HOME ?? path.join(homeDir, ".resin");
   const downloadsDir = path.join(resinHome, "downloads");
   const previousActiveVersion = getActiveVersion(resinHome);
+
+  const isActualLoginHome =
+    path.resolve(homeDir) === path.resolve(os.homedir()) &&
+    path.resolve(resinHome) === path.resolve(path.join(os.homedir(), ".resin"));
+  const hasInjectedServiceSupervisor = Boolean(
+    options.userServiceManager || options.serviceRunner || options.serviceCommandRunner,
+  );
+  const serviceRunner = options.serviceRunner ?? options.serviceCommandRunner;
+  const serviceManager =
+    options.userServiceManager ??
+    createUserServiceManager({
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner: serviceRunner,
+    });
+  const readinessVerifier =
+    options.daemonReadinessVerifier ?? options.readinessVerifier ?? verifyDaemonReadiness;
+
+  let priorServiceInstalled = false;
+  let priorUnitPath = "";
+  let priorUnitContent: string | null = null;
+  let priorServiceActive = false;
+
+  try {
+    priorUnitPath = serviceManager.getUnitPath();
+    const unitExists = await fsBridge.exists(priorUnitPath);
+    if (unitExists) {
+      if (!hasInjectedServiceSupervisor && !isActualLoginHome) {
+        priorServiceInstalled = true;
+        try {
+          priorUnitContent = await fsBridge.readFile(priorUnitPath);
+        } catch {
+          priorUnitContent = null;
+        }
+        priorServiceActive = false;
+      } else {
+        priorServiceInstalled = await serviceManager.isInstalled();
+        if (priorServiceInstalled) {
+          try {
+            priorUnitContent = await fsBridge.readFile(priorUnitPath);
+          } catch {
+            priorUnitContent = null;
+          }
+          try {
+            const priorStatus = await serviceManager.status();
+            priorServiceActive = Boolean(priorStatus.active);
+          } catch {
+            priorServiceActive = false;
+          }
+        }
+      }
+    }
+  } catch {
+    priorServiceInstalled = false;
+  }
 
   // Step 2: Resolve release metadata via channel document and pinned trust root
   const channel = options.channel ?? "stable";
@@ -1157,7 +1247,16 @@ export async function bootstrapInstall(
       logger: log,
     });
     if (pathConfig.updated) {
-      const displayHome = path.resolve(options.customHome ?? env.HOME ?? os.homedir());
+      const displayHome = path.resolve(
+        options.customHome ??
+          (options.resinHome
+            ? path.basename(options.resinHome) === ".resin"
+              ? path.dirname(options.resinHome)
+              : options.resinHome
+            : undefined) ??
+          env.HOME ??
+          os.homedir(),
+      );
       const displayBin =
         resinHome === path.join(displayHome, ".resin")
           ? "~/.resin/bin"
@@ -1168,6 +1267,115 @@ export async function bootstrapInstall(
     } else if (pathConfig.error) {
       log(`⚠ Could not update ${pathConfig.profileName}: ${pathConfig.error}`);
     }
+  }
+
+  // Step 9.8: If an existing service definition was present, update, reload, restart, and health check daemon
+  if (priorServiceInstalled) {
+    const targetUnitContent = serviceManager.getUnitDefinition();
+    const targetUnitPath = priorUnitPath || serviceManager.getUnitPath();
+    let unitRewritten = false;
+    let activationFailed = false;
+    let serviceError = "";
+
+    try {
+      if (!hasInjectedServiceSupervisor && !isActualLoginHome) {
+        throw new Error(
+          "Cannot activate default user service for custom home directory without an injected UserServiceManager or service runner",
+        );
+      }
+
+      if (priorUnitContent === null || priorUnitContent.trim() !== targetUnitContent.trim()) {
+        logVerbose("==> Updating existing service unit definition for new release...");
+        await fsBridge.mkdirp(path.dirname(targetUnitPath));
+        await fsBridge.writeFile(targetUnitPath, targetUnitContent);
+        unitRewritten = true;
+      }
+
+      logVerbose("==> Reloading and restarting existing daemon user service...");
+      if (typeof serviceManager.reload === "function") {
+        await serviceManager.reload();
+      }
+      await serviceManager.restart();
+
+      logVerbose("==> Verifying daemon readiness and running release version...");
+      const readiness = await readinessVerifier({
+        homeDir,
+        resinHome,
+        fsBridge,
+        expectedVersion: release.version,
+        timeoutMs: options.daemonReadinessTimeoutMs,
+        retryIntervalMs: options.daemonReadinessRetryIntervalMs,
+      });
+      if (!readiness.ready) {
+        throw new Error(
+          readiness.error ||
+            `Daemon readiness check failed (status: ${readiness.healthStatus ?? "unknown"})`,
+        );
+      }
+    } catch (err: unknown) {
+      activationFailed = true;
+      serviceError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (activationFailed || serviceError) {
+      log(
+        `✖ Daemon service activation failed (${serviceError}). Rolling back to previous release...`,
+      );
+      // 1. Rollback activation symlink
+      await rollbackBootstrapActivation({
+        resinHome,
+        previousActiveVersion,
+        installedVersion: release.version,
+        fsBridge,
+        logger: log,
+      });
+
+      // 2. Rollback unit file
+      if (unitRewritten || priorUnitContent !== null) {
+        try {
+          if (priorUnitContent !== null) {
+            await fsBridge.writeFile(targetUnitPath, priorUnitContent);
+          } else if (unitRewritten && (await fsBridge.exists(targetUnitPath))) {
+            await fsBridge.unlink(targetUnitPath);
+          }
+          if (hasInjectedServiceSupervisor || isActualLoginHome) {
+            if (typeof serviceManager.reload === "function") {
+              await serviceManager.reload();
+            }
+          }
+        } catch {
+          // Best-effort restoration of unit file
+        }
+      }
+
+      // 3. Restart and verify prior daemon
+      let priorDaemonRestored = false;
+      if (priorServiceActive && (hasInjectedServiceSupervisor || isActualLoginHome)) {
+        try {
+          if (typeof serviceManager.reload === "function") {
+            await serviceManager.reload();
+          }
+          await serviceManager.restart();
+          const priorReadiness = await readinessVerifier({
+            homeDir,
+            resinHome,
+            fsBridge,
+            expectedVersion: previousActiveVersion ?? undefined,
+            timeoutMs: options.daemonReadinessTimeoutMs,
+            retryIntervalMs: options.daemonReadinessRetryIntervalMs,
+          });
+          priorDaemonRestored = priorReadiness.ready;
+        } catch {
+          priorDaemonRestored = false;
+        }
+      }
+
+      throw new Error(
+        `Daemon service activation failed: ${serviceError}. Restored previous active release ${previousActiveVersion ?? "none"}${priorServiceActive ? (priorDaemonRestored ? " and verified prior daemon." : " (prior daemon restart failed).") : "."}`,
+      );
+    }
+
+    log(`✔ Daemon service updated to v${release.version} and verified`);
   }
 
   // Step 10: Automatic Browser Authorization, Harness Setup, and Daemon Verification

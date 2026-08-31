@@ -84,6 +84,7 @@ export interface DaemonReadinessOptions {
   fsBridge?: ConfigFsBridge;
   ipcClient?: IpcClient;
   cloudRequired?: boolean;
+  expectedVersion?: string;
   timeoutMs?: number;
   retryIntervalMs?: number;
 }
@@ -95,6 +96,7 @@ export interface DaemonReadinessResult {
   attempts: number;
   socketPath: string;
   healthStatus?: string;
+  version?: string;
   error?: string;
 }
 
@@ -599,6 +601,7 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
   let attempts = 0;
   let lastError = "Daemon readiness deadline elapsed";
   let lastHealthStatus: string | undefined;
+  let lastVersion: string | undefined;
   let lastIpcReady = false;
   let lastCloudReady = options.cloudRequired === false;
 
@@ -622,6 +625,7 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
       const ping = await client.ping();
       const health = await client.getHealth();
       lastHealthStatus = health.status;
+      lastVersion = health.version;
       lastIpcReady = ping.pong === true;
       const cloudModules = Object.entries(health.modules).filter(([moduleId]) =>
         moduleId.includes("cloud"),
@@ -632,19 +636,24 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
           cloudModules.every(([, moduleHealth]) => moduleHealth.status === "ready"));
 
       if (lastIpcReady && lastCloudReady) {
-        return {
-          ready: true,
-          ipcReady: true,
-          cloudReady: true,
-          attempts,
-          socketPath,
-          healthStatus: health.status,
-        };
+        if (options.expectedVersion && health.version !== options.expectedVersion) {
+          lastError = `Daemon version mismatch: expected ${options.expectedVersion}, got ${health.version}`;
+        } else {
+          return {
+            ready: true,
+            ipcReady: true,
+            cloudReady: true,
+            attempts,
+            socketPath,
+            healthStatus: health.status,
+            version: health.version,
+          };
+        }
+      } else {
+        lastError = !lastIpcReady
+          ? "Daemon IPC ping did not return pong"
+          : `Cloud runtime is not ready (daemon status: ${health.status})`;
       }
-
-      lastError = !lastIpcReady
-        ? "Daemon IPC ping did not return pong"
-        : `Cloud runtime is not ready (daemon status: ${health.status})`;
     } catch (error: unknown) {
       lastError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -668,6 +677,7 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
     attempts,
     socketPath,
     healthStatus: lastHealthStatus,
+    version: lastVersion,
     error: lastError,
   };
 };

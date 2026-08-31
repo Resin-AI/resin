@@ -175,6 +175,41 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(uninstallResult.success).toBe(true);
       expect(fs.existsSync(installResult.unitPath)).toBe(false);
     });
+    it("supports enable and disable methods on SystemdUserServiceManager", async () => {
+      const manager = new SystemdUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+
+      await manager.enable();
+      const lastEnable = mockRunner.commands.at(-1);
+      expect(lastEnable?.args).toEqual(["--user", "enable", "resin.service"]);
+
+      await manager.disable();
+      const lastDisable = mockRunner.commands.at(-1);
+      expect(lastDisable?.args).toEqual(["--user", "disable", "resin.service"]);
+    });
+
+    it("rejects supervisor commands with default runner when home is not login user home", async () => {
+      const manager = new SystemdUserServiceManager({
+        homeDir: "/non/matching/custom/home/path",
+        resinHome: "/non/matching/custom/home/path/.resin",
+      });
+
+      await expect(manager.start()).rejects.toThrow(
+        /Cannot issue login-session supervisor commands/,
+      );
+      await expect(manager.stop()).rejects.toThrow(
+        /Cannot issue login-session supervisor commands/,
+      );
+      await expect(manager.enable()).rejects.toThrow(
+        /Cannot issue login-session supervisor commands/,
+      );
+      await expect(manager.disable()).rejects.toThrow(
+        /Cannot issue login-session supervisor commands/,
+      );
+    });
   });
 
   describe("LaunchdUserServiceManager", () => {
@@ -424,9 +459,9 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(fs.readFileSync(unitPath, "utf-8")).toBe(priorContent);
 
       // Verify restart failure and rollback restoration were executed
-      expect(restartAttempts).toBe(1);
+      expect(restartAttempts).toBe(2);
       const restartCommands = recordedCommands.filter((c) => c.args.includes("restart"));
-      expect(restartCommands).toHaveLength(1);
+      expect(restartCommands).toHaveLength(2);
 
       expect(startAttempts).toBe(2);
       const startCommands = recordedCommands.filter((c) => c.args.includes("start"));
@@ -442,6 +477,88 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(finalStatus.installed).toBe(true);
       expect(finalStatus.active).toBe(true);
       expect(finalStatus.pid).toBe(4242);
+    });
+    it("restores prior-disabled and inactive state in correct order on failure", async () => {
+      const manager = createUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+
+      // Pre-install a previous service version that was disabled and inactive
+      const unitPath = manager.getUnitPath();
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      const priorContent =
+        "# Prior disabled resin service\nDescription=Old Disabled Resin Daemon\n";
+      fs.writeFileSync(unitPath, priorContent);
+
+      const commandLog: string[] = [];
+      const failingUpdateRunner: ServiceCommandRunner = {
+        run: async (cmd, args) => {
+          const action = args.join(" ");
+          commandLog.push(`${cmd} ${action}`);
+
+          if (args.includes("is-active")) {
+            return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+          }
+          if (args.includes("is-enabled")) {
+            return { stdout: "disabled\n", stderr: "", exitCode: 1 };
+          }
+          if (args.includes("status")) {
+            return {
+              stdout: "● resin.service\n   Loaded: loaded\n   Active: inactive (dead)\n",
+              stderr: "",
+              exitCode: 3,
+            };
+          }
+          if (args.includes("start")) {
+            return { stdout: "", stderr: "Simulated start failure", exitCode: 1 };
+          }
+          return { stdout: "ok", stderr: "", exitCode: 0 };
+        },
+      };
+
+      const result = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        runner: failingUpdateRunner,
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Failed to start daemon service");
+
+      // Verify prior unit content is restored
+      expect(fs.readFileSync(unitPath, "utf-8")).toBe(priorContent);
+
+      // Verify rollback sequence after the failed start:
+      // 1. restore prior unit content (fsBridge.writeFile)
+      // 2. reload supervisor (daemon-reload)
+      // 3. restore disabled state (disable)
+      // 4. restore inactive state (stop)
+      const startIdx = commandLog.indexOf("systemctl --user start resin.service");
+      const reloadIndex = commandLog.findIndex(
+        (c, idx) => idx > startIdx && c.includes("daemon-reload"),
+      );
+      const disableIndex = commandLog.findIndex(
+        (c, idx) => idx > startIdx && c.includes("disable"),
+      );
+      const stopIndex = commandLog.findIndex((c, idx) => idx > startIdx && c.includes("stop"));
+
+      expect(reloadIndex).toBeGreaterThan(-1);
+      expect(disableIndex).toBeGreaterThan(reloadIndex);
+      expect(stopIndex).toBeGreaterThan(disableIndex);
+
+      // Verify final status
+      const rollbackManager = createUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: failingUpdateRunner,
+      });
+      const finalStatus = await rollbackManager.status();
+      expect(finalStatus.installed).toBe(true);
+      expect(finalStatus.active).toBe(false);
+      expect(finalStatus.enabled).toBe(false);
     });
 
     it("reuses existing healthy service idempotently without recreation", async () => {
