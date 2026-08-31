@@ -13,7 +13,7 @@ describe("cli", () => {
     it("parses mcp flags with defaults and explicit overrides", () => {
       const defaultFlags = parseMcpArgs([]);
       expect(defaultFlags.standaloneFallback).toBe(true);
-      expect(defaultFlags.standaloneMode).toBe(false);
+      expect(defaultFlags.standaloneMode).toBe(true);
       expect(defaultFlags.showHelp).toBe(false);
 
       const parsed = parseMcpArgs([
@@ -27,7 +27,7 @@ describe("cli", () => {
         "-H",
         "custom-harness",
       ]);
-      expect(parsed.standaloneMode).toBe(true);
+      expect(parsed.standaloneMode).toBe(false);
       expect(parsed.standaloneFallback).toBe(true);
       expect(parsed.socketPath).toBe("/tmp/daemon.sock");
       expect(parsed.cwd).toBe("/custom/dir");
@@ -36,6 +36,7 @@ describe("cli", () => {
 
       const noStandalone = parseMcpArgs(["--no-standalone", "--socket=/path/to/sock"]);
       expect(noStandalone.standaloneFallback).toBe(false);
+      expect(noStandalone.standaloneMode).toBe(false);
       expect(noStandalone.socketPath).toBe("/path/to/sock");
     });
 
