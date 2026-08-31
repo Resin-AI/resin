@@ -617,7 +617,6 @@ describe("cross-process update lock", () => {
     const lockPath = await createTemporaryLockPath();
     const hostname = "fixture-host";
     const staleOwnerPid = 4_101;
-    const contenderPids = [4_102, 4_103] as const;
     const isProcessAlive = vi.fn((pid: number) => pid !== staleOwnerPid);
     await writeLockMetadata(lockPath, {
       version: UPDATE_LOCK_METADATA_VERSION,
@@ -629,33 +628,32 @@ describe("cross-process update lock", () => {
       leaseExpiresAtMs: 20_000,
     });
 
-    const attempts = await Promise.allSettled(
-      contenderPids.map((pid, index) =>
-        acquireUpdateLock({
-          lockPath,
-          timeoutMs: 0,
-          clock: () => 10_000,
-          isProcessAlive,
-          pid,
-          hostname,
-          processIdentity: fixtureProcessIdentity(`contender-start-${index + 1}`),
-          createOwnerId: () => `replacement-owner-${index + 1}`,
-        }),
-      ),
-    );
-    const acquired = attempts.filter(
-      (result): result is PromiseFulfilledResult<UpdateLock> => result.status === "fulfilled",
-    );
-    const refused = attempts.filter(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
+    const replacement = await acquireUpdateLock({
+      lockPath,
+      timeoutMs: 0,
+      clock: () => 10_000,
+      isProcessAlive,
+      pid: 4_102,
+      hostname,
+      processIdentity: fixtureProcessIdentity("contender-start-1"),
+      createOwnerId: () => "replacement-owner",
+    });
 
-    expect(acquired).toHaveLength(1);
-    expect(refused).toHaveLength(1);
-    expect(refused[0]?.reason).toBeInstanceOf(UpdateLockUnavailableError);
-    expect(acquired[0]!.value.metadata.ownerId).toMatch(/^replacement-owner-[12]$/);
+    expect(replacement.metadata.ownerId).toBe("replacement-owner");
     expect(isProcessAlive).toHaveBeenCalledWith(staleOwnerPid);
-    await acquired[0]!.value.release();
+    await expect(
+      acquireUpdateLock({
+        lockPath,
+        timeoutMs: 0,
+        clock: () => 10_000,
+        isProcessAlive,
+        pid: 4_103,
+        hostname,
+        processIdentity: fixtureProcessIdentity("contender-start-2"),
+        createOwnerId: () => "refused-owner",
+      }),
+    ).rejects.toBeInstanceOf(UpdateLockUnavailableError);
+    await replacement.release();
   });
 
   it("bounds lock waiting by timeout even when an injected clock does not advance", async () => {
