@@ -92,6 +92,23 @@ describe("VerificationSuite", () => {
       [socketPath]: "socket",
       [unitPath]: "unit content",
     });
+    const serviceManager = createUserServiceManager({
+      platform: "systemd",
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner: {
+        async run(_cmd, args) {
+          if (args.includes("is-active")) {
+            return { stdout: "active\n", stderr: "", exitCode: 0 };
+          }
+          if (args.includes("is-enabled")) {
+            return { stdout: "enabled\n", stderr: "", exitCode: 0 };
+          }
+          return { stdout: "Main PID: 123\n", stderr: "", exitCode: 0 };
+        },
+      },
+    });
 
     const mockIpcClient = new MockIpcClient({
       ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
@@ -110,6 +127,7 @@ describe("VerificationSuite", () => {
       resinHome,
       socketPath,
       fsBridge,
+      serviceManager,
       // SAFETY: Mock ipcClient implements IpcClient subset required for verification suite tests.
       ipcClient: mockIpcClient as IpcClient,
       customFetch: mockFetch,
