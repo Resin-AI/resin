@@ -135,6 +135,54 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });
+  it("refreshes the discovery catalog on each workspace poll", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-rediscovery-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "repo");
+      const sessionsDir = path.join(wsPath, ".omp", "sessions");
+      await fsp.mkdir(ompHome, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const writeSession = async (sessionId: string) => {
+        await fsp.writeFile(
+          path.join(sessionsDir, `session-${sessionId}.jsonl`),
+          `${JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: new Date().toISOString(),
+          })}\n`,
+        );
+      };
+
+      await writeSession("first");
+      const adapter = new OmpHarnessAdapter({
+        customHome: ompHome,
+        searchPaths: [wsPath],
+      });
+      const initialWorkspace = (await adapter.listWorkspaces()).find(
+        (workspace) => workspace.rootPath === wsPath,
+      );
+      expect(initialWorkspace).toBeDefined();
+      expect(
+        (await adapter.listSessions(initialWorkspace!)).map((session) => session.sessionId),
+      ).toEqual(["first"]);
+
+      await writeSession("second");
+      const refreshedWorkspace = (await adapter.listWorkspaces()).find(
+        (workspace) => workspace.rootPath === wsPath,
+      );
+      expect(refreshedWorkspace).toBeDefined();
+      expect(
+        (await adapter.listSessions(refreshedWorkspace!))
+          .map((session) => session.sessionId)
+          .sort(),
+      ).toEqual(["first", "second"]);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("plans canonical stdio and migrates legacy SSE entry using gatewayUrl as migration context", async () => {
     const adapter = new OmpHarnessAdapter();
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-migration-"));

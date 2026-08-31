@@ -91,9 +91,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
    * Scans OMP home once per refresh cycle and caches the catalog.
    */
   async listWorkspaces(): Promise<HarnessWorkspace[]> {
-    if (!this.cachedCatalog) {
-      this.cachedCatalog = await buildOmpDiscoveryCatalog(this.discoveryOptions);
-    }
+    this.cachedCatalog = await buildOmpDiscoveryCatalog(this.discoveryOptions);
     return this.cachedCatalog.workspaces;
   }
   /**
