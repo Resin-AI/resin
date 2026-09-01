@@ -677,4 +677,53 @@ describe("doctor & repair commands", () => {
     expect(mockServiceManager.restart).not.toHaveBeenCalled();
     expect(actions.some((a) => a.includes("daemon user service"))).toBe(false);
   });
+  it("installs missing user background service when running in default/current login home or with injected service manager", async () => {
+    const fsBridge = createMockFsBridge();
+    const mockServiceManager = createMockServiceManager();
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: false,
+      active: false,
+      enabled: false,
+      serviceName: "resin.service",
+      unitPath: "/mock/resin.service",
+      state: "not_installed",
+    });
+    mockServiceManager.install = vi.fn().mockResolvedValue({
+      success: true,
+      unitPath: "/mock/resin.service",
+      unitContent: "[Unit]\nDescription=Resin Daemon\n",
+      serviceName: "resin.service",
+      enabled: true,
+      started: true,
+    });
+
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(mockServiceManager.install).toHaveBeenCalled();
+    expect(actions.some((a) => a.includes("Installed user background service"))).toBe(true);
+  });
+
+  it("skips OS service installation in custom-home environment when no service manager/runner is injected", async () => {
+    const fsBridge = createMockFsBridge();
+    const customTempHome = "/tmp/custom-test-home-sandbox";
+
+    // Call repairState without injected serviceManager on customHome
+    const actions = await repairState({
+      home: customTempHome,
+      fsBridge,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    // Must not throw and must not attempt OS service mutations in custom test sandbox
+    expect(actions.some((a) => a.includes("daemon user service"))).toBe(false);
+  });
 });
