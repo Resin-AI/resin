@@ -615,8 +615,11 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
     });
     it("immediately rolls back when service starts but fails health check probes", async () => {
       const probeFailingRunner: ServiceCommandRunner = {
-        run: async (cmd, args) => {
-          if (args.includes("status") || args.includes("is-active")) {
+        run: async (_cmd, args) => {
+          if (args.includes("is-active")) {
+            return { stdout: "inactive", stderr: "", exitCode: 3 };
+          }
+          if (args.includes("status")) {
             return { stdout: "Active: inactive (dead)", stderr: "", exitCode: 3 };
           }
           return { stdout: "ok", stderr: "", exitCode: 0 };

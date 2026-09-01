@@ -1152,7 +1152,7 @@ export class UpdateEngine {
     try {
       backup = await this.createBackup(metadata);
       steps.push("backup_created");
-      if (lease.serviceState.active) {
+      if (lease.serviceState.installed || lease.serviceState.active || lease.drainInitiated) {
         await this.serviceManager.stop();
         serviceStopped = true;
       }
@@ -1490,8 +1490,15 @@ export class UpdateEngine {
   private async acquireActivationLease(signal?: AbortSignal): Promise<ActivationLease> {
     let serviceState: ServiceStatusInfo;
     try {
-      serviceState = await this.serviceManager.status();
+      this.throwIfAborted(signal);
+      serviceState = await this.withTimeoutAndSignal(
+        this.serviceManager.status(),
+        Math.min(this.drainTimeoutMs, 5_000),
+        signal,
+        "Initial service status inspection timed out.",
+      );
     } catch (error) {
+      if (signal?.aborted) throw error;
       return {
         activity: {
           state: "unknown",
@@ -1519,7 +1526,12 @@ export class UpdateEngine {
     if (this.sessionActivity) {
       try {
         this.throwIfAborted(signal);
-        const reported = await this.sessionActivity();
+        const reported = await this.withTimeoutAndSignal(
+          Promise.resolve().then(() => this.sessionActivity!()),
+          this.drainTimeoutMs,
+          signal,
+          "Session activity inspection timed out.",
+        );
         const activity =
           reported === true || reported === false
             ? {
@@ -1546,9 +1558,19 @@ export class UpdateEngine {
     let drainInitiated = false;
     try {
       this.throwIfAborted(signal);
-      await client.connect();
-      let health = await client.getHealth();
-      if (health.status === "stopped" && this.countActiveWork(health) === 0) {
+      await this.withTimeoutAndSignal(
+        client.connect(),
+        Math.min(this.drainTimeoutMs, 5_000),
+        signal,
+        "IPC daemon connection timed out.",
+      );
+      const initialHealth = await this.withTimeoutAndSignal(
+        client.getHealth(),
+        Math.min(this.drainTimeoutMs, 5_000),
+        signal,
+        "IPC daemon health probe timed out.",
+      );
+      if (initialHealth.status === "stopped" && this.countActiveWork(initialHealth) === 0) {
         return {
           activity: { state: "inactive", activeCount: 0 },
           serviceState,
@@ -1556,13 +1578,18 @@ export class UpdateEngine {
         };
       }
 
-      if (health.status === "stopping") {
+      if (initialHealth.status === "stopping") {
         drainInitiated = true;
       } else {
-        const drain = await client.gracefulShutdown({
-          timeoutMs: this.drainTimeoutMs,
-          reason: "Signed Resin update activation drain",
-        });
+        const drain = await this.withTimeoutAndSignal(
+          client.gracefulShutdown({
+            timeoutMs: this.drainTimeoutMs,
+            reason: "Signed Resin update activation drain",
+          }),
+          Math.min(this.drainTimeoutMs, 5_000),
+          signal,
+          "IPC daemon graceful shutdown timed out.",
+        );
         if (!drain.accepted) {
           return {
             activity: { state: "unknown", reason: drain.message },
@@ -1575,24 +1602,23 @@ export class UpdateEngine {
 
       const startedAt = this.clock();
       let elapsedMs = 0;
+      let ipcDisconnected = false;
+      let lastReportedActiveCount = this.countActiveWork(initialHealth);
+
       while (true) {
         this.throwIfAborted(signal);
-        health = await client.getHealth();
-        const activeCount = this.countActiveWork(health);
-        if (activeCount === 0 && health.status === "stopped") {
-          return {
-            activity: { state: "inactive", activeCount: 0 },
-            serviceState,
-            drainInitiated: true,
-          };
-        }
         if (elapsedMs >= this.drainTimeoutMs) {
           return {
-            activity:
-              activeCount > 0
+            activity: ipcDisconnected
+              ? {
+                  state: "active",
+                  activeCount: 1,
+                  reason: "daemon drain timed out with service still active",
+                }
+              : lastReportedActiveCount > 0
                 ? {
                     state: "active",
-                    activeCount,
+                    activeCount: lastReportedActiveCount,
                     reason: "daemon drain timed out with work still active",
                   }
                 : {
@@ -1600,9 +1626,68 @@ export class UpdateEngine {
                     reason: `daemon drain did not complete within ${this.drainTimeoutMs}ms`,
                   },
             serviceState,
-            drainInitiated,
+            drainInitiated: true,
           };
         }
+        const remainingBudgetMs = Math.max(0, this.drainTimeoutMs - elapsedMs);
+
+        if (!ipcDisconnected) {
+          try {
+            const probeTimeout = Math.max(
+              1,
+              Math.min(this.healthProbeIntervalMs, remainingBudgetMs, 5_000),
+            );
+            const health = await this.withTimeoutAndSignal(
+              client.getHealth(),
+              probeTimeout,
+              signal,
+              "IPC health probe timed out",
+            );
+            const activeCount = this.countActiveWork(health);
+            lastReportedActiveCount = activeCount;
+            if (activeCount === 0 && health.status === "stopped") {
+              return {
+                activity: { state: "inactive", activeCount: 0 },
+                serviceState,
+                drainInitiated: true,
+              };
+            }
+          } catch (ipcError) {
+            if (signal?.aborted) throw ipcError;
+            ipcDisconnected = true;
+          }
+        }
+
+        if (ipcDisconnected) {
+          let currentServiceState: ServiceStatusInfo;
+          try {
+            currentServiceState = await this.withTimeoutAndSignal(
+              this.serviceManager.status(),
+              Math.min(remainingBudgetMs, 5_000),
+              signal,
+              "Service status inspection timed out.",
+            );
+          } catch (statusError) {
+            if (signal?.aborted) throw statusError;
+            return {
+              activity: {
+                state: "unknown",
+                reason: `service state unavailable after drain: ${safeDiagnostic(statusError)}`,
+              },
+              serviceState,
+              drainInitiated: true,
+            };
+          }
+
+          if (!currentServiceState.active) {
+            return {
+              activity: { state: "inactive", activeCount: 0 },
+              serviceState,
+              drainInitiated: true,
+            };
+          }
+        }
+
         const delayMs = Math.min(this.healthProbeIntervalMs, this.drainTimeoutMs - elapsedMs);
         await this.sleep(delayMs);
         this.throwIfAborted(signal);
@@ -2325,6 +2410,42 @@ export class UpdateEngine {
     if (!signal?.aborted) return;
     const reason = signal.reason;
     throw reason instanceof Error ? reason : new Error("Update operation aborted.");
+  }
+  private async withTimeoutAndSignal<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    timeoutMessage: string,
+  ): Promise<T> {
+    this.throwIfAborted(signal);
+    if (timeoutMs <= 0) {
+      throw new Error(timeoutMessage);
+    }
+    let rejectRace: (reason?: unknown) => void = () => {};
+    const racePromise = new Promise<T>((_resolve, reject) => {
+      rejectRace = reject;
+    });
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectRace(
+        signal?.reason instanceof Error ? signal.reason : new Error("Update operation aborted."),
+      );
+    };
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      rejectRace(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    try {
+      return await Promise.race([promise, racePromise]);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   private async rollbackActivation(options: {
