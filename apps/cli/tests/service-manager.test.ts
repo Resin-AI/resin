@@ -203,6 +203,58 @@ describe("SystemdUserServiceManager", () => {
     expect(status.enabled).toBe(true);
     expect(status.pid).toBe(12345);
   });
+
+  it("throws when systemctl is-active returns unexpected exit code or unknown state (bus failure)", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const fsBridge = createMockFsBridge({ [unitPath]: "unit content" });
+    const runner = createMockRunner((_cmd, args) => {
+      if (args[1] === "is-active")
+        return {
+          stdout: "\n",
+          stderr: "Failed to connect to bus: Connection refused\n",
+          exitCode: 1,
+        };
+      if (args[1] === "is-enabled") return { stdout: "enabled\n", stderr: "", exitCode: 0 };
+      if (args[1] === "status")
+        return { stdout: "", stderr: "Failed to connect to bus\n", exitCode: 1 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const manager = new SystemdUserServiceManager({
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner,
+    });
+
+    await expect(manager.status()).rejects.toThrow(
+      "Failed to determine systemd service state for resin",
+    );
+  });
+
+  it("returns inactive for legitimate inactive/failed systemd states (exit code 3 or inactive stdout)", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const fsBridge = createMockFsBridge({ [unitPath]: "unit content" });
+    const runner = createMockRunner((_cmd, args) => {
+      if (args[1] === "is-active") return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+      if (args[1] === "is-enabled") return { stdout: "enabled\n", stderr: "", exitCode: 0 };
+      if (args[1] === "status")
+        return { stdout: "Loaded: loaded\nActive: inactive (dead)\n", stderr: "", exitCode: 3 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const manager = new SystemdUserServiceManager({
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner,
+    });
+
+    const status = await manager.status();
+    expect(status.installed).toBe(true);
+    expect(status.active).toBe(false);
+    expect(status.state).toBe("inactive");
+  });
 });
 
 describe("LaunchdUserServiceManager", () => {
@@ -298,6 +350,59 @@ describe("LaunchdUserServiceManager", () => {
     expect(status.installed).toBe(true);
     expect(status.active).toBe(true);
     expect(status.pid).toBe(54321);
+  });
+
+  it("returns inactive when launchctl list reports Could not find service", async () => {
+    const plistPath = path.join(homeDir, "Library", "LaunchAgents", "com.resin.daemon.plist");
+    const fsBridge = createMockFsBridge({ [plistPath]: "<plist></plist>" });
+    const runner = createMockRunner((_cmd, args) => {
+      if (args[0] === "list") {
+        return {
+          stdout: "",
+          stderr: 'Could not find service "com.resin.daemon" in domain for port\n',
+          exitCode: 1,
+        };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const manager = new LaunchdUserServiceManager({
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner,
+    });
+
+    const status = await manager.status();
+    expect(status.installed).toBe(true);
+    expect(status.active).toBe(false);
+    expect(status.state).toBe("inactive");
+  });
+
+  it("throws when launchctl list encounters an ambiguous failure", async () => {
+    const plistPath = path.join(homeDir, "Library", "LaunchAgents", "com.resin.daemon.plist");
+    const fsBridge = createMockFsBridge({ [plistPath]: "<plist></plist>" });
+    const runner = createMockRunner((_cmd, args) => {
+      if (args[0] === "list") {
+        return {
+          stdout: "",
+          stderr: "Internal launchd IPC communication error: connection broken\n",
+          exitCode: 92,
+        };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const manager = new LaunchdUserServiceManager({
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner,
+    });
+
+    await expect(manager.status()).rejects.toThrow(
+      "Failed to determine launchd service state for com.resin.daemon",
+    );
   });
 });
 

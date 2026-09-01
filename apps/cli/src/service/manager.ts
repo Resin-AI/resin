@@ -834,7 +834,6 @@ WantedBy=default.target
         state: "not_installed",
       };
     }
-
     this.ensureLoginHomeForCommands();
     const [activeRes, enabledRes, statusRes] = await Promise.all([
       this.runner.run("systemctl", ["--user", "is-active", this.serviceName]),
@@ -842,7 +841,21 @@ WantedBy=default.target
       this.runner.run("systemctl", ["--user", "status", this.serviceName]),
     ]);
 
-    const active = activeRes.exitCode === 0 && activeRes.stdout.trim() === "active";
+    const activeState = activeRes.stdout.trim();
+    const knownActiveStates: Record<string, true> = {
+      active: true,
+      inactive: true,
+      failed: true,
+      activating: true,
+      deactivating: true,
+    };
+    if ((activeRes.exitCode !== 0 && activeRes.exitCode !== 3) || !knownActiveStates[activeState]) {
+      const err =
+        activeRes.stderr.trim() || activeRes.stdout.trim() || `exit code ${activeRes.exitCode}`;
+      throw new Error(`Failed to determine systemd service state for ${this.serviceName}: ${err}`);
+    }
+
+    const active = activeState !== "inactive" && activeState !== "failed";
     const enabled = enabledRes.exitCode === 0 && enabledRes.stdout.trim() === "enabled";
 
     let pid: number | undefined;
@@ -858,7 +871,7 @@ WantedBy=default.target
       serviceName: this.serviceName,
       unitPath: this.getUnitPath(),
       pid,
-      state: active ? "active" : "inactive",
+      state: activeState,
       rawStatus: statusRes.stdout || statusRes.stderr,
     };
   }
@@ -1099,15 +1112,29 @@ ${envXml}
 
     this.ensureLoginHomeForCommands();
     const listRes = await this.runner.run("launchctl", ["list", this.serviceName]);
-    const active = listRes.exitCode === 0;
-
-    let pid: number | undefined;
-    if (active) {
-      const pidMatch =
-        listRes.stdout.match(/"PID"\s*=\s*(\d+)/i) ?? listRes.stdout.match(/^(\d+)\s+/m);
-      if (pidMatch?.[1]) {
-        pid = Number.parseInt(pidMatch[1], 10);
+    if (listRes.exitCode !== 0) {
+      const combined = `${listRes.stderr}\n${listRes.stdout}`.toLowerCase();
+      if (combined.includes("could not find service") || combined.includes("no such process")) {
+        return {
+          installed: true,
+          active: false,
+          enabled: true,
+          serviceName: this.serviceName,
+          unitPath: this.getUnitPath(),
+          state: "inactive",
+          rawStatus: listRes.stdout || listRes.stderr,
+        };
       }
+      const err = listRes.stderr.trim() || listRes.stdout.trim() || `exit code ${listRes.exitCode}`;
+      throw new Error(`Failed to determine launchd service state for ${this.serviceName}: ${err}`);
+    }
+
+    const active = true;
+    let pid: number | undefined;
+    const pidMatch =
+      listRes.stdout.match(/"PID"\s*=\s*(\d+)/i) ?? listRes.stdout.match(/^(\d+)\s+/m);
+    if (pidMatch?.[1]) {
+      pid = Number.parseInt(pidMatch[1], 10);
     }
 
     return {
@@ -1117,15 +1144,11 @@ ${envXml}
       serviceName: this.serviceName,
       unitPath: this.getUnitPath(),
       pid,
-      state: active ? "active" : "inactive",
+      state: "active",
       rawStatus: listRes.stdout || listRes.stderr,
     };
   }
 }
-
-// -----------------------------------------------------------------------------
-// WSL User Service Manager (systemd when available, script fallback otherwise)
-// -----------------------------------------------------------------------------
 
 export class WslUserServiceManager implements UserServiceManager {
   readonly name = "wsl";
