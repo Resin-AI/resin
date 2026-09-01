@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ProviderReportedUsage } from "@resin/contracts";
+import type { NormalizedSessionEvent, ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import {
   CloudObservationClient,
@@ -487,7 +487,12 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(sendObsResolvedBeforeAck).toBe(true);
       expect(ackCalled).toBe(true);
       expect(mockObservationClient.sendTrajectoryObservationBatch).not.toHaveBeenCalled();
-      expect(submittedObservations.length).toBe(2);
+      expect(submittedObservations.length).toBe(3);
+      expect(submittedObservations[2]).toMatchObject({
+        type: "session_lifecycle",
+        lifecycleType: "end",
+        exitReason: "completed",
+      });
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
       expect(coordinator.getActiveSessionCount()).toBe(0);
     });
@@ -632,6 +637,296 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(mockObservationClient.sendObservationBatch).not.toHaveBeenCalled();
       expect(mockObservationClient.sendTrajectoryObservationBatch).not.toHaveBeenCalled();
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+    });
+
+    it("generic completed session without terminal record: synthesizes exactly one metadata-only terminal lifecycle event and sequences it after existing events", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedObservations: NormalizedSessionEvent[] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedObservations.push(...input.observations);
+          return {
+            batchId: "batch_synth_1",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const session = createMockHarnessSession("sess_generic_synth_1", "completed");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(session.sessionId, 1);
+      const compRec = createCompletionRecord(session.sessionId, 2);
+
+      const ack1 = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [promptRec, compRec], ack1);
+
+      expect(ack1).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedObservations.length).toBe(3);
+
+      expect(submittedObservations[0].type).toBe("message");
+      expect(submittedObservations[0].causalRef.causalSequence).toBe(1);
+
+      expect(submittedObservations[1].type).toBe("message");
+      expect(submittedObservations[1].causalRef.causalSequence).toBe(2);
+
+      const syntheticTerminalEvent = submittedObservations[2];
+      expect(syntheticTerminalEvent.type).toBe("session_lifecycle");
+      if (syntheticTerminalEvent.type === "session_lifecycle") {
+        expect(syntheticTerminalEvent.lifecycleType).toBe("end");
+        expect(syntheticTerminalEvent.exitReason).toBe("completed");
+      }
+      expect(syntheticTerminalEvent.causalRef.causalSequence).toBe(3);
+      expect(syntheticTerminalEvent.causalRef.parentId).toBe(submittedObservations[1].eventId);
+      expect(syntheticTerminalEvent.redaction.isRedacted).toBe(true);
+      expect(syntheticTerminalEvent.redaction.redactionStrategy).toBe("drop");
+      expect(syntheticTerminalEvent.sessionId).toBe(session.sessionId);
+
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+
+      // Idempotency / repeat guard: subsequent handleRecords call does not re-emit
+      const ack2 = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 3)], ack2);
+      expect(ack2).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("generic completed session with explicit terminal end record: does NOT synthesize duplicate terminal lifecycle event", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedObservations: NormalizedSessionEvent[] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedObservations.push(...input.observations);
+          return {
+            batchId: "batch_explicit_end_1",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const session = createMockHarnessSession("sess_generic_explicit_end_1", "completed");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(session.sessionId, 1);
+      const endRec = createLifecycleRecord(session.sessionId, 2, "end", "completed");
+
+      const ack = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [promptRec, endRec], ack);
+
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedObservations.length).toBe(2);
+
+      const lifecycleEvents = submittedObservations.filter((e) => e.type === "session_lifecycle");
+      expect(lifecycleEvents.length).toBe(1);
+      if (lifecycleEvents[0].type === "session_lifecycle") {
+        expect(lifecycleEvents[0].lifecycleType).toBe("end");
+        expect(lifecycleEvents[0].exitReason).toBe("completed");
+      }
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+    });
+
+    it("generic failed session without terminal record: synthesizes crash terminal event", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedObservations: NormalizedSessionEvent[] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedObservations.push(...input.observations);
+          return {
+            batchId: "batch_synth_crash_1",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const session = createMockHarnessSession("sess_generic_synth_crash_1", "failed");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(session.sessionId, 1);
+      const ack = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [promptRec], ack);
+
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedObservations.length).toBe(2);
+
+      const terminalEvent = submittedObservations[1];
+      expect(terminalEvent.type).toBe("session_lifecycle");
+      if (terminalEvent.type === "session_lifecycle") {
+        expect(terminalEvent.lifecycleType).toBe("crash");
+        expect(terminalEvent.exitReason).toBe("failed");
+      }
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+    });
+
+    it("generic active session without terminal record: does NOT synthesize terminal lifecycle event and remains active", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedObservations: NormalizedSessionEvent[] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedObservations.push(...input.observations);
+          return {
+            batchId: "batch_live_1",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const session = createMockHarnessSession("sess_generic_live_1", "active");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(session.sessionId, 1);
+      const ack = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [promptRec], ack);
+
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedObservations.length).toBe(1);
+      expect(submittedObservations[0].type).toBe("message");
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+      expect(coordinator.getActiveSessionCount()).toBe(1);
+    });
+
+    it("generic session incremental delivery: derives synthetic causal tail from prior batches, never seq 1 / null parent", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedBatches: NormalizedSessionEvent[][] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedBatches.push([...input.observations]);
+          return {
+            batchId: `batch_${submittedBatches.length}`,
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const activeSession = createMockHarnessSession("sess_generic_incremental_1", "active");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(activeSession.sessionId, 1);
+      const compRec = createCompletionRecord(activeSession.sessionId, 2);
+
+      // Batch 1: session is active, receives initial records
+      const ack1 = vi.fn(async () => {});
+      await coordinator.handleRecords(activeSession, [promptRec, compRec], ack1);
+
+      expect(ack1).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedBatches[0].length).toBe(2);
+      expect(submittedBatches[0][0].causalRef.causalSequence).toBe(1);
+      expect(submittedBatches[0][1].causalRef.causalSequence).toBe(2);
+      const lastEventIdBatch1 = submittedBatches[0][1].eventId;
+      expect(coordinator.isSessionFinalized(activeSession.sessionId)).toBe(false);
+
+      // Batch 2: session is now completed, receives empty record update
+      const completedSession = {
+        ...activeSession,
+        status: "completed" as const,
+      };
+      const ack2 = vi.fn(async () => {});
+      await coordinator.handleRecords(completedSession, [], ack2);
+
+      expect(ack2).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(2);
+      expect(submittedBatches[1].length).toBe(1);
+
+      const syntheticEvent = submittedBatches[1][0];
+      expect(syntheticEvent.type).toBe("session_lifecycle");
+      if (syntheticEvent.type === "session_lifecycle") {
+        expect(syntheticEvent.lifecycleType).toBe("end");
+        expect(syntheticEvent.exitReason).toBe("completed");
+      }
+      // Sequences accurately after batch 1's tail
+      expect(syntheticEvent.causalRef.causalSequence).toBe(3);
+      expect(syntheticEvent.causalRef.parentId).toBe(lastEventIdBatch1);
+      expect(coordinator.isSessionFinalized(completedSession.sessionId)).toBe(true);
+    });
+
+    it("generic session duplicate explicit end: suppresses synthesis when duplicate results contain explicit end", async () => {
+      const pipeline = new NormalizationPipeline();
+      const submittedBatches: NormalizedSessionEvent[][] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedBatches.push([...input.observations]);
+          return {
+            batchId: `batch_${submittedBatches.length}`,
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+
+      const session = createMockHarnessSession("sess_generic_dup_explicit_1", "active");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const promptRec = createPromptRecord(session.sessionId, 1);
+      const endRec = createLifecycleRecord(session.sessionId, 2, "end", "completed");
+
+      // Batch 1: delivered initial records including explicit end
+      const ack1 = vi.fn(async () => {});
+      await coordinator.handleRecords(session, [promptRec, endRec], ack1);
+
+      expect(ack1).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(submittedBatches[0].length).toBe(2);
+      expect(submittedBatches[0][1].type).toBe("session_lifecycle");
+
+      // Reset finalized session to simulate receiving duplicate replay while session status is completed
+      const completedSession = {
+        ...session,
+        status: "completed" as const,
+      };
+
+      // Test another coordinator instance where pipeline already has the events (duplicates)
+      const coordinator2 = new TrajectoryCaptureCoordinator({
+        pipeline, // shares same deduplicator/pipeline
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+
+      const ack2 = vi.fn(async () => {});
+      await coordinator2.handleRecords(completedSession, [promptRec, endRec], ack2);
+
+      expect(ack2).toHaveBeenCalledTimes(1);
+      // No new batch sent because all records were duplicates and duplicate had explicit end
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(coordinator2.isSessionFinalized(completedSession.sessionId)).toBe(true);
     });
   });
 

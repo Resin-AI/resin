@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
-import type { NormalizedSessionEvent } from "@resin/contracts";
+import {
+  type NormalizedSessionEvent,
+  NormalizedSessionEventSchema,
+} from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { z } from "zod";
 import type { CloudObservationClient, TrajectoryObservation } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
 import {
+  generateDeterministicEventId,
   NormalizationPipeline,
   type PipelineProcessContext,
   type PipelineProcessResult,
@@ -115,6 +119,10 @@ export class TrajectoryCaptureCoordinator {
   private readonly finalizedSessions = new Set<string>();
   private readonly genericSessions = new Set<string>();
   private readonly sessionLocks = new Map<string, Promise<void>>();
+  private readonly genericSessionTails = new Map<
+    string,
+    { eventId: string; causalSequence: number }
+  >();
 
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(
@@ -217,6 +225,7 @@ export class TrajectoryCaptureCoordinator {
     this.activeSessions.clear();
     this.activeGenericSessions.clear();
     this.genericSessions.clear();
+    this.genericSessionTails.clear();
   }
 
   /**
@@ -234,6 +243,7 @@ export class TrajectoryCaptureCoordinator {
       this.activeSessions.clear();
       this.activeGenericSessions.clear();
       this.genericSessions.clear();
+      this.genericSessionTails.clear();
     }
   }
 
@@ -243,6 +253,7 @@ export class TrajectoryCaptureCoordinator {
   ): Promise<void> {
     this.activeSessions.delete(sessionId);
     this.activeGenericSessions.delete(sessionId);
+    this.genericSessionTails.delete(sessionId);
     this.genericSessions.delete(sessionId);
     await ack();
   }
@@ -447,6 +458,8 @@ export class TrajectoryCaptureCoordinator {
       } else {
         // GENERIC SESSION PATH
         const validEvents: NormalizedSessionEvent[] = [];
+        let hasExplicitTerminal = false;
+        let latestTail = this.genericSessionTails.get(sessionId);
 
         if (telemetryRecords.length > 0) {
           const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
@@ -469,13 +482,40 @@ export class TrajectoryCaptureCoordinator {
           }
 
           for (const res of pipelineResults) {
-            if (res.status === "dead_letter" || (res.status === "success" && res.isDuplicate)) {
+            if (res.status === "dead_letter") {
               continue;
             }
-            if (res.event) {
-              validEvents.push(res.event);
+            if (res.status === "success" && res.event) {
+              const ev = res.event;
+              if (
+                ev.type === "session_lifecycle" &&
+                (ev.lifecycleType === "end" || ev.lifecycleType === "crash")
+              ) {
+                hasExplicitTerminal = true;
+              }
+              const seq = ev.causalRef?.causalSequence ?? 0;
+              if (!latestTail || seq >= latestTail.causalSequence) {
+                latestTail = { eventId: ev.eventId, causalSequence: seq };
+              }
+              if (!res.isDuplicate) {
+                validEvents.push(ev);
+              }
             }
           }
+        }
+
+        const isTerminalStatus =
+          session.status === "completed" ||
+          session.status === "failed" ||
+          session.status === "interrupted";
+
+        if (isTerminalStatus && !hasExplicitTerminal && latestTail) {
+          const syntheticEvent = this.createSyntheticTerminalEvent(session, latestTail);
+          validEvents.push(syntheticEvent);
+          latestTail = {
+            eventId: syntheticEvent.eventId,
+            causalSequence: syntheticEvent.causalRef.causalSequence,
+          };
         }
 
         if (validEvents.length > 0) {
@@ -512,10 +552,13 @@ export class TrajectoryCaptureCoordinator {
           return;
         }
 
+        if (latestTail) {
+          this.genericSessionTails.set(sessionId, latestTail);
+        }
+
         const isTerminal =
-          session.status === "completed" ||
-          session.status === "failed" ||
-          session.status === "interrupted" ||
+          isTerminalStatus ||
+          hasExplicitTerminal ||
           validEvents.some(
             (e) =>
               e.type === "session_lifecycle" &&
@@ -525,6 +568,7 @@ export class TrajectoryCaptureCoordinator {
         if (isTerminal) {
           this.finalizedSessions.add(sessionId);
           this.activeGenericSessions.delete(sessionId);
+          this.genericSessionTails.delete(sessionId);
         }
 
         await ack();
@@ -593,5 +637,62 @@ export class TrajectoryCaptureCoordinator {
    */
   public getActiveEmitter(sessionId: string): TrajectoryEmitter | undefined {
     return this.activeSessions.get(sessionId);
+  }
+  private createSyntheticTerminalEvent(
+    session: HarnessSession,
+    tail: { eventId: string; causalSequence: number },
+  ): NormalizedSessionEvent {
+    const causalSequence = tail.causalSequence + 1;
+    const parentId = tail.eventId;
+
+    const lifecycleType: "end" | "crash" = session.status === "failed" ? "crash" : "end";
+    const exitReason =
+      session.status === "completed"
+        ? "completed"
+        : session.status === "failed"
+          ? "failed"
+          : "interrupted";
+
+    const timestamp = session.updatedAt;
+
+    const payloadForHash = {
+      schemaVersion: "1.0.0",
+      sessionId: session.sessionId,
+      type: "session_lifecycle" as const,
+      lifecycleType,
+      exitReason,
+      timestamp,
+      causalRef: {
+        parentId,
+        causalSequence,
+      },
+      redaction: {
+        isRedacted: true,
+        redactedFields: [],
+        redactionStrategy: "drop" as const,
+        scrubbedPatterns: [],
+        redactedAt: timestamp,
+      },
+      metadata: {},
+      ...(typeof session.harnessId === "string" && session.harnessId.length > 0
+        ? { harnessName: session.harnessId }
+        : {}),
+      ...(typeof session.workspaceId === "string" && session.workspaceId.length > 0
+        ? { workspaceId: session.workspaceId }
+        : {}),
+    };
+
+    const eventId = generateDeterministicEventId(
+      session.sessionId,
+      causalSequence,
+      payloadForHash,
+    );
+
+    const event: NormalizedSessionEvent = {
+      ...payloadForHash,
+      eventId,
+    };
+
+    return NormalizedSessionEventSchema.parse(event);
   }
 }

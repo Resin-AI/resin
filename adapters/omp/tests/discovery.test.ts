@@ -417,7 +417,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
-  it("ensures explicit lifecycle records override mtime status", async () => {
+  it("expires stale non-terminal lifecycle records while preserving explicit terminal status", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-explicit-lifecycle-"));
     try {
       const ompHome = path.join(tmpDir, ".omp");
@@ -426,7 +426,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-explicit-app");
       await fsp.mkdir(sessionsDir, { recursive: true });
 
-      // 1. Session with explicit start but old mtime (10 hours ago) -> active
+      // 1. Session with explicit start but old mtime (10 hours ago) -> completed
       const startTranscript = path.join(sessionsDir, "session-start.jsonl");
       const tenHoursAgo = new Date(Date.now() - 36_000_000);
       await fsp.writeFile(
@@ -482,7 +482,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const endSession = sessions.find((s) => s.sessionId === "sess-explicit-end");
 
       expect(startSession).toBeDefined();
-      expect(startSession?.status).toBe("active");
+      expect(startSession?.status).toBe("completed");
 
       expect(endSession).toBeDefined();
       expect(endSession?.status).toBe("completed");
@@ -829,6 +829,202 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       expect(allSessions.length).toBe(2);
       expect(allSessions.some((s) => s.sessionId === "long-running-sess-1")).toBe(true);
       expect(allSessions.some((s) => s.sessionId === "old-peer-sess-2")).toBe(true);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stale start-only transcript becomes completed after 60s inactivity timeout", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-stale-session-"));
+    try {
+      const wsPath = path.join(tmpDir, "workspace");
+      const sessionsDir = path.join(wsPath, ".omp", "sessions");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const sessionFile = path.join(sessionsDir, "session-print-mode.jsonl");
+      await fsp.writeFile(
+        sessionFile,
+        `${[
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: "2026-08-20T10:00:00.000Z",
+          }),
+          JSON.stringify({ type: "message", role: "user", content: "one-shot prompt" }),
+          JSON.stringify({ type: "message", role: "assistant", content: "one-shot response" }),
+        ].join("\n")}\n`,
+      );
+
+      // Backdate mtime to 120 seconds ago (> 60s inactivity timeout)
+      const staleTime = new Date(Date.now() - 120_000);
+      await fsp.utimes(sessionFile, staleTime, staleTime);
+
+      const workspace = {
+        workspaceId: "ws-stale-test",
+        rootPath: wsPath,
+        name: "workspace",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("print-mode");
+      expect(sessions[0].status).toBe("completed");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recent start-only transcript remains active within 60s window", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-recent-session-"));
+    try {
+      const wsPath = path.join(tmpDir, "workspace");
+      const sessionsDir = path.join(wsPath, ".omp", "sessions");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const sessionFile = path.join(sessionsDir, "session-live.jsonl");
+      await fsp.writeFile(
+        sessionFile,
+        `${[
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: "2026-08-20T10:00:00.000Z",
+          }),
+          JSON.stringify({ type: "message", role: "user", content: "live turn" }),
+        ].join("\n")}\n`,
+      );
+
+      // Recent mtime (5 seconds ago, <= 60s window)
+      const recentTime = new Date(Date.now() - 5_000);
+      await fsp.utimes(sessionFile, recentTime, recentTime);
+
+      const workspace = {
+        workspaceId: "ws-recent-test",
+        rootPath: wsPath,
+        name: "workspace",
+        harnessId: "omp",
+      };
+
+      const sessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].sessionId).toBe("live");
+      expect(sessions[0].status).toBe("active");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recent pause transcript remains idle within 60s window and becomes completed when stale", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-idle-session-"));
+    try {
+      const wsPath = path.join(tmpDir, "workspace");
+      const sessionsDir = path.join(wsPath, ".omp", "sessions");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const idleFile = path.join(sessionsDir, "session-idle.jsonl");
+      await fsp.writeFile(
+        idleFile,
+        `${[
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: "2026-08-20T10:00:00.000Z",
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "pause",
+            timestamp: "2026-08-20T10:01:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const workspace = {
+        workspaceId: "ws-idle-test",
+        rootPath: wsPath,
+        name: "workspace",
+        harnessId: "omp",
+      };
+
+      // When recent -> idle
+      const recentTime = new Date(Date.now() - 5_000);
+      await fsp.utimes(idleFile, recentTime, recentTime);
+      const recentSessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(recentSessions[0].status).toBe("idle");
+
+      // When stale -> completed
+      const staleTime = new Date(Date.now() - 120_000);
+      await fsp.utimes(idleFile, staleTime, staleTime);
+      const staleSessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(staleSessions[0].status).toBe("completed");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("explicit terminal status (end / crash) always wins regardless of recent or stale mtime", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-terminal-session-"));
+    try {
+      const wsPath = path.join(tmpDir, "workspace");
+      const sessionsDir = path.join(wsPath, ".omp", "sessions");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const endFile = path.join(sessionsDir, "session-ended.jsonl");
+      await fsp.writeFile(
+        endFile,
+        `${[
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: "2026-08-20T10:00:00.000Z",
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "end",
+            timestamp: "2026-08-20T10:05:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const crashFile = path.join(sessionsDir, "session-crashed.jsonl");
+      await fsp.writeFile(
+        crashFile,
+        `${[
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            timestamp: "2026-08-20T10:00:00.000Z",
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "crash",
+            timestamp: "2026-08-20T10:02:00.000Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const workspace = {
+        workspaceId: "ws-terminal-test",
+        rootPath: wsPath,
+        name: "workspace",
+        harnessId: "omp",
+      };
+
+      // Both files with recent mtimes (1 second ago)
+      const recentTime = new Date(Date.now() - 1_000);
+      await fsp.utimes(endFile, recentTime, recentTime);
+      await fsp.utimes(crashFile, recentTime, recentTime);
+      let sessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(sessions.find((s) => s.sessionId === "ended")?.status).toBe("completed");
+      expect(sessions.find((s) => s.sessionId === "crashed")?.status).toBe("failed");
+
+      // Both files with stale mtimes (200 seconds ago)
+      const staleTime = new Date(Date.now() - 200_000);
+      await fsp.utimes(endFile, staleTime, staleTime);
+      await fsp.utimes(crashFile, staleTime, staleTime);
+      sessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      expect(sessions.find((s) => s.sessionId === "ended")?.status).toBe("completed");
+      expect(sessions.find((s) => s.sessionId === "crashed")?.status).toBe("failed");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
