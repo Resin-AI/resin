@@ -705,7 +705,9 @@ WantedBy=default.target
       // Unit file must now contain unversioned stable launcher under current/
       const updatedUnitContent = fs.readFileSync(unitPath, "utf8");
       expect(updatedUnitContent).not.toContain("v1.0.20");
-      expect(updatedUnitContent).toContain(path.join(resinHome, "current", "apps", "cli", "dist", "index.js"));
+      expect(updatedUnitContent).toContain(
+        path.join(resinHome, "current", "apps", "cli", "dist", "index.js"),
+      );
 
       // Systemctl daemon-reload and restart must have been called
       const daemonReloadCmd = mockRunner.commands.find(
@@ -729,7 +731,8 @@ WantedBy=default.target
       expect(secondRun.reused).toBe(true);
 
       const secondMutations = mockRunner.commands.filter(
-        (c) => c.cmd === "systemctl" && (c.args.includes("daemon-reload") || c.args.includes("restart")),
+        (c) =>
+          c.cmd === "systemctl" && (c.args.includes("daemon-reload") || c.args.includes("restart")),
       );
       expect(secondMutations.length).toBe(0);
     });
@@ -761,7 +764,11 @@ WantedBy=default.target
       expect(result.reused).toBe(true);
 
       const mutations = mockRunner.commands.filter(
-        (c) => c.cmd === "systemctl" && (c.args.includes("daemon-reload") || c.args.includes("restart") || c.args.includes("enable")),
+        (c) =>
+          c.cmd === "systemctl" &&
+          (c.args.includes("daemon-reload") ||
+            c.args.includes("restart") ||
+            c.args.includes("enable")),
       );
       expect(mutations.length).toBe(0);
     });

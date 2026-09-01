@@ -727,15 +727,40 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         return this.normalizeReasoning(mergedPayload, sessionId, timestamp, causalRef, metadata);
       }
       if (effectiveRole === "user") {
-        return this.normalizeMessage(mergedPayload, "user", sessionId, timestamp, causalRef, metadata);
+        return this.normalizeMessage(
+          mergedPayload,
+          "user",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
       }
       if (effectiveRole === "system") {
-        return this.normalizeMessage(mergedPayload, "system", sessionId, timestamp, causalRef, metadata);
+        return this.normalizeMessage(
+          mergedPayload,
+          "system",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
       }
-      if (effectiveRole === "toolresult" || effectiveRole === "tool_result" || effectiveRole === "tool") {
+      if (
+        effectiveRole === "toolresult" ||
+        effectiveRole === "tool_result" ||
+        effectiveRole === "tool"
+      ) {
         return this.normalizeToolResult(mergedPayload, sessionId, timestamp, causalRef, metadata);
       }
-      return this.normalizeMessage(mergedPayload, "assistant", sessionId, timestamp, causalRef, metadata);
+      return this.normalizeMessage(
+        mergedPayload,
+        "assistant",
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
     }
 
     // 3. Standalone nested message envelope
@@ -1145,7 +1170,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       (lifecycleType === "crash"
         ? "error"
         : lifecycleType === "end"
-          ? asString(obj.status) ?? "completed"
+          ? (asString(obj.status) ?? "completed")
           : undefined);
     const harnessName = asString(obj.harnessName) ?? asString(obj.harness) ?? "omp";
     const workspaceId = asString(obj.workspaceId) ?? asString(obj.workspace);

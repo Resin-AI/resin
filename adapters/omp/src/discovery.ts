@@ -659,10 +659,7 @@ export async function inspectTranscriptFile(
               const defaultAction =
                 eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
               const action = String(
-                parsed.lifecycleType ??
-                  parsed.action ??
-                  parsed.status ??
-                  defaultAction,
+                parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
               ).toLowerCase();
               const exitReason = String(
                 parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
@@ -758,10 +755,7 @@ export async function inspectTranscriptFile(
               const defaultAction =
                 eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
               const action = String(
-                parsed.lifecycleType ??
-                  parsed.action ??
-                  parsed.status ??
-                  defaultAction,
+                parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
               ).toLowerCase();
               const exitReason = String(
                 parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",

@@ -382,10 +382,7 @@ function isAbortError(cause: unknown): boolean {
   return false;
 }
 
-export function resolveSupervisorEntryPath(
-  resinHome: string,
-  explicitPath?: string,
-): string {
+export function resolveSupervisorEntryPath(resinHome: string, explicitPath?: string): string {
   if (explicitPath && explicitPath.trim().length > 0) {
     return explicitPath;
   }
@@ -443,8 +440,12 @@ export function isStaleSupervisorUnitContent(
   }
 
   // 3. Launchd: compare ProgramArguments array only
-  const onDiskArgsMatch = onDiskContent.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
-  const expectedArgsMatch = expectedContent.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  const onDiskArgsMatch = onDiskContent.match(
+    /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/,
+  );
+  const expectedArgsMatch = expectedContent.match(
+    /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/,
+  );
   if (onDiskArgsMatch && expectedArgsMatch) {
     const normalizeArgs = (str: string) => str.replace(/\s+/g, " ").trim();
     return normalizeArgs(onDiskArgsMatch[1]) !== normalizeArgs(expectedArgsMatch[1]);

@@ -313,7 +313,8 @@ export class VerificationSuite {
         const expectedUnit = this.serviceManager.getUnitDefinition();
         if (isStaleSupervisorUnitContent(onDiskUnit, expectedUnit)) {
           isStaleUnit = true;
-          unitMismatchReason = "Unit definition on disk is outdated (stale supervisor command or paths)";
+          unitMismatchReason =
+            "Unit definition on disk is outdated (stale supervisor command or paths)";
         }
       }
     } catch {
@@ -323,7 +324,8 @@ export class VerificationSuite {
       return {
         status: "warn",
         message: `Daemon service unit definition is outdated (${status.serviceName})`,
-        remediation: "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
+        remediation:
+          "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
         details: {
           platform: this.serviceManager.platform,
           serviceName: status.serviceName,

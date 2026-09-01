@@ -560,7 +560,9 @@ describe("doctor & repair commands", () => {
       enabled: true,
       started: false,
     });
-    mockServiceManager.restart = vi.fn().mockRejectedValue(new Error("systemctl restart timed out"));
+    mockServiceManager.restart = vi
+      .fn()
+      .mockRejectedValue(new Error("systemctl restart timed out"));
 
     await expect(
       repairState({
@@ -605,7 +607,9 @@ describe("doctor & repair commands", () => {
       enabled: true,
       started: false,
     });
-    mockServiceManager.restart = vi.fn().mockRejectedValue(new Error("systemctl restart timed out"));
+    mockServiceManager.restart = vi
+      .fn()
+      .mockRejectedValue(new Error("systemctl restart timed out"));
 
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;

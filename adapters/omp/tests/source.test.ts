@@ -204,10 +204,10 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-tool-exec-"));
     try {
       const transcriptPath = path.join(tmpDir, "session.jsonl");
-      const content = [
+      const content = `${[
         JSON.stringify({ type: "tool_execution_start", toolName: "read", callId: "c1" }),
         JSON.stringify({ type: "tool_execution_end", callId: "c1", result: "ok" }),
-      ].join("\n") + "\n";
+      ].join("\n")}\n`;
 
       await fsp.writeFile(transcriptPath, content);
 

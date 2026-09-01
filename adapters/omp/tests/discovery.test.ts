@@ -11,8 +11,8 @@ import {
   discoverOmpWorkspaces,
   findOmpExecutable,
   inspectBreadcrumbs,
-  probeOmpInstallation,
   inspectTranscriptFile,
+  probeOmpInstallation,
   resolveOmpHome,
 } from "../src/discovery.js";
 
@@ -963,11 +963,15 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const t1Path = path.join(tmpDir, "session-agent-end.jsonl");
       await fsp.writeFile(
         t1Path,
-        [
+        `${[
           JSON.stringify({ type: "session", id: "sess-1", timestamp: "2026-09-01T10:00:00Z" }),
           JSON.stringify({ type: "agent_start", timestamp: "2026-09-01T10:00:01Z" }),
-          JSON.stringify({ type: "agent_end", status: "completed", timestamp: "2026-09-01T10:00:10Z" }),
-        ].join("\n") + "\n",
+          JSON.stringify({
+            type: "agent_end",
+            status: "completed",
+            timestamp: "2026-09-01T10:00:10Z",
+          }),
+        ].join("\n")}\n`,
       );
 
       const parsed1 = await inspectTranscriptFile(t1Path);
@@ -977,10 +981,14 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const t2Path = path.join(tmpDir, "session-terminal.jsonl");
       await fsp.writeFile(
         t2Path,
-        [
+        `${[
           JSON.stringify({ type: "session", id: "sess-2", timestamp: "2026-09-01T10:00:00Z" }),
-          JSON.stringify({ type: "session", status: "completed", timestamp: "2026-09-01T10:00:05Z" }),
-        ].join("\n") + "\n",
+          JSON.stringify({
+            type: "session",
+            status: "completed",
+            timestamp: "2026-09-01T10:00:05Z",
+          }),
+        ].join("\n")}\n`,
       );
 
       const parsed2 = await inspectTranscriptFile(t2Path);
@@ -997,11 +1005,16 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const t1Path = path.join(tmpDir, "session-agent-crash.jsonl");
       await fsp.writeFile(
         t1Path,
-        [
+        `${[
           JSON.stringify({ type: "session", id: "sess-fail-1", timestamp: "2026-09-01T10:00:00Z" }),
           JSON.stringify({ type: "agent_start", timestamp: "2026-09-01T10:00:01Z" }),
-          JSON.stringify({ type: "agent_end", status: "failed", error: "fatal crash", timestamp: "2026-09-01T10:00:10Z" }),
-        ].join("\n") + "\n",
+          JSON.stringify({
+            type: "agent_end",
+            status: "failed",
+            error: "fatal crash",
+            timestamp: "2026-09-01T10:00:10Z",
+          }),
+        ].join("\n")}\n`,
       );
 
       const parsed1 = await inspectTranscriptFile(t1Path);
@@ -1011,10 +1024,15 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const t2Path = path.join(tmpDir, "session-term-error.jsonl");
       await fsp.writeFile(
         t2Path,
-        [
+        `${[
           JSON.stringify({ type: "session", id: "sess-fail-2", timestamp: "2026-09-01T10:00:00Z" }),
-          JSON.stringify({ type: "session", status: "crash", reason: "oom", timestamp: "2026-09-01T10:00:05Z" }),
-        ].join("\n") + "\n",
+          JSON.stringify({
+            type: "session",
+            status: "crash",
+            reason: "oom",
+            timestamp: "2026-09-01T10:00:05Z",
+          }),
+        ].join("\n")}\n`,
       );
 
       const parsed2 = await inspectTranscriptFile(t2Path);

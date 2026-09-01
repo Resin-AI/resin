@@ -375,7 +375,8 @@ export async function runDiagnostics(options: {
       category: "service",
       status: "warn",
       message: `Service unit ${svcStatus.serviceName} has an outdated definition (stale supervisor command)`,
-      remediation: "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
+      remediation:
+        "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
       fixable: true,
     });
   } else if (!svcStatus.active) {

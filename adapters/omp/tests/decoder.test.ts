@@ -1148,7 +1148,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(res3.isError).toBe(false);
 
       // Terminal event is session_lifecycle end
-      const lastEvent = decodedEvents[decodedEvents.length - 1] as IntermediateSessionLifecycleEvent;
+      const lastEvent = decodedEvents[
+        decodedEvents.length - 1
+      ] as IntermediateSessionLifecycleEvent;
       expect(lastEvent.type).toBe("session_lifecycle");
       expect(lastEvent.lifecycleType).toBe("end");
       expect(lastEvent.exitReason).toBe("task_completed");
