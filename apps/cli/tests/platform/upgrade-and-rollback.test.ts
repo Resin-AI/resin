@@ -1770,9 +1770,9 @@ describe("UpdateEngine staging, activation, and rollback", () => {
         setImmediate(async () => {
           if (!serverStopped) {
             serverStopped = true;
-            await server.stop().catch(() => {});
             serviceActive = false;
             events.push("daemon-exited");
+            await server.stop().catch(() => {});
           }
         });
       },
