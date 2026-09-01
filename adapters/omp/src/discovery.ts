@@ -802,23 +802,15 @@ export async function inspectTranscriptFile(
     }
 
     const hasExplicitLifecycle = explicitStatus !== null;
+    const isStale = ageMs > 60_000;
+
     let status: SessionStatus;
-    if (explicitStatus !== null) {
+    if (explicitStatus === "completed" || explicitStatus === "failed") {
       status = explicitStatus;
+    } else if (explicitStatus === "active" || explicitStatus === "idle") {
+      status = isStale ? "completed" : explicitStatus;
     } else {
-      const now =
-        options?.now instanceof Date
-          ? options.now.getTime()
-          : typeof options?.now === "number"
-            ? options.now
-            : Date.now();
-      const mtimeMs = stat.mtimeMs || stat.mtime.getTime();
-      const ageMs = now - mtimeMs;
-      if (ageMs <= 60_000) {
-        status = "active";
-      } else {
-        status = "completed";
-      }
+      status = isStale ? "completed" : "active";
     }
 
     let canonicalCwd: string | null = null;

@@ -713,7 +713,7 @@ describe("cloud authentication recovery", () => {
 
     expect(restartedHandlerCalls).toBe(2);
     expect(deliveredRecordIds).toEqual([firstRecord.recordId, secondRecord.recordId]);
-    expect(uploadedSequences).toEqual([1, 2]);
+    expect(uploadedSequences).toEqual([1, 2, 3]);
     expect(attemptedBatchIds).toHaveLength(2);
     expect(await cursorManager.getCursor(session.sessionId)).toMatchObject({ sequence: 2 });
     expect(restartedSource.getCursor()).toMatchObject({ sequence: 2 });
