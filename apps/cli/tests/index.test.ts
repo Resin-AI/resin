@@ -1,5 +1,15 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { main, mcpCommand, parseArgs, parseMcpArgs } from "../src/index.js";
+import {
+  isDirectServiceSupervisorEntry,
+  main,
+  mcpCommand,
+  parseArgs,
+  parseMcpArgs,
+} from "../src/index.js";
 
 describe("cli", () => {
   it("parses CLI arguments", () => {
@@ -148,6 +158,85 @@ describe("cli", () => {
 
       expect(exitCode).toBe(1);
       expect(stderrOutput).toContain("Fatal MCP error: Bridge connection failed");
+    });
+  });
+
+  describe("isDirectServiceSupervisorEntry", () => {
+    it("detects direct entry when argv1 invokes the script through a directory symlink", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-symlink-test-"));
+      try {
+        const versionDir = path.join(tmpDir, "versions", "1.0.23", "apps", "cli", "dist");
+        fs.mkdirSync(versionDir, { recursive: true });
+        const realScriptPath = path.join(versionDir, "index.js");
+        fs.writeFileSync(realScriptPath, "// test", "utf8");
+
+        const currentSymlink = path.join(tmpDir, "current");
+        fs.symlinkSync(path.join(tmpDir, "versions", "1.0.23"), currentSymlink, "dir");
+
+        const symlinkedArgv = path.join(currentSymlink, "apps", "cli", "dist", "index.js");
+        const canonicalMetaUrl = pathToFileURL(realScriptPath).href;
+
+        expect(isDirectServiceSupervisorEntry(canonicalMetaUrl, symlinkedArgv)).toBe(true);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("detects direct entry when argv1 is a direct file symlink to the script", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-symlink-file-test-"));
+      try {
+        const targetFile = path.join(tmpDir, "target.js");
+        const linkFile = path.join(tmpDir, "link.js");
+        fs.writeFileSync(targetFile, "// target", "utf8");
+        fs.symlinkSync(targetFile, linkFile, "file");
+
+        const canonicalMetaUrl = pathToFileURL(targetFile).href;
+
+        expect(isDirectServiceSupervisorEntry(canonicalMetaUrl, linkFile)).toBe(true);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("handles mock or nonexistent paths matching the expected identity", () => {
+      const mockPath = "/mock/virtual/apps/cli/dist/index.js";
+      const mockMetaUrl = pathToFileURL(mockPath).href;
+
+      expect(isDirectServiceSupervisorEntry(mockMetaUrl, mockPath)).toBe(true);
+    });
+
+    it("returns false for nonexistent paths with mismatched identities", () => {
+      const mockArgv = "/mock/virtual/apps/cli/dist/index.js";
+      const mockMetaUrl = pathToFileURL("/mock/virtual/apps/cli/dist/other.js").href;
+
+      expect(isDirectServiceSupervisorEntry(mockMetaUrl, mockArgv)).toBe(false);
+    });
+
+    it("returns false when imported by an unrelated script or CLI binary", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-negative-test-"));
+      try {
+        const cliEntry = path.join(tmpDir, "cli.js");
+        const indexModule = path.join(tmpDir, "index.js");
+        fs.writeFileSync(cliEntry, "// cli", "utf8");
+        fs.writeFileSync(indexModule, "// index", "utf8");
+
+        const moduleMetaUrl = pathToFileURL(indexModule).href;
+        expect(isDirectServiceSupervisorEntry(moduleMetaUrl, cliEntry)).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns false when argv1 is undefined or empty", () => {
+      expect(isDirectServiceSupervisorEntry(import.meta.url, undefined)).toBe(false);
+      expect(isDirectServiceSupervisorEntry(import.meta.url, "")).toBe(false);
+    });
+
+    it("returns false for invalid or non-file metaUrl strings", () => {
+      expect(
+        isDirectServiceSupervisorEntry("https://example.com/index.js", "/some/path/index.js"),
+      ).toBe(false);
+      expect(isDirectServiceSupervisorEntry("not-a-valid-url", "/some/path/index.js")).toBe(false);
     });
   });
 });
