@@ -32,6 +32,8 @@ import {
   gzipDeterministic,
 } from "./package-release.mjs";
 import {
+  DEFAULT_CHANNEL_TTL_MS,
+  DEFAULT_MANIFEST_TTL_MS,
   RELEASE_SIGNING_ALGORITHM,
   REVOKED_RELEASE_KEY_IDS,
   canonicalJson,
@@ -1014,6 +1016,7 @@ export async function verifyCandidate(options = {}) {
       manifestPayload,
       manifestSigs[0],
       trustedKeys,
+      options,
     );
     if (!manifestSigResult.valid) {
       throw new Error(
@@ -1068,7 +1071,12 @@ export async function verifyCandidate(options = {}) {
       throw new Error("Candidate channels.json is unsigned.");
     }
     const { signatures: chanSigs, ...chanPayload } = channels;
-    const chanSigResult = verifyReleasePayloadSignature(chanPayload, chanSigs[0], trustedKeys);
+    const chanSigResult = verifyReleasePayloadSignature(
+      chanPayload,
+      chanSigs[0],
+      trustedKeys,
+      options,
+    );
     if (!chanSigResult.valid) {
       throw new Error(`Candidate channels signature verification failed: ${chanSigResult.reason}`);
     }
@@ -1276,7 +1284,12 @@ export async function verifyPublic(options = {}) {
     if (item.type === "manifest") {
       const parsedManifest = JSON.parse(bodyBuffer.toString("utf8"));
       const { signatures, ...payload } = parsedManifest;
-      const sigResult = verifyReleasePayloadSignature(payload, signatures?.[0], trustedKeys);
+      const sigResult = verifyReleasePayloadSignature(
+        payload,
+        signatures?.[0],
+        trustedKeys,
+        options,
+      );
       if (!sigResult.valid) {
         throw new Error(
           `Public manifest signature verification failed for '${url}': ${sigResult.reason}`,
@@ -1285,7 +1298,12 @@ export async function verifyPublic(options = {}) {
     } else if (item.type === "candidate-channel") {
       const parsedChannels = JSON.parse(bodyBuffer.toString("utf8"));
       const { signatures, ...payload } = parsedChannels;
-      const sigResult = verifyReleasePayloadSignature(payload, signatures?.[0], trustedKeys);
+      const sigResult = verifyReleasePayloadSignature(
+        payload,
+        signatures?.[0],
+        trustedKeys,
+        options,
+      );
       if (!sigResult.valid) {
         throw new Error(
           `Public candidate channels signature verification failed for '${url}': ${sigResult.reason}`,
@@ -2179,32 +2197,55 @@ export async function freeze(options = {}) {
   const channelsS3Key = applyKeyPrefix(CHANNELS_S3_KEY, keyPrefix);
   const channelsInvalidationPath = deriveInvalidationPath(CHANNELS_S3_KEY, keyPrefix);
 
-  // 1. Upload immutable signed freeze notice
-  await s3PutObject(
-    {
-      bucket,
-      key: freezeS3Key,
-      body: noticeCanonical,
-      cacheControl: IMMUTABLE_CACHE_CONTROL,
-      contentType: "application/json",
-    },
-    options,
-  );
-  // 2. Load and update channels.json with revoked version
+  // 1. Resolve and update channels.json with revoked version
   let currentChannels = options.currentChannels;
   if (!currentChannels) {
-    const localChannelsPath = path.resolve(
-      options.rootDir || process.cwd(),
-      `dist/release/v${targetVersion}/channels.json`,
-    );
-    if (fs.existsSync(localChannelsPath)) {
-      currentChannels = JSON.parse(fs.readFileSync(localChannelsPath, "utf8"));
+    if (options.channelsPath) {
+      const explicitChannelsPath = path.resolve(options.channelsPath);
+      if (!fs.existsSync(explicitChannelsPath)) {
+        throw new Error(`Explicit channels file not found at '${options.channelsPath}'.`);
+      }
+      currentChannels = JSON.parse(fs.readFileSync(explicitChannelsPath, "utf8"));
+    } else if (options.releaseDir || options.distDir || options.candidateDir) {
+      const explicitDir = path.resolve(
+        options.releaseDir || options.distDir || options.candidateDir,
+      );
+      const directPath = path.join(explicitDir, "channels.json");
+      const nestedPath = path.join(explicitDir, "release", "channels.json");
+      if (fs.existsSync(directPath)) {
+        currentChannels = JSON.parse(fs.readFileSync(directPath, "utf8"));
+      } else if (fs.existsSync(nestedPath)) {
+        currentChannels = JSON.parse(fs.readFileSync(nestedPath, "utf8"));
+      } else {
+        throw new Error(
+          `channels.json not found in explicitly specified release directory '${explicitDir}' (checked '${directPath}' and '${nestedPath}').`,
+        );
+      }
+    } else if (options.rootDir) {
+      const explicitRootDir = path.resolve(options.rootDir);
+      const candidates = [
+        path.resolve(explicitRootDir, `dist/release/v${targetVersion}/channels.json`),
+        path.join(explicitRootDir, "release", "channels.json"),
+        path.join(explicitRootDir, "channels.json"),
+      ];
+      const matched = candidates.find((p) => fs.existsSync(p));
+      if (matched) {
+        currentChannels = JSON.parse(fs.readFileSync(matched, "utf8"));
+      } else {
+        throw new Error(
+          `channels.json not found under explicitly specified root directory '${explicitRootDir}' (checked ${candidates.map((c) => `'${c}'`).join(", ")}).`,
+        );
+      }
     } else {
+      // Synthesize fresh minimal channels without touching ambient cwd artifacts
       currentChannels = {
         schemaVersion: "2.0.0",
         minSupportedVersion: "0.1.0",
         currentVersion: targetVersion,
-        updatedAt: new Date().toISOString(),
+        updatedAt: freezeParams.frozenAt,
+        expiresAt:
+          options.expiresAt ||
+          new Date(Date.parse(freezeParams.frozenAt) + DEFAULT_CHANNEL_TTL_MS).toISOString(),
         channels: {
           stable: {
             version: targetVersion,
@@ -2226,11 +2267,25 @@ export async function freeze(options = {}) {
   }
   chanPayload.revokedVersions = existingRevoked;
   chanPayload.updatedAt = freezeParams.frozenAt;
+  chanPayload.expiresAt =
+    options.expiresAt ||
+    new Date(Date.parse(freezeParams.frozenAt) + DEFAULT_CHANNEL_TTL_MS).toISOString();
   const signedRevokedChannels = {
     ...chanPayload,
     signatures: [{ ...signReleasePayload(chanPayload, keyPair), signedAt: freezeParams.frozenAt }],
   };
 
+  // 2. Upload immutable signed freeze notice
+  await s3PutObject(
+    {
+      bucket,
+      key: freezeS3Key,
+      body: noticeCanonical,
+      cacheControl: IMMUTABLE_CACHE_CONTROL,
+      contentType: "application/json",
+    },
+    options,
+  );
   // 3. Upload updated channels.json & invalidate CloudFront
   await s3PutObject(
     {
@@ -2267,7 +2322,7 @@ export async function freeze(options = {}) {
     }
     const noticeBuf = Buffer.from(await noticeResp.arrayBuffer());
     const fetchedNotice = JSON.parse(noticeBuf.toString("utf8"));
-    const verifyNotice = verifySignedFreezeNotice(fetchedNotice, trustedKeys);
+    const verifyNotice = verifySignedFreezeNotice(fetchedNotice, trustedKeys, options);
     if (!verifyNotice.valid) {
       throw new Error(
         `Anonymous freeze notice signature verification failed: ${verifyNotice.reason}`,
@@ -2284,7 +2339,12 @@ export async function freeze(options = {}) {
     const chanBuf = Buffer.from(await chanResp.arrayBuffer());
     const fetchedChannels = JSON.parse(chanBuf.toString("utf8"));
     const { signatures: chanSigs, ...chanPayloadRest } = fetchedChannels;
-    const verifyChan = verifyReleasePayloadSignature(chanPayloadRest, chanSigs?.[0], trustedKeys);
+    const verifyChan = verifyReleasePayloadSignature(
+      chanPayloadRest,
+      chanSigs?.[0],
+      trustedKeys,
+      options,
+    );
     if (!verifyChan.valid) {
       throw new Error(
         `Anonymous channels signature verification failed after freeze: ${verifyChan.reason}`,
@@ -2475,6 +2535,12 @@ export function parseCliArgs(argv) {
     } else if (arg.startsWith("--dist-dir=")) {
       options.distDir = arg.slice(11);
       options.releaseDir = options.distDir;
+    } else if (arg === "--channels-path" || arg === "--channels") {
+      options.channelsPath = argv[++i];
+    } else if (arg.startsWith("--channels-path=")) {
+      options.channelsPath = arg.slice(16);
+    } else if (arg.startsWith("--channels=")) {
+      options.channelsPath = arg.slice(11);
     } else if (arg === "--bucket") {
       options.bucket = argv[++i];
     } else if (arg.startsWith("--bucket=")) {

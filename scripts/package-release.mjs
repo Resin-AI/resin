@@ -20,6 +20,7 @@ import process from "node:process";
 import zlib from "node:zlib";
 import { getGitCommitSha, writeReleaseEvidence } from "./generate-release-evidence.mjs";
 import {
+  DEFAULT_CHANNEL_TTL_MS,
   REVOKED_RELEASE_KEY_IDS,
   createTestReleaseSigningKey,
   loadReleaseSigningKeyFromEnv,
@@ -1456,7 +1457,7 @@ export function generateChannelMetadata(manifestSha256, options = {}) {
   const releaseIdentity = options.releaseIdentity || resolveReleaseIdentity(options);
   const updatedAt = options.updatedAt || RELEASE_DATE;
   const expiresAt =
-    options.expiresAt || new Date(Date.parse(updatedAt) + 24 * 60 * 60 * 1000).toISOString();
+    options.expiresAt || new Date(Date.parse(updatedAt) + DEFAULT_CHANNEL_TTL_MS).toISOString();
   const payload = {
     schemaVersion: "2.0.0",
     metadataVersion: 1,
