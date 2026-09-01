@@ -1633,10 +1633,7 @@ export class UpdateEngine {
 
         if (!ipcDisconnected) {
           try {
-            const probeTimeout = Math.max(
-              1,
-              Math.min(this.healthProbeIntervalMs, remainingBudgetMs, 5_000),
-            );
+            const probeTimeout = Math.max(1, Math.min(remainingBudgetMs, 5_000));
             const health = await this.withTimeoutAndSignal(
               client.getHealth(),
               probeTimeout,
