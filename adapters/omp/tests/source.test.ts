@@ -199,4 +199,38 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("classifies tool_execution_start and tool_execution_end records properly", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-tool-exec-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const content = `${[
+        JSON.stringify({ type: "tool_execution_start", toolName: "read", callId: "c1" }),
+        JSON.stringify({ type: "tool_execution_end", callId: "c1", result: "ok" }),
+      ].join("\n")}\n`;
+
+      await fsp.writeFile(transcriptPath, content);
+
+      const session: HarnessSession = {
+        sessionId: "session-tool-1",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        transcriptPath,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      };
+
+      const source = new OmpSessionEventSource(session);
+      const records = await source.readNext();
+      await source.close();
+
+      expect(records).toHaveLength(2);
+      expect(records[0].recordType).toBe("tool_call");
+      expect(records[1].recordType).toBe("tool_result");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

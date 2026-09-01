@@ -51,6 +51,8 @@ import {
   verifyPublic,
 } from "./publish-public-release.mjs";
 import {
+  DEFAULT_CHANNEL_TTL_MS,
+  DEFAULT_MANIFEST_TTL_MS,
   createSignedFreezeNotice,
   createTestReleaseSigningKey,
   signReleasePayload,
@@ -1158,6 +1160,7 @@ describe("publish-public-release", () => {
       };
 
       const result = await freeze({
+        releaseDir,
         targetVersion: RELEASE_VERSION,
         incidentId: "INC-TEST-001",
         reason: "Critical smoke regression",
@@ -1171,7 +1174,6 @@ describe("publish-public-release", () => {
         runner: mockRunner,
         fetch: mockFetch,
       });
-
       expect(result.status).toBe("frozen");
       expect(result.targetVersion).toBe(RELEASE_VERSION);
       expect(invalidated).toBe(true);
@@ -1188,8 +1190,9 @@ describe("publish-public-release", () => {
       expect(channelsBuf).toBeDefined();
       const updatedChannels = JSON.parse(channelsBuf.toString("utf8"));
       expect(updatedChannels.revokedVersions).toContain(RELEASE_VERSION);
-
-      // Verify final public smoke evidence binds the verified signed notice
+      expect(updatedChannels.expiresAt).toBe(
+        new Date(Date.parse(result.timestamp) + DEFAULT_CHANNEL_TTL_MS).toISOString(),
+      );
       expect(result.finalSmokeEvidence).toBeDefined();
       expect(result.finalSmokeEvidence.freezeOutcome.triggered).toBe(true);
       expect(result.finalSmokeEvidence.freezeOutcome.status).toBe("FROZEN");
@@ -1203,8 +1206,326 @@ describe("publish-public-release", () => {
       expect(fs.existsSync(path.resolve(process.cwd(), "public-release-smoke.json"))).toBe(false);
       expect(result.finalSmokeEvidence.originalFailureEvidence).toBeDefined();
     });
-  });
 
+    it("fails freeze and aborts when anonymous channel verification encounters expired manifest", async () => {
+      setupFixtureReleaseDir();
+      const s3Storage = new Map();
+
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const bodyPath = args[args.indexOf("--body") + 1];
+          s3Storage.set(key, fs.readFileSync(bodyPath));
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront") {
+          return { stdout: JSON.stringify({ Invalidation: { Id: "INV-FREEZE-1" } }) };
+        }
+        return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        const key = url.replace("https://dist.resin.sh/", "");
+        if (key === CHANNELS_S3_KEY) {
+          // Return an expired channels payload signed by valid key
+          const expiredPayload = {
+            schemaVersion: "2.0.0",
+            metadataVersion: 1,
+            expiresAt: new Date(Date.now() - 60000).toISOString(),
+            minSupportedVersion: "0.1.0",
+            currentVersion: RELEASE_VERSION,
+            updatedAt: new Date(Date.now() - 120000).toISOString(),
+            channels: {},
+            revokedVersions: [RELEASE_VERSION],
+            revokedKeyIds: [],
+          };
+          const signed = {
+            ...expiredPayload,
+            signatures: [signReleasePayload(expiredPayload, testSigningKey)],
+          };
+          const buf = Buffer.from(JSON.stringify(signed));
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        if (s3Storage.has(key)) {
+          const buf = s3Storage.get(key);
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      await expect(
+        freeze({
+          releaseDir,
+          targetVersion: RELEASE_VERSION,
+          incidentId: "INC-TEST-EXPIRED",
+          reason: "Expired channel test",
+          receiptDir: path.join(tempRoot, "freeze-receipts"),
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          baseUrl: PRODUCTION_BASE_URL,
+          keyPair: testSigningKey,
+          trustedKeys,
+          runner: mockRunner,
+          fetch: mockFetch,
+        }),
+      ).rejects.toThrow(
+        /Anonymous channels signature verification failed after freeze: manifest_expired/,
+      );
+    });
+
+    it("fails freeze and aborts when anonymous freeze notice verification encounters invalid signature", async () => {
+      setupFixtureReleaseDir();
+      const s3Storage = new Map();
+
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const bodyPath = args[args.indexOf("--body") + 1];
+          s3Storage.set(key, fs.readFileSync(bodyPath));
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront") {
+          return { stdout: JSON.stringify({ Invalidation: { Id: "INV-FREEZE-1" } }) };
+        }
+        return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        const key = url.replace("https://dist.resin.sh/", "");
+        if (key.startsWith("releases/v1/freezes/")) {
+          // Return a tampered freeze notice
+          const noticeBuf = s3Storage.get(key);
+          const parsed = JSON.parse(noticeBuf.toString("utf8"));
+          parsed.reason = "Tampered reason without resigning";
+          const buf = Buffer.from(JSON.stringify(parsed));
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        if (s3Storage.has(key)) {
+          const buf = s3Storage.get(key);
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      await expect(
+        freeze({
+          releaseDir,
+          targetVersion: RELEASE_VERSION,
+          incidentId: "INC-TEST-TAMPERED-NOTICE",
+          reason: "Tampered notice test",
+          receiptDir: path.join(tempRoot, "freeze-receipts"),
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          baseUrl: PRODUCTION_BASE_URL,
+          keyPair: testSigningKey,
+          trustedKeys,
+          runner: mockRunner,
+          fetch: mockFetch,
+        }),
+      ).rejects.toThrow(
+        /Anonymous freeze notice signature verification failed: signature_mismatch/,
+      );
+    });
+
+    it("fails closed when explicit releaseDir/distDir is missing channels.json without falling back to cwd", async () => {
+      setupFixtureReleaseDir();
+      const emptyDir = path.join(tempRoot, "empty-explicit-dir");
+      fs.mkdirSync(emptyDir, { recursive: true });
+      const mockRunner = async () => ({ stdout: "{}" });
+
+      await expect(
+        freeze({
+          releaseDir: emptyDir,
+          targetVersion: RELEASE_VERSION,
+          incidentId: "INC-TEST-FAIL-CLOSED",
+          reason: "Explicit dir without channels.json test",
+          receiptDir: path.join(tempRoot, "freeze-receipts"),
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          baseUrl: PRODUCTION_BASE_URL,
+          keyPair: testSigningKey,
+          trustedKeys,
+          runner: mockRunner,
+        }),
+      ).rejects.toThrow(/channels\.json not found in explicitly specified release directory/);
+    });
+
+    it("fails closed when explicit channelsPath does not exist", async () => {
+      setupFixtureReleaseDir();
+      const nonExistentPath = path.join(tempRoot, "missing", "channels.json");
+      const mockRunner = async () => ({ stdout: "{}" });
+
+      await expect(
+        freeze({
+          channelsPath: nonExistentPath,
+          targetVersion: RELEASE_VERSION,
+          incidentId: "INC-TEST-FAIL-CLOSED-PATH",
+          reason: "Explicit channelsPath missing test",
+          receiptDir: path.join(tempRoot, "freeze-receipts"),
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          baseUrl: PRODUCTION_BASE_URL,
+          keyPair: testSigningKey,
+          trustedKeys,
+          runner: mockRunner,
+        }),
+      ).rejects.toThrow(/Explicit channels file not found/);
+    });
+
+    it("discovers channels.json in nested candidate bundle layout <candidateDir>/release/channels.json", async () => {
+      setupFixtureReleaseDir();
+      const s3Storage = new Map();
+      const candidateBundleDir = path.join(tempRoot, "candidate-bundle-layout");
+      const nestedReleaseDir = path.join(candidateBundleDir, "release");
+      fs.mkdirSync(nestedReleaseDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(releaseDir, "channels.json"),
+        path.join(nestedReleaseDir, "channels.json"),
+      );
+
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const bodyPath = args[args.indexOf("--body") + 1];
+          s3Storage.set(key, fs.readFileSync(bodyPath));
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront") {
+          return { stdout: JSON.stringify({ Invalidation: { Id: "INV-FREEZE-1" } }) };
+        }
+        return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        const key = url.replace("https://dist.resin.sh/", "");
+        if (s3Storage.has(key)) {
+          const buf = s3Storage.get(key);
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      const result = await freeze({
+        candidateDir: candidateBundleDir,
+        targetVersion: RELEASE_VERSION,
+        incidentId: "INC-TEST-NESTED-BUNDLE",
+        reason: "Nested bundle freeze test",
+        receiptDir: path.join(tempRoot, "freeze-receipts"),
+        bucket: "my-bucket",
+        distributionId: "EDIST123",
+        baseUrl: PRODUCTION_BASE_URL,
+        keyPair: testSigningKey,
+        trustedKeys,
+        runner: mockRunner,
+        fetch: mockFetch,
+      });
+      expect(result.status).toBe("frozen");
+      const channelsBuf = s3Storage.get(CHANNELS_S3_KEY);
+      expect(channelsBuf).toBeDefined();
+      const updatedChannels = JSON.parse(channelsBuf.toString("utf8"));
+      expect(updatedChannels.revokedVersions).toContain(RELEASE_VERSION);
+    });
+
+    it("synthesizes fresh minimal channels when no explicit directory or channels path is provided, ignoring cwd", async () => {
+      const s3Storage = new Map();
+
+      const mockRunner = async (cmd, args) => {
+        if (args[1] === "put-object") {
+          const key = args[args.indexOf("--key") + 1];
+          const bodyPath = args[args.indexOf("--body") + 1];
+          s3Storage.set(key, fs.readFileSync(bodyPath));
+          return { stdout: "{}" };
+        }
+        if (args[0] === "cloudfront") {
+          return { stdout: JSON.stringify({ Invalidation: { Id: "INV-FREEZE-1" } }) };
+        }
+        return { stdout: "{}" };
+      };
+
+      const mockFetch = async (url) => {
+        const key = url.replace("https://dist.resin.sh/", "");
+        if (s3Storage.has(key)) {
+          const buf = s3Storage.get(key);
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () =>
+              buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      const result = await freeze({
+        targetVersion: "2.5.0",
+        incidentId: "INC-SYNTH-TEST",
+        reason: "Synthesized fresh channel test",
+        receiptDir: path.join(tempRoot, "freeze-receipts"),
+        bucket: "my-bucket",
+        distributionId: "EDIST123",
+        baseUrl: PRODUCTION_BASE_URL,
+        keyPair: testSigningKey,
+        trustedKeys,
+        runner: mockRunner,
+        fetch: mockFetch,
+      });
+
+      expect(result.status).toBe("frozen");
+      expect(result.targetVersion).toBe("2.5.0");
+      const channelsBuf = s3Storage.get(CHANNELS_S3_KEY);
+      expect(channelsBuf).toBeDefined();
+      const updatedChannels = JSON.parse(channelsBuf.toString("utf8"));
+      expect(updatedChannels.currentVersion).toBe("2.5.0");
+      expect(updatedChannels.revokedVersions).toEqual(["2.5.0"]);
+    });
+
+    it("fails closed when explicit rootDir is missing channels.json", async () => {
+      const emptyRootDir = path.join(tempRoot, "empty-root-dir");
+      fs.mkdirSync(emptyRootDir, { recursive: true });
+      const mockRunner = async () => ({ stdout: "{}" });
+
+      await expect(
+        freeze({
+          rootDir: emptyRootDir,
+          targetVersion: RELEASE_VERSION,
+          incidentId: "INC-TEST-FAIL-ROOTDIR",
+          reason: "Explicit rootDir missing channels test",
+          receiptDir: path.join(tempRoot, "freeze-receipts"),
+          bucket: "my-bucket",
+          distributionId: "EDIST123",
+          baseUrl: PRODUCTION_BASE_URL,
+          keyPair: testSigningKey,
+          trustedKeys,
+          runner: mockRunner,
+        }),
+      ).rejects.toThrow(/channels\.json not found under explicitly specified root directory/);
+    });
+  });
   describe("smoke evidence recording", () => {
     it("records smoke tests and emits complete public-release-smoke.json schema with S3 upload and verification", async () => {
       setupFixtureReleaseDir();
@@ -2721,6 +3042,20 @@ describe("publish-public-release", () => {
         parseCliArgs(["verify-public", "--installers-dir", "dist/installers"]).options
           .installersDir,
       ).toBe("dist/installers");
+    });
+    it("parses --channels-path and --channels options with space or equal delimiter", () => {
+      expect(
+        parseCliArgs(["freeze", "--channels-path", "/custom/channels.json"]).options.channelsPath,
+      ).toBe("/custom/channels.json");
+      expect(
+        parseCliArgs(["freeze", "--channels-path=/custom/channels.json"]).options.channelsPath,
+      ).toBe("/custom/channels.json");
+      expect(
+        parseCliArgs(["freeze", "--channels", "/custom2/channels.json"]).options.channelsPath,
+      ).toBe("/custom2/channels.json");
+      expect(
+        parseCliArgs(["freeze", "--channels=/custom2/channels.json"]).options.channelsPath,
+      ).toBe("/custom2/channels.json");
     });
 
     it("causes CLI to exit with code 1 when post-promotion smoke qualification fails", async () => {

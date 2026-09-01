@@ -1,0 +1,24 @@
+{"type":"session","id":"session-v18-rwr-1","timestamp":"2026-09-01T10:00:00.000Z","workspace":"/workspace"}
+{"type":"agent_start","timestamp":"2026-09-01T10:00:00.100Z"}
+{"type":"turn_start","timestamp":"2026-09-01T10:00:00.200Z"}
+{"type":"message_start","message":{"role":"assistant"},"timestamp":"2026-09-01T10:00:00.300Z"}
+{"type":"message_update","message":{"role":"assistant","content":"Thinking about aggregating"},"timestamp":"2026-09-01T10:00:00.400Z"}
+{"type":"message_end","message":{"role":"assistant","content":"I will read input.json, process it, write output.json, and verify with read.","model":"gemini-3.7-flash"},"timestamp":"2026-09-01T10:00:00.500Z"}
+{"type":"tool_execution_start","toolName":"read","callId":"call-read-1","args":{"path":"data/input.json"},"timestamp":"2026-09-01T10:00:01.000Z"}
+{"type":"tool_execution_update","callId":"call-read-1","progress":"reading file","timestamp":"2026-09-01T10:00:01.100Z"}
+{"type":"tool_execution_end","toolName":"read","callId":"call-read-1","result":"{\"users\":[{\"id\":1,\"count\":10}]}","isError":false,"executionDurationMs":45,"timestamp":"2026-09-01T10:00:01.200Z"}
+{"type":"turn_end","timestamp":"2026-09-01T10:00:01.300Z"}
+{"type":"turn_start","timestamp":"2026-09-01T10:00:01.400Z"}
+{"type":"message_start","message":{"role":"assistant"},"timestamp":"2026-09-01T10:00:01.500Z"}
+{"type":"message_update","message":{"role":"assistant","content":"Writing aggregated data"},"timestamp":"2026-09-01T10:00:01.600Z"}
+{"type":"message_end","message":{"role":"assistant","content":"Aggregating records into output.json.","model":"gemini-3.7-flash"},"timestamp":"2026-09-01T10:00:01.700Z"}
+{"type":"tool_execution_start","toolName":"write","callId":"call-write-2","args":{"path":"data/output.json","content":"{\"totalUsers\":1,\"totalCount\":10}"},"timestamp":"2026-09-01T10:00:02.000Z"}
+{"type":"tool_execution_end","callId":"call-write-2","result":"File written successfully","isError":false,"executionDurationMs":30,"timestamp":"2026-09-01T10:00:02.100Z"}
+{"type":"turn_end","timestamp":"2026-09-01T10:00:02.200Z"}
+{"type":"turn_start","timestamp":"2026-09-01T10:00:02.300Z"}
+{"type":"tool_execution_start","toolName":"read","callId":"call-read-3","args":{"path":"data/output.json"},"timestamp":"2026-09-01T10:00:03.000Z"}
+{"type":"tool_execution_end","callId":"call-read-3","result":"{\"totalUsers\":1,\"totalCount\":10}","isError":false,"executionDurationMs":20,"timestamp":"2026-09-01T10:00:03.100Z"}
+{"type":"turn_end","timestamp":"2026-09-01T10:00:03.200Z"}
+{"type":"advisor_cost_changed","cost":0.0042,"tokens":1500,"timestamp":"2026-09-01T10:00:03.300Z"}
+{"type":"advisor_yielded","status":"ok","timestamp":"2026-09-01T10:00:03.400Z"}
+{"type":"agent_end","status":"completed","exitReason":"task_completed","timestamp":"2026-09-01T10:00:03.500Z"}

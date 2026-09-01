@@ -16,6 +16,7 @@ import {
   type WslUserServiceManager,
   createUserServiceManager,
   defaultServiceCommandRunner,
+  isStaleSupervisorUnitContent,
 } from "../service/manager.js";
 import {
   type DaemonReadinessResult,
@@ -64,6 +65,7 @@ export interface SetupDaemonServiceResult {
   readonly installed: boolean;
   readonly started: boolean;
   readonly healthy: boolean;
+  readonly reused?: boolean;
   readonly unitPath?: string;
   readonly pid?: number;
   readonly details?: string;
@@ -216,7 +218,7 @@ export async function setupAndStartDaemonService(
     const isMatchingUnit =
       priorInstalled &&
       priorUnitContent !== null &&
-      priorUnitContent.trim() === targetUnitDefinition.trim();
+      !isStaleSupervisorUnitContent(priorUnitContent, targetUnitDefinition);
 
     if (isMatchingUnit && priorActive && !options.forceRestart) {
       const maxRetries = options.maxHealthRetries ?? 5;
@@ -248,6 +250,7 @@ export async function setupAndStartDaemonService(
           installed: true,
           started: true,
           healthy: true,
+          reused: true,
           unitPath,
           pid,
           details: healthDetails,

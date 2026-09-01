@@ -11,6 +11,7 @@ import {
   discoverOmpWorkspaces,
   findOmpExecutable,
   inspectBreadcrumbs,
+  inspectTranscriptFile,
   probeOmpInstallation,
   resolveOmpHome,
 } from "../src/discovery.js";
@@ -951,6 +952,92 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessionIds = sessions.map((s) => s.sessionId).sort();
       expect(sessionIds).toEqual(["sess-l0", "sess-l1", "sess-l2", "sess-l3", "sess-sibling"]);
       expect(sessions.length).toBe(5);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("identifies completed session status when transcript ends with agent_end or terminal session envelope", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-discovery-transcript-"));
+    try {
+      const t1Path = path.join(tmpDir, "session-agent-end.jsonl");
+      await fsp.writeFile(
+        t1Path,
+        `${[
+          JSON.stringify({ type: "session", id: "sess-1", timestamp: "2026-09-01T10:00:00Z" }),
+          JSON.stringify({ type: "agent_start", timestamp: "2026-09-01T10:00:01Z" }),
+          JSON.stringify({
+            type: "agent_end",
+            status: "completed",
+            timestamp: "2026-09-01T10:00:10Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const parsed1 = await inspectTranscriptFile(t1Path);
+      expect(parsed1?.status).toBe("completed");
+      expect(parsed1?.sessionId).toBe("sess-1");
+
+      const t2Path = path.join(tmpDir, "session-terminal.jsonl");
+      await fsp.writeFile(
+        t2Path,
+        `${[
+          JSON.stringify({ type: "session", id: "sess-2", timestamp: "2026-09-01T10:00:00Z" }),
+          JSON.stringify({
+            type: "session",
+            status: "completed",
+            timestamp: "2026-09-01T10:00:05Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const parsed2 = await inspectTranscriptFile(t2Path);
+      expect(parsed2?.status).toBe("completed");
+      expect(parsed2?.sessionId).toBe("sess-2");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("identifies failed session status when transcript ends with error or crash", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-discovery-fail-"));
+    try {
+      const t1Path = path.join(tmpDir, "session-agent-crash.jsonl");
+      await fsp.writeFile(
+        t1Path,
+        `${[
+          JSON.stringify({ type: "session", id: "sess-fail-1", timestamp: "2026-09-01T10:00:00Z" }),
+          JSON.stringify({ type: "agent_start", timestamp: "2026-09-01T10:00:01Z" }),
+          JSON.stringify({
+            type: "agent_end",
+            status: "failed",
+            error: "fatal crash",
+            timestamp: "2026-09-01T10:00:10Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const parsed1 = await inspectTranscriptFile(t1Path);
+      expect(parsed1?.status).toBe("failed");
+      expect(parsed1?.sessionId).toBe("sess-fail-1");
+
+      const t2Path = path.join(tmpDir, "session-term-error.jsonl");
+      await fsp.writeFile(
+        t2Path,
+        `${[
+          JSON.stringify({ type: "session", id: "sess-fail-2", timestamp: "2026-09-01T10:00:00Z" }),
+          JSON.stringify({
+            type: "session",
+            status: "crash",
+            reason: "oom",
+            timestamp: "2026-09-01T10:00:05Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      const parsed2 = await inspectTranscriptFile(t2Path);
+      expect(parsed2?.status).toBe("failed");
+      expect(parsed2?.sessionId).toBe("sess-fail-2");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

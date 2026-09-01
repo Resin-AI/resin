@@ -34,6 +34,7 @@ import {
   type ServiceStatusInfo,
   type UserServiceManager,
   createUserServiceManager,
+  isStaleSupervisorUnitContent,
 } from "../service/manager.js";
 import { RecoveryStateTracker, sanitizeCrashDiagnostic } from "../service/recovery-state.js";
 import {
@@ -174,7 +175,8 @@ export interface UpdateEngineResult {
   readonly snapshot: UpdateStatusSnapshot;
 }
 
-type UpdateServiceManager = Pick<UserServiceManager, "start" | "stop" | "status">;
+type UpdateServiceManager = Pick<UserServiceManager, "start" | "stop" | "status"> &
+  Partial<Pick<UserServiceManager, "install" | "getUnitDefinition" | "getUnitPath">>;
 type UpdateLockHandle = Pick<UpdateLock, "release">;
 type ReleaseResolver = (
   options: ResolveProductionReleaseOptions,
@@ -1181,6 +1183,31 @@ export class UpdateEngine {
         explicitRollback,
       });
       steps.push("active_version_switched");
+      if (
+        typeof this.serviceManager.getUnitDefinition === "function" &&
+        typeof this.serviceManager.getUnitPath === "function" &&
+        typeof this.serviceManager.install === "function"
+      ) {
+        const unitPath = this.serviceManager.getUnitPath();
+        const targetUnit = this.serviceManager.getUnitDefinition();
+        const unitExists = await this.fsBridge.exists(unitPath);
+        if (unitExists) {
+          const onDiskUnit = await this.fsBridge.readFile(unitPath);
+          if (isStaleSupervisorUnitContent(onDiskUnit, targetUnit)) {
+            const installResult = await this.serviceManager.install({
+              homeDir: this.homeDir,
+              resinHome: this.resinHome,
+              autoStart: false,
+            });
+            if (!installResult.success) {
+              throw new Error(
+                `Failed to update stale service unit during update cutover: ${installResult.error || "installation failed"}`,
+              );
+            }
+            steps.push("service_unit_updated");
+          }
+        }
+      }
 
       await this.serviceManager.start();
       candidateStarted = true;

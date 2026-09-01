@@ -645,6 +645,134 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(await manager.isInstalled()).toBe(false);
     });
 
+    it("recognizes stale v1.0.20 supervisor unit and updates to unversioned stable launcher on v1.0.22 install", async () => {
+      // Create versioned structure simulating v1.0.22 active install
+      const v20Dir = path.join(resinHome, "versions", "v1.0.20");
+      const v22Dir = path.join(resinHome, "versions", "v1.0.22");
+      const currentLink = path.join(resinHome, "current");
+      fs.mkdirSync(path.join(v20Dir, "apps", "cli", "dist"), { recursive: true });
+      fs.mkdirSync(path.join(v22Dir, "apps", "cli", "dist"), { recursive: true });
+      fs.writeFileSync(path.join(v20Dir, "apps", "cli", "dist", "index.js"), "// v1.0.20");
+      fs.writeFileSync(path.join(v22Dir, "apps", "cli", "dist", "index.js"), "// v1.0.22");
+      fs.symlinkSync(v22Dir, currentLink, "dir");
+
+      // Write stale v1.0.20 unit file to disk
+      const manager = createUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+      const unitPath = manager.getUnitPath();
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+
+      const staleUnitContent = `[Unit]
+Description=Resin Daemon
+Documentation=https://github.com/Resin-AI/resin
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node ${v20Dir}/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- ${resinHome}/bin/resin-daemon --foreground
+Restart=on-failure
+RestartSec=3s
+Environment="RESIN_HOME=${resinHome}"
+Environment="NODE_ENV=production"
+Environment="PATH=/usr/bin:/bin"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+`;
+      fs.writeFileSync(unitPath, staleUnitContent);
+
+      // Verify initial unit content is stale
+      expect(fs.readFileSync(unitPath, "utf8")).toContain("v1.0.20");
+
+      mockRunner.commands = [];
+
+      // Run setupAndStartDaemonService
+      const result = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.healthy).toBe(true);
+
+      // Unit file must now contain unversioned stable launcher under current/
+      const updatedUnitContent = fs.readFileSync(unitPath, "utf8");
+      expect(updatedUnitContent).not.toContain("v1.0.20");
+      expect(updatedUnitContent).toContain(
+        path.join(resinHome, "current", "apps", "cli", "dist", "index.js"),
+      );
+
+      // Systemctl daemon-reload and restart must have been called
+      const daemonReloadCmd = mockRunner.commands.find(
+        (c) => c.cmd === "systemctl" && c.args.includes("daemon-reload"),
+      );
+      const restartCmd = mockRunner.commands.find(
+        (c) => c.cmd === "systemctl" && c.args.includes("restart"),
+      );
+      expect(daemonReloadCmd).toBeDefined();
+      expect(restartCmd).toBeDefined();
+
+      // Subsequent run on the updated unit is idempotent (no daemon-reload, no restart)
+      mockRunner.commands = [];
+      const secondRun = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+        autoStart: true,
+      });
+      expect(secondRun.success).toBe(true);
+      expect(secondRun.reused).toBe(true);
+
+      const secondMutations = mockRunner.commands.filter(
+        (c) =>
+          c.cmd === "systemctl" && (c.args.includes("daemon-reload") || c.args.includes("restart")),
+      );
+      expect(secondMutations.length).toBe(0);
+    });
+    it("reuses existing healthy service idempotently when ExecStart matches despite differing PATH environment variable", async () => {
+      const manager = createUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+      const canonicalUnit = manager.getUnitDefinition();
+      const unitWithCustomPath = canonicalUnit.replace(
+        /Environment="PATH=.*"/,
+        'Environment="PATH=/custom/bin:/usr/bin:/bin"',
+      );
+
+      const unitPath = manager.getUnitPath();
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, unitWithCustomPath);
+
+      mockRunner.commands = [];
+      const result = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.reused).toBe(true);
+
+      const mutations = mockRunner.commands.filter(
+        (c) =>
+          c.cmd === "systemctl" &&
+          (c.args.includes("daemon-reload") ||
+            c.args.includes("restart") ||
+            c.args.includes("enable")),
+      );
+      expect(mutations.length).toBe(0);
+    });
+
     it("ensures zero root execution: all file paths remain strictly within user home directory", async () => {
       const manager = createUserServiceManager({
         homeDir: fakeHome,

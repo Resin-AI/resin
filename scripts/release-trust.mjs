@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 export const RELEASE_SIGNING_ALGORITHM = "Ed25519";
 export const REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 export const DEFAULT_MANIFEST_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+export const DEFAULT_CHANNEL_TTL_MS = 24 * 60 * 60 * 1000;
 
 function normalizePem(value) {
   return Object.prototype.toString.call(value) === "[object String]"
@@ -414,7 +415,7 @@ export function createSignedFreezeNotice(params, key) {
   });
 }
 
-export function verifySignedFreezeNotice(notice, trustedKeys) {
+export function verifySignedFreezeNotice(notice, trustedKeys, options = {}) {
   if (
     !notice ||
     notice.type !== "RELEASE_FREEZE" ||
@@ -424,7 +425,7 @@ export function verifySignedFreezeNotice(notice, trustedKeys) {
     return { valid: false, reason: "invalid_freeze_notice_format" };
   }
   const { signatures, ...payload } = notice;
-  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys);
+  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys, options);
 }
 
 export function createSignedRollbackPlan(params, key) {
@@ -451,7 +452,7 @@ export function createSignedRollbackPlan(params, key) {
   });
 }
 
-export function verifySignedRollbackPlan(plan, trustedKeys) {
+export function verifySignedRollbackPlan(plan, trustedKeys, options = {}) {
   if (
     !plan ||
     plan.type !== "RELEASE_ROLLBACK" ||
@@ -461,7 +462,7 @@ export function verifySignedRollbackPlan(plan, trustedKeys) {
     return { valid: false, reason: "invalid_rollback_plan_format" };
   }
   const { signatures, ...payload } = plan;
-  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys);
+  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys, options);
 }
 
 export function createSignedRevocationNotice(params, key) {
@@ -483,7 +484,7 @@ export function createSignedRevocationNotice(params, key) {
   });
 }
 
-export function verifySignedRevocationNotice(notice, trustedKeys) {
+export function verifySignedRevocationNotice(notice, trustedKeys, options = {}) {
   if (
     !notice ||
     notice.type !== "KEY_REVOCATION" ||
@@ -493,7 +494,7 @@ export function verifySignedRevocationNotice(notice, trustedKeys) {
     return { valid: false, reason: "invalid_revocation_notice_format" };
   }
   const { signatures, ...payload } = notice;
-  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys);
+  return verifyReleasePayloadSignature(payload, signatures[0], trustedKeys, options);
 }
 
 export function canonicalJson(value) {

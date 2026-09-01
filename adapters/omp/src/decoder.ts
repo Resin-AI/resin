@@ -558,7 +558,38 @@ function buildProviderUsage(
 export class OmpRecordDecoder implements HarnessRecordDecoder {
   readonly harnessId = "omp";
   readonly decoderVersion = "1.0.0";
+  private static readonly MAX_CALL_CACHE_ENTRIES = 5000;
+  private readonly callToolNames = new Map<string, string>();
 
+  private setToolCallName(sessionId: string, callId: string, toolName: string): void {
+    if (!callId || !toolName || toolName === "unknown_tool") return;
+    const key = `${sessionId}:${callId}`;
+    if (this.callToolNames.size >= OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES) {
+      const oldestKey = this.callToolNames.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.callToolNames.delete(oldestKey);
+      }
+    }
+    this.callToolNames.set(key, toolName);
+  }
+
+  private getAndClearToolCallName(sessionId: string, callId: string): string | undefined {
+    const key = `${sessionId}:${callId}`;
+    const name = this.callToolNames.get(key);
+    if (name) {
+      this.callToolNames.delete(key);
+    }
+    return name;
+  }
+
+  private clearSessionToolCalls(sessionId: string): void {
+    const prefix = `${sessionId}:`;
+    for (const key of Array.from(this.callToolNames.keys())) {
+      if (key.startsWith(prefix)) {
+        this.callToolNames.delete(key);
+      }
+    }
+  }
   canDecode(record: RawHarnessRecord): boolean {
     if (!record) return false;
     if (record.harnessId === "omp" || record.harnessId === "*") {
@@ -625,11 +656,38 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const rawType = String(
       asString(obj.type) ?? asString(obj.event) ?? asString(obj.kind) ?? asString(obj.action) ?? "",
     ).toLowerCase();
-
-    // 0. Pre-dispatch handling for OMP v18 wrappers
     const customType = String(
       asString(obj.customType) ?? asString(obj.custom_type) ?? "",
     ).toLowerCase();
+    // 0. Filter out non-semantic streaming/delta/lifecycle progress events
+    // In OMP v18.1.x, the stream includes fine-grained stream/chunk and progress events
+    // that must NOT become unknown_passthrough workflow operations.
+    if (
+      rawType === "message_start" ||
+      rawType === "message_update" ||
+      rawType === "tool_execution_update" ||
+      rawType === "tool_update" ||
+      rawType === "turn_start" ||
+      rawType === "turn_end" ||
+      rawType === "advisor_cost_changed" ||
+      rawType === "cost_changed" ||
+      rawType === "cost_update"
+    ) {
+      return null;
+    }
+
+    // Bare advisor_yielded without subagent identity is an internal advisor lifecycle event
+    if (
+      (rawType === "advisor_yielded" || customType === "advisor_yielded") &&
+      !obj.subagentId &&
+      !obj.subagent_id &&
+      !obj.parentId &&
+      !obj.parent_id
+    ) {
+      return null;
+    }
+
+    // 1. Tool Execution Start & End (OMP v18.1 tool execution lifecycle)
     if (
       (rawType === "custom" &&
         (customType === "tool_execution_start" ||
@@ -642,11 +700,84 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeToolCall(toolCallPayload, sessionId, timestamp, causalRef, metadata);
     }
 
+    if (
+      (rawType === "custom" &&
+        (customType === "tool_execution_end" ||
+          customType === "tool_end" ||
+          customType === "toolexecutionend")) ||
+      rawType === "tool_execution_end"
+    ) {
+      const dataObj = asObject(obj.data) ?? {};
+      const toolResultPayload: OmpTranscriptPayload = { ...obj, ...dataObj };
+      return this.normalizeToolResult(toolResultPayload, sessionId, timestamp, causalRef, metadata);
+    }
+
+    // 2. Message End / Completed Messages (OMP v18.1 streaming message completion)
+    if (rawType === "message_end") {
+      const nestedMsg = asObject(obj.message);
+      const mergedPayload: OmpTranscriptPayload = nestedMsg ? { ...obj, ...nestedMsg } : obj;
+      const effectiveRole = asString(mergedPayload.role)?.toLowerCase().trim() ?? "assistant";
+      if (
+        effectiveRole === "reasoning" ||
+        effectiveRole === "thought" ||
+        effectiveRole === "thinking" ||
+        mergedPayload.thinking !== undefined ||
+        mergedPayload.reasoningContent !== undefined
+      ) {
+        return this.normalizeReasoning(mergedPayload, sessionId, timestamp, causalRef, metadata);
+      }
+      if (effectiveRole === "user") {
+        return this.normalizeMessage(
+          mergedPayload,
+          "user",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      if (effectiveRole === "system") {
+        return this.normalizeMessage(
+          mergedPayload,
+          "system",
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      if (
+        effectiveRole === "toolresult" ||
+        effectiveRole === "tool_result" ||
+        effectiveRole === "tool"
+      ) {
+        return this.normalizeToolResult(mergedPayload, sessionId, timestamp, causalRef, metadata);
+      }
+      return this.normalizeMessage(
+        mergedPayload,
+        "assistant",
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
+    }
+
+    // 3. Standalone nested message envelope
     const nestedMsg = asObject(obj.message);
     if (nestedMsg) {
       const nestedRole = asString(nestedMsg.role)?.toLowerCase().trim();
       const mergedPayload: OmpTranscriptPayload = { ...obj, ...nestedMsg };
 
+      if (
+        nestedRole === "reasoning" ||
+        nestedRole === "thought" ||
+        nestedRole === "thinking" ||
+        mergedPayload.thinking !== undefined ||
+        mergedPayload.reasoningContent !== undefined
+      ) {
+        return this.normalizeReasoning(mergedPayload, sessionId, timestamp, causalRef, metadata);
+      }
       if (nestedRole === "user") {
         return this.normalizeMessage(
           mergedPayload,
@@ -682,7 +813,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       }
     }
 
-    // 1. Session Lifecycle Events
+    // 4. Session Lifecycle & Agent Start / End
     if (
       rawType === "session_start" ||
       rawType === "session_init" ||
@@ -695,7 +826,118 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeLifecycle(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 2. User Message / Prompt Events
+    if (rawType === "session") {
+      const action = String(obj.lifecycleType ?? obj.action ?? obj.status ?? "").toLowerCase();
+      const exitReasonStr = String(obj.exitReason ?? obj.reason ?? obj.error ?? "").toLowerCase();
+      const isCrash =
+        action === "crash" ||
+        action === "error" ||
+        action === "fatal" ||
+        action === "failed" ||
+        exitReasonStr === "error" ||
+        exitReasonStr === "crash" ||
+        exitReasonStr === "fatal" ||
+        obj.error !== undefined ||
+        obj.isError === true;
+      const isTerminal =
+        isCrash ||
+        action === "end" ||
+        action === "completed" ||
+        action === "complete" ||
+        action === "finished" ||
+        action === "closed";
+      if (isTerminal) {
+        const lifecycleType = isCrash ? "crash" : "end";
+        const exitReason =
+          asString(obj.exitReason) ??
+          asString(obj.reason) ??
+          asString(obj.error) ??
+          asString(obj.status) ??
+          (isCrash ? "error" : "completed");
+        return this.normalizeLifecycle(
+          { ...obj, lifecycleType, exitReason },
+          sessionId,
+          timestamp,
+          causalRef,
+          metadata,
+        );
+      }
+      return this.normalizeLifecycle(
+        { ...obj, lifecycleType: "start" },
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
+    }
+
+    if (rawType === "agent_start") {
+      const isSubagent =
+        obj.subagentId !== undefined ||
+        obj.subagent_id !== undefined ||
+        obj.parentId !== undefined ||
+        obj.parent_id !== undefined ||
+        rawRole === "subagent" ||
+        rawRole === "advisor";
+      if (isSubagent) {
+        return this.normalizeSubagent(obj, sessionId, timestamp, causalRef, metadata);
+      }
+      return this.normalizeLifecycle(
+        { ...obj, lifecycleType: "start" },
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
+    }
+
+    if (
+      rawType === "agent_end" ||
+      rawType === "agent_complete" ||
+      rawType === "agent_finish" ||
+      rawType === "agent_terminated"
+    ) {
+      const isSubagent =
+        obj.subagentId !== undefined ||
+        obj.subagent_id !== undefined ||
+        obj.parentId !== undefined ||
+        obj.parent_id !== undefined ||
+        rawRole === "subagent" ||
+        rawRole === "advisor";
+      if (isSubagent) {
+        return this.normalizeSubagent(obj, sessionId, timestamp, causalRef, metadata);
+      }
+      const rawStatus = String(
+        obj.status ?? obj.action ?? obj.lifecycleType ?? obj.exitReason ?? obj.reason ?? "",
+      ).toLowerCase();
+      const exitReasonStr = String(obj.exitReason ?? obj.reason ?? obj.error ?? "").toLowerCase();
+      const isCrash =
+        rawStatus === "crash" ||
+        rawStatus === "error" ||
+        rawStatus === "fatal" ||
+        rawStatus === "failed" ||
+        exitReasonStr === "error" ||
+        exitReasonStr === "crash" ||
+        exitReasonStr === "fatal" ||
+        obj.error !== undefined ||
+        obj.isError === true;
+      const lifecycleType = isCrash ? "crash" : "end";
+      const exitReason =
+        asString(obj.exitReason) ??
+        asString(obj.reason) ??
+        asString(obj.error) ??
+        asString(obj.status) ??
+        (isCrash ? "error" : "completed");
+      return this.normalizeLifecycle(
+        { ...obj, lifecycleType, exitReason },
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
+    }
+
+    // 5. User Message / Prompt Events
     if (
       rawRole === "user" ||
       rawType === "prompt" ||
@@ -706,7 +948,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeMessage(obj, "user", sessionId, timestamp, causalRef, metadata);
     }
 
-    // 3. Model Reasoning / Thought Events
+    // 6. Model Reasoning / Thought Events
     if (
       rawType === "model_reasoning" ||
       rawType === "thought" ||
@@ -716,7 +958,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeReasoning(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 4. Tool Discovery Events
+    // 7. Tool Discovery Events
     if (
       rawType === "tool_discovery" ||
       rawType === "tools_discovered" ||
@@ -727,11 +969,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeToolDiscovery(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 5. Tool Call Events
+    // 8. Tool Call Events
     if (
       rawType === "tool_call" ||
       rawType === "tool_use" ||
-      rawType === "tool_invocation" ||
       rawType === "call" ||
       rawType === "function_call" ||
       rawRole === "tool_call" ||
@@ -741,7 +982,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeToolCall(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 6. Tool Result Events
+    // 9. Tool Result Events
     if (
       rawType === "tool_result" ||
       rawType === "tool_response" ||
@@ -756,17 +997,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeToolResult(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 7. Command Execution Events
+    // 10. Command Execution Events
     if (
       rawType === "command_exec" ||
-      rawType === "bash" ||
       rawType === "exec" ||
+      rawType === "command" ||
+      rawType === "cmd" ||
+      rawType === "bash" ||
       rawType === "sh"
     ) {
       return this.normalizeCommandExec(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 8. File Edit Events
+    // 11. File Edit Events
     if (
       rawType === "file_edit" ||
       rawType === "patch_applied" ||
@@ -777,7 +1020,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       return this.normalizeFileEdit(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 9. Subagent Lifecycle Events
+    // 12. Subagent Lifecycle Events
     if (
       rawType === "subagent_lifecycle" ||
       rawType === "subagent" ||
@@ -785,42 +1028,48 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       rawType === "subagent_start" ||
       rawType === "subagent_end" ||
       rawType === "subagent_complete" ||
-      rawType === "subagent_settle"
+      rawType === "subagent_settle" ||
+      rawType === "advisor_yielded"
     ) {
       return this.normalizeSubagent(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 10. Compaction Events
+    // 13. Compaction Events
     if (
       rawType === "compaction" ||
       rawType === "compact" ||
       rawType === "context_compaction" ||
-      rawType === "prune"
+      rawType === "context_compact" ||
+      rawType === "prune" ||
+      rawType === "pruned" ||
+      rawType === "context_prune" ||
+      rawType === "context_pruned"
     ) {
       return this.normalizeCompaction(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 11. Branch Fork Events
+    // 14. Branch Fork Events
     if (rawType === "branch_fork" || rawType === "fork" || rawType === "branch") {
       return this.normalizeBranchFork(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 12. Error Events
+    // 15. Error Events
     if (rawType === "error" || rawType === "exception" || rawType === "crash") {
       return this.normalizeError(obj, sessionId, timestamp, causalRef, metadata);
     }
 
-    // 13. Assistant Message Events
+    // 16. Assistant Message Events
     if (
       rawRole === "assistant" ||
       rawType === "assistant" ||
       rawType === "assistant_message" ||
+      rawType === "response" ||
       rawType === "completion"
     ) {
       return this.normalizeMessage(obj, "assistant", sessionId, timestamp, causalRef, metadata);
     }
 
-    // 14. System Message Events
+    // 17. System Message Events
     if (rawRole === "system" || rawType === "system" || rawType === "system_message") {
       return this.normalizeMessage(obj, "system", sessionId, timestamp, causalRef, metadata);
     }
@@ -838,7 +1087,6 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     };
     return fallback;
   }
-
   private extractPayload(record: RawHarnessRecord): OmpTranscriptValue {
     // SAFETY: Record rawPayload is decoded as an OmpTranscriptValue JSON value.
     const raw = record.rawPayload as OmpTranscriptValue;
@@ -882,32 +1130,56 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         asString(obj.action) ??
         asString(obj.type) ??
         asString(obj.event) ??
+        asString(obj.status) ??
         "",
     ).toLowerCase();
 
+    const isCrash =
+      rawAction === "crash" ||
+      rawAction === "fatal" ||
+      rawAction === "error" ||
+      rawAction === "failed" ||
+      obj.error !== undefined ||
+      obj.isError === true;
     const isStart =
-      rawAction === "start" ||
-      rawAction === "session_start" ||
-      rawAction === "session_init" ||
-      rawAction === "init";
-    const isSuspend = rawAction === "suspend" || rawAction === "pause";
-    const isResume = rawAction === "resume";
+      !isCrash &&
+      (rawAction === "start" ||
+        rawAction === "session_start" ||
+        rawAction === "session_init" ||
+        rawAction === "agent_start" ||
+        rawAction === "init" ||
+        rawAction === "session");
+    const isSuspend = !isCrash && (rawAction === "suspend" || rawAction === "pause");
+    const isResume = !isCrash && rawAction === "resume";
 
-    const lifecycleType: "start" | "end" | "pause" | "resume" = isStart
-      ? "start"
-      : isSuspend
-        ? "pause"
-        : isResume
-          ? "resume"
-          : "end";
+    const lifecycleType: "start" | "end" | "pause" | "resume" | "crash" = isCrash
+      ? "crash"
+      : isStart
+        ? "start"
+        : isSuspend
+          ? "pause"
+          : isResume
+            ? "resume"
+            : "end";
 
     const exitReason =
-      asString(obj.exitReason) ?? asString(obj.reason) ?? asString(obj.exit_reason);
+      asString(obj.exitReason) ??
+      asString(obj.reason) ??
+      asString(obj.error) ??
+      asString(obj.exit_reason) ??
+      (lifecycleType === "crash"
+        ? "error"
+        : lifecycleType === "end"
+          ? (asString(obj.status) ?? "completed")
+          : undefined);
     const harnessName = asString(obj.harnessName) ?? asString(obj.harness) ?? "omp";
     const workspaceId = asString(obj.workspaceId) ?? asString(obj.workspace);
 
-    const providerUsage = this.extractProviderUsage(obj, metadata);
+    if (lifecycleType === "end" || lifecycleType === "crash") {
+      this.clearSessionToolCalls(sessionId);
+    }
 
+    const providerUsage = this.extractProviderUsage(obj, metadata);
     const evt: IntermediateSessionLifecycleEvent = {
       sessionId,
       timestamp,
@@ -1054,7 +1326,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         asString(toolCallObj.id),
       `call_${causalRef.causalSequence}`,
     );
-
+    if (callId && toolName && toolName !== "unknown_tool") {
+      this.setToolCallName(sessionId, callId, toolName);
+    }
     const rawParams =
       toolCallObj.parameters ??
       toolCallObj.params ??
@@ -1105,14 +1379,6 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   ): IntermediateToolResultEvent {
     const toolResultObj = asObject(obj.toolResult) ?? asObject(obj.tool_result) ?? obj;
 
-    const toolName = String(
-      asString(toolResultObj.toolName) ??
-        asString(toolResultObj.tool_name) ??
-        asString(toolResultObj.name) ??
-        asString(toolResultObj.tool) ??
-        "unknown_tool",
-    );
-
     const callId = normalizeCallId(
       asString(toolResultObj.callId) ??
         asString(toolResultObj.call_id) ??
@@ -1122,6 +1388,24 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       `call_${causalRef.causalSequence}`,
     );
 
+    let toolName = String(
+      asString(toolResultObj.toolName) ??
+        asString(toolResultObj.tool_name) ??
+        asString(toolResultObj.name) ??
+        asString(toolResultObj.tool) ??
+        "",
+    );
+
+    if (!toolName || toolName === "unknown_tool") {
+      const correlated = this.getAndClearToolCallName(sessionId, callId);
+      if (correlated) {
+        toolName = correlated;
+      } else {
+        toolName = "unknown_tool";
+      }
+    } else {
+      this.getAndClearToolCallName(sessionId, callId);
+    }
     let rawResult =
       toolResultObj.result ??
       toolResultObj.output ??
@@ -1313,12 +1597,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       | "crash" =
       rawLType === "spawn" || rawLType === "subagent_spawn"
         ? "spawn"
-        : rawLType === "start" || rawLType === "subagent_start"
+        : rawLType === "start" || rawLType === "subagent_start" || rawLType === "agent_start"
           ? "start"
           : rawLType === "settle" ||
               rawLType === "subagent_settle" ||
               rawLType === "complete" ||
-              rawLType === "subagent_complete"
+              rawLType === "subagent_complete" ||
+              rawLType === "advisor_yielded"
             ? "settle"
             : rawLType === "pause" || rawLType === "subagent_pause"
               ? "pause"
@@ -1329,6 +1614,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
                   : rawLType === "terminate" ||
                       rawLType === "subagent_terminate" ||
                       rawLType === "subagent_end" ||
+                      rawLType === "agent_end" ||
                       rawLType === "end"
                     ? "terminate"
                     : "spawn";
@@ -1339,7 +1625,6 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asString(obj.parentSessionId) ??
       asString(obj.parent_session_id) ??
       sessionId;
-
     const role = asString(obj.role);
     const reason =
       asString(obj.reason) ?? asString(obj.resultSummary) ?? asString(obj.result_summary);

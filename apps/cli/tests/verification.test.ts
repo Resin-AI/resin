@@ -85,18 +85,10 @@ describe("VerificationSuite", () => {
   const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
 
   it("passes all checks when all local and cloud components are valid", async () => {
-    const fsBridge = createMockFsBridge({
-      [resinHome]: "dir",
-      [path.join(resinHome, "config")]: "dir",
-      [stateDbPath]: "sqlite header",
-      [socketPath]: "socket",
-      [unitPath]: "unit content",
-    });
     const serviceManager = createUserServiceManager({
       platform: "systemd",
       homeDir,
       resinHome,
-      fsBridge,
       runner: {
         async run(_cmd, args) {
           if (args.includes("is-active")) {
@@ -109,7 +101,13 @@ describe("VerificationSuite", () => {
         },
       },
     });
-
+    const fsBridge = createMockFsBridge({
+      [resinHome]: "dir",
+      [path.join(resinHome, "config")]: "dir",
+      [stateDbPath]: "sqlite header",
+      [socketPath]: "socket",
+      [unitPath]: serviceManager.getUnitDefinition(),
+    });
     const mockIpcClient = new MockIpcClient({
       ping: vi.fn().mockResolvedValue({ pong: true, timestamp: Date.now() }),
       getHealth: vi.fn().mockResolvedValue({
@@ -150,6 +148,95 @@ describe("VerificationSuite", () => {
     expect(checkNames).toContain("cloud_auth");
   });
 
+  it("warns when daemon service unit definition is outdated or stale", async () => {
+    const fsBridge = createMockFsBridge({
+      [resinHome]: "dir",
+      [path.join(resinHome, "config")]: "dir",
+      [stateDbPath]: "sqlite header",
+      [socketPath]: "socket",
+      // Simulate stale unit from prior v1.0.20
+      [unitPath]: `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/daemon --foreground\n`,
+    });
+    const serviceManager = createUserServiceManager({
+      platform: "systemd",
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner: {
+        async run(_cmd, args) {
+          if (args.includes("is-active")) {
+            return { stdout: "active\n", stderr: "", exitCode: 0 };
+          }
+          return { stdout: "Main PID: 123\n", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    const suite = new VerificationSuite({
+      homeDir,
+      resinHome,
+      socketPath,
+      fsBridge,
+      serviceManager,
+      allowOffline: true,
+    });
+
+    const report = await suite.runAll();
+    const serviceCheck = report.checks.find((c) => c.name === "service_state");
+    expect(serviceCheck).toBeDefined();
+    expect(serviceCheck?.status).toBe("warn");
+    expect(serviceCheck?.message).toContain("outdated");
+  });
+  it("passes when unit definition has matching ExecStart despite differing PATH environment variable", async () => {
+    const defaultManager = createUserServiceManager({
+      platform: "systemd",
+      homeDir,
+      resinHome,
+    });
+    const canonicalUnit = defaultManager.getUnitDefinition();
+    // Modify PATH in canonical unit to simulate user environment divergence
+    const unitWithCustomPath = canonicalUnit.replace(
+      /Environment="PATH=.*"/,
+      'Environment="PATH=/custom/toolchain/bin:/usr/local/bin:/usr/bin:/bin"',
+    );
+
+    const fsBridge = createMockFsBridge({
+      [resinHome]: "dir",
+      [path.join(resinHome, "config")]: "dir",
+      [stateDbPath]: "sqlite header",
+      [socketPath]: "socket",
+      [unitPath]: unitWithCustomPath,
+    });
+
+    const serviceManager = createUserServiceManager({
+      platform: "systemd",
+      homeDir,
+      resinHome,
+      fsBridge,
+      runner: {
+        async run(_cmd, args) {
+          if (args.includes("is-active")) {
+            return { stdout: "active\n", stderr: "", exitCode: 0 };
+          }
+          return { stdout: "Main PID: 123\n", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    const suite = new VerificationSuite({
+      homeDir,
+      resinHome,
+      socketPath,
+      fsBridge,
+      serviceManager,
+      allowOffline: true,
+    });
+
+    const report = await suite.runAll();
+    const serviceCheck = report.checks.find((c) => c.name === "service_state");
+    expect(serviceCheck).toBeDefined();
+    expect(serviceCheck?.status).toBe("pass");
+  });
   it("reports warning/failure when daemon socket is offline", async () => {
     const fsBridge = createMockFsBridge({
       [resinHome]: "dir",
