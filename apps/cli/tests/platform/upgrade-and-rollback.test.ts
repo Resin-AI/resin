@@ -971,9 +971,9 @@ describe("UpdateEngine staging, activation, and rollback", () => {
           recoveryBreakerTripped: false,
         }),
         probationMs: 0,
-        drainTimeoutMs: 100,
+        drainTimeoutMs: 1_000,
         healthProbeIntervalMs: 1,
-        sleep: async () => {},
+        sleep: async () => yieldEventLoop(),
       });
 
       const result = await engine.run({ mode: "manual" });
