@@ -949,13 +949,17 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       // When recent -> idle
       const recentTime = new Date(Date.now() - 5_000);
       await fsp.utimes(idleFile, recentTime, recentTime);
-      const recentSessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      const recentSessions = await discoverOmpSessions(workspace, {
+        ompHome: path.join(tmpDir, ".omp"),
+      });
       expect(recentSessions[0].status).toBe("idle");
 
       // When stale -> completed
       const staleTime = new Date(Date.now() - 120_000);
       await fsp.utimes(idleFile, staleTime, staleTime);
-      const staleSessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
+      const staleSessions = await discoverOmpSessions(workspace, {
+        ompHome: path.join(tmpDir, ".omp"),
+      });
       expect(staleSessions[0].status).toBe("completed");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });

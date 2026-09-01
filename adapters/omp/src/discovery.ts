@@ -831,7 +831,6 @@ export async function inspectTranscriptFile(
 
     const sessionId = headerSessionId || fallbackSessionId;
 
-
     return {
       sessionId,
       headerSessionId,

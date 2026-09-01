@@ -1,17 +1,14 @@
 import { createHash } from "node:crypto";
-import {
-  type NormalizedSessionEvent,
-  NormalizedSessionEventSchema,
-} from "@resin/contracts";
+import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { z } from "zod";
 import type { CloudObservationClient, TrajectoryObservation } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
 import {
-  generateDeterministicEventId,
   NormalizationPipeline,
   type PipelineProcessContext,
   type PipelineProcessResult,
+  generateDeterministicEventId,
 } from "../normalization/pipeline.js";
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
@@ -682,11 +679,7 @@ export class TrajectoryCaptureCoordinator {
         : {}),
     };
 
-    const eventId = generateDeterministicEventId(
-      session.sessionId,
-      causalSequence,
-      payloadForHash,
-    );
+    const eventId = generateDeterministicEventId(session.sessionId, causalSequence, payloadForHash);
 
     const event: NormalizedSessionEvent = {
       ...payloadForHash,
