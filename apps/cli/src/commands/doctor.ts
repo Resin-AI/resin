@@ -28,7 +28,11 @@ import {
 } from "../installer/harness-health.js";
 import { detectPlatform, validatePlatform } from "../installer/platform.js";
 import { DeviceAuthClient } from "../service/auth-bootstrap.js";
-import { type UserServiceManager, createUserServiceManager } from "../service/manager.js";
+import {
+  type UserServiceManager,
+  createUserServiceManager,
+  isStaleSupervisorUnitContent,
+} from "../service/manager.js";
 import {
   type NotificationConsumer,
   consumeCliActionableNotifications,
@@ -340,6 +344,20 @@ export async function runDiagnostics(options: {
     });
 
   const svcStatus = await serviceManager.status();
+  const unitPath = svcStatus.unitPath ?? serviceManager.getUnitPath();
+  let isStaleUnit = false;
+  try {
+    if (await fsBridge.exists(unitPath)) {
+      const currentUnitContent = await fsBridge.readFile(unitPath);
+      const expectedUnitContent = serviceManager.getUnitDefinition();
+      if (isStaleSupervisorUnitContent(currentUnitContent, expectedUnitContent)) {
+        isStaleUnit = true;
+      }
+    }
+  } catch {
+    // Best-effort check
+  }
+
   if (!svcStatus.installed) {
     items.push({
       id: "service_installed",
@@ -348,6 +366,16 @@ export async function runDiagnostics(options: {
       status: "warn",
       message: `Autostart service not installed for ${serviceManager.platform}`,
       remediation: "Run `resin repair` to install the user background service.",
+      fixable: true,
+    });
+  } else if (isStaleUnit) {
+    items.push({
+      id: "service_installed",
+      name: "Background User Autostart Service",
+      category: "service",
+      status: "warn",
+      message: `Service unit ${svcStatus.serviceName} has an outdated definition (stale supervisor command)`,
+      remediation: "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
       fixable: true,
     });
   } else if (!svcStatus.active) {
@@ -370,7 +398,6 @@ export async function runDiagnostics(options: {
       fixable: true,
     });
   }
-
   // 4. Stale Lockfile Detection
   const lockExists = await fsBridge.exists(daemonPaths.lockFilePath);
   if (lockExists && !svcStatus.active) {
@@ -674,26 +701,60 @@ export async function repairState(options: {
   }
 
   // 3. Install / repair background service unit
-  if (!svcStatus.installed) {
+  const unitPath = svcStatus.unitPath ?? serviceManager.getUnitPath();
+  const expectedUnitContent = serviceManager.getUnitDefinition({
+    homeDir: customHome,
+    resinHome,
+  });
+  let onDiskUnitContent: string | null = null;
+  try {
+    if (await fsBridge.exists(unitPath)) {
+      onDiskUnitContent = await fsBridge.readFile(unitPath);
+    }
+  } catch {
+    onDiskUnitContent = null;
+  }
+
+  const isStaleUnit =
+    svcStatus.installed &&
+    onDiskUnitContent !== null &&
+    isStaleSupervisorUnitContent(onDiskUnitContent, expectedUnitContent);
+
+  if (!svcStatus.installed || isStaleUnit) {
     const installResult = await serviceManager.install({
       homeDir: customHome,
       resinHome,
       autoStart: true,
     });
-    if (installResult.success) {
-      actions.push(
-        `Installed user background service (${serviceManager.platform}): ${installResult.serviceName}`,
+    if (!installResult.success) {
+      throw new Error(
+        `Failed to ${isStaleUnit ? "repair" : "install"} daemon user service (${serviceManager.platform}): ${installResult.error || "install failed"}`,
       );
     }
+    if (isStaleUnit && svcStatus.active) {
+      try {
+        await serviceManager.restart();
+      } catch (restartError: unknown) {
+        const msg = restartError instanceof Error ? restartError.message : String(restartError);
+        throw new Error(
+          `Failed to restart daemon user service after unit repair (${serviceManager.platform}): ${msg}`,
+        );
+      }
+    }
+    actions.push(
+      isStaleUnit
+        ? `Repaired outdated daemon user service (${serviceManager.platform}): ${installResult.serviceName}`
+        : `Installed user background service (${serviceManager.platform}): ${installResult.serviceName}`,
+    );
   } else if (!svcStatus.active) {
     try {
       await serviceManager.start();
       actions.push(`Started user background service: ${svcStatus.serviceName}`);
-    } catch {
-      // Ignored if unable to start immediately in test environment
+    } catch (startError: unknown) {
+      const msg = startError instanceof Error ? startError.message : String(startError);
+      actions.push(`Failed to start daemon user service (${serviceManager.platform}): ${msg}`);
     }
   }
-
   // 4. Safely reconcile detected harnesses through the shared noninteractive engine.
   const harnessHealthCoordinator =
     options.harnessHealthCoordinator ??
@@ -893,7 +954,9 @@ export async function doctorCommand(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify({ error: msg, success: false }, null, 2)}\n`);
+      process.stdout.write(
+        `${JSON.stringify({ error: msg, success: false, passed: false }, null, 2)}\n`,
+      );
     } else {
       process.stderr.write(`\nDoctor failed: ${msg}\n`);
     }

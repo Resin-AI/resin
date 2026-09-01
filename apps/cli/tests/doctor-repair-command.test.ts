@@ -42,8 +42,8 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   };
 }
 
-function createMockServiceManager(): UserServiceManager {
-  const unitPath = "/mock/resin.service";
+function createMockServiceManager(customUnitPath?: string): UserServiceManager {
+  const unitPath = customUnitPath ?? "/mock/resin.service";
   return {
     name: "mock",
     platform: "systemd",
@@ -400,5 +400,277 @@ describe("doctor & repair commands", () => {
     } finally {
       process.stdout.write = originalStdout;
     }
+  });
+  it("detects and repairs stale v1.0.20 unit definition to current valid command and remains idempotent", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const targetUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+
+    const fsBridge = createMockFsBridge({
+      [unitPath]: staleUnitContent,
+      [path.join(resinHome, "current", "apps", "cli", "dist", "index.js")]: "launcher",
+    });
+
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+
+    // 1. Diagnostics detect stale unit
+    const diagnostics = await runDiagnostics({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+    });
+    const svcDiag = diagnostics.find((d) => d.id === "service_installed");
+    expect(svcDiag).toBeDefined();
+    expect(svcDiag?.status).toBe("warn");
+    expect(svcDiag?.fixable).toBe(true);
+    expect(svcDiag?.message).toContain("outdated");
+
+    // 2. Repair rewrites the unit file and restarts the active service
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(mockServiceManager.install).toHaveBeenCalled();
+    expect(mockServiceManager.restart).toHaveBeenCalled();
+    expect(actions.some((a) => a.includes("Repaired outdated daemon user service"))).toBe(true);
+
+    // Simulate install rewriting the file
+    await fsBridge.writeFile(unitPath, targetUnitContent);
+
+    // 3. Subsequent diagnosis on updated unit is healthy (pass)
+    const postRepairDiag = await runDiagnostics({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+    });
+    const postSvcDiag = postRepairDiag.find((d) => d.id === "service_installed");
+    expect(postSvcDiag?.status).toBe("pass");
+    expect(postSvcDiag?.message).toContain("active");
+
+    // 4. Subsequent repair is completely idempotent (no restart, no rewrite)
+    vi.clearAllMocks();
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+
+    const idempotentActions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(mockServiceManager.install).not.toHaveBeenCalled();
+    expect(mockServiceManager.restart).not.toHaveBeenCalled();
+    expect(idempotentActions.some((a) => a.includes("daemon user service"))).toBe(false);
+  });
+  it("handles install failure truthfully during stale unit repair without claiming false success", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const targetUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+
+    const fsBridge = createMockFsBridge({
+      [unitPath]: staleUnitContent,
+    });
+
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+    mockServiceManager.install = vi.fn().mockResolvedValue({
+      success: false,
+      unitPath,
+      unitContent: "",
+      serviceName: "resin.service",
+      enabled: false,
+      started: false,
+      error: "permission denied writing unit file",
+    });
+    await expect(
+      repairState({
+        home: homeDir,
+        fsBridge,
+        serviceManager: mockServiceManager,
+        safetyCertification: {
+          probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+        },
+      }),
+    ).rejects.toThrow(/Failed to repair daemon user service/);
+
+    expect(mockServiceManager.install).toHaveBeenCalled();
+    expect(mockServiceManager.restart).not.toHaveBeenCalled();
+  });
+
+  it("handles restart failure truthfully during stale unit repair without claiming false success", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const targetUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+
+    const fsBridge = createMockFsBridge({
+      [unitPath]: staleUnitContent,
+    });
+
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+    mockServiceManager.install = vi.fn().mockResolvedValue({
+      success: true,
+      unitPath,
+      unitContent: targetUnitContent,
+      serviceName: "resin.service",
+      enabled: true,
+      started: false,
+    });
+    mockServiceManager.restart = vi.fn().mockRejectedValue(new Error("systemctl restart timed out"));
+
+    await expect(
+      repairState({
+        home: homeDir,
+        fsBridge,
+        serviceManager: mockServiceManager,
+        safetyCertification: {
+          probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+        },
+      }),
+    ).rejects.toThrow(/Failed to restart daemon user service/);
+
+    expect(mockServiceManager.install).toHaveBeenCalled();
+    expect(mockServiceManager.restart).toHaveBeenCalled();
+  });
+
+  it("command-level doctor --fix returns non-zero and reports passed: false when stale unit restart fails", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const targetUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+
+    const fsBridge = createMockFsBridge({
+      [unitPath]: staleUnitContent,
+    });
+
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+    mockServiceManager.install = vi.fn().mockResolvedValue({
+      success: true,
+      unitPath,
+      unitContent: targetUnitContent,
+      serviceName: "resin.service",
+      enabled: true,
+      started: false,
+    });
+    mockServiceManager.restart = vi.fn().mockRejectedValue(new Error("systemctl restart timed out"));
+
+    const stdoutChunks: string[] = [];
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
+      stdoutChunks.push(String(chunk));
+      return true;
+    });
+
+    try {
+      const exitCode = await doctorCommand(["--fix", "--json", "--home", homeDir], {
+        fsBridge,
+        serviceManager: mockServiceManager,
+        safetyCertification: {
+          probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+        },
+      });
+
+      expect(exitCode).toBe(1);
+      const output = JSON.parse(stdoutChunks.join(""));
+      expect(output.passed).toBe(false);
+      expect(output.error).toContain("Failed to restart daemon user service");
+    } finally {
+      process.stdout.write = originalStdout;
+    }
+  });
+
+  it("treats unit with matching ExecStart and differing PATH as healthy and idempotent", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const targetUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\nEnvironment="PATH=/usr/bin:/bin"\n`;
+    const unitWithCustomPath = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\nEnvironment="PATH=/custom/bin:/usr/bin:/bin"\n`;
+
+    const fsBridge = createMockFsBridge({
+      [unitPath]: unitWithCustomPath,
+    });
+
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(targetUnitContent);
+
+    const diagnostics = await runDiagnostics({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+    });
+    const svcDiag = diagnostics.find((d) => d.id === "service_installed");
+    expect(svcDiag?.status).toBe("pass");
+
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+    expect(mockServiceManager.install).not.toHaveBeenCalled();
+    expect(mockServiceManager.restart).not.toHaveBeenCalled();
+    expect(actions.some((a) => a.includes("daemon user service"))).toBe(false);
   });
 });

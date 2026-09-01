@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -381,17 +382,98 @@ function isAbortError(cause: unknown): boolean {
   return false;
 }
 
+export function resolveSupervisorEntryPath(
+  resinHome: string,
+  explicitPath?: string,
+): string {
+  if (explicitPath && explicitPath.trim().length > 0) {
+    return explicitPath;
+  }
+
+  const currentEntry = path.join(resinHome, "current", "apps", "cli", "dist", "index.js");
+  const currentLink = path.join(resinHome, "current");
+  const versionsDir = path.join(resinHome, "versions");
+
+  const normalizedDefault = path.resolve(SERVICE_SUPERVISOR_ENTRY_PATH);
+  const normalizedVersions = path.resolve(versionsDir);
+
+  if (
+    normalizedDefault.startsWith(normalizedVersions + path.sep) ||
+    normalizedDefault.includes(`${path.sep}versions${path.sep}`)
+  ) {
+    return currentEntry;
+  }
+
+  try {
+    if (
+      fsSync.existsSync(currentEntry) ||
+      fsSync.existsSync(currentLink) ||
+      fsSync.existsSync(versionsDir)
+    ) {
+      return currentEntry;
+    }
+  } catch {
+    // Fall back to default
+  }
+
+  return SERVICE_SUPERVISOR_ENTRY_PATH;
+}
+
+export function isStaleSupervisorUnitContent(
+  onDiskContent: string | null | undefined,
+  expectedContent: string,
+): boolean {
+  if (!onDiskContent || onDiskContent.trim().length === 0) {
+    return true;
+  }
+
+  // 1. Obsolete versioned supervisor paths are always stale
+  if (
+    /\/versions\/v[^\/\s"']+\/apps\/cli\/dist\/index\.js/.test(onDiskContent) ||
+    /\/versions\/v[^\/\s"']+\/bin\/resin/.test(onDiskContent)
+  ) {
+    return true;
+  }
+
+  // 2. Systemd: compare ExecStart directive only (ignoring volatile PATH or environment changes)
+  const onDiskExecMatch = onDiskContent.match(/^ExecStart=(.*)$/m);
+  const expectedExecMatch = expectedContent.match(/^ExecStart=(.*)$/m);
+  if (onDiskExecMatch && expectedExecMatch) {
+    return onDiskExecMatch[1].trim() !== expectedExecMatch[1].trim();
+  }
+
+  // 3. Launchd: compare ProgramArguments array only
+  const onDiskArgsMatch = onDiskContent.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  const expectedArgsMatch = expectedContent.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  if (onDiskArgsMatch && expectedArgsMatch) {
+    const normalizeArgs = (str: string) => str.replace(/\s+/g, " ").trim();
+    return normalizeArgs(onDiskArgsMatch[1]) !== normalizeArgs(expectedArgsMatch[1]);
+  }
+
+  // 4. WSL fallback script: compare command invocation line
+  const onDiskNohupMatch = onDiskContent.match(/^(?:nohup|exec)\s+(.*)$/m);
+  const expectedNohupMatch = expectedContent.match(/^(?:nohup|exec)\s+(.*)$/m);
+  if (onDiskNohupMatch && expectedNohupMatch) {
+    return onDiskNohupMatch[1].trim() !== expectedNohupMatch[1].trim();
+  }
+
+  // Fallback: full trim comparison if specific directives are missing
+  return onDiskContent.trim() !== expectedContent.trim();
+}
+
 function createSupervisorProgramArguments(
   daemonPath: string,
   resinHome: string,
   nodePath: string,
+  supervisorEntryPath?: string,
 ): string[] {
+  const resolvedSupervisorEntry = resolveSupervisorEntryPath(resinHome, supervisorEntryPath);
   const childCommand = daemonPath.endsWith(".js")
     ? [nodePath, daemonPath, "--foreground"]
     : [daemonPath, "--foreground"];
   return [
     nodePath,
-    SERVICE_SUPERVISOR_ENTRY_PATH,
+    resolvedSupervisorEntry,
     SERVICE_SUPERVISOR_COMMAND,
     "--resin-home",
     resinHome,
@@ -424,6 +506,7 @@ export interface ServiceInstallOptions {
   homeDir?: string;
   resinHome?: string;
   nodePath?: string;
+  supervisorEntryPath?: string;
   env?: Record<string, string>;
   autoStart?: boolean;
   force?: boolean;
@@ -465,6 +548,7 @@ export interface UserServiceManagerOptions {
   resinHome?: string;
   daemonPath?: string;
   nodePath?: string;
+  supervisorEntryPath?: string;
   fsBridge?: ConfigFsBridge;
   runner?: ServiceCommandRunner;
   env?: Record<string, string>;
@@ -500,6 +584,7 @@ export class SystemdUserServiceManager implements UserServiceManager {
   protected readonly resinHome: string;
   protected readonly defaultDaemonPath: string;
   protected readonly nodePath: string;
+  protected readonly supervisorEntryPath?: string;
   protected readonly fsBridge: ConfigFsBridge;
   protected readonly runner: ServiceCommandRunner;
   protected readonly defaultEnv: Record<string, string>;
@@ -509,6 +594,7 @@ export class SystemdUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
@@ -532,6 +618,7 @@ export class SystemdUserServiceManager implements UserServiceManager {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
+    const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const inheritedPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
     const servicePath = Array.from(
       new Set([path.dirname(nodePath), ...inheritedPath.split(path.delimiter)]),
@@ -542,7 +629,12 @@ export class SystemdUserServiceManager implements UserServiceManager {
       ...(options.env ?? {}),
     };
 
-    const execStart = createSupervisorProgramArguments(daemonPath, resinHome, nodePath)
+    const execStart = createSupervisorProgramArguments(
+      daemonPath,
+      resinHome,
+      nodePath,
+      supervisorEntryPath,
+    )
       .map(quoteSystemdArgument)
       .join(" ");
 
@@ -784,6 +876,7 @@ export class LaunchdUserServiceManager implements UserServiceManager {
   protected readonly resinHome: string;
   protected readonly defaultDaemonPath: string;
   protected readonly nodePath: string;
+  protected readonly supervisorEntryPath?: string;
   protected readonly fsBridge: ConfigFsBridge;
   protected readonly runner: ServiceCommandRunner;
   protected readonly defaultEnv: Record<string, string>;
@@ -793,6 +886,7 @@ export class LaunchdUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
@@ -819,8 +913,13 @@ export class LaunchdUserServiceManager implements UserServiceManager {
     const envVars = { ...this.defaultEnv, ...(options.env ?? {}) };
 
     const nodePath = options.nodePath ?? this.nodePath;
-    const programArgs = createSupervisorProgramArguments(daemonPath, resinHome, nodePath);
-
+    const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
+    const programArgs = createSupervisorProgramArguments(
+      daemonPath,
+      resinHome,
+      nodePath,
+      supervisorEntryPath,
+    );
     const argsXml = programArgs
       .map((arg) => `        <string>${this.escapeXml(arg)}</string>`)
       .join("\n");
@@ -1037,6 +1136,7 @@ export class WslUserServiceManager implements UserServiceManager {
   private readonly resinHome: string;
   private readonly defaultDaemonPath: string;
   private readonly nodePath: string;
+  private readonly supervisorEntryPath?: string;
   private readonly fsBridge: ConfigFsBridge;
   private readonly runner: ServiceCommandRunner;
   private readonly defaultEnv: Record<string, string>;
@@ -1047,6 +1147,7 @@ export class WslUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
@@ -1086,13 +1187,18 @@ export class WslUserServiceManager implements UserServiceManager {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
+    const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const logDir = path.join(resinHome, "logs");
     const runDir = path.join(resinHome, "run");
 
-    const execCmd = createSupervisorProgramArguments(daemonPath, resinHome, nodePath)
+    const execCmd = createSupervisorProgramArguments(
+      daemonPath,
+      resinHome,
+      nodePath,
+      supervisorEntryPath,
+    )
       .map(quoteShellArgument)
       .join(" ");
-
     return `#!/bin/sh
 # Resin Daemon WSL Service Fallback
 export RESIN_HOME=${quoteShellArgument(resinHome)}

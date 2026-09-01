@@ -17,7 +17,11 @@ import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
 import { IpcClient, type PathResolutionOptions, resolvePaths } from "@resin/observer";
 import { areClaimsExpired } from "@resin/protocol";
 import { DeviceAuthClient } from "./auth-bootstrap.js";
-import { type UserServiceManager, createUserServiceManager } from "./manager.js";
+import {
+  type UserServiceManager,
+  createUserServiceManager,
+  isStaleSupervisorUnitContent,
+} from "./manager.js";
 
 export type VerificationCheckStatus = "pass" | "fail" | "warn";
 
@@ -297,6 +301,37 @@ export class VerificationSuite {
         message: `User autostart service is not installed (${this.serviceManager.platform})`,
         remediation: "Run `resin repair` to install and enable the background daemon service.",
         details: { platform: this.serviceManager.platform },
+      };
+    }
+
+    const unitPath = status.unitPath ?? this.serviceManager.getUnitPath();
+    let isStaleUnit = false;
+    let unitMismatchReason: string | undefined;
+    try {
+      if (await this.fsBridge.exists(unitPath)) {
+        const onDiskUnit = await this.fsBridge.readFile(unitPath);
+        const expectedUnit = this.serviceManager.getUnitDefinition();
+        if (isStaleSupervisorUnitContent(onDiskUnit, expectedUnit)) {
+          isStaleUnit = true;
+          unitMismatchReason = "Unit definition on disk is outdated (stale supervisor command or paths)";
+        }
+      }
+    } catch {
+      // Best-effort check
+    }
+    if (isStaleUnit) {
+      return {
+        status: "warn",
+        message: `Daemon service unit definition is outdated (${status.serviceName})`,
+        remediation: "Run `resin repair` or `resin doctor --fix` to update and reload the background service.",
+        details: {
+          platform: this.serviceManager.platform,
+          serviceName: status.serviceName,
+          unitPath,
+          pid: status.pid,
+          active: status.active,
+          reason: unitMismatchReason,
+        },
       };
     }
 
