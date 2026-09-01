@@ -649,20 +649,50 @@ export async function inspectTranscriptFile(
               updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
             }
             const eventType = String(parsed.type ?? parsed.event ?? "");
-            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
-              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
-              if (
+            if (
+              eventType === "session_lifecycle" ||
+              eventType === "lifecycle" ||
+              eventType === "session" ||
+              eventType === "agent_end" ||
+              eventType === "agent_start"
+            ) {
+              const defaultAction =
+                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
+              const action = String(
+                parsed.lifecycleType ??
+                  parsed.action ??
+                  parsed.status ??
+                  defaultAction,
+              ).toLowerCase();
+              const exitReason = String(
+                parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
+              ).toLowerCase();
+              const isFailure =
+                action === "crash" ||
+                action === "error" ||
+                action === "fatal" ||
+                action === "failed" ||
+                exitReason === "error" ||
+                exitReason === "crash" ||
+                exitReason === "fatal" ||
+                parsed.error !== undefined ||
+                parsed.isError === true;
+              if (isFailure) {
+                explicitStatus = "failed";
+              } else if (
                 action === "end" ||
                 action === "complete" ||
+                action === "completed" ||
                 action === "finish" ||
-                action === "settle"
+                action === "finished" ||
+                action === "closed" ||
+                action === "settle" ||
+                eventType === "agent_end"
               ) {
                 explicitStatus = "completed";
-              } else if (action === "crash" || action === "error" || action === "fatal") {
-                explicitStatus = "failed";
               } else if (action === "pause" || action === "suspend") {
                 explicitStatus = "idle";
-              } else if (action === "start" || action === "resume") {
+              } else if (action === "start" || action === "resume" || eventType === "agent_start") {
                 explicitStatus = "active";
               }
             }
@@ -718,20 +748,50 @@ export async function inspectTranscriptFile(
               updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
             }
             const eventType = String(parsed.type ?? parsed.event ?? "");
-            if (eventType === "session_lifecycle" || eventType === "lifecycle") {
-              const action = String(parsed.lifecycleType ?? parsed.action ?? "");
-              if (
+            if (
+              eventType === "session_lifecycle" ||
+              eventType === "lifecycle" ||
+              eventType === "session" ||
+              eventType === "agent_end" ||
+              eventType === "agent_start"
+            ) {
+              const defaultAction =
+                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
+              const action = String(
+                parsed.lifecycleType ??
+                  parsed.action ??
+                  parsed.status ??
+                  defaultAction,
+              ).toLowerCase();
+              const exitReason = String(
+                parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
+              ).toLowerCase();
+              const isFailure =
+                action === "crash" ||
+                action === "error" ||
+                action === "fatal" ||
+                action === "failed" ||
+                exitReason === "error" ||
+                exitReason === "crash" ||
+                exitReason === "fatal" ||
+                parsed.error !== undefined ||
+                parsed.isError === true;
+              if (isFailure) {
+                explicitStatus = "failed";
+              } else if (
                 action === "end" ||
                 action === "complete" ||
+                action === "completed" ||
                 action === "finish" ||
-                action === "settle"
+                action === "finished" ||
+                action === "closed" ||
+                action === "settle" ||
+                eventType === "agent_end"
               ) {
                 explicitStatus = "completed";
-              } else if (action === "crash" || action === "error" || action === "fatal") {
-                explicitStatus = "failed";
               } else if (action === "pause" || action === "suspend") {
                 explicitStatus = "idle";
-              } else if (action === "start" || action === "resume") {
+              } else if (action === "start" || action === "resume" || eventType === "agent_start") {
                 explicitStatus = "active";
               }
             }

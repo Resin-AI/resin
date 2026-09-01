@@ -320,6 +320,7 @@ export class OmpSessionEventSource implements SessionEventSource {
       rawType === "tool_call" ||
       rawType === "tool_use" ||
       rawType === "tool_invocation" ||
+      rawType === "tool_execution_start" ||
       (obj.toolCall !== undefined && obj.toolCall instanceof Object) ||
       (obj.tool_call !== undefined && obj.tool_call instanceof Object)
     ) {
@@ -330,6 +331,7 @@ export class OmpSessionEventSource implements SessionEventSource {
       rawType === "tool_result" ||
       rawType === "tool_response" ||
       rawType === "tool_output" ||
+      rawType === "tool_execution_end" ||
       (obj.toolResult !== undefined && obj.toolResult instanceof Object) ||
       (obj.tool_result !== undefined && obj.tool_result instanceof Object)
     ) {

@@ -14,6 +14,7 @@ import type {
   IntermediateSubagentLifecycleEvent,
   IntermediateToolCallEvent,
   IntermediateToolResultEvent,
+  IntermediateUnknownPassthroughEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
@@ -1055,6 +1056,327 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         isError: true,
         error: "command failed",
       });
+    });
+  });
+
+  describe("OMP v18.1.1 stream normalization & read-write-read workflow", () => {
+    const v18Record = (sequenceNumber: number, payload: unknown): RawHarnessRecord => ({
+      recordId: `v18-${sequenceNumber}`,
+      sessionId: "session-v18-rwr-1",
+      harnessId: "omp",
+      sequenceNumber,
+      recordType: "transcript_line",
+      timestamp: `2026-09-01T10:00:${String(sequenceNumber).padStart(2, "0")}.000Z`,
+      cursor: {
+        offset: sequenceNumber * 100,
+        line: sequenceNumber,
+        sequence: sequenceNumber,
+        timestamp: `2026-09-01T10:00:${String(sequenceNumber).padStart(2, "0")}.000Z`,
+      },
+      rawPayload: JSON.stringify(payload),
+      metadata: {},
+    });
+
+    it("decodes genuine OMP v18.1.1 read-write-read session fixture without noise or duplicate events", async () => {
+      const fixturePath = path.join(fixturesDir, "session-v18-read-write-read.jsonl");
+      const content = await fsp.readFile(fixturePath, "utf8");
+      const rawLines = content
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+
+      expect(rawLines.length).toBe(24);
+
+      const decodedEvents = rawLines
+        .map((line, idx) => {
+          const parsed = JSON.parse(line);
+          return decoder.decode(v18Record(idx + 1, parsed));
+        })
+        .filter((evt): evt is NonNullable<typeof evt> => evt !== null);
+
+      // Filtered down to semantic events: start, agent_start, msg, tool_call, tool_result, msg, tool_call, tool_result, tool_call, tool_result, end
+      const eventTypes = decodedEvents.map((e) => (Array.isArray(e) ? e[0].type : e.type));
+      expect(eventTypes).not.toContain("unknown_passthrough");
+
+      // Verify semantic tool operation sequence is strictly read -> write -> read
+      const toolEvents = decodedEvents.filter(
+        (e): e is IntermediateToolCallEvent | IntermediateToolResultEvent =>
+          !Array.isArray(e) && (e.type === "tool_call" || e.type === "tool_result"),
+      );
+
+      expect(toolEvents).toHaveLength(6);
+      expect(toolEvents.map((t) => `${t.type}:${t.toolName}`)).toEqual([
+        "tool_call:read",
+        "tool_result:read",
+        "tool_call:write",
+        "tool_result:write",
+        "tool_call:read",
+        "tool_result:read",
+      ]);
+
+      // Tool 1: read
+      const call1 = toolEvents[0] as IntermediateToolCallEvent;
+      const res1 = toolEvents[1] as IntermediateToolResultEvent;
+      expect(call1.toolName).toBe("read");
+      expect(call1.callId).toBe("call-read-1");
+      expect(call1.parameters).toEqual({ path: "data/input.json" });
+      expect(res1.toolName).toBe("read");
+      expect(res1.callId).toBe("call-read-1");
+      expect(res1.isError).toBe(false);
+
+      // Tool 2: write (correlated tool name from callId even though tool_execution_end omitted it)
+      const call2 = toolEvents[2] as IntermediateToolCallEvent;
+      const res2 = toolEvents[3] as IntermediateToolResultEvent;
+      expect(call2.toolName).toBe("write");
+      expect(call2.callId).toBe("call-write-2");
+      expect(call2.parameters).toEqual({
+        path: "data/output.json",
+        content: '{"totalUsers":1,"totalCount":10}',
+      });
+      expect(res2.toolName).toBe("write");
+      expect(res2.callId).toBe("call-write-2");
+      expect(res2.isError).toBe(false);
+
+      // Tool 3: read (correlated tool name from callId even though tool_execution_end omitted it)
+      const call3 = toolEvents[4] as IntermediateToolCallEvent;
+      const res3 = toolEvents[5] as IntermediateToolResultEvent;
+      expect(call3.toolName).toBe("read");
+      expect(call3.callId).toBe("call-read-3");
+      expect(call3.parameters).toEqual({ path: "data/output.json" });
+      expect(res3.toolName).toBe("read");
+      expect(res3.callId).toBe("call-read-3");
+      expect(res3.isError).toBe(false);
+
+      // Terminal event is session_lifecycle end
+      const lastEvent = decodedEvents[decodedEvents.length - 1] as IntermediateSessionLifecycleEvent;
+      expect(lastEvent.type).toBe("session_lifecycle");
+      expect(lastEvent.lifecycleType).toBe("end");
+      expect(lastEvent.exitReason).toBe("task_completed");
+    });
+
+    it("filters out streaming delta and progress envelopes returning null", () => {
+      expect(
+        decoder.decode(
+          v18Record(1, {
+            type: "message_start",
+            message: { role: "assistant" },
+          }),
+        ),
+      ).toBeNull();
+
+      expect(
+        decoder.decode(
+          v18Record(2, {
+            type: "message_update",
+            message: { role: "assistant", content: "chunk delta" },
+          }),
+        ),
+      ).toBeNull();
+
+      expect(
+        decoder.decode(
+          v18Record(3, {
+            type: "tool_execution_update",
+            callId: "call-1",
+            progress: "running",
+          }),
+        ),
+      ).toBeNull();
+
+      expect(decoder.decode(v18Record(4, { type: "turn_start" }))).toBeNull();
+      expect(decoder.decode(v18Record(5, { type: "turn_end" }))).toBeNull();
+      expect(
+        decoder.decode(
+          v18Record(6, {
+            type: "advisor_cost_changed",
+            cost: 0.05,
+            tokens: 1000,
+          }),
+        ),
+      ).toBeNull();
+      expect(decoder.decode(v18Record(7, { type: "advisor_yielded" }))).toBeNull();
+    });
+
+    it("emits closed session lifecycle on agent_end and terminal session envelopes", () => {
+      const agentEnd = decoder.decode(
+        v18Record(1, {
+          type: "agent_end",
+          status: "completed",
+          exitReason: "finished_ok",
+        }),
+      ) as IntermediateSessionLifecycleEvent;
+
+      expect(agentEnd.type).toBe("session_lifecycle");
+      expect(agentEnd.lifecycleType).toBe("end");
+      expect(agentEnd.exitReason).toBe("finished_ok");
+
+      const sessionEnd = decoder.decode(
+        v18Record(2, {
+          type: "session",
+          status: "completed",
+          reason: "all_done",
+        }),
+      ) as IntermediateSessionLifecycleEvent;
+
+      expect(sessionEnd.type).toBe("session_lifecycle");
+      expect(sessionEnd.lifecycleType).toBe("end");
+      expect(sessionEnd.exitReason).toBe("all_done");
+
+      const agentCrash = decoder.decode(
+        v18Record(3, {
+          type: "agent_end",
+          status: "failed",
+          error: "out of memory",
+        }),
+      ) as IntermediateSessionLifecycleEvent;
+
+      expect(agentCrash.type).toBe("session_lifecycle");
+      expect(agentCrash.lifecycleType).toBe("crash");
+      expect(agentCrash.exitReason).toBe("out of memory");
+
+      const sessionCrash = decoder.decode(
+        v18Record(4, {
+          type: "session",
+          status: "crash",
+          reason: "fatal runtime error",
+        }),
+      ) as IntermediateSessionLifecycleEvent;
+
+      expect(sessionCrash.type).toBe("session_lifecycle");
+      expect(sessionCrash.lifecycleType).toBe("crash");
+      expect(sessionCrash.exitReason).toBe("fatal runtime error");
+    });
+
+    it("retains all legacy and modern compaction event aliases", () => {
+      const aliases = [
+        "compaction",
+        "compact",
+        "context_compaction",
+        "context_compact",
+        "prune",
+        "pruned",
+        "context_prune",
+        "context_pruned",
+      ];
+
+      for (let i = 0; i < aliases.length; i++) {
+        const event = decoder.decode(
+          v18Record(i + 1, {
+            type: aliases[i],
+            tokensBefore: 2000,
+            tokensAfter: 500,
+          }),
+        ) as IntermediateCompactionEvent;
+
+        expect(event.type).toBe("compaction");
+        expect(event.tokensBefore).toBe(2000);
+        expect(event.tokensAfter).toBe(500);
+      }
+    });
+
+    it("clears cached tool call names on session completion and bounds orphan retention", () => {
+      // Tool call without result in session-term-1
+      decoder.decode({
+        recordId: "r-c1",
+        sessionId: "session-term-1",
+        harnessId: "omp",
+        sequenceNumber: 1,
+        recordType: "tool_call",
+        timestamp: "2026-09-01T10:00:00.000Z",
+        cursor: { offset: 0, line: 1, sequence: 1, timestamp: "2026-09-01T10:00:00.000Z" },
+        rawPayload: JSON.stringify({
+          type: "tool_execution_start",
+          toolName: "orphan_tool",
+          callId: "call-orphan",
+        }),
+        metadata: {},
+      });
+
+      // Terminate session-term-1
+      decoder.decode({
+        recordId: "r-end",
+        sessionId: "session-term-1",
+        harnessId: "omp",
+        sequenceNumber: 2,
+        recordType: "transcript_line",
+        timestamp: "2026-09-01T10:00:01.000Z",
+        cursor: { offset: 100, line: 2, sequence: 2, timestamp: "2026-09-01T10:00:01.000Z" },
+        rawPayload: JSON.stringify({ type: "agent_end", status: "completed" }),
+        metadata: {},
+      });
+
+      // Tool result arriving after session termination will not find orphan name
+      const lateResult = decoder.decode({
+        recordId: "r-res",
+        sessionId: "session-term-1",
+        harnessId: "omp",
+        sequenceNumber: 3,
+        recordType: "tool_result",
+        timestamp: "2026-09-01T10:00:02.000Z",
+        cursor: { offset: 200, line: 3, sequence: 3, timestamp: "2026-09-01T10:00:02.000Z" },
+        rawPayload: JSON.stringify({
+          type: "tool_execution_end",
+          callId: "call-orphan",
+          result: "late",
+        }),
+        metadata: {},
+      }) as IntermediateToolResultEvent;
+
+      expect(lateResult.toolName).toBe("unknown_tool");
+    });
+    it("preserves forward compatibility for unrecognized event types via unknown_passthrough", () => {
+      const futureEvent = decoder.decode(
+        v18Record(1, {
+          type: "future_unknown_omp_feature",
+          payloadData: { customVal: 42 },
+        }),
+      ) as IntermediateUnknownPassthroughEvent;
+
+      expect(futureEvent.type).toBe("unknown_passthrough");
+      expect(futureEvent.rawEventType).toBe("future_unknown_omp_feature");
+      expect(futureEvent.rawPayload).toEqual({
+        type: "future_unknown_omp_feature",
+        payloadData: { customVal: 42 },
+      });
+    });
+
+    it("handles subagent lifecycle events without colliding with root session completion", () => {
+      const subStart = decoder.decode(
+        v18Record(1, {
+          type: "agent_start",
+          subagentId: "sub-1",
+          parentId: "main-agent",
+          role: "reviewer",
+        }),
+      ) as IntermediateSubagentLifecycleEvent;
+
+      expect(subStart.type).toBe("subagent_lifecycle");
+      expect(subStart.lifecycleType).toBe("start");
+      expect(subStart.subagentId).toBe("sub-1");
+
+      const subYield = decoder.decode(
+        v18Record(2, {
+          type: "advisor_yielded",
+          subagentId: "sub-1",
+          reason: "review_done",
+        }),
+      ) as IntermediateSubagentLifecycleEvent;
+
+      expect(subYield.type).toBe("subagent_lifecycle");
+      expect(subYield.lifecycleType).toBe("settle");
+      expect(subYield.subagentId).toBe("sub-1");
+
+      const subEnd = decoder.decode(
+        v18Record(3, {
+          type: "agent_end",
+          subagentId: "sub-1",
+          status: "completed",
+        }),
+      ) as IntermediateSubagentLifecycleEvent;
+
+      expect(subEnd.type).toBe("subagent_lifecycle");
+      expect(subEnd.lifecycleType).toBe("terminate");
+      expect(subEnd.subagentId).toBe("sub-1");
     });
   });
 });
