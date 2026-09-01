@@ -858,6 +858,10 @@ describe("UpdateEngine staging, activation, and rollback", () => {
       },
       async getHealth() {
         if (shutdownStatus === "stopping") {
+          // Real delay is required here to prove IPC latency may exceed the polling cadence.
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, 10);
+          await promise;
           drainPolls += 1;
           if (drainPolls >= 3) completeDrain?.();
         }

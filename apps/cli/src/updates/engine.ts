@@ -1654,13 +1654,17 @@ export class UpdateEngine {
             ipcDisconnected = true;
           }
         }
+        const wallElapsedAfterProbe = Math.max(0, this.clock() - startedAt);
+        elapsedMs = Math.max(elapsedMs, wallElapsedAfterProbe);
+        if (elapsedMs >= this.drainTimeoutMs) continue;
+        const remainingBudgetAfterProbeMs = this.drainTimeoutMs - elapsedMs;
 
         if (ipcDisconnected) {
           let currentServiceState: ServiceStatusInfo;
           try {
             currentServiceState = await this.withTimeoutAndSignal(
               this.serviceManager.status(),
-              Math.min(remainingBudgetMs, 5_000),
+              Math.min(remainingBudgetAfterProbeMs, 5_000),
               signal,
               "Service status inspection timed out.",
             );
@@ -1684,6 +1688,9 @@ export class UpdateEngine {
             };
           }
         }
+        const wallElapsedBeforeSleep = Math.max(0, this.clock() - startedAt);
+        elapsedMs = Math.max(elapsedMs, wallElapsedBeforeSleep);
+        if (elapsedMs >= this.drainTimeoutMs) continue;
 
         const delayMs = Math.min(this.healthProbeIntervalMs, this.drainTimeoutMs - elapsedMs);
         await this.sleep(delayMs);
