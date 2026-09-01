@@ -3,9 +3,10 @@
  *
  * Command-line interface and single-command installer for Resin.
  */
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   SERVICE_SUPERVISOR_COMMAND,
   type ServiceSupervisorOptions,
@@ -76,14 +77,64 @@ export async function runServiceSupervisorCommand(argv: string[]): Promise<numbe
   return 0;
 }
 
-function isDirectServiceSupervisorEntry(
+export function isDirectServiceSupervisorEntry(
   metaUrl: string = import.meta.url,
   argv1: string | undefined = process.argv[1],
 ): boolean {
   if (!argv1) {
     return false;
   }
-  return pathToFileURL(path.resolve(argv1)).href === metaUrl;
+
+  const resolvedArgv = path.resolve(argv1);
+
+  try {
+    if (pathToFileURL(resolvedArgv).href === metaUrl) {
+      return true;
+    }
+  } catch {
+    // Ignore URL conversion failures
+  }
+
+  try {
+    const metaPath = fileURLToPath(metaUrl);
+    const resolvedMeta = path.resolve(metaPath);
+
+    if (resolvedArgv === resolvedMeta) {
+      return true;
+    }
+
+    let realArgv: string;
+    try {
+      realArgv = fs.realpathSync(resolvedArgv);
+    } catch {
+      realArgv = resolvedArgv;
+    }
+
+    let realMeta: string;
+    try {
+      realMeta = fs.realpathSync(resolvedMeta);
+    } catch {
+      realMeta = resolvedMeta;
+    }
+
+    if (realArgv === realMeta) {
+      return true;
+    }
+
+    try {
+      const argvStat = fs.statSync(resolvedArgv);
+      const metaStat = fs.statSync(resolvedMeta);
+      if (argvStat.ino !== 0 && argvStat.dev === metaStat.dev && argvStat.ino === metaStat.ino) {
+        return true;
+      }
+    } catch {
+      // Ignore stat failures (e.g. for non-existent files)
+    }
+  } catch {
+    // metaUrl was not a file URL or path resolution failed
+  }
+
+  return false;
 }
 
 if (process.argv[2] === SERVICE_SUPERVISOR_COMMAND && isDirectServiceSupervisorEntry()) {
