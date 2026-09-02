@@ -452,6 +452,7 @@ export class LocalMcpGateway {
     switch (method) {
       case "notifications/initialized":
         connection.isInitialized = true;
+        connection.hasReceivedInitializedNotification = true;
         break;
 
       case "$/cancelRequest":
@@ -536,7 +537,8 @@ export class LocalMcpGateway {
     connection: McpConnection,
     _params: GatewayCallParams,
   ): Promise<void> {
-    // Standard MCP initialized notification - state transition already completed during initialize
+    connection.isInitialized = true;
+    connection.hasReceivedInitializedNotification = true;
   }
 
   /**
@@ -628,7 +630,7 @@ export class LocalMcpGateway {
     };
 
     for (const [connId, conn] of this.connections.entries()) {
-      if (conn.isInitialized && !conn.isClosed) {
+      if (conn.isInitialized && conn.hasReceivedInitializedNotification && !conn.isClosed) {
         this.sendNotificationToConnection(connId, notification);
       }
     }

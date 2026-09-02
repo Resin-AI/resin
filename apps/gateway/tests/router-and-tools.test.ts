@@ -218,6 +218,10 @@ describe("GatewayRouter & Tool Lifecycle", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       });
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
 
       // Register new tool dynamically
       router.registerTool(
