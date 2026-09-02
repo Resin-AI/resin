@@ -638,6 +638,41 @@ describe("projectEventToMetadataOnly", () => {
     expect(projectedNonString.metadata).toEqual({ scenarioId: nonStringScenarioEvent.sessionId });
     expect(NormalizedSessionEventSchema.safeParse(projectedNonString).success).toBe(true);
   });
+
+  it("preserves metadata.sessionKind string enum (user or agent) and drops anything else", () => {
+    const userEvent: NormalizedMessageEvent = {
+      ...createBaseHeaders(1),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: "scn-user", sessionKind: "user", other: "dropped" },
+    };
+    const projectedUser = projectEventToMetadataOnly(userEvent);
+    expect(projectedUser.metadata).toEqual({ scenarioId: "scn-user", sessionKind: "user" });
+    expect(NormalizedSessionEventSchema.safeParse(projectedUser).success).toBe(true);
+
+    const agentEvent: NormalizedMessageEvent = {
+      ...createBaseHeaders(2),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: "scn-agent", sessionKind: "agent", other: "dropped" },
+    };
+    const projectedAgent = projectEventToMetadataOnly(agentEvent);
+    expect(projectedAgent.metadata).toEqual({ scenarioId: "scn-agent", sessionKind: "agent" });
+    expect(NormalizedSessionEventSchema.safeParse(projectedAgent).success).toBe(true);
+
+    const invalidEvent: NormalizedMessageEvent = {
+      ...createBaseHeaders(3),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: "scn-invalid", sessionKind: "other_kind", other: "dropped" },
+    };
+    const projectedInvalid = projectEventToMetadataOnly(invalidEvent);
+    expect(projectedInvalid.metadata).toEqual({ scenarioId: "scn-invalid" });
+    expect(NormalizedSessionEventSchema.safeParse(projectedInvalid).success).toBe(true);
+  });
 });
 
 describe("extractParameterShape", () => {

@@ -295,6 +295,14 @@ export class NormalizationPipeline {
     if (typeof mergedMetadata.scenarioId !== "string" || mergedMetadata.scenarioId.length === 0) {
       mergedMetadata.scenarioId = sessionId;
     }
+    const rawSessionKind =
+      typeof context?.customMetadata?.sessionKind === "string"
+        ? context.customMetadata.sessionKind
+        : typeof mergedMetadata.sessionKind === "string"
+          ? mergedMetadata.sessionKind
+          : undefined;
+    mergedMetadata.sessionKind =
+      rawSessionKind === "agent" || rawSessionKind === "user" ? rawSessionKind : "user";
 
     const fullEventCandidate = {
       schemaVersion: schemaVersionParsed.success
@@ -446,7 +454,7 @@ export class NormalizationPipeline {
   /**
    * Helper to construct and persist a DeadLetterRecord.
    */
-  private async createAndSaveDeadLetter<T extends object>(
+  public async createAndSaveDeadLetter<T extends object>(
     originalEventType: string,
     payload: T,
     errorReason: string,

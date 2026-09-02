@@ -18,6 +18,7 @@ export const DaemonConfigSchema = z.object({
   maxWorkerMemoryMb: z.number().int().positive().default(512),
   workerExecutionTimeoutMs: z.number().int().positive().default(30000),
   moduleConfigs: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+  captureUserSessionsOnly: z.boolean().default(true),
   custom: z.record(z.string(), z.unknown()).default({}),
 });
 
@@ -155,6 +156,12 @@ export function parseEnvConfig(
   if (env.RESIN_WORKER_EXECUTION_TIMEOUT_MS) {
     const workerTimeout = Number.parseInt(env.RESIN_WORKER_EXECUTION_TIMEOUT_MS, 10);
     if (!Number.isNaN(workerTimeout)) result.workerExecutionTimeoutMs = workerTimeout;
+  }
+
+  if (env.RESIN_CAPTURE_USER_SESSIONS_ONLY !== undefined) {
+    result.captureUserSessionsOnly =
+      env.RESIN_CAPTURE_USER_SESSIONS_ONLY !== "false" &&
+      env.RESIN_CAPTURE_USER_SESSIONS_ONLY !== "0";
   }
 
   return result;

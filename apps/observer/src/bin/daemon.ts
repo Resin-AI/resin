@@ -1092,6 +1092,7 @@ async function runForeground(options: {
     remoteTelemetryConsent: cloudConsent,
     refreshRemoteTelemetryConsent: refreshCloudConsent,
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
+    captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
   const telemetryController = new TelemetryCaptureController({
     supervisor,

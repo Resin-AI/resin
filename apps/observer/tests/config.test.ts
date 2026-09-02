@@ -28,6 +28,7 @@ describe("config", () => {
       expect(config.shutdownTimeoutMs).toBe(10000);
       expect(config.maxWorkerMemoryMb).toBe(512);
       expect(config.workerExecutionTimeoutMs).toBe(30000);
+      expect(config.captureUserSessionsOnly).toBe(true);
     });
 
     it("rejects invalid port numbers", () => {
@@ -68,6 +69,22 @@ describe("config", () => {
       expect(parsed.shutdownTimeoutMs).toBe(5000);
       expect(parsed.maxWorkerMemoryMb).toBe(1024);
       expect(parsed.workerExecutionTimeoutMs).toBe(60000);
+    });
+
+    it("parses RESIN_CAPTURE_USER_SESSIONS_ONLY boolean correctly", () => {
+      expect(
+        parseEnvConfig({ RESIN_CAPTURE_USER_SESSIONS_ONLY: "false" }).captureUserSessionsOnly,
+      ).toBe(false);
+      expect(
+        parseEnvConfig({ RESIN_CAPTURE_USER_SESSIONS_ONLY: "0" }).captureUserSessionsOnly,
+      ).toBe(false);
+      expect(
+        parseEnvConfig({ RESIN_CAPTURE_USER_SESSIONS_ONLY: "true" }).captureUserSessionsOnly,
+      ).toBe(true);
+      expect(
+        parseEnvConfig({ RESIN_CAPTURE_USER_SESSIONS_ONLY: "1" }).captureUserSessionsOnly,
+      ).toBe(true);
+      expect(parseEnvConfig({}).captureUserSessionsOnly).toBeUndefined();
     });
   });
 

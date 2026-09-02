@@ -491,9 +491,19 @@ export class CloudObservationClient {
       return this.executeSendBatch(input, refreshedIdentity, true);
     }
 
+    if (response.status === 429) {
+      const retryAfterHeader =
+        response.headers.get("retry-after") ?? response.headers.get("Retry-After");
+      const retryAfterMs = parseRetryAfterHeader(retryAfterHeader);
+      throw new RateLimitedError("Observation batch rate limited (429)", {
+        retryAfterMs,
+      });
+    }
+
     if (!response.ok) {
+      const isRetryable = response.status >= 500 || response.status === 408;
       throw new ProtocolError(
-        response.status >= 500 ? "retryable" : "validation",
+        isRetryable ? "retryable" : "validation",
         `Observation batch request failed with HTTP ${response.status}`,
         { status: response.status },
       );

@@ -96,6 +96,64 @@ export function parseIsoTimestampFromFilename(name: string): number | null {
 }
 
 /**
+ * Classifies an OMP transcript file as a user session or subagent session.
+ * User sessions live at `<workspace-slug>/<timestamp>_<uuid>.jsonl` or `.omp/sessions/<timestamp>_<uuid>.jsonl`.
+ * Subagent transcripts live at `<workspace-slug>/<timestamp>_<uuid>/<agent-name>.jsonl` (nested under the parent session's directory).
+ */
+export function classifyTranscriptSessionKind(
+  filePath: string,
+  workspace?: HarnessWorkspace,
+): "user" | "agent" {
+  const normPath = path.resolve(filePath);
+  const dir = path.dirname(normPath);
+  const dirName = path.basename(dir);
+  const parentDir = path.dirname(dir);
+  const parentDirName = path.basename(parentDir);
+  const grandparentDir = path.dirname(parentDir);
+  const grandparentDirName = path.basename(grandparentDir);
+
+  // If workspace is available, check if the file is nested inside a session directory under the workspace
+  if (workspace) {
+    if (matchesWorkspace(parentDirName, workspace) && !matchesWorkspace(dirName, workspace)) {
+      return "agent";
+    }
+    if (matchesWorkspace(dirName, workspace)) {
+      return "user";
+    }
+  }
+
+  // Check structure relative to standard sessions directories:
+  // e.g. <ompHome>/agent/sessions/<workspace-slug>/<session-dir>/<agent-name>.jsonl -> agent
+  // e.g. <ompHome>/agent/sessions/<workspace-slug>/<session-file>.jsonl -> user
+  if (grandparentDirName === "sessions") {
+    return "agent";
+  }
+  if (parentDirName === "sessions") {
+    // If dirName matches timestamp/uuid pattern, it's .omp/sessions/<session-dir>/<agent-name>.jsonl
+    if (
+      parseIsoTimestampFromFilename(dirName) !== null ||
+      /\d{8}[T_]\d{6}|[0-9a-f]{8}-[0-9a-f]{4}/i.test(dirName)
+    ) {
+      return "agent";
+    }
+    return "user";
+  }
+  if (dirName === "sessions") {
+    return "user";
+  }
+
+  // Check if immediate parent directory matches session directory pattern (<timestamp>_<uuid>)
+  if (
+    parseIsoTimestampFromFilename(dirName) !== null ||
+    /\d{8}[T_]\d{6}|[0-9a-f]{8}-[0-9a-f]{4}/i.test(dirName)
+  ) {
+    return "agent";
+  }
+
+  return "user";
+}
+
+/**
  * Resolves the OMP home directory (~/.omp or $OMP_HOME).
  */
 export function resolveOmpHome(options?: {
@@ -539,6 +597,7 @@ export interface ParsedTranscript {
   totalLines: number;
   hasExplicitLifecycle: boolean;
   inspectedBytes: number;
+  sessionKind?: "user" | "agent";
 }
 
 /**
@@ -831,6 +890,7 @@ export async function inspectTranscriptFile(
         : fileName;
 
     const sessionId = headerSessionId || fallbackSessionId;
+    const sessionKind = classifyTranscriptSessionKind(filePath);
 
     return {
       sessionId,
@@ -847,6 +907,7 @@ export async function inspectTranscriptFile(
       totalLines: totalLinesCount,
       hasExplicitLifecycle,
       inspectedBytes: totalBytesInspected,
+      sessionKind,
     };
   } catch {
     return null;
@@ -1204,6 +1265,7 @@ export async function buildOmpDiscoveryCatalog(
         !t.headerSessionId && (t.sessionId === "session-main" || t.sessionId === "transcript-main")
           ? `${workspace.workspaceId}-main`
           : t.sessionId;
+      const sessionKind = classifyTranscriptSessionKind(t.filePath, workspace);
       const session: HarnessSession = {
         sessionId: effectiveSessionId,
         workspaceId: workspace.workspaceId,
@@ -1218,6 +1280,7 @@ export async function buildOmpDiscoveryCatalog(
           hasExplicitLifecycle: t.hasExplicitLifecycle,
           inspectedBytes: t.inspectedBytes,
           source: "omp-discovery",
+          sessionKind,
         },
       };
 
@@ -1297,6 +1360,7 @@ export async function buildOmpDiscoveryCatalog(
           (t.sessionId === "session-main" || t.sessionId === "transcript-main")
             ? `${workspace.workspaceId}-main`
             : t.sessionId;
+        const sessionKind = classifyTranscriptSessionKind(t.filePath, workspace);
         const session: HarnessSession = {
           sessionId: effectiveSessionId,
           workspaceId: workspace.workspaceId,
@@ -1311,6 +1375,7 @@ export async function buildOmpDiscoveryCatalog(
             hasExplicitLifecycle: t.hasExplicitLifecycle,
             inspectedBytes: t.inspectedBytes,
             source: "omp-discovery",
+            sessionKind,
           },
         };
         sessionMap.set(effectiveSessionId, session);

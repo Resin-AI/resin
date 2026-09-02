@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NormalizedSessionEvent, ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
+import { ProtocolError } from "@resin/protocol";
 import {
   CloudObservationClient,
   NormalizationPipeline,
@@ -1047,6 +1048,155 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(ackSuccess).toHaveBeenCalledTimes(1);
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
       expect(coordinator.getActiveSessionCount()).toBe(0);
+    });
+
+    it("generic session: treats HTTP 400 as terminal for batch: logs at error level with session id + status, saves dead letter, advances cursor via ack, and does not re-queue", async () => {
+      const pipeline = new NormalizationPipeline();
+      const deadLetterSpy = vi.spyOn(pipeline, "createAndSaveDeadLetter");
+      const errorLogs: Array<{ message: string; context?: unknown }> = [];
+      const mockLogger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn((msg: string, ctx?: unknown) => {
+          errorLogs.push({ message: msg, context: ctx });
+        }),
+      };
+
+      const mockObservationClient = createMockObservationClient({
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async () => {
+          throw new ProtocolError("validation", "Observation batch request failed with HTTP 400", {
+            status: 400,
+          });
+        }),
+      });
+
+      const session = createMockHarnessSession("sess_terminal_400_test", "active");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        coalesceDwellMs: 0,
+        logger: mockLogger,
+      });
+
+      const ack = vi.fn(async () => {});
+      const records = [createPromptRecord(session.sessionId, 1)];
+
+      // handleRecords should NOT throw because 400 is terminal and handled
+      await coordinator.handleRecords(session, records, ack);
+
+      // (a) Cursor is advanced past those records
+      expect(ack).toHaveBeenCalledTimes(1);
+
+      // (b) Logged once at error level with session id and status
+      expect(errorLogs.length).toBeGreaterThanOrEqual(1);
+      const matchingLog = errorLogs.find(
+        (l) => l.message.includes("sess_terminal_400_test") && l.message.includes("400"),
+      );
+      expect(matchingLog).toBeDefined();
+
+      // (c) Moved batch to dead-letter store
+      expect(deadLetterSpy).toHaveBeenCalledWith(
+        "observation_batch",
+        expect.objectContaining({
+          observations: expect.any(Array),
+        }),
+        expect.stringContaining("400"),
+      );
+
+      // (d) Not re-queued: subsequent flush has nothing pending
+      mockObservationClient.sendObservationBatch = vi.fn(async () => ({
+        batchId: "batch_next_ok",
+        status: "accepted",
+        acceptedCount: 1,
+        rejectedCount: 0,
+        errors: [],
+      }));
+
+      // A subsequent batch for the same session succeeds normally without stuck retries
+      const ack2 = vi.fn(async () => {});
+      const records2 = [createPromptRecord(session.sessionId, 2)];
+      await coordinator.handleRecords(session, records2, ack2);
+      expect(ack2).toHaveBeenCalledTimes(1);
+    });
+
+    it("generic session: applies exponential backoff with jitter (1 s -> 60 s cap) to retryable 5xx failures per session", async () => {
+      vi.useFakeTimers();
+      try {
+        const pipeline = new NormalizationPipeline();
+        let attempts = 0;
+        const capturedDelays: number[] = [];
+
+        // Spy on setTimeout to capture the scheduled retry delays
+        const originalSetTimeout = globalThis.setTimeout;
+        vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+          if (typeof ms === "number" && ms > 0) {
+            capturedDelays.push(ms);
+          }
+          return originalSetTimeout(fn, ms);
+        }) as typeof setTimeout);
+
+        const mockObservationClient = createMockObservationClient({
+          sendTrajectoryObservationBatch: vi.fn(),
+          sendObservationBatch: vi.fn(async () => {
+            attempts++;
+            throw new ProtocolError("retryable", "Cloud service 503", { status: 503 });
+          }),
+        });
+
+        const session = createMockHarnessSession("sess_backoff_test", "active");
+        const coordinator = new TrajectoryCaptureCoordinator({
+          pipeline,
+          observationClient: mockObservationClient,
+          coalesceDwellMs: 1000,
+        });
+
+        const ack = vi.fn(async () => {});
+        const records = [createPromptRecord(session.sessionId, 1)];
+
+        // Enqueue records
+        await coordinator.handleRecords(session, records, ack);
+
+        // Run the first scheduled flush
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(attempts).toBe(1);
+
+        // First retry was scheduled with backoff attempt 1 (~1s +/- jitter)
+        expect(capturedDelays.length).toBeGreaterThanOrEqual(2);
+        const retryDelay1 = capturedDelays[capturedDelays.length - 1];
+        expect(retryDelay1).toBeGreaterThanOrEqual(800);
+        expect(retryDelay1).toBeLessThanOrEqual(1500);
+
+        // Trigger retry 1
+        await vi.advanceTimersByTimeAsync(retryDelay1);
+        expect(attempts).toBe(2);
+
+        // Second retry scheduled with backoff attempt 2 (~2s +/- jitter)
+        const retryDelay2 = capturedDelays[capturedDelays.length - 1];
+        expect(retryDelay2).toBeGreaterThanOrEqual(1600);
+        expect(retryDelay2).toBeLessThanOrEqual(3000);
+
+        // Trigger retry 2
+        await vi.advanceTimersByTimeAsync(retryDelay2);
+        expect(attempts).toBe(3);
+
+        // Third retry scheduled with backoff attempt 3 (~4s +/- jitter)
+        const retryDelay3 = capturedDelays[capturedDelays.length - 1];
+        expect(retryDelay3).toBeGreaterThanOrEqual(3200);
+        expect(retryDelay3).toBeLessThanOrEqual(6000);
+
+        // Ensure cap does not exceed 60s
+        for (let i = 0; i < 8; i++) {
+          const nextDelay = capturedDelays[capturedDelays.length - 1];
+          await vi.advanceTimersByTimeAsync(nextDelay);
+        }
+        for (const delay of capturedDelays) {
+          expect(delay).toBeLessThanOrEqual(60_000);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
+import { ExponentialBackoff } from "@resin/protocol";
 import { z } from "zod";
 import { AuthRecoveryError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
@@ -36,6 +37,13 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
+
+function extractHttpStatus(err: unknown): number | undefined {
+  if (err && typeof err === "object" && "status" in err && typeof err.status === "number") {
+    return err.status;
+  }
+  return undefined;
+}
 
 /**
  * Function signature for resolving trajectory attribution context from a harness session.
@@ -151,6 +159,7 @@ export class TrajectoryCaptureCoordinator {
   private readonly maxBatchSize: number;
   private readonly telemetry?: TelemetryAggregator;
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
+  private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
   private totalGenericBatchesUploaded = 0;
   private totalGenericObservationsUploaded = 0;
@@ -198,6 +207,19 @@ export class TrajectoryCaptureCoordinator {
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
       ? pipelineOrOptions.authorizeTelemetryEmission
       : undefined;
+  }
+  private getSessionBackoff(sessionId: string): ExponentialBackoff {
+    let backoff = this.sessionBackoffs.get(sessionId);
+    if (!backoff) {
+      backoff = new ExponentialBackoff({
+        baseDelayMs: 1000,
+        maxDelayMs: 60_000,
+        factor: 2,
+        jitter: 0.2,
+      });
+      this.sessionBackoffs.set(sessionId, backoff);
+    }
+    return backoff;
   }
 
   private isTelemetryAllowed(generation = this.telemetryGeneration): boolean {
@@ -502,6 +524,43 @@ export class TrajectoryCaptureCoordinator {
               observations: [observation],
             });
           } catch (err) {
+            const status = extractHttpStatus(err);
+            const isTerminal4xx =
+              typeof status === "number" &&
+              status >= 400 &&
+              status < 500 &&
+              status !== 401 &&
+              status !== 403 &&
+              status !== 408 &&
+              status !== 429;
+
+            if (isTerminal4xx) {
+              this.logger?.error(
+                `Terminal failure submitting trajectory observation batch for session ${sessionId} with HTTP ${status}: dead-lettering batch`,
+                {
+                  sessionId,
+                  status,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+              );
+              try {
+                await this.pipeline.createAndSaveDeadLetter(
+                  "trajectory_observation_batch",
+                  { observations: [observation] },
+                  `Trajectory observation batch failed with HTTP ${status}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              } catch (dlErr) {
+                this.logger?.error(
+                  `Failed to save dead letter for session ${sessionId}: ${String(dlErr)}`,
+                );
+              }
+
+              this.finalizedSessions.add(sessionId);
+              this.activeSessions.delete(sessionId);
+              await ack();
+              return;
+            }
+
             this.logger?.error(
               `Failed to submit trajectory observation batch for session ${sessionId}`,
               { error: err instanceof Error ? err.message : String(err) },
@@ -664,7 +723,8 @@ export class TrajectoryCaptureCoordinator {
             if (this.coalesceDwellMs === 0) {
               throw err;
             }
-            this.scheduleGenericFlush(sessionId, buffer);
+            const nextDelay = Math.min(60_000, this.getSessionBackoff(sessionId).nextDelay());
+            this.scheduleGenericFlush(sessionId, buffer, nextDelay);
           }
         } else {
           this.scheduleGenericFlush(sessionId, buffer);
@@ -719,10 +779,15 @@ export class TrajectoryCaptureCoordinator {
     return false;
   }
 
-  private scheduleGenericFlush(sessionId: string, buffer: GenericCoalescingBuffer): void {
+  private scheduleGenericFlush(
+    sessionId: string,
+    buffer: GenericCoalescingBuffer,
+    delayMs?: number,
+  ): void {
     if (buffer.timer || this.coalesceDwellMs === 0) {
       return;
     }
+    const delay = delayMs ?? this.coalesceDwellMs;
     buffer.timer = setTimeout(() => {
       void this.runSessionTask(sessionId, async () => {
         try {
@@ -733,11 +798,12 @@ export class TrajectoryCaptureCoordinator {
           });
           const retryBuffer = this.genericCoalescingBuffers.get(sessionId);
           if (retryBuffer) {
-            this.scheduleGenericFlush(sessionId, retryBuffer);
+            const nextDelay = Math.min(60_000, this.getSessionBackoff(sessionId).nextDelay());
+            this.scheduleGenericFlush(sessionId, retryBuffer, nextDelay);
           }
         }
       });
-    }, this.coalesceDwellMs);
+    }, delay);
   }
 
   private async flushGenericSession(sessionId: string): Promise<void> {
@@ -794,7 +860,60 @@ export class TrajectoryCaptureCoordinator {
         observations: projectedEvents,
       });
       await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
+      this.sessionBackoffs.delete(sessionId);
     } catch (err) {
+      const status = extractHttpStatus(err);
+      const isTerminal4xx =
+        typeof status === "number" &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 401 &&
+        status !== 403 &&
+        status !== 408 &&
+        status !== 429;
+
+      if (isTerminal4xx) {
+        this.logger?.error(
+          `Terminal failure submitting observation batch for generic session ${sessionId} with HTTP ${status}: dead-lettering batch`,
+          {
+            sessionId,
+            status,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        try {
+          await this.pipeline.createAndSaveDeadLetter(
+            "observation_batch",
+            { batchId, observations: projectedEvents },
+            `Observation batch failed with HTTP ${status}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        } catch (dlErr) {
+          this.logger?.error(
+            `Failed to save dead letter for session ${sessionId}: ${String(dlErr)}`,
+          );
+        }
+
+        this.sessionBackoffs.delete(sessionId);
+
+        this.recordBatchTelemetry(projectedEvents.length);
+
+        if (buffer.latestTail) {
+          this.genericSessionTails.set(sessionId, buffer.latestTail);
+        }
+
+        if (buffer.isTerminal) {
+          this.finalizedSessions.add(sessionId);
+          this.activeGenericSessions.delete(sessionId);
+          this.genericSessionTails.delete(sessionId);
+        }
+
+        for (const ack of acks) {
+          await ack();
+        }
+
+        return;
+      }
+
       this.logger?.error(`Failed to submit observation batch for generic session ${sessionId}`, {
         error: err instanceof Error ? err.message : String(err),
       });

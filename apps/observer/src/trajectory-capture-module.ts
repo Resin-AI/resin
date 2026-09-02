@@ -187,6 +187,10 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    * Optional logger.
    */
   logger?: Logger;
+  /**
+   * If true, only user sessions will be attached by the tailing coordinator.
+   */
+  captureUserSessionsOnly?: boolean;
 }
 
 function isLocalStateStore(
@@ -235,6 +239,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private privacyCheckpointHealthy: boolean;
   private skipBackfillOnNextStart = false;
   private logger?: Logger;
+  private readonly captureUserSessionsOnly: boolean;
 
   constructor(options: TrajectoryCaptureRuntimeModuleOptions = {}) {
     this.logger = options.logger;
@@ -246,6 +251,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       options.refreshRemoteTelemetryConsent !== undefined;
     this.resolvedObservationClient = options.observationClient;
     this.privacyCheckpointPath = options.privacyCheckpointPath;
+    this.captureUserSessionsOnly = options.captureUserSessionsOnly ?? true;
     this.now = options.now ?? Date.now;
     const requestedTelemetryEnabled =
       options.telemetryEnabled === undefined ? true : options.telemetryEnabled === true;
@@ -324,6 +330,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
           session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+        captureUserSessionsOnly: this.captureUserSessionsOnly,
+        logger: this.logger,
       });
     for (const adapter of this.adapters) {
       this.observerCoordinator.registerAdapter(adapter);
@@ -669,6 +677,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
         session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+      captureUserSessionsOnly: this.captureUserSessionsOnly,
+      logger: this.logger,
     });
     for (const adapter of this.adapters) {
       this.observerCoordinator.registerAdapter(adapter);
