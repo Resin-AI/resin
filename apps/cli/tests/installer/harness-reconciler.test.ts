@@ -194,14 +194,24 @@ describe("HarnessReconciler", () => {
       "reconciled",
       "reconciled",
     ]);
-    expect(JSON.parse((await bridge.readFile(`${HOME}/.claude/claude.json`)) ?? "")).toMatchObject({
-      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+    expect(JSON.parse((await bridge.readFile(`${HOME}/.claude.json`)) ?? "")).toMatchObject({
+      mcpServers: {
+        resin: {
+          command: path.join(HOME, ".resin", "bin", "resin"),
+          args: ["mcp"],
+        },
+      },
     });
     expect(await bridge.readFile(`${HOME}/.codex/config.toml`)).toContain(
-      `[mcp_servers.resin]\ncommand = "resin"`,
+      `[mcp_servers.resin]\ncommand = "${path.join(HOME, ".resin", "bin", "resin")}"`,
     );
     expect(JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "")).toMatchObject({
-      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+      mcpServers: {
+        resin: {
+          command: path.join(HOME, ".resin", "bin", "resin"),
+          args: ["mcp"],
+        },
+      },
     });
 
     const backupCount = Object.keys(bridge.dump()).filter(
@@ -222,10 +232,50 @@ describe("HarnessReconciler", () => {
     ).toHaveLength(backupCount);
   });
 
+  it("migrates a prior bare command to the stable installed shim", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const targetPath = path.join(HOME, ".claude.json");
+    await bridge.writeFile(
+      targetPath,
+      JSON.stringify({
+        mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+      }),
+    );
+
+    const options = {
+      harnesses: ["claude-code"] as const,
+      installedHarnesses: ["claude-code"] as const,
+      customHome: HOME,
+      workspacePath: WORKSPACE,
+      gatewayUrl: GATEWAY_URL,
+      fsBridge: bridge,
+      probeHarness: NO_INSTALLATION_PROBE,
+    };
+    const reconciler = new HarnessReconciler();
+    const repaired = await reconciler.reconcile(options);
+
+    expect(repaired.results[0]).toMatchObject({
+      condition: "drifted",
+      status: "reconciled",
+      changed: true,
+    });
+    expect(JSON.parse((await bridge.readFile(targetPath)) ?? "").mcpServers.resin).toEqual({
+      command: path.join(HOME, ".resin", "bin", "resin"),
+      args: ["mcp"],
+    });
+
+    const converged = await reconciler.reconcile(options);
+    expect(converged.results[0]).toMatchObject({
+      condition: "healthy",
+      status: "registered",
+      changed: false,
+    });
+  });
+
   it("repairs missing and wrong Resin entries without changing user-owned data", async () => {
     const bridge = new InMemoryConfigFsBridge();
     await bridge.writeFile(
-      `${HOME}/.claude/claude.json`,
+      `${HOME}/.claude.json`,
       JSON.stringify({
         theme: "dark",
         env: { USER_TOKEN: "keep" },
@@ -275,7 +325,7 @@ describe("HarnessReconciler", () => {
       ["drifted", "reconciled"],
     ]);
 
-    const claude = JSON.parse((await bridge.readFile(`${HOME}/.claude/claude.json`)) ?? "");
+    const claude = JSON.parse((await bridge.readFile(`${HOME}/.claude.json`)) ?? "");
     expect(claude.theme).toBe("dark");
     expect(claude.env).toEqual({ USER_TOKEN: "keep" });
     expect(claude.mcpServers.user_server).toEqual({
@@ -296,7 +346,7 @@ describe("HarnessReconciler", () => {
       command: "user-mcp",
       env: { TOKEN: "keep" },
     });
-    expect(omp.mcpServers.resin.command).toBe("resin");
+    expect(omp.mcpServers.resin.command).toBe(path.join(HOME, ".resin", "bin", "resin"));
     expect(omp.mcpServers.resin.args).toEqual(["mcp"]);
     expect(omp.mcpServers.resin.env).toEqual({
       RESIN_USER_TOKEN: "keep-owned-env",
@@ -306,7 +356,7 @@ describe("HarnessReconciler", () => {
 
   it("reports corrupt configuration without replacing or backing it up", async () => {
     const bridge = new InMemoryConfigFsBridge();
-    const targetPath = `${HOME}/.claude/claude.json`;
+    const targetPath = `${HOME}/.claude.json`;
     const corruptContent = '{"mcpServers":';
     await bridge.writeFile(targetPath, corruptContent);
 
@@ -337,7 +387,7 @@ describe("HarnessReconciler", () => {
 
   it("rolls back a partial permission failure from the timestamped backup", async () => {
     const delegate = new InMemoryConfigFsBridge();
-    const targetPath = `${HOME}/.claude/claude.json`;
+    const targetPath = `${HOME}/.claude.json`;
     const original = JSON.stringify({
       settings: { theme: "dark" },
       mcpServers: { resin: { type: "sse", url: "http://wrong.invalid/sse" } },
@@ -372,7 +422,7 @@ describe("HarnessReconciler", () => {
 
   it("retains only the five newest backups", async () => {
     const bridge = new InMemoryConfigFsBridge();
-    const targetPath = `${HOME}/.claude/claude.json`;
+    const targetPath = `${HOME}/.claude.json`;
     await bridge.writeFile(
       targetPath,
       JSON.stringify({
@@ -458,7 +508,7 @@ describe("HarnessReconciler", () => {
       ),
     ).toBe(false);
 
-    const missingTargetPath = `${HOME}/.claude/claude.json`;
+    const missingTargetPath = `${HOME}/.claude.json`;
     const userManagedConfig = JSON.stringify({
       mcpServers: { user_server: { command: "user-mcp" } },
     });
@@ -484,7 +534,7 @@ describe("HarnessReconciler", () => {
   it("creates private backups and preserves existing target permissions", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-harness-reconcile-"));
     try {
-      const targetPath = path.join(home, ".claude", "claude.json");
+      const targetPath = path.join(home, ".claude.json");
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(
         targetPath,
@@ -543,7 +593,7 @@ describe("HarnessReconciler", () => {
     });
     const repaired = JSON.parse((await bridge.readFile(targetPath)) ?? "");
     expect(repaired.mcpServers.resin).toEqual({
-      command: "resin",
+      command: path.join(HOME, ".resin", "bin", "resin"),
       args: ["mcp"],
       env: { RESIN_TOKEN: "keep" },
     });
@@ -552,7 +602,7 @@ describe("HarnessReconciler", () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-harness-symlink-"));
     try {
       const managedPath = path.join(home, "dotfiles", "claude.json");
-      const targetPath = path.join(home, ".claude", "claude.json");
+      const targetPath = path.join(home, ".claude.json");
       await fs.mkdir(path.dirname(managedPath), { recursive: true });
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(
@@ -576,7 +626,12 @@ describe("HarnessReconciler", () => {
       expect((await fs.lstat(targetPath)).isSymbolicLink()).toBe(true);
       expect(JSON.parse(await fs.readFile(managedPath, "utf8"))).toMatchObject({
         keep: "managed",
-        mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+        mcpServers: {
+          resin: {
+            command: path.join(home, ".resin", "bin", "resin"),
+            args: ["mcp"],
+          },
+        },
       });
 
       const externallyEdited = JSON.stringify({
@@ -620,7 +675,7 @@ describe("HarnessReconciler", () => {
   });
 
   it("refuses to replace or delete concurrent writer content around writes and rollbacks", async () => {
-    const targetPath = `${HOME}/.claude/claude.json`;
+    const targetPath = `${HOME}/.claude.json`;
     const original = JSON.stringify({
       keep: "original",
       mcpServers: { resin: { type: "sse", url: "http://old" } },
@@ -691,7 +746,7 @@ describe("HarnessReconciler", () => {
   });
 
   it("retries exclusive backup collisions and authenticates bytes before rollback", async () => {
-    const targetPath = `${HOME}/.claude/claude.json`;
+    const targetPath = `${HOME}/.claude.json`;
     const original = JSON.stringify({
       keep: true,
       mcpServers: { resin: { type: "sse", url: "http://old" } },
@@ -789,7 +844,9 @@ describe("HarnessReconciler", () => {
       });
 
       expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-      expect(await fs.readFile(targetPath, "utf8")).toContain('command = "resin"');
+      expect(await fs.readFile(targetPath, "utf8")).toContain(
+        `command = "${path.join(home, ".resin", "bin", "resin")}"`,
+      );
       await expect(fs.access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await fs.rm(home, { recursive: true, force: true });
@@ -846,7 +903,9 @@ describe("HarnessReconciler", () => {
     const repaired = await bridge.readFile(targetPath);
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    expect(repaired).toContain('[mcp_servers.resin]\ncommand = "resin"');
+    expect(repaired).toContain(
+      `[mcp_servers.resin]\ncommand = "${path.join(HOME, ".resin", "bin", "resin")}"`,
+    );
     expect(repaired).not.toContain("url =");
   });
 
@@ -880,7 +939,7 @@ describe("HarnessReconciler", () => {
     const repaired = await bridge.readFile(targetPath);
 
     expect(report.results[0]).toMatchObject({ status: "reconciled", changed: true });
-    expect(repaired).toContain('command = "resin"');
+    expect(repaired).toContain(`command = "${path.join(HOME, ".resin", "bin", "resin")}"`);
     expect(repaired).toContain('user_note = "preserve me"');
     expect(repaired).not.toContain("legacy-command");
     expect(repaired).not.toContain("--legacy");
@@ -891,7 +950,7 @@ describe("HarnessReconciler", () => {
     for (const phase of ["before-install", "after-install"] as const) {
       const home = await fs.mkdtemp(path.join(os.tmpdir(), `resin-harness-${phase}-`));
       try {
-        const targetPath = path.join(home, ".claude", "claude.json");
+        const targetPath = path.join(home, ".claude.json");
         const original = JSON.stringify({
           keep: "original",
           mcpServers: { resin: { url: "http://wrong.invalid/sse" } },
@@ -920,7 +979,9 @@ describe("HarnessReconciler", () => {
         expect(transactionName).toBeDefined();
         const transactionPath = path.join(path.dirname(targetPath), transactionName!);
         expect(await fs.readFile(path.join(transactionPath, "captured"), "utf8")).toBe(original);
-        expect(await fs.readFile(path.join(transactionPath, "planned"), "utf8")).toContain("resin");
+        expect(await fs.readFile(path.join(transactionPath, "planned"), "utf8")).toContain(
+          path.join(home, ".resin", "bin", "resin"),
+        );
       } finally {
         await fs.rm(home, { recursive: true, force: true });
       }
@@ -929,7 +990,7 @@ describe("HarnessReconciler", () => {
 
   it("discovers through the production orchestrator and uses its safe bridge by default", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-harness-orchestrator-"));
-    const targetPath = path.join(home, ".claude", "claude.json");
+    const targetPath = path.join(home, ".claude.json");
     const original = JSON.stringify({
       keep: "original",
       mcpServers: { resin: { type: "sse", url: "http://wrong.invalid/sse" } },
@@ -1014,7 +1075,7 @@ describe("HarnessReconciler", () => {
         probeHarness: async () => installation,
       });
       expect(injected.success).toBe(true);
-      expect(await injectedBridge.exists(`${HOME}/.claude/claude.json`)).toBe(true);
+      expect(await injectedBridge.exists(`${HOME}/.claude.json`)).toBe(true);
     } finally {
       await fs.rm(home, { recursive: true, force: true });
     }
@@ -1134,7 +1195,7 @@ describe("HarnessReconciler", () => {
 
       // Claude Code with legacy alias
       await bridge.writeFile(
-        `${HOME}/.claude/claude.json`,
+        `${HOME}/.claude.json`,
         JSON.stringify({
           mcpServers: {
             resin_gateway: { type: "sse", url: GATEWAY_URL },
@@ -1170,17 +1231,23 @@ describe("HarnessReconciler", () => {
 
       expect(report.success).toBe(true);
 
-      const claude = JSON.parse((await bridge.readFile(`${HOME}/.claude/claude.json`)) ?? "{}");
-      expect(claude.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+      const claude = JSON.parse((await bridge.readFile(`${HOME}/.claude.json`)) ?? "{}");
+      expect(claude.mcpServers.resin).toEqual({
+        command: path.join(HOME, ".resin", "bin", "resin"),
+        args: ["mcp"],
+      });
       expect(claude.mcpServers.resin_gateway).toBeUndefined();
 
       const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
       expect(codex).toContain("[mcp_servers.resin]");
-      expect(codex).toContain('command = "resin"');
+      expect(codex).toContain(`command = "${path.join(HOME, ".resin", "bin", "resin")}"`);
       expect(codex).not.toContain("[mcp_servers.resin_gateway]");
 
       const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
-      expect(omp.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+      expect(omp.mcpServers.resin).toEqual({
+        command: path.join(HOME, ".resin", "bin", "resin"),
+        args: ["mcp"],
+      });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
 
@@ -1265,7 +1332,7 @@ describe("HarnessReconciler", () => {
       expect(omp.settings).toEqual({ compact: true });
       expect(omp.mcpServers.user_srv).toEqual({ command: "user-bin" });
       expect(omp.mcpServers.resin).toEqual({
-        command: "resin",
+        command: path.join(HOME, ".resin", "bin", "resin"),
         args: ["mcp"],
         env: { CUSTOM_VAR: "keep-me" },
       });
@@ -1312,14 +1379,14 @@ describe("HarnessReconciler", () => {
 
       const omp = JSON.parse((await bridge.readFile(`${HOME}/.omp/agent/mcp.json`)) ?? "{}");
       expect(omp.mcpServers.resin).toEqual({
-        command: "resin",
+        command: path.join(HOME, ".resin", "bin", "resin"),
         args: ["mcp"],
         env: { TOKEN: "user-tok" },
       });
 
       const codex = await bridge.readFile(`${HOME}/.codex/config.toml`);
       expect(codex).toContain("[mcp_servers.resin]");
-      expect(codex).toContain('command = "resin"');
+      expect(codex).toContain(`command = "${path.join(HOME, ".resin", "bin", "resin")}"`);
       expect(codex).not.toContain("localhost:9400");
       expect(codex).toContain('env.CUSTOM = "preserve"');
     });

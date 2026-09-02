@@ -78,6 +78,46 @@ function escapeRegExp(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function serializeTomlString(value: string): string {
+  // JSON basic-string escaping is a valid subset of TOML basic strings and
+  // safely preserves Windows path separators, quotes, and control characters.
+  return JSON.stringify(value);
+}
+
+function parseTomlStringLiteral(source: string): string | undefined {
+  const trimmed = source.trimStart();
+  if (trimmed.startsWith("'")) {
+    const end = trimmed.indexOf("'", 1);
+    return end < 0 ? undefined : trimmed.slice(1, end);
+  }
+  const match = trimmed.match(/^"(?:\\.|[^"\\])*"/);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(match[0]);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function findTomlStringProperty(source: string, property: string): string | undefined {
+  const match = new RegExp(`(?:^|[,\\s])${escapeRegExp(property)}\\s*=\\s*`).exec(source);
+  if (!match) {
+    return undefined;
+  }
+  return parseTomlStringLiteral(source.slice(match.index + match[0].length));
+}
+
+function findTomlLineStringProperty(source: string, property: string): string | undefined {
+  const match = new RegExp(`^${escapeRegExp(property)}\\s*=\\s*`).exec(source);
+  if (!match) {
+    return undefined;
+  }
+  return parseTomlStringLiteral(source.slice(match[0].length));
+}
+
 function resolveServerConfig(
   serverConfigOrUrl?: string | CodexMcpServerConfig,
 ): CodexMcpServerConfig {
@@ -121,12 +161,12 @@ export function updateTomlMcpConfig(
   if (!trimmed) {
     let freshSection = `[mcp_servers.${serverName}]\n`;
     if (serverConfig.command !== undefined) {
-      freshSection += `command = "${serverConfig.command}"\n`;
+      freshSection += `command = ${serializeTomlString(serverConfig.command)}\n`;
       if (serverConfig.args !== undefined && serverConfig.args.length > 0) {
         freshSection += `args = ${JSON.stringify(serverConfig.args)}\n`;
       }
     } else if (serverConfig.url !== undefined) {
-      freshSection += `url = "${serverConfig.url}"\n`;
+      freshSection += `url = ${serializeTomlString(serverConfig.url)}\n`;
     }
     return `# Codex CLI Configuration\n\n${freshSection}`;
   }
@@ -309,20 +349,20 @@ export function updateTomlMcpConfig(
       if (/^\s*url\s*=/m.test(line)) {
         if (serverConfig.command !== undefined) {
           if (!commandHandled) {
-            updatedLines.push(`command = "${serverConfig.command}"`);
+            updatedLines.push(`command = ${serializeTomlString(serverConfig.command)}`);
             commandHandled = true;
           }
         } else if (serverConfig.url !== undefined) {
-          updatedLines.push(`url = "${serverConfig.url}"`);
+          updatedLines.push(`url = ${serializeTomlString(serverConfig.url)}`);
           urlHandled = true;
         }
       } else if (/^\s*command\s*=/m.test(line)) {
         if (serverConfig.command !== undefined) {
-          updatedLines.push(`command = "${serverConfig.command}"`);
+          updatedLines.push(`command = ${serializeTomlString(serverConfig.command)}`);
           commandHandled = true;
         } else if (serverConfig.url !== undefined) {
           if (!urlHandled) {
-            updatedLines.push(`url = "${serverConfig.url}"`);
+            updatedLines.push(`url = ${serializeTomlString(serverConfig.url)}`);
             urlHandled = true;
           }
         }
@@ -341,9 +381,9 @@ export function updateTomlMcpConfig(
     }
 
     if (serverConfig.command !== undefined && !commandHandled) {
-      updatedLines.unshift(`command = "${serverConfig.command}"`);
+      updatedLines.unshift(`command = ${serializeTomlString(serverConfig.command)}`);
     } else if (serverConfig.url !== undefined && !urlHandled) {
-      updatedLines.unshift(`url = "${serverConfig.url}"`);
+      updatedLines.unshift(`url = ${serializeTomlString(serverConfig.url)}`);
     }
     if (serverConfig.args !== undefined && serverConfig.args.length > 0 && !argsHandled) {
       updatedLines.push(`args = ${JSON.stringify(serverConfig.args)}`);
@@ -361,15 +401,15 @@ export function updateTomlMcpConfig(
   // Section does not exist: append new canonical section
   const lines: string[] = [`[mcp_servers.${serverName}]`];
   if (serverConfig.command !== undefined) {
-    lines.push(`command = "${serverConfig.command}"`);
+    lines.push(`command = ${serializeTomlString(serverConfig.command)}`);
     if (serverConfig.args !== undefined && serverConfig.args.length > 0) {
       lines.push(`args = ${JSON.stringify(serverConfig.args)}`);
     }
   } else if (serverConfig.url !== undefined) {
-    lines.push(`url = "${serverConfig.url}"`);
+    lines.push(`url = ${serializeTomlString(serverConfig.url)}`);
   }
   if (serverConfig.type !== undefined) {
-    lines.push(`type = "${serverConfig.type}"`);
+    lines.push(`type = ${serializeTomlString(serverConfig.type)}`);
   }
   if (serverConfig.env !== undefined) {
     lines.push(`env = ${JSON.stringify(serverConfig.env)}`);
@@ -626,14 +666,11 @@ function applyDottedKeyValue(
 ): void {
   const prop = propSegments[0];
   if (prop === "command") {
-    const m = valPart.match(/^["']([^"']+)["']/);
-    if (m) config.command = m[1];
+    config.command = parseTomlStringLiteral(valPart);
   } else if (prop === "url") {
-    const m = valPart.match(/^["']([^"']+)["']/);
-    if (m) config.url = m[1];
+    config.url = parseTomlStringLiteral(valPart);
   } else if (prop === "type") {
-    const m = valPart.match(/^["']([^"']+)["']/);
-    if (m) config.type = m[1] as CodexMcpServerConfig["type"];
+    config.type = parseTomlStringLiteral(valPart) as CodexMcpServerConfig["type"];
   } else if (prop === "args") {
     const m = valPart.match(/^\[([^\]]*)\]/);
     if (m) {
@@ -684,19 +721,19 @@ function parseTomlServerBody(body: string): CodexMcpServerConfig {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
 
-    const cmdMatch = trimmed.match(/^command\s*=\s*["']([^"']+)["']/);
-    if (cmdMatch) {
-      result.command = cmdMatch[1];
+    const command = findTomlLineStringProperty(trimmed, "command");
+    if (command !== undefined) {
+      result.command = command;
       continue;
     }
-    const urlMatch = trimmed.match(/^url\s*=\s*["']([^"']+)["']/);
-    if (urlMatch) {
-      result.url = urlMatch[1];
+    const url = findTomlLineStringProperty(trimmed, "url");
+    if (url !== undefined) {
+      result.url = url;
       continue;
     }
-    const typeMatch = trimmed.match(/^type\s*=\s*["']([^"']+)["']/);
-    if (typeMatch) {
-      result.type = typeMatch[1] as CodexMcpServerConfig["type"];
+    const type = findTomlLineStringProperty(trimmed, "type");
+    if (type !== undefined) {
+      result.type = type as CodexMcpServerConfig["type"];
       continue;
     }
     const argsMatch = trimmed.match(/^args\s*=\s*\[([^\]]*)\]/);
@@ -747,17 +784,17 @@ function parseTomlServerBody(body: string): CodexMcpServerConfig {
  */
 function parseTomlInlineServerBody(inlineContent: string): CodexMcpServerConfig {
   const result: CodexMcpServerConfig = {};
-  const cmdMatch = inlineContent.match(/command\s*=\s*["']([^"']+)["']/);
-  if (cmdMatch) {
-    result.command = cmdMatch[1];
+  const command = findTomlStringProperty(inlineContent, "command");
+  if (command !== undefined) {
+    result.command = command;
   }
-  const urlMatch = inlineContent.match(/url\s*=\s*["']([^"']+)["']/);
-  if (urlMatch) {
-    result.url = urlMatch[1];
+  const url = findTomlStringProperty(inlineContent, "url");
+  if (url !== undefined) {
+    result.url = url;
   }
-  const typeMatch = inlineContent.match(/type\s*=\s*["']([^"']+)["']/);
-  if (typeMatch) {
-    result.type = typeMatch[1] as CodexMcpServerConfig["type"];
+  const type = findTomlStringProperty(inlineContent, "type");
+  if (type !== undefined) {
+    result.type = type as CodexMcpServerConfig["type"];
   }
   const argsMatch = inlineContent.match(/args\s*=\s*\[([^\]]*)\]/);
   if (argsMatch) {

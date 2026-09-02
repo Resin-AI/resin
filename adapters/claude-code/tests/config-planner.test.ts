@@ -165,6 +165,47 @@ describe("Claude Code MCP Config Planner", () => {
     expect(await verifyClaudeMcpConfig(mockWorkspace, "resin", fsBridge)).toBe(true);
   });
 
+  it("plans and verifies an explicit Resin command exactly", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const command = "/home/developer/.resin/bin/resin";
+    const plan = await planClaudeMcpConfig(mockWorkspace, undefined, fsBridge, command);
+
+    expect(JSON.parse(plan.plannedContent).mcpServers.resin).toEqual({
+      command,
+      args: ["mcp"],
+    });
+    await applyClaudeMcpConfig(plan, fsBridge);
+
+    await expect(verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge, command)).resolves.toBe(
+      true,
+    );
+    await expect(verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge)).resolves.toBe(false);
+
+    await fsBridge.writeFile(
+      mockWorkspace.configPath,
+      JSON.stringify({
+        mcpServers: {
+          resin: { type: "http", command, args: ["mcp"] },
+        },
+      }),
+    );
+    await expect(verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge, command)).resolves.toBe(
+      false,
+    );
+
+    await fsBridge.writeFile(
+      mockWorkspace.configPath,
+      JSON.stringify({
+        mcpServers: {
+          resin: { command: ` ${command} `, args: ["mcp"] },
+        },
+      }),
+    );
+    await expect(verifyClaudeMcpConfig(mockWorkspace, undefined, fsBridge, command)).resolves.toBe(
+      false,
+    );
+  });
+
   describe("Canonical resin key and legacy alias migration", () => {
     it("migrates recognized legacy alias resin_gateway and resin-gateway to resin", () => {
       const initial = JSON.stringify({

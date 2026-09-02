@@ -105,6 +105,7 @@ vi.spyOn(ompAdapter, "probeOmpInstallation").mockImplementation(async () => ({
 const NOW = 1_800_000_000_000;
 const HOME = "/home/status-user";
 const RESIN_HOME = path.join(HOME, ".resin");
+const RESIN_COMMAND = path.join(RESIN_HOME, "bin", "resin");
 const STATE_DIR = path.join(RESIN_HOME, "state");
 const CONFIG_FILE = path.join(RESIN_HOME, "config", "config.json");
 const SOCKET_FILE = path.join(STATE_DIR, "daemon.sock");
@@ -251,12 +252,12 @@ function healthyFiles() {
     [path.join(STATE_DIR, "recovery-state.json")]: JSON.stringify(recoverySnapshot()),
     [path.join(STATE_DIR, "harness-health.json")]: JSON.stringify(harnessSnapshot()),
     [path.join(HOME, ".claude.json")]: JSON.stringify({
-      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
     }),
     [path.join(HOME, ".codex", "config.toml")]:
-      '[mcp_servers.resin]\ncommand = "resin"\nargs = ["mcp"]\n',
+      `[mcp_servers.resin]\ncommand = "${RESIN_COMMAND}"\nargs = ["mcp"]\n`,
     [path.join(HOME, ".omp", "agent", "mcp.json")]: JSON.stringify({
-      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
     }),
     "/workspace/resin.json": JSON.stringify({
       workspaceId: "ws_project_99",
@@ -356,6 +357,40 @@ describe("unified status schema", () => {
     });
     expect(summary.harnesses.every((harness) => harness.status === "attached")).toBe(true);
     expect(summary.remediations).toEqual([]);
+  });
+
+  it("uses the active CODEX_HOME and does not accept a configured inactive default", async () => {
+    const activeCodexHome = "/profiles/status-codex";
+    const activeCodexPath = path.join(activeCodexHome, "config.toml");
+    const files = healthyFiles();
+    const env = { ...ENV, HOME, CODEX_HOME: activeCodexHome };
+
+    const inactiveOnly = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+    expect(inactiveOnly.harnesses.find((harness) => harness.id === "codex-cli")).toMatchObject({
+      configured: false,
+      status: "unconfigured",
+    });
+
+    const active = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env,
+      now: () => NOW,
+      fsBridge: createMockFsBridge({
+        ...files,
+        [activeCodexPath]: `[mcp_servers.resin]\ncommand = "${RESIN_COMMAND}"\nargs = ["mcp"]\n`,
+      }),
+    });
+    expect(active.harnesses.find((harness) => harness.id === "codex-cli")).toMatchObject({
+      configured: true,
+      status: "attached",
+    });
   });
 
   it("includes validated authoritative notifications from daemon health", async () => {
@@ -503,6 +538,66 @@ describe("unified status schema", () => {
     });
     expect(summary.status).toBe("degraded");
     expect(summary.remediations.map((item) => item.code)).toContain("repair_harnesses");
+  });
+
+  it("lets authoritative live health clear stale cached harness drift", async () => {
+    const files = healthyFiles();
+    files[path.join(STATE_DIR, "harness-health.json")] = JSON.stringify(
+      harnessSnapshot({
+        success: false,
+        hasDrift: true,
+        harnesses: [
+          {
+            harnessId: "claude-code",
+            displayName: "Claude Code",
+            installed: true,
+            configured: false,
+            status: "drifted",
+            condition: "drifted",
+            changed: true,
+            checkedAt: "2027-01-03T00:00:00.000Z",
+            recentAction: { kind: "repair_failed", at: "2027-01-03T00:00:00.000Z" },
+          },
+        ],
+      }),
+    );
+
+    const summary = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.harnesses.find((harness) => harness.id === "claude-code")).toMatchObject({
+      configured: true,
+      mcpAttached: true,
+      status: "attached",
+      recentAction: null,
+    });
+  });
+
+  it("does not treat the legacy OMP config as an active attachment", async () => {
+    const files = healthyFiles();
+    delete files[path.join(HOME, ".omp", "agent", "mcp.json")];
+    files[path.join(HOME, ".omp", "config.json")] = JSON.stringify({
+      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
+    });
+
+    const summary = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.harnesses.find((harness) => harness.id === "omp")).toMatchObject({
+      configured: false,
+      mcpAttached: false,
+      status: "unconfigured",
+    });
   });
 
   it("uses cached harness attachment only when live verification is unavailable", async () => {

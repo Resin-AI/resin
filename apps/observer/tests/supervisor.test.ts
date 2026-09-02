@@ -157,6 +157,24 @@ describe("supervisor", () => {
       await supervisor.stop();
     });
 
+    it("returns to ready when modules recover after a degraded startup", async () => {
+      const recoveringModule = createTrackingModule("control-plane", [], {
+        shouldFailStart: true,
+        healthStatus: "ready",
+      });
+      const config = DaemonConfigSchema.parse({ logLevel: "silent" });
+      const supervisor = new DaemonSupervisor({ config, modules: [recoveringModule] });
+
+      await supervisor.start();
+      expect(supervisor.currentState).toBe("degraded");
+
+      const health = await supervisor.getHealth();
+
+      expect(health.status).toBe("fully-ready");
+      expect(supervisor.currentState).toBe("ready");
+      await supervisor.stop();
+    });
+
     it("reports 'cloud-offline' when cloud module is offline", async () => {
       const localMod = createTrackingModule("local-registry");
       const cloudMod = createTrackingModule("cloud-sync", [], { healthStatus: "offline" });
@@ -167,6 +185,7 @@ describe("supervisor", () => {
       await supervisor.start();
       const health = await supervisor.getHealth();
       expect(health.status).toBe("cloud-offline");
+      expect(supervisor.currentState).toBe("ready");
       await supervisor.stop();
     });
 

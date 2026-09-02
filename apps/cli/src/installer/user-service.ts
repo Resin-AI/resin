@@ -140,7 +140,17 @@ export async function setupAndStartDaemonService(
   let priorActive = false;
   let priorEnabled = false;
   let priorPid: number | undefined;
-  const unitPath = manager.getUnitPath();
+  let unitPath = manager.getUnitPath();
+  if (manager.platform === "wsl") {
+    try {
+      // WSL chooses systemd or its login-shell fallback asynchronously.
+      // Resolve that choice before using synchronous path/definition methods.
+      await manager.isInstalled();
+      unitPath = manager.getUnitPath();
+    } catch {
+      // The regular installed-state probe below remains fail-closed.
+    }
+  }
 
   try {
     const unitExists = await fsBridge.exists(unitPath);

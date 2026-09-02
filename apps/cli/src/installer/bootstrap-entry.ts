@@ -981,6 +981,8 @@ export async function bootstrapInstall(
     options.userServiceManager ??
     createUserServiceManager({
       homeDir,
+      platform:
+        platformInfo.os === "darwin" ? "launchd" : platformInfo.os === "wsl" ? "wsl" : "systemd",
       resinHome,
       fsBridge,
       runner: serviceRunner,
@@ -994,6 +996,11 @@ export async function bootstrapInstall(
   let priorServiceActive = false;
 
   try {
+    if (serviceManager.platform === "wsl") {
+      // Resolve WSL's async systemd-vs-fallback choice before capturing the
+      // synchronous unit path used for update and rollback.
+      await serviceManager.isInstalled();
+    }
     priorUnitPath = serviceManager.getUnitPath();
     const unitExists = await fsBridge.exists(priorUnitPath);
     if (unitExists) {

@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { SafetyAttestationRecordSchema } from "@resin/contracts";
 import { FrameDecoder, encodeFrame, resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -195,6 +196,41 @@ describe("doctor & repair commands", () => {
     expect(await fsBridge.readFile(path.join(daemonPaths.stateDir, "daemon.token"))).toBeNull();
   });
 
+  it.skipIf(process.platform === "win32")(
+    "certifies repair with the active bundled Deno without DENO_PATH",
+    async () => {
+      const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-deno-"));
+      const bundledDeno = path.join(tempHome, ".resin", "current", "deno", "deno");
+
+      try {
+        await fs.mkdir(path.dirname(bundledDeno), { recursive: true });
+        await fs.writeFile(bundledDeno, '#!/bin/sh\necho "deno 2.9.5"\n', "utf8");
+        await fs.chmod(bundledDeno, 0o755);
+
+        await repairState({
+          home: tempHome,
+          env: { HOME: tempHome, PATH: "/usr/bin:/bin" },
+          serviceManager: createMockServiceManager(),
+          harnessHealthCoordinator: {
+            run: vi.fn().mockResolvedValue({ status: "failed", snapshot: null }),
+          },
+        });
+
+        const attestationSource = await fs.readFile(
+          path.join(tempHome, ".resin", "safety-attestation.json"),
+          "utf8",
+        );
+        const attestation = SafetyAttestationRecordSchema.parse(JSON.parse(attestationSource));
+        expect(attestation.metadata?.deno).toMatchObject({
+          executable: bundledDeno,
+          version: "2.9.5",
+        });
+      } finally {
+        await fs.rm(tempHome, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("safely cleans only stale IPC files without removing device-token.json or credentials", async () => {
     const deviceTokenContent = JSON.stringify({
       token: "cloud-device-cred-123",
@@ -295,7 +331,8 @@ describe("doctor & repair commands", () => {
   it("repairs and converges legacy localhost SSE entries to canonical stdio", async () => {
     const ompConfigPath = path.join(homeDir, ".omp", "agent", "mcp.json");
     const codexConfigPath = path.join(homeDir, ".codex", "config.toml");
-    const claudeConfigPath = path.join(homeDir, ".claude", "claude.json");
+    const claudeConfigPath = path.join(homeDir, ".claude.json");
+    const resinCommand = path.join(homeDir, ".resin", "bin", "resin");
     const fsBridge = createMockFsBridge({
       [ompConfigPath]: JSON.stringify({
         mcpServers: {
@@ -328,18 +365,18 @@ describe("doctor & repair commands", () => {
     });
 
     const omp = JSON.parse((await fsBridge.readFile(ompConfigPath)) ?? "{}");
-    expect(omp.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(omp.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
     expect(omp.mcpServers.custom).toEqual({ command: "custom-cmd" });
 
     const codex = await fsBridge.readFile(codexConfigPath);
     expect(codex).toContain("[mcp_servers.resin]");
-    expect(codex).toContain('command = "resin"');
+    expect(codex).toContain(`command = "${resinCommand}"`);
     expect(codex).toContain('args = ["mcp"]');
     expect(codex).not.toContain("9400/mcp/sse");
     expect(codex).toContain("[mcp_servers.other]");
 
     const claude = JSON.parse((await fsBridge.readFile(claudeConfigPath)) ?? "{}");
-    expect(claude.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(claude.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
     expect(claude.mcpServers.other).toEqual({ command: "other-tool" });
   });
 
@@ -401,6 +438,41 @@ describe("doctor & repair commands", () => {
       process.stdout.write = originalStdout;
     }
   });
+
+  it("restarts an active service when its IPC socket is missing", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const unitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const fsBridge = createMockFsBridge({
+      [unitPath]: unitContent,
+    });
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: true,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(unitContent);
+
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      harnessHealthCoordinator: {
+        run: vi.fn().mockResolvedValue({ status: "failed", snapshot: null }),
+      },
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(mockServiceManager.restart).toHaveBeenCalledOnce();
+    expect(actions).toContain("Restarted active daemon service to restore IPC: resin.service");
+  });
+
   it("detects and repairs stale v1.0.20 unit definition to current valid command and remains idempotent", async () => {
     const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
     const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
@@ -461,6 +533,7 @@ describe("doctor & repair commands", () => {
     const postSvcDiag = postRepairDiag.find((d) => d.id === "service_installed");
     expect(postSvcDiag?.status).toBe("pass");
     expect(postSvcDiag?.message).toContain("active");
+    await fsBridge.writeFile(daemonPaths.socketPath, "socket");
 
     // 4. Subsequent repair is completely idempotent (no restart, no rewrite)
     vi.clearAllMocks();
@@ -643,6 +716,7 @@ describe("doctor & repair commands", () => {
 
     const fsBridge = createMockFsBridge({
       [unitPath]: unitWithCustomPath,
+      [daemonPaths.socketPath]: "socket",
     });
 
     const mockServiceManager = createMockServiceManager(unitPath);

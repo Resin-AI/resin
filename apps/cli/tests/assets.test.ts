@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -97,6 +100,30 @@ describe("Asset Acquisition & Verification", () => {
     expect(result.digestMismatches).toHaveLength(1);
     expect(result.digestMismatches[0].name).toBe("daemon");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "discovers Deno from a custom home's active Resin release pointer",
+    async () => {
+      const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-deno-discovery-"));
+      const executablePath = path.join(home, ".resin", "versions", "v2.9.5", "deno", "deno");
+
+      try {
+        await fs.mkdir(path.dirname(executablePath), { recursive: true });
+        await fs.writeFile(executablePath, '#!/bin/sh\necho "deno 2.9.5"\n', "utf8");
+        await fs.chmod(executablePath, 0o755);
+        await fs.writeFile(path.join(home, ".resin", "current-version"), "2.9.5\n", "utf8");
+
+        const found = await findDenoExecutable(undefined, {
+          HOME: home,
+          PATH: "/usr/bin:/bin",
+        });
+
+        expect(found).toEqual({ path: executablePath, version: "2.9.5" });
+      } finally {
+        await fs.rm(home, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("does not treat a merely existing path as a working Deno executable", async () => {
     const bridge = new InMemoryConfigFsBridge();

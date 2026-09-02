@@ -40,6 +40,7 @@ export function generatePlannedClaudeConfig(
   currentContent: string | null,
   gatewayUrl?: string,
   serverKey = CANONICAL_RESIN_MCP_SERVER_KEY,
+  command = CANONICAL_RESIN_MCP_COMMAND,
 ): string {
   let doc: ClaudeConfigDoc = {};
 
@@ -63,7 +64,7 @@ export function generatePlannedClaudeConfig(
 
   // Configure resin gateway MCP endpoint
   const serverConfig: ClaudeMcpServerConfig = {
-    command: CANONICAL_RESIN_MCP_COMMAND,
+    command,
     args: [...CANONICAL_RESIN_MCP_ARGS],
   };
   doc.mcpServers = migrateJsonMcpServers(existingServers, serverConfig, gatewayUrl, serverKey);
@@ -78,10 +79,16 @@ export async function planClaudeMcpConfig(
   workspace: HarnessWorkspace,
   gatewayUrl?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
+  command = CANONICAL_RESIN_MCP_COMMAND,
 ): Promise<ConfigMutationPlan> {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
   const currentContent = await fsBridge.readFile(targetPath);
-  const plannedContent = generatePlannedClaudeConfig(currentContent, gatewayUrl);
+  const plannedContent = generatePlannedClaudeConfig(
+    currentContent,
+    gatewayUrl,
+    CANONICAL_RESIN_MCP_SERVER_KEY,
+    command,
+  );
 
   return planConfigMutation({
     harnessId: "claude-code",
@@ -118,6 +125,7 @@ export async function verifyClaudeMcpConfig(
   workspace: HarnessWorkspace,
   _expectedGatewayUrl?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
+  expectedCommand = CANONICAL_RESIN_MCP_COMMAND,
 ): Promise<boolean> {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
   const exists = await fsBridge.exists(targetPath);
@@ -140,11 +148,11 @@ export async function verifyClaudeMcpConfig(
       return false;
     }
 
-    if (entry.url !== undefined || entry.type === "sse") {
+    if (entry.url !== undefined || (entry.type !== undefined && entry.type !== "stdio")) {
       return false;
     }
 
-    if (typeof entry.command !== "string" || entry.command.trim() !== CANONICAL_RESIN_MCP_COMMAND) {
+    if (entry.command !== expectedCommand) {
       return false;
     }
 

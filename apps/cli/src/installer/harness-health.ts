@@ -118,6 +118,7 @@ export interface HarnessHealthReconciler {
 
 export interface HarnessHealthCoordinatorOptions {
   readonly home?: string;
+  readonly env?: NodeJS.ProcessEnv;
   readonly workspacePath?: string;
   readonly gatewayUrl?: string;
   readonly statePath?: string;
@@ -545,6 +546,7 @@ export async function saveHarnessHealthSettings(
  */
 export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private readonly home: string;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly workspacePath: string;
   private readonly gatewayUrl: string | undefined;
   private readonly statePath: string;
@@ -561,7 +563,8 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private inFlight: Promise<HarnessHealthRunResult> | null = null;
 
   constructor(options: HarnessHealthCoordinatorOptions = {}) {
-    this.home = path.resolve(options.home ?? os.homedir());
+    this.home = path.resolve(options.home ?? options.env?.HOME ?? os.homedir());
+    this.env = options.env ?? (options.home === undefined ? process.env : { HOME: this.home });
     this.workspacePath = path.resolve(options.workspacePath ?? process.cwd());
     this.gatewayUrl = options.gatewayUrl;
     this.statePath = options.statePath
@@ -646,6 +649,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
         harnesses: options.harnesses ?? this.harnesses,
         installedHarnesses: options.installedHarnesses ?? this.installedHarnesses,
         customHome: this.home,
+        env: this.env,
         workspacePath: this.workspacePath,
         gatewayUrl: this.gatewayUrl,
         fsBridge: this.fsBridge,
@@ -706,7 +710,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private async captureConfigFiles(): Promise<HarnessHealthConfigFiles> {
     const entries = await Promise.all(
       SUPPORTED_HARNESS_IDS.map(async (harnessId) => {
-        const configPath = resolveHarnessConfigPath(harnessId, this.home);
+        const configPath = resolveHarnessConfigPath(harnessId, this.home, this.env);
         const present = await this.fsBridge.exists(configPath);
         if (!present) {
           return [harnessId, { present: false, mtimeMs: null }] as const;

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
@@ -54,8 +55,33 @@ export function computeSha256(content: string | Buffer): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+const ACTIVE_RELEASE_VERSION_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+async function appendBundledDenoCandidates(
+  candidates: string[],
+  resinHome: string,
+  executableName: string,
+  fsBridge: ConfigFsBridge,
+): Promise<void> {
+  candidates.push(path.join(resinHome, "current", "deno", executableName));
+
+  try {
+    const activeVersionSource = await fsBridge.readFile(path.join(resinHome, "current-version"));
+    const activeVersion = activeVersionSource?.trim().replace(/^v/, "");
+    if (activeVersion && ACTIVE_RELEASE_VERSION_PATTERN.test(activeVersion)) {
+      candidates.push(
+        path.join(resinHome, "versions", `v${activeVersion}`, "deno", executableName),
+      );
+    }
+  } catch {
+    // The active symlink candidate and ambient fallbacks remain available.
+  }
+}
+
 /**
- * Probes for Deno executable on the host system.
+ * Probes for Deno executable on the host system, preferring Resin's active
+ * release bundle over ambient installations.
  */
 export async function findDenoExecutable(
   customPath?: string,
@@ -63,22 +89,35 @@ export async function findDenoExecutable(
   fsBridge: ConfigFsBridge = defaultFsBridge,
 ): Promise<{ path: string; version?: string } | null> {
   const candidatePaths: string[] = [];
+  const executableName = process.platform === "win32" ? "deno.exe" : "deno";
 
   if (customPath) {
     candidatePaths.push(customPath);
+  }
+  if (env.RESIN_HOME) {
+    await appendBundledDenoCandidates(candidatePaths, env.RESIN_HOME, executableName, fsBridge);
+  }
+  const userHome = env.HOME ?? env.USERPROFILE;
+  if (userHome) {
+    await appendBundledDenoCandidates(
+      candidatePaths,
+      path.join(userHome, ".resin"),
+      executableName,
+      fsBridge,
+    );
   }
   if (env.DENO_PATH) {
     candidatePaths.push(env.DENO_PATH);
   }
   if (env.DENO_INSTALL) {
-    candidatePaths.push(`${env.DENO_INSTALL}/bin/deno`);
+    candidatePaths.push(path.join(env.DENO_INSTALL, "bin", executableName));
   }
-  if (env.HOME) {
-    candidatePaths.push(`${env.HOME}/.deno/bin/deno`);
+  if (userHome) {
+    candidatePaths.push(path.join(userHome, ".deno", "bin", executableName));
   }
   candidatePaths.push("/usr/local/bin/deno", "/usr/bin/deno", "deno");
 
-  for (const candidate of candidatePaths) {
+  for (const candidate of new Set(candidatePaths)) {
     if (candidate === "deno") {
       try {
         const { stdout } = await execFileAsync("deno", ["--version"], { env });

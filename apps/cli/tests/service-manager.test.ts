@@ -83,7 +83,7 @@ describe("SystemdUserServiceManager", () => {
     ]);
     expect(def).toContain("Environment=RESIN_HOME=/home/testuser/.resin");
     expect(def).toContain("Environment=NODE_ENV=production");
-    expect(def).toContain("Environment=PATH=/home/testuser/.local/bin");
+    expect(def).toMatch(/Environment="?PATH=\/home\/testuser\/\.local\/bin/);
     expect(def).toContain("Restart=on-failure");
     expect(def).toContain("WantedBy=default.target");
   });
@@ -434,6 +434,15 @@ describe("WslUserServiceManager", () => {
     // Should have written systemd unit file
     const systemdPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
     expect(await fsBridge.exists(systemdPath)).toBe(true);
+    expect(manager.getUnitPath()).toBe(systemdPath);
+    expect(manager.getUnitDefinition()).toContain("[Service]");
+    expect(manager.getUnitDefinition()).toContain("ExecStart=");
+    expect(manager.getUnitDefinition()).not.toContain("WSL Service Fallback");
+    await manager.restart();
+    expect(runner.executed).toContainEqual({
+      cmd: "systemctl",
+      args: ["--user", "restart", "resin.service"],
+    });
   });
 
   it("uses script fallback when systemd is unavailable in WSL", async () => {
@@ -468,6 +477,8 @@ describe("WslUserServiceManager", () => {
     expect(content).toContain("RESIN_HOME");
     expect(content).toContain("daemon.pid");
     expect(content).toContain("--foreground");
+    expect(manager.getUnitPath()).toBe(path.join(resinHome, "services", "wsl-service.json"));
+    expect(manager.getUnitDefinition()).toContain("WSL Service Fallback");
   });
 });
 

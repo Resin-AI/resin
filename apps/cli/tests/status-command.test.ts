@@ -40,6 +40,7 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
 describe("status command & collector", () => {
   const homeDir = "/home/testuser";
   const resinHome = path.join(homeDir, ".resin");
+  const resinCommand = path.join(resinHome, "bin", "resin");
 
   it("parses CLI status flags correctly", () => {
     const flags1 = parseStatusFlags([
@@ -64,7 +65,7 @@ describe("status command & collector", () => {
 
     const fsBridge = createMockFsBridge({
       [claudePath]: JSON.stringify({
-        mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+        mcpServers: { resin: { command: resinCommand, args: ["mcp"] } },
       }),
       [codexPath]: "[mcp_servers.resin]\nurl = 'http://localhost:9400'\n",
       [ompPath]: JSON.stringify({
