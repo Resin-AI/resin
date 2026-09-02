@@ -19,8 +19,8 @@ import {
   ProtocolError,
   ValidationError,
 } from "@resin/protocol";
-import type { ArtifactCache, RuntimeTrustStore } from "@resin/runtime";
-import type { ProjectLockManager } from "../project/lock-manager.js";
+import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
+import { ProjectLockManager } from "../project/lock-manager.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
@@ -28,6 +28,7 @@ import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
 import { CloudInvocationRouter } from "./router.js";
 import {
+  type ArtifactBytesDownloader,
   CloudCatalogSyncCoordinator,
   type CloudCatalogSyncOptions,
   type LockedSyncIdentity,
@@ -44,8 +45,14 @@ export interface ProductionProxyRuntimeOptions {
   cache?: CloudCatalogCache;
   registry?: ToolRegistry;
   lockManager?: ProjectLockManager;
+  /**
+   * When true (default), each ready workspace with a `.resin/resin.lock` gets its own
+   * ProjectLockManager so published tools are activated from verified local artifacts.
+   */
+  bindWorkspaceLocks?: boolean;
   syncIntervalMs?: number;
   artifactCache?: ArtifactCache;
+  transferClient?: ArtifactBytesDownloader;
   trustStore?: RuntimeTrustStore;
   identity?: LockedSyncIdentity;
   certificateProvider?: (
@@ -137,15 +144,26 @@ export async function createProductionProxyRuntime(
       fetchFn: options.fetchFn,
     });
 
+    const artifactCache = options.artifactCache ?? new ArtifactCache();
+    const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
+      async downloadArtifact(digest: string) {
+        const downloaded = await client.downloadArtifact(digest);
+        return { bytes: downloaded.bytes };
+      },
+    };
+    const bindWorkspaceLocks = options.bindWorkspaceLocks ?? true;
+
     const coordinator = new CloudCatalogSyncCoordinator({
       client,
       cache,
       router,
       circuitBreaker,
       registry: options.registry,
+      workspaceId: undefined,
       lockManager: options.lockManager,
+      transferClient,
+      artifactCache,
       intervalMs: options.syncIntervalMs,
-      artifactCache: options.artifactCache,
       trustStore: options.trustStore,
       identity: options.identity,
       certificateProvider: options.certificateProvider,
@@ -175,6 +193,25 @@ export async function createProductionProxyRuntime(
           ) {
             options.registry.bindWorkspaceLock(workspace.workspaceId, workspace.lock);
           }
+        }
+
+        // 1b. Bind the coordinator to this workspace so registry entries are scoped to it and,
+        //     when the project has a lock file, activation reconciles the catalog into
+        //     `.resin/resin.lock` and verified local artifacts.
+        if (bindWorkspaceLocks && !options.lockManager) {
+          let lockManager: ProjectLockManager | undefined;
+          if (workspace.lockPath) {
+            try {
+              lockManager = new ProjectLockManager({
+                lockPath: workspace.lockPath,
+                projectId: workspace.projectId,
+                readOnly: workspace.isReadOnly,
+              });
+            } catch {
+              lockManager = undefined;
+            }
+          }
+          coordinator.bindWorkspace({ workspaceId: workspace.workspaceId, lockManager });
         }
 
         // 2. Register project if metadata exists

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import {
   type ToolManifest,
   type V1ActivationCertificate,
@@ -10,15 +11,12 @@ import {
   hashCanonicalContent,
   normalizeSha256,
 } from "@resin/contracts";
-import type {
-  ArtifactTransferClient,
-  LocalPreactivationChecker,
-  SigningKeyStore,
-} from "@resin/observer";
+import type { LocalPreactivationChecker, SigningKeyStore } from "@resin/observer";
 import type { CatalogSnapshotResponse, StreamCatalogInvalidation } from "@resin/protocol";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
+  BUNDLE_FILE_ENTRYPOINT_TS,
   BUNDLE_FILE_MANIFEST,
   type RuntimeTrustStore,
   type TrustIdentity,
@@ -49,6 +47,25 @@ export interface LockedToolSyncSummary {
   newerAvailable: string[];
 }
 
+/**
+ * Minimal contract for fetching immutable artifact bytes by digest. Satisfied by
+ * `@resin/observer` ArtifactTransferClient and by the cloud catalog client adapter.
+ */
+export interface ArtifactBytesDownloader {
+  downloadArtifact(
+    digest: string,
+    options?: { metadata?: Record<string, string | number | boolean | null | undefined> },
+  ): Promise<{ bytes: Buffer | Uint8Array }>;
+}
+
+/**
+ * Per-workspace binding applied when a connection resolves its project lock.
+ */
+export interface WorkspaceSyncBinding {
+  workspaceId?: string;
+  lockManager?: ProjectLockManager;
+}
+
 export interface CloudCatalogSyncOptions {
   client: CloudCatalogClient;
   cache: CloudCatalogCache;
@@ -64,7 +81,7 @@ export interface CloudCatalogSyncOptions {
 
   // Locked project sync & offline trust options
   lockManager?: ProjectLockManager;
-  transferClient?: ArtifactTransferClient;
+  transferClient?: ArtifactBytesDownloader;
   artifactCache?: ArtifactCache;
   trustStore?: RuntimeTrustStore;
   identity?: LockedSyncIdentity;
@@ -90,9 +107,21 @@ export interface ToolLockTuple {
 }
 
 const ZERO_DIGEST = "0".repeat(64);
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 
 function workspaceScopeId(workspaceId: string | undefined): string {
   return workspaceId || "default";
+}
+
+/**
+ * Bundle archives are served either as plain tar or gzip-compressed tar (`tar_gz`).
+ * The artifact digest always covers the bytes as served; only extraction inflates.
+ */
+export function inflateArtifactArchive(bytes: Buffer): Buffer {
+  if (bytes.length >= 2 && bytes[0] === GZIP_MAGIC[0] && bytes[1] === GZIP_MAGIC[1]) {
+    return zlib.gunzipSync(bytes);
+  }
+  return bytes;
 }
 
 /**
@@ -106,13 +135,13 @@ export class CloudCatalogSyncCoordinator {
   readonly cache: CloudCatalogCache;
   readonly router: CloudInvocationRouter;
   readonly registry?: ToolRegistry;
-  readonly workspaceId?: string;
+  workspaceId?: string;
   readonly autoRegisterInRegistry: boolean;
   readonly intervalMs: number;
   readonly circuitBreaker?: CloudCircuitBreaker;
 
-  readonly lockManager?: ProjectLockManager;
-  readonly transferClient?: ArtifactTransferClient;
+  lockManager?: ProjectLockManager;
+  readonly transferClient?: ArtifactBytesDownloader;
   readonly artifactCache?: ArtifactCache;
   readonly trustStore?: RuntimeTrustStore;
   readonly identity?: LockedSyncIdentity;
@@ -166,8 +195,22 @@ export class CloudCatalogSyncCoordinator {
     return this.artifactCache;
   }
 
-  getTransferClient(): ArtifactTransferClient | undefined {
+  getTransferClient(): ArtifactBytesDownloader | undefined {
     return this.transferClient;
+  }
+
+  /**
+   * Binds the coordinator to the workspace a connection resolved. The standalone gateway
+   * creates one runtime per process but serves one project per connection, so the lock
+   * manager and workspace scope are supplied when the workspace becomes ready.
+   */
+  bindWorkspace(binding: WorkspaceSyncBinding): void {
+    if (binding.workspaceId !== undefined) {
+      this.workspaceId = binding.workspaceId;
+    }
+    if (binding.lockManager !== undefined) {
+      this.lockManager = binding.lockManager;
+    }
   }
 
   /**
@@ -437,9 +480,12 @@ export class CloudCatalogSyncCoordinator {
                 },
               );
 
+              const downloadedBytes = Buffer.isBuffer(downloadResult.bytes)
+                ? downloadResult.bytes
+                : Buffer.from(downloadResult.bytes);
               const computedDigest = crypto
                 .createHash("sha256")
-                .update(downloadResult.bytes)
+                .update(downloadedBytes)
                 .digest("hex");
 
               if (normalizeSha256(computedDigest) !== normalizeSha256(entry.artifactDigest)) {
@@ -452,13 +498,17 @@ export class CloudCatalogSyncCoordinator {
                 entry.artifactDigest,
               );
               let fileCount = 0;
+              let bundleEntrypoint: string = BUNDLE_FILE_ENTRYPOINT_JS;
               try {
-                const tarEntries = parseTarArchive(downloadResult.bytes);
+                const tarEntries = parseTarArchive(inflateArtifactArchive(downloadedBytes));
                 const entryPaths = new Set(tarEntries.map((entry) => entry.path));
+                bundleEntrypoint = entryPaths.has(BUNDLE_FILE_ENTRYPOINT_JS)
+                  ? BUNDLE_FILE_ENTRYPOINT_JS
+                  : BUNDLE_FILE_ENTRYPOINT_TS;
                 if (
                   tarEntries.length === 0 ||
                   !entryPaths.has(BUNDLE_FILE_MANIFEST) ||
-                  !entryPaths.has(BUNDLE_FILE_ENTRYPOINT_JS)
+                  !entryPaths.has(bundleEntrypoint)
                 ) {
                   throw new Error(
                     `Artifact '${entry.name}' is not a complete signed bundle archive`,
@@ -489,8 +539,8 @@ export class CloudCatalogSyncCoordinator {
                 digest: entry.artifactDigest,
                 extractedAt: new Date().toISOString(),
                 fileCount,
-                totalSizeBytes: downloadResult.bytes.length,
-                entrypoint: BUNDLE_FILE_ENTRYPOINT_JS,
+                totalSizeBytes: downloadedBytes.length,
+                entrypoint: bundleEntrypoint,
                 verified: true,
               });
 

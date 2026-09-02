@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   type CapabilityEnvelope,
   type ToolArtifact,
@@ -57,6 +58,18 @@ export interface CloudCatalogClientOptions {
     request: ProjectRegistrationRequest,
     signal?: AbortSignal,
   ) => Promise<ProjectRegistrationResponse>;
+}
+
+/**
+ * Verified bytes of an immutable artifact bundle downloaded by digest.
+ */
+export interface ArtifactDownloadResult {
+  digest: string;
+  bytes: Buffer;
+  contentType?: string;
+  manifestDigest?: string;
+  signature?: string;
+  signatureKeyId?: string;
 }
 
 interface ProjectRegistrarCarrier {
@@ -524,6 +537,136 @@ export class CloudCatalogClient {
 
       // Record other failures and rethrow
       this.circuitBreaker.recordFailure(err);
+      throw error;
+    }
+  }
+
+  /**
+   * Downloads an immutable artifact bundle by digest through the public
+   * `GET /v1/artifacts/{digest}/download` contract and verifies the bytes hash to that digest.
+   */
+  async downloadArtifact(
+    digest: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ArtifactDownloadResult> {
+    if (this.isPaused) {
+      throw new ProtocolError(
+        "terminal",
+        "Cloud catalog client is paused due to authentication failure / revocation",
+        { status: 401 },
+      );
+    }
+    if (!this.circuitBreaker.canExecute()) {
+      throw new ProtocolError("retryable", "Cloud artifact service is currently unavailable", {
+        status: 503,
+      });
+    }
+
+    const expectedDigest = normalizeSha256(digest);
+    if (!/^[0-9a-f]{64}$/.test(expectedDigest)) {
+      throw new ValidationError("Artifact digest must be a sha256 hex digest", {
+        details: { digest },
+      });
+    }
+
+    try {
+      let identity: CloudRequestIdentity | null = null;
+      if (this.identityProvider) {
+        identity = await this.identityProvider();
+        if (!identity) {
+          this.isPaused = true;
+          throw new ProtocolError("terminal", "Cloud credentials unavailable", { status: 401 });
+        }
+      }
+      const targetBaseUrl = identity?.cloudUrl ?? this.baseUrl;
+      if (!targetBaseUrl) {
+        throw new Error("No baseUrl or identity cloudUrl configured for CloudCatalogClient");
+      }
+      const workspaceId = identity?.workspaceId ?? this.workspaceId ?? "";
+      const url = new URL(`${targetBaseUrl}/v1/artifacts/${expectedDigest}/download`);
+      if (workspaceId) {
+        url.searchParams.set("workspaceId", workspaceId);
+      }
+
+      const buildHeaders = (id: CloudRequestIdentity | null): Record<string, string> => {
+        const headers: Record<string, string> = {
+          Accept: "application/octet-stream, application/x-tar, application/gzip",
+          "x-protocol-version": PROTOCOL_VERSION,
+        };
+        if (id) {
+          headers.Authorization = `Bearer ${id.accessToken}`;
+          headers["x-account-id"] = id.accountId;
+          headers["x-workspace-id"] = id.workspaceId;
+          headers["x-device-id"] = id.deviceId;
+          headers["x-installation-id"] = id.installationId;
+          if (id.userId) {
+            headers["x-user-id"] = id.userId;
+          }
+        } else {
+          if (this.authToken) {
+            headers.Authorization = `Bearer ${this.authToken}`;
+          }
+          if (workspaceId) {
+            headers["x-workspace-id"] = workspaceId;
+          }
+          if (this.deviceId) {
+            headers["x-device-id"] = this.deviceId;
+          }
+        }
+        return headers;
+      };
+
+      let response = await this.fetchFn(url.toString(), {
+        headers: buildHeaders(identity),
+        signal: options.signal,
+      });
+      if (response.status === 401 && this.identityProvider) {
+        identity = await this.identityProvider({ forceRefresh: true });
+        if (!identity) {
+          this.isPaused = true;
+          throw new ProtocolError("terminal", "Cloud credentials revoked or invalid", {
+            status: 401,
+          });
+        }
+        response = await this.fetchFn(url.toString(), {
+          headers: buildHeaders(identity),
+          signal: options.signal,
+        });
+      }
+
+      if (!response.ok) {
+        const message = `Cloud artifact download failed with HTTP ${response.status}: ${response.statusText}`;
+        if (response.status === 401 || response.status === 403) {
+          throw new ProtocolError("terminal", message, { status: response.status });
+        }
+        if (response.status === 429 || response.status >= 500) {
+          throw new ProtocolError("retryable", message, { status: response.status });
+        }
+        throw new ProtocolError("terminal", message, { status: response.status });
+      }
+
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const computedDigest = crypto.createHash("sha256").update(bytes).digest("hex");
+      if (computedDigest !== expectedDigest) {
+        throw new ValidationError(
+          "Artifact digest mismatch: downloaded bytes are not the requested artifact",
+          {
+            details: { expected: expectedDigest, computed: computedDigest },
+          },
+        );
+      }
+
+      this.circuitBreaker.recordSuccess();
+      return {
+        digest: expectedDigest,
+        bytes,
+        contentType: response.headers.get("content-type") ?? undefined,
+        manifestDigest: response.headers.get("x-manifest-sha256") ?? undefined,
+        signature: response.headers.get("x-artifact-signature") ?? undefined,
+        signatureKeyId: response.headers.get("x-artifact-key-id") ?? undefined,
+      };
+    } catch (error) {
+      this.circuitBreaker.recordFailure(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
