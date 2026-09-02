@@ -462,6 +462,7 @@ describe("init onboarding & pairing workflow", () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = vi.fn();
     const openBrowser = vi.fn();
+    const codexHome = path.join(home, "active-codex");
 
     const result = await captureOutput(async () => {
       return await initCommand(
@@ -471,6 +472,7 @@ describe("init onboarding & pairing workflow", () => {
           // SAFETY: Mock fetch implementing fetch interface for testing.
           customFetch: customFetch as typeof fetch,
           openBrowser,
+          env: { HOME: home, CODEX_HOME: codexHome },
         },
       );
     });
@@ -478,6 +480,10 @@ describe("init onboarding & pairing workflow", () => {
     expect(result.exitCode).toBe(0);
     expect(customFetch).not.toHaveBeenCalled();
     expect(openBrowser).not.toHaveBeenCalled();
+    expect(await bridge.readFile(path.join(codexHome, "config.toml"))).toContain(
+      `command = "${path.join(home, ".resin", "bin", "resin")}"`,
+    );
+    expect(await bridge.readFile(path.join(home, ".codex", "config.toml"))).toBeNull();
 
     // Verify token file was not created
     const tokenFilePath = path.join(home, ".resin", "state", "device-token.json");

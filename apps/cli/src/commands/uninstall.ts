@@ -9,7 +9,7 @@ import {
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
-import { HarnessConfigOrchestrator } from "../installer/harness-config.js";
+import { resolveHarnessConfigPath } from "../installer/harness-config.js";
 import { createUserServiceManager } from "../service/manager.js";
 export type McpServerConfigValue =
   | string
@@ -128,94 +128,97 @@ Options:
   process.stdout.write(text.trimStart());
 }
 
+async function removeResinFromJsonConfig(
+  configPath: string,
+  fsBridge: ConfigFsBridge,
+): Promise<boolean> {
+  const content = await fsBridge.readFile(configPath);
+  if (!content) {
+    return false;
+  }
+
+  try {
+    const parsed: HarnessJsonConfig = JSON.parse(content);
+    let modified = false;
+    if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
+      modified = cleanMcpContainer(parsed.mcpServers) || modified;
+    }
+    if (parsed.mcp_servers && !Array.isArray(parsed.mcp_servers)) {
+      modified = cleanMcpContainer(parsed.mcp_servers) || modified;
+    }
+    if (modified) {
+      await fsBridge.writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`);
+    }
+    return modified;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Removes Resin MCP configuration from known harness config files.
+ * Removes Resin MCP configuration from active and legacy harness config files.
  */
 export async function removeHarnessMcpConfigurations(options: {
   customHome?: string;
+  env?: NodeJS.ProcessEnv;
   fsBridge?: ConfigFsBridge;
 }): Promise<string[]> {
   const fsBridge = options.fsBridge ?? defaultFsBridge;
-  const home = options.customHome ?? os.homedir();
+  const home = path.resolve(options.customHome ?? options.env?.HOME ?? os.homedir());
+  const env = options.env ?? (options.customHome === undefined ? process.env : { HOME: home });
   const cleaned: string[] = [];
 
-  // 1. Claude Code (~/.claude.json)
-  const claudePaths = [path.join(home, ".claude.json"), path.join(home, ".claude", "config.json")];
-  for (const cPath of claudePaths) {
-    const content = await fsBridge.readFile(cPath);
-    if (content) {
-      try {
-        const parsed: HarnessJsonConfig = JSON.parse(content);
-        if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
-          const modified = cleanMcpContainer(parsed.mcpServers);
-          if (modified) {
-            await fsBridge.writeFile(cPath, `${JSON.stringify(parsed, null, 2)}\n`);
-            cleaned.push("Claude Code");
-            break;
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
+  const claudePaths = new Set([
+    resolveHarnessConfigPath("claude-code", home, env),
+    path.join(home, ".claude.json"),
+    path.join(home, ".claude", "claude.json"),
+    path.join(home, ".claude", "config.json"),
+  ]);
+  let claudeCleaned = false;
+  for (const configPath of claudePaths) {
+    claudeCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || claudeCleaned;
+  }
+  if (claudeCleaned) {
+    cleaned.push("Claude Code");
   }
 
-  // 2. Codex CLI (~/.codex/config.toml and ~/.codex/config.json)
-  const codexPath = path.join(home, ".codex", "config.toml");
-  const codexContent = await fsBridge.readFile(codexPath);
-  if (codexContent) {
-    const removal = removeResinFromCodexToml(codexContent);
+  const codexPaths = new Set([
+    resolveHarnessConfigPath("codex-cli", home, env),
+    path.join(home, ".codex", "config.toml"),
+    path.join(home, ".codex", "config.json"),
+    path.join(home, ".codex", "mcp.json"),
+  ]);
+  let codexCleaned = false;
+  for (const configPath of codexPaths) {
+    if (configPath.endsWith(".json")) {
+      codexCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || codexCleaned;
+      continue;
+    }
+    const content = await fsBridge.readFile(configPath);
+    if (!content) {
+      continue;
+    }
+    const removal = removeResinFromCodexToml(content);
     if (removal.modified) {
-      await fsBridge.writeFile(codexPath, removal.content);
-      cleaned.push("Codex CLI");
+      await fsBridge.writeFile(configPath, removal.content);
+      codexCleaned = true;
     }
   }
-
-  const codexJsonPath = path.join(home, ".codex", "config.json");
-  const codexJsonContent = await fsBridge.readFile(codexJsonPath);
-  if (codexJsonContent) {
-    try {
-      const parsed: HarnessJsonConfig = JSON.parse(codexJsonContent);
-      let modified = false;
-      if (parsed.mcp_servers && !Array.isArray(parsed.mcp_servers)) {
-        if (cleanMcpContainer(parsed.mcp_servers)) modified = true;
-      }
-      if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
-        if (cleanMcpContainer(parsed.mcpServers)) modified = true;
-      }
-      if (modified) {
-        await fsBridge.writeFile(codexJsonPath, `${JSON.stringify(parsed, null, 2)}\n`);
-        if (!cleaned.includes("Codex CLI")) {
-          cleaned.push("Codex CLI");
-        }
-      }
-    } catch {
-      // Continue
-    }
+  if (codexCleaned) {
+    cleaned.push("Codex CLI");
   }
 
-  // 3. OMP (~/.omp/agent/mcp.json and legacy ~/.omp/config.json)
-  const ompPaths = [
+  const activeOmpPath = resolveHarnessConfigPath("omp", home, env);
+  const activeOmpHome = path.dirname(path.dirname(activeOmpPath));
+  const ompPaths = new Set([
+    activeOmpPath,
+    path.join(activeOmpHome, "config.json"),
     path.join(home, ".omp", "agent", "mcp.json"),
     path.join(home, ".omp", "config.json"),
-  ];
+  ]);
   let ompCleaned = false;
-  for (const oPath of ompPaths) {
-    const ompContent = await fsBridge.readFile(oPath);
-    if (ompContent) {
-      try {
-        const parsed: HarnessJsonConfig = JSON.parse(ompContent);
-        if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
-          if (cleanMcpContainer(parsed.mcpServers)) {
-            await fsBridge.writeFile(oPath, `${JSON.stringify(parsed, null, 2)}\n`);
-            cleaned.push(`Oh My Pi (${path.basename(oPath)})`);
-            ompCleaned = true;
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
+  for (const configPath of ompPaths) {
+    ompCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || ompCleaned;
   }
   if (ompCleaned) {
     cleaned.push("Oh My Pi (OMP)");
@@ -295,6 +298,7 @@ function removeResinFromCodexToml(content: string): TomlRemovalResult {
 export async function uninstallCommand(
   args: string[],
   options: {
+    env?: NodeJS.ProcessEnv;
     fsBridge?: ConfigFsBridge;
   } = {},
 ): Promise<number> {
@@ -305,7 +309,10 @@ export async function uninstallCommand(
     return 0;
   }
 
-  const customHome = flags.home ? path.resolve(flags.home) : os.homedir();
+  const customHome = flags.home
+    ? path.resolve(flags.home)
+    : path.resolve(options.env?.HOME ?? os.homedir());
+  const env = { ...(options.env ?? process.env), HOME: customHome };
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -350,6 +357,7 @@ export async function uninstallCommand(
     // 2. Remove Resin MCP configuration from all agent harnesses
     const cleanedHarnesses = await removeHarnessMcpConfigurations({
       customHome,
+      env,
       fsBridge,
     });
 

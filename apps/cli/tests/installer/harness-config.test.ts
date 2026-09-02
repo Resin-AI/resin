@@ -6,6 +6,7 @@ import {
   RESIN_MCP_SERVER_KEYS,
   planHarnessRegistration,
   resolveHarnessConfigPath,
+  resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "../../src/installer/harness-config.js";
 
@@ -48,14 +49,42 @@ class OneRollbackFailureBridge implements ConfigFsBridge {
 }
 
 describe("harness adapter operations", () => {
-  it("resolves canonical global config paths and Resin-owned server keys", () => {
+  it("resolves default and environment-specific global config paths", () => {
     const home = "/home/developer";
 
-    expect(resolveHarnessConfigPath("claude-code", home)).toBe(
-      "/home/developer/.claude/claude.json",
-    );
+    expect(resolveHarnessConfigPath("claude-code", home)).toBe("/home/developer/.claude.json");
     expect(resolveHarnessConfigPath("codex-cli", home)).toBe("/home/developer/.codex/config.toml");
     expect(resolveHarnessConfigPath("omp", home)).toBe("/home/developer/.omp/agent/mcp.json");
+    expect(resolveInstalledResinMcpCommand(home)).toBe("/home/developer/.resin/bin/resin");
+
+    expect(
+      resolveHarnessConfigPath("claude-code", home, {
+        CLAUDE_CONFIG_DIR: "/profiles/claude",
+      }),
+    ).toBe("/profiles/claude/.claude.json");
+    expect(
+      resolveHarnessConfigPath("codex-cli", home, {
+        CODEX_HOME: "/profiles/codex",
+      }),
+    ).toBe("/profiles/codex/config.toml");
+    expect(
+      resolveHarnessConfigPath("codex-cli", home, {
+        CODEX_HOME: "/profiles/codex",
+        CODEX_CONFIG_PATH: "/profiles/codex/custom.json",
+      }),
+    ).toBe("/profiles/codex/custom.json");
+    expect(resolveHarnessConfigPath("omp", home, { OMP_HOME: "/profiles/omp" })).toBe(
+      "/profiles/omp/agent/mcp.json",
+    );
+    expect(resolveHarnessConfigPath("omp", home, { RESIN_OMP_HOME: "/profiles/resin-omp" })).toBe(
+      "/profiles/resin-omp/agent/mcp.json",
+    );
+    expect(
+      resolveHarnessConfigPath("omp", home, {
+        OMP_HOME: "",
+        RESIN_OMP_HOME: "/profiles/resin-omp",
+      }),
+    ).toBe("/profiles/resin-omp/agent/mcp.json");
     expect(RESIN_MCP_SERVER_KEYS).toEqual({
       "claude-code": "resin",
       "codex-cli": "resin",
@@ -69,7 +98,7 @@ describe("harness adapter operations", () => {
     const cases = [
       {
         harnessId: "claude-code" as const,
-        targetPath: "/home/developer/.claude/claude.json",
+        targetPath: "/home/developer/.claude.json",
         serverKey: "resin",
         expectedServer: { command: "resin", args: ["mcp"] },
       },
@@ -166,7 +195,7 @@ describe("harness adapter operations", () => {
 
   it("validates every Resin-owned transport field instead of URL alone", async () => {
     const bridge = new InMemoryConfigFsBridge();
-    const targetPath = "/home/developer/.claude/claude.json";
+    const targetPath = "/home/developer/.claude.json";
     await bridge.writeFile(
       targetPath,
       JSON.stringify({
@@ -176,6 +205,28 @@ describe("harness adapter operations", () => {
             command: "/missing/resin",
             args: ["--wrong"],
             url: "http://127.0.0.1:9400/mcp/sse",
+          },
+        },
+      }),
+    );
+    await expect(
+      verifyHarnessRegistration({
+        harnessId: "claude-code",
+        targetPath,
+        workspacePath: "/workspace/project",
+        gatewayUrl: "http://127.0.0.1:9400/mcp/sse",
+        fsBridge: bridge,
+      }),
+    ).resolves.toBe(false);
+
+    await bridge.writeFile(
+      targetPath,
+      JSON.stringify({
+        mcpServers: {
+          resin: {
+            type: "http",
+            command: "resin",
+            args: ["mcp"],
           },
         },
       }),
@@ -267,7 +318,7 @@ describe("harness adapter operations", () => {
 
   it("routes the legacy orchestrator through preservation and corrupt-config safeguards", async () => {
     const bridge = new InMemoryConfigFsBridge();
-    const claudePath = "/home/developer/.claude/claude.json";
+    const claudePath = "/home/developer/.claude.json";
     await bridge.writeFile(
       claudePath,
       JSON.stringify({
@@ -295,7 +346,7 @@ describe("harness adapter operations", () => {
     const repaired = JSON.parse((await bridge.readFile(claudePath)) ?? "");
     expect(repaired.theme).toBe("keep");
     expect(repaired.mcpServers.resin).toMatchObject({
-      command: "resin",
+      command: "/home/developer/.resin/bin/resin",
       args: ["mcp"],
       headers: { Authorization: "keep-resin-header" },
       env: { RESIN_TOKEN: "keep-resin-env" },
@@ -313,9 +364,28 @@ describe("harness adapter operations", () => {
     expect(failed.backups).toHaveLength(0);
   });
 
+  it("writes to the active Codex home supplied by the environment", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const activePath = "/profiles/codex/config.toml";
+
+    const result = await new HarnessConfigOrchestrator().configureHarnesses({
+      harnesses: ["codex-cli"],
+      customHome: "/home/developer",
+      env: { HOME: "/home/developer", CODEX_HOME: "/profiles/codex" },
+      fsBridge: bridge,
+    });
+
+    expect(result.success).toBe(true);
+    expect(await bridge.readFile(activePath)).toContain("[mcp_servers.resin]");
+    expect(await bridge.readFile(activePath)).toContain(
+      'command = "/home/developer/.resin/bin/resin"',
+    );
+    expect(await bridge.readFile("/home/developer/.codex/config.toml")).toBeNull();
+  });
+
   it("reports and retains a failed legacy rollback so the same closure can retry", async () => {
     const delegate = new InMemoryConfigFsBridge();
-    const targetPath = "/home/developer/.claude/claude.json";
+    const targetPath = "/home/developer/.claude.json";
     const original = JSON.stringify({
       mcpServers: { resin: { type: "sse", url: "http://old" } },
     });
@@ -344,7 +414,7 @@ describe("harness adapter operations", () => {
 
       // 1. Claude Code
       await bridge.writeFile(
-        "/home/developer/.claude/claude.json",
+        "/home/developer/.claude.json",
         JSON.stringify({
           mcpServers: {
             resin_gateway: { url: gatewayUrl },
@@ -354,7 +424,7 @@ describe("harness adapter operations", () => {
       );
       const claudePlan = await planHarnessRegistration({
         harnessId: "claude-code",
-        targetPath: "/home/developer/.claude/claude.json",
+        targetPath: "/home/developer/.claude.json",
         workspacePath: "/workspace",
         gatewayUrl,
         fsBridge: bridge,

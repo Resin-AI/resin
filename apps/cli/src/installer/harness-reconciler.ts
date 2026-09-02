@@ -27,6 +27,7 @@ import {
   probeHarnessInstallation,
   projectCodexTomlUserConfig,
   resolveHarnessConfigPath,
+  resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "./harness-config.js";
 import type { HarnessProbeOptions, SupportedHarnessId } from "./harness-config.js";
@@ -116,6 +117,8 @@ export interface HarnessReconcileOptions {
   readonly harnesses?: readonly SupportedHarnessId[];
   readonly installedHarnesses?: readonly SupportedHarnessId[];
   readonly customHome?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly resinCommand?: string;
   readonly workspacePath?: string;
   readonly gatewayUrl?: string;
   readonly fsBridge?: HarnessReconcileFsBridge;
@@ -154,6 +157,8 @@ interface ResolvedReconcileOptions {
   readonly dryRun: boolean;
   readonly installedHarnesses: ReadonlySet<SupportedHarnessId>;
   readonly customHome: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly resinCommand: string;
   readonly workspacePath: string;
   readonly gatewayUrl: string;
   readonly fsBridge: HarnessReconcileFsBridge;
@@ -1235,11 +1240,16 @@ export class HarnessReconciler {
     const now = options.now ?? (() => new Date());
     const autoRepair = options.autoRepair ?? DEFAULT_HARNESS_AUTO_REPAIR;
     const harnesses = [...new Set(options.harnesses ?? SUPPORTED_HARNESS_IDS)];
+    const customHome = options.customHome ?? options.env?.HOME ?? process.env.HOME ?? os.homedir();
+    const env =
+      options.env ?? (options.customHome === undefined ? process.env : { HOME: customHome });
     const resolved: ResolvedReconcileOptions = {
       autoRepair,
       dryRun: options.dryRun ?? false,
       installedHarnesses: new Set(options.installedHarnesses ?? []),
-      customHome: options.customHome ?? process.env.HOME ?? os.homedir(),
+      customHome,
+      env,
+      resinCommand: options.resinCommand ?? resolveInstalledResinMcpCommand(customHome),
       workspacePath: options.workspacePath ?? process.cwd(),
       gatewayUrl: options.gatewayUrl ?? DEFAULT_GATEWAY_URL,
       fsBridge: options.fsBridge ?? defaultReconciliationFsBridge,
@@ -1299,7 +1309,7 @@ export class HarnessReconciler {
     harnessId: SupportedHarnessId,
     options: ResolvedReconcileOptions,
   ): Promise<HarnessReconciliationResult> {
-    const targetPath = resolveHarnessConfigPath(harnessId, options.customHome);
+    const targetPath = resolveHarnessConfigPath(harnessId, options.customHome, options.env);
     const displayName = HARNESS_DISPLAY_NAMES[harnessId];
     let configExists: boolean;
 
@@ -1328,6 +1338,7 @@ export class HarnessReconciler {
           harnessId,
           targetPath,
           customHome: options.customHome,
+          env: options.env,
           fsBridge: options.fsBridge,
         });
         if (installation !== null) {
@@ -1393,6 +1404,7 @@ export class HarnessReconciler {
       targetPath,
       workspacePath: options.workspacePath,
       gatewayUrl: options.gatewayUrl,
+      command: options.resinCommand,
       fsBridge: options.fsBridge,
     } as const;
 

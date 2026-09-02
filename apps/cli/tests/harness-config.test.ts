@@ -8,6 +8,7 @@ describe("HarnessConfigOrchestrator", () => {
     const orchestrator = new HarnessConfigOrchestrator();
 
     const home = "/home/developer";
+    const resinCommand = `${home}/.resin/bin/resin`;
     const workspace = "/home/developer/projects/my-project";
 
     const result = await orchestrator.configureHarnesses({
@@ -22,22 +23,22 @@ describe("HarnessConfigOrchestrator", () => {
     expect(result.backups).toHaveLength(3);
 
     // Verify Claude config was written
-    const claudeContent = await bridge.readFile(`${home}/.claude/claude.json`);
+    const claudeContent = await bridge.readFile(`${home}/.claude.json`);
     expect(claudeContent).not.toBeNull();
     const claudeJson = JSON.parse(claudeContent ?? "{}");
-    expect(claudeJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(claudeJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
 
     // Verify Codex config was written
     const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
     expect(codexContent).not.toBeNull();
-    expect(codexContent).toContain('command = "resin"');
+    expect(codexContent).toContain(`command = "${resinCommand}"`);
     expect(codexContent).toContain('args = ["mcp"]');
 
     // Verify OMP config was written
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {
@@ -87,7 +88,7 @@ describe("HarnessConfigOrchestrator", () => {
     expect(result.results.every((r) => r.plan !== undefined)).toBe(true);
 
     // Nothing written to disk
-    expect(await bridge.readFile(`${home}/.claude/claude.json`)).toBeNull();
+    expect(await bridge.readFile(`${home}/.claude.json`)).toBeNull();
     expect(await bridge.readFile(`${home}/.codex/config.toml`)).toBeNull();
     expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toBeNull();
   });
@@ -100,7 +101,7 @@ describe("HarnessConfigOrchestrator", () => {
     const workspace = "/home/developer/projects/my-project";
 
     // Pre-populate original content
-    await bridge.writeFile(`${home}/.claude/claude.json`, '{"original": true}');
+    await bridge.writeFile(`${home}/.claude.json`, '{"original": true}');
     await bridge.writeFile(`${home}/.codex/config.toml`, "# Original Codex Config\n");
 
     // Run first configuration
@@ -115,7 +116,7 @@ describe("HarnessConfigOrchestrator", () => {
     await runResult.rollback();
 
     // Verify Claude was restored to original content
-    const restoredClaude = await bridge.readFile(`${home}/.claude/claude.json`);
+    const restoredClaude = await bridge.readFile(`${home}/.claude.json`);
     expect(restoredClaude).toBe('{"original": true}');
 
     // Verify Codex was restored to original content

@@ -227,6 +227,10 @@ export async function initCommand(
       : (optionsOrBridge ?? {});
 
   const env = options.env ?? process.env;
+  const harnessHome = flags.home
+    ? path.resolve(flags.home)
+    : path.resolve(env.HOME ?? os.homedir());
+  const harnessEnv = { ...env, HOME: harnessHome };
   const verbosity =
     options.verbosity ??
     resolveVerbosity({
@@ -279,10 +283,8 @@ export async function initCommand(
         };
       };
     } else {
-      const cloudUrl = validateCloudUrl(
-        flags.cloudUrl ?? process.env.RESIN_CLOUD_URL ?? DEFAULT_CLOUD_URL,
-      );
-      const home = flags.home ? path.resolve(flags.home) : os.homedir();
+      const cloudUrl = validateCloudUrl(flags.cloudUrl ?? env.RESIN_CLOUD_URL ?? DEFAULT_CLOUD_URL);
+      const home = harnessHome;
 
       pairingCallback = async (): Promise<InstallerPairingMutation> => {
         return await performPairing({
@@ -314,6 +316,7 @@ export async function initCommand(
     rollbackInstall: flags.rollbackInstall,
     gatewayUrl: flags.gatewayUrl,
     customHome: flags.home,
+    env: harnessEnv,
     promptFn: options.promptFn ?? options.authPromptFn,
     logger: options.logger,
     fetchImpl: options.customFetch,
@@ -346,7 +349,6 @@ export async function initCommand(
     const result = await runInit(installerOptions, options.customFsBridge);
 
     if (isRealInstall && result.success) {
-      const harnessHome = flags.home ? path.resolve(flags.home) : os.homedir();
       const autoRepair = flags.autoRepair ?? options.harnessAutoRepair;
       if (autoRepair !== undefined) {
         await saveHarnessHealthSettings(autoRepair, {
@@ -364,6 +366,7 @@ export async function initCommand(
           options.harnessHealthCoordinator ??
           new HarnessHealthCoordinator({
             home: harnessHome,
+            env: harnessEnv,
             workspacePath: flags.workspace,
             gatewayUrl: flags.gatewayUrl,
             fsBridge: options.customFsBridge,

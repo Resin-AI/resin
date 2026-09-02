@@ -22,6 +22,26 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       expect(result).not.toContain("localhost");
     });
 
+    it("escapes and verifies an absolute Windows command path", async () => {
+      const targetPath = "C:/Users/developer/.codex/config.toml";
+      const command = String.raw`C:\Users\developer\.resin\bin\resin.exe`;
+      const fsBridge = new InMemoryConfigFsBridge();
+      const result = updateTomlMcpConfig("", DEFAULT_GATEWAY_SERVER_NAME, {
+        command,
+        args: ["mcp"],
+      });
+
+      expect(result).toContain(`command = ${JSON.stringify(command)}`);
+      await fsBridge.writeFile(targetPath, result);
+      await expect(
+        verifyCodexMcpConfig({
+          targetPath,
+          expectedCommand: command,
+          fsBridge,
+        }),
+      ).resolves.toBe(true);
+    });
+
     it("preserves non-mcp TOML keys, comments, and structure", () => {
       const initial = [
         "# OpenAI Codex Configuration",
@@ -311,6 +331,18 @@ describe("Codex CLI Config Planner (TOML & JSON)", () => {
       expect(result).toContain('command = "custom-user-tool"');
       expect(result).toContain("[mcp_servers.resin]");
       expect(result).toContain(`command = "${DEFAULT_RESIN_MCP_COMMAND}"`);
+    });
+
+    it("does not infer a Resin command from text inside an unrelated TOML property", () => {
+      const initialToml = ["[mcp_servers.resin-gateway]", `note = 'run command = "resin"'`].join(
+        "\n",
+      );
+
+      const result = updateTomlMcpConfig(initialToml);
+
+      expect(result).toContain("[mcp_servers.resin-gateway]");
+      expect(result).toContain(`note = 'run command = "resin"'`);
+      expect(result).toContain("[mcp_servers.resin]");
     });
 
     it("migrates inline legacy aliases under [mcp_servers] in TOML", () => {

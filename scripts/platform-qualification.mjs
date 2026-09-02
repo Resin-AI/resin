@@ -750,6 +750,11 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     cleanEnv.VITEST = "1";
   }
   delete cleanEnv.NODE_PATH;
+  delete cleanEnv.CLAUDE_CONFIG_DIR;
+  delete cleanEnv.CODEX_CONFIG_PATH;
+  delete cleanEnv.CODEX_HOME;
+  delete cleanEnv.OMP_HOME;
+  delete cleanEnv.RESIN_OMP_HOME;
 
   let daemonChild = null;
 
@@ -805,6 +810,7 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     }
 
     // Invariant 4: Generated OMP and Codex configs each contain one canonical stdio resin entry and no legacy localhost SSE
+    const expectedMcpCommand = path.join(resinHome, "bin", "resin");
     const ompConfigCandidates = [
       path.join(cleanWorkspace, ".omp", "agent", "mcp.json"),
       path.join(cleanWorkspace, ".omp", "mcp.json"),
@@ -826,13 +832,12 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       );
     }
     if (
-      !ompServer.command ||
-      (!ompServer.command.includes("resin") && ompServer.command !== "resin") ||
+      ompServer.command !== expectedMcpCommand ||
       !Array.isArray(ompServer.args) ||
       !ompServer.args.includes("mcp")
     ) {
       throw new Error(
-        `OMP mcpServers entry does not use canonical command 'resin' with 'mcp' arg: ${JSON.stringify(ompServer)}`,
+        `OMP mcpServers entry does not use installed command '${expectedMcpCommand}' with 'mcp' arg: ${JSON.stringify(ompServer)}`,
       );
     }
     if (
@@ -867,9 +872,12 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
         `Codex config at ${codexConfigFile} missing [mcp_servers.resin] section: ${codexConfigRaw}`,
       );
     }
-    if (!codexConfigRaw.includes('command = "resin"') || !codexConfigRaw.includes('"mcp"')) {
+    if (
+      !codexConfigRaw.includes(`command = "${expectedMcpCommand}"`) ||
+      !codexConfigRaw.includes('"mcp"')
+    ) {
       throw new Error(
-        `Codex config at ${codexConfigFile} does not contain canonical command 'resin' with args ['mcp']: ${codexConfigRaw}`,
+        `Codex config at ${codexConfigFile} does not contain installed command '${expectedMcpCommand}' with args ['mcp']: ${codexConfigRaw}`,
       );
     }
     if (

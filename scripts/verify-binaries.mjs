@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
  * @property {string} packageDir - Relative directory path of package
  * @property {string} binKey - Key name in package.json "bin" field
  * @property {string} binPath - Relative path to the compiled JS binary
+ * @property {string[]} [requiredRuntimePaths] - Built runtime files required by the binary
  * @property {string[]} testArgs - CLI arguments for smoke verification
  * @property {RegExp} expectedOutputPattern - Regex pattern that stdout must match
  */
@@ -35,6 +36,7 @@ export const BINARY_SPECS = [
     binPath: "apps/cli/bin/resin.mjs",
     testArgs: ["--help"],
     expectedOutputPattern: /Resin CLI/i,
+    requiredRuntimePaths: ["apps/cli/dist/release-trust.json"],
   },
   {
     packageName: "resin",
@@ -136,6 +138,15 @@ export async function verifyBinaries(options = {}) {
     // 2. Verify binary file existence on disk
     if (!fs.existsSync(fullBinPath)) {
       const msg = `Compiled binary not found for ${spec.packageName}: ${spec.binPath}. Run 'pnpm run build' first.`;
+      errors.push(msg);
+      results.push({ spec, status: "fail", error: msg });
+      continue;
+    }
+    const missingRuntimePath = (spec.requiredRuntimePaths ?? []).find(
+      (runtimePath) => !fs.existsSync(path.join(rootDir, runtimePath)),
+    );
+    if (missingRuntimePath) {
+      const msg = `Required runtime file not found for ${spec.packageName}: ${missingRuntimePath}. Run 'pnpm run build' first.`;
       errors.push(msg);
       results.push({ spec, status: "fail", error: msg });
       continue;

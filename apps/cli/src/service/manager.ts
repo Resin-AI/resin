@@ -1196,7 +1196,9 @@ export class WslUserServiceManager implements UserServiceManager {
   }
 
   getUnitPath(): string {
-    return path.join(this.resinHome, "services", "wsl-service.json");
+    return this.systemdAvailableCache === true
+      ? this.systemdDelegate.getUnitPath()
+      : path.join(this.resinHome, "services", "wsl-service.json");
   }
 
   getFallbackScriptPath(): string {
@@ -1208,6 +1210,10 @@ export class WslUserServiceManager implements UserServiceManager {
   }
 
   getUnitDefinition(options: ServiceInstallOptions = {}): string {
+    if (this.systemdAvailableCache === true) {
+      return this.systemdDelegate.getUnitDefinition(options);
+    }
+
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
@@ -1382,6 +1388,10 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
   }
 
   async restart(): Promise<void> {
+    const hasSystemd = await this.checkSystemdAvailable();
+    if (hasSystemd) {
+      return this.systemdDelegate.restart();
+    }
     await this.stop().catch(() => {});
     await this.start();
   }

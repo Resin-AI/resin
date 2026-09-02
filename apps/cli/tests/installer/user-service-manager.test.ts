@@ -372,6 +372,7 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       });
 
       // Pre-install a previous service version
+      await manager.isInstalled();
       const unitPath = manager.getUnitPath();
       fs.mkdirSync(path.dirname(unitPath), { recursive: true });
       const priorContent = "# Prior version of resin service\nDescription=Old Resin Daemon\n";
@@ -486,6 +487,7 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       });
 
       // Pre-install a previous service version that was disabled and inactive
+      await manager.isInstalled();
       const unitPath = manager.getUnitPath();
       fs.mkdirSync(path.dirname(unitPath), { recursive: true });
       const priorContent =
@@ -608,7 +610,15 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
         }
         // Only status / health check probes should be invoked
         const isStatusProbe = args.some((arg) =>
-          ["is-active", "is-enabled", "status", "show", "list", "print"].includes(arg),
+          [
+            "is-active",
+            "is-enabled",
+            "is-system-running",
+            "status",
+            "show",
+            "list",
+            "print",
+          ].includes(arg),
         );
         expect(isStatusProbe).toBe(true);
       }
@@ -665,6 +675,7 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
         resinHome,
         runner: mockRunner,
       });
+      await manager.isInstalled();
       const unitPath = manager.getUnitPath();
       fs.mkdirSync(path.dirname(unitPath), { recursive: true });
 
@@ -745,6 +756,7 @@ WantedBy=default.target
         resinHome,
         runner: mockRunner,
       });
+      await manager.isInstalled();
       const canonicalUnit = manager.getUnitDefinition();
       const unitWithCustomPath = canonicalUnit.replace(
         /Environment="PATH=.*"/,

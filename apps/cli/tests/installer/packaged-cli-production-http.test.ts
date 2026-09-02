@@ -347,6 +347,13 @@ describe("packed CLI production bootstrap", () => {
           cwd: path.dirname(packedBin),
           env: {
             ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            CLAUDE_CONFIG_DIR: undefined,
+            CODEX_CONFIG_PATH: undefined,
+            CODEX_HOME: undefined,
+            OMP_HOME: undefined,
+            RESIN_OMP_HOME: undefined,
             NODE_ENV: undefined,
             RESIN_RELEASE_MODE: "production",
             RESIN_RELEASE_CHANNEL_URL: `${baseUrl}/channels.json`,

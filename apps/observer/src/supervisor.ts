@@ -367,6 +367,13 @@ export class DaemonSupervisor {
       }
     }
 
+    if (
+      this.state === "degraded" &&
+      Object.values(moduleHealthMap).every((health) => health.status === "ready")
+    ) {
+      this.state = "ready";
+    }
+
     let overallStatus: DaemonHealthStatus;
 
     if (this.state === "starting" || this.state === "stopping" || this.state === "stopped") {

@@ -90,6 +90,7 @@ export interface InstallerOptions {
   privacyConfig?: string;
   rollbackInstall?: boolean;
   customHome?: string;
+  env?: NodeJS.ProcessEnv;
   denoExecutable?: string;
   assetManifest?: AssetManifest;
   channel?: ReleaseChannel;
@@ -189,7 +190,9 @@ export class ResinInstaller {
    * Runs the complete installation workflow or handles rollback request.
    */
   async run(options: InstallerOptions = {}): Promise<InstallationSummary> {
-    const customHome = options.customHome ?? process.env.HOME ?? os.homedir();
+    const customHome = options.customHome ?? options.env?.HOME ?? process.env.HOME ?? os.homedir();
+    const harnessEnv =
+      options.env ?? (options.customHome === undefined ? process.env : { HOME: customHome });
     const workspacePath = path.resolve(options.workspace ?? process.cwd());
     const dryRun = Boolean(options.dryRun);
     if (options.logger) {
@@ -369,6 +372,7 @@ export class ResinInstaller {
           fsBridge: this.fsBridge,
           manifest: options.assetManifest,
           denoExecutable: options.denoExecutable,
+          env: { ...harnessEnv, HOME: customHome, RESIN_HOME: resinHome },
           allowMissingOptional: true,
         });
       }
@@ -590,6 +594,7 @@ export class ResinInstaller {
       const orchestrationResult = await orchestrator.configureHarnesses({
         workspacePath,
         customHome,
+        env: harnessEnv,
         gatewayUrl: options.gatewayUrl,
         fsBridge: this.fsBridge,
         dryRun,

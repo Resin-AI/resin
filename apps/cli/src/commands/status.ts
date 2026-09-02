@@ -1,9 +1,9 @@
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { probeClaudeInstallation, verifyClaudeMcpConfig } from "@resin/adapter-claude-code";
-import { probeCodexInstallation, verifyCodexMcpConfig } from "@resin/adapter-codex";
-import { probeOmpInstallation, verifyOmpMcpConfig } from "@resin/adapter-omp";
+import { probeClaudeInstallation } from "@resin/adapter-claude-code";
+import { probeCodexInstallation } from "@resin/adapter-codex";
+import { probeOmpInstallation } from "@resin/adapter-omp";
 import {
   type ProductionSafetyGateStatus,
   type SafetyAttestationRecord,
@@ -27,6 +27,12 @@ import {
   filterActionableNotifications,
 } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
+import {
+  DEFAULT_GATEWAY_URL,
+  resolveHarnessConfigPath,
+  resolveInstalledResinMcpCommand,
+  verifyHarnessRegistration,
+} from "../installer/harness-config.js";
 import {
   type CloudCredentialLoadResult,
   type CloudCredentialStatus,
@@ -323,7 +329,7 @@ export async function collectStatus(
     customHome?: string;
   } = {},
 ): Promise<DaemonStatusSummary> {
-  const home = options.home ?? options.customHome ?? os.homedir();
+  const home = options.home ?? options.customHome ?? options.env?.HOME ?? os.homedir();
   return fetchDaemonStatusSummary(home, options);
 }
 
@@ -495,7 +501,7 @@ export async function fetchDaemonStatusSummary(
   );
 
   const harnessSnapshot = await readHarnessSnapshot(fsBridge, resinHome);
-  const harnesses = await collectHarnessStatuses(home, fsBridge, harnessSnapshot);
+  const harnesses = await collectHarnessStatuses(home, fsBridge, harnessSnapshot, env);
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
   const update = await readUpdateStatus(fsBridge, resinHome);
   const privacy = collectPrivacySnapshot(
@@ -772,7 +778,10 @@ export async function statusCommand(
     return 0;
   }
 
-  const customHome = flags.home ? path.resolve(flags.home) : os.homedir();
+  const customHome = flags.home
+    ? path.resolve(flags.home)
+    : path.resolve(options.env?.HOME ?? os.homedir());
+  const env = { ...(options.env ?? process.env), HOME: customHome };
   try {
     const now = options.now?.() ?? Date.now();
     const summary = await fetchDaemonStatusSummary(customHome, {
@@ -780,7 +789,7 @@ export async function statusCommand(
       fsBridge: options.fsBridge,
       customFetch: options.customFetch,
       cwd: options.cwd,
-      env: options.env,
+      env,
       now: () => now,
     });
     const activeNotifications = [
@@ -1054,43 +1063,56 @@ async function collectHarnessStatuses(
   home: string,
   fsBridge: ConfigFsBridge,
   cached: CachedHarnessSnapshot,
+  env: NodeJS.ProcessEnv,
 ): Promise<DaemonStatusSummary["harnesses"]> {
+  const claudePath = resolveHarnessConfigPath("claude-code", home, env);
+  const codexPath = resolveHarnessConfigPath("codex-cli", home, env);
+  const ompPath = resolveHarnessConfigPath("omp", home, env);
+  const resinCommand = resolveInstalledResinMcpCommand(home);
   const [claudeProbe, codexProbe, ompProbe] = await Promise.all([
-    probeClaudeInstallation(undefined, fsBridge).catch(() => null),
-    probeCodexInstallation().catch(() => null),
-    probeOmpInstallation({ homeDir: path.join(home, ".omp") }).catch(() => null),
+    probeClaudeInstallation({ customConfigPath: claudePath }, fsBridge).catch(() => null),
+    probeCodexInstallation({
+      customConfigPath: codexPath,
+      env: { ...env, HOME: home },
+    }).catch(() => null),
+    probeOmpInstallation({
+      customConfigPath: ompPath,
+      env,
+      homeDir: home,
+    }).catch(() => null),
   ]);
-  const claudePath = path.join(home, ".claude.json");
-  const codexPath = path.join(home, ".codex", "config.toml");
-  const ompPath = path.join(home, ".omp", "agent", "mcp.json");
-  const ompLegacyPath = path.join(home, ".omp", "config.json");
-  const [claudeConfigured, codexConfigured, ompAgentConfigured, ompLegacyConfigured] =
-    await Promise.all([
-      verifyLiveHarnessConfig(fsBridge, claudePath, () =>
-        verifyClaudeMcpConfig(
-          {
-            harnessId: "claude-code",
-            workspaceId: "global",
-            name: "global",
-            rootPath: home,
-            configPath: claudePath,
-            mcpConfigPath: claudePath,
-            metadata: {},
-          },
-          undefined,
-          fsBridge,
-        ),
-      ),
-      verifyLiveHarnessConfig(fsBridge, codexPath, () =>
-        verifyCodexMcpConfig(codexPath, undefined, "resin", fsBridge),
-      ),
-      verifyLiveHarnessConfig(fsBridge, ompPath, () =>
-        verifyOmpMcpConfig({ customConfigPath: ompPath, fsBridge }),
-      ),
-      verifyLiveHarnessConfig(fsBridge, ompLegacyPath, () =>
-        verifyOmpMcpConfig({ customConfigPath: ompLegacyPath, fsBridge }),
-      ),
-    ]);
+  const [claudeConfigured, codexConfigured, ompConfigured] = await Promise.all([
+    verifyLiveHarnessConfig(fsBridge, claudePath, () =>
+      verifyHarnessRegistration({
+        harnessId: "claude-code",
+        targetPath: claudePath,
+        workspacePath: home,
+        gatewayUrl: DEFAULT_GATEWAY_URL,
+        command: resinCommand,
+        fsBridge,
+      }),
+    ),
+    verifyLiveHarnessConfig(fsBridge, codexPath, () =>
+      verifyHarnessRegistration({
+        harnessId: "codex-cli",
+        targetPath: codexPath,
+        workspacePath: home,
+        gatewayUrl: DEFAULT_GATEWAY_URL,
+        command: resinCommand,
+        fsBridge,
+      }),
+    ),
+    verifyLiveHarnessConfig(fsBridge, ompPath, () =>
+      verifyHarnessRegistration({
+        harnessId: "omp",
+        targetPath: ompPath,
+        workspacePath: home,
+        gatewayUrl: DEFAULT_GATEWAY_URL,
+        command: resinCommand,
+        fsBridge,
+      }),
+    ),
+  ]);
 
   const live = {
     "claude-code": {
@@ -1103,12 +1125,7 @@ async function collectHarnessStatuses(
     },
     omp: {
       installed: ompProbe === null ? null : Boolean(ompProbe.isInstalled),
-      configured:
-        ompAgentConfigured === true || ompLegacyConfigured === true
-          ? true
-          : ompAgentConfigured === false && ompLegacyConfigured === false
-            ? false
-            : null,
+      configured: ompConfigured,
     },
   } satisfies Record<HarnessId, { installed: boolean | null; configured: boolean | null }>;
 
@@ -1116,12 +1133,15 @@ async function collectHarnessStatuses(
   return (Object.keys(HARNESS_DETAILS) as HarnessId[]).map((id) => {
     const cachedHarness = cached.harnesses[id];
     const installed = live[id].installed ?? cachedHarness?.installed ?? false;
-    const configured = live[id].configured ?? cachedHarness?.configured ?? false;
+    const liveConfigured = live[id].configured;
+    const configured = liveConfigured ?? cachedHarness?.configured ?? false;
+    const useCachedDiagnostic = liveConfigured === null;
     const drift =
-      cachedHarness?.condition === "drifted" ||
-      cachedHarness?.status === "drifted" ||
-      cachedHarness?.recentAction === "drift_detected";
-    const error = cachedHarness?.recentAction === "repair_failed";
+      useCachedDiagnostic &&
+      (cachedHarness?.condition === "drifted" ||
+        cachedHarness?.status === "drifted" ||
+        cachedHarness?.recentAction === "drift_detected");
+    const error = useCachedDiagnostic && cachedHarness?.recentAction === "repair_failed";
     return {
       id,
       name: HARNESS_DETAILS[id],
@@ -1138,7 +1158,7 @@ async function collectHarnessStatuses(
               ? "attached"
               : "unconfigured",
       lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
-      recentAction: cachedHarness?.recentAction ?? null,
+      recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
     };
   });
 }

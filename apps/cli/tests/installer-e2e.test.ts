@@ -139,7 +139,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     });
 
     // Verify Claude, Codex, OMP configs were written
-    expect(await bridge.readFile(`${home}/.claude/claude.json`)).toContain("resin");
+    expect(await bridge.readFile(`${home}/.claude.json`)).toContain("resin");
     expect(await bridge.readFile(`${home}/.codex/config.toml`)).toContain("resin");
     expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toContain("resin");
   });
@@ -167,7 +167,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
 
     // Verify no files/directories were created on disk
     expect(await bridge.readFile(`${home}/.resin/state/install-journal.json`)).toBeNull();
-    expect(await bridge.readFile(`${home}/.claude/claude.json`)).toBeNull();
+    expect(await bridge.readFile(`${home}/.claude.json`)).toBeNull();
     expect(await bridge.readFile(`${home}/.codex/config.toml`)).toBeNull();
     expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toBeNull();
   });
@@ -278,7 +278,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     const workspace = "/home/developer/code/my-app";
 
     // Pre-create original config files
-    await bridge.writeFile(`${home}/.claude/claude.json`, '{"original": "claude"}');
+    await bridge.writeFile(`${home}/.claude.json`, '{"original": "claude"}');
     await bridge.writeFile(`${home}/.codex/config.toml`, "# original codex\n");
 
     const installer = new ResinInstaller({
@@ -296,7 +296,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     ).rejects.toThrow(InstallationError);
 
     // Original files must remain intact
-    expect(await bridge.readFile(`${home}/.claude/claude.json`)).toBe('{"original": "claude"}');
+    expect(await bridge.readFile(`${home}/.claude.json`)).toBe('{"original": "claude"}');
     expect(await bridge.readFile(`${home}/.codex/config.toml`)).toBe("# original codex\n");
   });
   it("invokes pairing in correct order, sanitizes pairing summary, and rolls back pairing on failure", async () => {
@@ -431,6 +431,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("emits canonical stdio configurations and does not write explicit gatewayUrl into harness configs", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
+    const resinCommand = path.join(home, ".resin", "bin", "resin");
     const workspace = "/home/developer/code/my-app";
     const customGateway = "http://127.0.0.1:9876/mcp/sse";
 
@@ -448,22 +449,22 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     });
 
     // Verify all three emitted configs are canonical stdio and do not contain custom gateway
-    const claudeContent = await bridge.readFile(`${home}/.claude/claude.json`);
+    const claudeContent = await bridge.readFile(`${home}/.claude.json`);
     expect(claudeContent).not.toBeNull();
     const claudeJson = JSON.parse(claudeContent ?? "{}");
-    expect(claudeJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(claudeJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
     expect(claudeContent).not.toContain(customGateway);
 
     const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
     expect(codexContent).not.toBeNull();
-    expect(codexContent).toContain('command = "resin"');
+    expect(codexContent).toContain(`command = "${resinCommand}"`);
     expect(codexContent).toContain('args = ["mcp"]');
     expect(codexContent).not.toContain(customGateway);
 
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+    expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
     expect(ompContent).not.toContain(customGateway);
   });
 
@@ -528,6 +529,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
       fsBridge: bridge,
       runner: serviceRunner,
     });
+    await manager.status();
     const unitPath = manager.getUnitPath();
     fs.mkdirSync(path.dirname(unitPath), { recursive: true });
     fs.writeFileSync(unitPath, manager.getUnitDefinition());

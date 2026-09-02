@@ -164,6 +164,38 @@ url = "http://localhost:9400"
     expect(updatedOmp.mcpServers.resin).toBeUndefined();
   });
 
+  it("cleans environment-specific harness homes and the prior Claude path", async () => {
+    const activeClaudePath = "/profiles/claude/.claude.json";
+    const priorClaudePath = path.join(homeDir, ".claude", "claude.json");
+    const activeCodexPath = "/profiles/codex/config.toml";
+    const activeOmpPath = "/profiles/omp/agent/mcp.json";
+    const resinJson = JSON.stringify({
+      mcpServers: { resin: { command: "resin", args: ["mcp"] } },
+    });
+    const fsBridge = createMockFsBridge({
+      [activeClaudePath]: resinJson,
+      [priorClaudePath]: resinJson,
+      [activeCodexPath]: '[mcp_servers.resin]\ncommand = "resin"\nargs = ["mcp"]\n',
+      [activeOmpPath]: resinJson,
+    });
+
+    const cleaned = await removeHarnessMcpConfigurations({
+      env: {
+        HOME: homeDir,
+        CLAUDE_CONFIG_DIR: "/profiles/claude",
+        CODEX_HOME: "/profiles/codex",
+        OMP_HOME: "/profiles/omp",
+      },
+      fsBridge,
+    });
+
+    expect(cleaned).toEqual(["Claude Code", "Codex CLI", "Oh My Pi (OMP)"]);
+    for (const configPath of [activeClaudePath, priorClaudePath, activeOmpPath]) {
+      expect(await fsBridge.readFile(configPath)).not.toContain('"resin"');
+    }
+    expect(await fsBridge.readFile(activeCodexPath)).not.toContain("[mcp_servers.resin]");
+  });
+
   it("removes legacy aliases only when recognizably Resin-owned, preserving unrecognized same-named entries", async () => {
     const claudePath = path.join(homeDir, ".claude.json");
     const codexPath = path.join(homeDir, ".codex", "config.toml");

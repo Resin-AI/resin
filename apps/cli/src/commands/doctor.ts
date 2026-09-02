@@ -18,6 +18,7 @@ const SYSTEM_META_TOOL_NAMES = [
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
 import { IpcClient, resolvePaths } from "@resin/observer";
 import type { ActionableNotification } from "@resin/protocol";
+import { findDenoExecutable } from "../installer/assets.js";
 import {
   HarnessHealthCoordinator,
   type HarnessHealthRunOptions,
@@ -43,6 +44,7 @@ import {
   type VerificationCheckResult,
   type VerificationReport,
   runVerificationSuite,
+  verifyDaemonReadiness,
 } from "../service/verification.js";
 
 export interface DoctorCommandFlags {
@@ -258,13 +260,17 @@ function createHarnessDiagnostics(result: HarnessHealthRunResult): DoctorDiagnos
 
 export async function runDiagnostics(options: {
   home?: string;
+  env?: NodeJS.ProcessEnv;
   fsBridge?: ConfigFsBridge;
   customFetch?: typeof fetch;
   harnessHealthCoordinator?: HarnessHealthRunner;
   serviceManager?: UserServiceManager;
   forceHarnessHealthCheck?: boolean;
 }): Promise<DoctorDiagnosticItem[]> {
-  const customHome = options.home ? path.resolve(options.home) : os.homedir();
+  const customHome = options.home
+    ? path.resolve(options.home)
+    : path.resolve(options.env?.HOME ?? os.homedir());
+  const env = options.env ?? (options.home === undefined ? process.env : { HOME: customHome });
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -471,6 +477,7 @@ export async function runDiagnostics(options: {
     options.harnessHealthCoordinator ??
     new HarnessHealthCoordinator({
       home: customHome,
+      env,
       fsBridge,
       autoRepair: false,
     });
@@ -615,13 +622,17 @@ export async function runDiagnostics(options: {
 
 export async function repairState(options: {
   home?: string;
+  env?: NodeJS.ProcessEnv;
   fsBridge?: ConfigFsBridge;
   customFetch?: typeof fetch;
   safetyCertification?: LocalSafetyCertificationOptions;
   harnessHealthCoordinator?: HarnessHealthRunner;
   serviceManager?: UserServiceManager;
 }): Promise<string[]> {
-  const customHome = options.home ? path.resolve(options.home) : os.homedir();
+  const customHome = options.home
+    ? path.resolve(options.home)
+    : path.resolve(options.env?.HOME ?? os.homedir());
+  const env = options.env ?? (options.home === undefined ? process.env : { HOME: customHome });
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -705,6 +716,7 @@ export async function repairState(options: {
   const isActualLoginHome = path.resolve(customHome) === path.resolve(os.homedir());
   const hasInjectedServiceManager = options.serviceManager !== undefined;
   const canManageOsService = isActualLoginHome || hasInjectedServiceManager;
+  let serviceRestarted = false;
 
   if (canManageOsService) {
     if (!svcStatus.installed) {
@@ -755,6 +767,7 @@ export async function repairState(options: {
         if (svcStatus.active) {
           try {
             await serviceManager.restart();
+            serviceRestarted = true;
           } catch (restartError: unknown) {
             const msg = restartError instanceof Error ? restartError.message : String(restartError);
             throw new Error(
@@ -807,6 +820,7 @@ export async function repairState(options: {
       if (svcStatus.active) {
         try {
           await serviceManager.restart();
+          serviceRestarted = true;
         } catch (restartError: unknown) {
           const msg = restartError instanceof Error ? restartError.message : String(restartError);
           throw new Error(
@@ -819,11 +833,41 @@ export async function repairState(options: {
       );
     }
   }
+
+  if (
+    canManageOsService &&
+    svcStatus.installed &&
+    svcStatus.active &&
+    !serviceRestarted &&
+    !(await fsBridge.exists(daemonPaths.socketPath))
+  ) {
+    try {
+      await serviceManager.restart();
+      serviceRestarted = true;
+    } catch (restartError: unknown) {
+      const message = restartError instanceof Error ? restartError.message : String(restartError);
+      throw new Error(
+        `Failed to restart active daemon service with missing IPC socket (${serviceManager.platform}): ${message}`,
+      );
+    }
+    actions.push(`Restarted active daemon service to restore IPC: ${svcStatus.serviceName}`);
+
+    if (fsBridge === defaultFsBridge) {
+      await verifyDaemonReadiness({
+        homeDir: customHome,
+        resinHome,
+        fsBridge,
+        cloudRequired: false,
+        timeoutMs: 15_000,
+      });
+    }
+  }
   // 4. Safely reconcile detected harnesses through the shared noninteractive engine.
   const harnessHealthCoordinator =
     options.harnessHealthCoordinator ??
     new HarnessHealthCoordinator({
       home: customHome,
+      env,
       fsBridge,
       autoRepair: true,
     });
@@ -850,11 +894,15 @@ export async function repairState(options: {
   const publicKeyPath = path.join(resinHome, "state", "safety-attestation.pub.pem");
   const existingPrivateKey = await fsBridge.readFile(privateKeyPath);
   const existingPublicKey = await fsBridge.readFile(publicKeyPath);
+  const denoExecutable =
+    options.safetyCertification?.denoExecutable ??
+    (await findDenoExecutable(undefined, env, fsBridge))?.path;
   const certification = certifyLocalRuntime({
     environment: "production",
     privateKeyPem: existingPrivateKey ?? undefined,
     publicKeyPem: existingPublicKey ?? undefined,
     ...options.safetyCertification,
+    denoExecutable,
   });
   await fsBridge.writeFile(privateKeyPath, certification.privateKeyPem);
   await fsBridge.writeFile(publicKeyPath, certification.publicKeyPem);
@@ -908,6 +956,7 @@ export async function doctorCommand(
   args: string[],
   options: {
     fsBridge?: ConfigFsBridge;
+    env?: NodeJS.ProcessEnv;
     customFetch?: typeof fetch;
     isRepair?: boolean;
     safetyCertification?: LocalSafetyCertificationOptions;
@@ -926,7 +975,10 @@ export async function doctorCommand(
   }
 
   try {
-    const customHome = flags.home ? path.resolve(flags.home) : os.homedir();
+    const customHome = flags.home
+      ? path.resolve(flags.home)
+      : path.resolve(options.env?.HOME ?? os.homedir());
+    const env = { ...(options.env ?? process.env), HOME: customHome };
     const fsBridge = options.fsBridge ?? defaultFsBridge;
     const serviceManager =
       options.serviceManager ??
@@ -939,6 +991,7 @@ export async function doctorCommand(
       options.harnessHealthCoordinator ??
       new HarnessHealthCoordinator({
         home: customHome,
+        env,
         fsBridge,
       });
     const actionsTaken: string[] = [];
@@ -958,6 +1011,7 @@ export async function doctorCommand(
       actionsTaken.push(
         ...(await repairState({
           home: customHome,
+          env,
           fsBridge,
           customFetch: options.customFetch,
           safetyCertification: options.safetyCertification,
@@ -970,6 +1024,7 @@ export async function doctorCommand(
     // Run diagnostics through the same coordinator used for repair.
     const items = await runDiagnostics({
       home: customHome,
+      env,
       fsBridge,
       serviceManager,
       customFetch: options.customFetch,

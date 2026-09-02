@@ -1528,18 +1528,28 @@ export function packageRelease(options = {}) {
 
   if (!skipBuild) buildWorkspacePackages(rootDir);
   if (!testOnly) assertInstallHelperTrustRoot(rootDir, keyPair);
+  const cliTrustPath = path.resolve(rootDir, "apps/cli/dist/release-trust.json");
+  const existingCliTrust = fs.existsSync(cliTrustPath) ? fs.readFileSync(cliTrustPath) : null;
   const cliTrust = writeCliReleaseTrustBundle(rootDir, keyPair, { testOnly });
   const allowedGeneratedFilesByPackage = { "apps/cli": ["release-trust.json"] };
-
-  const packageDigests = generatePackageDigests(rootDir, {
-    publicPackages,
-    allowedGeneratedFilesByPackage,
-  });
-  const assetDigests = createPlatformReleaseTarballs(rootDir, distDir, {
-    publicPackages,
-    allowedGeneratedFilesByPackage,
-  });
-  fs.rmSync(cliTrust.outputPath, { force: true });
+  let packageDigests;
+  let assetDigests;
+  try {
+    packageDigests = generatePackageDigests(rootDir, {
+      publicPackages,
+      allowedGeneratedFilesByPackage,
+    });
+    assetDigests = createPlatformReleaseTarballs(rootDir, distDir, {
+      publicPackages,
+      allowedGeneratedFilesByPackage,
+    });
+  } finally {
+    if (existingCliTrust !== null) {
+      fs.writeFileSync(cliTrust.outputPath, existingCliTrust);
+    } else {
+      fs.rmSync(cliTrust.outputPath, { force: true });
+    }
+  }
   const evidenceResult = writeReleaseEvidence({
     rootDir,
     distDir,
