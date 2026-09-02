@@ -159,6 +159,42 @@ describe("verify-binaries", () => {
       }
     });
 
+    it("fails when a binary runtime file is missing", async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bin-test-missing-runtime-"));
+      try {
+        const pkgDir = path.join(tempDir, "packages/missing-runtime");
+        const binDist = path.join(pkgDir, "dist");
+        fs.mkdirSync(binDist, { recursive: true });
+        fs.writeFileSync(
+          path.join(pkgDir, "package.json"),
+          JSON.stringify({
+            name: "@test/missing-runtime",
+            bin: { "test-bin": "./dist/bin.js" },
+          }),
+        );
+        fs.writeFileSync(
+          path.join(binDist, "bin.js"),
+          '#!/usr/bin/env node\nconsole.log("test");\n',
+        );
+
+        const testSpec = {
+          packageName: "@test/missing-runtime",
+          packageDir: "packages/missing-runtime",
+          binKey: "test-bin",
+          binPath: "packages/missing-runtime/dist/bin.js",
+          requiredRuntimePaths: ["packages/missing-runtime/dist/release-trust.json"],
+          testArgs: ["--help"],
+          expectedOutputPattern: /test/i,
+        };
+
+        const result = await verifyBinaries({ rootDir: tempDir, specs: [testSpec] });
+        expect(result.success).toBe(false);
+        expect(result.errors[0]).toContain("Required runtime file not found");
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("fails when binary file lacks node shebang", async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bin-test-no-shebang-"));
       try {

@@ -46,6 +46,25 @@ pnpm run check:all
 - **Runtime Security Check:** `pnpm run check:runtime-security`
 - **Release Verification:** `pnpm run release:verify`
 - **Release Test Suite:** `pnpm run release:test`
+
+### Running the Locally Built CLI
+
+Run package-manager commands from the repository root so Corepack selects the pinned pnpm version. An invocation from a parent directory such as `pnpm --dir resin build` can select that directory's pnpm version before pnpm processes `--dir`.
+
+```bash
+pnpm build
+npm exec --yes --ignore-scripts --package ./apps/cli -- resin --version
+```
+
+To pair the locally built CLI with a development cloud, pass its printed loopback URL explicitly:
+
+```bash
+npm exec --yes --ignore-scripts --package ./apps/cli -- \
+  resin init --cloud-url "$RESIN_CLOUD_URL" --workspace "$TARGET_WORKSPACE"
+```
+
+Do not use an unqualified `npx resin` command to validate source changes. It resolves the npm registry package rather than the package in this checkout.
+
 ---
 
 ## Pull Request Lifecycle & Governance Policy

@@ -76,7 +76,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node ../../scripts/write-cli-bundled-release-trust.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo .tsbuildinfo",
     "lint": "eslint src/ tests/ --max-warnings 0",
     "postinstall": "node bin/postinstall.mjs",
