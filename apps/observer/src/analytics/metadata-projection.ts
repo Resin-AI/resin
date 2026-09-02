@@ -54,6 +54,15 @@ export const HARD_MAX_NODES = 1024;
 
 export const RESIN_PARAMETER_SHAPE_KEY = "__resinParameterShapeV1";
 
+export const ALLOWED_PRIMITIVE_KINDS: ReadonlySet<string> = new Set([
+  "string",
+  "number",
+  "boolean",
+  "null",
+  "undefined",
+  "opaque",
+]);
+
 const BLOCKED_PROPERTIES = new Set([
   "__proto__",
   "constructor",
@@ -377,6 +386,233 @@ export function extractParameterShape(
 export { extractParameterShape as extractParameterTypeShape };
 
 /**
+ * Strict bounded recursive validator and canonicalizer for pre-projected safe shape descriptors.
+ * Ensures the descriptor strictly contains only allowed primitive kind strings,
+ * zero or one-element arrays, and bounded plain objects.
+ * Rejects arbitrary literal strings, getters/accessors, prototype pollution keys,
+ * circular references, multi-element arrays, and budget/depth/key/length violations.
+ * Returns null if the descriptor fails any safety check.
+ */
+function validateAndCanonicalizeDescriptor(
+  value: unknown,
+  depth: number,
+  ancestors: Set<object>,
+  options: Required<ParameterShapeOptions>,
+  budget: TraversalBudget,
+): ParameterShapeDescriptor | null {
+  if (budget.nodesRemaining <= 0) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    if (!ALLOWED_PRIMITIVE_KINDS.has(value)) {
+      return null;
+    }
+    budget.nodesRemaining--;
+    return value as ParameterPrimitiveKind;
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  if (depth >= options.maxDepth) {
+    return null;
+  }
+
+  if (ancestors.has(value)) {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    budget.nodesRemaining--;
+    if (value.length === 0) {
+      return [];
+    }
+    if (budget.nodesRemaining <= 0) {
+      return null;
+    }
+    if (value.length !== 1) {
+      return null;
+    }
+
+    const elemProp = readOwnDataProperty(value, "0");
+    if (!elemProp.ok) {
+      return null;
+    }
+
+    ancestors.add(value);
+    const elemDescriptor = validateAndCanonicalizeDescriptor(
+      elemProp.value,
+      depth + 1,
+      ancestors,
+      options,
+      budget,
+    );
+    ancestors.delete(value);
+
+    if (elemDescriptor === null) {
+      return null;
+    }
+    return [elemDescriptor];
+  }
+
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  budget.nodesRemaining--;
+
+  const ownSymbols = Object.getOwnPropertySymbols(value);
+  if (ownSymbols.length > 0) {
+    return null;
+  }
+
+  const ownNames = Object.getOwnPropertyNames(value);
+  if (ownNames.length > options.maxKeys) {
+    return null;
+  }
+
+  for (const name of ownNames) {
+    if (BLOCKED_PROPERTIES.has(name)) {
+      return null;
+    }
+    if (name.length > options.maxKeyLength) {
+      return null;
+    }
+  }
+
+  // Deterministic sorting
+  const sortedNames = [...ownNames].sort();
+  const result: Record<string, ParameterShapeDescriptor> = {};
+
+  ancestors.add(value);
+  for (const name of sortedNames) {
+    if (budget.nodesRemaining <= 0) {
+      ancestors.delete(value);
+      return null;
+    }
+    const prop = readOwnDataProperty(value, name);
+    if (!prop.ok) {
+      ancestors.delete(value);
+      return null;
+    }
+    const child = validateAndCanonicalizeDescriptor(
+      prop.value,
+      depth + 1,
+      ancestors,
+      options,
+      budget,
+    );
+    if (child === null) {
+      ancestors.delete(value);
+      return null;
+    }
+    result[name] = child;
+  }
+  ancestors.delete(value);
+
+  return result;
+}
+
+/**
+ * Validates and canonicalizes an already-projected `__resinParameterShapeV1` envelope.
+ * Returns `{ [RESIN_PARAMETER_SHAPE_KEY]: canonicalDescriptor }` if valid and safe, or `null` otherwise.
+ */
+export function tryPreserveSafeParameterShapeEnvelope(
+  parameters: unknown,
+  options: ParameterShapeOptions = {},
+): Record<string, unknown> | null {
+  if (
+    parameters === null ||
+    parameters === undefined ||
+    typeof parameters !== "object" ||
+    Array.isArray(parameters) ||
+    !isPlainObject(parameters)
+  ) {
+    return null;
+  }
+
+  const ownSymbols = Object.getOwnPropertySymbols(parameters);
+  if (ownSymbols.length > 0) {
+    return null;
+  }
+
+  const ownNames = Object.getOwnPropertyNames(parameters);
+  if (ownNames.length !== 1 || ownNames[0] !== RESIN_PARAMETER_SHAPE_KEY) {
+    return null;
+  }
+
+  const shapeProp = readOwnDataProperty(parameters, RESIN_PARAMETER_SHAPE_KEY);
+  if (!shapeProp.ok) {
+    return null;
+  }
+
+  const rawDescriptor = shapeProp.value;
+  if (
+    rawDescriptor === null ||
+    rawDescriptor === undefined ||
+    typeof rawDescriptor !== "object" ||
+    Array.isArray(rawDescriptor) ||
+    !isPlainObject(rawDescriptor)
+  ) {
+    return null;
+  }
+
+  const fullOptions: Required<ParameterShapeOptions> = {
+    maxDepth: normalizeBound(options.maxDepth, DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH),
+    maxKeys: normalizeBound(options.maxKeys, DEFAULT_MAX_KEYS, HARD_MAX_KEYS),
+    maxKeyLength: normalizeBound(options.maxKeyLength, DEFAULT_MAX_KEY_LENGTH, HARD_MAX_KEY_LENGTH),
+    maxNodes: normalizeBound(options.maxNodes, DEFAULT_MAX_NODES, HARD_MAX_NODES),
+  };
+
+  const budget: TraversalBudget = {
+    nodesRemaining: fullOptions.maxNodes,
+  };
+
+  const ancestors = new Set<object>();
+  ancestors.add(parameters);
+
+  const canonicalDescriptor = validateAndCanonicalizeDescriptor(
+    rawDescriptor,
+    0,
+    ancestors,
+    fullOptions,
+    budget,
+  );
+
+  if (
+    canonicalDescriptor === null ||
+    typeof canonicalDescriptor !== "object" ||
+    Array.isArray(canonicalDescriptor)
+  ) {
+    return null;
+  }
+
+  return {
+    [RESIN_PARAMETER_SHAPE_KEY]: canonicalDescriptor,
+  };
+}
+
+/**
+ * Projects tool parameters with idempotent safe-descriptor envelope preservation.
+ * If the parameters already form a valid bounded __resinParameterShapeV1 envelope,
+ * preserves its canonical form; otherwise, extracts parameter shapes deterministically.
+ */
+export function projectToolParameters(
+  rawParams: unknown,
+  options: ParameterShapeOptions = {},
+): Record<string, unknown> {
+  const preserved = tryPreserveSafeParameterShapeEnvelope(rawParams, options);
+  if (preserved !== null) {
+    return preserved;
+  }
+  return {
+    [RESIN_PARAMETER_SHAPE_KEY]: extractParameterShape(rawParams, options),
+  };
+}
+
+/**
  * Exhaustive metadata-only projection for normalized session events.
  *
  * Strips all prompt/response text, reasoning tokens, tool parameters/results,
@@ -390,9 +626,9 @@ export { extractParameterShape as extractParameterTypeShape };
  */
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
-  options: { validate?: boolean } = {},
+  options: { validate?: boolean; parameterShapeOptions?: ParameterShapeOptions } = {},
 ): NormalizedSessionEvent {
-  const { validate = false } = options;
+  const { validate = false, parameterShapeOptions } = options;
 
   const buildRedaction = (fieldsToRedact: readonly string[]): RedactionMeta => {
     const existingFields = event.redaction?.redactedFields ?? [];
@@ -477,9 +713,7 @@ export function projectEventToMetadataOnly(
         type: "tool_call",
         callId: event.callId,
         toolName: event.toolName,
-        parameters: {
-          [RESIN_PARAMETER_SHAPE_KEY]: extractParameterShape(event.parameters),
-        },
+        parameters: projectToolParameters(event.parameters, parameterShapeOptions),
         isShadow: event.isShadow,
       };
       if (event.candidateRef !== undefined) callEvent.candidateRef = event.candidateRef;
