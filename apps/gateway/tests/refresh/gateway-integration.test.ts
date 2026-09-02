@@ -94,8 +94,13 @@ describe("Gateway Refresh Coordinator End-to-End Integration", () => {
           rootUri: pathToFileURL(tmpDir).href,
         },
       });
+      await gateway.handleMessage(connection.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
 
       expect(connection.isInitialized).toBe(true);
+      expect(connection.hasReceivedInitializedNotification).toBe(true);
 
       // Initial tools list
       const initialListResp = await gateway.handleMessage(connection.connectionId, {

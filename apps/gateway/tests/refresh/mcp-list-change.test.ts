@@ -94,6 +94,33 @@ describe("CatalogRefreshCoordinator - MCP List Changed Notifications", () => {
     coordinator.destroy();
   });
 
+  it("does not send MCP notification before the initialized notification", async () => {
+    const conn = createMockConnection({
+      connectionId: "conn-awaiting-initialized-notification",
+      workspaceId: "ws-test",
+      supportsListChanged: true,
+      isInitialized: true,
+      hasReceivedInitializedNotification: false,
+    });
+
+    const mockGateway: McpGatewayLike = {
+      getAllConnections: () => [conn.connection],
+      getConnection: () => conn.connection,
+      sendNotificationToConnection: vi.fn((_, notif) => conn.connection.sendMessage(notif)),
+    };
+
+    const coordinator = new CatalogRefreshCoordinator({
+      debounceMs: 0,
+      gateway: mockGateway,
+    });
+
+    const attempts = await coordinator.triggerRefresh("ws-test", 1);
+    expect(attempts[0]?.mcpNotificationSent).toBe(false);
+    expect(conn.notificationsReceived.length).toBe(0);
+
+    coordinator.destroy();
+  });
+
   it("dispatches notifications to multiple concurrent negotiated clients in the same workspace", async () => {
     const conn1 = createMockConnection({
       connectionId: "c1",
