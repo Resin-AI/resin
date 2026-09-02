@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { type ToolManifest, type V1LockedToolEntry, hashCanonicalContent } from "@resin/contracts";
 import type { ArtifactTransferClient } from "@resin/observer";
 import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
@@ -316,6 +317,58 @@ describe("CloudCatalogSyncCoordinator", () => {
     const res2 = await syncCoordinator.reconcileLockedTools();
     expect(res2.activated).toContain("calc_tool");
     expect(downloadCount).toBe(1);
+  });
+
+  it("activates a gzip-compressed bundle whose entrypoint is src/index.ts", async () => {
+    const lockPath = path.join(tempDir, "resin.lock");
+    const cacheDir = path.join(tempDir, "artifacts-gz");
+    const lockManager = new ProjectLockManager({ lockPath, projectId: PROJECT_A });
+    const artifactCache = new ArtifactCache({ cacheDir });
+
+    const manifest = makeTool(TOOL_FORMATTER, "gz_tool", "1.0.0");
+    const { archive: plainTar } = encodeDeterministicTar([
+      { path: "manifest.json", content: JSON.stringify(manifest) },
+      { path: "src/index.ts", content: "export default async () => ({ ok: true });" },
+    ]);
+    const gzipped = zlib.gzipSync(plainTar);
+    const artifactDigest = crypto.createHash("sha256").update(gzipped).digest("hex");
+
+    lockManager.reconcileQualified({
+      toolId: TOOL_FORMATTER,
+      name: "gz_tool",
+      version: "1.0.0",
+      manifestDigest: manifest.digest,
+      artifactDigest,
+      status: "active",
+    });
+
+    const mockService = new MockCloudMcpService();
+    const cache = new CloudCatalogCache();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const registry = new ToolRegistry();
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router: new CloudInvocationRouter({ catalogCache: cache }),
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+      transferClient: { downloadArtifact: async () => ({ bytes: gzipped }) },
+      artifactCache,
+    });
+
+    const result = await syncCoordinator.reconcileLockedTools();
+    expect(result.activated).toContain("gz_tool");
+    expect(result.failed).toEqual([]);
+    expect(
+      fs.existsSync(path.join(artifactCache.getArtifactPath(artifactDigest), "src/index.ts")),
+    ).toBe(true);
+    expect(registry.getAllRegisteredTools().some((tool) => tool.name === "gz_tool")).toBe(true);
   });
 
   it("reconcileQualified adds new tool but reports newer_available without rewriting existing lock", async () => {
