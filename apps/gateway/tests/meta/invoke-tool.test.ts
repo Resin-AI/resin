@@ -1,5 +1,7 @@
 import {
   CapabilityManifestSchema,
+  type InvocationRecord,
+  InvocationRecordSchema,
   ToolLimitConfigSchema,
   type ToolManifest,
   ToolParameterSchema,
@@ -254,5 +256,131 @@ describe("invoke_tool Meta-Tool", () => {
 
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("is disabled in workspace");
+  });
+
+  it("invokes onInvocationRecorded hook with a schema-valid record on success", async () => {
+    const registry = new ToolRegistry();
+    const manifest = makeManifest();
+    await registry.registerTool(manifest, undefined, { workspaceId: "ws-invoke" });
+
+    const { promise, resolve } = Promise.withResolvers<InvocationRecord>();
+    const onInvocationRecorded = async (record: InvocationRecord) => {
+      resolve(record);
+    };
+    const mockRouter: ToolInvocationRouter = {
+      async invoke(req: ToolInvocationRequest): Promise<CallToolResult> {
+        return { content: [{ type: "text", text: `Success: ${req.parameters.count}` }] };
+      },
+    };
+
+    const handler = createInvokeToolHandler(registry, mockRouter, { onInvocationRecorded });
+    const context = makeContext("ws-invoke", "session-xyz");
+
+    const res = await handler(context, {
+      name: "validate_tool",
+      parameters: { count: 42, mode: "safe" },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const capturedRecord = await promise;
+    expect(capturedRecord).toBeDefined();
+    const validated = InvocationRecordSchema.parse(capturedRecord);
+    expect(validated.status).toBe("success");
+    expect(validated.toolId).toBe("tool_validator");
+    expect(validated.toolVersion).toBe("1.0.0");
+    expect(validated.sessionId).toBe("session-xyz");
+    expect(validated.workspaceId).toBe("ws-invoke");
+    expect(validated.durationMs).toBeGreaterThanOrEqual(0);
+    expect(validated.inputDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(validated.outputDigest).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("invokes onInvocationRecorded hook with a schema-valid record on error", async () => {
+    const registry = new ToolRegistry();
+    const manifest = makeManifest();
+    await registry.registerTool(manifest, undefined, { workspaceId: "ws-invoke" });
+
+    const { promise, resolve } = Promise.withResolvers<InvocationRecord>();
+    const onInvocationRecorded = async (record: InvocationRecord) => {
+      resolve(record);
+    };
+    const mockRouter: ToolInvocationRouter = {
+      async invoke(_req: ToolInvocationRequest): Promise<CallToolResult> {
+        throw new Error("Target service unavailable");
+      },
+    };
+
+    const handler = createInvokeToolHandler(registry, mockRouter, undefined, onInvocationRecorded);
+    const context = makeContext("ws-invoke", "session-abc");
+
+    const res = await handler(context, {
+      name: "validate_tool",
+      parameters: { count: 10, mode: "fast" },
+    });
+
+    expect(res.isError).toBe(true);
+    const capturedRecord = await promise;
+    expect(capturedRecord).toBeDefined();
+    const validated = InvocationRecordSchema.parse(capturedRecord);
+    expect(validated.status).toBe("error");
+    expect(validated.toolId).toBe("tool_validator");
+    expect(validated.sessionId).toBe("session-abc");
+    expect(validated.errorDetails).toBeDefined();
+    expect(validated.errorDetails?.message).toContain("Target service unavailable");
+  });
+
+  it("does not call onInvocationRecorded for system meta-tools", async () => {
+    const registry = new ToolRegistry();
+
+    let capturedRecord: InvocationRecord | undefined;
+    const onInvocationRecorded = async (record: InvocationRecord) => {
+      capturedRecord = record;
+    };
+
+    const mockRouter: ToolInvocationRouter = {
+      async invoke(_req: ToolInvocationRequest): Promise<CallToolResult> {
+        return { content: [{ type: "text", text: "OK" }] };
+      },
+    };
+
+    const handler = createInvokeToolHandler(registry, mockRouter, { onInvocationRecorded });
+    const context = makeContext("ws-invoke");
+
+    // Invoke search_tools through invoke_tool
+    await handler(context, {
+      name: "search_tools",
+      parameters: {},
+    });
+
+    // Allow any microtasks to drain
+    await Promise.resolve();
+    expect(capturedRecord).toBeUndefined();
+  });
+
+  it("does not alter tool result when onInvocationRecorded throws", async () => {
+    const registry = new ToolRegistry();
+    const manifest = makeManifest();
+    await registry.registerTool(manifest, undefined, { workspaceId: "ws-invoke" });
+
+    const onInvocationRecorded = async () => {
+      throw new Error("Telemetry recording crashed");
+    };
+
+    const mockRouter: ToolInvocationRouter = {
+      async invoke(req: ToolInvocationRequest): Promise<CallToolResult> {
+        return { content: [{ type: "text", text: `Success: ${req.parameters.count}` }] };
+      },
+    };
+
+    const handler = createInvokeToolHandler(registry, mockRouter, { onInvocationRecorded });
+    const context = makeContext("ws-invoke");
+
+    const res = await handler(context, {
+      name: "validate_tool",
+      parameters: { count: 5, mode: "fast" },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toBe("Success: 5");
   });
 });

@@ -18,8 +18,8 @@ describe("Database Diagnostics & Safe Redaction", () => {
     expect(diagnostics.integrityOk).toBe(true);
     expect(diagnostics.integrityDetails).toEqual(["ok"]);
     expect(diagnostics.foreignKeysEnabled).toBe(true);
-    expect(diagnostics.schemaVersion).toBe(1);
-    expect(diagnostics.appliedMigrations).toHaveLength(1);
+    expect(diagnostics.schemaVersion).toBe(2);
+    expect(diagnostics.appliedMigrations).toHaveLength(2);
     expect(diagnostics.appliedMigrations[0].name).toBe("001_initial_local_schema");
 
     // All monitored tables must be tracked

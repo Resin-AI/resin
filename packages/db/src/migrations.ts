@@ -375,6 +375,14 @@ CREATE INDEX IF NOT EXISTS idx_local_inbox_received_at ON local_inbox(received_a
 `;
 
 /**
+ * Migration 002: Add uploaded_at column to invocation_records for telemetry upload tracking.
+ */
+export const MIGRATION_002_SQL = `
+ALTER TABLE invocation_records ADD COLUMN uploaded_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_invocation_records_uploaded_at ON invocation_records(uploaded_at);
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -383,6 +391,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "001_initial_local_schema",
     sql: INITIAL_SCHEMA_SQL,
     checksum: hashCanonicalContent(INITIAL_SCHEMA_SQL),
+  },
+  {
+    version: 2,
+    name: "002_add_invocation_records_uploaded_at",
+    sql: MIGRATION_002_SQL,
+    checksum: hashCanonicalContent(MIGRATION_002_SQL),
   },
 ];
 

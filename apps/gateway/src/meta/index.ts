@@ -16,3 +16,4 @@ export * from "./search-tools.js";
 export * from "./get-tool-schema.js";
 export * from "./invoke-tool.js";
 export * from "./manage-tools.js";
+export * from "./invocation-recorder.js";

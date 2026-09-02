@@ -2,6 +2,7 @@ import type {
   CapabilityEnvelope,
   CatalogSnapshot,
   CatalogToolSummary,
+  InvocationRecord,
   ToolArtifact,
   ToolManifest,
   ToolOutputSchema,
@@ -240,6 +241,10 @@ export interface ToolRegistryOptions {
    * Whether to automatically hydrate tools from the database on startup (default: true).
    */
   autoHydrate?: boolean;
+  /**
+   * Optional hook called when a tool invocation completes.
+   */
+  onInvocationRecorded?: (record: InvocationRecord) => Promise<void>;
   /**
    * Optional lock manager instance or resolver.
    */

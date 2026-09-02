@@ -4,6 +4,7 @@ import {
   type CapabilityEnvelope,
   type CatalogSnapshot,
   type CatalogToolSummary,
+  type InvocationRecord,
   type ToolArtifact,
   ToolArtifactSchema,
   type ToolManifest,
@@ -27,6 +28,7 @@ import {
 } from "@resin/runtime";
 import {
   type ToolInvocationRouter,
+  createInvocationRecorder,
   createSystemMetaTools,
   isSystemMetaTool,
 } from "../meta/index.js";
@@ -342,6 +344,39 @@ export function extractToolRepo(
   return null;
 }
 
+export interface ExtractedToolRepoResult {
+  repo: ToolRepoLike | null;
+  db: LocalDatabaseConnection | null;
+}
+
+export function extractToolRepoWithDb(
+  db: ToolRepoLike | StateStoreLike | LocalDatabaseConnection | DbConnectionLike | null | undefined,
+): ExtractedToolRepoResult {
+  if (!db) {
+    try {
+      const paths = resolvePaths();
+      const dbPath = path.join(paths.dataDir, "state.db");
+      if (fs.existsSync(dbPath)) {
+        const conn = new LocalDatabaseConnection({ path: dbPath });
+        return { repo: new ToolRepository(conn), db: conn };
+      }
+    } catch {
+      // Ignore
+    }
+    return { repo: null, db: null };
+  }
+  let conn: LocalDatabaseConnection | null = null;
+  if (db instanceof LocalDatabaseConnection) {
+    conn = db;
+  } else if ("run" in db && "get" in db && "all" in db && typeof db.run === "function") {
+    conn = db as LocalDatabaseConnection;
+  } else if ("conn" in db && db.conn instanceof LocalDatabaseConnection) {
+    conn = db.conn;
+  }
+  const repo = extractToolRepo(db);
+  return { repo, db: conn };
+}
+
 function isToolRegistryOptions(
   value:
     | ToolRegistryOptions
@@ -450,6 +485,8 @@ export class ToolRegistry {
   private readonly snapshotHistory = new Map<string, CatalogSnapshotRecord[]>();
   private hydrated = false;
   private hydrationPromise?: Promise<number>;
+  private readonly dbConnection?: LocalDatabaseConnection;
+  private readonly onInvocationRecorded?: (record: InvocationRecord) => Promise<void>;
   constructor(
     options?:
       | ToolRegistryOptions
@@ -473,8 +510,12 @@ export class ToolRegistry {
     } else {
       db = options;
     }
-
-    this.toolRepo = extractToolRepo(db);
+    const extracted = extractToolRepoWithDb(db);
+    this.toolRepo = extracted.repo;
+    this.dbConnection = extracted.db ?? undefined;
+    this.onInvocationRecorded =
+      opts?.onInvocationRecorded ??
+      (this.dbConnection ? createInvocationRecorder({ db: this.dbConnection }) : undefined);
     this.defaultEnvelope = opts?.defaultEnvelope;
     this.cache = new CatalogCache({ maxSize: opts?.cacheSize });
     const lockMgrOpt = opts?.lockManager;
@@ -521,12 +562,20 @@ export class ToolRegistry {
   }
 
   private initSystemMetaTools(): void {
-    const metaTools = createSystemMetaTools(this, this.invocationRouter, this.safetyGateEvaluator);
+    const metaTools = createSystemMetaTools(
+      this,
+      this.invocationRouter,
+      this.safetyGateEvaluator,
+      this.onInvocationRecorded,
+    );
     for (const tool of metaTools) {
       this.registerToolSync(tool);
     }
   }
 
+  getDatabaseConnection(): LocalDatabaseConnection | undefined {
+    return this.dbConnection;
+  }
   /**
    * Returns all registered tools across all versions.
    */
