@@ -17,7 +17,11 @@ import {
   nowIso,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
-import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
+import {
+  RESIN_PARAMETER_SHAPE_KEY,
+  extractParameterShape,
+  projectEventToMetadataOnly,
+} from "../../src/analytics/metadata-projection.js";
 
 function createBaseHeaders(seq = 1) {
   return {
@@ -156,7 +160,7 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
   });
 
-  it("projects tool_call event: empties parameters while preserving callId, toolName, shadow flag, candidateRef", () => {
+  it("projects tool_call event: projects bounded structural parameters without values while preserving callId, toolName, shadow flag, candidateRef", () => {
     const original: NormalizedToolCallEvent = {
       ...createBaseHeaders(4),
       type: "tool_call",
@@ -177,7 +181,19 @@ describe("projectEventToMetadataOnly", () => {
     if (projected.type !== "tool_call") throw new Error("Expected tool_call event");
     expect(projected.callId).toBe("call_abc_123");
     expect(projected.toolName).toBe("curl");
-    expect(projected.parameters).toEqual({});
+    expect(projected.parameters).toEqual({
+      [RESIN_PARAMETER_SHAPE_KEY]: {
+        body: "string",
+        headers: {
+          Authorization: "string",
+        },
+        url: "string",
+      },
+    });
+    expect(Object.keys(projected.parameters)).toEqual([RESIN_PARAMETER_SHAPE_KEY]);
+    expect(projected.parameters.url).toBeUndefined();
+    expect(projected.parameters.headers).toBeUndefined();
+    expect(projected.parameters.body).toBeUndefined();
     expect(projected.candidateRef).toBe("cand_1");
     expect(projected.isShadow).toBe(false);
     expect(projected.redaction.isRedacted).toBe(true);
@@ -567,5 +583,604 @@ describe("projectEventToMetadataOnly", () => {
       expect(p.redaction.redactionStrategy).toBe("drop");
       expect(NormalizedSessionEventSchema.safeParse(p).success).toBe(true);
     }
+  });
+});
+
+describe("extractParameterShape", () => {
+  it("extracts primitive kinds without retaining literal values", () => {
+    const raw = {
+      str: "super-secret-password-12345",
+      num: 42.5,
+      boolTrue: true,
+      boolFalse: false,
+      nil: null,
+      undef: undefined,
+    };
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      boolFalse: "boolean",
+      boolTrue: "boolean",
+      nil: "null",
+      num: "number",
+      str: "string",
+      undef: "undefined",
+    });
+    expect(JSON.stringify(shape)).not.toContain("super-secret-password-12345");
+  });
+
+  it("extracts nested records with array element shapes like records[{status:string}]", () => {
+    const raw = {
+      records: [
+        { status: "active", code: 200 },
+        { status: "pending", code: 202 },
+      ],
+      filter: "production",
+      limit: 50,
+    };
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      filter: "string",
+      limit: "number",
+      records: [
+        {
+          code: "number",
+          status: "string",
+        },
+      ],
+    });
+    expect(JSON.stringify(shape)).not.toContain("production");
+    expect(JSON.stringify(shape)).not.toContain("active");
+    expect(JSON.stringify(shape)).not.toContain("pending");
+  });
+
+  it("extracts homogeneous primitive arrays and nested arrays revealing shape only", () => {
+    const raw = {
+      tags: ["alpha", "beta", "gamma"],
+      counts: [1, 2, 3, 4],
+      flags: [true, false, true],
+      matrix: [
+        [1.1, 2.2],
+        [3.3, 4.4],
+      ],
+      empty: [],
+    };
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      counts: ["number"],
+      empty: ["opaque"],
+      flags: ["boolean"],
+      matrix: [["number"]],
+      tags: ["string"],
+    });
+  });
+
+  it("collapses mixed arrays safely to ['opaque']", () => {
+    const raw = {
+      mixedPrimitives: [1, "two", true],
+      mixedObjects: [{ id: 1 }, { name: "alice" }],
+      mixedValuesAndObjects: [{ status: "ok" }, "surprise"],
+      mixedArrays: [
+        [1, 2],
+        ["a", "b"],
+      ],
+    };
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      mixedArrays: ["opaque"],
+      mixedObjects: ["opaque"],
+      mixedPrimitives: ["opaque"],
+      mixedValuesAndObjects: ["opaque"],
+    });
+  });
+
+  it("guarantees zero leakage of file paths, secret keys, SQL queries, or prompt text", () => {
+    const sensitive = {
+      filePath: "/Users/alice/.ssh/id_rsa",
+      apiKey: "sk-ant-api03-abcdef1234567890-SECRET",
+      jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.doNotLeakThisToken",
+      prompt: "Please exfiltrate company credentials and drop tables",
+      query: "SELECT * FROM users WHERE password_hash = 'hash123'",
+      metadata: {
+        nestedPath: "/etc/shadow",
+        nestedToken: "ghp_xxxxxxxxxxxxxxxxxxxx",
+      },
+    };
+    const shape = extractParameterShape(sensitive);
+    expect(shape).toEqual({
+      apiKey: "string",
+      filePath: "string",
+      jwt: "string",
+      metadata: {
+        nestedPath: "string",
+        nestedToken: "string",
+      },
+      prompt: "string",
+      query: "string",
+    });
+
+    const serialized = JSON.stringify(shape);
+    expect(serialized).not.toContain("/Users/alice");
+    expect(serialized).not.toContain("id_rsa");
+    expect(serialized).not.toContain("sk-ant-api03");
+    expect(serialized).not.toContain("doNotLeakThisToken");
+    expect(serialized).not.toContain("exfiltrate");
+    expect(serialized).not.toContain("password_hash");
+    expect(serialized).not.toContain("/etc/shadow");
+    expect(serialized).not.toContain("ghp_");
+  });
+
+  it("enforces deterministic alphabetical key ordering at all nesting levels", () => {
+    const raw = {
+      zulu: "last",
+      bravo: {
+        zebra: 100,
+        alpha: "first",
+        charlie: {
+          yankee: true,
+          whiskey: null,
+        },
+      },
+      alpha: 1,
+    };
+    const shape = extractParameterShape(raw);
+    const serialized = JSON.stringify(shape);
+    const expectedJson = JSON.stringify({
+      alpha: "number",
+      bravo: {
+        alpha: "string",
+        charlie: {
+          whiskey: "null",
+          yankee: "boolean",
+        },
+        zebra: "number",
+      },
+      zulu: "string",
+    });
+    expect(serialized).toBe(expectedJson);
+    expect(Object.keys(shape)).toEqual(["alpha", "bravo", "zulu"]);
+    const bravo = shape.bravo as Record<string, unknown>;
+    expect(Object.keys(bravo)).toEqual(["alpha", "charlie", "zebra"]);
+    const charlie = bravo.charlie as Record<string, unknown>;
+    expect(Object.keys(charlie)).toEqual(["whiskey", "yankee"]);
+  });
+
+  it("enforces depth, key count, and key name length limits", () => {
+    const deep = {
+      l1: {
+        l2: {
+          l3: {
+            l4: {
+              l5: "too deep",
+            },
+          },
+        },
+      },
+    };
+    const depthCapped = extractParameterShape(deep, { maxDepth: 3 });
+    expect(depthCapped).toEqual({
+      l1: {
+        l2: {
+          l3: "opaque",
+        },
+      },
+    });
+
+    const manyKeys: Record<string, number> = {};
+    for (let i = 0; i < 20; i++) {
+      const key = `k_${i.toString().padStart(2, "0")}`;
+      manyKeys[key] = i;
+    }
+    const keysCapped = extractParameterShape(manyKeys, { maxKeys: 3 });
+    expect(Object.keys(keysCapped)).toEqual(["k_00", "k_01", "k_02"]);
+
+    const longKey = "a".repeat(100);
+    const lengthCapped = extractParameterShape({ [longKey]: "val" }, { maxKeyLength: 10 });
+    expect(lengthCapped).toEqual({
+      ["a".repeat(10)]: "string",
+    });
+  });
+
+  it("safely handles circular references and self-referencing containers", () => {
+    const cyclicObj: Record<string, unknown> = {
+      name: "cycle-root",
+    };
+    cyclicObj.self = cyclicObj;
+
+    const shape = extractParameterShape(cyclicObj);
+    expect(shape).toEqual({
+      name: "string",
+      self: "opaque",
+    });
+
+    const cyclicArray: unknown[] = [];
+    cyclicArray.push(cyclicArray);
+    const arrayContainer = {
+      list: cyclicArray,
+    };
+    const arrayShape = extractParameterShape(arrayContainer);
+    expect(arrayShape).toEqual({
+      list: ["opaque"],
+    });
+
+    const nodeA: Record<string, unknown> = { id: "a" };
+    const nodeB: Record<string, unknown> = { id: "b" };
+    nodeA.next = nodeB;
+    nodeB.next = nodeA;
+    const mutualShape = extractParameterShape({ graph: nodeA });
+    expect(mutualShape).toEqual({
+      graph: {
+        id: "string",
+        next: {
+          id: "string",
+          next: "opaque",
+        },
+      },
+    });
+
+    // Non-cyclic diamond / shared references extract cleanly
+    const shared = { sharedField: "common" };
+    const diamond = { branchA: shared, branchB: shared };
+    const diamondShape = extractParameterShape(diamond);
+    expect(diamondShape).toEqual({
+      branchA: { sharedField: "string" },
+      branchB: { sharedField: "string" },
+    });
+  });
+
+  it("protects against prototype pollution and reserved property names", () => {
+    const raw = JSON.parse(
+      '{"__proto__":{"polluted":true},"constructor":"bad","prototype":"bad","valid":"ok"}',
+    );
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      valid: "string",
+    });
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "polluted")).toBe(false);
+  });
+
+  it("fails closed to 'opaque' for non-plain objects and unusual types", () => {
+    const raw = {
+      date: new Date(),
+      regex: /^[a-z]+$/,
+      error: new Error("sample error"),
+      map: new Map(),
+      set: new Set(),
+      fn: () => 42,
+      sym: Symbol("test"),
+      big: 9007199254740991n,
+    };
+    const shape = extractParameterShape(raw);
+    expect(shape).toEqual({
+      big: "opaque",
+      date: "opaque",
+      error: "opaque",
+      fn: "opaque",
+      map: "opaque",
+      regex: "opaque",
+      set: "opaque",
+      sym: "opaque",
+    });
+  });
+
+  it("fails closed to {} for invalid top-level inputs", () => {
+    expect(extractParameterShape(null)).toEqual({});
+    expect(extractParameterShape(undefined)).toEqual({});
+    expect(extractParameterShape("not an object")).toEqual({});
+    expect(extractParameterShape(123)).toEqual({});
+    expect(extractParameterShape([1, 2, 3])).toEqual({});
+    expect(extractParameterShape(new Date())).toEqual({});
+  });
+
+  it("demonstrates projectEventToMetadataOnly projects complex tool_call with nested records[{status:string}]", () => {
+    const original: NormalizedToolCallEvent = {
+      ...createBaseHeaders(100),
+      type: "tool_call",
+      callId: "call_records_999",
+      toolName: "aggregate_status_records",
+      parameters: {
+        records: [
+          { status: "SUCCESS", latencyMs: 120, host: "prod-node-01.internal" },
+          { status: "FAILED", latencyMs: 450, host: "prod-node-02.internal" },
+        ],
+        windowSize: 300,
+        dryRun: false,
+      },
+      isShadow: false,
+    };
+
+    const projected = projectEventToMetadataOnly(original);
+    expect(projected.type).toBe("tool_call");
+    if (projected.type !== "tool_call") throw new Error("Expected tool_call event");
+    expect(projected.toolName).toBe("aggregate_status_records");
+    expect(projected.parameters).toEqual({
+      [RESIN_PARAMETER_SHAPE_KEY]: {
+        dryRun: "boolean",
+        records: [
+          {
+            host: "string",
+            latencyMs: "number",
+            status: "string",
+          },
+        ],
+        windowSize: "number",
+      },
+    });
+    expect(Object.keys(projected.parameters)).toEqual([RESIN_PARAMETER_SHAPE_KEY]);
+    expect(projected.parameters.records).toBeUndefined();
+    expect(projected.parameters.windowSize).toBeUndefined();
+    expect(projected.parameters.dryRun).toBeUndefined();
+    expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("returns ['opaque'] for empty arrays to prevent cardinality signal leakage", () => {
+    const shape = extractParameterShape({
+      emptyList: [],
+      nestedEmpty: {
+        items: [],
+      },
+    });
+    expect(shape).toEqual({
+      emptyList: ["opaque"],
+      nestedEmpty: {
+        items: ["opaque"],
+      },
+    });
+  });
+
+  it("normalizes invalid, zero, negative, NaN, and Infinity option values to defaults", () => {
+    const sample = { a: "test", b: 123 };
+    // All invalid / non-positive / non-finite inputs safely fallback to defaults
+    expect(extractParameterShape(sample, { maxNodes: Number.POSITIVE_INFINITY })).toEqual({
+      a: "string",
+      b: "number",
+    });
+    expect(extractParameterShape(sample, { maxNodes: 0 })).toEqual({ a: "string", b: "number" });
+    expect(extractParameterShape(sample, { maxNodes: -10 })).toEqual({ a: "string", b: "number" });
+    expect(extractParameterShape(sample, { maxNodes: Number.NaN })).toEqual({
+      a: "string",
+      b: "number",
+    });
+    expect(extractParameterShape(sample, { maxDepth: Number.POSITIVE_INFINITY })).toEqual({
+      a: "string",
+      b: "number",
+    });
+    expect(extractParameterShape(sample, { maxDepth: 0 })).toEqual({ a: "string", b: "number" });
+    expect(extractParameterShape(sample, { maxKeys: -5 })).toEqual({ a: "string", b: "number" });
+    expect(extractParameterShape(sample, { maxKeyLength: 0 })).toEqual({
+      a: "string",
+      b: "number",
+    });
+  });
+
+  it("clamps options to hard maxima (depth 8, keys 64, keyLength 128, nodes 1024)", () => {
+    // Generate 100 properties
+    const hugeObj: Record<string, number> = {};
+    for (let i = 0; i < 100; i++) {
+      hugeObj[`prop_${i.toString().padStart(3, "0")}`] = i;
+    }
+    // Asking for 500 keys is clamped to HARD_MAX_KEYS = 64
+    const clampedKeys = extractParameterShape(hugeObj, { maxKeys: 500 });
+    expect(Object.keys(clampedKeys).length).toBe(64);
+
+    // Asking for 200 key length is clamped to HARD_MAX_KEY_LENGTH = 128
+    const longKey = "k".repeat(200);
+    const clampedKeyLength = extractParameterShape({ [longKey]: "val" }, { maxKeyLength: 200 });
+    expect(Object.keys(clampedKeyLength)[0]?.length).toBe(128);
+  });
+
+  it("enforces exact total node budget on huge flat inputs without allocating unbounded key arrays", () => {
+    const hugeFlat: Record<string, number> = {};
+    for (let i = 0; i < 1000; i++) {
+      hugeFlat[`k_${i.toString().padStart(4, "0")}`] = i;
+    }
+
+    // Helper to count actual emitted descriptor nodes in output tree
+    const countNodes = (node: unknown): number => {
+      if (typeof node === "string") return 1;
+      if (Array.isArray(node)) {
+        return 1 + node.reduce((acc: number, el: unknown) => acc + countNodes(el), 0);
+      }
+      if (typeof node === "object" && node !== null) {
+        return (
+          1 + Object.values(node).reduce((acc: number, el: unknown) => acc + countNodes(el), 0)
+        );
+      }
+      return 1;
+    };
+
+    // maxNodes: 5 -> 1 root object node + 4 property primitive nodes = 5 nodes
+    const shape5 = extractParameterShape(hugeFlat, { maxNodes: 5 });
+    expect(countNodes(shape5)).toBe(5);
+    expect(Object.keys(shape5)).toEqual(["k_0000", "k_0001", "k_0002", "k_0003"]);
+
+    // maxNodes: 10 -> 1 root object node + 9 property primitive nodes = 10 nodes
+    const shape10 = extractParameterShape(hugeFlat, { maxNodes: 10 });
+    expect(countNodes(shape10)).toBe(10);
+    expect(Object.keys(shape10).length).toBe(9);
+  });
+
+  it("enforces node budget across complex deep branching tree structures", () => {
+    interface TreeNode {
+      val: number;
+      left?: TreeNode;
+      right?: TreeNode;
+    }
+
+    const buildTree = (depth: number): TreeNode => {
+      if (depth <= 0) return { val: depth };
+      return {
+        val: depth,
+        left: buildTree(depth - 1),
+        right: buildTree(depth - 1),
+      };
+    };
+
+    const countNodes = (node: unknown): number => {
+      if (typeof node === "string") return 1;
+      if (Array.isArray(node)) {
+        return 1 + node.reduce((acc: number, el: unknown) => acc + countNodes(el), 0);
+      }
+      if (typeof node === "object" && node !== null) {
+        return (
+          1 + Object.values(node).reduce((acc: number, el: unknown) => acc + countNodes(el), 0)
+        );
+      }
+      return 1;
+    };
+
+    const deepBranchingTree = buildTree(6);
+    const budgetedShape = extractParameterShape(
+      deepBranchingTree as unknown as Record<string, unknown>,
+      {
+        maxNodes: 15,
+      },
+    );
+
+    expect(countNodes(budgetedShape)).toBeLessThanOrEqual(15);
+  });
+
+  it("emits at most 2 descriptor nodes when maxNodes=2 with an empty array", () => {
+    const countNodes = (node: unknown): number => {
+      if (typeof node === "string") return 1;
+      if (Array.isArray(node)) {
+        return 1 + node.reduce((acc: number, el: unknown) => acc + countNodes(el), 0);
+      }
+      if (typeof node === "object" && node !== null) {
+        return (
+          1 + Object.values(node).reduce((acc: number, el: unknown) => acc + countNodes(el), 0)
+        );
+      }
+      return 1;
+    };
+
+    const shape = extractParameterShape({ list: [] }, { maxNodes: 2 });
+    // With maxNodes=2: 1 root object node + 1 child node ("opaque") = 2 nodes total
+    expect(countNodes(shape)).toBeLessThanOrEqual(2);
+    expect(shape).toEqual({ list: "opaque" });
+  });
+
+  it("shares maxNodes globally across deep and wide array traversals without exceeding descriptor-node cap", () => {
+    const countNodes = (node: unknown): number => {
+      if (typeof node === "string") return 1;
+      if (Array.isArray(node)) {
+        return 1 + node.reduce((acc: number, el: unknown) => acc + countNodes(el), 0);
+      }
+      if (typeof node === "object" && node !== null) {
+        return (
+          1 + Object.values(node).reduce((acc: number, el: unknown) => acc + countNodes(el), 0)
+        );
+      }
+      return 1;
+    };
+
+    // Deep nested arrays: [[[[[1]]]]]
+    const deepArray = [
+      [
+        [
+          [
+            [1, 2],
+            [3, 4],
+          ],
+        ],
+      ],
+    ];
+    const deepShape = extractParameterShape({ matrix: deepArray }, { maxNodes: 4 });
+    expect(countNodes(deepShape)).toBeLessThanOrEqual(4);
+
+    // Wide array of objects
+    const wideArray = Array.from({ length: 50 }, (_, i) => ({
+      id: i,
+      name: `item_${i}`,
+      active: true,
+      score: 100 + i,
+    }));
+    const wideShape = extractParameterShape({ items: wideArray }, { maxNodes: 5 });
+    expect(countNodes(wideShape)).toBeLessThanOrEqual(5);
+
+    // Mixed deep and wide array
+    const mixedContainer = {
+      arr1: Array.from({ length: 20 }, () => [1, 2, 3]),
+      arr2: Array.from({ length: 20 }, () => ({ x: 1, y: 2 })),
+      arr3: ["alpha", "beta"],
+    };
+    const mixedShape = extractParameterShape(mixedContainer, { maxNodes: 6 });
+    expect(countNodes(mixedShape)).toBeLessThanOrEqual(6);
+  });
+
+  it("never invokes root or nested own getters and projects them as opaque", () => {
+    let rootGetterInvoked = false;
+    let nestedGetterInvoked = false;
+
+    const objWithGetters = {};
+    Object.defineProperty(objWithGetters, "sensitiveRoot", {
+      get() {
+        rootGetterInvoked = true;
+        throw new Error("Root getter MUST NOT be invoked");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const nestedObj = { normal: "hello" };
+    Object.defineProperty(nestedObj, "sensitiveNested", {
+      get() {
+        nestedGetterInvoked = true;
+        throw new Error("Nested getter MUST NOT be invoked");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    Object.assign(objWithGetters, {
+      safeField: 123,
+      nested: nestedObj,
+    });
+
+    const shape = extractParameterShape(objWithGetters);
+    expect(rootGetterInvoked).toBe(false);
+    expect(nestedGetterInvoked).toBe(false);
+    expect(shape).toEqual({
+      nested: {
+        normal: "string",
+        sensitiveNested: "opaque",
+      },
+      safeField: "number",
+      sensitiveRoot: "opaque",
+    });
+  });
+
+  it("never invokes own getters on array indices and projects safely", () => {
+    let arrayGetterInvoked = false;
+    const arrWithGetter: unknown[] = ["validValue"];
+    Object.defineProperty(arrWithGetter, "1", {
+      get() {
+        arrayGetterInvoked = true;
+        return "secretGetterPayload";
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const shape = extractParameterShape({ items: arrWithGetter });
+    expect(arrayGetterInvoked).toBe(false);
+    expect(shape).toEqual({ items: ["opaque"] });
+  });
+
+  it("keeps sampled element shape allowed when budget permits", () => {
+    const raw = {
+      records: [
+        { status: "OK", count: 10 },
+        { status: "WARN", count: 20 },
+      ],
+    };
+    const shape = extractParameterShape(raw, { maxNodes: 10 });
+    expect(shape).toEqual({
+      records: [
+        {
+          count: "number",
+          status: "string",
+        },
+      ],
+    });
   });
 });

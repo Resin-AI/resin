@@ -22,4 +22,18 @@ export {
 export {
   projectEventToMetadataOnly,
   projectEventMetadataOnly,
+  extractParameterShape,
+  extractParameterTypeShape,
+  RESIN_PARAMETER_SHAPE_KEY,
+  DEFAULT_MAX_DEPTH,
+  HARD_MAX_DEPTH,
+  DEFAULT_MAX_KEYS,
+  HARD_MAX_KEYS,
+  DEFAULT_MAX_KEY_LENGTH,
+  HARD_MAX_KEY_LENGTH,
+  DEFAULT_MAX_NODES,
+  HARD_MAX_NODES,
+  type ParameterPrimitiveKind,
+  type ParameterShapeDescriptor,
+  type ParameterShapeOptions,
 } from "./metadata-projection.js";
