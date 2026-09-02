@@ -351,4 +351,42 @@ describe("Snapshot Ingestion & Quarantine", () => {
 
     expect(registry.getToolVersion(LOCKED_TOOL_ID, "2.0.0")).toBeUndefined();
   });
+
+  it("skips catalog entries that violate the lock contract without blocking other tools", async () => {
+    const lockPath = path.join(tempDir, "resin.lock");
+    const lockManager = new ProjectLockManager({ lockPath, projectId: PROJECT_ID });
+
+    const mockService = new MockCloudMcpService();
+    mockService.seedTools([
+      makeCloudManifest({ id: "tool_legacy_nonuuid", name: "legacy_tool", version: "1.0.0" }),
+      makeCloudManifest({ id: LOCKED_TOOL_ID, name: "query_runner", version: "1.0.0" }),
+    ]);
+
+    const cache = new CloudCatalogCache();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const skipped: string[] = [];
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router: new CloudInvocationRouter({ catalogCache: cache }),
+      registry: new ToolRegistry(),
+      workspaceId: "ws-1",
+      lockManager,
+      onToolSyncError: (toolName) => {
+        skipped.push(toolName);
+      },
+    });
+
+    await syncCoordinator.sync();
+
+    const currentLock = lockManager.read();
+    expect(currentLock.tools.legacy_tool).toBeUndefined();
+    expect(currentLock.tools.query_runner?.toolId).toBe(LOCKED_TOOL_ID);
+    expect(skipped).toContain("legacy_tool");
+  });
 });
