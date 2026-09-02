@@ -568,6 +568,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       const coordinator = new TrajectoryCaptureCoordinator({
         pipeline,
         observationClient: mockObservationClient,
+        coalesceDwellMs: 0,
       });
 
       const ackFail = vi.fn(async () => {});
@@ -798,6 +799,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         pipeline,
         observationClient: mockObservationClient,
         attributionResolver: async () => null,
+        coalesceDwellMs: 0,
       });
 
       const promptRec = createPromptRecord(session.sessionId, 1);

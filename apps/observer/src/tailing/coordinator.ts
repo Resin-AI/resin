@@ -52,6 +52,7 @@ export interface ObserverCoordinatorOptions {
   defaultBackfillPolicy?: BackfillPolicy;
   autoStart?: boolean;
   backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
+  defaultMaxInFlightBatches?: number;
 }
 
 /**
@@ -67,6 +68,7 @@ export class ObserverCoordinator extends EventEmitter {
   private readonly backfillPolicyForSession?: (
     session: HarnessSession,
   ) => BackfillPolicy | undefined;
+  private readonly defaultMaxInFlightBatches?: number;
   private isRunning = false;
   private pollTimer?: NodeJS.Timeout;
   private inFlightPoll?: Promise<PollSummary>;
@@ -79,13 +81,14 @@ export class ObserverCoordinator extends EventEmitter {
     super();
     this.pollIntervalMs = options.pollIntervalMs ?? 10_000;
     this.backfillPolicyForSession = options.backfillPolicyForSession;
+    this.defaultMaxInFlightBatches = options.defaultMaxInFlightBatches;
     this.tailer =
       options.tailer ??
       new TranscriptTailer({
         cursorManager: options.cursorManager,
         defaultBackfillPolicy: options.defaultBackfillPolicy,
+        defaultMaxInFlightBatches: options.defaultMaxInFlightBatches,
       });
-
     if (options.autoStart) {
       void this.start();
     }
@@ -271,6 +274,9 @@ export class ObserverCoordinator extends EventEmitter {
                 await this.tailer.attachSession(session, source, {
                   workspaceId: workspace.workspaceId,
                   ...(backfillPolicy ? { backfillPolicy } : {}),
+                  ...(this.defaultMaxInFlightBatches !== undefined
+                    ? { maxInFlightBatches: this.defaultMaxInFlightBatches }
+                    : {}),
                 });
                 summary.sessionsAttached++;
               }

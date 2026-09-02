@@ -496,4 +496,76 @@ describe("Sequential Record Delivery and Atomic Checkpointing", () => {
 
     await tailer.close();
   });
+
+  it("allows multiple in-flight batches when configured and advances checkpoints monotonically upon sequential ack", async () => {
+    const store = await createInMemoryStateStore();
+    const cursorManager = new SourceCursorManager({ store });
+
+    const firstLines = [
+      JSON.stringify({ type: "prompt", text: "Batch 1 Line 1" }),
+      JSON.stringify({ type: "tool_call", tool: "calc", input: { a: 1 } }),
+    ];
+    const secondLines = [
+      JSON.stringify({ type: "prompt", text: "Batch 2 Line 1" }),
+      JSON.stringify({ type: "tool_call", tool: "calc", input: { a: 2 } }),
+    ];
+    fs.writeFileSync(transcriptPath, `${firstLines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({
+      cursorManager,
+      defaultBatchSize: 2,
+      defaultMaxInFlightBatches: 3,
+    });
+
+    const receivedBatches: RawHarnessRecord[][] = [];
+    const acks: Array<() => Promise<void>> = [];
+    const batchResolve = Promise.withResolvers<void>();
+    const firstBatchResolve = Promise.withResolvers<void>();
+
+    tailer.onRecords((_sess, records, ack) => {
+      receivedBatches.push(records);
+      acks.push(ack);
+      if (receivedBatches.length === 1) {
+        firstBatchResolve.resolve();
+      } else if (receivedBatches.length === 2) {
+        batchResolve.resolve();
+      }
+    });
+
+    const session: HarnessSession = {
+      sessionId: "session-multi-inflight",
+      workspaceId: "ws-1",
+      harnessId: "test-harness",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 20 });
+    await firstBatchResolve.promise;
+    fs.appendFileSync(transcriptPath, `${secondLines.join("\n")}\n`);
+    await batchResolve.promise;
+
+    // Both batches were delivered concurrently without waiting for batch 1 to ack
+    expect(receivedBatches).toHaveLength(2);
+    expect(receivedBatches[0]).toHaveLength(2);
+    expect(receivedBatches[1]).toHaveLength(2);
+
+    // Before any ack: checkpoint in SQLite is null
+    let savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor).toBeNull();
+
+    // Ack batch 1
+    await acks[0]();
+    savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor?.sequence).toBe(2);
+
+    // Ack batch 2
+    await acks[1]();
+    savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor?.sequence).toBe(4);
+
+    await tailer.close();
+    store.close();
+  });
 });

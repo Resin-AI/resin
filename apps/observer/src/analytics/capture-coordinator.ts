@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { z } from "zod";
-import type { CloudObservationClient, TrajectoryObservation } from "../cloud-runtime.js";
+import { AuthRecoveryError } from "../auth-recovery.js";
+import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
 import {
   NormalizationPipeline,
@@ -11,11 +12,11 @@ import {
   generateDeterministicEventId,
 } from "../normalization/pipeline.js";
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
+import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { projectEventToMetadataOnly } from "./metadata-projection.js";
 import {
   TrajectoryAlreadyFinalizedError,
-  type TrajectoryAttributionContext,
   type TrajectoryAttributionContextInput,
   TrajectoryAttributionContextSchema,
   type TrajectoryEmitter,
@@ -92,6 +93,32 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * transmission.
    */
   minimumRecordTimestampMs?: number;
+  /**
+   * Bounded coalescing dwell window in milliseconds for generic observation sessions.
+   * Defaults to 2000 (2 seconds). Set to 0 to disable coalescing.
+   */
+  coalesceDwellMs?: number;
+  /**
+   * Maximum batch size (number of observations) before an immediate flush occurs.
+   * Defaults to 100.
+   */
+  maxBatchSize?: number;
+  /**
+   * Optional local telemetry aggregator for recording batch metrics.
+   */
+  telemetry?: TelemetryAggregator;
+}
+
+interface GenericCoalescingBuffer {
+  sessionId: string;
+  session: HarnessSession;
+  validEvents: NormalizedSessionEvent[];
+  rawRecords: RawHarnessRecord[];
+  acks: Array<() => Promise<void>>;
+  timer: NodeJS.Timeout | null;
+  telemetryRecordTimestampMs: number[];
+  latestTail?: { eventId: string; causalSequence: number };
+  isTerminal: boolean;
 }
 
 /**
@@ -120,7 +147,14 @@ export class TrajectoryCaptureCoordinator {
     string,
     { eventId: string; causalSequence: number }
   >();
+  private readonly coalesceDwellMs: number;
+  private readonly maxBatchSize: number;
+  private readonly telemetry?: TelemetryAggregator;
+  private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
 
+  private totalGenericBatchesUploaded = 0;
+  private totalGenericObservationsUploaded = 0;
+  private lastGenericBatchSize = 0;
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(
     pipeline: NormalizationPipeline,
@@ -141,6 +175,9 @@ export class TrajectoryCaptureCoordinator {
       this.logger = options?.logger;
       this.isTelemetryEnabledFn = undefined;
       this.minimumRecordTimestampMs = 0;
+      this.coalesceDwellMs = 2000;
+      this.maxBatchSize = 100;
+      this.telemetry = undefined;
     } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
@@ -150,6 +187,12 @@ export class TrajectoryCaptureCoordinator {
       this.isTelemetryEnabledFn = pipelineOrOptions.isTelemetryEnabled;
       this.minimumRecordTimestampMs =
         z.number().safeParse(pipelineOrOptions.minimumRecordTimestampMs).data ?? 0;
+      this.coalesceDwellMs =
+        pipelineOrOptions.coalesceDwellMs !== undefined
+          ? Math.max(0, pipelineOrOptions.coalesceDwellMs)
+          : 2000;
+      this.maxBatchSize = Math.max(1, pipelineOrOptions.maxBatchSize ?? 100);
+      this.telemetry = pipelineOrOptions.telemetry;
     }
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
@@ -207,6 +250,18 @@ export class TrajectoryCaptureCoordinator {
     return { records: authorizedRecords, timestampMs };
   }
 
+  private acknowledgeBufferedAcks(acks: ReadonlyArray<() => Promise<void>>): void {
+    void (async () => {
+      for (const ack of acks) {
+        await ack();
+      }
+    })().catch((err: unknown) => {
+      this.logger?.error("Failed to acknowledge locally discarded observation records", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   /**
    * Advances the privacy cutoff monotonically and invalidates work that began before it.
    */
@@ -219,6 +274,11 @@ export class TrajectoryCaptureCoordinator {
     }
     this.minimumRecordTimestampMs = normalizedCutoff;
     this.telemetryGeneration += 1;
+    for (const buf of this.genericCoalescingBuffers.values()) {
+      if (buf.timer) clearTimeout(buf.timer);
+      this.acknowledgeBufferedAcks(buf.acks);
+    }
+    this.genericCoalescingBuffers.clear();
     this.activeSessions.clear();
     this.activeGenericSessions.clear();
     this.genericSessions.clear();
@@ -237,6 +297,11 @@ export class TrajectoryCaptureCoordinator {
     this.telemetryEnabled = nextEnabled;
     this.telemetryGeneration += 1;
     if (!nextEnabled) {
+      for (const buf of this.genericCoalescingBuffers.values()) {
+        if (buf.timer) clearTimeout(buf.timer);
+        this.acknowledgeBufferedAcks(buf.acks);
+      }
+      this.genericCoalescingBuffers.clear();
       this.activeSessions.clear();
       this.activeGenericSessions.clear();
       this.genericSessions.clear();
@@ -248,6 +313,14 @@ export class TrajectoryCaptureCoordinator {
     sessionId: string,
     ack: () => Promise<void>,
   ): Promise<void> {
+    const buffer = this.genericCoalescingBuffers.get(sessionId);
+    if (buffer) {
+      if (buffer.timer) clearTimeout(buffer.timer);
+      this.genericCoalescingBuffers.delete(sessionId);
+      for (const bufferedAck of buffer.acks) {
+        await bufferedAck();
+      }
+    }
     this.activeSessions.delete(sessionId);
     this.activeGenericSessions.delete(sessionId);
     this.genericSessionTails.delete(sessionId);
@@ -312,13 +385,10 @@ export class TrajectoryCaptureCoordinator {
 
       // 2. Classify session as Attributed or Generic
       let emitter: TrajectoryEmitter | undefined;
-      let isGeneric = false;
 
       if (this.activeSessions.has(sessionId)) {
         emitter = this.activeSessions.get(sessionId)!;
-      } else if (this.activeGenericSessions.has(sessionId)) {
-        isGeneric = true;
-      } else {
+      } else if (!this.activeGenericSessions.has(sessionId)) {
         // Resolve attribution once per session if not yet classified
         let rawContext: TrajectoryAttributionContextInput | null | undefined;
         try {
@@ -348,7 +418,6 @@ export class TrajectoryCaptureCoordinator {
                 `Failed to construct TrajectoryEmitter for session ${sessionId}; falling back to generic observation submission`,
                 { error: err instanceof Error ? err.message : String(err) },
               );
-              isGeneric = true;
               this.genericSessions.add(sessionId);
               this.activeGenericSessions.add(sessionId);
             }
@@ -357,7 +426,6 @@ export class TrajectoryCaptureCoordinator {
               `Session ${sessionId} has invalid attribution context; falling back to generic observation submission`,
               { errors: parsedContext.error.issues.map((issue) => issue.message) },
             );
-            isGeneric = true;
             this.genericSessions.add(sessionId);
             this.activeGenericSessions.add(sessionId);
           }
@@ -365,7 +433,6 @@ export class TrajectoryCaptureCoordinator {
           this.logger?.info(
             `Session ${sessionId} has no trajectory attribution; processing as generic observation session`,
           );
-          isGeneric = true;
           this.genericSessions.add(sessionId);
           this.activeGenericSessions.add(sessionId);
         }
@@ -458,6 +525,16 @@ export class TrajectoryCaptureCoordinator {
         let hasExplicitTerminal = false;
         let latestTail = this.genericSessionTails.get(sessionId);
 
+        const existingBuffer = this.genericCoalescingBuffers.get(sessionId);
+        if (existingBuffer?.latestTail) {
+          if (
+            !latestTail ||
+            existingBuffer.latestTail.causalSequence >= latestTail.causalSequence
+          ) {
+            latestTail = existingBuffer.latestTail;
+          }
+        }
+
         if (telemetryRecords.length > 0) {
           const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
           const pipelineContext: PipelineProcessContext = {
@@ -501,6 +578,11 @@ export class TrajectoryCaptureCoordinator {
           }
         }
 
+        if (!this.isTelemetryAllowed(telemetryGeneration)) {
+          await this.acknowledgeWithoutTelemetry(sessionId, ack);
+          return;
+        }
+
         const isTerminalStatus =
           session.status === "completed" ||
           session.status === "failed" ||
@@ -515,44 +597,6 @@ export class TrajectoryCaptureCoordinator {
           };
         }
 
-        if (validEvents.length > 0) {
-          if (
-            !(await this.isTelemetryAuthorized(telemetryGeneration, telemetryRecordTimestampMs))
-          ) {
-            await this.acknowledgeWithoutTelemetry(sessionId, ack);
-            return;
-          }
-          const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
-          const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
-          const batchDigest = createHash("sha256")
-            .update(projectedEvents.map((event) => event.eventId).join("\0"))
-            .digest("hex")
-            .slice(0, 16);
-          const sessionKey = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-          const batchId = `obs_${batchDigest}_${sessionKey}_${firstSeq}`.slice(0, 128);
-          try {
-            await this.observationClient.sendObservationBatch({
-              batchId,
-              observations: projectedEvents,
-            });
-            await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
-          } catch (err) {
-            this.logger?.error(
-              `Failed to submit observation batch for generic session ${sessionId}`,
-              { error: err instanceof Error ? err.message : String(err) },
-            );
-            throw err;
-          }
-        }
-        if (!this.isTelemetryAllowed(telemetryGeneration)) {
-          await this.acknowledgeWithoutTelemetry(sessionId, ack);
-          return;
-        }
-
-        if (latestTail) {
-          this.genericSessionTails.set(sessionId, latestTail);
-        }
-
         const isTerminal =
           isTerminalStatus ||
           hasExplicitTerminal ||
@@ -562,22 +606,277 @@ export class TrajectoryCaptureCoordinator {
               (e.lifecycleType === "end" || e.lifecycleType === "crash"),
           );
 
-        if (isTerminal) {
-          this.finalizedSessions.add(sessionId);
-          this.activeGenericSessions.delete(sessionId);
-          this.genericSessionTails.delete(sessionId);
+        if (validEvents.length === 0 && !existingBuffer) {
+          if (!this.isTelemetryAllowed(telemetryGeneration)) {
+            await this.acknowledgeWithoutTelemetry(sessionId, ack);
+            return;
+          }
+          if (isTerminal) {
+            this.finalizedSessions.add(sessionId);
+            this.activeGenericSessions.delete(sessionId);
+            this.genericSessionTails.delete(sessionId);
+          }
+          await ack();
+          return;
         }
 
-        await ack();
+        let buffer = existingBuffer;
+        if (!buffer) {
+          buffer = {
+            sessionId,
+            session,
+            validEvents: [],
+            rawRecords: [],
+            acks: [],
+            timer: null,
+            telemetryRecordTimestampMs: [],
+            latestTail,
+            isTerminal: false,
+          };
+          this.genericCoalescingBuffers.set(sessionId, buffer);
+        }
+
+        buffer.session = session;
+        buffer.validEvents.push(...validEvents);
+        buffer.rawRecords.push(...records);
+        buffer.acks.push(ack);
+        buffer.telemetryRecordTimestampMs.push(...telemetryRecordTimestampMs);
+        if (latestTail) {
+          buffer.latestTail = latestTail;
+        }
+        if (isTerminal) {
+          buffer.isTerminal = true;
+        }
+
+        const isTurn = this.isTurnBoundary(session, records, validEvents, hasExplicitTerminal);
+        const reachedMaxSize =
+          buffer.validEvents.length >= this.maxBatchSize || buffer.acks.length >= this.maxBatchSize;
+        const shouldFlushImmediately =
+          this.coalesceDwellMs === 0 || buffer.isTerminal || reachedMaxSize || isTurn;
+
+        if (shouldFlushImmediately) {
+          try {
+            await this.flushGenericSession(sessionId);
+          } catch (err) {
+            if (err instanceof AuthRecoveryError) {
+              throw err;
+            }
+            if (this.coalesceDwellMs === 0) {
+              throw err;
+            }
+            this.scheduleGenericFlush(sessionId, buffer);
+          }
+        } else {
+          this.scheduleGenericFlush(sessionId, buffer);
+        }
       }
     });
   };
 
+  private isTurnBoundary(
+    session: HarnessSession,
+    records: RawHarnessRecord[],
+    events: NormalizedSessionEvent[],
+    hasExplicitTerminal: boolean,
+  ): boolean {
+    if (
+      session.status === "completed" ||
+      session.status === "failed" ||
+      session.status === "interrupted" ||
+      hasExplicitTerminal
+    ) {
+      return true;
+    }
+
+    for (const record of records) {
+      if (record.recordType === "completion") {
+        return true;
+      }
+      const rawPayload = record.rawPayload;
+      if (rawPayload && typeof rawPayload === "object") {
+        const payloadObj = rawPayload as Record<string, unknown>;
+        if (payloadObj.type === "completion") {
+          return true;
+        }
+        if (payloadObj.role === "assistant") {
+          return true;
+        }
+      }
+    }
+
+    for (const ev of events) {
+      if (
+        ev.type === "session_lifecycle" &&
+        (ev.lifecycleType === "end" || ev.lifecycleType === "crash")
+      ) {
+        return true;
+      }
+      if (ev.type === "message" && ev.role === "assistant") {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private scheduleGenericFlush(sessionId: string, buffer: GenericCoalescingBuffer): void {
+    if (buffer.timer || this.coalesceDwellMs === 0) {
+      return;
+    }
+    buffer.timer = setTimeout(() => {
+      void this.runSessionTask(sessionId, async () => {
+        try {
+          await this.flushGenericSession(sessionId);
+        } catch (err) {
+          this.logger?.error(`Deferred flush failed for generic session ${sessionId}`, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          const retryBuffer = this.genericCoalescingBuffers.get(sessionId);
+          if (retryBuffer) {
+            this.scheduleGenericFlush(sessionId, retryBuffer);
+          }
+        }
+      });
+    }, this.coalesceDwellMs);
+  }
+
+  private async flushGenericSession(sessionId: string): Promise<void> {
+    const buffer = this.genericCoalescingBuffers.get(sessionId);
+    if (!buffer) {
+      return;
+    }
+    clearTimeout(buffer.timer!);
+    buffer.timer = null;
+    this.genericCoalescingBuffers.delete(sessionId);
+
+    const { validEvents, acks, telemetryRecordTimestampMs } = buffer;
+
+    if (validEvents.length === 0) {
+      for (const ack of acks) {
+        await ack();
+      }
+      return;
+    }
+
+    const telemetryGeneration = this.telemetryGeneration;
+    if (!this.isTelemetryAllowed(telemetryGeneration)) {
+      this.genericSessionTails.delete(sessionId);
+      this.activeGenericSessions.delete(sessionId);
+      this.genericSessions.delete(sessionId);
+      for (const ack of acks) {
+        await ack();
+      }
+      return;
+    }
+
+    if (!(await this.isTelemetryAuthorized(telemetryGeneration, telemetryRecordTimestampMs))) {
+      this.genericSessionTails.delete(sessionId);
+      this.activeGenericSessions.delete(sessionId);
+      this.genericSessions.delete(sessionId);
+      for (const ack of acks) {
+        await ack();
+      }
+      return;
+    }
+
+    const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
+    const batchDigest = createHash("sha256")
+      .update(projectedEvents.map((event) => event.eventId).join("\0"))
+      .digest("hex")
+      .slice(0, 16);
+    const sessionKey = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+    const batchId = `obs_${batchDigest}_${sessionKey}_${firstSeq}`.slice(0, 128);
+
+    try {
+      await this.observationClient.sendObservationBatch({
+        batchId,
+        observations: projectedEvents,
+      });
+      await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
+    } catch (err) {
+      this.logger?.error(`Failed to submit observation batch for generic session ${sessionId}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (!(err instanceof AuthRecoveryError)) {
+        this.genericCoalescingBuffers.set(sessionId, buffer);
+      }
+      throw err;
+    }
+
+    this.recordBatchTelemetry(projectedEvents.length);
+
+    if (buffer.latestTail) {
+      this.genericSessionTails.set(sessionId, buffer.latestTail);
+    }
+
+    if (buffer.isTerminal) {
+      this.finalizedSessions.add(sessionId);
+      this.activeGenericSessions.delete(sessionId);
+      this.genericSessionTails.delete(sessionId);
+    }
+
+    for (const ack of acks) {
+      await ack();
+    }
+  }
+
+  private async flushAllGenericBuffers(): Promise<void> {
+    const sessionIds = Array.from(this.genericCoalescingBuffers.keys());
+    for (const sessionId of sessionIds) {
+      await this.runSessionTask(sessionId, async () => {
+        await this.flushGenericSession(sessionId);
+      });
+    }
+  }
+
   /**
-   * Waits for every session handler already admitted through the tailer boundary to settle.
+   * Flushes any in-flight coalesced generic observation buffers immediately.
+   */
+  public async flush(sessionId?: string): Promise<void> {
+    if (sessionId) {
+      await this.runSessionTask(sessionId, async () => {
+        await this.flushGenericSession(sessionId);
+      });
+    } else {
+      await this.flushAllGenericBuffers();
+    }
+  }
+
+  private recordBatchTelemetry(batchSize: number): void {
+    this.totalGenericBatchesUploaded++;
+    this.totalGenericObservationsUploaded += batchSize;
+    this.lastGenericBatchSize = batchSize;
+
+    if (this.telemetry) {
+      this.telemetry.incrementCounter("observer.batches.generic.uploaded", 1);
+      this.telemetry.incrementCounter("observer.batches.generic.observations_uploaded", batchSize);
+      this.telemetry.setGauge("observer.batches.generic.last_size", batchSize);
+    }
+  }
+
+  /**
+   * Returns current generic batching telemetry metrics.
+   */
+  public getBatchMetrics(): {
+    totalBatchesUploaded: number;
+    totalObservationsUploaded: number;
+    lastBatchSize: number;
+  } {
+    return {
+      totalBatchesUploaded: this.totalGenericBatchesUploaded,
+      totalObservationsUploaded: this.totalGenericObservationsUploaded,
+      lastBatchSize: this.lastGenericBatchSize,
+    };
+  }
+
+  /**
+   * Waits for every session handler already admitted through the tailer boundary to settle,
+   * flushing any pending generic coalescing buffers.
    */
   public async waitForIdle(): Promise<void> {
     await Promise.all(Array.from(this.sessionLocks.values()));
+    await this.flushAllGenericBuffers();
   }
 
   /**
