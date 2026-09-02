@@ -451,7 +451,14 @@ export class FakeHarnessAdapter implements HarnessAdapter {
 
   addSession(session: HarnessSession): void {
     const existing = this.sessions.get(session.workspaceId) ?? [];
-    this.sessions.set(session.workspaceId, [...existing, session]);
+    const index = existing.findIndex((s) => s.sessionId === session.sessionId);
+    if (index !== -1) {
+      const updated = [...existing];
+      updated[index] = session;
+      this.sessions.set(session.workspaceId, updated);
+    } else {
+      this.sessions.set(session.workspaceId, [...existing, session]);
+    }
   }
 
   setActiveSession(workspaceId: string, sessionId: string | null): void {
