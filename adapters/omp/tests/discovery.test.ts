@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildOmpDiscoveryCatalog,
+  classifyTranscriptSessionKind,
   collectTranscriptFiles,
   createWorkspaceIdFromPath,
   detectOmpVersion,
@@ -1238,6 +1239,91 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const parsed2 = await inspectTranscriptFile(t2Path);
       expect(parsed2?.status).toBe("failed");
       expect(parsed2?.sessionId).toBe("sess-fail-2");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies user vs subagent transcripts by directory nesting and exposes sessionKind on HarnessSession metadata", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-kind-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsSlug = "test-project";
+      const wsDir = path.join(tmpDir, wsSlug);
+      await fsp.mkdir(wsDir, { recursive: true });
+
+      const sessionsDir = path.join(ompHome, "agent", "sessions", wsSlug);
+      const parentSessionDir = path.join(sessionsDir, "20260902T120000_a1b2c3d4");
+      await fsp.mkdir(parentSessionDir, { recursive: true });
+
+      // User session: directly under workspace slug directory
+      const userTranscriptPath = path.join(sessionsDir, "20260902T120000_a1b2c3d4.jsonl");
+      await fsp.writeFile(
+        userTranscriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            id: "sess-user-1",
+            cwd: wsDir,
+            timestamp: "2026-09-02T12:00:00Z",
+          }),
+          JSON.stringify({ type: "agent_start", timestamp: "2026-09-02T12:00:01Z" }),
+          JSON.stringify({
+            type: "agent_end",
+            status: "completed",
+            timestamp: "2026-09-02T12:00:10Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      // Subagent transcript: nested under the parent session's directory
+      const subagentTranscriptPath = path.join(parentSessionDir, "scout.jsonl");
+      await fsp.writeFile(
+        subagentTranscriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            id: "sess-subagent-1",
+            cwd: wsDir,
+            timestamp: "2026-09-02T12:00:02Z",
+          }),
+          JSON.stringify({ type: "agent_start", timestamp: "2026-09-02T12:00:03Z" }),
+          JSON.stringify({
+            type: "agent_end",
+            status: "completed",
+            timestamp: "2026-09-02T12:00:08Z",
+          }),
+        ].join("\n")}\n`,
+      );
+
+      // 1. Direct classification helper
+      const workspace = {
+        workspaceId: "ws-test",
+        rootPath: wsDir,
+        name: wsSlug,
+        harnessId: "omp",
+      };
+      expect(classifyTranscriptSessionKind(userTranscriptPath, workspace)).toBe("user");
+      expect(classifyTranscriptSessionKind(subagentTranscriptPath, workspace)).toBe("agent");
+
+      // 2. inspectTranscriptFile
+      const userParsed = await inspectTranscriptFile(userTranscriptPath);
+      const subagentParsed = await inspectTranscriptFile(subagentTranscriptPath);
+      expect(userParsed?.sessionKind).toBe("user");
+      expect(subagentParsed?.sessionKind).toBe("agent");
+
+      // 3. Catalog discovery
+      const catalog = await buildOmpDiscoveryCatalog({ ompHome, searchPaths: [wsDir] });
+      const sessions = catalog.getSessionsForWorkspace(workspace);
+
+      const userSession = sessions.find((s) => s.sessionId === "sess-user-1");
+      const subagentSession = sessions.find((s) => s.sessionId === "sess-subagent-1");
+
+      expect(userSession).toBeDefined();
+      expect(userSession?.metadata.sessionKind).toBe("user");
+
+      expect(subagentSession).toBeDefined();
+      expect(subagentSession?.metadata.sessionKind).toBe("agent");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

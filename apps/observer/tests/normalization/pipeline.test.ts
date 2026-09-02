@@ -103,4 +103,67 @@ describe("NormalizationPipeline Scenario ID & Metadata", () => {
       expect(NormalizedSessionEventSchema.safeParse(results[0].event).success).toBe(true);
     }
   });
+
+  it("stamps metadata.sessionKind defaulting to user and preserves agent from context.customMetadata", async () => {
+    const pipeline = new NormalizationPipeline();
+    // Default case: no customMetadata.sessionKind -> "user"
+    const rawRecord1: RawHarnessRecord = {
+      recordId: "rec_kind_1",
+      sessionId,
+      harnessId: "test_harness",
+      sequenceNumber: 1,
+      timestamp,
+      recordType: "custom",
+      rawPayload: {
+        type: "message",
+        role: "user",
+        content: "Test sessionKind default",
+      },
+      cursor: { offset: 0, line: 1, sequence: 1, timestamp },
+      metadata: {},
+    };
+    const resUser = await pipeline.processRecord(rawRecord1);
+    expect(resUser[0].status).toBe("success");
+    if (resUser[0].status === "success") {
+      expect(resUser[0].event.metadata?.sessionKind).toBe("user");
+    }
+
+    // Explicit agent case in context.customMetadata -> "agent"
+    const rawRecord2: RawHarnessRecord = {
+      ...rawRecord1,
+      recordId: "rec_kind_2",
+      sequenceNumber: 2,
+      rawPayload: {
+        type: "message",
+        role: "user",
+        content: "Test sessionKind agent",
+      },
+    };
+    const resAgent = await pipeline.processRecord(rawRecord2, {
+      customMetadata: { sessionKind: "agent" },
+    });
+    expect(resAgent[0].status).toBe("success");
+    if (resAgent[0].status === "success") {
+      expect(resAgent[0].event.metadata?.sessionKind).toBe("agent");
+    }
+
+    // Invalid sessionKind in customMetadata -> falls back to "user"
+    const rawRecord3: RawHarnessRecord = {
+      ...rawRecord1,
+      recordId: "rec_kind_3",
+      sequenceNumber: 3,
+      rawPayload: {
+        type: "message",
+        role: "user",
+        content: "Test sessionKind invalid",
+      },
+    };
+    const resInvalid = await pipeline.processRecord(rawRecord3, {
+      customMetadata: { sessionKind: "invalid_kind" },
+    });
+    expect(resInvalid[0].status).toBe("success");
+    if (resInvalid[0].status === "success") {
+      expect(resInvalid[0].event.metadata?.sessionKind).toBe("user");
+    }
+  });
 });

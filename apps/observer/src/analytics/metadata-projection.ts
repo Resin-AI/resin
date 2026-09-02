@@ -648,6 +648,14 @@ export function projectEventToMetadataOnly(
   const rawScenarioId = event.metadata?.scenarioId;
   const scenarioId =
     typeof rawScenarioId === "string" && rawScenarioId.length > 0 ? rawScenarioId : event.sessionId;
+  const rawSessionKind = event.metadata?.sessionKind;
+  const sessionKind: "user" | "agent" | undefined =
+    rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
+
+  const metadata: { scenarioId: string; sessionKind?: "user" | "agent" } = { scenarioId };
+  if (sessionKind !== undefined) {
+    metadata.sessionKind = sessionKind;
+  }
 
   const baseHeaders = {
     eventId: event.eventId,
@@ -655,7 +663,7 @@ export function projectEventToMetadataOnly(
     sessionId: event.sessionId,
     timestamp: event.timestamp,
     causalRef: event.causalRef,
-    metadata: { scenarioId },
+    metadata,
     providerUsage: event.providerUsage,
   };
 

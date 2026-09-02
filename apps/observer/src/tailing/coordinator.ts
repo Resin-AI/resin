@@ -6,6 +6,8 @@ import type {
   RawHarnessRecord,
   SessionEventSource,
 } from "@resin/harness-contracts";
+import { withTimeout } from "../lifecycle.js";
+import type { JsonObject } from "../normalization/redaction.js";
 import type { SourceCursorManager } from "./cursor-manager.js";
 import {
   type BackfillPolicy,
@@ -53,6 +55,16 @@ export interface ObserverCoordinatorOptions {
   autoStart?: boolean;
   backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
   defaultMaxInFlightBatches?: number;
+  captureUserSessionsOnly?: boolean;
+  terminalNotificationTimeoutMs?: number;
+  logger?: CoordinatorLogger;
+}
+
+export interface CoordinatorLogger {
+  debug: (message: string, meta?: JsonObject) => void;
+  info?: (message: string, meta?: JsonObject) => void;
+  warn?: (message: string, meta?: JsonObject) => void;
+  error?: (message: string, meta?: JsonObject) => void;
 }
 
 /**
@@ -69,6 +81,10 @@ export class ObserverCoordinator extends EventEmitter {
     session: HarnessSession,
   ) => BackfillPolicy | undefined;
   private readonly defaultMaxInFlightBatches?: number;
+  private readonly captureUserSessionsOnly: boolean;
+  private readonly terminalNotificationTimeoutMs: number;
+  private readonly logger?: CoordinatorLogger;
+  private readonly loggedIgnoredAgentSessions = new Set<string>();
   private isRunning = false;
   private pollTimer?: NodeJS.Timeout;
   private inFlightPoll?: Promise<PollSummary>;
@@ -82,6 +98,9 @@ export class ObserverCoordinator extends EventEmitter {
     this.pollIntervalMs = options.pollIntervalMs ?? 10_000;
     this.backfillPolicyForSession = options.backfillPolicyForSession;
     this.defaultMaxInFlightBatches = options.defaultMaxInFlightBatches;
+    this.captureUserSessionsOnly = options.captureUserSessionsOnly ?? true;
+    this.terminalNotificationTimeoutMs = options.terminalNotificationTimeoutMs ?? 5000;
+    this.logger = options.logger;
     this.tailer =
       options.tailer ??
       new TranscriptTailer({
@@ -230,75 +249,103 @@ export class ObserverCoordinator extends EventEmitter {
         summary.workspacesDiscovered += workspaces.length;
 
         for (const workspace of workspaces) {
-          this.trackedWorkspaces.set(workspace.workspaceId, workspace);
+          try {
+            this.trackedWorkspaces.set(workspace.workspaceId, workspace);
 
-          let sessions: HarnessSession[] = [];
-          if ("listSessions" in adapter && adapter.listSessions instanceof Function) {
-            sessions = await adapter.listSessions(workspace);
-          } else if (
-            "resolveActiveSession" in adapter &&
-            adapter.resolveActiveSession instanceof Function
-          ) {
-            const active = await adapter.resolveActiveSession(workspace);
-            if (active) {
-              sessions = [active];
-            }
-          }
-
-          summary.sessionsDiscovered += sessions.length;
-
-          for (const session of sessions) {
-            currentDiscoveredSessions.add(session.sessionId);
-            const previousSession = this.activeSessionStates.get(session.sessionId);
-
-            if (session.status === "active") {
-              const activeSessions = this.tailer.getActiveSessions();
-              if (!activeSessions.includes(session.sessionId)) {
-                // Open event source if supported by adapter
-                let source: SessionEventSource | undefined;
-                if ("openEventSource" in adapter && adapter.openEventSource instanceof Function) {
-                  try {
-                    const cursor = await this.tailer
-                      .getCursorManager()
-                      .getCursor(session.sessionId);
-                    source = await adapter.openEventSource(session, cursor ?? undefined);
-                  } catch (err: unknown) {
-                    summary.errors.push(
-                      `Failed to open event source for session ${session.sessionId}: ${String(err)}`,
-                    );
-                  }
-                }
-
-                const backfillPolicy = this.backfillPolicyForSession?.(session);
-
-                await this.tailer.attachSession(session, source, {
-                  workspaceId: workspace.workspaceId,
-                  ...(backfillPolicy ? { backfillPolicy } : {}),
-                  ...(this.defaultMaxInFlightBatches !== undefined
-                    ? { maxInFlightBatches: this.defaultMaxInFlightBatches }
-                    : {}),
-                });
-                summary.sessionsAttached++;
-              }
-              this.activeSessionStates.set(session.sessionId, session);
+            let sessions: HarnessSession[] = [];
+            if ("listSessions" in adapter && adapter.listSessions instanceof Function) {
+              sessions = await adapter.listSessions(workspace);
             } else if (
-              session.status === "completed" ||
-              session.status === "failed" ||
-              session.status === "interrupted"
+              "resolveActiveSession" in adapter &&
+              adapter.resolveActiveSession instanceof Function
             ) {
-              const activeSessions = this.tailer.getActiveSessions();
-              if (activeSessions.includes(session.sessionId)) {
-                if (previousSession?.status === "active") {
-                  await this.tailer.notifyTerminalState(session);
+              const active = await adapter.resolveActiveSession(workspace);
+              if (active) {
+                sessions = [active];
+              }
+            }
+
+            summary.sessionsDiscovered += sessions.length;
+
+            for (const session of sessions) {
+              try {
+                currentDiscoveredSessions.add(session.sessionId);
+                const previousSession = this.activeSessionStates.get(session.sessionId);
+
+                if (session.status === "active") {
+                  if (this.captureUserSessionsOnly && session.metadata?.sessionKind === "agent") {
+                    if (!this.loggedIgnoredAgentSessions.has(session.sessionId)) {
+                      this.loggedIgnoredAgentSessions.add(session.sessionId);
+                      this.logger?.debug(
+                        `Skipping agent session ${session.sessionId} (captureUserSessionsOnly=true)`,
+                      );
+                    }
+                    this.activeSessionStates.set(session.sessionId, session);
+                    continue;
+                  }
+
+                  const activeSessions = this.tailer.getActiveSessions();
+                  if (!activeSessions.includes(session.sessionId)) {
+                    // Open event source if supported by adapter
+                    let source: SessionEventSource | undefined;
+                    if (
+                      "openEventSource" in adapter &&
+                      adapter.openEventSource instanceof Function
+                    ) {
+                      try {
+                        const cursor = await this.tailer
+                          .getCursorManager()
+                          .getCursor(session.sessionId);
+                        source = await adapter.openEventSource(session, cursor ?? undefined);
+                      } catch (err: unknown) {
+                        summary.errors.push(
+                          `Failed to open event source for session ${session.sessionId}: ${String(err)}`,
+                        );
+                      }
+                    }
+
+                    const backfillPolicy = this.backfillPolicyForSession?.(session);
+
+                    await this.tailer.attachSession(session, source, {
+                      workspaceId: workspace.workspaceId,
+                      ...(backfillPolicy ? { backfillPolicy } : {}),
+                      ...(this.defaultMaxInFlightBatches !== undefined
+                        ? { maxInFlightBatches: this.defaultMaxInFlightBatches }
+                        : {}),
+                    });
+                    summary.sessionsAttached++;
+                  }
+                  this.activeSessionStates.set(session.sessionId, session);
+                } else if (
+                  session.status === "completed" ||
+                  session.status === "failed" ||
+                  session.status === "interrupted"
+                ) {
+                  const activeSessions = this.tailer.getActiveSessions();
+                  if (activeSessions.includes(session.sessionId)) {
+                    if (previousSession?.status === "active") {
+                      await withTimeout(
+                        this.tailer.notifyTerminalState(session),
+                        this.terminalNotificationTimeoutMs,
+                        `notifyTerminalState:${session.sessionId}`,
+                      );
+                      this.activeSessionStates.set(session.sessionId, session);
+                    }
+                    await this.tailer.detachSession(session.sessionId);
+                    summary.sessionsDetached++;
+                  }
+                  this.activeSessionStates.set(session.sessionId, session);
+                } else {
                   this.activeSessionStates.set(session.sessionId, session);
                 }
-                await this.tailer.detachSession(session.sessionId);
-                summary.sessionsDetached++;
+              } catch (sessErr: unknown) {
+                summary.errors.push(sessErr instanceof Error ? sessErr.message : String(sessErr));
               }
-              this.activeSessionStates.set(session.sessionId, session);
-            } else {
-              this.activeSessionStates.set(session.sessionId, session);
             }
+          } catch (wsErr: unknown) {
+            summary.errors.push(
+              `Error processing workspace ${workspace.workspaceId}: ${String(wsErr)}`,
+            );
           }
         }
       } catch (err: unknown) {

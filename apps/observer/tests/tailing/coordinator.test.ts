@@ -1110,3 +1110,177 @@ describe("ObserverCoordinator Terminal State Delivery on Transition", () => {
     await coordinator.stop();
   });
 });
+
+describe("ObserverCoordinator captureUserSessionsOnly and Stuck Flush Isolation", () => {
+  it("skips agent sessions with default captureUserSessionsOnly=true and logs once at debug level", async () => {
+    const debugLogs: string[] = [];
+    const mockLogger = {
+      debug: vi.fn((msg: string) => {
+        debugLogs.push(msg);
+      }),
+    };
+
+    const coordinator = new ObserverCoordinator({
+      pollIntervalMs: 5000,
+      logger: mockLogger,
+    });
+    const adapter = new FakeHarnessAdapter({ id: "agent-filter-adapter" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-filter",
+      harnessId: "agent-filter-adapter",
+      rootPath: "/tmp/ws-filter",
+      name: "Filter WS",
+    };
+    adapter.addWorkspace(ws);
+
+    const userSess: HarnessSession = {
+      sessionId: "session-user-main",
+      workspaceId: ws.workspaceId,
+      harnessId: "agent-filter-adapter",
+      transcriptPath: "/tmp/user.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+      metadata: { sessionKind: "user" },
+    };
+    const agentSess: HarnessSession = {
+      sessionId: "session-agent-sub",
+      workspaceId: ws.workspaceId,
+      harnessId: "agent-filter-adapter",
+      transcriptPath: "/tmp/agent.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+      metadata: { sessionKind: "agent" },
+    };
+
+    adapter.addSession(userSess);
+    adapter.addSession(agentSess);
+
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(1);
+
+    const tailer = coordinator.getTailer();
+    expect(tailer.getActiveSessions()).toContain("session-user-main");
+    expect(tailer.getActiveSessions()).not.toContain("session-agent-sub");
+
+    expect(mockLogger.debug).toHaveBeenCalledTimes(1);
+    expect(debugLogs[0]).toContain("session-agent-sub");
+
+    // Subsequent poll should not log debug again for the same session
+    await coordinator.pollOnce();
+    expect(mockLogger.debug).toHaveBeenCalledTimes(1);
+
+    await coordinator.stop();
+  });
+
+  it("attaches agent sessions when captureUserSessionsOnly is explicitly false", async () => {
+    const coordinator = new ObserverCoordinator({
+      pollIntervalMs: 5000,
+      captureUserSessionsOnly: false,
+    });
+    const adapter = new FakeHarnessAdapter({ id: "agent-allow-adapter" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-allow",
+      harnessId: "agent-allow-adapter",
+      rootPath: "/tmp/ws-allow",
+      name: "Allow WS",
+    };
+    adapter.addWorkspace(ws);
+
+    const agentSess: HarnessSession = {
+      sessionId: "session-agent-allowed",
+      workspaceId: ws.workspaceId,
+      harnessId: "agent-allow-adapter",
+      transcriptPath: "/tmp/agent-allowed.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+      metadata: { sessionKind: "agent" },
+    };
+    adapter.addSession(agentSess);
+
+    const summary = await coordinator.pollOnce();
+    expect(summary.sessionsAttached).toBe(1);
+
+    const tailer = coordinator.getTailer();
+    expect(tailer.getActiveSessions()).toContain("session-agent-allowed");
+
+    await coordinator.stop();
+  });
+
+  it("stuck or failing flush on one session does not prevent attaching a new session in another workspace", async () => {
+    const coordinator = new ObserverCoordinator({
+      pollIntervalMs: 5000,
+      terminalNotificationTimeoutMs: 50, // Short timeout for test
+    });
+    const adapter = new FakeHarnessAdapter({ id: "isolation-adapter" });
+    coordinator.registerAdapter(adapter);
+
+    const ws1: HarnessWorkspace = {
+      workspaceId: "ws-stuck-1",
+      harnessId: "isolation-adapter",
+      rootPath: "/tmp/ws-stuck-1",
+      name: "Stuck WS 1",
+    };
+    const ws2: HarnessWorkspace = {
+      workspaceId: "ws-new-2",
+      harnessId: "isolation-adapter",
+      rootPath: "/tmp/ws-new-2",
+      name: "New WS 2",
+    };
+    adapter.addWorkspace(ws1);
+    adapter.addWorkspace(ws2);
+
+    const sess1: HarnessSession = {
+      sessionId: "sess-stuck-1",
+      workspaceId: ws1.workspaceId,
+      harnessId: "isolation-adapter",
+      transcriptPath: "/tmp/stuck1.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess1);
+
+    // Poll 1: attach sess1
+    await coordinator.pollOnce();
+    expect(coordinator.getTailer().getActiveSessions()).toContain("sess-stuck-1");
+
+    const { promise: stuckPromise, resolve: unblockStuck } = Promise.withResolvers<void>();
+    coordinator.onRecords(async (session, records, ack) => {
+      if (session.sessionId === "sess-stuck-1" && records.length === 0) {
+        // Stuck flush: hangs until explicitly unblocked
+        await stuckPromise;
+      }
+      await ack();
+    });
+
+    // Transition sess1 to completed, and add new active session in ws2
+    adapter.addSession({ ...sess1, status: "completed" });
+
+    const sess2: HarnessSession = {
+      sessionId: "sess-new-2",
+      workspaceId: ws2.workspaceId,
+      harnessId: "isolation-adapter",
+      transcriptPath: "/tmp/new2.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess2);
+
+    // Poll 2: sess1 terminal notification will time out (50ms), but sess2 in ws2 MUST be attached!
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.sessionsAttached).toBe(1);
+    expect(coordinator.getTailer().getActiveSessions()).toContain("sess-new-2");
+    expect(summary2.errors.length).toBeGreaterThanOrEqual(1);
+    expect(
+      summary2.errors.some(
+        (e) => e.includes("timed out") || e.includes("Failed to deliver terminal state"),
+      ),
+    ).toBe(true);
+
+    unblockStuck();
+    await coordinator.stop();
+  });
+});
