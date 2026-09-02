@@ -553,40 +553,247 @@ function buildProviderUsage(
 }
 
 /**
+ * Bounded session-scoped cache that maps (sessionId, callId) -> value without
+ * key concatenation or prefix ambiguity, with global capacity bounding and FIFO eviction.
+ */
+class BoundedSessionCallMap<T> {
+  private readonly maxEntries: number;
+  private readonly sessions = new Map<string, Map<string, { value: T; sequence: number }>>();
+  private readonly order = new Map<number, { sessionId: string; callId: string }>();
+  private entryCount = 0;
+  private nextSequence = 0;
+
+  constructor(maxEntries = 5000) {
+    this.maxEntries = maxEntries;
+  }
+
+  set(sessionId: string, callId: string, value: T): void {
+    if (!sessionId || !callId || value === undefined) return;
+
+    let calls = this.sessions.get(sessionId);
+    if (!calls) {
+      calls = new Map<string, { value: T; sequence: number }>();
+      this.sessions.set(sessionId, calls);
+    }
+
+    const existing = calls.get(callId);
+    if (existing) {
+      existing.value = value;
+      return;
+    }
+
+    while (this.entryCount >= this.maxEntries) {
+      this.evictOldest();
+    }
+
+    const sequence = this.nextSequence++;
+    calls.set(callId, { value, sequence });
+    this.order.set(sequence, { sessionId, callId });
+    this.entryCount++;
+  }
+
+  get(sessionId: string, callId: string): T | undefined {
+    return this.sessions.get(sessionId)?.get(callId)?.value;
+  }
+
+  getAndClear(sessionId: string, callId: string): T | undefined {
+    const calls = this.sessions.get(sessionId);
+    const entry = calls?.get(callId);
+    if (!calls || !entry) return undefined;
+
+    calls.delete(callId);
+    this.order.delete(entry.sequence);
+    this.entryCount--;
+    if (calls.size === 0) {
+      this.sessions.delete(sessionId);
+    }
+    return entry.value;
+  }
+
+  clearSession(sessionId: string): void {
+    const calls = this.sessions.get(sessionId);
+    if (!calls) return;
+
+    for (const entry of calls.values()) {
+      this.order.delete(entry.sequence);
+    }
+    this.entryCount -= calls.size;
+    this.sessions.delete(sessionId);
+  }
+
+  get size(): number {
+    return this.entryCount;
+  }
+
+  private evictOldest(): void {
+    const oldest = this.order.entries().next().value;
+    if (!oldest) return;
+
+    const [sequence, location] = oldest;
+    this.order.delete(sequence);
+    const calls = this.sessions.get(location.sessionId);
+    const entry = calls?.get(location.callId);
+    if (!calls || !entry || entry.sequence !== sequence) return;
+
+    calls.delete(location.callId);
+    this.entryCount--;
+    if (calls.size === 0) {
+      this.sessions.delete(location.sessionId);
+    }
+  }
+}
+
+/**
  * High-fidelity record decoder for Oh My Pi transcripts and structured records.
  */
 export class OmpRecordDecoder implements HarnessRecordDecoder {
   readonly harnessId = "omp";
   readonly decoderVersion = "1.0.0";
   private static readonly MAX_CALL_CACHE_ENTRIES = 5000;
-  private readonly callToolNames = new Map<string, string>();
+  private readonly callToolNames = new BoundedSessionCallMap<string>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+  private readonly callToolArguments = new BoundedSessionCallMap<OmpTranscriptPayload>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
 
   private setToolCallName(sessionId: string, callId: string, toolName: string): void {
     if (!callId || !toolName || toolName === "unknown_tool") return;
-    const key = `${sessionId}:${callId}`;
-    if (this.callToolNames.size >= OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES) {
-      const oldestKey = this.callToolNames.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.callToolNames.delete(oldestKey);
-      }
-    }
-    this.callToolNames.set(key, toolName);
+    this.callToolNames.set(sessionId, callId, toolName);
   }
 
   private getAndClearToolCallName(sessionId: string, callId: string): string | undefined {
-    const key = `${sessionId}:${callId}`;
-    const name = this.callToolNames.get(key);
-    if (name) {
-      this.callToolNames.delete(key);
-    }
-    return name;
+    return this.callToolNames.getAndClear(sessionId, callId);
+  }
+
+  private setToolCallArguments(
+    sessionId: string,
+    callId: string,
+    args: OmpTranscriptPayload,
+  ): void {
+    if (!callId || !args) return;
+    this.callToolArguments.set(sessionId, callId, args);
+  }
+
+  private getAndClearToolCallArguments(
+    sessionId: string,
+    callId: string,
+  ): OmpTranscriptPayload | undefined {
+    return this.callToolArguments.getAndClear(sessionId, callId);
   }
 
   private clearSessionToolCalls(sessionId: string): void {
-    const prefix = `${sessionId}:`;
-    for (const key of Array.from(this.callToolNames.keys())) {
-      if (key.startsWith(prefix)) {
-        this.callToolNames.delete(key);
+    this.callToolNames.clearSession(sessionId);
+    this.callToolArguments.clearSession(sessionId);
+  }
+
+  private cacheAssistantToolCalls(obj: OmpTranscriptPayload, sessionId: string): void {
+    const candidateArrays: unknown[] = [obj.content, obj.parts, obj.toolCalls, obj.tool_calls];
+    const nestedMsg = asObject(obj.message);
+    if (nestedMsg) {
+      candidateArrays.push(
+        nestedMsg.content,
+        nestedMsg.parts,
+        nestedMsg.toolCalls,
+        nestedMsg.tool_calls,
+      );
+    }
+
+    for (const cand of candidateArrays) {
+      const arr = asArray(cand as OmpTranscriptValue);
+      if (!arr) continue;
+      for (const item of arr) {
+        const block = asObject(item);
+        if (!block) continue;
+
+        const rawType = asString(block.type)?.toLowerCase();
+        const hasToolType =
+          rawType === "toolcall" ||
+          rawType === "tool_call" ||
+          rawType === "tooluse" ||
+          rawType === "tool_use" ||
+          rawType === "function" ||
+          rawType === "function_call";
+
+        const rawCallId =
+          asString(block.id) ??
+          asString(block.callId) ??
+          asString(block.call_id) ??
+          asString(block.toolCallId) ??
+          asString(block.tool_call_id);
+
+        if (!rawCallId) continue;
+        const callId = rawCallId;
+        const rawArgs =
+          block.arguments ?? block.args ?? block.parameters ?? block.params ?? block.input;
+
+        const toolName =
+          asString(block.name) ??
+          asString(block.toolName) ??
+          asString(block.tool_name) ??
+          asString(block.tool);
+
+        if (hasToolType || rawArgs !== undefined || toolName !== undefined) {
+          if (toolName && toolName !== "unknown_tool") {
+            this.setToolCallName(sessionId, callId, toolName);
+          }
+
+          if (rawArgs !== undefined) {
+            let argsObj: OmpTranscriptPayload | undefined = asObject(rawArgs);
+            if (!argsObj && typeof rawArgs === "string") {
+              try {
+                argsObj = asObject(JSON.parse(rawArgs));
+              } catch {
+                // ignore JSON parse failure
+              }
+            }
+            if (argsObj !== undefined) {
+              this.setToolCallArguments(sessionId, callId, argsObj);
+            }
+          }
+        }
+      }
+    }
+
+    const singleToolCall =
+      asObject(obj.toolCall) ??
+      asObject(obj.tool_call) ??
+      (nestedMsg ? (asObject(nestedMsg.toolCall) ?? asObject(nestedMsg.tool_call)) : undefined);
+    if (singleToolCall) {
+      const rawCallId =
+        asString(singleToolCall.id) ??
+        asString(singleToolCall.callId) ??
+        asString(singleToolCall.call_id) ??
+        asString(singleToolCall.toolCallId) ??
+        asString(singleToolCall.tool_call_id);
+      if (rawCallId) {
+        const toolName =
+          asString(singleToolCall.name) ??
+          asString(singleToolCall.toolName) ??
+          asString(singleToolCall.tool_name) ??
+          asString(singleToolCall.tool);
+        if (toolName && toolName !== "unknown_tool") {
+          this.setToolCallName(sessionId, rawCallId, toolName);
+        }
+        const rawArgs =
+          singleToolCall.arguments ??
+          singleToolCall.args ??
+          singleToolCall.parameters ??
+          singleToolCall.params ??
+          singleToolCall.input;
+        if (rawArgs !== undefined) {
+          let argsObj: OmpTranscriptPayload | undefined = asObject(rawArgs);
+          if (!argsObj && typeof rawArgs === "string") {
+            try {
+              argsObj = asObject(JSON.parse(rawArgs));
+            } catch {
+              // ignore JSON parse failure
+            }
+          }
+          if (argsObj !== undefined) {
+            this.setToolCallArguments(sessionId, rawCallId, argsObj);
+          }
+        }
       }
     }
   }
@@ -1206,6 +1413,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
   ): IntermediateMessageEvent {
+    if (role === "assistant") {
+      this.cacheAssistantToolCalls(obj, sessionId);
+    }
+
     let content = "";
     let contentParts: MessageContentPart[] | undefined;
 
@@ -1309,8 +1520,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
   ): IntermediateToolCallEvent {
-    const toolCallObj = asObject(obj.toolCall) ?? asObject(obj.tool_call) ?? obj;
-    const toolName = String(
+    const toolCallObj =
+      asObject(obj.toolCall) ??
+      asObject(obj.tool_call) ??
+      (obj.data ? { ...obj, ...asObject(obj.data) } : obj);
+    let toolName = String(
       asString(toolCallObj.toolName) ??
         asString(toolCallObj.tool_name) ??
         asString(toolCallObj.name) ??
@@ -1318,34 +1532,52 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         "unknown_tool",
     );
 
-    const callId = normalizeCallId(
+    const rawCallId =
       asString(toolCallObj.callId) ??
-        asString(toolCallObj.call_id) ??
-        asString(toolCallObj.toolCallId) ??
-        asString(toolCallObj.tool_call_id) ??
-        asString(toolCallObj.id),
-      `call_${causalRef.causalSequence}`,
-    );
+      asString(toolCallObj.call_id) ??
+      asString(toolCallObj.toolCallId) ??
+      asString(toolCallObj.tool_call_id) ??
+      asString(toolCallObj.id);
+    const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
+    const cacheCallId = rawCallId ?? callId;
+    const cachedName = cacheCallId
+      ? this.getAndClearToolCallName(sessionId, cacheCallId)
+      : undefined;
+
+    if ((!toolName || toolName === "unknown_tool") && cachedName) {
+      toolName = cachedName;
+    }
+
     if (callId && toolName && toolName !== "unknown_tool") {
       this.setToolCallName(sessionId, callId, toolName);
     }
-    const rawParams =
-      toolCallObj.parameters ??
-      toolCallObj.params ??
-      toolCallObj.input ??
-      toolCallObj.arguments ??
-      toolCallObj.args ??
-      {};
 
-    let rawParamsObj = asObject(rawParams);
-    if (!rawParamsObj && typeof rawParams === "string") {
-      try {
-        rawParamsObj = asObject(JSON.parse(rawParams));
-      } catch {
-        // ignore JSON parse failure
+    const cachedArgs = cacheCallId
+      ? this.getAndClearToolCallArguments(sessionId, cacheCallId)
+      : undefined;
+
+    let parameters: DecoderMetadataRecord;
+    if (cachedArgs !== undefined) {
+      parameters = cachedArgs;
+    } else {
+      const rawParams =
+        toolCallObj.parameters ??
+        toolCallObj.params ??
+        toolCallObj.input ??
+        toolCallObj.arguments ??
+        toolCallObj.args ??
+        {};
+
+      let rawParamsObj = asObject(rawParams);
+      if (!rawParamsObj && typeof rawParams === "string") {
+        try {
+          rawParamsObj = asObject(JSON.parse(rawParams));
+        } catch {
+          // ignore JSON parse failure
+        }
       }
+      parameters = rawParamsObj ?? {};
     }
-    const parameters = rawParamsObj ?? {};
 
     if (toolCallObj.intent !== undefined && metadata.intent === undefined) {
       metadata.intent = toolCallObj.intent;
