@@ -645,12 +645,17 @@ export function projectEventToMetadataOnly(
     };
   };
 
+  const rawScenarioId = event.metadata?.scenarioId;
+  const scenarioId =
+    typeof rawScenarioId === "string" && rawScenarioId.length > 0 ? rawScenarioId : event.sessionId;
+
   const baseHeaders = {
     eventId: event.eventId,
     schemaVersion: event.schemaVersion,
     sessionId: event.sessionId,
     timestamp: event.timestamp,
     causalRef: event.causalRef,
+    metadata: { scenarioId },
     providerUsage: event.providerUsage,
   };
 
