@@ -48,6 +48,12 @@ describe("MCP Initialization & Capability Negotiation", () => {
       expect(resp.result.serverInfo.name).toBe("resin-mcp");
       expect(conn.harnessId).toBe("claude-code");
       expect(conn.isInitialized).toBe(true);
+      expect(conn.hasReceivedInitializedNotification).toBe(false);
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      expect(conn.hasReceivedInitializedNotification).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -82,6 +88,12 @@ describe("MCP Initialization & Capability Negotiation", () => {
       expect(resp.error).toBeUndefined();
       expect(conn.harnessId).toBe("codex");
       expect(conn.isInitialized).toBe(true);
+      expect(conn.hasReceivedInitializedNotification).toBe(false);
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      expect(conn.hasReceivedInitializedNotification).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -118,6 +130,55 @@ describe("MCP Initialization & Capability Negotiation", () => {
       expect(resp.error).toBeUndefined();
       expect(conn.harnessId).toBe("omp");
       expect(conn.isInitialized).toBe(true);
+      expect(conn.hasReceivedInitializedNotification).toBe(false);
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      expect(conn.hasReceivedInitializedNotification).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not emit tool-list notifications before the initialized notification", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-init-order-"));
+    try {
+      const methods: string[] = [];
+      const gatewayRef: { current?: LocalMcpGateway } = {};
+      const gateway = new LocalMcpGateway({
+        router: new FakeGatewayRouter(),
+        onWorkspaceReady: async () => gatewayRef.current?.broadcastToolListChanged(),
+      });
+      gatewayRef.current = gateway;
+      const conn = gateway.createConnection({
+        cwd: tmpDir,
+        sendMessage: (message) => {
+          if ("method" in message) methods.push(message.method);
+        },
+      });
+
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id: "ordered-init",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          clientInfo: { name: "oh-my-pi", version: "18.1.3" },
+          capabilities: { tools: { listChanged: true } },
+          rootUri: pathToFileURL(tmpDir).href,
+        },
+      });
+
+      expect(conn.isInitialized).toBe(true);
+      expect(conn.hasReceivedInitializedNotification).toBe(false);
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      expect(conn.hasReceivedInitializedNotification).toBe(true);
+      gateway.broadcastToolListChanged();
+      expect(methods).toEqual(["notifications/tools/list_changed"]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

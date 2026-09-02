@@ -82,6 +82,7 @@ export class McpConnection {
   serverCapabilities: McpServerCapabilities;
   protocolVersion: string;
   isInitialized = false;
+  hasReceivedInitializedNotification = false;
   isClosed = false;
 
   private readonly rateLimiter: TokenBucketRateLimiter;
