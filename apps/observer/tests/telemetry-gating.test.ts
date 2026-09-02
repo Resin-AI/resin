@@ -760,6 +760,7 @@ describe("observer telemetry gating", () => {
       [createTimestampedRecord(session.sessionId, 3_500, 3)],
       vi.fn(async () => undefined),
     );
+    await module.getCaptureCoordinator().waitForIdle();
     expect(doubles.processBatch).toHaveBeenCalledOnce();
     expect(doubles.sendObservationBatch).toHaveBeenCalledOnce();
   });

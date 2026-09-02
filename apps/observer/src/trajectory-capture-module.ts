@@ -320,6 +320,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       options.observerCoordinator ??
       new ObserverCoordinator({
         cursorManager: this.cursorManager,
+        defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
           session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
@@ -664,6 +665,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
     this.observerCoordinator = new ObserverCoordinator({
       cursorManager: this.cursorManager,
+      defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
         session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,

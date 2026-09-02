@@ -41,6 +41,10 @@ export interface TailerSessionOptions {
   pollingIntervalMs?: number;
   workspaceId?: string;
   deviceId?: string;
+  /**
+   * More than one requires a handler that acknowledges batches in delivery order.
+   */
+  maxInFlightBatches?: number;
 }
 
 /**
@@ -56,6 +60,7 @@ export interface TailerSessionContext {
   options: TailerSessionOptions;
   latestEmittedCursor: SourceCursor | null;
   latestAckedCursor: SourceCursor | null;
+  inFlightBatches: number;
   hasInFlightBatch: boolean;
   inFlightDelivery?: Promise<void>;
   inFlightPump?: Promise<void>;
@@ -105,6 +110,7 @@ export interface TranscriptTailerOptions {
   deviceId?: string;
   pendingStorageDirectory?: string | null;
   maxPendingBytes?: number;
+  defaultMaxInFlightBatches?: number;
 }
 
 /**
@@ -120,7 +126,7 @@ export class TranscriptTailer extends EventEmitter {
   private readonly defaultDeviceId: string;
   private readonly pendingStorageDirectory: string | null;
   private readonly maxPendingBytes: number;
-
+  private readonly defaultMaxInFlightBatches: number;
   private recordHandler?: TailerRecordHandler;
   private isClosed = false;
 
@@ -137,6 +143,7 @@ export class TranscriptTailer extends EventEmitter {
         ? path.join(getDaemonPaths().stateDir, "auth-pending")
         : options.pendingStorageDirectory;
     this.maxPendingBytes = Math.max(1, options.maxPendingBytes ?? 32 * 1024 * 1024);
+    this.defaultMaxInFlightBatches = Math.max(1, options.defaultMaxInFlightBatches ?? 1);
   }
 
   /**
@@ -242,6 +249,7 @@ export class TranscriptTailer extends EventEmitter {
       options,
       latestEmittedCursor: startCursor,
       latestAckedCursor: startCursor,
+      inFlightBatches: 0,
       hasInFlightBatch: false,
       isPaused: queue.isPaused,
       isAuthDegraded: hasRestoredAuthPending,
@@ -456,10 +464,11 @@ export class TranscriptTailer extends EventEmitter {
   ): Promise<void> {
     const isAuthRecoveryProbe =
       context.isAuthDegraded && context.needsAuthRecoveryProbe && allowAuthRecoveryProbe;
+    const maxInFlight = context.options.maxInFlightBatches ?? this.defaultMaxInFlightBatches;
     if (
       !this.recordHandler ||
       context.queue.size === 0 ||
-      context.hasInFlightBatch ||
+      context.inFlightBatches >= maxInFlight ||
       (context.isAuthDegraded && !isAuthRecoveryProbe)
     ) {
       return;
@@ -469,13 +478,14 @@ export class TranscriptTailer extends EventEmitter {
     const batch = context.queue.dequeue(batchSize);
     if (batch.length === 0) return;
 
+    context.inFlightBatches++;
     context.hasInFlightBatch = true;
     const latestInBatch = batch[batch.length - 1];
     if (!isAuthRecoveryProbe) {
       context.latestEmittedCursor = latestInBatch.cursor;
     }
 
-    // Create durable ack closure
+    // Create durable ack closure. Concurrent consumers must invoke these in delivery order.
     const ack = async () => {
       // 1. Mark in queue as acknowledged
       context.queue.ack(batch.map((r) => r.recordId));
@@ -489,7 +499,8 @@ export class TranscriptTailer extends EventEmitter {
       // 3. Notify event source of committed checkpoint
       await context.source.checkpoint(latestInBatch.cursor);
       context.latestAckedCursor = latestInBatch.cursor;
-      context.hasInFlightBatch = false;
+      context.inFlightBatches = Math.max(0, context.inFlightBatches - 1);
+      context.hasInFlightBatch = context.inFlightBatches > 0;
 
       if (context.isRestoringDurablePending && !context.queue.hasDurablePending) {
         context.isRestoringDurablePending = false;
@@ -521,7 +532,8 @@ export class TranscriptTailer extends EventEmitter {
           void this.dispatchQueue(context);
         }
       } catch (err: unknown) {
-        context.hasInFlightBatch = false;
+        context.inFlightBatches = Math.max(0, context.inFlightBatches - 1);
+        context.hasInFlightBatch = context.inFlightBatches > 0;
         if (err instanceof AuthRecoveryError) {
           const persisted = context.queue.deferForAuthentication(
             batch.map((record) => record.recordId),
@@ -695,7 +707,8 @@ export class TranscriptTailer extends EventEmitter {
           await context.inFlightDelivery;
         }
 
-        while (context.queue.size > 0 && !context.hasInFlightBatch) {
+        const maxInFlight = context.options.maxInFlightBatches ?? this.defaultMaxInFlightBatches;
+        while (context.queue.size > 0 && context.inFlightBatches < maxInFlight) {
           if (!this.recordHandler) {
             throw new Error(
               `Cannot deliver terminal state for session ${session.sessionId}: no record handler registered to drain ${context.queue.size} pending records`,

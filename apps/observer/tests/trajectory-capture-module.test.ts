@@ -540,6 +540,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
       const ack = vi.fn().mockResolvedValue(undefined);
       await captureCoordinator.handleRecords(ordinarySession, [rawRecord], ack);
+      await captureCoordinator.waitForIdle();
 
       expect(ack).toHaveBeenCalled();
       expect(mockSubmit).not.toHaveBeenCalled();
@@ -581,6 +582,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
       const ack = vi.fn().mockResolvedValue(undefined);
       await captureCoordinator.handleRecords(malformedSession, [rawRecord], ack);
+      await captureCoordinator.waitForIdle();
 
       expect(ack).toHaveBeenCalled();
       expect(mockSubmit).not.toHaveBeenCalled();
