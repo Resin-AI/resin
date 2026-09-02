@@ -18,6 +18,10 @@ import type {
   RawHarnessRecord,
 } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
+import {
+  RESIN_PARAMETER_SHAPE_KEY,
+  projectToolParameters,
+} from "../../../apps/observer/src/analytics/metadata-projection.js";
 import { OmpRecordDecoder } from "../src/decoder.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "../fixtures");
@@ -1379,6 +1383,653 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(subEnd.type).toBe("subagent_lifecycle");
       expect(subEnd.lifecycleType).toBe("terminate");
       expect(subEnd.subagentId).toBe("sub-1");
+    });
+  });
+
+  describe("OMP tool parameter recovery for truncated execution markers", () => {
+    const decoder = new OmpRecordDecoder();
+
+    const makeRecord = (sessionId: string, seq: number, payload: unknown): RawHarnessRecord => ({
+      recordId: `rec-${sessionId}-${seq}`,
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: seq,
+      recordType: "transcript_line",
+      timestamp: `2026-09-02T12:00:${String(seq).padStart(2, "0")}.000Z`,
+      cursor: {
+        offset: seq * 100,
+        line: seq,
+        sequence: seq,
+        timestamp: `2026-09-02T12:00:${String(seq).padStart(2, "0")}.000Z`,
+      },
+      rawPayload: JSON.stringify(payload),
+      metadata: {},
+    });
+
+    it("recovers nested records parameters from assistant toolCall block when start has no args and projects to safe shape", () => {
+      const sessionId = "session-param-rec-1";
+
+      // Step 1: Assistant message with canonical toolCall content block containing nested records
+      const assistantRecord = makeRecord(sessionId, 1, {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_records_101",
+            name: "custom_sync_tool",
+            arguments: {
+              records: [{ status: "ready" }],
+            },
+          },
+        ],
+      });
+
+      const assistantEvt = decoder.decode(assistantRecord) as IntermediateMessageEvent;
+      expect(assistantEvt.type).toBe("message");
+      expect(assistantEvt.role).toBe("assistant");
+
+      // Step 2: Durable tool_execution_start marker arrives with data envelope and no args
+      const startRecord = makeRecord(sessionId, 2, {
+        type: "custom",
+        customType: "tool_execution_start",
+        data: {
+          toolCallId: "call_records_101",
+          toolName: "custom_sync_tool",
+        },
+      });
+
+      const toolCallEvt = decoder.decode(startRecord) as IntermediateToolCallEvent;
+      expect(toolCallEvt.type).toBe("tool_call");
+      expect(toolCallEvt.toolName).toBe("custom_sync_tool");
+      expect(toolCallEvt.callId).toBe("call_records_101");
+      expect(toolCallEvt.parameters).toEqual({
+        records: [{ status: "ready" }],
+      });
+
+      // Step 3: Verify existing metadata projector produces safe descriptor envelope
+      const projected = projectToolParameters(toolCallEvt.parameters);
+      expect(projected).toEqual({
+        [RESIN_PARAMETER_SHAPE_KEY]: {
+          records: [{ status: "string" }],
+        },
+      });
+
+      // Verify no raw values appear anywhere in projected metadata output
+      const projectedStr = JSON.stringify(projected);
+      expect(projectedStr).not.toContain("ready");
+    });
+
+    it("uses authoritative assistant arguments when execution start contains truncated path/command", () => {
+      const sessionId = "session-param-trunc-1";
+
+      const assistantRecord = makeRecord(sessionId, 1, {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "Deploying cluster configuration",
+            },
+            {
+              type: "toolCall",
+              id: "call_deploy_202",
+              name: "cluster_deploy",
+              arguments: {
+                config: { env: "prod", replicas: 3 },
+                dryRun: false,
+              },
+            },
+          ],
+        },
+      });
+
+      const msgEvt = decoder.decode(assistantRecord) as IntermediateMessageEvent;
+      expect(msgEvt.type).toBe("message");
+      expect(msgEvt.role).toBe("assistant");
+      expect(msgEvt.content).toBe("Deploying cluster configuration\n");
+
+      // Truncated tool_execution_start with only command/path
+      const startRecord = makeRecord(sessionId, 2, {
+        type: "tool_execution_start",
+        toolName: "cluster_deploy",
+        callId: "call_deploy_202",
+        args: { command: "cluster_deploy" },
+      });
+
+      const toolCallEvt = decoder.decode(startRecord) as IntermediateToolCallEvent;
+      expect(toolCallEvt.type).toBe("tool_call");
+      expect(toolCallEvt.parameters).toEqual({
+        config: { env: "prod", replicas: 3 },
+        dryRun: false,
+      });
+
+      const projected = projectToolParameters(toolCallEvt.parameters);
+      expect(projected).toEqual({
+        [RESIN_PARAMETER_SHAPE_KEY]: {
+          config: { env: "string", replicas: "number" },
+          dryRun: "boolean",
+        },
+      });
+      expect(JSON.stringify(projected)).not.toContain("prod");
+    });
+
+    it("isolates sessions and call IDs without cross-session/call argument collisions", () => {
+      const sessionA = "session-iso-A";
+      const sessionB = "session-iso-B";
+      const sharedCallId = "call_shared_001";
+
+      // Assistant message in session A
+      decoder.decode(
+        makeRecord(sessionA, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: sharedCallId,
+              name: "scoped_tool",
+              arguments: { sessionScope: "A", tenant: "alpha" },
+            },
+          ],
+        }),
+      );
+
+      // Assistant message in session B with same call ID but different arguments
+      decoder.decode(
+        makeRecord(sessionB, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: sharedCallId,
+              name: "scoped_tool",
+              arguments: { sessionScope: "B", tenant: "beta" },
+            },
+          ],
+        }),
+      );
+
+      // Execution start in session A recovers session A arguments
+      const startA = decoder.decode(
+        makeRecord(sessionA, 2, {
+          type: "tool_execution_start",
+          callId: sharedCallId,
+          toolName: "scoped_tool",
+        }),
+      ) as IntermediateToolCallEvent;
+
+      expect(startA.parameters).toEqual({ sessionScope: "A", tenant: "alpha" });
+
+      // Execution start in session B recovers session B arguments
+      const startB = decoder.decode(
+        makeRecord(sessionB, 2, {
+          type: "tool_execution_start",
+          callId: sharedCallId,
+          toolName: "scoped_tool",
+        }),
+      ) as IntermediateToolCallEvent;
+
+      expect(startB.parameters).toEqual({ sessionScope: "B", tenant: "beta" });
+    });
+
+    it("bounds argument cache eviction under high volume and clears on session termination", () => {
+      const boundDecoder = new OmpRecordDecoder();
+      const sessionTerm = "session-term-cache";
+
+      // Populate 5005 tool call arguments in assistant messages across distinct call IDs
+      for (let i = 1; i <= 5005; i++) {
+        boundDecoder.decode(
+          makeRecord("session-flood", i, {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: `flood_call_${i}`,
+                name: "flood_tool",
+                arguments: { index: i },
+              },
+            ],
+          }),
+        );
+      }
+
+      // Oldest entries (1..5) should have been evicted due to MAX_CALL_CACHE_ENTRIES = 5000
+      const evictedStart = boundDecoder.decode(
+        makeRecord("session-flood", 5006, {
+          type: "tool_execution_start",
+          callId: "flood_call_1",
+          toolName: "flood_tool",
+          args: { fallback: true },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(evictedStart.parameters).toEqual({ fallback: true });
+
+      // Recent entry (5005) should still be cached and recovered
+      const recentStart = boundDecoder.decode(
+        makeRecord("session-flood", 5007, {
+          type: "tool_execution_start",
+          callId: "flood_call_5005",
+          toolName: "flood_tool",
+          args: { fallback: true },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(recentStart.parameters).toEqual({ index: 5005 });
+
+      // Add call to sessionTerm, then terminate session
+      boundDecoder.decode(
+        makeRecord(sessionTerm, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_term_1",
+              name: "term_tool",
+              arguments: { active: true },
+            },
+          ],
+        }),
+      );
+
+      // End session
+      boundDecoder.decode(
+        makeRecord(sessionTerm, 2, {
+          type: "session_lifecycle",
+          lifecycleType: "end",
+        }),
+      );
+
+      // Start after session end will not find cached arguments
+      const postEndStart = boundDecoder.decode(
+        makeRecord(sessionTerm, 3, {
+          type: "tool_execution_start",
+          callId: "call_term_1",
+          toolName: "term_tool",
+          args: { fallbackAfterEnd: true },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(postEndStart.parameters).toEqual({ fallbackAfterEnd: true });
+    });
+
+    it("preserves canonical standalone start arguments when no assistant toolCall exists", () => {
+      const sessionId = "session-standalone-1";
+
+      const standaloneStart = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "tool_execution_start",
+          callId: "call_standalone_99",
+          toolName: "read",
+          args: { path: "src/auth.ts" },
+        }),
+      ) as IntermediateToolCallEvent;
+
+      expect(standaloneStart.type).toBe("tool_call");
+      expect(standaloneStart.toolName).toBe("read");
+      expect(standaloneStart.callId).toBe("call_standalone_99");
+      expect(standaloneStart.parameters).toEqual({ path: "src/auth.ts" });
+
+      const projected = projectToolParameters(standaloneStart.parameters);
+      expect(projected).toEqual({
+        [RESIN_PARAMETER_SHAPE_KEY]: {
+          path: "string",
+        },
+      });
+    });
+
+    it("ensures assistant message remains a single message event and start remains a single tool_call event without duplicates", () => {
+      const sessionId = "session-no-dups-1";
+
+      const msgResult = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_single_1",
+              name: "do_task",
+              arguments: { target: "repo" },
+            },
+          ],
+        }),
+      );
+
+      // Assistant message decodes to exactly ONE IntermediateMessageEvent (not an array, not a tool_call)
+      expect(Array.isArray(msgResult)).toBe(false);
+      const msgEvt = msgResult as IntermediateMessageEvent;
+      expect(msgEvt.type).toBe("message");
+      expect(msgEvt.role).toBe("assistant");
+
+      const startResult = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "tool_execution_start",
+          callId: "call_single_1",
+          toolName: "do_task",
+        }),
+      );
+
+      // Execution start decodes to exactly ONE IntermediateToolCallEvent
+      expect(Array.isArray(startResult)).toBe(false);
+      const toolCallEvt = startResult as IntermediateToolCallEvent;
+      expect(toolCallEvt.type).toBe("tool_call");
+      expect(toolCallEvt.parameters).toEqual({ target: "repo" });
+    });
+
+    it("avoids retaining arguments past the matching start", () => {
+      const sessionId = "session-no-retain-1";
+
+      decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_once_1",
+              name: "one_time_tool",
+              arguments: { secretToken: "cached-val" },
+            },
+          ],
+        }),
+      );
+
+      // First start consumes and clears the cached arguments
+      const firstStart = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "tool_execution_start",
+          callId: "call_once_1",
+          toolName: "one_time_tool",
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(firstStart.parameters).toEqual({ secretToken: "cached-val" });
+
+      // Subsequent start for the same call ID does not retain the previous arguments
+      const secondStart = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "tool_execution_start",
+          callId: "call_once_1",
+          toolName: "one_time_tool",
+          args: { fallback: true },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(secondStart.parameters).toEqual({ fallback: true });
+    });
+
+    it("consistently normalizes assistant tool call IDs containing pipe characters for cache insertion and lookup", () => {
+      const sessionId = "session-pipe-id";
+      const rawPipeCallId = "call|tool|nested|999";
+
+      // Assistant message with pipe-delimited raw call ID
+      decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: rawPipeCallId,
+              name: "pipe_tool",
+              arguments: { recordList: [{ key: "k1", count: 42 }] },
+            },
+          ],
+        }),
+      );
+
+      // Execution start with the same pipe-delimited call ID
+      const startEvt = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "custom",
+          customType: "tool_execution_start",
+          data: {
+            toolCallId: rawPipeCallId,
+            toolName: "pipe_tool",
+            args: { truncated: true },
+          },
+        }),
+      ) as IntermediateToolCallEvent;
+
+      expect(startEvt.type).toBe("tool_call");
+      expect(startEvt.callId).toBe("call_tool_nested_999");
+      expect(startEvt.toolCallId).toBe("call_tool_nested_999");
+      expect(startEvt.parameters).toEqual({ recordList: [{ key: "k1", count: 42 }] });
+
+      const projected = projectToolParameters(startEvt.parameters);
+      expect(projected).toEqual({
+        [RESIN_PARAMETER_SHAPE_KEY]: {
+          recordList: [{ key: "string", count: "number" }],
+        },
+      });
+    });
+
+    it("distinguishes absent argument field from explicit empty arguments object/string", () => {
+      const sessionId = "session-absent-vs-empty";
+
+      // Case 1: Absent argument field in assistant message -> preserves marker fallback
+      decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_absent_args",
+              name: "absent_tool",
+            },
+          ],
+        }),
+      );
+
+      const absentStart = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "tool_execution_start",
+          callId: "call_absent_args",
+          toolName: "absent_tool",
+          args: { markerFallback: "kept" },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(absentStart.parameters).toEqual({ markerFallback: "kept" });
+
+      // Case 2: Explicit empty object -> authoritative explicit empty arguments override marker
+      decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_explicit_empty_obj",
+              name: "empty_tool",
+              arguments: {},
+            },
+          ],
+        }),
+      );
+
+      const emptyObjStart = decoder.decode(
+        makeRecord(sessionId, 4, {
+          type: "tool_execution_start",
+          callId: "call_explicit_empty_obj",
+          toolName: "empty_tool",
+          args: { markerFallback: "should_be_overridden" },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(emptyObjStart.parameters).toEqual({});
+
+      // Case 3: Explicit empty JSON string -> authoritative explicit empty arguments override marker
+      decoder.decode(
+        makeRecord(sessionId, 5, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_explicit_empty_str",
+              name: "empty_str_tool",
+              arguments: "{}",
+            },
+          ],
+        }),
+      );
+
+      const emptyStrStart = decoder.decode(
+        makeRecord(sessionId, 6, {
+          type: "tool_execution_start",
+          callId: "call_explicit_empty_str",
+          toolName: "empty_str_tool",
+          args: { markerFallback: "should_be_overridden" },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(emptyStrStart.parameters).toEqual({});
+    });
+
+    it("prevents colon-concatenation collisions and ensures collision-free session lifecycle cleanup", () => {
+      const collisionDecoder = new OmpRecordDecoder();
+
+      // Subtly colliding session/call ID combinations if colon concatenation were used:
+      // "session:alpha" + "beta" vs "session" + "alpha:beta" vs "session:alpha:beta" + "gamma"
+      const sess1 = "session:alpha";
+      const call1 = "beta";
+
+      const sess2 = "session";
+      const call2 = "alpha:beta";
+
+      const sess3 = "session:alpha:beta";
+      const call3 = "gamma";
+
+      // Populate assistant tool calls for all 3 ambiguous session/call ID combos
+      collisionDecoder.decode(
+        makeRecord(sess1, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: call1,
+              name: "tool_1",
+              arguments: { target: "session-alpha-beta" },
+            },
+          ],
+        }),
+      );
+
+      collisionDecoder.decode(
+        makeRecord(sess2, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: call2,
+              name: "tool_2",
+              arguments: { target: "session-alpha-colon-beta" },
+            },
+          ],
+        }),
+      );
+
+      collisionDecoder.decode(
+        makeRecord(sess3, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: call3,
+              name: "tool_3",
+              arguments: { target: "session-alpha-beta-gamma" },
+            },
+          ],
+        }),
+      );
+
+      // Terminate sess1 ("session:alpha")
+      collisionDecoder.decode(
+        makeRecord(sess1, 2, {
+          type: "session_lifecycle",
+          lifecycleType: "end",
+        }),
+      );
+
+      // sess1 cache should be cleared
+      const start1 = collisionDecoder.decode(
+        makeRecord(sess1, 3, {
+          type: "tool_execution_start",
+          callId: call1,
+          toolName: "tool_1",
+          args: { fallbackAfterEnd: true },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(start1.parameters).toEqual({ fallbackAfterEnd: true });
+
+      // sess2 ("session") must NOT be affected by sess1's termination
+      const start2 = collisionDecoder.decode(
+        makeRecord(sess2, 2, {
+          type: "tool_execution_start",
+          callId: call2,
+          toolName: "tool_2",
+          args: { fallback: false },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(start2.parameters).toEqual({ target: "session-alpha-colon-beta" });
+
+      // sess3 ("session:alpha:beta") must NOT be affected by sess1's termination
+      const start3 = collisionDecoder.decode(
+        makeRecord(sess3, 2, {
+          type: "tool_execution_start",
+          callId: call3,
+          toolName: "tool_3",
+          args: { fallback: false },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(start3.parameters).toEqual({ target: "session-alpha-beta-gamma" });
+    });
+    it("keeps authoritative arguments distinct when raw call IDs normalize identically", () => {
+      const collisionDecoder = new OmpRecordDecoder();
+      const sessionId = "session-normalized-id-collision";
+      collisionDecoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call|x",
+                name: "pipe_tool",
+                arguments: { target: "pipe" },
+              },
+              {
+                type: "toolCall",
+                id: "call?x",
+                name: "question_tool",
+                arguments: { target: "question" },
+              },
+            ],
+          },
+        }),
+      );
+
+      const pipeStart = collisionDecoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "tool_execution_start",
+          callId: "call|x",
+          toolName: "pipe_tool",
+        }),
+      ) as IntermediateToolCallEvent;
+      const questionStart = collisionDecoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "tool_execution_start",
+          callId: "call?x",
+          toolName: "question_tool",
+        }),
+      ) as IntermediateToolCallEvent;
+
+      expect(pipeStart.parameters).toEqual({ target: "pipe" });
+      expect(questionStart.parameters).toEqual({ target: "question" });
     });
   });
 });
