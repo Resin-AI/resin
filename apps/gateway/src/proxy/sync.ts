@@ -6,6 +6,7 @@ import {
   type ToolManifest,
   type V1ActivationCertificate,
   type V1LockedToolEntry,
+  V1LockedToolEntrySchema,
   type V1RevocationMetadata,
   type V1ToolLock,
   hashCanonicalContent,
@@ -381,7 +382,31 @@ export class CloudCatalogSyncCoordinator {
           status: "active",
         };
 
-        const result: ReconcileResult = this.lockManager.reconcileQualified(candidateEntry);
+        // One catalog entry that violates the lock contract (for example a legacy non-UUID
+        // tool id) must not prevent every other published tool from activating.
+        const contractCheck = V1LockedToolEntrySchema.safeParse(candidateEntry);
+        if (!contractCheck.success) {
+          this.options.onToolSyncError?.(
+            manifest.name,
+            new Error(
+              `Catalog entry for '${manifest.name}' cannot be locked: ${contractCheck.error.issues
+                .map((issue) => `${issue.path.join(".")} ${issue.message}`)
+                .join("; ")}`,
+            ),
+          );
+          continue;
+        }
+
+        let result: ReconcileResult;
+        try {
+          result = this.lockManager.reconcileQualified(candidateEntry);
+        } catch (reconcileError: unknown) {
+          this.options.onToolSyncError?.(
+            manifest.name,
+            reconcileError instanceof Error ? reconcileError : new Error(String(reconcileError)),
+          );
+          continue;
+        }
         if (result.outcome === "added") {
           currentLock = result.lock;
           this.options.onToolQualified?.(candidateEntry, "added");
