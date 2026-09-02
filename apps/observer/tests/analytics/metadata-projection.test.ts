@@ -587,6 +587,57 @@ describe("projectEventToMetadataOnly", () => {
       expect(NormalizedSessionEventSchema.safeParse(p).success).toBe(true);
     }
   });
+
+  it("projects event with metadata preserving scenarioId and stripping all other metadata keys", () => {
+    const original: NormalizedMessageEvent = {
+      ...createBaseHeaders(1),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: "scn-1", secret: "x" },
+    };
+
+    const projected = projectEventToMetadataOnly(original);
+    expect(projected.metadata).toEqual({ scenarioId: "scn-1" });
+    expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("projects event with no metadata falling back to sessionId", () => {
+    const original: NormalizedMessageEvent = {
+      ...createBaseHeaders(1),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+    };
+
+    const projected = projectEventToMetadataOnly(original);
+    expect(projected.metadata).toEqual({ scenarioId: original.sessionId });
+    expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("projects event falling back to sessionId when metadata.scenarioId is empty string or non-string", () => {
+    const emptyScenarioEvent: NormalizedMessageEvent = {
+      ...createBaseHeaders(1),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: "", secret: "x" },
+    };
+    const projectedEmpty = projectEventToMetadataOnly(emptyScenarioEvent);
+    expect(projectedEmpty.metadata).toEqual({ scenarioId: emptyScenarioEvent.sessionId });
+    expect(NormalizedSessionEventSchema.safeParse(projectedEmpty).success).toBe(true);
+
+    const nonStringScenarioEvent: NormalizedMessageEvent = {
+      ...createBaseHeaders(2),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: { scenarioId: 12345, secret: "x" },
+    };
+    const projectedNonString = projectEventToMetadataOnly(nonStringScenarioEvent);
+    expect(projectedNonString.metadata).toEqual({ scenarioId: nonStringScenarioEvent.sessionId });
+    expect(NormalizedSessionEventSchema.safeParse(projectedNonString).success).toBe(true);
+  });
 });
 
 describe("extractParameterShape", () => {

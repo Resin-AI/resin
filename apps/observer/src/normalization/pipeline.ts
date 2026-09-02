@@ -282,15 +282,18 @@ export class NormalizationPipeline {
     const eventId = generateDeterministicEventId(sessionId, causalSequence, eventBodyForHashing);
 
     const metadataParsed = z.record(z.unknown()).safeParse(metadata);
-    let mergedMetadata: JsonObject | undefined;
-    if (metadataParsed.success || context?.customMetadata) {
-      mergedMetadata = {};
-      if (metadataParsed.success) {
-        Object.assign(mergedMetadata, metadataParsed.data);
-      }
-      if (context?.customMetadata) {
-        Object.assign(mergedMetadata, context.customMetadata);
-      }
+    const mergedMetadata: JsonObject = {};
+    if (metadataParsed.success) {
+      Object.assign(mergedMetadata, metadataParsed.data);
+    }
+    if (context?.customMetadata) {
+      Object.assign(mergedMetadata, context.customMetadata);
+    }
+    // Every normal session is its own evolution scenario. Cloud recurrence analysis keys
+    // evidence by scenarioId, so day-to-day sessions must carry one without any harness
+    // or test-harness tagging. An explicitly supplied scenarioId is preserved.
+    if (typeof mergedMetadata.scenarioId !== "string" || mergedMetadata.scenarioId.length === 0) {
+      mergedMetadata.scenarioId = sessionId;
     }
 
     const fullEventCandidate = {
