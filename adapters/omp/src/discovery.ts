@@ -15,6 +15,7 @@ import type {
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
+const ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 60_000;
 
 export interface OmpBreadcrumb {
   sessionId: string;
@@ -568,7 +569,7 @@ export async function inspectTranscriptFile(
           : Date.now();
     const ageMs = now - mtimeMs;
 
-    if (options?.activeOnly && ageMs > 60_000) {
+    if (options?.activeOnly && ageMs > ACTIVE_ONLY_TERMINAL_GRACE_MS) {
       return null;
     }
 

@@ -692,7 +692,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });
-  it("skips full inspection and does not open stale transcript files in activeOnly mode", async () => {
+  it("skips full inspection for transcripts outside the active-only terminal grace window", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-active-only-"));
     try {
       const ompHome = path.join(tmpDir, ".omp");
@@ -702,7 +702,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       await fsp.mkdir(sessionsDir, { recursive: true });
 
       const staleTranscriptPath = path.join(sessionsDir, "stale-session.jsonl");
-      const staleTime = new Date(Date.now() - 300_000);
+      const staleTime = new Date(Date.now() - 600_000);
       await fsp.writeFile(
         staleTranscriptPath,
         `${[
@@ -718,7 +718,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       await fsp.utimes(staleTranscriptPath, staleTime, staleTime);
 
       const activeTranscriptPath = path.join(sessionsDir, "active-session.jsonl");
-      const activeTime = new Date();
+      const activeTime = staleTime; // Old session identity; the fresh file mtime represents new activity.
       await fsp.writeFile(
         activeTranscriptPath,
         `${[

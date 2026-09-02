@@ -326,7 +326,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
     }
   });
 
-  it("resolves active sessions with 60s mtime grace and explicit lifecycle override", async () => {
+  it("resolves active sessions and retains recent completed sessions for transition delivery", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-active-"));
     try {
       const ompHome = path.join(tmpDir, ".omp");
@@ -350,9 +350,9 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
         ].join("\n")}\n`,
       );
 
-      // Stale session (>60s old)
+      // Recently stale session (>60s old) remains discoverable long enough to report completion.
       const staleTranscript = path.join(sessionsDir, "stale.jsonl");
-      const staleTime = new Date(Date.now() - 300_000); // 5 mins ago
+      const staleTime = new Date(Date.now() - 90_000);
       await fsp.writeFile(
         staleTranscript,
         `${[
@@ -379,6 +379,10 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       expect(activeSession).not.toBeNull();
       expect(activeSession?.sessionId).toBe("sess-active");
       expect(activeSession?.status).toBe("active");
+
+      const sessions = await adapter.listSessions(workspace);
+      const staleSession = sessions.find((session) => session.sessionId === "sess-stale");
+      expect(staleSession?.status).toBe("completed");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
@@ -459,8 +463,8 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       const sessionsDir = path.join(ompHome, "agent", "sessions", "-active-only-project");
       await fsp.mkdir(sessionsDir, { recursive: true });
 
-      // Create 2,006 stale ISO-timestamped session files
-      const baseStaleTime = Date.now() - 300_000;
+      // Create 2,006 transcripts outside the active-only terminal grace window.
+      const baseStaleTime = Date.now() - 600_000;
       const filePromises: Promise<void>[] = [];
       for (let i = 0; i < 2006; i++) {
         const fileTime = new Date(baseStaleTime - i * 1000);
