@@ -324,7 +324,12 @@ export class CatalogRefreshCoordinator {
       requiresSessionRestart: false,
     };
     // 1. Native MCP list_changed notification
-    if (capabilities.supportsNativeListChange && conn.isInitialized) {
+    if (
+      capabilities.supportsNativeListChange &&
+      conn.isInitialized &&
+      conn.hasReceivedInitializedNotification &&
+      !conn.isClosed
+    ) {
       try {
         const notification: JsonRpcNotification = {
           jsonrpc: "2.0",

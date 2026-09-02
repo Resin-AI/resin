@@ -154,6 +154,7 @@ export interface FakeConnectionOptions {
   cwd?: string;
   supportsListChanged?: boolean;
   isInitialized?: boolean;
+  hasReceivedInitializedNotification?: boolean;
   onNotification?: (msg: JsonRpcNotification) => void;
 }
 
@@ -179,6 +180,7 @@ export function createMockConnection(options: FakeConnectionOptions = {}) {
     harnessId,
     workspaceContext,
     isInitialized: options.isInitialized ?? true,
+    hasReceivedInitializedNotification: options.hasReceivedInitializedNotification ?? true,
     isClosed: false,
     clientCapabilities: {
       roots: { listChanged: true },
