@@ -1,4 +1,4 @@
-import type { ToolManifest } from "@resin/contracts";
+import type { InvocationRecord, ToolManifest } from "@resin/contracts";
 import {
   CapabilityManifestSchema,
   ToolLimitConfigSchema,
@@ -308,6 +308,7 @@ export function createSystemMetaTools(
   registry: ToolRegistry,
   invocationRouter?: ToolInvocationRouter,
   safetyGateEvaluator?: SafetyGateEvaluator,
+  onInvocationRecorded?: (record: InvocationRecord) => Promise<void>,
 ): RegistryTool[] {
   const router = invocationRouter ?? new DefaultToolInvocationRouter(registry);
 
@@ -352,7 +353,7 @@ export function createSystemMetaTools(
     // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
     parameters: INVOKE_TOOL_MANIFEST.parameters as JsonRpcParams,
     manifest: INVOKE_TOOL_MANIFEST,
-    handler: createInvokeToolHandler(registry, router, safetyGateEvaluator),
+    handler: createInvokeToolHandler(registry, router, safetyGateEvaluator, onInvocationRecorded),
     isSystem: true,
   };
 

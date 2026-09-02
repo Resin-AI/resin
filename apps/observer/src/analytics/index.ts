@@ -40,3 +40,8 @@ export {
   type ParameterShapeDescriptor,
   type ParameterShapeOptions,
 } from "./metadata-projection.js";
+
+export {
+  type InvocationTelemetryUploaderOptions,
+  InvocationTelemetryUploader,
+} from "./invocation-telemetry-uploader.js";

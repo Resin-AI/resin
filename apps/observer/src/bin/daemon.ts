@@ -1067,7 +1067,11 @@ async function runForeground(options: {
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),
   });
-  const cloudRuntimeModule = new CloudRuntimeModule({ credentialStore });
+  const cloudRuntimeModule = new CloudRuntimeModule({
+    credentialStore,
+    auditRepository: stateStore.audit,
+    logger,
+  });
   supervisor.registerModule(cloudRuntimeModule);
   const deviceTelemetryEnabled = resolveDeviceTelemetryEnabled(
     config.telemetryEnabled,

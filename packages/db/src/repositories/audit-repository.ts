@@ -165,6 +165,55 @@ export class AuditRepository {
     );
   }
 
+  listPendingInvocationUploads(limit: number): InvocationRecord[] {
+    const sql =
+      "SELECT * FROM invocation_records WHERE uploaded_at IS NULL ORDER BY started_at ASC LIMIT ?;";
+    const rows = this.conn.all<{
+      invocation_id: string;
+      session_id: string;
+      workspace_id: string;
+      tool_id: string;
+      tool_version: string;
+      started_at: string;
+      completed_at: string;
+      duration_ms: number;
+      status: "success" | "error" | "timeout" | "rejected_capability";
+      input_digest: string;
+      output_digest: string | null;
+      error_details_json: string | null;
+      resource_usage_json: string | null;
+    }>(sql, [limit]);
+
+    return rows.map((row) =>
+      InvocationRecordSchema.parse({
+        invocationId: row.invocation_id,
+        sessionId: row.session_id,
+        workspaceId: row.workspace_id,
+        toolId: row.tool_id,
+        toolVersion: row.tool_version,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        durationMs: row.duration_ms,
+        status: row.status,
+        inputDigest: row.input_digest,
+        outputDigest: row.output_digest ?? undefined,
+        errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
+        resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
+      }),
+    );
+  }
+
+  markInvocationsUploaded(invocationIds: string[], uploadedAt: string): void {
+    if (invocationIds.length === 0) {
+      return;
+    }
+    const placeholders = invocationIds.map(() => "?").join(", ");
+    this.conn.run(
+      `UPDATE invocation_records SET uploaded_at = ? WHERE invocation_id IN (${placeholders});`,
+      [uploadedAt, ...invocationIds],
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Audit Records
   // ---------------------------------------------------------------------------

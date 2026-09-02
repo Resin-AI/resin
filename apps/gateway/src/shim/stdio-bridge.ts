@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import type { SecretManager } from "@resin/crypto";
-import { type CloudCredentialStore, getDaemonPaths } from "@resin/observer";
+import { LocalDatabaseConnection } from "@resin/db";
+import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
 import { LocalMcpGateway } from "../gateway.js";
-import { createSystemMetaTools } from "../meta/index.js";
+import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
 import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../proxy/runtime.js";
 import { ToolRegistry } from "../registry/registry.js";
 import type { ToolRegistryDatabaseOption } from "../registry/types.js";
@@ -232,6 +234,40 @@ export class McpStdioShim {
     let router: GatewayRouter;
     let registry: ToolRegistry | undefined;
 
+    // Retain or open database connection once for standalone lifetime
+    let dbConn: LocalDatabaseConnection | undefined;
+    if (this.options.db instanceof LocalDatabaseConnection) {
+      dbConn = this.options.db;
+    } else if (
+      this.options.db &&
+      "run" in this.options.db &&
+      "get" in this.options.db &&
+      "all" in this.options.db &&
+      typeof this.options.db.run === "function"
+    ) {
+      dbConn = this.options.db as LocalDatabaseConnection;
+    } else if (
+      this.options.stateStore &&
+      "conn" in this.options.stateStore &&
+      this.options.stateStore.conn instanceof LocalDatabaseConnection
+    ) {
+      dbConn = this.options.stateStore.conn;
+    } else if (!this.options.db && !this.options.stateStore && !this.options.toolRepo) {
+      try {
+        const paths = resolvePaths({ home: this.options.home });
+        const dbPath = path.join(paths.dataDir, "state.db");
+        if (fs.existsSync(dbPath)) {
+          dbConn = new LocalDatabaseConnection({ path: dbPath });
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    const onInvocationRecorded = dbConn
+      ? createInvocationRecorder({ db: dbConn, harnessId: this.harnessId })
+      : undefined;
+
     if (this.options.router) {
       router = this.options.router;
       if (this.options.registry) {
@@ -241,15 +277,19 @@ export class McpStdioShim {
       registry = this.options.registry;
       router = createRegistryGatewayRouter(this.options.registry);
     } else {
-      const db = this.options.db ?? this.options.stateStore ?? this.options.toolRepo;
-      registry = new ToolRegistry({ db });
-      const systemMetaTools = createSystemMetaTools(registry);
+      const db = dbConn ?? this.options.db ?? this.options.stateStore ?? this.options.toolRepo;
+      registry = new ToolRegistry({ db, onInvocationRecorded });
+      const systemMetaTools = createSystemMetaTools(
+        registry,
+        undefined,
+        undefined,
+        onInvocationRecorded,
+      );
       for (const tool of systemMetaTools) {
         registry.registerToolSync(tool);
       }
       router = createRegistryGatewayRouter(registry);
     }
-
     if (registry) {
       try {
         await registry.hydrateFromStore();

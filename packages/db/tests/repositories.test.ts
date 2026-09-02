@@ -661,4 +661,73 @@ describe("Repositories End-to-End Round-Trip & Operations", () => {
 
     store.close();
   });
+
+  it("audit repository lists pending invocation uploads ordered by started_at and marks them uploaded", async () => {
+    const store = await createInMemoryStateStore();
+    await store.sessions.saveSession({
+      sessionId: "ses_telemetry_test",
+      harnessId: "claude-code",
+      status: "active",
+      startedAt: "2026-08-17T14:00:00.000Z",
+    });
+
+    const inv1: InvocationRecord = {
+      invocationId: "inv_001_earlier",
+      sessionId: "ses_telemetry_test",
+      workspaceId: "ws_telemetry_test",
+      toolId: "tool_a",
+      toolVersion: "1.0.0",
+      startedAt: "2026-08-17T14:01:00.000Z",
+      completedAt: "2026-08-17T14:01:01.000Z",
+      durationMs: 1000,
+      status: "success",
+      inputDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+
+    const inv2: InvocationRecord = {
+      invocationId: "inv_002_later",
+      sessionId: "ses_telemetry_test",
+      workspaceId: "ws_telemetry_test",
+      toolId: "tool_b",
+      toolVersion: "1.0.0",
+      startedAt: "2026-08-17T14:05:00.000Z",
+      completedAt: "2026-08-17T14:05:01.000Z",
+      durationMs: 1000,
+      status: "success",
+      inputDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+
+    await store.audit.recordInvocation(inv2);
+    await store.audit.recordInvocation(inv1);
+
+    // Verify listPendingInvocationUploads respects order by started_at ASC
+    const pendingAll = store.audit.listPendingInvocationUploads(10);
+    expect(pendingAll).toHaveLength(2);
+    expect(pendingAll[0].invocationId).toBe("inv_001_earlier");
+    expect(pendingAll[1].invocationId).toBe("inv_002_later");
+
+    // Verify limit works
+    const pendingLimit1 = store.audit.listPendingInvocationUploads(1);
+    expect(pendingLimit1).toHaveLength(1);
+    expect(pendingLimit1[0].invocationId).toBe("inv_001_earlier");
+
+    // Mark first as uploaded
+    const uploadedAt = "2026-08-17T14:10:00.000Z";
+    store.audit.markInvocationsUploaded(["inv_001_earlier"], uploadedAt);
+
+    // Verify only inv2 remains pending
+    const pendingAfter = store.audit.listPendingInvocationUploads(10);
+    expect(pendingAfter).toHaveLength(1);
+    expect(pendingAfter[0].invocationId).toBe("inv_002_later");
+
+    // Mark remaining with empty array check (no-op)
+    store.audit.markInvocationsUploaded([], uploadedAt);
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
+
+    // Mark inv2 uploaded
+    store.audit.markInvocationsUploaded(["inv_002_later"], uploadedAt);
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+
+    store.close();
+  });
 });

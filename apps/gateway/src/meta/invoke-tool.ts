@@ -1,4 +1,10 @@
-import { isSafetyGateBypassTool } from "@resin/contracts";
+import { randomUUID } from "node:crypto";
+import process from "node:process";
+import {
+  type InvocationRecord,
+  hashCanonicalContent,
+  isSafetyGateBypassTool,
+} from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -7,6 +13,7 @@ import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
+import { isSystemMetaTool } from "./system-tools.js";
 import { validateParameters } from "./validator-helper.js";
 
 export interface InvokeToolParams {
@@ -17,6 +24,11 @@ export interface InvokeToolParams {
   arguments?: JsonRpcParams;
   version?: string;
   timeout_ms?: number;
+}
+
+export interface CreateInvokeToolHandlerOptions {
+  safetyGateEvaluator?: SafetyGateEvaluator;
+  onInvocationRecorded?: (record: InvocationRecord) => Promise<void>;
 }
 
 function normalizeIdentifier(value: JsonRpcParamValue | undefined): string | undefined {
@@ -43,13 +55,31 @@ function isSameLogicalTool(left: RegistryTool, right: RegistryTool): boolean {
 export function createInvokeToolHandler(
   registry: ToolRegistry,
   invocationRouter: ToolInvocationRouter,
-  safetyGateEvaluator?: SafetyGateEvaluator,
+  safetyGateEvaluatorOrOptions?: SafetyGateEvaluator | CreateInvokeToolHandlerOptions,
+  onInvocationRecordedHook?: (record: InvocationRecord) => Promise<void>,
 ): ToolHandler {
+  let safetyGateEvaluator: SafetyGateEvaluator | undefined;
+  let onInvocationRecorded: ((record: InvocationRecord) => Promise<void>) | undefined =
+    onInvocationRecordedHook;
+
+  if (safetyGateEvaluatorOrOptions) {
+    if ("canExecuteTool" in safetyGateEvaluatorOrOptions) {
+      safetyGateEvaluator = safetyGateEvaluatorOrOptions;
+    } else {
+      safetyGateEvaluator = safetyGateEvaluatorOrOptions.safetyGateEvaluator;
+      if (!onInvocationRecorded) {
+        onInvocationRecorded = safetyGateEvaluatorOrOptions.onInvocationRecorded;
+      }
+    }
+  }
+
   return async (
     context: WorkspaceContext,
     params: JsonRpcParams,
     options?: ToolCallOptions,
   ): Promise<CallToolResult> => {
+    const startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
     const publicName = normalizeIdentifier(params.name) ?? normalizeIdentifier(params.tool_name);
     const toolId = normalizeIdentifier(params.toolId);
     const displayIdentifier = publicName ?? toolId;
@@ -140,6 +170,86 @@ export function createInvokeToolHandler(
         ],
       };
     }
+    const isMetaTool = Boolean(
+      resolvedTool.isSystem ||
+        resolvedTool.scope === "system" ||
+        isSystemMetaTool(resolvedTool.toolId) ||
+        isSystemMetaTool(resolvedTool.name),
+    );
+    const recordedToolId = resolvedTool.toolId;
+    const recordedToolVersion = resolvedTool.version;
+
+    const recordInvocation = (
+      status: "success" | "error" | "timeout" | "rejected_capability",
+      result?: CallToolResult,
+      errorMessage?: string,
+    ) => {
+      if (!onInvocationRecorded || isMetaTool) {
+        return;
+      }
+      try {
+        const completedTime = Date.now();
+        const completedAt = new Date(completedTime).toISOString();
+        const durationMs = Math.max(0, completedTime - startTime);
+        const semVerRegex =
+          /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+        const toolVersion =
+          recordedToolVersion && semVerRegex.test(recordedToolVersion)
+            ? recordedToolVersion
+            : "1.0.0";
+        const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
+        const inputDigest = hashCanonicalContent(targetParams);
+        const outputDigest = result ? hashCanonicalContent(result) : undefined;
+        const invocationId = `inv_${randomUUID().replace(/-/g, "")}`;
+
+        const record: InvocationRecord = {
+          invocationId,
+          sessionId,
+          workspaceId: context.workspaceId,
+          toolId: recordedToolId,
+          toolVersion,
+          startedAt,
+          completedAt,
+          durationMs,
+          status,
+          inputDigest,
+          ...(outputDigest ? { outputDigest } : {}),
+          ...(errorMessage
+            ? {
+                errorDetails: {
+                  errorType:
+                    status === "timeout"
+                      ? "TimeoutError"
+                      : status === "rejected_capability"
+                        ? "SafetyGateRefusal"
+                        : "ToolExecutionError",
+                  message: errorMessage,
+                },
+              }
+            : {}),
+        };
+
+        Promise.resolve()
+          .then(() => onInvocationRecorded(record))
+          .catch((err) => {
+            try {
+              process.stderr.write(
+                `[invoke-tool] Failed to record invocation: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+              );
+            } catch {
+              // Ignore write errors to closed stderr
+            }
+          });
+      } catch (err) {
+        try {
+          process.stderr.write(
+            `[invoke-tool] Failed to construct invocation record: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+          );
+        } catch {
+          // Ignore write errors to closed stderr
+        }
+      }
+    };
 
     const requestedVersion = normalizeIdentifier(params.version);
     if (requestedVersion) {
@@ -147,7 +257,7 @@ export function createInvokeToolHandler(
         registry.getToolVersion(resolvedTool.toolId, requestedVersion) ??
         (publicName ? registry.getToolVersion(publicName, requestedVersion) : undefined);
       if (!explicitVersion || !isToolInScope(explicitVersion, context)) {
-        return {
+        const res: CallToolResult = {
           isError: true,
           content: [
             {
@@ -156,6 +266,12 @@ export function createInvokeToolHandler(
             },
           ],
         };
+        recordInvocation(
+          "error",
+          res,
+          `Version '${requestedVersion}' of tool '${displayIdentifier}' not found or not accessible.`,
+        );
+        return res;
       }
       resolvedTool = explicitVersion;
     }
@@ -163,7 +279,7 @@ export function createInvokeToolHandler(
     const isDisabled =
       controls.disabledTools.includes(resolvedTool.toolId) && !resolvedTool.isSystem;
     if (isDisabled) {
-      return {
+      const res: CallToolResult = {
         isError: true,
         content: [
           {
@@ -172,6 +288,8 @@ export function createInvokeToolHandler(
           },
         ],
       };
+      recordInvocation("error", res, `Tool '${resolvedTool.name}' is disabled.`);
+      return res;
     }
 
     if (
@@ -195,18 +313,20 @@ export function createInvokeToolHandler(
           evaluatedAt: gateCheck.refusal.evaluatedAt,
           content: gateCheck.refusal.content,
         };
-        return {
+        const res: CallToolResult = {
           isError: true,
           content: gateCheck.refusal.content,
           _meta: { refusal },
         };
+        recordInvocation("rejected_capability", res, gateCheck.refusal.refusalReason);
+        return res;
       }
     }
 
     const paramSchema = resolvedTool.parameters ?? resolvedTool.manifest?.parameters;
     const validation = validateParameters(paramSchema, targetParams);
     if (!validation.valid) {
-      return {
+      const res: CallToolResult = {
         isError: true,
         content: [
           {
@@ -215,6 +335,8 @@ export function createInvokeToolHandler(
           },
         ],
       };
+      recordInvocation("error", res, validation.errors.join("; "));
+      return res;
     }
 
     const timeoutMs =
@@ -244,7 +366,7 @@ export function createInvokeToolHandler(
     if (parentSignal) {
       if (parentSignal.aborted) {
         clearTimeout(timerId);
-        return {
+        const res: CallToolResult = {
           isError: true,
           content: [
             {
@@ -253,12 +375,14 @@ export function createInvokeToolHandler(
             },
           ],
         };
+        recordInvocation("error", res, "Tool invocation was cancelled.");
+        return res;
       }
       parentSignal.addEventListener("abort", onParentAbort, { once: true });
     }
 
     try {
-      return await invocationRouter.invoke({
+      const result = await invocationRouter.invoke({
         toolId: resolvedTool.toolId,
         name: resolvedTool.name,
         version: resolvedTool.version,
@@ -269,9 +393,16 @@ export function createInvokeToolHandler(
         onProgress: options?.onProgress,
         timeoutMs,
       });
+      const status = result.isError
+        ? result._meta?.refusal
+          ? "rejected_capability"
+          : "error"
+        : "success";
+      recordInvocation(status, result);
+      return result;
     } catch (error) {
       if (timedOut) {
-        return {
+        const res: CallToolResult = {
           isError: true,
           content: [
             {
@@ -280,9 +411,15 @@ export function createInvokeToolHandler(
             },
           ],
         };
+        recordInvocation(
+          "timeout",
+          res,
+          `Tool '${resolvedTool.name}' timed out after ${timeoutMs}ms.`,
+        );
+        return res;
       }
       if (abortController.signal.aborted || parentSignal?.aborted) {
-        return {
+        const res: CallToolResult = {
           isError: true,
           content: [
             {
@@ -291,9 +428,11 @@ export function createInvokeToolHandler(
             },
           ],
         };
+        recordInvocation("error", res, "Tool invocation was cancelled.");
+        return res;
       }
       const message = error instanceof Error ? error.message : String(error);
-      return {
+      const res: CallToolResult = {
         isError: true,
         content: [
           {
@@ -302,6 +441,8 @@ export function createInvokeToolHandler(
           },
         ],
       };
+      recordInvocation("error", res, message);
+      return res;
     } finally {
       clearTimeout(timerId);
       if (parentSignal) {

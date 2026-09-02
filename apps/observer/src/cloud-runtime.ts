@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import {
   ISOTimestampSchema,
   IdentifierSchema,
+  type InvocationRecord,
   type NormalizedSessionEvent,
   Sha256DigestSchema,
 } from "@resin/contracts";
+import type { AuditRepository } from "@resin/db";
 import {
   type ArtifactDownloadOptions,
   type DownloadedArtifact,
@@ -19,6 +22,11 @@ import {
   type ProtocolErrorDetailRecord,
   type ProtocolErrorDetailValue,
   RateLimitedError,
+  type TelemetryBatchRequest,
+  TelemetryBatchRequestSchema,
+  type TelemetryBatchResponse,
+  TelemetryBatchResponseSchema,
+  type TelemetryMetric,
 } from "@resin/protocol";
 import { z } from "zod";
 import {
@@ -63,6 +71,7 @@ export {
   type AuthRecoveryControllerOptions,
   type AuthRecoveryStatus,
 } from "./auth-recovery.js";
+import { InvocationTelemetryUploader } from "./analytics/invocation-telemetry-uploader.js";
 import { CloudJobClient, parseRetryAfterHeader } from "./cloud-job-client.js";
 import type { DaemonConfig } from "./config.js";
 import type {
@@ -199,6 +208,14 @@ export type SendTrajectoryObservationBatchInput =
   | { observations: TrajectoryObservation[] }
   | TrajectoryObservation[];
 
+export interface SendTelemetryBatchInput {
+  workspaceId: string;
+  invocations: InvocationRecord[];
+  metrics?: TelemetryMetric[];
+  deviceId?: string;
+  installationId?: string;
+}
+
 export interface CloudObservationClientOptions {
   credentialStore?: CloudCredentialStore;
   identityProvider?: (options?: { forceRefresh?: boolean }) => Promise<CloudRequestIdentity | null>;
@@ -294,7 +311,7 @@ export class CloudObservationClient {
   }
 
   private async requireIdentity(
-    purpose: "observations" | "trajectory observations",
+    purpose: "observations" | "trajectory observations" | "telemetry",
   ): Promise<CloudRequestIdentity> {
     if (this.credentialStore) {
       const credentialState = await this.credentialStore.load();
@@ -577,6 +594,90 @@ export class CloudObservationClient {
   }
 
   /**
+   * Transmits a validated batch of invocation records and performance telemetry
+   * to the paired Resin Cloud origin at /v1/telemetry/batch.
+   */
+  async sendTelemetryBatch(input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> {
+    const identity = await this.requireIdentity("telemetry");
+    return this.executeSendTelemetryBatch(input, identity, false);
+  }
+
+  private async executeSendTelemetryBatch(
+    input: SendTelemetryBatchInput,
+    identity: CloudRequestIdentity,
+    isRetry: boolean,
+  ): Promise<TelemetryBatchResponse> {
+    const workspaceId = input.workspaceId ?? identity.workspaceId;
+    const deviceId = input.deviceId ?? identity.deviceId;
+    const installationId = input.installationId ?? identity.installationId;
+    const batchId = `tb_${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+
+    const requestPayload: TelemetryBatchRequest = {
+      batchId,
+      deviceId,
+      installationId,
+      workspaceId,
+      timestamp,
+      invocations: input.invocations,
+      metrics: input.metrics ?? [],
+    };
+
+    // Strictly validate against wire schema before sending
+    TelemetryBatchRequestSchema.parse(requestPayload);
+
+    const endpoint = `${identity.cloudUrl.replace(/\/+$/, "")}/v1/telemetry/batch`;
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${identity.accessToken}`,
+          "x-account-id": identity.accountId,
+          "x-workspace-id": identity.workspaceId,
+          "x-device-id": identity.deviceId,
+          "x-installation-id": identity.installationId,
+          "x-protocol-version": PROTOCOL_VERSION,
+        },
+        body: JSON.stringify(requestPayload),
+      });
+    } catch (error) {
+      const refreshedIdentity = await this.recoverFromAuthError(error, identity, isRetry);
+      if (refreshedIdentity) {
+        return this.executeSendTelemetryBatch(input, refreshedIdentity, true);
+      }
+      throw new ProtocolError(
+        "retryable",
+        "Failed to transmit telemetry batch: cloud origin unreachable",
+      );
+    }
+
+    const refreshedIdentity = await this.recoverFromAuthResponse(response, identity, isRetry);
+    if (refreshedIdentity) {
+      return this.executeSendTelemetryBatch(input, refreshedIdentity, true);
+    }
+
+    if (!response.ok) {
+      throw new ProtocolError(
+        response.status >= 500 ? "retryable" : "validation",
+        `Telemetry batch request failed with HTTP ${response.status}`,
+        { status: response.status },
+      );
+    }
+
+    let responseJson: unknown;
+    try {
+      responseJson = await response.json();
+    } catch {
+      throw new ProtocolError("validation", "Failed to parse telemetry response JSON");
+    }
+
+    return TelemetryBatchResponseSchema.parse(responseJson);
+  }
+
+  /**
    * Dispatches an observation batch and, if an async job is returned (jobId / statusUrl),
    * polls the job to completion and downloads verified result/tool artifacts.
    *
@@ -649,6 +750,9 @@ export interface CloudRuntimeModuleOptions {
   credentialStore?: CloudCredentialStore;
   authRecoveryController?: AuthRecoveryController;
   fetchImpl?: typeof fetch;
+  auditRepository?: AuditRepository;
+  telemetryUploader?: InvocationTelemetryUploader;
+  logger?: Logger;
 }
 
 /**
@@ -664,6 +768,7 @@ export class CloudRuntimeModule implements DaemonModule {
   private state: ModuleLifecycleState = "uninitialized";
   private readonly credentialStore: CloudCredentialStore;
   private readonly observationClient: CloudObservationClient;
+  private readonly telemetryUploader?: InvocationTelemetryUploader;
   private refreshTimer: NodeJS.Timeout | null = null;
   private logger?: Logger;
   private lastLoadResult: CloudCredentialLoadResult = { status: "missing" };
@@ -675,6 +780,21 @@ export class CloudRuntimeModule implements DaemonModule {
       authRecoveryController: options.authRecoveryController,
       fetchImpl: options.fetchImpl,
     });
+    this.logger = options.logger;
+    if (options.telemetryUploader) {
+      this.telemetryUploader = options.telemetryUploader;
+    } else if (options.auditRepository) {
+      this.telemetryUploader = new InvocationTelemetryUploader({
+        auditRepository: options.auditRepository,
+        cloudClient: this.observationClient,
+        logger: {
+          debug: (msg, meta) => this.logger?.debug(msg, meta),
+          info: (msg, meta) => this.logger?.info(msg, meta),
+          warn: (msg, meta) => this.logger?.warn(msg, meta),
+          error: (msg, meta) => this.logger?.error(msg, meta),
+        },
+      });
+    }
   }
 
   getCredentialStore(): CloudCredentialStore {
@@ -693,6 +813,10 @@ export class CloudRuntimeModule implements DaemonModule {
     return this.observationClient.getAuthRecoverySnapshot();
   }
 
+  getTelemetryUploader(): InvocationTelemetryUploader | undefined {
+    return this.telemetryUploader;
+  }
+
   getState(): ModuleLifecycleState {
     return this.state;
   }
@@ -704,6 +828,10 @@ export class CloudRuntimeModule implements DaemonModule {
     await this.refreshCredentialsState();
     this.scheduleProactiveRefresh();
 
+    if (this.lastLoadResult.status === "valid") {
+      this.telemetryUploader?.start();
+    }
+
     this.state = "ready";
   }
 
@@ -713,10 +841,10 @@ export class CloudRuntimeModule implements DaemonModule {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
+    this.telemetryUploader?.stop();
     this.observationClient.dispose();
     this.state = "stopped";
   }
-
   async reloadConfig(_newConfig: DaemonConfig): Promise<void> {
     await this.refreshCredentialsState();
     this.scheduleProactiveRefresh();
@@ -836,18 +964,30 @@ export class CloudRuntimeModule implements DaemonModule {
       }
 
       if (this.lastLoadResult.status === "valid") {
-        this.logger?.info("Cloud credentials loaded successfully", {
-          cloudUrl: this.lastLoadResult.credentials?.cloudUrl,
-          workspaceId: this.lastLoadResult.credentials?.workspaceId,
-        });
-      } else if (this.lastLoadResult.status === "missing") {
-        this.logger?.info("No cloud credentials found; operating in local-only mode");
+        if (this.state === "ready" || this.state === "starting") {
+          this.telemetryUploader?.start();
+        }
+        if (emitLogs) {
+          this.logger?.info("Cloud credentials loaded successfully", {
+            cloudUrl: this.lastLoadResult.credentials?.cloudUrl,
+            workspaceId: this.lastLoadResult.credentials?.workspaceId,
+          });
+        }
       } else {
-        this.logger?.warn("Cloud credentials in non-ready state", {
-          status: this.lastLoadResult.status,
-        });
+        this.telemetryUploader?.stop();
+        if (!emitLogs) {
+          return;
+        }
+        if (this.lastLoadResult.status === "missing") {
+          this.logger?.info("No cloud credentials found; operating in local-only mode");
+        } else {
+          this.logger?.warn("Cloud credentials in non-ready state", {
+            status: this.lastLoadResult.status,
+          });
+        }
       }
     } catch {
+      this.telemetryUploader?.stop();
       this.lastLoadResult = {
         status: "invalid",
         reason: "Credential state could not be loaded",
@@ -858,7 +998,6 @@ export class CloudRuntimeModule implements DaemonModule {
       }
     }
   }
-
   private scheduleProactiveRefresh(): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);

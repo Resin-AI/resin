@@ -1,3 +1,4 @@
+import type { InvocationRecord } from "@resin/contracts";
 import { PROTOCOL_VERSION, ProtocolError, RateLimitedError } from "@resin/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
@@ -50,6 +51,22 @@ function makeValidObservation(
     },
     observedAt: "2026-08-27T10:00:00.000Z",
     digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ...overrides,
+  };
+}
+
+function makeValidInvocationRecord(overrides: Partial<InvocationRecord> = {}): InvocationRecord {
+  return {
+    invocationId: "inv-test-001",
+    sessionId: "ses-test-001",
+    workspaceId: "ws-test-1",
+    toolId: "test_tool",
+    toolVersion: "1.0.0",
+    startedAt: "2026-08-27T10:00:00.000Z",
+    completedAt: "2026-08-27T10:00:01.500Z",
+    durationMs: 1500,
+    status: "success",
+    inputDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ...overrides,
   };
 }
@@ -610,5 +627,139 @@ describe("CloudObservationClient.sendTrajectoryObservationBatch", () => {
     await expect(client.sendTrajectoryObservationBatch([makeValidObservation()])).rejects.toThrow(
       /Cannot send trajectory observations: no valid cloud credentials/i,
     );
+  });
+});
+
+describe("CloudObservationClient.sendTelemetryBatch", () => {
+  it("transmits telemetry batch with exact path, POST method, headers, and json body", async () => {
+    const identity = makeTestIdentity({
+      cloudUrl: "https://api.resin.local///",
+      accountId: "acc-tele-1",
+      workspaceId: "ws-tele-1",
+      deviceId: "dev-tele-1",
+      installationId: "inst-tele-1",
+      accessToken: "token-tele-valid",
+    });
+    const inv = makeValidInvocationRecord();
+
+    let capturedUrl = "";
+    let capturedMethod = "";
+    let capturedBody = "";
+    let capturedHeaders: Record<string, string> = {};
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      capturedUrl = url;
+      capturedMethod = init?.method ?? "";
+      capturedBody = init?.body as string;
+      capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+
+      return new Response(
+        JSON.stringify({
+          batchId: "tb-response-1",
+          status: "accepted",
+          processedCount: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudObservationClient({
+      identityProvider: async () => identity,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    const result = await client.sendTelemetryBatch({
+      workspaceId: "ws-tele-1",
+      invocations: [inv],
+    });
+
+    expect(result).toEqual({
+      batchId: "tb-response-1",
+      status: "accepted",
+      processedCount: 1,
+    });
+    expect(capturedUrl).toBe("https://api.resin.local/v1/telemetry/batch");
+    expect(capturedMethod).toBe("POST");
+    expect(capturedHeaders["Content-Type"]).toBe("application/json");
+    expect(capturedHeaders.Authorization).toBe("Bearer token-tele-valid");
+    expect(capturedHeaders["x-account-id"]).toBe("acc-tele-1");
+    expect(capturedHeaders["x-workspace-id"]).toBe("ws-tele-1");
+    expect(capturedHeaders["x-device-id"]).toBe("dev-tele-1");
+    expect(capturedHeaders["x-installation-id"]).toBe("inst-tele-1");
+    expect(capturedHeaders["x-protocol-version"]).toBe(PROTOCOL_VERSION);
+
+    const parsedBody = JSON.parse(capturedBody);
+    expect(parsedBody.workspaceId).toBe("ws-tele-1");
+    expect(parsedBody.deviceId).toBe("dev-tele-1");
+    expect(parsedBody.installationId).toBe("inst-tele-1");
+    expect(parsedBody.batchId).toMatch(/^tb_/);
+    expect(parsedBody.timestamp).toBeDefined();
+    expect(parsedBody.invocations).toHaveLength(1);
+    expect(parsedBody.invocations[0].invocationId).toBe("inv-test-001");
+    expect(parsedBody.metrics).toEqual([]);
+  });
+
+  it("performs single forced-refresh retry on 401 and succeeds with refreshed token", async () => {
+    const initialIdentity = makeTestIdentity({ accessToken: "token-expired" });
+    const refreshedIdentity = makeTestIdentity({ accessToken: "token-fresh-new" });
+
+    let callCount = 0;
+    const providerMock = vi.fn().mockImplementation(async (opts?: { forceRefresh?: boolean }) => {
+      if (opts?.forceRefresh) {
+        return refreshedIdentity;
+      }
+      return initialIdentity;
+    });
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      callCount++;
+      const authHeader = (init?.headers as Record<string, string>)?.Authorization;
+
+      if (callCount === 1) {
+        expect(authHeader).toBe("Bearer token-expired");
+        return new Response(JSON.stringify({ error: "UNAUTHORIZED", message: "Token expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      expect(authHeader).toBe("Bearer token-fresh-new");
+      return new Response(
+        JSON.stringify({
+          batchId: "tb-after-refresh",
+          status: "accepted",
+          processedCount: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudObservationClient({
+      identityProvider: providerMock,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    const result = await client.sendTelemetryBatch({
+      workspaceId: "ws-test-1",
+      invocations: [makeValidInvocationRecord()],
+    });
+
+    expect(result.status).toBe("accepted");
+    expect(result.batchId).toBe("tb-after-refresh");
+    expect(callCount).toBe(2);
+    expect(providerMock).toHaveBeenCalledWith({ forceRefresh: true });
+  });
+
+  it("throws descriptive error when no identity or credentials available", async () => {
+    const client = new CloudObservationClient({
+      identityProvider: async () => null,
+    });
+
+    await expect(
+      client.sendTelemetryBatch({
+        workspaceId: "ws-test-1",
+        invocations: [makeValidInvocationRecord()],
+      }),
+    ).rejects.toThrow(/Cannot send telemetry: no valid cloud credentials/i);
   });
 });
