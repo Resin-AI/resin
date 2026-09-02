@@ -19,6 +19,363 @@ import {
   nowIso,
 } from "@resin/contracts";
 
+export type ParameterPrimitiveKind =
+  | "string"
+  | "number"
+  | "boolean"
+  | "null"
+  | "undefined"
+  | "opaque";
+
+export type ParameterShapeDescriptor =
+  | ParameterPrimitiveKind
+  | ParameterShapeDescriptor[]
+  | { [key: string]: ParameterShapeDescriptor };
+
+export interface ParameterShapeOptions {
+  /** Maximum nesting depth for objects and arrays (default: 4, hard max: 8) */
+  maxDepth?: number;
+  /** Maximum number of keys extracted per object (default: 32, hard max: 64) */
+  maxKeys?: number;
+  /** Maximum character length for property names (default: 64, hard max: 128) */
+  maxKeyLength?: number;
+  /** Maximum total descriptor nodes across the entire tree (default: 256, hard max: 1024) */
+  maxNodes?: number;
+}
+
+export const DEFAULT_MAX_DEPTH = 4;
+export const HARD_MAX_DEPTH = 8;
+export const DEFAULT_MAX_KEYS = 32;
+export const HARD_MAX_KEYS = 64;
+export const DEFAULT_MAX_KEY_LENGTH = 64;
+export const HARD_MAX_KEY_LENGTH = 128;
+export const DEFAULT_MAX_NODES = 256;
+export const HARD_MAX_NODES = 1024;
+
+export const RESIN_PARAMETER_SHAPE_KEY = "__resinParameterShapeV1";
+
+const BLOCKED_PROPERTIES = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+  RESIN_PARAMETER_SHAPE_KEY,
+]);
+
+function normalizeBound(val: unknown, defaultVal: number, hardMax: number): number {
+  if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val) || val <= 0) {
+    return defaultVal;
+  }
+  const intVal = Math.floor(val);
+  if (intVal <= 0) {
+    return defaultVal;
+  }
+  return Math.min(intVal, hardMax);
+}
+
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  if (typeof val !== "object" || val === null || Array.isArray(val)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(val);
+  return proto === null || proto === Object.prototype;
+}
+
+interface BoundedKey {
+  raw: string;
+  projected: string;
+}
+
+function compareBoundedKeys(a: BoundedKey, b: BoundedKey): number {
+  return a.projected < b.projected
+    ? -1
+    : a.projected > b.projected
+      ? 1
+      : a.raw < b.raw
+        ? -1
+        : a.raw > b.raw
+          ? 1
+          : 0;
+}
+
+function getBoundedSortedOwnKeys(
+  obj: Record<string, unknown>,
+  maxKeys: number,
+  maxKeyLength: number,
+): BoundedKey[] {
+  const boundedKeys: BoundedKey[] = [];
+  for (const raw in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, raw)) continue;
+    if (BLOCKED_PROPERTIES.has(raw)) continue;
+    const projected = raw.length > maxKeyLength ? raw.slice(0, maxKeyLength) : raw;
+    if (BLOCKED_PROPERTIES.has(projected)) continue;
+
+    const entry = { raw, projected };
+    let low = 0;
+    let high = boundedKeys.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (compareBoundedKeys(boundedKeys[mid], entry) < 0) low = mid + 1;
+      else high = mid;
+    }
+    if (boundedKeys.length < maxKeys) {
+      boundedKeys.splice(low, 0, entry);
+    } else if (compareBoundedKeys(entry, boundedKeys[boundedKeys.length - 1]) < 0) {
+      boundedKeys.pop();
+      boundedKeys.splice(low, 0, entry);
+    }
+  }
+  return boundedKeys;
+}
+type OwnDataProperty = { ok: true; value: unknown } | { ok: false };
+
+function readOwnDataProperty(value: object, key: string): OwnDataProperty {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor
+      ? { ok: true, value: descriptor.value }
+      : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function areShapesEquivalent(a: ParameterShapeDescriptor, b: ParameterShapeDescriptor): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) {
+    return false;
+  }
+  const aIsArray = Array.isArray(a);
+  const bIsArray = Array.isArray(b);
+  if (aIsArray !== bIsArray) return false;
+  if (aIsArray && bIsArray) {
+    const aArr = a as ParameterShapeDescriptor[];
+    const bArr = b as ParameterShapeDescriptor[];
+    if (aArr.length !== bArr.length) return false;
+    for (let i = 0; i < aArr.length; i++) {
+      if (!areShapesEquivalent(aArr[i], bArr[i])) return false;
+    }
+    return true;
+  }
+  const aObj = a as Record<string, ParameterShapeDescriptor>;
+  const bObj = b as Record<string, ParameterShapeDescriptor>;
+  const aKeys = Object.keys(aObj);
+  const bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(bObj, k)) return false;
+    if (!areShapesEquivalent(aObj[k], bObj[k])) return false;
+  }
+  return true;
+}
+
+interface TraversalBudget {
+  nodesRemaining: number;
+}
+
+function countDescriptorNodes(shape: ParameterShapeDescriptor): number {
+  if (typeof shape === "string") {
+    return 1;
+  }
+  if (Array.isArray(shape)) {
+    let count = 1;
+    for (const elem of shape) {
+      count += countDescriptorNodes(elem);
+    }
+    return count;
+  }
+  if (typeof shape === "object" && shape !== null) {
+    let count = 1;
+    for (const k of Object.keys(shape)) {
+      count += countDescriptorNodes((shape as Record<string, ParameterShapeDescriptor>)[k]);
+    }
+    return count;
+  }
+  return 1;
+}
+
+function extractValueShape(
+  value: unknown,
+  depth: number,
+  ancestors: Set<object>,
+  options: Required<ParameterShapeOptions>,
+  budget: TraversalBudget,
+): ParameterShapeDescriptor {
+  if (budget.nodesRemaining <= 0) {
+    return "opaque";
+  }
+
+  if (value === null) {
+    budget.nodesRemaining--;
+    return "null";
+  }
+  if (value === undefined) {
+    budget.nodesRemaining--;
+    return "undefined";
+  }
+
+  const valType = typeof value;
+  if (valType === "string") {
+    budget.nodesRemaining--;
+    return "string";
+  }
+  if (valType === "number") {
+    budget.nodesRemaining--;
+    return "number";
+  }
+  if (valType === "boolean") {
+    budget.nodesRemaining--;
+    return "boolean";
+  }
+  if (valType === "bigint" || valType === "symbol" || valType === "function") {
+    budget.nodesRemaining--;
+    return "opaque";
+  }
+
+  if (typeof value !== "object") {
+    budget.nodesRemaining--;
+    return "opaque";
+  }
+
+  if (depth >= options.maxDepth) {
+    budget.nodesRemaining--;
+    return "opaque";
+  }
+
+  if (ancestors.has(value)) {
+    budget.nodesRemaining--;
+    return "opaque";
+  }
+
+  if (Array.isArray(value)) {
+    budget.nodesRemaining--;
+    if (budget.nodesRemaining <= 0) {
+      return "opaque";
+    }
+    if (value.length === 0) {
+      budget.nodesRemaining--;
+      return ["opaque"];
+    }
+
+    ancestors.add(value);
+    const sampleLimit = Math.min(value.length, options.maxKeys);
+    const elementShapes: ParameterShapeDescriptor[] = [];
+    for (let i = 0; i < sampleLimit && budget.nodesRemaining > 0; i++) {
+      const property = readOwnDataProperty(value, String(i));
+      if (!property.ok) {
+        budget.nodesRemaining--;
+        elementShapes.push("opaque");
+        continue;
+      }
+      elementShapes.push(extractValueShape(property.value, depth + 1, ancestors, options, budget));
+    }
+    ancestors.delete(value);
+
+    const first = elementShapes[0] ?? "opaque";
+    for (let i = 1; i < elementShapes.length; i++) {
+      if (!areShapesEquivalent(first, elementShapes[i])) {
+        return ["opaque"];
+      }
+    }
+    return [first];
+  }
+
+  if (!isPlainObject(value)) {
+    budget.nodesRemaining--;
+    return "opaque";
+  }
+
+  budget.nodesRemaining--;
+  ancestors.add(value);
+  const boundedKeys = getBoundedSortedOwnKeys(
+    value as Record<string, unknown>,
+    options.maxKeys,
+    options.maxKeyLength,
+  );
+  const result: Record<string, ParameterShapeDescriptor> = {};
+  for (const { raw, projected } of boundedKeys) {
+    if (budget.nodesRemaining <= 0) {
+      break;
+    }
+    const property = readOwnDataProperty(value, raw);
+    if (!property.ok) {
+      budget.nodesRemaining--;
+      result[projected] = "opaque";
+      continue;
+    }
+    result[projected] = extractValueShape(property.value, depth + 1, ancestors, options, budget);
+  }
+  ancestors.delete(value);
+  return result;
+}
+
+/**
+ * Pure deterministic bounded extractor over raw parameter values.
+ * Represents object property names plus primitive/container kind metadata only.
+ * Never retains literal values, paths, prompts, or secrets.
+ *
+ * Arrays reveal element shape only, never length or values; empty or mixed arrays collapse safely to ['opaque'].
+ * Object keys are deterministically sorted and bounded by depth, key count, key length, and total node budget.
+ * Unhandled, circular, or budget-exhausted structures fail closed to 'opaque'.
+ */
+export function extractParameterShape(
+  rawParams: unknown,
+  options: ParameterShapeOptions = {},
+): Record<string, unknown> {
+  if (
+    rawParams === null ||
+    rawParams === undefined ||
+    typeof rawParams !== "object" ||
+    Array.isArray(rawParams) ||
+    !isPlainObject(rawParams)
+  ) {
+    return {};
+  }
+
+  const fullOptions: Required<ParameterShapeOptions> = {
+    maxDepth: normalizeBound(options.maxDepth, DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH),
+    maxKeys: normalizeBound(options.maxKeys, DEFAULT_MAX_KEYS, HARD_MAX_KEYS),
+    maxKeyLength: normalizeBound(options.maxKeyLength, DEFAULT_MAX_KEY_LENGTH, HARD_MAX_KEY_LENGTH),
+    maxNodes: normalizeBound(options.maxNodes, DEFAULT_MAX_NODES, HARD_MAX_NODES),
+  };
+
+  const budget: TraversalBudget = {
+    nodesRemaining: fullOptions.maxNodes,
+  };
+
+  budget.nodesRemaining--;
+  if (budget.nodesRemaining <= 0) {
+    return {};
+  }
+
+  const ancestors = new Set<object>();
+  ancestors.add(rawParams);
+
+  const boundedKeys = getBoundedSortedOwnKeys(
+    rawParams as Record<string, unknown>,
+    fullOptions.maxKeys,
+    fullOptions.maxKeyLength,
+  );
+  const result: Record<string, unknown> = {};
+
+  for (const { raw, projected } of boundedKeys) {
+    if (budget.nodesRemaining <= 0) {
+      break;
+    }
+    const property = readOwnDataProperty(rawParams, raw);
+    if (!property.ok) {
+      budget.nodesRemaining--;
+      result[projected] = "opaque";
+      continue;
+    }
+    result[projected] = extractValueShape(property.value, 1, ancestors, fullOptions, budget);
+  }
+  ancestors.delete(rawParams);
+  return result;
+}
+
+export { extractParameterShape as extractParameterTypeShape };
+
 /**
  * Exhaustive metadata-only projection for normalized session events.
  *
@@ -120,7 +477,9 @@ export function projectEventToMetadataOnly(
         type: "tool_call",
         callId: event.callId,
         toolName: event.toolName,
-        parameters: {},
+        parameters: {
+          [RESIN_PARAMETER_SHAPE_KEY]: extractParameterShape(event.parameters),
+        },
         isShadow: event.isShadow,
       };
       if (event.candidateRef !== undefined) callEvent.candidateRef = event.candidateRef;
