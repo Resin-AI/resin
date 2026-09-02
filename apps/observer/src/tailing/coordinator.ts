@@ -246,7 +246,7 @@ export class ObserverCoordinator extends EventEmitter {
 
           for (const session of sessions) {
             currentDiscoveredSessions.add(session.sessionId);
-            this.activeSessionStates.set(session.sessionId, session);
+            const previousSession = this.activeSessionStates.get(session.sessionId);
 
             if (session.status === "active") {
               const activeSessions = this.tailer.getActiveSessions();
@@ -274,6 +274,7 @@ export class ObserverCoordinator extends EventEmitter {
                 });
                 summary.sessionsAttached++;
               }
+              this.activeSessionStates.set(session.sessionId, session);
             } else if (
               session.status === "completed" ||
               session.status === "failed" ||
@@ -281,9 +282,16 @@ export class ObserverCoordinator extends EventEmitter {
             ) {
               const activeSessions = this.tailer.getActiveSessions();
               if (activeSessions.includes(session.sessionId)) {
+                if (previousSession?.status === "active") {
+                  await this.tailer.notifyTerminalState(session);
+                  this.activeSessionStates.set(session.sessionId, session);
+                }
                 await this.tailer.detachSession(session.sessionId);
                 summary.sessionsDetached++;
               }
+              this.activeSessionStates.set(session.sessionId, session);
+            } else {
+              this.activeSessionStates.set(session.sessionId, session);
             }
           }
         }

@@ -57,6 +57,9 @@ export interface TailerSessionContext {
   latestEmittedCursor: SourceCursor | null;
   latestAckedCursor: SourceCursor | null;
   hasInFlightBatch: boolean;
+  inFlightDelivery?: Promise<void>;
+  inFlightPump?: Promise<void>;
+  isTerminalizing?: boolean;
   isPaused: boolean;
   isAuthDegraded: boolean;
   isRestoringDurablePending: boolean;
@@ -503,67 +506,78 @@ export class TranscriptTailer extends EventEmitter {
       }
     };
 
-    try {
-      await this.recordHandler(context.session, batch, ack);
-      if (isAuthRecoveryProbe) {
-        context.needsAuthRecoveryProbe = false;
-        context.isAuthDegraded = false;
-        context.latestEmittedCursor = latestInBatch.cursor;
-        this.emit("auth:recovered", {
-          sessionId: context.session.sessionId,
-          pendingCount: context.queue.pendingCount,
-        });
-        context.queue.resume();
-        void this.dispatchQueue(context);
-      }
-    } catch (err: unknown) {
-      context.hasInFlightBatch = false;
-      if (err instanceof AuthRecoveryError) {
-        const persisted = context.queue.deferForAuthentication(
-          batch.map((record) => record.recordId),
-        );
-        context.isPaused = true;
-        context.isAuthDegraded = true;
-        context.needsAuthRecoveryProbe = false;
-        context.watcher?.pause();
-        context.authRecoveryUnsubscribe?.();
-        context.authRecoveryUnsubscribe = err.onRecovered(() => {
-          if (this.isClosed || this.sessions.get(context.session.sessionId) !== context) {
-            return;
-          }
-          context.authRecoveryUnsubscribe = undefined;
+    const deliveryPromise = (async () => {
+      try {
+        await this.recordHandler!(context.session, batch, ack);
+        if (isAuthRecoveryProbe) {
+          context.needsAuthRecoveryProbe = false;
           context.isAuthDegraded = false;
+          context.latestEmittedCursor = latestInBatch.cursor;
           this.emit("auth:recovered", {
             sessionId: context.session.sessionId,
             pendingCount: context.queue.pendingCount,
           });
           context.queue.resume();
           void this.dispatchQueue(context);
-        });
-        this.emit("auth:degraded", {
-          sessionId: context.session.sessionId,
-          category: err.category,
-          remediation: err.remediation,
-          pendingCount: context.queue.pendingCount,
-          persisted,
-        });
-        return;
-      }
+        }
+      } catch (err: unknown) {
+        context.hasInFlightBatch = false;
+        if (err instanceof AuthRecoveryError) {
+          const persisted = context.queue.deferForAuthentication(
+            batch.map((record) => record.recordId),
+          );
+          context.isPaused = true;
+          context.isAuthDegraded = true;
+          context.needsAuthRecoveryProbe = false;
+          context.watcher?.pause();
+          context.authRecoveryUnsubscribe?.();
+          context.authRecoveryUnsubscribe = err.onRecovered(() => {
+            if (this.isClosed || this.sessions.get(context.session.sessionId) !== context) {
+              return;
+            }
+            context.authRecoveryUnsubscribe = undefined;
+            context.isAuthDegraded = false;
+            this.emit("auth:recovered", {
+              sessionId: context.session.sessionId,
+              pendingCount: context.queue.pendingCount,
+            });
+            context.queue.resume();
+            void this.dispatchQueue(context);
+          });
+          this.emit("auth:degraded", {
+            sessionId: context.session.sessionId,
+            category: err.category,
+            remediation: err.remediation,
+            pendingCount: context.queue.pendingCount,
+            persisted,
+          });
+          return;
+        }
 
-      if (isAuthRecoveryProbe) {
-        context.queue.deferForAuthentication(batch.map((record) => record.recordId));
-        context.isPaused = true;
-        context.needsAuthRecoveryProbe = true;
-        context.watcher?.pause();
-        return;
-      }
+        if (isAuthRecoveryProbe) {
+          context.queue.deferForAuthentication(batch.map((record) => record.recordId));
+          context.isPaused = true;
+          context.needsAuthRecoveryProbe = true;
+          context.watcher?.pause();
+          return;
+        }
 
-      for (const record of batch) {
-        context.queue.nack(
-          record.recordId,
-          err instanceof Error ? err : String(err),
-          "UNHANDLED_ERROR",
-        );
+        for (const record of batch) {
+          context.queue.nack(
+            record.recordId,
+            err instanceof Error ? err : String(err),
+            "UNHANDLED_ERROR",
+          );
+        }
+      }
+    })();
+
+    context.inFlightDelivery = deliveryPromise;
+    try {
+      await deliveryPromise;
+    } finally {
+      if (context.inFlightDelivery === deliveryPromise) {
+        context.inFlightDelivery = undefined;
       }
     }
   }
@@ -576,24 +590,41 @@ export class TranscriptTailer extends EventEmitter {
     if (
       !context ||
       context.isPaused ||
+      context.queue.isPaused ||
       context.isAuthDegraded ||
       context.isRestoringDurablePending ||
+      context.isTerminalizing ||
       this.isClosed
     ) {
       return;
     }
 
-    try {
-      if (context.queue.size < context.queue.highWatermark) {
-        const records = await context.source.readNext(
-          context.options.maxBatchSize ?? this.defaultBatchSize,
-        );
-        if (records.length > 0) {
-          await this.handleIncomingRecords(context, records);
+    if (context.inFlightPump) {
+      return context.inFlightPump;
+    }
+
+    const pumpPromise = (async () => {
+      try {
+        if (context.queue.size < context.queue.highWatermark && !this.isClosed) {
+          const records = await context.source.readNext(
+            context.options.maxBatchSize ?? this.defaultBatchSize,
+          );
+          if (records.length > 0 && !this.isClosed) {
+            await this.handleIncomingRecords(context, records);
+          }
         }
+      } catch (err: unknown) {
+        this.emit("error", { sessionId, error: err });
       }
-    } catch (err: unknown) {
-      this.emit("error", { sessionId, error: err });
+    })();
+
+    context.inFlightPump = pumpPromise;
+    try {
+      await pumpPromise;
+    } finally {
+      if (context.inFlightPump === pumpPromise) {
+        context.inFlightPump = undefined;
+      }
     }
   }
 
@@ -616,6 +647,93 @@ export class TranscriptTailer extends EventEmitter {
       context.queue.resume();
     }
   }
+  /**
+   * Delivers updated terminal session state downstream with an empty record batch
+   * prior to detachment, allowing consumers to synthesize terminal lifecycle events.
+   */
+  async notifyTerminalState(session: HarnessSession): Promise<void> {
+    const context = this.sessions.get(session.sessionId);
+    if (!context || this.isClosed) {
+      return;
+    }
+
+    if (context.isPaused || context.queue.isPaused || context.isAuthDegraded) {
+      throw new Error(
+        `Cannot deliver terminal state for session ${session.sessionId}: queue is paused or auth-degraded with ${context.queue.size} pending records`,
+      );
+    }
+
+    // Mark terminalizing to prevent any concurrent or background pumpSession from starting
+    context.isTerminalizing = true;
+
+    try {
+      // 1. Stop background watcher and unsubscribe source pushes so no concurrent background ingestion occurs
+      if (context.watcher) {
+        context.watcher.stop();
+      }
+      if (context.unsubscribeSource) {
+        context.unsubscribeSource();
+        context.unsubscribeSource = undefined;
+      }
+
+      // 2. Await any already-started in-flight pump before active source exhaustion
+      if (context.inFlightPump) {
+        await context.inFlightPump;
+      }
+
+      // 3. Actively exhaust event source and drain all queued/in-flight records in strict order
+      const batchSize = context.options.maxBatchSize ?? this.defaultBatchSize;
+
+      while (true) {
+        if (context.isPaused || context.queue.isPaused || context.isAuthDegraded) {
+          throw new Error(
+            `Cannot deliver terminal state for session ${session.sessionId}: queue is paused or auth-degraded with ${context.queue.size} pending records`,
+          );
+        }
+
+        if (context.inFlightDelivery) {
+          await context.inFlightDelivery;
+        }
+
+        while (context.queue.size > 0 && !context.hasInFlightBatch) {
+          if (!this.recordHandler) {
+            throw new Error(
+              `Cannot deliver terminal state for session ${session.sessionId}: no record handler registered to drain ${context.queue.size} pending records`,
+            );
+          }
+          await this.dispatchQueue(context);
+          if (context.inFlightDelivery) {
+            await context.inFlightDelivery;
+          }
+        }
+
+        const incoming = await context.source.readNext(batchSize);
+        if (incoming.length > 0) {
+          await this.handleIncomingRecords(context, incoming);
+        } else if (
+          context.queue.size === 0 &&
+          !context.hasInFlightBatch &&
+          !context.inFlightDelivery
+        ) {
+          break;
+        }
+      }
+
+      if (context.queue.size > 0 || context.hasInFlightBatch || context.inFlightDelivery) {
+        throw new Error(
+          `Cannot deliver terminal state for session ${session.sessionId}: ${context.queue.size} records remain undelivered`,
+        );
+      }
+
+      // 4. Call handler with the terminal snapshot and [] without mutating context.session
+      if (this.recordHandler) {
+        await this.recordHandler(session, [], async () => {});
+      }
+    } catch (err: unknown) {
+      context.isTerminalizing = false;
+      throw err;
+    }
+  }
 
   /**
    * Detaches and closes a session.
@@ -624,9 +742,22 @@ export class TranscriptTailer extends EventEmitter {
     const context = this.sessions.get(sessionId);
     if (!context) return;
 
+    context.isTerminalizing = true;
+    if (context.watcher) {
+      context.watcher.stop();
+    }
+    if (context.inFlightPump) {
+      try {
+        await context.inFlightPump;
+      } catch {
+        // ignore
+      }
+    }
+
     context.authRecoveryUnsubscribe?.();
     if (context.unsubscribeSource) {
       context.unsubscribeSource();
+      context.unsubscribeSource = undefined;
     }
 
     await context.source.close();

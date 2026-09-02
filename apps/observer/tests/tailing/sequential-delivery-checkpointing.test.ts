@@ -196,4 +196,304 @@ describe("Sequential Record Delivery and Atomic Checkpointing", () => {
 
     store.close();
   });
+
+  it("delivers queued and in-flight records in strict order before terminal empty-record callback without mutating context session", async () => {
+    const lines = [
+      JSON.stringify({ type: "prompt", text: "Line 1" }),
+      JSON.stringify({ type: "completion", text: "Line 2" }),
+      JSON.stringify({ type: "prompt", text: "Line 3" }),
+      JSON.stringify({ type: "completion", text: "Line 4" }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({ defaultBatchSize: 2 });
+    const session: HarnessSession = {
+      sessionId: "sess-order-test",
+      workspaceId: "ws-1",
+      harnessId: "fake",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    const deliveryLog: Array<{ status: string; count: number; texts: string[] }> = [];
+    const firstBatchInFlight = Promise.withResolvers<void>();
+    const continueFirstBatch = Promise.withResolvers<void>();
+    let isFirstBatch = true;
+
+    tailer.onRecords(async (sess, records, ack) => {
+      if (isFirstBatch && records.length > 0) {
+        isFirstBatch = false;
+        firstBatchInFlight.resolve();
+        await continueFirstBatch.promise;
+      }
+      deliveryLog.push({
+        status: sess.status,
+        count: records.length,
+        texts: records.map((r) => {
+          const payload = r.rawPayload;
+          if (payload && typeof payload === "object" && "text" in payload) {
+            return String(payload.text);
+          }
+          return "";
+        }),
+      });
+      await ack();
+    });
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 20 });
+
+    // Wait for first batch to be in-flight in the recordHandler
+    await firstBatchInFlight.promise;
+    // Trigger notifyTerminalState while first batch is in-flight and second batch is queued
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    const notifyPromise = tailer.notifyTerminalState(completedSession);
+
+    // Release the first in-flight batch
+    continueFirstBatch.resolve();
+    await notifyPromise;
+
+    // Verify ordering: batch 1 (lines 1,2), batch 2 (lines 3,4), then terminal empty-record callback (status completed, 0 records)
+    expect(deliveryLog).toHaveLength(3);
+    expect(deliveryLog[0]).toEqual({
+      status: "active",
+      count: 2,
+      texts: ["Line 1", "Line 2"],
+    });
+    expect(deliveryLog[1]).toEqual({
+      status: "active",
+      count: 2,
+      texts: ["Line 3", "Line 4"],
+    });
+    expect(deliveryLog[2]).toEqual({
+      status: "completed",
+      count: 0,
+      texts: [],
+    });
+
+    // Verify context.session was NOT mutated to completed
+    const sessionStatus = tailer.getSessionStatus(session.sessionId);
+    expect(sessionStatus?.sessionId).toBe(session.sessionId);
+
+    // Non-tracked session is a no-op
+    await tailer.notifyTerminalState({
+      ...session,
+      sessionId: "non-existent-session",
+      status: "completed",
+    });
+    expect(deliveryLog).toHaveLength(3);
+
+    await tailer.close();
+  });
+
+  it("delivers in-flight pump readNext that resolves after terminalization starts before the terminal callback", async () => {
+    const tailer = new TranscriptTailer({ defaultBatchSize: 10 });
+    const session: HarnessSession = {
+      sessionId: "sess-inflight-pump-race",
+      workspaceId: "ws-1",
+      harnessId: "fake",
+      transcriptPath: "/tmp/fake-inflight.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    const deliveryLog: Array<{ status: string; count: number; texts: string[] }> = [];
+    const readNextEntered = Promise.withResolvers<void>();
+    const allowReadNextToResolve = Promise.withResolvers<void>();
+
+    let hasRead = false;
+    const customSource: SessionEventSource = {
+      readNext: async () => {
+        if (!hasRead) {
+          hasRead = true;
+          readNextEntered.resolve();
+          await allowReadNextToResolve.promise;
+          return [
+            {
+              recordId: "rec-in-flight-pump",
+              sessionId: session.sessionId,
+              harnessId: session.harnessId,
+              sequenceNumber: 1,
+              timestamp: new Date().toISOString(),
+              recordType: "transcript_line",
+              rawPayload: { text: "Pumped during terminalization race" },
+              cursor: { offset: 0, line: 1, sequence: 1, timestamp: new Date().toISOString() },
+            },
+          ];
+        }
+        return [];
+      },
+      onRecords: () => () => {},
+      checkpoint: async () => {},
+      getCursor: () => null,
+      detectRotation: async () => false,
+      close: async () => {},
+    };
+
+    tailer.onRecords(async (sess, records, ack) => {
+      deliveryLog.push({
+        status: sess.status,
+        count: records.length,
+        texts: records.map((r) => {
+          const payload = r.rawPayload;
+          if (payload && typeof payload === "object" && "text" in payload) {
+            return String(payload.text);
+          }
+          return "";
+        }),
+      });
+      await ack();
+    });
+
+    await tailer.attachSession(session, customSource);
+
+    // 1. Start pumpSession in background — it enters customSource.readNext and blocks
+    const pumpPromise = tailer.pumpSession(session.sessionId);
+    await readNextEntered.promise;
+
+    // 2. Trigger notifyTerminalState while readNext is currently in flight inside pumpSession
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+    const notifyPromise = tailer.notifyTerminalState(completedSession);
+
+    // 3. Now resolve the in-flight readNext: pumpSession must feed these records despite terminalizing
+    allowReadNextToResolve.resolve();
+
+    await pumpPromise;
+    await notifyPromise;
+
+    // 4. Verify ordering: pumped batch is delivered first, followed by the terminal callback
+    expect(deliveryLog).toHaveLength(2);
+    expect(deliveryLog[0]).toEqual({
+      status: "active",
+      count: 1,
+      texts: ["Pumped during terminalization race"],
+    });
+    expect(deliveryLog[1]).toEqual({
+      status: "completed",
+      count: 0,
+      texts: [],
+    });
+
+    await tailer.close();
+  });
+
+  it("preserves tailer attachment and context when terminal handler fails, remaining retryable", async () => {
+    const tailer = new TranscriptTailer();
+    const session: HarnessSession = {
+      sessionId: "sess-terminal-fail-retry",
+      workspaceId: "ws-1",
+      harnessId: "fake",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    let shouldFail = true;
+    const receivedCalls: Array<{ status: string; count: number }> = [];
+
+    tailer.onRecords(async (sess, records, ack) => {
+      if (shouldFail && records.length === 0) {
+        throw new Error("Downstream handler rejected terminal event");
+      }
+      receivedCalls.push({ status: sess.status, count: records.length });
+      await ack();
+    });
+
+    await tailer.attachSession(session);
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    // First notify attempt fails
+    await expect(tailer.notifyTerminalState(completedSession)).rejects.toThrow(
+      "Downstream handler rejected terminal event",
+    );
+
+    // Session remains attached in tailer
+    expect(tailer.getActiveSessions()).toContain(session.sessionId);
+
+    // Second notify attempt succeeds
+    shouldFail = false;
+    await tailer.notifyTerminalState(completedSession);
+
+    expect(receivedCalls).toHaveLength(1);
+    expect(receivedCalls[0]).toEqual({
+      status: "completed",
+      count: 0,
+    });
+
+    await tailer.close();
+  });
+
+  it("rejects terminal state and produces no terminal callback when queue is paused with pending records, remaining attached", async () => {
+    const lines = [
+      JSON.stringify({ type: "prompt", text: "Pending line 1" }),
+      JSON.stringify({ type: "completion", text: "Pending line 2" }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer();
+    const session: HarnessSession = {
+      sessionId: "sess-paused-queue",
+      workspaceId: "ws-1",
+      harnessId: "fake",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    const receivedCalls: Array<{ status: string; count: number }> = [];
+    tailer.onRecords(async (sess, records, ack) => {
+      receivedCalls.push({ status: sess.status, count: records.length });
+      await ack();
+    });
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 50 });
+    tailer.pauseSession(session.sessionId);
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    // notifyTerminalState must fail fast and NOT dispatch empty terminal batch while paused
+    await expect(tailer.notifyTerminalState(completedSession)).rejects.toThrow(
+      /queue is paused or auth-degraded/,
+    );
+
+    // Zero terminal callbacks delivered
+    expect(receivedCalls.filter((c) => c.count === 0)).toHaveLength(0);
+
+    // Session remains attached in tailer
+    expect(tailer.getActiveSessions()).toContain(session.sessionId);
+
+    // Once resumed, notifyTerminalState successfully drains records and delivers terminal event
+    tailer.resumeSession(session.sessionId);
+    await tailer.notifyTerminalState(completedSession);
+
+    expect(receivedCalls).toContainEqual({
+      status: "completed",
+      count: 0,
+    });
+
+    // Post-terminal writes must not trigger any further background source reads or deliveries
+    const totalDeliveries = receivedCalls.length;
+    fs.appendFileSync(
+      transcriptPath,
+      `${JSON.stringify({ type: "prompt", text: "Post-terminal unread line" })}\n`,
+    );
+    await tailer.pumpSession(session.sessionId);
+    expect(receivedCalls).toHaveLength(totalDeliveries);
+
+    await tailer.close();
+  });
 });

@@ -623,3 +623,490 @@ describe("ObserverCoordinator backfillPolicyForSession Contract", () => {
     }
   });
 });
+
+describe("ObserverCoordinator Terminal State Delivery on Transition", () => {
+  it("delivers zero-record callback with updated terminal session on completed transition before detach", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-1" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-1",
+      harnessId: "term-adapter-1",
+      rootPath: "/tmp/ws-term-1",
+      name: "Terminal Workspace 1",
+    };
+    adapter.addWorkspace(ws);
+
+    const sess: HarnessSession = {
+      sessionId: "session-term-completed",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-1",
+      transcriptPath: "/tmp/fake-term-1.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess);
+
+    const tailer = coordinator.getTailer();
+    const callbacks: Array<{
+      status: string;
+      recordCount: number;
+      activeDuringCallback: boolean;
+    }> = [];
+
+    coordinator.onRecords(async (session, records, ack) => {
+      callbacks.push({
+        status: session.status,
+        recordCount: records.length,
+        activeDuringCallback: tailer.getActiveSessions().includes(session.sessionId),
+      });
+      await ack();
+    });
+
+    // Poll 1: session is active, attached to tailer, no terminal callback
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(1);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+    expect(callbacks).toHaveLength(0);
+
+    // Transition session to completed
+    const completedSess: HarnessSession = {
+      ...sess,
+      status: "completed",
+    };
+    adapter.addSession(completedSess);
+
+    // Poll 2: transition from active -> completed triggers zero-record callback before detach
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.sessionsDetached).toBe(1);
+    expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
+
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]).toEqual({
+      status: "completed",
+      recordCount: 0,
+      activeDuringCallback: true,
+    });
+
+    // Poll 3: session remains completed in adapter, no redundant callback or detachment
+    const summary3 = await coordinator.pollOnce();
+    expect(summary3.sessionsDetached).toBe(0);
+    expect(callbacks).toHaveLength(1);
+
+    await coordinator.stop();
+  });
+
+  it("delivers zero-record callback with updated terminal session on failed and interrupted transitions before detach", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-2" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-2",
+      harnessId: "term-adapter-2",
+      rootPath: "/tmp/ws-term-2",
+      name: "Terminal Workspace 2",
+    };
+    adapter.addWorkspace(ws);
+
+    const failedSess: HarnessSession = {
+      sessionId: "session-term-failed",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-2",
+      transcriptPath: "/tmp/fake-term-failed.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    const interruptedSess: HarnessSession = {
+      sessionId: "session-term-interrupted",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-2",
+      transcriptPath: "/tmp/fake-term-interrupted.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(failedSess);
+    adapter.addSession(interruptedSess);
+
+    const tailer = coordinator.getTailer();
+    const callbacks: Array<{ sessionId: string; status: string; recordCount: number }> = [];
+
+    coordinator.onRecords(async (session, records, ack) => {
+      callbacks.push({
+        sessionId: session.sessionId,
+        status: session.status,
+        recordCount: records.length,
+      });
+      await ack();
+    });
+
+    // Poll 1: both attached
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(2);
+    expect(callbacks).toHaveLength(0);
+
+    // Transition both sessions to terminal
+    adapter.addSession({ ...failedSess, status: "failed" });
+    adapter.addSession({ ...interruptedSess, status: "interrupted" });
+
+    // Poll 2: both deliver zero-record terminal callback before detach
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.sessionsDetached).toBe(2);
+    expect(tailer.getActiveSessions()).not.toContain(failedSess.sessionId);
+    expect(tailer.getActiveSessions()).not.toContain(interruptedSess.sessionId);
+
+    expect(callbacks).toHaveLength(2);
+    expect(callbacks).toContainEqual({
+      sessionId: failedSess.sessionId,
+      status: "failed",
+      recordCount: 0,
+    });
+    expect(callbacks).toContainEqual({
+      sessionId: interruptedSess.sessionId,
+      status: "interrupted",
+      recordCount: 0,
+    });
+
+    await coordinator.stop();
+  });
+
+  it("suppresses terminal callback for historical terminal sessions discovered initially", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-3" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-3",
+      harnessId: "term-adapter-3",
+      rootPath: "/tmp/ws-term-3",
+      name: "Terminal Workspace 3",
+    };
+    adapter.addWorkspace(ws);
+
+    // Sessions already terminal upon initial discovery
+    const historicalCompleted: HarnessSession = {
+      sessionId: "session-hist-completed",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-3",
+      transcriptPath: "/tmp/fake-hist-completed.jsonl",
+      status: "completed",
+      startedAt: new Date().toISOString(),
+    };
+    const historicalFailed: HarnessSession = {
+      sessionId: "session-hist-failed",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-3",
+      transcriptPath: "/tmp/fake-hist-failed.jsonl",
+      status: "failed",
+      startedAt: new Date().toISOString(),
+    };
+    const historicalInterrupted: HarnessSession = {
+      sessionId: "session-hist-interrupted",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-3",
+      transcriptPath: "/tmp/fake-hist-interrupted.jsonl",
+      status: "interrupted",
+      startedAt: new Date().toISOString(),
+    };
+
+    adapter.addSession(historicalCompleted);
+    adapter.addSession(historicalFailed);
+    adapter.addSession(historicalInterrupted);
+
+    const callbacks: Array<{ sessionId: string; status: string }> = [];
+    coordinator.onRecords(async (session, _records, ack) => {
+      callbacks.push({ sessionId: session.sessionId, status: session.status });
+      await ack();
+    });
+
+    // Poll 1: historical terminal sessions discovered
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsDiscovered).toBe(3);
+    expect(summary1.sessionsAttached).toBe(0);
+    expect(summary1.sessionsDetached).toBe(0);
+    expect(callbacks).toHaveLength(0);
+
+    // Poll 2: subsequent cycle still does not trigger any callback
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.sessionsDiscovered).toBe(3);
+    expect(summary2.sessionsAttached).toBe(0);
+    expect(summary2.sessionsDetached).toBe(0);
+    expect(callbacks).toHaveLength(0);
+
+    await coordinator.stop();
+  });
+
+  it("suppresses zero-record terminal callback when an active session remains active", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-4" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-4",
+      harnessId: "term-adapter-4",
+      rootPath: "/tmp/ws-term-4",
+      name: "Terminal Workspace 4",
+    };
+    adapter.addWorkspace(ws);
+
+    const activeSess: HarnessSession = {
+      sessionId: "session-stay-active",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-4",
+      transcriptPath: "/tmp/fake-stay-active.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(activeSess);
+
+    const callbacks: Array<{ sessionId: string; status: string }> = [];
+    coordinator.onRecords(async (session, _records, ack) => {
+      callbacks.push({ sessionId: session.sessionId, status: session.status });
+      await ack();
+    });
+
+    await coordinator.pollOnce();
+    await coordinator.pollOnce();
+
+    expect(callbacks).toHaveLength(0);
+
+    await coordinator.stop();
+  });
+
+  it("preserves active session state and attached tailer for retry when terminal notification fails", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-retry" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-retry",
+      harnessId: "term-adapter-retry",
+      rootPath: "/tmp/ws-term-retry",
+      name: "Terminal Workspace Retry",
+    };
+    adapter.addWorkspace(ws);
+
+    const sess: HarnessSession = {
+      sessionId: "session-term-retry",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-retry",
+      transcriptPath: "/tmp/fake-term-retry.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess);
+
+    const tailer = coordinator.getTailer();
+    let shouldFailNotification = false;
+    const callbacks: Array<{ status: string; recordCount: number }> = [];
+
+    coordinator.onRecords(async (session, records, ack) => {
+      if (session.status === "completed" && shouldFailNotification) {
+        throw new Error("Simulated terminal notification failure");
+      }
+      callbacks.push({
+        status: session.status,
+        recordCount: records.length,
+      });
+      await ack();
+    });
+
+    // Poll 1: attach active session
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(1);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+
+    // Transition session to completed in adapter, but notification will fail
+    shouldFailNotification = true;
+    const completedSess: HarnessSession = {
+      ...sess,
+      status: "completed",
+    };
+    adapter.addSession(completedSess);
+
+    // Poll 2: notification fails; error is recorded, session remains attached in tailer and active state is preserved
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.errors).toHaveLength(1);
+    expect(summary2.errors[0]).toContain("Simulated terminal notification failure");
+    expect(summary2.sessionsDetached).toBe(0);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+    expect(callbacks).toHaveLength(0);
+
+    // Poll 3: notification succeeds on retry; session is detached and active state is updated
+    shouldFailNotification = false;
+    const summary3 = await coordinator.pollOnce();
+    expect(summary3.errors).toHaveLength(0);
+    expect(summary3.sessionsDetached).toBe(1);
+    expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
+
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]).toEqual({
+      status: "completed",
+      recordCount: 0,
+    });
+
+    // Poll 4: session remains completed, no additional notifications
+    const summary4 = await coordinator.pollOnce();
+    expect(summary4.sessionsDetached).toBe(0);
+    expect(callbacks).toHaveLength(1);
+
+    await coordinator.stop();
+  });
+
+  it("suppresses duplicate terminal notification when detachSession fails and retries detach only on subsequent poll", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-detach-fail" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-detach-fail",
+      harnessId: "term-adapter-detach-fail",
+      rootPath: "/tmp/ws-term-detach-fail",
+      name: "Terminal Workspace Detach Fail",
+    };
+    adapter.addWorkspace(ws);
+
+    const sess: HarnessSession = {
+      sessionId: "session-term-detach-fail",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-detach-fail",
+      transcriptPath: "/tmp/fake-term-detach-fail.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess);
+
+    const tailer = coordinator.getTailer();
+    const callbacks: Array<{ status: string; recordCount: number }> = [];
+
+    coordinator.onRecords(async (session, records, ack) => {
+      callbacks.push({
+        status: session.status,
+        recordCount: records.length,
+      });
+      await ack();
+    });
+
+    // Poll 1: attach active session
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(1);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+
+    // Transition session to completed in adapter
+    const completedSess: HarnessSession = {
+      ...sess,
+      status: "completed",
+    };
+    adapter.addSession(completedSess);
+
+    // Mock detachSession on tailer to fail on first attempt
+    const originalDetachSession = tailer.detachSession.bind(tailer);
+    let detachCallCount = 0;
+    vi.spyOn(tailer, "detachSession").mockImplementation(async (sessionId) => {
+      detachCallCount++;
+      if (detachCallCount === 1) {
+        throw new Error("Simulated detachSession failure");
+      }
+      return originalDetachSession(sessionId);
+    });
+
+    // Poll 2: notifyTerminalState succeeds (delivers callback) and state is set to completed, but detachSession fails
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.errors).toHaveLength(1);
+    expect(summary2.errors[0]).toContain("Simulated detachSession failure");
+    expect(summary2.sessionsDetached).toBe(0);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]).toEqual({
+      status: "completed",
+      recordCount: 0,
+    });
+
+    // Poll 3: subsequent poll sees state already completed; skips notifyTerminalState and retries detachSession only
+    const summary3 = await coordinator.pollOnce();
+    expect(summary3.errors).toHaveLength(0);
+    expect(summary3.sessionsDetached).toBe(1);
+    expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
+    // Callback count is STILL 1 (no duplicate callback delivered)
+    expect(callbacks).toHaveLength(1);
+
+    await coordinator.stop();
+  });
+
+  it("produces no terminal callback and keeps session attached when queue is paused with pending records during poll", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "term-adapter-paused" });
+    coordinator.registerAdapter(adapter);
+
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-term-paused",
+      harnessId: "term-adapter-paused",
+      rootPath: "/tmp/ws-term-paused",
+      name: "Terminal Workspace Paused",
+    };
+    adapter.addWorkspace(ws);
+
+    const sess: HarnessSession = {
+      sessionId: "session-term-paused",
+      workspaceId: ws.workspaceId,
+      harnessId: "term-adapter-paused",
+      transcriptPath: "/tmp/fake-term-paused.jsonl",
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession(sess);
+
+    const tailer = coordinator.getTailer();
+    const callbacks: Array<{ status: string; recordCount: number }> = [];
+
+    coordinator.onRecords(async (session, records, ack) => {
+      callbacks.push({
+        status: session.status,
+        recordCount: records.length,
+      });
+      await ack();
+    });
+
+    // Poll 1: attach active session
+    const summary1 = await coordinator.pollOnce();
+    expect(summary1.sessionsAttached).toBe(1);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+
+    // Seed pending records into the session event source and pause the session queue
+    const eventSource = adapter.getOrCreateEventSource(sess.sessionId);
+    eventSource.appendRecord({ text: "Pending record 1" });
+    await tailer.pumpSession(sess.sessionId);
+    tailer.pauseSession(sess.sessionId);
+
+    // Transition session to completed in adapter while paused with pending queue
+    const completedSess: HarnessSession = {
+      ...sess,
+      status: "completed",
+    };
+    adapter.addSession(completedSess);
+
+    // Poll 2: notifyTerminalState rejects because queue is paused with pending records; error recorded in summary
+    const summary2 = await coordinator.pollOnce();
+    expect(summary2.errors).toHaveLength(1);
+    expect(summary2.errors[0]).toContain("queue is paused or auth-degraded");
+    expect(summary2.sessionsDetached).toBe(0);
+    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+    // Zero terminal callbacks delivered
+    expect(callbacks.filter((c) => c.recordCount === 0)).toHaveLength(0);
+
+    // Resume session queue: Poll 3 succeeds, drains records, delivers terminal callback, and detaches
+    tailer.resumeSession(sess.sessionId);
+    const summary3 = await coordinator.pollOnce();
+    expect(summary3.errors).toHaveLength(0);
+    expect(summary3.sessionsDetached).toBe(1);
+    expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
+
+    expect(callbacks).toContainEqual({
+      status: "completed",
+      recordCount: 0,
+    });
+
+    await coordinator.stop();
+  });
+});
