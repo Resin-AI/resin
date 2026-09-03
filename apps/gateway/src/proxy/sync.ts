@@ -211,6 +211,13 @@ export class CloudCatalogSyncCoordinator {
     }
     if (binding.lockManager !== undefined) {
       this.lockManager = binding.lockManager;
+      if (
+        this.router &&
+        "setLockManager" in this.router &&
+        typeof this.router.setLockManager === "function"
+      ) {
+        this.router.setLockManager(binding.lockManager);
+      }
     }
   }
 
@@ -416,9 +423,8 @@ export class CloudCatalogSyncCoordinator {
         }
       }
     }
-
+    this.bindRegistryLock(currentLock);
     const summary = await this.activateLockedEntries(currentLock, snapshot, true);
-    summary.newerAvailable = newerAvailable;
     return summary;
   }
 

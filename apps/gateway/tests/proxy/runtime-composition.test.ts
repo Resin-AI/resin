@@ -18,6 +18,7 @@ import { PROTOCOL_VERSION, ProtocolError } from "@resin/protocol";
 import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
+import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import { ProjectLockManager } from "../../src/project/lock-manager.js";
 import { CloudCatalogCache } from "../../src/proxy/cache.js";
 import { CloudCircuitBreaker } from "../../src/proxy/circuit-breaker.js";
@@ -880,5 +881,23 @@ describe("Production Runtime Composition & Credential Security", () => {
     expect(registered?.workspaceId).toBe(ws.workspaceId);
     expect(registered?.artifactDigest).toBe(artifactDigest);
     expect(registered?.metadata?.source).toBe("cloud");
+
+    // Verify that after activation, invoke_tool executes locally and returns the bundle result
+    // without calling the cloud /invoke endpoint.
+    const invokeTool = createInvokeToolHandler(registry, runtime.router!);
+    const invokeResult = await invokeTool(ws, {
+      name: "aggregate_status_records",
+      parameters: { records: [] },
+    });
+    expect(invokeResult.isError).toBeFalsy();
+    expect(invokeResult.content.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(invokeResult.content[0]?.text ?? "{}");
+    expect(parsed).toEqual({ total: 0 });
+
+    // Assert that the mock cloud received no /invoke call
+    for (const call of mockFetch.mock.calls) {
+      const urlStr = call[0].toString();
+      expect(urlStr).not.toContain("/invoke");
+    }
   });
 });

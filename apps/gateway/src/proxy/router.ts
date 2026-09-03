@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import type { ToolManifest, V1LockedToolEntry, V1ToolLock } from "@resin/contracts";
 import type { ToolInvocationRequest, ToolInvocationRouter } from "../meta/router-contract.js";
+import type { ProjectLockManager } from "../project/lock-manager.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -7,6 +10,7 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import type { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CloudIdentityProvider, CloudRequestIdentity } from "./client.js";
+import type { LocalArtifactExecutor } from "./local-executor.js";
 export interface TraceContext {
   traceId: string;
   spanId: string;
@@ -49,6 +53,8 @@ export interface CloudInvocationRouterOptions {
     params: JsonRpcParams,
     context: CloudInvocationContext,
   ) => Promise<CallToolResult>;
+  localExecutor?: LocalArtifactExecutor;
+  lockManager?: ProjectLockManager;
 }
 
 export class CloudInvocationRouter implements ToolInvocationRouter {
@@ -65,6 +71,8 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     params: JsonRpcParams,
     context: CloudInvocationContext,
   ) => Promise<CallToolResult>;
+  private localExecutor?: LocalArtifactExecutor;
+  private lockManager?: ProjectLockManager;
   private isPaused = false;
   fallbackHandler?: (
     toolIdOrName: string,
@@ -82,6 +90,8 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 60000;
     this.fetchFn = options.fetchFn ?? globalThis.fetch;
     this.invocationForwarder = options.invocationForwarder;
+    this.localExecutor = options.localExecutor;
+    this.lockManager = options.lockManager;
   }
 
   pauseCloudCalls(): void {
@@ -102,6 +112,70 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
 
   getCatalogCache(): CloudCatalogCache | undefined {
     return this.catalogCache;
+  }
+  getLocalExecutor(): LocalArtifactExecutor | undefined {
+    return this.localExecutor;
+  }
+
+  setLocalExecutor(executor?: LocalArtifactExecutor): void {
+    this.localExecutor = executor;
+  }
+
+  getLockManager(): ProjectLockManager | undefined {
+    return this.lockManager;
+  }
+
+  setLockManager(lockManager?: ProjectLockManager): void {
+    this.lockManager = lockManager;
+  }
+
+  private resolveActiveLockEntry(
+    toolIdOrName: string,
+    workspaceContext: WorkspaceContext,
+  ): V1LockedToolEntry | undefined {
+    let lock: V1ToolLock | undefined;
+
+    if (this.lockManager) {
+      try {
+        lock = this.lockManager.read();
+      } catch {
+        lock = undefined;
+      }
+    }
+
+    if (!lock && workspaceContext.lockPath && fs.existsSync(workspaceContext.lockPath)) {
+      try {
+        const content = fs.readFileSync(workspaceContext.lockPath, "utf8");
+        lock = JSON.parse(content) as V1ToolLock;
+      } catch {
+        lock = undefined;
+      }
+    }
+
+    if (!lock && workspaceContext.lock) {
+      lock = workspaceContext.lock;
+    }
+
+    if (!lock?.tools) {
+      return undefined;
+    }
+
+    const directEntry = lock.tools[toolIdOrName];
+    if (directEntry && directEntry.status === "active") {
+      return directEntry;
+    }
+
+    for (const entry of Object.values(lock.tools)) {
+      if (
+        entry &&
+        entry.status === "active" &&
+        (entry.toolId === toolIdOrName || entry.name === toolIdOrName)
+      ) {
+        return entry;
+      }
+    }
+
+    return undefined;
   }
 
   /**
@@ -126,6 +200,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
         onProgress: request.onProgress,
         timeoutMs: request.timeoutMs,
       },
+      request.manifest,
     );
   }
 
@@ -145,7 +220,22 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     params: JsonRpcParams,
     workspaceContext: WorkspaceContext,
     options?: ToolCallOptions,
+    manifest?: ToolManifest,
   ): Promise<CallToolResult> {
+    if (this.localExecutor) {
+      const activeEntry = this.resolveActiveLockEntry(toolIdOrName, workspaceContext);
+      if (activeEntry && this.localExecutor.canExecute(activeEntry)) {
+        return await this.localExecutor.execute({
+          entry: activeEntry,
+          manifest,
+          parameters: params,
+          context: workspaceContext,
+          signal: options?.signal,
+          timeoutMs: options?.timeoutMs,
+          onProgress: options?.onProgress,
+        });
+      }
+    }
     if (this.isPaused) {
       throw new McpProtocolError(
         MCP_ERROR_CODES.CONNECTION_CLOSED,

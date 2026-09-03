@@ -43,6 +43,8 @@ export const DEFAULT_DEVICE_AUTH_SCOPES = Object.freeze([
   "observations:write",
   "catalog:read",
   "artifacts:read",
+  "deployments:read",
+  "telemetry:write",
   "privacy:read",
   "privacy:write",
   "control:read",

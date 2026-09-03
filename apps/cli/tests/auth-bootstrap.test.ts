@@ -75,6 +75,8 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
             "observations:write",
             "catalog:read",
             "artifacts:read",
+            "deployments:read",
+            "telemetry:write",
             "privacy:read",
             "privacy:write",
             "control:read",

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   CanonicalJsonRecord,
   CanonicalJsonValue,
@@ -29,6 +30,7 @@ import {
   withResolvers,
 } from "./protocol.js";
 import type { BrokerRequestHandlerFn } from "./sdk.js";
+import { TOOL_SDK_SHIM_SOURCE } from "./tool-sdk-shim.js";
 
 /**
  * Options for launching and executing a tool inside a WorkerProcess.
@@ -46,6 +48,8 @@ export interface WorkerProcessOptions {
   brokerHandler?: BrokerRequestHandlerFn;
   onProgress?: (progress: ProgressMessage) => void;
   onLog?: (log: LogMessage) => void;
+  importMap?: Record<string, string>;
+  extraReadPaths?: string[];
 }
 
 /**
@@ -69,6 +73,23 @@ export interface WorkerExecutionResult {
   progress: ProgressMessage[];
 }
 
+function resolveDenoBinary(custom?: string): string {
+  if (custom) return custom;
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".resin", "current", "deno", "deno"),
+    path.join(home, ".local", "node-v24.17.0-linux-arm64", "bin", "deno"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  const envPath = (process.env.PATH || "").split(path.delimiter);
+  for (const p of envPath) {
+    const candidate = path.join(p, process.platform === "win32" ? "deno.exe" : "deno");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "deno";
+}
 /**
  * Manages an isolated Deno child process worker for executing tool bundles.
  */
@@ -100,7 +121,7 @@ export class WorkerProcess {
   ): Promise<WorkerExecutionResult> {
     const startTime = Date.now();
     const timeoutMs = this.options.timeoutMs ?? 30000;
-    const denoPath = this.options.denoExecutable ?? "deno";
+    const denoPath = resolveDenoBinary(this.options.denoExecutable);
     const memoryLimitMb = Math.max(16, this.options.memoryLimitMb ?? 128);
     const maxOutputBytes = Math.max(1024, this.options.maxOutputSizeBytes ?? 1024 * 1024);
     let observedOutputBytes = 0;
@@ -110,21 +131,67 @@ export class WorkerProcess {
     this.scratchDir = fs.mkdtempSync(tempPrefix);
     const bootstrapFilePath = path.join(this.scratchDir, "bootstrap.js");
     fs.writeFileSync(bootstrapFilePath, DENO_WORKER_BOOTSTRAP_SOURCE, "utf-8");
+    const shimFilePath = path.join(this.scratchDir, "resin-runtime.js");
+    fs.writeFileSync(shimFilePath, TOOL_SDK_SHIM_SOURCE, "utf-8");
 
-    // 2. Prepare permission flags
+    // 2. Prepare permission flags and import map
     // The worker is permissionless for network, env, run, ffi, write.
-    // Read is allowed ONLY for bootstrap script, verified bundle entrypoint, and scratch workspace.
-    // The workspace root is strictly excluded from Deno read/write permissions.
+    // Read is allowed ONLY for bootstrap script, verified bundle entrypoint, scratch workspace,
+    // and mapped import directories.
     const entrypointDir = path.dirname(path.resolve(this.options.bundleEntrypoint));
-    const allowReadPaths = [
+    const allowReadSet = new Set<string>([
       this.scratchDir,
       entrypointDir,
       path.resolve(this.options.bundleEntrypoint),
-    ];
+    ]);
+
+    if (this.options.extraReadPaths) {
+      for (const p of this.options.extraReadPaths) {
+        if (p) {
+          const resolved = path.resolve(p);
+          allowReadSet.add(resolved);
+          try {
+            allowReadSet.add(fs.realpathSync(resolved));
+          } catch {
+            // Ignore path resolution errors
+          }
+        }
+      }
+    }
+
+    let importMapArg: string | undefined;
+    if (this.options.importMap) {
+      const mergedMap: Record<string, string> = {
+        "@resin/runtime": shimFilePath,
+        ...this.options.importMap,
+      };
+      const importMapPath = path.join(this.scratchDir, "import_map.json");
+      fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
+      importMapArg = `--import-map=${importMapPath}`;
+
+      for (const target of Object.values(this.options.importMap)) {
+        if (!target) continue;
+        const filePath = target.startsWith("file://")
+          ? fileURLToPath(target)
+          : path.resolve(target);
+        const dir = path.dirname(filePath);
+        allowReadSet.add(dir);
+        allowReadSet.add(filePath);
+        try {
+          allowReadSet.add(fs.realpathSync(dir));
+          allowReadSet.add(fs.realpathSync(filePath));
+        } catch {
+          // Ignore path resolution errors
+        }
+      }
+    }
+
+    const allowReadPaths = Array.from(allowReadSet);
     const args = [
-      `--v8-flags=--max-old-space-size=${memoryLimitMb}`,
       "run",
+      `--v8-flags=--max-old-space-size=${memoryLimitMb}`,
       "--no-prompt",
+      ...(importMapArg ? [importMapArg] : []),
       `--allow-read=${allowReadPaths.join(",")}`,
       `--allow-write=${this.scratchDir}`,
       "--deny-net",
@@ -133,7 +200,6 @@ export class WorkerProcess {
       "--deny-ffi",
       bootstrapFilePath,
     ];
-
     const { promise, resolve } = withResolvers<WorkerExecutionResult>();
 
     try {
