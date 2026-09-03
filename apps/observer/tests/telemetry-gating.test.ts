@@ -803,10 +803,6 @@ describe("observer telemetry gating", () => {
       [createTimestampedRecord(session.sessionId, 2_000, 1)],
       vi.fn(async () => undefined),
     );
-    remoteConsent = {
-      metadataTelemetryEnabled: true,
-      updatedAt,
-    };
     await module.getCaptureCoordinator().handleRecords(
       session,
       [createTimestampedRecord(session.sessionId, 2_500, 2)],
@@ -819,6 +815,310 @@ describe("observer telemetry gating", () => {
       version: 2,
       remoteHistoryAvailable: false,
     });
+  });
+  it("recovers remote telemetry authorization after an unparsable consent snapshot", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-remote-unparsable-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    let nowMs = 1_000;
+    const updatedAt = new Date(1_000).toISOString();
+    const validConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt,
+    };
+    let currentConsent: unknown = validConsent;
+    const logger = createLogger();
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      logger,
+      telemetryEnabled: true,
+      remoteTelemetryConsent: validConsent,
+      refreshRemoteTelemetryConsent: async () => currentConsent as RemoteTelemetryConsentSnapshot,
+      privacyCheckpointPath,
+      now: () => nowMs,
+    });
+    const session = mockHarnessSession({
+      sessionId: "unparsable-recovery-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+
+    // Step 1: Unparsable snapshot arrives
+    nowMs = 1_500;
+    currentConsent = { invalidField: true };
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 1_500, 1)],
+      vi.fn(async () => undefined),
+    );
+
+    expect(doubles.processBatch).not.toHaveBeenCalled();
+    expect(doubles.sendObservationBatch).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      version: 2,
+      remoteHistoryAvailable: false,
+    });
+    expect(logger.warn).toHaveBeenCalledWith("telemetry paused until consent is re-verified");
+
+    // Another unparsable snapshot does not emit warn again
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 1_600, 2)],
+      vi.fn(async () => undefined),
+    );
+    expect(logger.warn).toHaveBeenCalledOnce();
+
+    // Step 2: Same valid snapshot arrives again at nowMs = 2_000
+    nowMs = 2_000;
+    currentConsent = validConsent;
+    // Record before recovery (1_800 < 2_000) stays ineligible
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 1_800, 3)],
+      vi.fn(async () => undefined),
+    );
+    expect(doubles.processBatch).not.toHaveBeenCalled();
+
+    // Record after recovery (2_500 > 2_000) is authorized
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 2_500, 4)],
+      vi.fn(async () => undefined),
+    );
+    await module.getCaptureCoordinator().waitForIdle();
+    expect(doubles.processBatch).toHaveBeenCalledOnce();
+    expect(doubles.sendObservationBatch).toHaveBeenCalledOnce();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      version: 2,
+      remoteConsent: validConsent,
+      remoteConsentCutoffMs: 2_000,
+      remoteHistoryAvailable: true,
+    });
+    expect(logger.info).toHaveBeenCalledWith("telemetry resumed after consent is re-verified");
+  });
+
+  it("recovers remote telemetry authorization after an updatedAt regression", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-remote-regression-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    let nowMs = 2_000;
+    const validConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(2_000).toISOString(),
+    };
+    let currentConsent: RemoteTelemetryConsentSnapshot = validConsent;
+    const logger = createLogger();
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      logger,
+      telemetryEnabled: true,
+      remoteTelemetryConsent: validConsent,
+      refreshRemoteTelemetryConsent: async () => currentConsent,
+      privacyCheckpointPath,
+      now: () => nowMs,
+    });
+    const session = mockHarnessSession({
+      sessionId: "regression-recovery-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+
+    // Step 1: updatedAt regression (1_000 < 2_000)
+    nowMs = 2_500;
+    currentConsent = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 2_600, 1)],
+      vi.fn(async () => undefined),
+    );
+
+    expect(doubles.processBatch).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      version: 2,
+      remoteHistoryAvailable: false,
+    });
+    expect(logger.warn).toHaveBeenCalledWith("telemetry paused until consent is re-verified");
+
+    // Step 2: Later, same snapshot arrives again at nowMs = 3_000 -> recovers
+    nowMs = 3_000;
+    currentConsent = validConsent;
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 2_800, 2)],
+      vi.fn(async () => undefined),
+    );
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      version: 2,
+      remoteConsent: validConsent,
+      remoteConsentCutoffMs: 3_000,
+      remoteHistoryAvailable: true,
+    });
+    expect(logger.info).toHaveBeenCalledWith("telemetry resumed after consent is re-verified");
+
+    // Subsequent records after recovery cutoff (3_500 > 3_000) are authorized
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 3_500, 3)],
+      vi.fn(async () => undefined),
+    );
+    await module.getCaptureCoordinator().waitForIdle();
+    expect(doubles.processBatch).toHaveBeenCalledOnce();
+    expect(doubles.sendObservationBatch).toHaveBeenCalledOnce();
+  });
+
+  it("advances cutoff as before when a newer updatedAt arrives after history was unavailable", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-remote-newer-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    let nowMs = 1_000;
+    const initialConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    let currentConsent: unknown = initialConsent;
+    const logger = createLogger();
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      logger,
+      telemetryEnabled: true,
+      remoteTelemetryConsent: initialConsent,
+      refreshRemoteTelemetryConsent: async () => currentConsent as RemoteTelemetryConsentSnapshot,
+      privacyCheckpointPath,
+      now: () => nowMs,
+    });
+    const session = mockHarnessSession({
+      sessionId: "newer-recovery-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+
+    // Make history unavailable with an unparsable snapshot
+    nowMs = 1_500;
+    currentConsent = { invalid: true };
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 1_500, 1)],
+      vi.fn(async () => undefined),
+    );
+    expect(logger.warn).toHaveBeenCalledWith("telemetry paused until consent is re-verified");
+
+    // Later snapshot with newer updatedAt: 4_000 (> nowMs 2_000 and > 1_000)
+    nowMs = 2_000;
+    const newerConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(4_000).toISOString(),
+    };
+    currentConsent = newerConsent;
+
+    // Record at 3_500 is before cutoff 4_000 -> not authorized
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 3_500, 2)],
+      vi.fn(async () => undefined),
+    );
+    expect(doubles.processBatch).not.toHaveBeenCalled();
+
+    // Record at 4_500 is after cutoff 4_000 -> authorized
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 4_500, 3)],
+      vi.fn(async () => undefined),
+    );
+    await module.getCaptureCoordinator().waitForIdle();
+    expect(doubles.processBatch).toHaveBeenCalledOnce();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      version: 2,
+      remoteConsent: newerConsent,
+      remoteConsentCutoffMs: 4_000,
+      remoteHistoryAvailable: true,
+    });
+    expect(logger.info).toHaveBeenCalledWith("telemetry resumed after consent is re-verified");
+  });
+
+  it("recovers on first reconcile from a persisted checkpoint with remoteHistoryAvailable false", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-remote-checkpoint-recovery-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    const storedConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    fs.writeFileSync(
+      privacyCheckpointPath,
+      JSON.stringify({
+        version: 2,
+        cutoffMs: 1_000,
+        telemetryEnabled: true,
+        remoteConsent: storedConsent,
+        remoteConsentCutoffMs: 1_000,
+        remoteHistoryAvailable: false,
+      }),
+    );
+
+    const nowMs = 2_500;
+    const logger = createLogger();
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      logger,
+      telemetryEnabled: true,
+      remoteTelemetryConsent: storedConsent,
+      refreshRemoteTelemetryConsent: async () => storedConsent,
+      privacyCheckpointPath,
+      now: () => nowMs,
+    });
+    const session = mockHarnessSession({
+      sessionId: "checkpoint-recovery-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+
+    // Checkpoint should recover immediately on first reconcile (in constructor)
+    // Cutoff should advance to nowMs (2_500)
+    const checkpointAfterInit = JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"));
+    expect(checkpointAfterInit).toMatchObject({
+      version: 2,
+      remoteConsent: storedConsent,
+      remoteConsentCutoffMs: 2_500,
+      remoteHistoryAvailable: true,
+    });
+    expect(logger.info).toHaveBeenCalledWith("telemetry resumed after consent is re-verified");
+
+    // Records after nowMs (3_000 > 2_500) are authorized
+    await module.getCaptureCoordinator().handleRecords(
+      session,
+      [createTimestampedRecord(session.sessionId, 3_000, 1)],
+      vi.fn(async () => undefined),
+    );
+    await module.getCaptureCoordinator().waitForIdle();
+    expect(doubles.processBatch).toHaveBeenCalledOnce();
+    expect(doubles.sendObservationBatch).toHaveBeenCalledOnce();
   });
 
   it("keeps a remote opt-out cutoff across restart before delayed delivery", async () => {

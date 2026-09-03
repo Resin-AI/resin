@@ -475,6 +475,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     if (!parsed.success) {
       this.remoteConsentHistoryAvailable = false;
       cutoffAdvanced = this.advanceRemoteConsentCutoff(this.now());
+      if (previousHistoryAvailable) {
+        this.logger?.warn("telemetry paused until consent is re-verified");
+      }
       return {
         valid: false,
         changed: previousHistoryAvailable || cutoffAdvanced,
@@ -500,6 +503,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     ) {
       this.remoteConsentHistoryAvailable = false;
       cutoffAdvanced = this.advanceRemoteConsentCutoff(this.now());
+      if (previousHistoryAvailable) {
+        this.logger?.warn("telemetry paused until consent is re-verified");
+      }
       return {
         valid: false,
         changed: previousHistoryAvailable || cutoffAdvanced,
@@ -508,11 +514,22 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
 
     if (!this.remoteConsentHistoryAvailable) {
+      if (
+        nextUpdatedAtMs <= previousUpdatedAtMs &&
+        nextConsent.metadataTelemetryEnabled === previousConsent.metadataTelemetryEnabled
+      ) {
+        cutoffAdvanced = this.advanceRemoteConsentCutoff(this.now());
+        this.remoteConsentHistoryAvailable = true;
+        this.remoteTelemetryConsent = nextConsent;
+        this.logger?.info("telemetry resumed after consent is re-verified");
+        return { valid: true, changed: true, cutoffAdvanced };
+      }
       if (nextUpdatedAtMs <= previousUpdatedAtMs) {
         return { valid: false, changed: false, cutoffAdvanced: false };
       }
       cutoffAdvanced = this.advanceRemoteConsentCutoff(Math.max(this.now(), nextUpdatedAtMs));
       this.remoteConsentHistoryAvailable = true;
+      this.logger?.info("telemetry resumed after consent is re-verified");
     } else if (nextUpdatedAtMs > previousUpdatedAtMs && nextConsent.metadataTelemetryEnabled) {
       // A later enabled snapshot may conceal a complete false -> true transition. Advancing the
       // cutoff to updatedAt makes every record from that unavailable interval ineligible.

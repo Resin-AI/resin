@@ -94,6 +94,23 @@ export function parseIsoTimestampFromFilename(name: string): number | null {
 
   return null;
 }
+const SESSION_DIR_NAME_REGEX =
+  /^(\d{4}[0-9a-zA-Z.:T_-]*)_[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Checks whether a directory name matches the OMP session directory pattern:
+ * `^<timestamp>_<uuid>$` where `<timestamp>` is a valid ISO timestamp
+ * (parsed via parseIsoTimestampFromFilename on the full name) and `<uuid>` is a full RFC UUID v4 or v7.
+ */
+export function isSessionDirectoryName(name: string): boolean {
+  if (!name) {
+    return false;
+  }
+  if (!SESSION_DIR_NAME_REGEX.test(name)) {
+    return false;
+  }
+  return parseIsoTimestampFromFilename(name) !== null;
+}
 
 /**
  * Classifies an OMP transcript file as a user session or subagent session.
@@ -130,10 +147,7 @@ export function classifyTranscriptSessionKind(
   }
   if (parentDirName === "sessions") {
     // If dirName matches timestamp/uuid pattern, it's .omp/sessions/<session-dir>/<agent-name>.jsonl
-    if (
-      parseIsoTimestampFromFilename(dirName) !== null ||
-      /\d{8}[T_]\d{6}|[0-9a-f]{8}-[0-9a-f]{4}/i.test(dirName)
-    ) {
+    if (isSessionDirectoryName(dirName)) {
       return "agent";
     }
     return "user";
@@ -143,10 +157,7 @@ export function classifyTranscriptSessionKind(
   }
 
   // Check if immediate parent directory matches session directory pattern (<timestamp>_<uuid>)
-  if (
-    parseIsoTimestampFromFilename(dirName) !== null ||
-    /\d{8}[T_]\d{6}|[0-9a-f]{8}-[0-9a-f]{4}/i.test(dirName)
-  ) {
+  if (isSessionDirectoryName(dirName)) {
     return "agent";
   }
 
