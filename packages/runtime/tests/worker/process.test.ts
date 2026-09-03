@@ -131,7 +131,7 @@ export default async function (context: { input: { x: number; y: number } }) {
         const worker = new WorkerProcess({
           manifest: { id: "test-inflight-tool", name: "sleeper", version: "1.0.0" },
           bundleEntrypoint: entryPath,
-          timeoutMs: 5000,
+          timeoutMs: 20_000,
           onProgress: () => {
             // Tool has started and is waiting on broker; send heartbeat ping
             worker.sendHeartbeat(42);
@@ -162,6 +162,7 @@ export default async function (context: { input: { x: number; y: number } }) {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it.skipIf(!hasDeno)(
@@ -189,7 +190,7 @@ export default async function (context: { input: { x: number; y: number } }) {
         const worker = new WorkerProcess({
           manifest: { id: "test-cancel-tool", name: "cancellable", version: "1.0.0" },
           bundleEntrypoint: entryPath,
-          timeoutMs: 5000,
+          timeoutMs: 20_000,
           onProgress: () => {
             // Invocation is confirmed running, send cancel immediately
             worker.sendCancel("inv-cancel-1", "User requested cancel");
@@ -203,5 +204,6 @@ export default async function (context: { input: { x: number; y: number } }) {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 });

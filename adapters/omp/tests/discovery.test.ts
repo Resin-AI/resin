@@ -1,6 +1,7 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { HarnessWorkspace } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildOmpDiscoveryCatalog,
@@ -13,6 +14,7 @@ import {
   findOmpExecutable,
   inspectBreadcrumbs,
   inspectTranscriptFile,
+  isSessionDirectoryName,
   probeOmpInstallation,
   resolveOmpHome,
 } from "../src/discovery.js";
@@ -1327,5 +1329,100 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("classifies session kind correctly distinguishing workspace slugs with timestamps from session directories", () => {
+    const uuid = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d";
+
+    // (a) sessions/-tmp-toolgen-20260903T063224Z/2026-09-03T06-32-24-000Z_<uuid>.jsonl -> user
+    const pathA = `sessions/-tmp-toolgen-20260903T063224Z/2026-09-03T06-32-24-000Z_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(pathA)).toBe("user");
+
+    const absPathA = `/var/tmp/.omp/agent/sessions/-tmp-toolgen-20260903T063224Z/2026-09-03T06-32-24-000Z_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(absPathA)).toBe("user");
+
+    const wsA: HarnessWorkspace = {
+      workspaceId: "ws-toolgen",
+      rootPath: "/tmp/toolgen-20260903T063224Z",
+      name: "-tmp-toolgen-20260903T063224Z",
+      harnessId: "omp",
+    };
+    expect(classifyTranscriptSessionKind(absPathA, wsA)).toBe("user");
+
+    // (b) sessions/-home-me-build-20240101_120000/<ts>_<uuid>.jsonl -> user
+    const pathB = `sessions/-home-me-build-20240101_120000/20240101T120000_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(pathB)).toBe("user");
+
+    const pathBIso = `sessions/-home-me-build-20240101_120000/2024-01-01T12-00-00-000Z_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(pathBIso)).toBe("user");
+
+    const absPathB = `/home/me/.omp/agent/sessions/-home-me-build-20240101_120000/20240101T120000_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(absPathB)).toBe("user");
+
+    const wsB: HarnessWorkspace = {
+      workspaceId: "ws-build",
+      rootPath: "/home/me/build-20240101_120000",
+      name: "-home-me-build-20240101_120000",
+      harnessId: "omp",
+    };
+    expect(classifyTranscriptSessionKind(absPathB, wsB)).toBe("user");
+
+    // (c) sessions/<slug>/<ts>_<uuid>/agent.jsonl -> agent
+    const pathC = `sessions/test-project/2026-09-03T06-32-24-000Z_${uuid}/agent.jsonl`;
+    expect(classifyTranscriptSessionKind(pathC)).toBe("agent");
+
+    const absPathC = `/var/tmp/.omp/agent/sessions/test-project/2026-09-03T06-32-24-000Z_${uuid}/agent.jsonl`;
+    expect(classifyTranscriptSessionKind(absPathC)).toBe("agent");
+
+    const wsC: HarnessWorkspace = {
+      workspaceId: "ws-test",
+      rootPath: "/tmp/test-project",
+      name: "test-project",
+      harnessId: "omp",
+    };
+    expect(classifyTranscriptSessionKind(absPathC, wsC)).toBe("agent");
+
+    // (d) .omp/sessions/<ts>_<uuid>/agent.jsonl -> agent
+    const pathD = `.omp/sessions/2026-09-03T06-32-24-000Z_${uuid}/agent.jsonl`;
+    expect(classifyTranscriptSessionKind(pathD)).toBe("agent");
+
+    const absPathD = `/home/me/.omp/sessions/2026-09-03T06-32-24-000Z_${uuid}/agent.jsonl`;
+    expect(classifyTranscriptSessionKind(absPathD)).toBe("agent");
+
+    // (e) .omp/sessions/<ts>_<uuid>.jsonl -> user
+    const pathE = `.omp/sessions/2026-09-03T06-32-24-000Z_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(pathE)).toBe("user");
+
+    const absPathE = `/home/me/.omp/sessions/2026-09-03T06-32-24-000Z_${uuid}.jsonl`;
+    expect(classifyTranscriptSessionKind(absPathE)).toBe("user");
+  });
+
+  it("verifies isSessionDirectoryName helper validates ISO timestamp and UUID v4/v7 correctly", () => {
+    const uuidV4 = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d";
+    const uuidV7 = "018f6c5b-3b7d-7bad-9bdd-2b0d7b3dcb6d";
+
+    // Valid session directory names
+    expect(isSessionDirectoryName(`2026-09-03T06-32-24-000Z_${uuidV4}`)).toBe(true);
+    expect(isSessionDirectoryName(`2026-09-03T06:32:24.000Z_${uuidV4}`)).toBe(true);
+    expect(isSessionDirectoryName(`20260902T120000_${uuidV4}`)).toBe(true);
+    expect(isSessionDirectoryName(`2024-01-01_12-00-00_${uuidV4}`)).toBe(true);
+    expect(isSessionDirectoryName(`2026-09-03T06-32-24-000Z_${uuidV7}`)).toBe(true);
+
+    // Workspace slugs containing timestamps or UUID fragments (not session directories)
+    expect(isSessionDirectoryName("-tmp-toolgen-20260903T063224Z")).toBe(false);
+    expect(isSessionDirectoryName("-home-me-build-20240101_120000")).toBe(false);
+    expect(isSessionDirectoryName("test-project")).toBe(false);
+    expect(isSessionDirectoryName("sessions")).toBe(false);
+
+    // Truncated UUID fragment (8 hex characters)
+    expect(isSessionDirectoryName("20260902T120000_a1b2c3d4")).toBe(false);
+
+    // Prefixed names with timestamp
+    expect(isSessionDirectoryName(`prefix-20260903T063224Z_${uuidV4}`)).toBe(false);
+
+    // Non v4/v7 UUID (e.g. nil UUID)
+    expect(
+      isSessionDirectoryName("2026-09-03T06-32-24-000Z_00000000-0000-0000-0000-000000000000"),
+    ).toBe(false);
   });
 });
