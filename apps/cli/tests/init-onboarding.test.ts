@@ -5,7 +5,11 @@ import process from "node:process";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { initCommand } from "../src/commands/init.js";
+import {
+  type InitCommandOptions,
+  initCommand,
+  resolveInitReleaseContext,
+} from "../src/commands/init.js";
 import { performPairing } from "../src/commands/login.js";
 import { logoutCommand } from "../src/commands/logout.js";
 import type { InstallerPairingMutation } from "../src/installer/installer.js";
@@ -15,6 +19,15 @@ const ACCESS_TOKEN = "access-token-must-never-be-printed";
 const REFRESH_TOKEN = "refresh-token-must-never-be-printed";
 const VERIFICATION_URI = "https://auth.resin.sh/device";
 const VERIFICATION_URI_COMPLETE = "https://auth.resin.sh/device?code=ABCD-9876";
+
+function initCommandForTest(argv: string[], options: InitCommandOptions = {}): Promise<number> {
+  return initCommand(argv, {
+    releaseMode: "local-test",
+    setupService: false,
+    autoStartService: false,
+    ...options,
+  });
+}
 
 function successfulDeviceFetch() {
   let binding: { deviceId: string; installationId: string } | undefined;
@@ -108,6 +121,37 @@ describe("init onboarding & pairing workflow", () => {
     await fs.rm(home, { recursive: true, force: true });
     await fs.rm(workspace, { recursive: true, force: true });
   });
+
+  it("rejects ambient local-test markers unless the executing CLI belongs to that checkout", () => {
+    const sourceRoot = path.resolve(".");
+    const sourceEntry = path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs");
+    const env = {
+      RESIN_LOCAL_SOURCE_ROOT: sourceRoot,
+      RESIN_RELEASE_MODE: "local-test",
+      RESIN_RELEASE_TEST_ONLY: "1",
+      VITEST: "1",
+      NODE_ENV: "test",
+    };
+
+    expect(
+      resolveInitReleaseContext({
+        env,
+        entryPath: process.execPath,
+      }),
+    ).toEqual({ releaseMode: "production" });
+    expect(
+      resolveInitReleaseContext({
+        env: { RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+        entryPath: sourceEntry,
+      }),
+    ).toEqual({ releaseMode: "production" });
+    expect(
+      resolveInitReleaseContext({
+        env,
+        entryPath: sourceEntry,
+      }),
+    ).toEqual({ releaseMode: "local-test", localSourceRoot: sourceRoot });
+  });
   it("displays formatted capability and privacy plan in verbose mode and proceeds on explicit interactive approval", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = successfulDeviceFetch();
@@ -120,7 +164,7 @@ describe("init onboarding & pairing workflow", () => {
         return true;
       });
 
-      const exitCode = await initCommand(
+      const exitCode = await initCommandForTest(
         [
           "--verbose",
           "--home",
@@ -182,7 +226,7 @@ describe("init onboarding & pairing workflow", () => {
         return true;
       });
 
-      const exitCode = await initCommand(
+      const exitCode = await initCommandForTest(
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
@@ -209,7 +253,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn().mockResolvedValue(true);
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--auto-approve",
           "--home",
@@ -239,7 +283,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn().mockResolvedValue(true);
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--quiet",
           "--auto-approve",
@@ -269,7 +313,7 @@ describe("init onboarding & pairing workflow", () => {
     const promptFn = vi.fn().mockResolvedValue(false);
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
@@ -301,7 +345,7 @@ describe("init onboarding & pairing workflow", () => {
     const promptFn = vi.fn().mockImplementation(async () => false);
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
         {
           customFsBridge: bridge,
@@ -326,7 +370,7 @@ describe("init onboarding & pairing workflow", () => {
     const promptFn = vi.fn();
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--home",
           home,
@@ -357,7 +401,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn();
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--non-interactive",
           "--home",
@@ -390,7 +434,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn().mockResolvedValue(true);
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--home",
           home,
@@ -431,7 +475,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn().mockRejectedValue(new Error("No graphical display found"));
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--home",
           home,
@@ -458,21 +502,53 @@ describe("init onboarding & pairing workflow", () => {
     expect(result.stdout).toContain("2. Enter code:   ABCD-9876");
   });
 
-  it("supports explicit --local-only to skip pairing and avoid network requests", async () => {
+  it("selects local public source without contacting the production release channel", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = vi.fn();
     const openBrowser = vi.fn();
     const codexHome = path.join(home, "active-codex");
+    const publicSourceRoot = "/work/resin";
+
+    await bridge.writeFile(
+      path.join(home, ".resin", "versions", "v1.0.32", "version.json"),
+      JSON.stringify({ version: "1.0.32" }),
+    );
+    await bridge.writeFile(
+      path.join(publicSourceRoot, "apps", "observer", "dist", "bin", "daemon.js"),
+      "export const daemon = true;",
+    );
+    await bridge.writeFile(
+      path.join(publicSourceRoot, "packages", "runtime", "dist", "index.js"),
+      "export const runtime = true;",
+    );
+    await bridge.writeFile(
+      path.join(publicSourceRoot, "apps", "gateway", "dist", "bin", "mcp-shim.js"),
+      "export const mcp = true;",
+    );
+    await bridge.writeFile(
+      path.join(publicSourceRoot, "apps", "cli", "bin", "resin.mjs"),
+      "#!/usr/bin/env node",
+    );
+    await bridge.writeFile(
+      path.join(publicSourceRoot, "apps", "cli", "dist", "index.js"),
+      "export const supervisor = true;",
+    );
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         ["--local-only", "--home", home, "--workspace", workspace, "--auto-approve"],
         {
           customFsBridge: bridge,
+          localSourceRoot: publicSourceRoot,
           // SAFETY: Mock fetch implementing fetch interface for testing.
           customFetch: customFetch as typeof fetch,
           openBrowser,
-          env: { HOME: home, CODEX_HOME: codexHome },
+          env: {
+            HOME: home,
+            CODEX_HOME: codexHome,
+            RESIN_LOCAL_SOURCE_ROOT: publicSourceRoot,
+            RESIN_RELEASE_MODE: "local-test",
+          },
         },
       );
     });
@@ -481,9 +557,12 @@ describe("init onboarding & pairing workflow", () => {
     expect(customFetch).not.toHaveBeenCalled();
     expect(openBrowser).not.toHaveBeenCalled();
     expect(await bridge.readFile(path.join(codexHome, "config.toml"))).toContain(
-      `command = "${path.join(home, ".resin", "bin", "resin")}"`,
+      `command = "${path.join(publicSourceRoot, "apps", "cli", "bin", "resin.mjs")}"`,
     );
     expect(await bridge.readFile(path.join(home, ".codex", "config.toml"))).toBeNull();
+    expect(
+      await bridge.readFile(path.join(home, ".resin", "versions", "v1.0.32", "LICENSE")),
+    ).toBeNull();
 
     // Verify token file was not created
     const tokenFilePath = path.join(home, ".resin", "state", "device-token.json");
@@ -496,7 +575,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn();
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--non-interactive",
           "--home",
@@ -557,7 +636,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn();
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--non-interactive",
           "--home",
@@ -675,7 +754,7 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn();
 
     const result = await captureOutput(async () => {
-      return await initCommand(
+      return await initCommandForTest(
         [
           "--dry-run",
           "--home",

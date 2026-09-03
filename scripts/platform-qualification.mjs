@@ -96,6 +96,30 @@ function runNode(entrypoint, args = [], options = {}) {
   };
 }
 
+function createQualificationCliDriver(installedRoot, sandboxDir) {
+  const driverPath = path.join(sandboxDir, "qualification-cli.mjs");
+  const cliModuleUrl = pathToFileURL(
+    path.join(installedRoot, "apps", "cli", "dist", "index.js"),
+  ).href;
+  fs.writeFileSync(
+    driverPath,
+    [
+      `import { main } from ${JSON.stringify(cliModuleUrl)};`,
+      "const exitCode = await main(process.argv.slice(2), {",
+      "  initOptions: {",
+      '    releaseMode: "local-test",',
+      "    setupService: false,",
+      "    autoStartService: false,",
+      "  },",
+      "});",
+      "process.exitCode = exitCode;",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return driverPath;
+}
+
 async function waitFor(check, { timeoutMs = 10_000, intervalMs = 100 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
@@ -243,6 +267,7 @@ function qualifyCli(installedRoot, sandboxDir, manifest) {
   const workspace = path.join(sandboxDir, "workspace");
   fs.mkdirSync(outside, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
+  const initCli = createQualificationCliDriver(installedRoot, sandboxDir);
   const env = { ...process.env, NODE_ENV: "production" };
   delete env.NODE_PATH;
 
@@ -255,7 +280,7 @@ function qualifyCli(installedRoot, sandboxDir, manifest) {
     throw new Error(`Packaged CLI help command failed: ${help.stderr || help.stdout}`);
   }
   const initDryRun = runNode(
-    cli,
+    initCli,
     [
       "init",
       "--dry-run",
@@ -745,10 +770,9 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     RESIN_TELEMETRY_ENABLED: "true",
     RESIN_LOG_LEVEL: "info",
   };
-  if (process.env.RESIN_RELEASE_TEST_ONLY === "1") {
-    cleanEnv.RESIN_RELEASE_MODE = "local-test";
-    cleanEnv.VITEST = "1";
-  }
+  delete cleanEnv.RESIN_RELEASE_MODE;
+  delete cleanEnv.RESIN_LOCAL_SOURCE_ROOT;
+  delete cleanEnv.VITEST;
   delete cleanEnv.NODE_PATH;
   delete cleanEnv.CLAUDE_CONFIG_DIR;
   delete cleanEnv.CODEX_CONFIG_PATH;
@@ -759,9 +783,9 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
   let daemonChild = null;
 
   try {
-    const cliBin = path.join(installedRoot, "bin", "resin");
+    const initCli = createQualificationCliDriver(installedRoot, sandboxDir);
     const initResult = runNode(
-      cliBin,
+      initCli,
       [
         "init",
         "--non-interactive",

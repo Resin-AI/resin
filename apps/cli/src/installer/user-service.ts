@@ -46,6 +46,7 @@ export interface SetupDaemonServiceOptions {
   readonly resinHome?: string;
   readonly daemonPath?: string;
   readonly nodePath?: string;
+  readonly supervisorEntryPath?: string;
   readonly env?: Record<string, string>;
   readonly fsBridge?: ConfigFsBridge;
   readonly runner?: ServiceCommandRunner;
@@ -126,6 +127,7 @@ export async function setupAndStartDaemonService(
     resinHome,
     daemonPath: options.daemonPath,
     nodePath: options.nodePath,
+    supervisorEntryPath: options.supervisorEntryPath,
     env: options.env,
     fsBridge,
     runner: options.runner,
@@ -453,6 +455,7 @@ export async function restartDaemonService(options: SetupDaemonServiceOptions = 
     resinHome,
     daemonPath: options.daemonPath,
     nodePath: options.nodePath,
+    supervisorEntryPath: options.supervisorEntryPath,
     env: options.env,
     fsBridge: options.fsBridge,
     runner: options.runner,

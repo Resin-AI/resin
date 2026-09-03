@@ -79,6 +79,28 @@ export interface InstallerPairingMutation extends InstallationPairingSummary {
   rollback?: () => Promise<void>;
 }
 
+export interface LocalSourceInstallPaths {
+  readonly daemonPath: string;
+  readonly runtimePath: string;
+  readonly mcpShimPath: string;
+  readonly resinCommand: string;
+  readonly supervisorEntryPath: string;
+}
+
+export function resolveLocalSourceInstallPaths(sourceRoot: string): LocalSourceInstallPaths {
+  if (sourceRoot.trim().length === 0) {
+    throw new Error("Local source root must not be empty.");
+  }
+  const root = path.resolve(sourceRoot);
+  return {
+    daemonPath: path.join(root, "apps", "observer", "dist", "bin", "daemon.js"),
+    runtimePath: path.join(root, "packages", "runtime", "dist", "index.js"),
+    mcpShimPath: path.join(root, "apps", "gateway", "dist", "bin", "mcp-shim.js"),
+    resinCommand: path.join(root, "apps", "cli", "bin", "resin.mjs"),
+    supervisorEntryPath: path.join(root, "apps", "cli", "dist", "index.js"),
+  };
+}
+
 export interface InstallerOptions {
   dryRun?: boolean;
   json?: boolean;
@@ -98,6 +120,7 @@ export interface InstallerOptions {
   signedManifest?: SignedManifest;
   assetTarball?: string | Buffer;
   targetVersion?: string;
+  localSourceRoot?: string;
   releaseMode?: "production" | "local-test";
   releaseChannelUrl?: string;
   trustedReleaseKeys?: TrustedReleaseKey[];
@@ -255,6 +278,13 @@ export class ResinInstaller {
       const releaseMode = options.releaseMode ?? "local-test";
       const resinHome = path.join(customHome, ".resin");
       const downloadsDir = path.join(resinHome, "downloads");
+      const localSourceRoot =
+        releaseMode === "local-test" && options.localSourceRoot
+          ? path.resolve(options.localSourceRoot)
+          : undefined;
+      const localSourcePaths = localSourceRoot
+        ? resolveLocalSourceInstallPaths(localSourceRoot)
+        : undefined;
 
       let assetResult: AssetVerificationResult;
       if (releaseMode === "production") {
@@ -372,9 +402,36 @@ export class ResinInstaller {
           fsBridge: this.fsBridge,
           manifest: options.assetManifest,
           denoExecutable: options.denoExecutable,
+          customPaths: localSourcePaths
+            ? {
+                daemon: localSourcePaths.daemonPath,
+                runtime: localSourcePaths.runtimePath,
+                "mcp-shim": localSourcePaths.mcpShimPath,
+              }
+            : undefined,
           env: { ...harnessEnv, HOME: customHome, RESIN_HOME: resinHome },
           allowMissingOptional: true,
         });
+        if (localSourcePaths) {
+          const missingSourcePaths = assetResult.assets
+            .filter((asset) => asset.name !== "deno" && !asset.verified)
+            .map((asset) => asset.path);
+          const [resinCommandExists, supervisorEntryExists] = await Promise.all([
+            this.fsBridge.exists(localSourcePaths.resinCommand),
+            this.fsBridge.exists(localSourcePaths.supervisorEntryPath),
+          ]);
+          if (!resinCommandExists) {
+            missingSourcePaths.push(localSourcePaths.resinCommand);
+          }
+          if (!supervisorEntryExists) {
+            missingSourcePaths.push(localSourcePaths.supervisorEntryPath);
+          }
+          if (missingSourcePaths.length > 0) {
+            throw new Error(
+              `Local source build is incomplete; missing required output: ${missingSourcePaths.join(", ")}`,
+            );
+          }
+        }
       }
       this.journal.completeStep("assets", {
         allVerified: assetResult.allVerified,
@@ -596,6 +653,7 @@ export class ResinInstaller {
         customHome,
         env: harnessEnv,
         gatewayUrl: options.gatewayUrl,
+        resinCommand: localSourcePaths?.resinCommand,
         fsBridge: this.fsBridge,
         dryRun,
         harnesses: requestedHarnesses,
@@ -720,13 +778,18 @@ export class ResinInstaller {
       if (options.setupService) {
         this.log("==> Step 10/11: Registering and starting non-root user daemon service...");
         if (!dryRun) {
-          const forceRestart = Boolean(
-            versionSwitchResult &&
-              versionSwitchResult.activeVersion !== versionSwitchResult.previousVersion,
-          );
+          const forceRestart =
+            Boolean(localSourcePaths) ||
+            Boolean(
+              versionSwitchResult &&
+                versionSwitchResult.activeVersion !== versionSwitchResult.previousVersion,
+            );
           serviceSetupResult = await setupAndStartDaemonService({
             homeDir: customHome,
             resinHome,
+            daemonPath: localSourcePaths?.daemonPath,
+            supervisorEntryPath: localSourcePaths?.supervisorEntryPath,
+            env: localSourceRoot ? { RESIN_LOCAL_SOURCE_ROOT: localSourceRoot } : undefined,
             autoStart: options.autoStartService ?? true,
             fsBridge: this.fsBridge,
             runner: options.serviceRunner,

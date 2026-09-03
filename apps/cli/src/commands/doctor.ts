@@ -25,8 +25,10 @@ import {
   type HarnessHealthRunResult,
   type HarnessHealthRunner,
   type HarnessHealthSettingsDiagnostic,
+  resolveLocalSourceResinCommand,
   saveHarnessHealthSettings,
 } from "../installer/harness-health.js";
+import { resolveLocalSourceInstallPaths } from "../installer/installer.js";
 import { detectPlatform, validatePlatform } from "../installer/platform.js";
 import { DeviceAuthClient } from "../service/auth-bootstrap.js";
 import {
@@ -133,6 +135,28 @@ Options:
   -h, --help       Show this help message.
 `;
   process.stdout.write(text.trimStart());
+}
+
+export function createDoctorUserServiceManager(options: {
+  readonly home: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly fsBridge: ConfigFsBridge;
+  readonly entryPath?: string;
+}): UserServiceManager {
+  const home = path.resolve(options.home);
+  const sourceCommand = resolveLocalSourceResinCommand(options.env, options.entryPath);
+  const sourceRoot = sourceCommand
+    ? path.resolve(path.dirname(sourceCommand), "..", "..", "..")
+    : undefined;
+  const sourcePaths = sourceRoot ? resolveLocalSourceInstallPaths(sourceRoot) : undefined;
+  return createUserServiceManager({
+    homeDir: home,
+    resinHome: path.join(home, ".resin"),
+    daemonPath: sourcePaths?.daemonPath,
+    supervisorEntryPath: sourcePaths?.supervisorEntryPath,
+    env: sourceRoot ? { RESIN_LOCAL_SOURCE_ROOT: sourceRoot } : undefined,
+    fsBridge: options.fsBridge,
+  });
 }
 
 async function runHarnessHealthSafely(
@@ -343,9 +367,9 @@ export async function runDiagnostics(options: {
   // 3. User Autostart Service
   const serviceManager =
     options.serviceManager ??
-    createUserServiceManager({
-      homeDir: customHome,
-      resinHome,
+    createDoctorUserServiceManager({
+      home: customHome,
+      env,
       fsBridge,
     });
 
@@ -660,9 +684,9 @@ export async function repairState(options: {
   // 2. Clean stale lockfile if daemon not active
   const serviceManager =
     options.serviceManager ??
-    createUserServiceManager({
-      homeDir: customHome,
-      resinHome,
+    createDoctorUserServiceManager({
+      home: customHome,
+      env,
       fsBridge,
     });
   const svcStatus = await serviceManager.status();
@@ -851,16 +875,16 @@ export async function repairState(options: {
       );
     }
     actions.push(`Restarted active daemon service to restore IPC: ${svcStatus.serviceName}`);
+  }
 
-    if (fsBridge === defaultFsBridge) {
-      await verifyDaemonReadiness({
-        homeDir: customHome,
-        resinHome,
-        fsBridge,
-        cloudRequired: false,
-        timeoutMs: 15_000,
-      });
-    }
+  if (serviceRestarted && fsBridge === defaultFsBridge) {
+    await verifyDaemonReadiness({
+      homeDir: customHome,
+      resinHome,
+      fsBridge,
+      cloudRequired: false,
+      timeoutMs: 15_000,
+    });
   }
   // 4. Safely reconcile detected harnesses through the shared noninteractive engine.
   const harnessHealthCoordinator =
@@ -982,9 +1006,9 @@ export async function doctorCommand(
     const fsBridge = options.fsBridge ?? defaultFsBridge;
     const serviceManager =
       options.serviceManager ??
-      createUserServiceManager({
-        homeDir: customHome,
-        resinHome: path.join(customHome, ".resin"),
+      createDoctorUserServiceManager({
+        home: customHome,
+        env,
         fsBridge,
       });
     const harnessHealthCoordinator =

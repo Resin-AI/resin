@@ -9,7 +9,7 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
-import { initCommand } from "../commands/init.js";
+import { type InitCommandOptions, initCommand } from "../commands/init.js";
 import { type BrowserLauncher, loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { privacyCommand } from "../commands/privacy.js";
@@ -305,6 +305,10 @@ export interface MainOptions {
   isInteractive?: boolean;
   isInitialized?: boolean;
   autoOnboard?: boolean;
+  initOptions?: Pick<
+    InitCommandOptions,
+    "releaseMode" | "localSourceRoot" | "setupService" | "autoStartService"
+  >;
   harnessHealthRunner?: HarnessHealthRunner;
   harnessHealthDeadlineMs?: number;
   verbosity?: VerbosityLevel;
@@ -454,6 +458,7 @@ export async function main(
         initArgs.push("--quiet");
       }
       return await initCommand(initArgs, {
+        ...options.initOptions,
         customFetch: options.customFetch,
         openBrowser: options.openBrowser,
         customFsBridge: options.fsBridge,
@@ -481,6 +486,7 @@ export async function main(
   switch (command) {
     case "init":
       return initCommand(args, {
+        ...options.initOptions,
         customFetch: options.customFetch,
         openBrowser: options.openBrowser,
         env,

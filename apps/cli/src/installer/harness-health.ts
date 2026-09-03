@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type Stats, constants as fsConstants } from "node:fs";
+import { type Stats, constants as fsConstants, realpathSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -119,6 +119,8 @@ export interface HarnessHealthReconciler {
 export interface HarnessHealthCoordinatorOptions {
   readonly home?: string;
   readonly env?: NodeJS.ProcessEnv;
+  readonly resinCommand?: string;
+  readonly entryPath?: string;
   readonly workspacePath?: string;
   readonly gatewayUrl?: string;
   readonly statePath?: string;
@@ -540,6 +542,43 @@ export async function saveHarnessHealthSettings(
   return settings;
 }
 
+export function resolveLocalSourceResinCommand(
+  env: NodeJS.ProcessEnv,
+  entryPath: string | undefined = process.argv[1],
+): string | undefined {
+  if (!entryPath) return undefined;
+
+  try {
+    const resolvedEntry = realpathSync.native(entryPath);
+    const requestedRoot = env.RESIN_LOCAL_SOURCE_ROOT?.trim();
+    const root = requestedRoot
+      ? realpathSync.native(requestedRoot)
+      : path.resolve(path.dirname(resolvedEntry), "..", "..", "..");
+    const sourceCommand = realpathSync.native(path.join(root, "apps", "cli", "bin", "resin.mjs"));
+    const remainsInsideRoot = (candidatePath: string): boolean => {
+      const relativePath = path.relative(root, candidatePath);
+      return (
+        relativePath.length > 0 &&
+        !relativePath.startsWith(`..${path.sep}`) &&
+        relativePath !== ".." &&
+        !path.isAbsolute(relativePath)
+      );
+    };
+    if (!remainsInsideRoot(sourceCommand)) return undefined;
+    if (resolvedEntry === sourceCommand) return sourceCommand;
+    if (!requestedRoot) return undefined;
+
+    const supervisorCommand = realpathSync.native(
+      path.join(root, "apps", "cli", "dist", "index.js"),
+    );
+    return remainsInsideRoot(supervisorCommand) && resolvedEntry === supervisorCommand
+      ? sourceCommand
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Coordinates low-overhead harness checks and safe reconciliation without ever
  * exposing planner data, config contents, paths, or raw errors in persisted state.
@@ -549,6 +588,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private readonly env: NodeJS.ProcessEnv;
   private readonly workspacePath: string;
   private readonly gatewayUrl: string | undefined;
+  private readonly resinCommand: string | undefined;
   private readonly statePath: string;
   private readonly settingsPath: string;
   private readonly autoRepairOverride: boolean | undefined;
@@ -565,6 +605,9 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   constructor(options: HarnessHealthCoordinatorOptions = {}) {
     this.home = path.resolve(options.home ?? options.env?.HOME ?? os.homedir());
     this.env = options.env ?? (options.home === undefined ? process.env : { HOME: this.home });
+    this.resinCommand =
+      options.resinCommand ??
+      resolveLocalSourceResinCommand(options.env ?? process.env, options.entryPath);
     this.workspacePath = path.resolve(options.workspacePath ?? process.cwd());
     this.gatewayUrl = options.gatewayUrl;
     this.statePath = options.statePath
@@ -652,6 +695,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
         env: this.env,
         workspacePath: this.workspacePath,
         gatewayUrl: this.gatewayUrl,
+        resinCommand: this.resinCommand,
         fsBridge: this.fsBridge,
         probeHarness: this.probeHarness,
         now: () => attemptedAt,

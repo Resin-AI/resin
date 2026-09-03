@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
@@ -328,40 +329,64 @@ describe("packed CLI production bootstrap", () => {
     };
     channelBytes = Buffer.from(JSON.stringify(channel), "utf8");
 
+    const initArgs = [
+      "init",
+      "--non-interactive",
+      "--local-only",
+      "--auto-approve",
+      `--home=${home}`,
+      `--workspace=${workspace}`,
+      "--json",
+    ];
+    const cliEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      CLAUDE_CONFIG_DIR: undefined,
+      CODEX_CONFIG_PATH: undefined,
+      CODEX_HOME: undefined,
+      OMP_HOME: undefined,
+      RESIN_OMP_HOME: undefined,
+      NODE_ENV: undefined,
+      RESIN_RELEASE_MODE: "production",
+      RESIN_RELEASE_CHANNEL_URL: `${baseUrl}/channels.json`,
+      RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES: "1",
+    };
+    const dryRunResult = await execFileAsync(
+      process.execPath,
+      [packedBin, ...initArgs, "--dry-run"],
+      {
+        cwd: path.dirname(packedBin),
+        env: cliEnv,
+        maxBuffer: 20 * 1024 * 1024,
+      },
+    );
+    expect(dryRunResult.stderr).toBe("");
+    expect(dryRunResult.stdout).toContain('"success": true');
+
+    const driverPath = path.join(runDir, "invoke-packed-cli.mjs");
+    const packedCliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "bin", "cli.js"));
+    fs.writeFileSync(
+      driverPath,
+      [
+        `import { main } from ${JSON.stringify(packedCliModuleUrl.href)};`,
+        "const exitCode = await main(process.argv.slice(2), {",
+        '  initOptions: { releaseMode: "production", setupService: false, autoStartService: false },',
+        "});",
+        "process.exitCode = exitCode;",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
     let stdout = "";
     let stderr = "";
     try {
-      const result = await execFileAsync(
-        process.execPath,
-        [
-          packedBin,
-          "init",
-          "--non-interactive",
-          "--local-only",
-          "--auto-approve",
-          `--home=${home}`,
-          `--workspace=${workspace}`,
-          "--json",
-        ],
-        {
-          cwd: path.dirname(packedBin),
-          env: {
-            ...process.env,
-            HOME: home,
-            USERPROFILE: home,
-            CLAUDE_CONFIG_DIR: undefined,
-            CODEX_CONFIG_PATH: undefined,
-            CODEX_HOME: undefined,
-            OMP_HOME: undefined,
-            RESIN_OMP_HOME: undefined,
-            NODE_ENV: undefined,
-            RESIN_RELEASE_MODE: "production",
-            RESIN_RELEASE_CHANNEL_URL: `${baseUrl}/channels.json`,
-            RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES: "1",
-          },
-          maxBuffer: 20 * 1024 * 1024,
-        },
-      );
+      const result = await execFileAsync(process.execPath, [driverPath, ...initArgs], {
+        cwd: path.dirname(packedBin),
+        env: cliEnv,
+        maxBuffer: 20 * 1024 * 1024,
+      });
       stdout = result.stdout;
       stderr = result.stderr;
     } catch (error: unknown) {

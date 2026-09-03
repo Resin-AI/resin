@@ -88,6 +88,27 @@ describe("status command & collector", () => {
     expect(claudeHarness?.configured).toBe(true);
   });
 
+  it("verifies harnesses against the local checkout command in source mode", async () => {
+    const sourceRoot = path.resolve(".");
+    const sourceCommand = path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs");
+    const claudePath = path.join(homeDir, ".claude.json");
+    const fsBridge = createMockFsBridge({
+      [claudePath]: JSON.stringify({
+        mcpServers: { resin: { command: sourceCommand, args: ["mcp"] } },
+      }),
+    });
+
+    const summary = await collectStatus({
+      home: homeDir,
+      env: { HOME: homeDir, RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+      fsBridge,
+      entryPath: sourceCommand,
+    });
+
+    const claudeHarness = summary.harnesses.find((h) => h.id === "claude-code");
+    expect(claudeHarness?.configured).toBe(true);
+  });
+
   it("collects status through active local socket without requiring IPC auth token", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-status-ipc-"));
     const socketPath = path.join(tempDir, "daemon.sock");

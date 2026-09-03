@@ -2,9 +2,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
+import { resolveInstalledResinMcpCommand } from "../installer/harness-config.js";
 import {
   HarnessHealthCoordinator,
   type HarnessHealthRunner,
+  resolveLocalSourceResinCommand,
   runBoundedHarnessHealthCheck,
   saveHarnessHealthSettings,
 } from "../installer/harness-health.js";
@@ -50,6 +52,7 @@ export interface InitCommandOptions {
   authPromptFn?: (question: string) => Promise<boolean>;
   logger?: (msg: string) => void;
   releaseMode?: "production" | "local-test";
+  localSourceRoot?: string;
   setupService?: boolean;
   autoStartService?: boolean;
   readinessVerifier?: InstallerOptions["readinessVerifier"];
@@ -200,11 +203,38 @@ function isConfigFsBridge(value: ConfigFsBridge | InitCommandOptions): value is 
   return "readFile" in value && value.readFile instanceof Function;
 }
 
-function resolveReleaseMode(envMode: string | undefined): "production" | "local-test" | undefined {
-  if (envMode === "production" || envMode === "local-test") {
-    return envMode;
+export interface InitReleaseContext {
+  readonly releaseMode: "production" | "local-test";
+  readonly localSourceRoot?: string;
+}
+
+export function resolveInitReleaseContext(options: {
+  readonly releaseMode?: "production" | "local-test";
+  readonly localSourceRoot?: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly entryPath?: string;
+}): InitReleaseContext {
+  if (options.releaseMode !== undefined) {
+    const explicitSourceRoot = options.localSourceRoot?.trim();
+    return {
+      releaseMode: options.releaseMode,
+      localSourceRoot:
+        options.releaseMode === "local-test" && explicitSourceRoot
+          ? path.resolve(explicitSourceRoot)
+          : undefined,
+    };
   }
-  return undefined;
+
+  const requestedRoot = options.env.RESIN_LOCAL_SOURCE_ROOT?.trim();
+  if (options.env.RESIN_RELEASE_MODE !== "local-test" || !requestedRoot) {
+    return { releaseMode: "production" };
+  }
+  const sourceCommand = resolveLocalSourceResinCommand(options.env, options.entryPath);
+  if (sourceCommand === undefined) return { releaseMode: "production" };
+  return {
+    releaseMode: "local-test",
+    localSourceRoot: path.resolve(path.dirname(sourceCommand), "..", "..", ".."),
+  };
 }
 
 /**
@@ -304,6 +334,12 @@ export async function initCommand(
     }
   }
 
+  const { releaseMode, localSourceRoot } = resolveInitReleaseContext({
+    releaseMode: options.releaseMode,
+    localSourceRoot: options.localSourceRoot,
+    env,
+  });
+
   const installerOptions: InstallerOptions = {
     dryRun: flags.dryRun,
     json: flags.json,
@@ -323,23 +359,15 @@ export async function initCommand(
     verbosity,
     verbose: isVerbose,
     quiet: isQuiet,
-    releaseMode:
-      options.releaseMode ??
-      resolveReleaseMode(env.RESIN_RELEASE_MODE) ??
-      (env.RESIN_RELEASE_TEST_ONLY === "1" ||
-      env.VITEST ||
-      process.env.VITEST ||
-      env.NODE_ENV === "test" ||
-      process.env.NODE_ENV === "test"
-        ? "local-test"
-        : "production"),
+    localSourceRoot,
+    releaseMode,
     releaseChannelUrl: process.env.RESIN_RELEASE_CHANNEL_URL,
     allowInsecureReleaseTransportForTests:
       process.env.RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES === "1",
     fsBridge: options.customFsBridge,
     serviceRunner: options.serviceRunner,
-    setupService: options.setupService ?? (isRealInstall && !process.env.VITEST),
-    autoStartService: options.autoStartService ?? (isRealInstall && !process.env.VITEST),
+    setupService: options.setupService ?? isRealInstall,
+    autoStartService: options.autoStartService ?? isRealInstall,
     readinessVerifier: options.readinessVerifier,
     pairing: pairingCallback,
     abortSignal: cancellationController.signal,
@@ -370,6 +398,9 @@ export async function initCommand(
             workspacePath: flags.workspace,
             gatewayUrl: flags.gatewayUrl,
             fsBridge: options.customFsBridge,
+            resinCommand: localSourceRoot
+              ? path.join(localSourceRoot, "apps", "cli", "bin", "resin.mjs")
+              : resolveInstalledResinMcpCommand(harnessHome),
             harnesses,
             installedHarnesses,
           });
