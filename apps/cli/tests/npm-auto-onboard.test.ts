@@ -339,6 +339,11 @@ describe("npm-auto-onboard: fail-safe npm lifecycle & first-run onboarding", () 
         customFetch: customFetch as typeof fetch,
         openBrowser,
         fsBridge: bridge,
+        initOptions: {
+          releaseMode: "local-test",
+          setupService: false,
+          autoStartService: false,
+        },
       });
 
       expect(exitCode).toBe(0);

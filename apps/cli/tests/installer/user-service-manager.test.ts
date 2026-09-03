@@ -329,6 +329,25 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
 
       expect(uninstalled.success).toBe(true);
     });
+    it("registers explicit local-source daemon and supervisor paths", async () => {
+      const daemonPath = "/work/resin/apps/observer/dist/bin/daemon.js";
+      const supervisorEntryPath = "/work/resin/apps/cli/dist/index.js";
+      const setupResult = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        daemonPath,
+        supervisorEntryPath,
+        runner: mockRunner,
+        autoStart: true,
+      });
+
+      expect(setupResult.success).toBe(true);
+      expect(setupResult.unitPath).toBeDefined();
+      const unitContent = fs.readFileSync(setupResult.unitPath!, "utf8");
+      expect(unitContent).toContain(supervisorEntryPath);
+      expect(unitContent).toContain(daemonPath);
+      expect(unitContent).not.toContain(path.join(resinHome, "current"));
+    });
     it("restores prior non-installed state on startup or installation failure", async () => {
       // A runner that fails on start
       const failingRunner: ServiceCommandRunner = {

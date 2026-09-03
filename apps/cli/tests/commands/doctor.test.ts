@@ -20,6 +20,7 @@ import {
   loadHarnessHealthSnapshot,
   resolveHarnessHealthSettingsPath,
   resolveHarnessHealthStatePath,
+  resolveLocalSourceResinCommand,
   runBoundedHarnessHealthCheck,
   saveHarnessHealthSettings,
   startHarnessHealthScheduler,
@@ -109,12 +110,16 @@ function createCoordinator(options: {
   now: () => Date;
   probeHarness?: HarnessInstallationProbe;
   autoRepair?: boolean;
+  env?: NodeJS.ProcessEnv;
+  entryPath?: string;
   reconciler?: HarnessHealthReconciler;
 }): HarnessHealthCoordinator {
   return new HarnessHealthCoordinator({
     home: HOME,
     workspacePath: WORKSPACE,
     harnesses: ["claude-code"],
+    env: options.env,
+    entryPath: options.entryPath,
     fsBridge: options.bridge,
     statFile: options.bridge.statFile.bind(options.bridge),
     now: options.now,
@@ -125,6 +130,80 @@ function createCoordinator(options: {
 }
 
 describe("HarnessHealthCoordinator", () => {
+  it("keeps the local checkout command as the automatic repair target", async () => {
+    const bridge = new MtimeMemoryBridge();
+    const sourceRoot = path.resolve(".");
+    const reconciler = new HarnessReconciler();
+    const reconcileSpy = vi.spyOn(reconciler, "reconcile");
+    const coordinator = createCoordinator({
+      bridge,
+      env: { HOME, RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+      entryPath: path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs"),
+      now: () => new Date(START_MS),
+      probeHarness: createInstalledProbe(() => true),
+      reconciler,
+    });
+
+    await coordinator.run({ trigger: "init", force: true });
+
+    const resinCommand = path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs");
+    expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ resinCommand }));
+    expect(await bridge.readFile(resolveHarnessConfigPath("claude-code", HOME))).toContain(
+      resinCommand,
+    );
+    expect(
+      resolveLocalSourceResinCommand({ RESIN_LOCAL_SOURCE_ROOT: sourceRoot }, resinCommand),
+    ).toBe(resinCommand);
+    expect(
+      resolveLocalSourceResinCommand(
+        { RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+        "/home/developer/.resin/current/bin/resin",
+      ),
+    ).toBeUndefined();
+    expect(resolveLocalSourceResinCommand({}, resinCommand)).toBe(resinCommand);
+  });
+
+  it("rejects a source-looking symlink whose canonical command escapes the requested root", async () => {
+    const attackerRoot = await fs.mkdtemp(path.join(os.tmpdir(), "resin-source-symlink-"));
+    const fakeBin = path.join(attackerRoot, "apps", "cli", "bin");
+    const fakeDist = path.join(attackerRoot, "apps", "cli", "dist");
+    await fs.mkdir(fakeBin, { recursive: true });
+    await fs.mkdir(fakeDist, { recursive: true });
+    const fakeEntry = path.join(fakeBin, "resin.mjs");
+    await fs.symlink(path.resolve("apps", "cli", "bin", "resin.mjs"), fakeEntry);
+    await fs.writeFile(path.join(fakeDist, "index.js"), "export {};\n");
+
+    try {
+      expect(
+        resolveLocalSourceResinCommand({ RESIN_LOCAL_SOURCE_ROOT: attackerRoot }, fakeEntry),
+      ).toBeUndefined();
+    } finally {
+      await fs.rm(attackerRoot, { recursive: true, force: true });
+    }
+  });
+  it("keeps the resident scheduler on the local checkout when a service home is explicit", async () => {
+    const bridge = new MtimeMemoryBridge();
+    const sourceRoot = path.resolve(".");
+    const reconciler = new HarnessReconciler();
+    const reconcileSpy = vi.spyOn(reconciler, "reconcile");
+    const coordinator = createCoordinator({
+      bridge,
+      env: { HOME, RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+      entryPath: path.join(sourceRoot, "apps", "cli", "dist", "index.js"),
+      now: () => new Date(START_MS),
+      probeHarness: createInstalledProbe(() => true),
+      reconciler,
+    });
+
+    await coordinator.run({ trigger: "startup", force: true });
+
+    expect(reconcileSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resinCommand: path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs"),
+      }),
+    );
+  });
+
   it("detects a harness installed after init on the next hourly check", async () => {
     const bridge = new MtimeMemoryBridge();
     let nowMs = START_MS;

@@ -33,6 +33,7 @@ import {
   resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "../installer/harness-config.js";
+import { resolveLocalSourceResinCommand } from "../installer/harness-health.js";
 import {
   type CloudCredentialLoadResult,
   type CloudCredentialStatus,
@@ -257,6 +258,7 @@ interface StatusCollectionOptions {
   customFetch?: typeof fetch;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  entryPath?: string;
   now?: () => number;
 }
 
@@ -501,7 +503,13 @@ export async function fetchDaemonStatusSummary(
   );
 
   const harnessSnapshot = await readHarnessSnapshot(fsBridge, resinHome);
-  const harnesses = await collectHarnessStatuses(home, fsBridge, harnessSnapshot, env);
+  const harnesses = await collectHarnessStatuses(
+    home,
+    fsBridge,
+    harnessSnapshot,
+    env,
+    options.entryPath,
+  );
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
   const update = await readUpdateStatus(fsBridge, resinHome);
   const privacy = collectPrivacySnapshot(
@@ -1064,11 +1072,13 @@ async function collectHarnessStatuses(
   fsBridge: ConfigFsBridge,
   cached: CachedHarnessSnapshot,
   env: NodeJS.ProcessEnv,
+  entryPath?: string,
 ): Promise<DaemonStatusSummary["harnesses"]> {
   const claudePath = resolveHarnessConfigPath("claude-code", home, env);
   const codexPath = resolveHarnessConfigPath("codex-cli", home, env);
   const ompPath = resolveHarnessConfigPath("omp", home, env);
-  const resinCommand = resolveInstalledResinMcpCommand(home);
+  const resinCommand =
+    resolveLocalSourceResinCommand(env, entryPath) ?? resolveInstalledResinMcpCommand(home);
   const [claudeProbe, codexProbe, ompProbe] = await Promise.all([
     probeClaudeInstallation({ customConfigPath: claudePath }, fsBridge).catch(() => null),
     probeCodexInstallation({

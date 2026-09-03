@@ -7,6 +7,7 @@ import { SafetyAttestationRecordSchema } from "@resin/contracts";
 import { FrameDecoder, encodeFrame, resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createDoctorUserServiceManager,
   doctorCommand,
   formatDoctorForTerminal,
   parseDoctorFlags,
@@ -95,6 +96,26 @@ describe("doctor & repair commands", () => {
     const flags2 = parseDoctorFlags(["--home", "/custom/path", "-h"]);
     expect(flags2.home).toBe("/custom/path");
     expect(flags2.help).toBe(true);
+  });
+
+  it("preserves checkout-built service paths during source-mode doctor repairs", () => {
+    const sourceRoot = path.resolve(".");
+    const manager = createDoctorUserServiceManager({
+      home: homeDir,
+      env: { HOME: homeDir, RESIN_LOCAL_SOURCE_ROOT: sourceRoot },
+      entryPath: path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs"),
+      fsBridge: createMockFsBridge(),
+    });
+
+    const definition = manager.getUnitDefinition();
+    expect(definition).toContain(path.join(sourceRoot, "apps", "cli", "dist", "index.js"));
+    expect(definition).toContain(
+      path.join(sourceRoot, "apps", "observer", "dist", "bin", "daemon.js"),
+    );
+    expect(definition).toContain("RESIN_LOCAL_SOURCE_ROOT");
+    expect(definition).toContain(sourceRoot);
+    expect(definition).not.toContain(path.join(resinHome, "current"));
+    expect(definition).not.toContain(path.join(resinHome, "bin", "resin-daemon"));
   });
 
   it("diagnoses missing directories and stale lockfiles", async () => {

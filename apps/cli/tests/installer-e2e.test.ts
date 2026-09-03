@@ -11,6 +11,7 @@ import {
   type InstallationPairingSummary,
   type InstallerPairingMutation,
   ResinInstaller,
+  resolveLocalSourceInstallPaths,
 } from "../src/installer/installer.js";
 import { createUserServiceManager } from "../src/installer/user-service.js";
 
@@ -468,6 +469,71 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(ompContent).not.toContain(customGateway);
   });
 
+  it("uses the public source tree for local-test assets and harness commands", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const home = "/home/developer";
+    const sourceRoot = "/work/resin";
+    const workspace = "/work/resin-cloud";
+    const sourcePaths = resolveLocalSourceInstallPaths(sourceRoot);
+    const fetchImpl = vi.fn();
+
+    await bridge.writeFile(
+      path.join(home, ".resin", "versions", "v1.0.32", "version.json"),
+      JSON.stringify({ version: "1.0.32" }),
+    );
+    await bridge.writeFile(sourcePaths.daemonPath, "export const daemon = true;");
+    await bridge.writeFile(sourcePaths.runtimePath, "export const runtime = true;");
+    await bridge.writeFile(sourcePaths.mcpShimPath, "export const mcp = true;");
+    await bridge.writeFile(sourcePaths.resinCommand, "#!/usr/bin/env node");
+    await bridge.writeFile(sourcePaths.supervisorEntryPath, "export const supervisor = true;");
+
+    const summary = await new ResinInstaller({
+      fsBridge: bridge,
+      logger: () => {},
+    }).run({
+      autoApprove: true,
+      customHome: home,
+      fetchImpl: fetchImpl as typeof fetch,
+      localSourceRoot: sourceRoot,
+      nonInteractive: true,
+      releaseMode: "local-test",
+      workspace,
+    });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(summary.assets.assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "daemon", path: sourcePaths.daemonPath, verified: true }),
+        expect.objectContaining({ name: "runtime", path: sourcePaths.runtimePath, verified: true }),
+        expect.objectContaining({
+          name: "mcp-shim",
+          path: sourcePaths.mcpShimPath,
+          verified: true,
+        }),
+      ]),
+    );
+    expect(await bridge.readFile(path.join(home, ".resin", "versions", "v1.0.32", "LICENSE"))).toBe(
+      null,
+    );
+    expect(
+      JSON.parse((await bridge.readFile(path.join(home, ".claude.json"))) ?? "{}").mcpServers.resin,
+    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"] });
+    expect(await bridge.readFile(path.join(home, ".codex", "config.toml"))).toContain(
+      `command = "${sourcePaths.resinCommand}"`,
+    );
+    expect(
+      JSON.parse((await bridge.readFile(path.join(home, ".omp", "agent", "mcp.json"))) ?? "{}")
+        .mcpServers.resin,
+    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"] });
+    expect(sourcePaths).toEqual({
+      daemonPath: "/work/resin/apps/observer/dist/bin/daemon.js",
+      mcpShimPath: "/work/resin/apps/gateway/dist/bin/mcp-shim.js",
+      resinCommand: "/work/resin/apps/cli/bin/resin.mjs",
+      runtimePath: "/work/resin/packages/runtime/dist/index.js",
+      supervisorEntryPath: "/work/resin/apps/cli/dist/index.js",
+    });
+  });
+
   it("omitted service setup does not record serviceHealthy as true in journal", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
@@ -706,7 +772,12 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
         "--home=/home/testuser",
         "--workspace=/workspace/test",
       ],
-      bridge,
+      {
+        customFsBridge: bridge,
+        releaseMode: "local-test",
+        setupService: false,
+        autoStartService: false,
+      },
     );
 
     expect(exitCode).toBe(0);

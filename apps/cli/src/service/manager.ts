@@ -502,6 +502,13 @@ function quoteShellArgument(argument: string): string {
   return `'${argument.replaceAll("'", "'\"'\"'")}'`;
 }
 
+function formatShellEnvironment(name: string, value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`Invalid service environment variable name: ${name}`);
+  }
+  return `export ${name}=${quoteShellArgument(value)}`;
+}
+
 export interface ServiceInstallOptions {
   daemonPath?: string;
   homeDir?: string;
@@ -1220,6 +1227,10 @@ export class WslUserServiceManager implements UserServiceManager {
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const logDir = path.join(resinHome, "logs");
     const runDir = path.join(resinHome, "run");
+    const envLines = Object.entries({
+      ...this.defaultEnv,
+      ...(options.env ?? {}),
+    }).map(([name, value]) => formatShellEnvironment(name, value));
 
     const execCmd = createSupervisorProgramArguments(
       daemonPath,
@@ -1233,6 +1244,7 @@ export class WslUserServiceManager implements UserServiceManager {
 # Resin Daemon WSL Service Fallback
 export RESIN_HOME=${quoteShellArgument(resinHome)}
 export NODE_ENV=production
+${envLines.join("\n")}
 mkdir -p ${quoteShellArgument(logDir)} ${quoteShellArgument(runDir)}
 nohup ${execCmd} >> ${quoteShellArgument(path.join(logDir, "daemon.stdout.log"))} 2>> ${quoteShellArgument(path.join(logDir, "daemon.stderr.log"))} &
 echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
