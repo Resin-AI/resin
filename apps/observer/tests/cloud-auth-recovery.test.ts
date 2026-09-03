@@ -9,7 +9,9 @@ import {
   AUTH_ERROR_BODY_LIMIT_BYTES,
   AuthRecoveryController,
   AuthRecoveryError,
+  ResourceForbiddenError,
   classifyAuthResponse,
+  classifyForbiddenResponse,
 } from "../src/auth-recovery.js";
 import {
   CloudCredentialStore,
@@ -445,7 +447,7 @@ describe("cloud authentication recovery", () => {
     const fetchMock = vi.fn(async () => {
       requestCalls += 1;
       if (requestCalls === 1) {
-        return new Response(JSON.stringify({ error: "permission_denied" }), {
+        return new Response(JSON.stringify({ code: "device_revoked" }), {
           status: 403,
           headers: { "Content-Type": "application/json" },
         });
@@ -862,5 +864,101 @@ describe("cloud authentication recovery", () => {
     expect(cancelled).toBe(true);
     expect(pulledBytes).toBeLessThanOrEqual(chunkSize * 3);
     expect(response.bodyUsed).toBe(true);
+  });
+
+  it("leaves the controller AUTHENTICATED on 403 with TENANT_MISMATCH and later acceptIdentity returns true", async () => {
+    const controller = new AuthRecoveryController();
+    controller.setAuthenticated();
+    const identity = makeIdentity("access-tenant-mismatch");
+
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "TENANT_MISMATCH" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const client = new CloudObservationClient({
+      authRecoveryController: controller,
+      identityProvider: vi.fn(async () => identity),
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(client.sendTrajectoryObservationBatch([makeObservation()])).rejects.toThrow(
+      ResourceForbiddenError,
+    );
+
+    // Controller must remain AUTHENTICATED
+    expect(controller.getSnapshot().status).toBe("AUTHENTICATED");
+    expect(controller.getSnapshot().category).toBeNull();
+
+    // Later acceptIdentity with the same identity must return true
+    expect(controller.acceptIdentity(identity)).toBe(true);
+  });
+
+  it("degrades the controller to DEGRADED_OFFLINE on 403 with device_revoked", async () => {
+    const controller = new AuthRecoveryController({ getRefreshFailure: () => "revoked" });
+    controller.setAuthenticated();
+    const identity = makeIdentity("access-device-revoked");
+
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ code: "device_revoked" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const client = new CloudObservationClient({
+      authRecoveryController: controller,
+      identityProvider: vi.fn(async () => identity),
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await expect(client.sendTrajectoryObservationBatch([makeObservation()])).rejects.toThrow(
+      AuthRecoveryError,
+    );
+
+    // Controller must transition to DEGRADED_OFFLINE
+    expect(controller.getSnapshot().status).toBe("DEGRADED_OFFLINE");
+    expect(controller.getSnapshot().category).toBe("REFRESH_REVOKED");
+
+    // Later acceptIdentity with the same identity must return false
+    expect(controller.acceptIdentity(identity)).toBe(false);
+  });
+
+  describe("classifyForbiddenResponse", () => {
+    it("classifies resource-scoped errors as resource", () => {
+      expect(classifyForbiddenResponse({ error: "TENANT_MISMATCH" })).toBe("resource");
+      expect(classifyForbiddenResponse({ error: "WORKSPACE_FORBIDDEN" })).toBe("resource");
+      expect(
+        classifyForbiddenResponse({
+          error: "permission_denied",
+          message: "Workspace ws_1 forbidden",
+        }),
+      ).toBe("resource");
+      expect(classifyForbiddenResponse({ error: "permission_denied" })).toBe("resource");
+      expect(classifyForbiddenResponse({})).toBe("resource");
+      expect(classifyForbiddenResponse(null)).toBe("resource");
+    });
+
+    it("classifies credential-scoped errors as credential", () => {
+      expect(classifyForbiddenResponse({ code: "device_revoked" })).toBe("credential");
+      expect(classifyForbiddenResponse({ error: "device_revoked" })).toBe("credential");
+      expect(classifyForbiddenResponse({ error: "invalid_grant" })).toBe("credential");
+      expect(classifyForbiddenResponse({ error: "revoked_token" })).toBe("credential");
+      expect(classifyForbiddenResponse({ error: "unauthorized_client" })).toBe("credential");
+      expect(
+        classifyForbiddenResponse({ error: "permission_denied", message: "device access revoked" }),
+      ).toBe("credential");
+      expect(
+        classifyForbiddenResponse({
+          error: "permission_denied",
+          details: { reason: "token_revoked" },
+        }),
+      ).toBe("credential");
+      expect(
+        classifyForbiddenResponse({}, { "www-authenticate": 'Bearer error="invalid_token"' }),
+      ).toBe("credential");
+    });
   });
 });

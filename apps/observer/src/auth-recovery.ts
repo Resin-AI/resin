@@ -64,6 +64,165 @@ const REVOKED_CODES = {
   unauthorized_client: true,
 } as const;
 
+const CREDENTIAL_FORBIDDEN_CODES = {
+  device_revoked: true,
+  invalid_grant: true,
+  revoked_token: true,
+  unauthorized_client: true,
+  token_expired: true,
+  expired_token: true,
+  jwt_expired: true,
+  invalid_token: true,
+} as const;
+
+function extractErrorCode(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  let obj: unknown = value;
+  if (typeof value === "string") {
+    try {
+      obj = JSON.parse(value);
+    } catch {
+      const lower = value.toLowerCase();
+      for (const code of Object.keys(CREDENTIAL_FORBIDDEN_CODES)) {
+        if (lower.includes(code)) {
+          return code;
+        }
+      }
+      return null;
+    }
+  }
+
+  if (typeof obj !== "object" || obj === null) {
+    return null;
+  }
+
+  const record = obj as Record<string, unknown>;
+  if (typeof record.code === "string" && record.code.trim()) {
+    return record.code.trim().toLowerCase();
+  }
+  if (typeof record.error_code === "string" && record.error_code.trim()) {
+    return record.error_code.trim().toLowerCase();
+  }
+  if (typeof record.errorCode === "string" && record.errorCode.trim()) {
+    return record.errorCode.trim().toLowerCase();
+  }
+  if (typeof record.error === "string" && record.error.trim()) {
+    return record.error.trim().toLowerCase();
+  }
+  if (typeof record.error === "object" && record.error !== null) {
+    const inner = record.error as Record<string, unknown>;
+    if (typeof inner.code === "string" && inner.code.trim()) {
+      return inner.code.trim().toLowerCase();
+    }
+    if (typeof inner.message === "string" && inner.message.trim()) {
+      return inner.message.trim().toLowerCase();
+    }
+  }
+  return null;
+}
+
+function extractWwwAuthenticate(
+  headers?: Headers | Record<string, string | string[] | undefined> | null,
+): string {
+  if (!headers) {
+    return "";
+  }
+  if (typeof (headers as Headers).get === "function") {
+    return (headers as Headers).get("www-authenticate")?.toLowerCase() ?? "";
+  }
+  const record = headers as Record<string, string | string[] | undefined>;
+  const val =
+    record["www-authenticate"] ?? record["WWW-Authenticate"] ?? record["Www-Authenticate"];
+  if (Array.isArray(val)) {
+    return val.join(" ").toLowerCase();
+  }
+  if (typeof val === "string") {
+    return val.toLowerCase();
+  }
+  return "";
+}
+
+/**
+ * Classifies a 403 Forbidden response as either a credential-level failure
+ * (requiring auth recovery/degradation) or a resource-scoped failure
+ * (such as a tenant/workspace mismatch that should fail the batch without degrading auth).
+ */
+export function classifyForbiddenResponse(
+  body: unknown,
+  headers?: Headers | Record<string, string | string[] | undefined> | null,
+): "credential" | "resource" {
+  const challenge = extractWwwAuthenticate(headers);
+  for (const code of Object.keys(CREDENTIAL_FORBIDDEN_CODES)) {
+    if (challenge.includes(code)) {
+      return "credential";
+    }
+  }
+
+  const code = extractErrorCode(body);
+  if (code && code in CREDENTIAL_FORBIDDEN_CODES) {
+    return "credential";
+  }
+
+  if (code === "permission_denied" || (code && code.startsWith("permission_denied"))) {
+    let detailText = "";
+    if (typeof body === "string") {
+      detailText = body;
+    } else if (typeof body === "object" && body !== null) {
+      const record = body as Record<string, unknown>;
+      const parts: string[] = [];
+      if (typeof record.message === "string") parts.push(record.message);
+      if (typeof record.error_description === "string") parts.push(record.error_description);
+      if (typeof record.reason === "string") parts.push(record.reason);
+      if (typeof record.details === "string") parts.push(record.details);
+      if (typeof record.details === "object" && record.details !== null) {
+        parts.push(JSON.stringify(record.details));
+      }
+      detailText = parts.join(" ");
+    }
+
+    if (
+      /(device|token|credential)/i.test(detailText) ||
+      /(device|token|credential)/i.test(challenge)
+    ) {
+      return "credential";
+    }
+  }
+
+  return "resource";
+}
+
+/**
+ * Safe, actionable failure propagated when a cloud request fails with HTTP 403
+ * due to a resource-scoped authorization error (e.g. workspace or tenant mismatch).
+ * Does not trigger auth degradation or require re-login.
+ */
+export class ResourceForbiddenError extends ProtocolError {
+  readonly workspaceId?: string;
+
+  constructor(
+    message = "Forbidden: resource access denied",
+    options: {
+      workspaceId?: string;
+      details?: Record<string, unknown>;
+      cause?: unknown;
+    } = {},
+  ) {
+    super("permission_denied", message, {
+      status: 403,
+      details: {
+        ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+        ...options.details,
+      },
+      cause: options.cause,
+    });
+    this.name = "ResourceForbiddenError";
+    this.workspaceId = options.workspaceId;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 function responseErrorCode<T>(value: T): string | null {
   const schema = z.union([
     z.object({ code: z.string() }),
@@ -184,7 +343,8 @@ export async function classifyAuthResponse(
     return "TOKEN_EXPIRED";
   }
 
-  const errorCode = responseErrorCode(await readCappedAuthErrorJson(response));
+  const rawJson = await readCappedAuthErrorJson(response);
+  const errorCode = responseErrorCode(rawJson);
   if (errorCode && errorCode in TOKEN_EXPIRY_CODES) {
     return "TOKEN_EXPIRED";
   }
@@ -195,11 +355,19 @@ export async function classifyAuthResponse(
     return "UNAUTHORIZED";
   }
   if (response.status === 403) {
-    return "FORBIDDEN";
+    const forbiddenScope = classifyForbiddenResponse(rawJson, response.headers);
+    if (forbiddenScope === "credential") {
+      return "FORBIDDEN";
+    }
+    return null;
   }
   return null;
 }
 export function classifyAuthError<E>(error: E): AuthRecoveryCategory | null {
+  if (error instanceof ResourceForbiddenError) {
+    return null;
+  }
+
   if (error instanceof ProtocolError) {
     switch (error.code) {
       case "token_expired":
@@ -209,8 +377,14 @@ export function classifyAuthError<E>(error: E): AuthRecoveryCategory | null {
         return "REFRESH_REVOKED";
       case "unauthorized":
         return "UNAUTHORIZED";
-      case "permission_denied":
-        return "FORBIDDEN";
+      case "permission_denied": {
+        const forbiddenScope = classifyForbiddenResponse({
+          code: error.code,
+          message: error.message,
+          details: error.details,
+        });
+        return forbiddenScope === "credential" ? "FORBIDDEN" : null;
+      }
       default:
         break;
     }
@@ -222,7 +396,8 @@ export function classifyAuthError<E>(error: E): AuthRecoveryCategory | null {
       return "UNAUTHORIZED";
     }
     if (statusParsed.data.status === 403) {
-      return "FORBIDDEN";
+      const forbiddenScope = classifyForbiddenResponse(error);
+      return forbiddenScope === "credential" ? "FORBIDDEN" : null;
     }
   }
   return null;

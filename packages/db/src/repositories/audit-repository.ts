@@ -1,6 +1,7 @@
 import {
   type AuditRecord,
   AuditRecordSchema,
+  type DeadLetterRecord,
   type InvocationRecord,
   InvocationRecordSchema,
   canonicalJson,
@@ -12,6 +13,9 @@ import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
  */
 export class AuditRepository {
   constructor(private readonly conn: LocalDatabaseConnection) {}
+  getConnection(): LocalDatabaseConnection {
+    return this.conn;
+  }
 
   // ---------------------------------------------------------------------------
   // Invocation Records
@@ -211,6 +215,42 @@ export class AuditRepository {
     this.conn.run(
       `UPDATE invocation_records SET uploaded_at = ? WHERE invocation_id IN (${placeholders});`,
       [uploadedAt, ...invocationIds],
+    );
+  }
+  markInvocationsFailed(invocationIds: string[], failedAt: string): void {
+    if (invocationIds.length === 0) {
+      return;
+    }
+    const placeholders = invocationIds.map(() => "?").join(", ");
+    this.conn.run(
+      `UPDATE invocation_records SET status = 'error', uploaded_at = ? WHERE invocation_id IN (${placeholders});`,
+      [failedAt, ...invocationIds],
+    );
+  }
+
+  saveDeadLetter(deadLetter: DeadLetterRecord): void {
+    this.conn.run(
+      `INSERT INTO dead_letters (
+        dead_letter_id, original_event_type, payload_json, error_reason, failed_at, retry_count, next_retry_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(dead_letter_id) DO UPDATE SET
+        original_event_type = excluded.original_event_type,
+        payload_json = excluded.payload_json,
+        error_reason = excluded.error_reason,
+        failed_at = excluded.failed_at,
+        retry_count = excluded.retry_count,
+        next_retry_at = excluded.next_retry_at,
+        status = excluded.status;`,
+      [
+        deadLetter.deadLetterId,
+        deadLetter.originalEventType,
+        canonicalJson(deadLetter.payload),
+        deadLetter.errorReason,
+        deadLetter.failedAt,
+        deadLetter.retryCount,
+        deadLetter.nextRetryAt ?? null,
+        deadLetter.status,
+      ],
     );
   }
 

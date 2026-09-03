@@ -1,5 +1,7 @@
+import path from "node:path";
 import type {
   V1ActivationCertificate,
+  V1LockedToolEntry,
   V1ProjectMetadata,
   V1RevocationMetadata,
   V1ToolLock,
@@ -20,12 +22,13 @@ import {
   ValidationError,
 } from "@resin/protocol";
 import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
-import { ProjectLockManager } from "../project/lock-manager.js";
+import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
+import { LocalArtifactExecutor } from "./local-executor.js";
 import { CloudInvocationRouter } from "./router.js";
 import {
   type ArtifactBytesDownloader,
@@ -61,6 +64,11 @@ export interface ProductionProxyRuntimeOptions {
   ) => Promise<V1ActivationCertificate | null> | V1ActivationCertificate | null;
   revocationProvider?: () => Promise<V1RevocationMetadata | null> | V1RevocationMetadata | null;
   allowDevKeys?: boolean;
+  executor?: LocalArtifactExecutor;
+  onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
+  onToolSyncError?: (toolName: string, error: Error) => void;
+  onOfflineDegraded?: (toolName: string, reason: string) => void;
+  isPinned?: (toolId: string) => boolean;
 }
 
 export interface ProductionProxyRuntime {
@@ -75,6 +83,7 @@ export interface ProductionProxyRuntime {
   coordinator?: CloudCatalogSyncCoordinator;
   registry?: ToolRegistry;
   lockManager?: ProjectLockManager;
+  executor?: LocalArtifactExecutor;
   onWorkspaceReady(workspace: WorkspaceContext): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -136,15 +145,26 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
+    const artifactCache = options.artifactCache ?? new ArtifactCache();
+    const executor =
+      options.executor ??
+      new LocalArtifactExecutor({
+        cache: artifactCache,
+        workspaceRoot: process.cwd(),
+        allowDevKeys: options.allowDevKeys ?? false,
+        resinHome:
+          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+      });
+
     const router = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
       baseUrl: identity.cloudUrl,
       identityProvider,
       fetchFn: options.fetchFn,
+      localExecutor: executor,
+      lockManager: options.lockManager,
     });
-
-    const artifactCache = options.artifactCache ?? new ArtifactCache();
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -169,6 +189,10 @@ export async function createProductionProxyRuntime(
       certificateProvider: options.certificateProvider,
       revocationProvider: options.revocationProvider,
       allowDevKeys: options.allowDevKeys ?? false,
+      onToolQualified: options.onToolQualified,
+      onToolSyncError: options.onToolSyncError,
+      onOfflineDegraded: options.onOfflineDegraded,
+      isPinned: options.isPinned,
     });
 
     const runtime: ProductionProxyRuntime = {
@@ -180,11 +204,19 @@ export async function createProductionProxyRuntime(
       client,
       cache,
       router,
+      executor,
       coordinator,
       registry: options.registry,
       lockManager: options.lockManager,
-
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
+        const workspaceRoot =
+          workspace.projectRoot ??
+          workspace.canonicalRoot ??
+          (workspace.lockPath ? path.dirname(path.dirname(workspace.lockPath)) : undefined) ??
+          workspace.roots?.[0]?.path;
+        if (workspaceRoot) {
+          executor.setWorkspaceRoot(workspaceRoot);
+        }
         // 1. Hydrate registry with locked tools before any cloud operations
         if (workspace.lock && options.registry) {
           if (
@@ -212,6 +244,9 @@ export async function createProductionProxyRuntime(
             }
           }
           coordinator.bindWorkspace({ workspaceId: workspace.workspaceId, lockManager });
+          if (lockManager) {
+            router.setLockManager(lockManager);
+          }
         }
 
         // 2. Register project if metadata exists
@@ -282,6 +317,15 @@ export async function createProductionProxyRuntime(
     credentialStore,
     registry: options.registry,
     lockManager: options.lockManager,
+    executor:
+      options.executor ??
+      new LocalArtifactExecutor({
+        cache: options.artifactCache ?? new ArtifactCache(),
+        workspaceRoot: process.cwd(),
+        allowDevKeys: options.allowDevKeys ?? false,
+        resinHome:
+          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+      }),
 
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
       // Hydrate registry with locked tools locally

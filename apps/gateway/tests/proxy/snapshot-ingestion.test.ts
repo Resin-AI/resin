@@ -341,6 +341,7 @@ describe("Snapshot Ingestion & Quarantine", () => {
       registry,
       workspaceId: "ws-1",
       lockManager,
+      isPinned: (id) => id === LOCKED_TOOL_ID || id === "query_runner",
     });
 
     await syncCoordinator.sync();
@@ -350,6 +351,55 @@ describe("Snapshot Ingestion & Quarantine", () => {
     expect(currentLock.tools.query_runner.manifestDigest).toBe(lockedManifestDigest);
 
     expect(registry.getToolVersion(LOCKED_TOOL_ID, "2.0.0")).toBeUndefined();
+  });
+
+  it("lock advances to newer version when tool is not pinned", async () => {
+    const lockPath = path.join(tempDir, "resin-advance.lock");
+    const lockManager = new ProjectLockManager({ lockPath, projectId: PROJECT_ID });
+
+    const lockedManifestDigest = "1".repeat(64);
+    const lockedArtifactDigest = "2".repeat(64);
+
+    lockManager.reconcileQualified({
+      toolId: LOCKED_TOOL_ID,
+      name: "query_runner",
+      version: "1.0.0",
+      manifestDigest: lockedManifestDigest,
+      artifactDigest: lockedArtifactDigest,
+      status: "active",
+    });
+
+    const mockService = new MockCloudMcpService();
+    const cloudManifest = makeCloudManifest({
+      id: LOCKED_TOOL_ID,
+      name: "query_runner",
+      version: "2.0.0",
+    });
+    mockService.seedTools([cloudManifest]);
+
+    const cache = new CloudCatalogCache();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const registry = new ToolRegistry();
+    const router = new CloudInvocationRouter({ catalogCache: cache });
+
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router,
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+    });
+
+    await syncCoordinator.sync();
+
+    const currentLock = lockManager.read();
+    expect(currentLock.tools.query_runner.version).toBe("2.0.0");
   });
 
   it("skips catalog entries that violate the lock contract without blocking other tools", async () => {

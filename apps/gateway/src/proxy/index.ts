@@ -8,3 +8,4 @@ export * from "./client.js";
 export * from "./router.js";
 export * from "./sync.js";
 export * from "./runtime.js";
+export * from "./local-executor.js";

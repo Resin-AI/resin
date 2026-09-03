@@ -243,31 +243,9 @@ export interface LegacyToolDefinition<TInput = unknown, TOutput = unknown> {
 }
 
 /**
- * Defines the canonical generated-tool ABI. New tools export a context-first
- * handler. Legacy descriptor objects are adapted at definition time so the
- * Deno bootstrap always receives one callable default export.
+ * Defines the canonical generated-tool ABI. Re-exported from dependency-free tool-sdk-shim.
  */
-function isToolHandlerFunction<TInput, TOutput>(
-  value: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
-): value is ToolHandler<TInput, TOutput> {
-  const tag = Object.prototype.toString.call(value);
-  return tag === "[object Function]" || tag === "[object AsyncFunction]";
-}
-
-export function defineTool<TInput = unknown, TOutput = unknown>(
-  handlerOrDefinition: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
-): ToolHandler<TInput, TOutput> {
-  if (isToolHandlerFunction(handlerOrDefinition)) {
-    return handlerOrDefinition;
-  }
-  if (
-    !handlerOrDefinition ||
-    Object.prototype.toString.call(handlerOrDefinition.handler) !== "[object Function]"
-  ) {
-    throw new TypeError("defineTool requires a callable handler");
-  }
-  return (context: ToolContext<TInput>) => handlerOrDefinition.handler(context.input, context);
-}
+export { defineTool } from "./tool-sdk-shim.js";
 
 export type BrokerRequestHandlerFn = (
   service: "fs" | "net" | "cmd" | "secret",

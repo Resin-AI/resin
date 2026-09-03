@@ -18,10 +18,12 @@ import { PROTOCOL_VERSION, ProtocolError } from "@resin/protocol";
 import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
+import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import { ProjectLockManager } from "../../src/project/lock-manager.js";
 import { CloudCatalogCache } from "../../src/proxy/cache.js";
 import { CloudCircuitBreaker } from "../../src/proxy/circuit-breaker.js";
 import { CloudCatalogClient } from "../../src/proxy/client.js";
+import { resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
@@ -29,6 +31,8 @@ import type { RegistryTool } from "../../src/registry/types.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { createRegistryGatewayRouter } from "../../src/router.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
+
+const hasDeno = resolveDenoExecutable() !== undefined;
 
 function makeJwt(
   payload: Record<string, string | number | boolean | null | undefined | readonly string[]>,
@@ -724,12 +728,189 @@ describe("Production Runtime Composition & Credential Security", () => {
     gateway.close();
   });
 
-  it("activates a published cloud tool into the workspace lock and local artifact cache", async () => {
-    const projectDir = path.join(tempDir, "published-activation-proj");
-    fs.mkdirSync(projectDir, { recursive: true });
-    const ws = resolveWorkspaceContext({ cwd: projectDir });
-    expect(ws.lockPath).toBeDefined();
+  it.skipIf(!hasDeno)(
+    "activates a published cloud tool into the workspace lock and local artifact cache",
+    async () => {
+      const projectDir = path.join(tempDir, "published-activation-proj");
+      fs.mkdirSync(projectDir, { recursive: true });
+      const ws = resolveWorkspaceContext({ cwd: projectDir });
+      expect(ws.lockPath).toBeDefined();
 
+      const claims = makeValidClaims();
+      const token = makeJwt(claims);
+      const store = new CloudCredentialStore({ tokenFilePath: tokenFile });
+      await store.persist({
+        cloudUrl: "https://cloud.resin.io",
+        accessToken: token,
+        deviceId: claims.deviceId,
+        workspaceId: claims.workspaceId,
+      });
+
+      const toolId = "7a1c4e2b-9d3f-4b6a-8c5e-1f2a3b4c5d6e";
+      const bundleManifestBase = {
+        id: toolId,
+        name: "aggregate_status_records",
+        version: "1.0.0",
+        description: "Aggregates record statuses",
+        parameters: {
+          type: "object" as const,
+          properties: { records: { type: "array" } },
+          required: ["records"],
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "deno" as const,
+          memoryLimitMb: 128,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 1048576,
+        },
+        capabilities: {},
+        limits: {
+          timeoutMs: 5000,
+          maxOutputBytes: 1048576,
+          maxMemoryBytes: 134217728,
+          maxConcurrentInvocations: 4,
+        },
+        scope: "workspace" as const,
+        metadata: { origin: "evolution" },
+        createdAt: "2026-09-02T00:00:00.000Z",
+      };
+      const bundleManifest = {
+        ...bundleManifestBase,
+        digest: computeManifestDigest(bundleManifestBase),
+      };
+      const { archive: plainTar } = encodeDeterministicTar([
+        { path: "manifest.json", content: JSON.stringify(bundleManifest) },
+        { path: "src/index.ts", content: "export default async () => ({ total: 0 });" },
+      ]);
+      const gzipped = zlib.gzipSync(plainTar);
+      const artifactDigest = crypto.createHash("sha256").update(gzipped).digest("hex");
+
+      // The catalog serves the schema-normalized manifest with serve-time metadata and a
+      // recomputed digest, and signs the checksum over the normalized arrays.
+      const { digest: _servedDigest, ...servedBase } = ToolManifestSchema.parse({
+        ...bundleManifestBase,
+        metadata: {
+          ...bundleManifestBase.metadata,
+          source: "registry",
+          workspaceId: claims.workspaceId,
+          accountId: claims.accountId,
+          artifactDigest,
+        },
+        digest: "0".repeat(64),
+      });
+      const servedManifest: ToolManifest = {
+        ...servedBase,
+        digest: computeManifestDigest(servedBase),
+      };
+      const activeDeployments = [
+        DeploymentRecordSchema.parse({
+          deploymentId: `deploy-${claims.workspaceId}-${toolId}`,
+          workspaceId: claims.workspaceId,
+          toolId,
+          toolVersion: "1.0.0",
+          state: "promoted",
+          activeTrafficPercentage: 100,
+          history: [],
+          createdAt: "2026-09-02T00:00:00.000Z",
+        }),
+      ];
+      const snapshotBody = {
+        snapshotVersion: "v1-abcdefabcdef",
+        generatedAt: "2026-09-02T00:00:00.000Z",
+        checksum: hashCanonicalContent({ tools: [servedManifest], activeDeployments }),
+        tools: [servedManifest],
+        activeDeployments,
+      };
+
+      const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const urlStr = url.toString();
+        if (urlStr.includes("/v1/projects")) {
+          const body =
+            Object.prototype.toString.call(init?.body) === "[object String]"
+              ? JSON.parse(String(init?.body))
+              : {};
+          return new Response(
+            JSON.stringify({ outcome: "registered", projectId: body.project?.projectId }),
+            { status: 200, statusText: "OK" },
+          );
+        }
+        if (urlStr.includes("/v1/catalog/snapshot")) {
+          return new Response(JSON.stringify(snapshotBody), { status: 200, statusText: "OK" });
+        }
+        if (urlStr.includes(`/v1/artifacts/${artifactDigest}/download`)) {
+          return new Response(gzipped, {
+            status: 200,
+            statusText: "OK",
+            headers: { "content-type": "application/gzip" },
+          });
+        }
+        return new Response(JSON.stringify({ error: "NOT_FOUND" }), {
+          status: 404,
+          statusText: "Not Found",
+        });
+      });
+
+      const registry = new ToolRegistry();
+      const artifactCache = new ArtifactCache({ cacheDir: path.join(tempDir, "artifact-cache") });
+      const runtime = await createProductionProxyRuntime({
+        credentialStore: store,
+        registry,
+        artifactCache,
+        // SAFETY: Test fixture provides mock fetchFn.
+        fetchFn: mockFetch as typeof fetch,
+      });
+      expect(runtime.isCloudEnabled).toBe(true);
+
+      await runtime.onWorkspaceReady(ws);
+      await runtime.stop();
+
+      const lock = new ProjectLockManager({
+        lockPath: ws.lockPath!,
+        projectId: ws.projectId,
+      }).read();
+      expect(lock.tools.aggregate_status_records).toMatchObject({
+        toolId,
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: servedManifest.digest,
+        status: "active",
+      });
+      expect(artifactCache.isArtifactCached(artifactDigest)).toBe(true);
+      expect(
+        fs.existsSync(path.join(artifactCache.getArtifactPath(artifactDigest), "src/index.ts")),
+      ).toBe(true);
+
+      const registered = registry
+        .getAllRegisteredTools()
+        .find((tool) => tool.toolId === toolId && tool.version === "1.0.0");
+      expect(registered).toBeDefined();
+      expect(registered?.workspaceId).toBe(ws.workspaceId);
+      expect(registered?.artifactDigest).toBe(artifactDigest);
+      expect(registered?.metadata?.source).toBe("cloud");
+
+      // Verify that after activation, invoke_tool executes locally and returns the bundle result
+      // without calling the cloud /invoke endpoint.
+      const invokeTool = createInvokeToolHandler(registry, runtime.router!);
+      const invokeResult = await invokeTool(ws, {
+        name: "aggregate_status_records",
+        parameters: { records: [] },
+      });
+      expect(invokeResult.isError).toBeFalsy();
+      expect(invokeResult.content.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(invokeResult.content[0]?.text ?? "{}");
+      expect(parsed).toEqual({ total: 0 });
+
+      // Assert that the mock cloud received no /invoke call
+      for (const call of mockFetch.mock.calls) {
+        const urlStr = call[0].toString();
+        expect(urlStr).not.toContain("/invoke");
+      }
+    },
+  );
+
+  it("runtime forwards onToolSyncError to the coordinator", async () => {
     const claims = makeValidClaims();
     const token = makeJwt(claims);
     const store = new CloudCredentialStore({ tokenFilePath: tokenFile });
@@ -740,145 +921,36 @@ describe("Production Runtime Composition & Credential Security", () => {
       workspaceId: claims.workspaceId,
     });
 
-    const toolId = "7a1c4e2b-9d3f-4b6a-8c5e-1f2a3b4c5d6e";
-    const bundleManifestBase = {
-      id: toolId,
-      name: "aggregate_status_records",
-      version: "1.0.0",
-      description: "Aggregates record statuses",
-      parameters: {
-        type: "object" as const,
-        properties: { records: { type: "array" } },
-        required: ["records"],
-        additionalProperties: false,
-      },
-      runtime: {
-        runtime: "deno" as const,
-        memoryLimitMb: 128,
-        timeoutMs: 5000,
-        cpuLimitPercent: 100,
-        maxOutputSizeBytes: 1048576,
-      },
-      capabilities: {},
-      limits: {
-        timeoutMs: 5000,
-        maxOutputBytes: 1048576,
-        maxMemoryBytes: 134217728,
-        maxConcurrentInvocations: 4,
-      },
-      scope: "workspace" as const,
-      metadata: { origin: "evolution" },
-      createdAt: "2026-09-02T00:00:00.000Z",
-    };
-    const bundleManifest = {
-      ...bundleManifestBase,
-      digest: computeManifestDigest(bundleManifestBase),
-    };
-    const { archive: plainTar } = encodeDeterministicTar([
-      { path: "manifest.json", content: JSON.stringify(bundleManifest) },
-      { path: "src/index.ts", content: "export default async () => ({ total: 0 });" },
-    ]);
-    const gzipped = zlib.gzipSync(plainTar);
-    const artifactDigest = crypto.createHash("sha256").update(gzipped).digest("hex");
+    let syncErrorTool: string | undefined;
+    let syncErrorInstance: Error | undefined;
+    let degradedTool: string | undefined;
+    let degradedReason: string | undefined;
 
-    // The catalog serves the schema-normalized manifest with serve-time metadata and a
-    // recomputed digest, and signs the checksum over the normalized arrays.
-    const { digest: _servedDigest, ...servedBase } = ToolManifestSchema.parse({
-      ...bundleManifestBase,
-      metadata: {
-        ...bundleManifestBase.metadata,
-        source: "registry",
-        workspaceId: claims.workspaceId,
-        accountId: claims.accountId,
-        artifactDigest,
-      },
-      digest: "0".repeat(64),
-    });
-    const servedManifest: ToolManifest = {
-      ...servedBase,
-      digest: computeManifestDigest(servedBase),
-    };
-    const activeDeployments = [
-      DeploymentRecordSchema.parse({
-        deploymentId: `deploy-${claims.workspaceId}-${toolId}`,
-        workspaceId: claims.workspaceId,
-        toolId,
-        toolVersion: "1.0.0",
-        state: "promoted",
-        activeTrafficPercentage: 100,
-        history: [],
-        createdAt: "2026-09-02T00:00:00.000Z",
-      }),
-    ];
-    const snapshotBody = {
-      snapshotVersion: "v1-abcdefabcdef",
-      generatedAt: "2026-09-02T00:00:00.000Z",
-      checksum: hashCanonicalContent({ tools: [servedManifest], activeDeployments }),
-      tools: [servedManifest],
-      activeDeployments,
-    };
-
-    const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = url.toString();
-      if (urlStr.includes("/v1/projects")) {
-        const body =
-          Object.prototype.toString.call(init?.body) === "[object String]"
-            ? JSON.parse(String(init?.body))
-            : {};
-        return new Response(
-          JSON.stringify({ outcome: "registered", projectId: body.project?.projectId }),
-          { status: 200, statusText: "OK" },
-        );
-      }
-      if (urlStr.includes("/v1/catalog/snapshot")) {
-        return new Response(JSON.stringify(snapshotBody), { status: 200, statusText: "OK" });
-      }
-      if (urlStr.includes(`/v1/artifacts/${artifactDigest}/download`)) {
-        return new Response(gzipped, {
-          status: 200,
-          statusText: "OK",
-          headers: { "content-type": "application/gzip" },
-        });
-      }
-      return new Response(JSON.stringify({ error: "NOT_FOUND" }), {
-        status: 404,
-        statusText: "Not Found",
-      });
-    });
-
-    const registry = new ToolRegistry();
-    const artifactCache = new ArtifactCache({ cacheDir: path.join(tempDir, "artifact-cache") });
     const runtime = await createProductionProxyRuntime({
       credentialStore: store,
-      registry,
-      artifactCache,
-      // SAFETY: Test fixture provides mock fetchFn.
-      fetchFn: mockFetch as typeof fetch,
+      onToolSyncError: (toolName, err) => {
+        syncErrorTool = toolName;
+        syncErrorInstance = err;
+      },
+      onOfflineDegraded: (toolName, reason) => {
+        degradedTool = toolName;
+        degradedReason = reason;
+      },
+      isPinned: (toolId) => toolId === "pinned_test_tool",
     });
-    expect(runtime.isCloudEnabled).toBe(true);
 
-    await runtime.onWorkspaceReady(ws);
-    await runtime.stop();
+    expect(runtime.coordinator).toBeDefined();
+    // @ts-expect-error - verify options wiring on coordinator
+    runtime.coordinator?.options.onToolSyncError?.("forwarded_tool", new Error("Sync failure"));
+    // @ts-expect-error - verify options wiring on coordinator
+    runtime.coordinator?.options.onOfflineDegraded?.("degraded_tool", "Degraded reason");
+    // @ts-expect-error - verify options wiring on coordinator
+    const pinned = runtime.coordinator?.options.isPinned?.("pinned_test_tool");
 
-    const lock = new ProjectLockManager({ lockPath: ws.lockPath!, projectId: ws.projectId }).read();
-    expect(lock.tools.aggregate_status_records).toMatchObject({
-      toolId,
-      version: "1.0.0",
-      artifactDigest,
-      manifestDigest: servedManifest.digest,
-      status: "active",
-    });
-    expect(artifactCache.isArtifactCached(artifactDigest)).toBe(true);
-    expect(
-      fs.existsSync(path.join(artifactCache.getArtifactPath(artifactDigest), "src/index.ts")),
-    ).toBe(true);
-
-    const registered = registry
-      .getAllRegisteredTools()
-      .find((tool) => tool.toolId === toolId && tool.version === "1.0.0");
-    expect(registered).toBeDefined();
-    expect(registered?.workspaceId).toBe(ws.workspaceId);
-    expect(registered?.artifactDigest).toBe(artifactDigest);
-    expect(registered?.metadata?.source).toBe("cloud");
+    expect(syncErrorTool).toBe("forwarded_tool");
+    expect(syncErrorInstance?.message).toBe("Sync failure");
+    expect(degradedTool).toBe("degraded_tool");
+    expect(degradedReason).toBe("Degraded reason");
+    expect(pinned).toBe(true);
   });
 });

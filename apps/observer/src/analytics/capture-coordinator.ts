@@ -3,7 +3,7 @@ import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resi
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { ExponentialBackoff } from "@resin/protocol";
 import { z } from "zod";
-import { AuthRecoveryError } from "../auth-recovery.js";
+import { AuthRecoveryError, ResourceForbiddenError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
 import {
@@ -161,6 +161,8 @@ export class TrajectoryCaptureCoordinator {
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
+  private readonly genericResourceForbiddenRetries = new Map<string, number>();
+  private readonly trajectoryResourceForbiddenRetries = new Map<string, number>();
   private totalGenericBatchesUploaded = 0;
   private totalGenericObservationsUploaded = 0;
   private lastGenericBatchSize = 0;
@@ -523,7 +525,55 @@ export class TrajectoryCaptureCoordinator {
             await this.observationClient.sendTrajectoryObservationBatch({
               observations: [observation],
             });
+            this.trajectoryResourceForbiddenRetries.delete(sessionId);
           } catch (err) {
+            if (err instanceof ResourceForbiddenError) {
+              const retries = (this.trajectoryResourceForbiddenRetries.get(sessionId) ?? 0) + 1;
+              this.trajectoryResourceForbiddenRetries.set(sessionId, retries);
+              const workspaceId = err.workspaceId ?? "unknown";
+
+              if (retries < 3) {
+                this.logger?.warn(
+                  `Resource forbidden for workspace ${workspaceId} on trajectory session ${sessionId} (attempt ${retries}/3); will retry`,
+                  {
+                    sessionId,
+                    workspaceId,
+                    retries,
+                    error: err.message,
+                  },
+                );
+                throw err;
+              }
+
+              this.logger?.warn(
+                `Resource forbidden for workspace ${workspaceId} on trajectory session ${sessionId}: max retries exceeded, dead-lettering batch`,
+                {
+                  sessionId,
+                  workspaceId,
+                  retries,
+                  error: err.message,
+                },
+              );
+
+              try {
+                await this.pipeline.createAndSaveDeadLetter(
+                  "trajectory_observation_batch",
+                  { observations: [observation], workspaceId },
+                  `Resource forbidden for workspace ${workspaceId}: ${err.message}`,
+                );
+              } catch (dlErr) {
+                this.logger?.error(
+                  `Failed to save dead letter for session ${sessionId}: ${String(dlErr)}`,
+                );
+              }
+
+              this.trajectoryResourceForbiddenRetries.delete(sessionId);
+              this.finalizedSessions.add(sessionId);
+              this.activeSessions.delete(sessionId);
+              await ack();
+              return;
+            }
+
             const status = extractHttpStatus(err);
             const isTerminal4xx =
               typeof status === "number" &&
@@ -567,7 +617,6 @@ export class TrajectoryCaptureCoordinator {
             );
             throw err;
           }
-
           this.finalizedSessions.add(sessionId);
           this.activeSessions.delete(sessionId);
         }
@@ -861,7 +910,71 @@ export class TrajectoryCaptureCoordinator {
       });
       await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
       this.sessionBackoffs.delete(sessionId);
+      this.genericResourceForbiddenRetries.delete(sessionId);
     } catch (err) {
+      if (err instanceof ResourceForbiddenError) {
+        const retries = (this.genericResourceForbiddenRetries.get(sessionId) ?? 0) + 1;
+        this.genericResourceForbiddenRetries.set(sessionId, retries);
+        const workspaceId = err.workspaceId ?? "unknown";
+
+        if (retries < 3) {
+          this.logger?.warn(
+            `Resource forbidden for workspace ${workspaceId} on session ${sessionId} (attempt ${retries}/3); will retry`,
+            {
+              sessionId,
+              workspaceId,
+              batchId,
+              retries,
+              error: err.message,
+            },
+          );
+          this.genericCoalescingBuffers.set(sessionId, buffer);
+          throw err;
+        }
+
+        this.logger?.warn(
+          `Resource forbidden for workspace ${workspaceId} on session ${sessionId}: max retries exceeded, dead-lettering observation batch`,
+          {
+            sessionId,
+            workspaceId,
+            batchId,
+            retries,
+            error: err.message,
+          },
+        );
+
+        try {
+          await this.pipeline.createAndSaveDeadLetter(
+            "observation_batch",
+            { batchId, workspaceId, observations: projectedEvents },
+            `Resource forbidden for workspace ${workspaceId}: ${err.message}`,
+          );
+        } catch (dlErr) {
+          this.logger?.error(
+            `Failed to save dead letter for session ${sessionId}: ${String(dlErr)}`,
+          );
+        }
+
+        this.genericResourceForbiddenRetries.delete(sessionId);
+        this.sessionBackoffs.delete(sessionId);
+        this.recordBatchTelemetry(projectedEvents.length);
+
+        if (buffer.latestTail) {
+          this.genericSessionTails.set(sessionId, buffer.latestTail);
+        }
+
+        if (buffer.isTerminal) {
+          this.finalizedSessions.add(sessionId);
+          this.activeGenericSessions.delete(sessionId);
+          this.genericSessionTails.delete(sessionId);
+        }
+
+        for (const ack of acks) {
+          await ack();
+        }
+
+        return;
+      }
       const status = extractHttpStatus(err);
       const isTerminal4xx =
         typeof status === "number" &&

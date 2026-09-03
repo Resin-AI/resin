@@ -96,6 +96,7 @@ export interface CloudCatalogSyncOptions {
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
   allowDevKeys?: boolean;
+  isPinned?: (toolId: string) => boolean;
 }
 
 export interface ToolLockTuple {
@@ -211,6 +212,13 @@ export class CloudCatalogSyncCoordinator {
     }
     if (binding.lockManager !== undefined) {
       this.lockManager = binding.lockManager;
+      if (
+        this.router &&
+        "setLockManager" in this.router &&
+        typeof this.router.setLockManager === "function"
+      ) {
+        this.router.setLockManager(binding.lockManager);
+      }
     }
   }
 
@@ -411,14 +419,24 @@ export class CloudCatalogSyncCoordinator {
           currentLock = result.lock;
           this.options.onToolQualified?.(candidateEntry, "added");
         } else if (result.outcome === "newer_available") {
-          newerAvailable.push(manifest.name);
-          this.options.onToolQualified?.(candidateEntry, "newer_available");
+          const isPinned = Boolean(
+            this.options.isPinned?.(candidateEntry.toolId) ||
+              this.options.isPinned?.(candidateEntry.name) ||
+              currentLock.tools[manifest.name]?.status === "pinned",
+          );
+          if (isPinned) {
+            newerAvailable.push(manifest.name);
+            this.options.onToolQualified?.(candidateEntry, "newer_available");
+          } else {
+            result = this.lockManager.advance(candidateEntry);
+            currentLock = result.lock;
+            this.options.onToolQualified?.(candidateEntry, "updated");
+          }
         }
       }
     }
-
+    this.bindRegistryLock(currentLock);
     const summary = await this.activateLockedEntries(currentLock, snapshot, true);
-    summary.newerAvailable = newerAvailable;
     return summary;
   }
 
@@ -630,6 +648,7 @@ export class CloudCatalogSyncCoordinator {
         }
 
         let resolvedManifest: ToolManifest | undefined;
+        let isArtifactBundleFallback = false;
         if (snapshot?.tools) {
           resolvedManifest = snapshot.tools.find(
             (t) => t.id === entry.toolId && t.version === entry.version,
@@ -647,24 +666,45 @@ export class CloudCatalogSyncCoordinator {
           const cachedManifest = this.artifactCache.getArtifactManifest(entry.artifactDigest);
           if (cachedManifest) {
             resolvedManifest = cachedManifest;
+            isArtifactBundleFallback = true;
           }
         }
-        if (resolvedManifest && entry.manifestDigest) {
-          const computedManifestDigest = computeManifestDigest(resolvedManifest);
-          if (
-            normalizeSha256(computedManifestDigest, false) !==
-            normalizeSha256(entry.manifestDigest, false)
-          ) {
-            failed.push(toolName);
-            const err = new Error(
-              `Manifest digest mismatch for '${entry.name}': expected ${entry.manifestDigest}, got ${computedManifestDigest}`,
-            );
-            this.options.onToolSyncError?.(toolName, err);
-            this.options.onOfflineDegraded?.(
-              toolName,
-              `Manifest digest mismatch for '${entry.name}'`,
-            );
-            continue;
+        if (resolvedManifest) {
+          if (isArtifactBundleFallback) {
+            const idMatches = resolvedManifest.id === entry.toolId;
+            const versionMatches = resolvedManifest.version === entry.version;
+            const nameMatches = resolvedManifest.name === entry.name;
+            const hasArtifactDigest = Boolean(entry.artifactDigest);
+
+            if (!idMatches || !versionMatches || !nameMatches || !hasArtifactDigest) {
+              failed.push(toolName);
+              const err = new Error(
+                `Artifact-bundle fallback manifest mismatch for '${entry.name}': expected id=${entry.toolId}, name=${entry.name}, version=${entry.version}, got id=${resolvedManifest.id}, name=${resolvedManifest.name}, version=${resolvedManifest.version}`,
+              );
+              this.options.onToolSyncError?.(toolName, err);
+              this.options.onOfflineDegraded?.(
+                toolName,
+                `Artifact-bundle manifest mismatch for '${entry.name}'`,
+              );
+              continue;
+            }
+          } else if (entry.manifestDigest) {
+            const computedManifestDigest = computeManifestDigest(resolvedManifest);
+            if (
+              normalizeSha256(computedManifestDigest, false) !==
+              normalizeSha256(entry.manifestDigest, false)
+            ) {
+              failed.push(toolName);
+              const err = new Error(
+                `Manifest digest mismatch for '${entry.name}': expected ${entry.manifestDigest}, got ${computedManifestDigest}`,
+              );
+              this.options.onToolSyncError?.(toolName, err);
+              this.options.onOfflineDegraded?.(
+                toolName,
+                `Manifest digest mismatch for '${entry.name}'`,
+              );
+              continue;
+            }
           }
         }
 

@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection } from "@resin/db";
 import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
+import type { ReconcileOutcome } from "../project/lock-manager.js";
 import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../proxy/runtime.js";
 import { ToolRegistry } from "../registry/registry.js";
 import type { ToolRegistryDatabaseOption } from "../registry/types.js";
@@ -32,6 +34,10 @@ export interface McpStdioShimOptions {
   resinHome?: string;
   tokenFilePath?: string;
   credentialStore?: CloudCredentialStore;
+  onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
+  onToolSyncError?: (toolName: string, error: Error) => void;
+  onOfflineDegraded?: (toolName: string, reason: string) => void;
+  isPinned?: (toolId: string) => boolean;
 }
 export type ShimMode = "daemon_ipc" | "standalone_inprocess" | "failed";
 
@@ -307,6 +313,40 @@ export class McpStdioShim {
         home: this.options.home,
         resinHome: this.options.resinHome,
         tokenFilePath: this.options.tokenFilePath,
+        onToolSyncError: (toolName: string, error: Error) => {
+          this.writeStderr(`[WARN] ${toolName}: ${error.message}\n`);
+          this.options.onToolSyncError?.(toolName, error);
+        },
+        onOfflineDegraded: (toolName: string, reason: string) => {
+          this.writeStderr(`[WARN] ${toolName}: ${reason}\n`);
+          this.options.onOfflineDegraded?.(toolName, reason);
+        },
+        onToolQualified: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => {
+          this.options.onToolQualified?.(tool, outcome);
+        },
+        isPinned: (toolId: string): boolean => {
+          if (this.options.isPinned?.(toolId)) {
+            return true;
+          }
+          if (dbConn) {
+            try {
+              const rows = dbConn.all<{ pinned_versions_json: string }>(
+                "SELECT pinned_versions_json FROM user_tool_controls;",
+              );
+              for (const row of rows) {
+                if (row.pinned_versions_json) {
+                  const parsed = JSON.parse(row.pinned_versions_json) as Record<string, string>;
+                  if (parsed[toolId]) {
+                    return true;
+                  }
+                }
+              }
+            } catch {
+              // Table may not exist yet
+            }
+          }
+          return false;
+        },
       });
 
       if (cloudRuntime.isCloudEnabled && registry && cloudRuntime.router) {
