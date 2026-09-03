@@ -900,4 +900,48 @@ describe("Production Runtime Composition & Credential Security", () => {
       expect(urlStr).not.toContain("/invoke");
     }
   });
+
+  it("runtime forwards onToolSyncError to the coordinator", async () => {
+    const claims = makeValidClaims();
+    const token = makeJwt(claims);
+    const store = new CloudCredentialStore({ tokenFilePath: tokenFile });
+    await store.persist({
+      cloudUrl: "https://cloud.resin.io",
+      accessToken: token,
+      deviceId: claims.deviceId,
+      workspaceId: claims.workspaceId,
+    });
+
+    let syncErrorTool: string | undefined;
+    let syncErrorInstance: Error | undefined;
+    let degradedTool: string | undefined;
+    let degradedReason: string | undefined;
+
+    const runtime = await createProductionProxyRuntime({
+      credentialStore: store,
+      onToolSyncError: (toolName, err) => {
+        syncErrorTool = toolName;
+        syncErrorInstance = err;
+      },
+      onOfflineDegraded: (toolName, reason) => {
+        degradedTool = toolName;
+        degradedReason = reason;
+      },
+      isPinned: (toolId) => toolId === "pinned_test_tool",
+    });
+
+    expect(runtime.coordinator).toBeDefined();
+    // @ts-expect-error - verify options wiring on coordinator
+    runtime.coordinator?.options.onToolSyncError?.("forwarded_tool", new Error("Sync failure"));
+    // @ts-expect-error - verify options wiring on coordinator
+    runtime.coordinator?.options.onOfflineDegraded?.("degraded_tool", "Degraded reason");
+    // @ts-expect-error - verify options wiring on coordinator
+    const pinned = runtime.coordinator?.options.isPinned?.("pinned_test_tool");
+
+    expect(syncErrorTool).toBe("forwarded_tool");
+    expect(syncErrorInstance?.message).toBe("Sync failure");
+    expect(degradedTool).toBe("degraded_tool");
+    expect(degradedReason).toBe("Degraded reason");
+    expect(pinned).toBe(true);
+  });
 });

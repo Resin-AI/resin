@@ -415,6 +415,7 @@ describe("CloudCatalogSyncCoordinator", () => {
       registry,
       workspaceId: "ws-1",
       lockManager,
+      isPinned: (toolId) => toolId === TOOL_SEARCH || toolId === "search_tool",
       onToolQualified: (tool, outcome) => {
         qualifiedEvents.push({ tool, outcome });
       },
@@ -445,6 +446,139 @@ describe("CloudCatalogSyncCoordinator", () => {
           e.outcome === "newer_available",
       ),
     ).toBe(true);
+  });
+
+  it("lock advances 1.0.0 -> 1.0.1 when the catalog activates 1.0.1 and the tool is not pinned; stays at 1.0.0 when pinned", async () => {
+    const lockPath = path.join(tempDir, "resin-pin-advance.lock");
+    const projectId = PROJECT_A;
+    const lockManager = new ProjectLockManager({ lockPath, projectId });
+
+    const TOOL_UNPINNED_ID = "77777777-7777-4777-8777-777777777777";
+    const TOOL_PINNED_ID = "88888888-8888-4888-8888-888888888888";
+
+    const unpinnedV1 = makeTool(TOOL_UNPINNED_ID, "tool_unpinned", "1.0.0");
+    const pinnedV1 = makeTool(TOOL_PINNED_ID, "tool_pinned", "1.0.0");
+
+    lockManager.reconcileQualified({
+      toolId: TOOL_UNPINNED_ID,
+      name: "tool_unpinned",
+      version: "1.0.0",
+      manifestDigest: unpinnedV1.digest,
+      artifactDigest: "a".repeat(64),
+      status: "active",
+    });
+    lockManager.reconcileQualified({
+      toolId: TOOL_PINNED_ID,
+      name: "tool_pinned",
+      version: "1.0.0",
+      manifestDigest: pinnedV1.digest,
+      artifactDigest: "b".repeat(64),
+      status: "pinned",
+    });
+
+    const mockService = new MockCloudMcpService();
+    const unpinnedV2 = makeTool(TOOL_UNPINNED_ID, "tool_unpinned", "1.0.1");
+    const pinnedV2 = makeTool(TOOL_PINNED_ID, "tool_pinned", "1.0.1");
+    mockService.seedTools([unpinnedV2, pinnedV2]);
+
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const cache = new CloudCatalogCache();
+    const registry = new ToolRegistry();
+    const router = new CloudInvocationRouter({ catalogCache: cache });
+
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router,
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+      isPinned: (toolId) => toolId === TOOL_PINNED_ID || toolId === "tool_pinned",
+    });
+
+    await syncCoordinator.sync();
+
+    const updatedLock = lockManager.read();
+    expect(updatedLock.tools.tool_unpinned.version).toBe("1.0.1");
+    expect(updatedLock.tools.tool_pinned.version).toBe("1.0.0");
+  });
+
+  it("artifact-bundle fallback activates when artifactDigest matches even though the catalog manifest digest differs", async () => {
+    const lockPath = path.join(tempDir, "resin-bundle-fallback.lock");
+    const cacheDir = path.join(tempDir, "bundle-artifacts");
+    const projectId = PROJECT_A;
+
+    const lockManager = new ProjectLockManager({ lockPath, projectId });
+    const artifactCache = new ArtifactCache({ cacheDir });
+
+    const TOOL_BUNDLE_ID = "99999999-9999-4999-8999-999999999999";
+    const manifest = makeTool(TOOL_BUNDLE_ID, "bundle_tool", "1.0.0");
+
+    const { archive: artifactContent } = encodeDeterministicTar([
+      { path: "manifest.json", content: JSON.stringify(manifest) },
+      { path: "src/index.js", content: "console.log('fallback test tool');" },
+    ]);
+    const artifactDigest = crypto.createHash("sha256").update(artifactContent).digest("hex");
+
+    // Commit artifact to cache
+    const staging = await artifactCache.createStagingDirectory(artifactDigest);
+    await fs.promises.mkdir(path.join(staging, "src"), { recursive: true });
+    await fs.promises.writeFile(
+      path.join(staging, "src/index.js"),
+      "console.log('fallback test tool');",
+    );
+    await fs.promises.writeFile(path.join(staging, "manifest.json"), JSON.stringify(manifest));
+    await artifactCache.commitStagingDirectory(staging, artifactDigest, {
+      digest: artifactDigest,
+      extractedAt: new Date().toISOString(),
+      fileCount: 2,
+      totalSizeBytes: artifactContent.length,
+      entrypoint: "src/index.js",
+      verified: true,
+    });
+
+    // The catalog manifest digest is different from the bundled manifest digest
+    const differentCatalogManifestDigest = "d".repeat(64);
+    lockManager.reconcileQualified({
+      toolId: TOOL_BUNDLE_ID,
+      name: "bundle_tool",
+      version: "1.0.0",
+      manifestDigest: differentCatalogManifestDigest,
+      artifactDigest,
+      status: "active",
+    });
+
+    const mockService = new MockCloudMcpService();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const cache = new CloudCatalogCache();
+    const registry = new ToolRegistry();
+    const router = new CloudInvocationRouter({ catalogCache: cache });
+
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router,
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+      artifactCache,
+    });
+
+    // Reconcile locked tools offline / without catalog snapshot - triggering artifact bundle fallback
+    const result = await syncCoordinator.reconcileLockedTools();
+    expect(result.activated).toContain("bundle_tool");
+    expect(result.failed).toEqual([]);
+    expect(registry.getToolVersion(TOOL_BUNDLE_ID, "1.0.0")).toBeDefined();
   });
 
   it("supports two projects with different locked versions of same tool running concurrently", async () => {

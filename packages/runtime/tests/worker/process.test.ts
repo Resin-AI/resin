@@ -71,4 +71,94 @@ export default async function (context: { input: { x: number; y: number } }) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+  it("processes heartbeat message while invoke is in flight without blocking", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-inflight-test-"));
+    try {
+      const entryPath = path.join(tempDir, "entry.ts");
+      fs.writeFileSync(
+        entryPath,
+        `export default async function (context: { progress: (p: number, m?: string) => Promise<void>; fs: { readFile: (p: string) => Promise<string> } }) {
+  await context.progress(10, "started");
+  const content = await context.fs.readFile("test.txt");
+  return { completed: true, content };
+};
+`,
+        "utf-8",
+      );
+
+      const pongReceived = Promise.withResolvers<{ kind: string; sequence: number }>();
+      const brokerRelease = Promise.withResolvers<{ content: string }>();
+
+      const worker = new WorkerProcess({
+        manifest: { id: "test-inflight-tool", name: "sleeper", version: "1.0.0" },
+        bundleEntrypoint: entryPath,
+        timeoutMs: 5000,
+        onProgress: () => {
+          // Tool has started and is waiting on broker; send heartbeat ping
+          worker.sendHeartbeat(42);
+        },
+        onHeartbeat: (hb) => {
+          pongReceived.resolve(hb);
+          // Release the broker once heartbeat pong has been verified
+          brokerRelease.resolve({ content: "broker-data" });
+        },
+        brokerHandler: async (_service, action) => {
+          if (action === "readFile") {
+            return await brokerRelease.promise;
+          }
+          return {};
+        },
+      });
+
+      const execPromise = worker.execute("inv-inflight-1", {});
+
+      const pong = await pongReceived.promise;
+      expect(pong.kind).toBe("pong");
+      expect(pong.sequence).toBe(42);
+
+      const res = await execPromise;
+      expect(res.status).toBe("success");
+      expect(res.output).toEqual({ completed: true, content: "broker-data" });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels an in-flight invocation via abort signal when cancel message is received", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-cancel-test-"));
+    try {
+      const entryPath = path.join(tempDir, "entry.ts");
+      fs.writeFileSync(
+        entryPath,
+        `export default async function (context: { progress: (p: number, m?: string) => Promise<void>; signal?: AbortSignal }) {
+  await context.progress(10, "ready_to_cancel");
+  return new Promise((_resolve, reject) => {
+    context.signal?.addEventListener("abort", () => {
+      const err = new Error("Tool invocation aborted via signal");
+      err.name = "AbortError";
+      reject(err);
+    });
+  });
+};
+`,
+        "utf-8",
+      );
+
+      const worker = new WorkerProcess({
+        manifest: { id: "test-cancel-tool", name: "cancellable", version: "1.0.0" },
+        bundleEntrypoint: entryPath,
+        timeoutMs: 5000,
+        onProgress: () => {
+          // Invocation is confirmed running, send cancel immediately
+          worker.sendCancel("inv-cancel-1", "User requested cancel");
+        },
+      });
+
+      const res = await worker.execute("inv-cancel-1", {});
+      expect(res.status).toBe("cancelled");
+      expect(res.error?.message).toContain("Tool invocation aborted via signal");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

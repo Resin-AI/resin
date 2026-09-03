@@ -334,9 +334,13 @@ export class ProjectLockManager {
    * Reconciles a candidate tool entry during sync/qualification.
    * - If tool is not present in lockfile, commits it immediately as active.
    * - If candidate matches existing locked entry exactly, returns unchanged.
-   * - If candidate is a newer version, returns newer_available without mutating.
+   * - If candidate is a newer version and follow/advance is requested (and not pinned), updates lock.
+   * - Otherwise, returns newer_available without mutating.
    */
-  reconcileQualified(candidateEntry: V1LockedToolEntry): ReconcileResult {
+  reconcileQualified(
+    candidateEntry: V1LockedToolEntry,
+    options?: { follow?: boolean; advance?: boolean },
+  ): ReconcileResult {
     const validatedEntry = V1LockedToolEntrySchema.parse(candidateEntry);
 
     return this.withLock(() => {
@@ -381,11 +385,68 @@ export class ProjectLockManager {
         };
       }
 
+      if ((options?.follow || options?.advance) && existing.status !== "pinned") {
+        const updatedTools = {
+          ...currentLock.tools,
+          [validatedEntry.name]: validatedEntry,
+        };
+
+        const updatedLock: V1ToolLock = {
+          ...currentLock,
+          updatedAt: new Date().toISOString(),
+          tools: updatedTools,
+        };
+
+        const validatedLock = validateV1ToolLock(updatedLock);
+        atomicWriteJsonSync(this.lockPath, validatedLock);
+
+        return {
+          outcome: "updated",
+          lock: validatedLock,
+        };
+      }
+
       return {
         outcome: "newer_available",
         lock: currentLock,
       };
     });
+  }
+
+  /**
+   * Advances an existing locked tool to a candidate entry (e.g. newer active version).
+   */
+  advance(candidateEntry: V1LockedToolEntry): ReconcileResult {
+    const validatedEntry = V1LockedToolEntrySchema.parse(candidateEntry);
+
+    return this.withLock(() => {
+      const currentLock = this.readLock();
+      const updatedTools = {
+        ...currentLock.tools,
+        [validatedEntry.name]: validatedEntry,
+      };
+
+      const updatedLock: V1ToolLock = {
+        ...currentLock,
+        updatedAt: new Date().toISOString(),
+        tools: updatedTools,
+      };
+
+      const validatedLock = validateV1ToolLock(updatedLock);
+      atomicWriteJsonSync(this.lockPath, validatedLock);
+
+      return {
+        outcome: "updated",
+        lock: validatedLock,
+      };
+    });
+  }
+
+  /**
+   * Follows the catalog's active version for a locked tool. Alias for advance.
+   */
+  follow(candidateEntry: V1LockedToolEntry): ReconcileResult {
+    return this.advance(candidateEntry);
   }
 
   /**

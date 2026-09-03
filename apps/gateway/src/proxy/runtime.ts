@@ -1,6 +1,7 @@
 import path from "node:path";
 import type {
   V1ActivationCertificate,
+  V1LockedToolEntry,
   V1ProjectMetadata,
   V1RevocationMetadata,
   V1ToolLock,
@@ -21,7 +22,7 @@ import {
   ValidationError,
 } from "@resin/protocol";
 import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
-import { ProjectLockManager } from "../project/lock-manager.js";
+import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
@@ -64,6 +65,10 @@ export interface ProductionProxyRuntimeOptions {
   revocationProvider?: () => Promise<V1RevocationMetadata | null> | V1RevocationMetadata | null;
   allowDevKeys?: boolean;
   executor?: LocalArtifactExecutor;
+  onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
+  onToolSyncError?: (toolName: string, error: Error) => void;
+  onOfflineDegraded?: (toolName: string, reason: string) => void;
+  isPinned?: (toolId: string) => boolean;
 }
 
 export interface ProductionProxyRuntime {
@@ -182,6 +187,10 @@ export async function createProductionProxyRuntime(
       certificateProvider: options.certificateProvider,
       revocationProvider: options.revocationProvider,
       allowDevKeys: options.allowDevKeys ?? false,
+      onToolQualified: options.onToolQualified,
+      onToolSyncError: options.onToolSyncError,
+      onOfflineDegraded: options.onOfflineDegraded,
+      isPinned: options.isPinned,
     });
 
     const runtime: ProductionProxyRuntime = {

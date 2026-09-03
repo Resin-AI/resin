@@ -494,4 +494,66 @@ export default defineTool(async (context: { input: { val: string } }) => {
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("zod");
   });
+
+  it("spawns resolved Deno binary directly without creating shell shims outside scratch directory", async () => {
+    const toolId = "test-no-shim-008";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "no_shim_tool",
+      version: "1.0.0",
+      description: "Verifies no shell shim is written to tmpdir",
+      parameters: {
+        type: "object",
+        properties: { text: { type: "string" } },
+        required: ["text"],
+      },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+      manifestBase,
+      "export default async (ctx: { input: { text: string } }) => ({ echoed: ctx.input.text });",
+    );
+
+    const tmpdirShimBefore = fs
+      .readdirSync(os.tmpdir())
+      .filter((name) => name.startsWith("resin-deno-shim-"));
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "no_shim_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest,
+      },
+      manifest,
+      parameters: { text: "direct-deno-execution" },
+      context: ws,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
+    expect(parsedOutput).toEqual({ echoed: "direct-deno-execution" });
+
+    const tmpdirShimAfter = fs
+      .readdirSync(os.tmpdir())
+      .filter((name) => name.startsWith("resin-deno-shim-"));
+    expect(tmpdirShimAfter.length).toBe(tmpdirShimBefore.length);
+  });
 });

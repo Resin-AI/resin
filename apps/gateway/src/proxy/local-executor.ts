@@ -69,6 +69,14 @@ export interface LocalArtifactExecutorOptions {
 
 function findDenoBinary(custom?: string): string {
   if (custom && fs.existsSync(custom)) return custom;
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".resin", "current", "deno", "deno"),
+    path.join(home, ".local", "node-v24.17.0-linux-arm64", "bin", "deno"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
   const paths = (process.env.PATH || "").split(path.delimiter);
   for (const p of paths) {
     const candidate = path.join(p, process.platform === "win32" ? "deno.exe" : "deno");
@@ -77,44 +85,6 @@ function findDenoBinary(custom?: string): string {
   return custom || "deno";
 }
 
-let cachedShimPath: string | undefined;
-
-function ensureDenoExecutable(custom?: string): string {
-  const resolvedDeno = findDenoBinary(custom);
-  if (process.platform === "win32") {
-    return resolvedDeno;
-  }
-  if (cachedShimPath && fs.existsSync(cachedShimPath)) {
-    return cachedShimPath;
-  }
-  const shimDir = path.join(os.tmpdir(), `resin-deno-shim-${process.pid}`);
-  fs.mkdirSync(shimDir, { recursive: true });
-  const shimPath = path.join(shimDir, "deno-shim.sh");
-  const currentPath = (process.env.PATH ?? "")
-    .split(path.delimiter)
-    .filter((p) => !p.includes("mount_orca"))
-    .join(path.delimiter);
-  const scriptContent = `#!/bin/sh
-export PATH="${currentPath}:$PATH"
-
-for arg in "$@"; do
-  target_file="$arg"
-done
-if [ -f "$target_file" ]; then
-  sed -i 's/await handleMessage(parsed);/handleMessage(parsed);/g' "$target_file" 2>/dev/null || true
-fi
-
-if [ "$2" = "run" ]; then
-  v8="$1"
-  shift 2
-  exec "${resolvedDeno}" run "$v8" "$@"
-fi
-exec "${resolvedDeno}" "$@"
-`;
-  fs.writeFileSync(shimPath, scriptContent, { mode: 0o755 });
-  cachedShimPath = shimPath;
-  return shimPath;
-}
 function scanArtifactForBareImports(
   entrypointPath: string,
   artifactDir: string,
@@ -570,7 +540,7 @@ export class LocalArtifactExecutor {
       timeoutMs,
       memoryLimitMb,
       maxOutputSizeBytes,
-      denoExecutable: ensureDenoExecutable(this.denoExecutable),
+      denoExecutable: findDenoBinary(this.denoExecutable),
       brokerHandler,
       importMap: {},
       onProgress: (prog) => {

@@ -15,6 +15,7 @@ import {
   type BrokerRequestMessage,
   type BrokerResponseMessage,
   type ErrorMessage,
+  type HeartbeatMessage,
   type InitializeMessage,
   type InvokeMessage,
   type LogMessage,
@@ -24,6 +25,7 @@ import {
   WorkerFrameEncoder,
   type WorkerMessage,
   createCancelMessage,
+  createHeartbeatMessage,
   createInitializeMessage,
   createInvokeMessage,
   createShutdownMessage,
@@ -48,6 +50,7 @@ export interface WorkerProcessOptions {
   brokerHandler?: BrokerRequestHandlerFn;
   onProgress?: (progress: ProgressMessage) => void;
   onLog?: (log: LogMessage) => void;
+  onHeartbeat?: (heartbeat: HeartbeatMessage) => void;
   importMap?: Record<string, string>;
   extraReadPaths?: string[];
 }
@@ -206,7 +209,9 @@ export class WorkerProcess {
       this.childProcess = spawn(denoPath, args, {
         cwd: this.scratchDir,
         env: {
+          PATH: process.env.PATH ?? "",
           NO_COLOR: "1",
+          ...(this.options.environment ?? {}),
         },
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
@@ -406,6 +411,10 @@ export class WorkerProcess {
         this.options.onLog?.(msg);
         break;
       }
+      case "heartbeat": {
+        this.options.onHeartbeat?.(msg);
+        break;
+      }
       case "broker_request": {
         await this.handleBrokerRequest(msg);
         break;
@@ -510,6 +519,20 @@ export class WorkerProcess {
    */
   sendCancel(invocationId: string, reason?: string): void {
     this.writeMessage(createCancelMessage({ invocationId, reason }));
+  }
+
+  /**
+   * Sends a heartbeat ping message to the worker.
+   */
+  sendHeartbeat(sequence = 1): void {
+    this.writeMessage(createHeartbeatMessage({ kind: "ping", sequence }));
+  }
+
+  /**
+   * Sends an arbitrary protocol message to the worker over stdin.
+   */
+  sendMessage(msg: WorkerMessage): void {
+    this.writeMessage(msg);
   }
 
   /**

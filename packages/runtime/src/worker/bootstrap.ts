@@ -299,6 +299,8 @@ function createToolContext(invocationId, input, options = {}) {
   return {
     input,
     invocationId,
+    signal: options.signal,
+    abortSignal: options.signal,
     workspaceRoot: options.workspaceRoot || ".",
     scratchDir: options.scratchDir || "",
     metadata: options.metadata || {},
@@ -428,6 +430,7 @@ async function handleMessage(msg) {
         workspaceRoot: msg.workspaceRoot || ".",
         scratchDir: msg.scratchDir || "",
         metadata: context.metadata || {},
+        signal: currentAbortController.signal,
       });
 
       // Load tool entrypoint
@@ -474,13 +477,15 @@ async function handleMessage(msg) {
         durationMs,
       });
     } catch (err) {
+      const isCancelled = (currentAbortController && currentAbortController.signal.aborted) ||
+        (err instanceof Error && err.name === "AbortError");
       writeMessage({
         id: "err_" + Date.now(),
         type: "error",
         timestamp: Date.now(),
         version: "1.0.0",
         invocationId,
-        errorType: "execution_error",
+        errorType: isCancelled ? "cancelled" : "execution_error",
         message: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack : undefined,
       });
@@ -506,7 +511,18 @@ async function main() {
       if (line.length > 0) {
         try {
           const parsed = JSON.parse(line);
-          await handleMessage(parsed);
+          void handleMessage(parsed).catch((err) => {
+            writeMessage({
+              id: "err_" + Date.now(),
+              type: "error",
+              timestamp: Date.now(),
+              version: "1.0.0",
+              invocationId: parsed && typeof parsed === "object" ? parsed.invocationId : undefined,
+              errorType: "execution_error",
+              message: err instanceof Error ? err.message : String(err),
+              stack: err instanceof Error ? err.stack : undefined,
+            });
+          });
         } catch (e) {
           // ignore or write malformed frame error
         }
