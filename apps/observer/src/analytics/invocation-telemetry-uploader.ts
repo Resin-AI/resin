@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { InvocationRecord } from "@resin/contracts";
 import type { AuditRepository } from "@resin/db";
+import { ResourceForbiddenError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
-
 /**
  * Options for configuring InvocationTelemetryUploader.
  */
@@ -24,6 +25,8 @@ export class InvocationTelemetryUploader {
   private readonly intervalMs: number;
   private readonly batchSize: number;
   private readonly logger?: Logger;
+
+  private readonly resourceForbiddenRetries = new Map<string, number>();
 
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
@@ -107,6 +110,7 @@ export class InvocationTelemetryUploader {
           });
 
           if (response.status === "accepted" || response.status === "partial") {
+            this.resourceForbiddenRetries.delete(workspaceId);
             const uploadedAt = new Date().toISOString();
             const ids = invocations.map((inv) => inv.invocationId);
             this.auditRepository.markInvocationsUploaded(ids, uploadedAt);
@@ -119,12 +123,62 @@ export class InvocationTelemetryUploader {
             });
           }
         } catch (error) {
-          this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
-            workspaceId,
-            count: invocations.length,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          // Rows remain pending for retry on the next cycle
+          if (error instanceof ResourceForbiddenError) {
+            const currentRetries = (this.resourceForbiddenRetries.get(workspaceId) ?? 0) + 1;
+            this.resourceForbiddenRetries.set(workspaceId, currentRetries);
+
+            if (currentRetries < 3) {
+              this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
+                workspaceId,
+                count: invocations.length,
+                retries: currentRetries,
+                error: error.message,
+              });
+            } else {
+              this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
+                workspaceId,
+                count: invocations.length,
+                retries: currentRetries,
+                exhausted: true,
+                error: error.message,
+              });
+
+              const failedAt = new Date().toISOString();
+              const ids = invocations.map((inv) => inv.invocationId);
+              this.auditRepository.markInvocationsFailed(ids, failedAt);
+
+              const deadLetterId = `dl_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+              try {
+                this.auditRepository.saveDeadLetter({
+                  deadLetterId,
+                  originalEventType: "invocation_telemetry_batch",
+                  payload: {
+                    workspaceId,
+                    invocationIds: ids,
+                    count: invocations.length,
+                  },
+                  errorReason: `Resource forbidden for workspace ${workspaceId}: ${error.message}`,
+                  failedAt,
+                  retryCount: currentRetries,
+                  status: "exhausted",
+                });
+              } catch (dlError) {
+                this.logger?.error("Failed to save dead letter for invocation telemetry batch", {
+                  workspaceId,
+                  deadLetterId,
+                  error: dlError instanceof Error ? dlError.message : String(dlError),
+                });
+              }
+
+              this.resourceForbiddenRetries.delete(workspaceId);
+            }
+          } else {
+            this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
+              workspaceId,
+              count: invocations.length,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
       }
 

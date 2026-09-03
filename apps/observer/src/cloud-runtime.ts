@@ -34,14 +34,17 @@ import {
   type AuthRecoveryCategory,
   AuthRecoveryController,
   type AuthRecoverySnapshot,
+  ResourceForbiddenError,
   classifyAuthError,
   classifyAuthResponse,
+  classifyForbiddenResponse,
 } from "./auth-recovery.js";
 import {
   type CloudCredentialLoadResult,
   CloudCredentialStore,
   type CloudRequestIdentity,
 } from "./cloud-credentials.js";
+export { ResourceForbiddenError, classifyForbiddenResponse } from "./auth-recovery.js";
 import type { JsonObject } from "./normalization/redaction.js";
 
 const ProtocolErrorDetailValueSchema: z.ZodType<ProtocolErrorDetailValue> = z.lazy(() =>
@@ -370,9 +373,16 @@ export class CloudObservationClient {
     response: Response,
     rejectedIdentity: CloudRequestIdentity,
     isRetry: boolean,
+    targetWorkspaceId?: string,
   ): Promise<CloudRequestIdentity | null> {
     const category = await classifyAuthResponse(response);
     if (!category) {
+      if (response.status === 403) {
+        const workspaceId = targetWorkspaceId ?? rejectedIdentity.workspaceId;
+        throw new ResourceForbiddenError(`Cloud request forbidden for workspace ${workspaceId}`, {
+          workspaceId,
+        });
+      }
       this.authRecovery.setAuthenticated();
       return null;
     }
@@ -384,11 +394,13 @@ export class CloudObservationClient {
     rejectedIdentity: CloudRequestIdentity,
     isRetry: boolean,
   ): Promise<CloudRequestIdentity | null> {
+    if (error instanceof ResourceForbiddenError) {
+      throw error;
+    }
     const category = classifyAuthError(error);
     if (!category) {
       return null;
     }
-
     let status = category === "FORBIDDEN" ? 403 : 401;
     if (error instanceof ProtocolError) {
       status = error.status;
@@ -486,7 +498,12 @@ export class CloudObservationClient {
       );
     }
 
-    const refreshedIdentity = await this.recoverFromAuthResponse(response, identity, isRetry);
+    const refreshedIdentity = await this.recoverFromAuthResponse(
+      response,
+      identity,
+      isRetry,
+      workspaceId,
+    );
     if (refreshedIdentity) {
       return this.executeSendBatch(input, refreshedIdentity, true);
     }
@@ -570,7 +587,12 @@ export class CloudObservationClient {
       );
     }
 
-    const refreshedIdentity = await this.recoverFromAuthResponse(response, identity, isRetry);
+    const refreshedIdentity = await this.recoverFromAuthResponse(
+      response,
+      identity,
+      isRetry,
+      identity.workspaceId,
+    );
     if (refreshedIdentity) {
       return this.executeSendTrajectoryBatch(input, refreshedIdentity, true);
     }
@@ -664,7 +686,12 @@ export class CloudObservationClient {
       );
     }
 
-    const refreshedIdentity = await this.recoverFromAuthResponse(response, identity, isRetry);
+    const refreshedIdentity = await this.recoverFromAuthResponse(
+      response,
+      identity,
+      isRetry,
+      workspaceId,
+    );
     if (refreshedIdentity) {
       return this.executeSendTelemetryBatch(input, refreshedIdentity, true);
     }

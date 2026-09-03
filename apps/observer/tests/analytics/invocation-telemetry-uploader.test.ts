@@ -3,6 +3,7 @@ import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import type { TelemetryBatchResponse } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InvocationTelemetryUploader } from "../../src/analytics/invocation-telemetry-uploader.js";
+import { ResourceForbiddenError } from "../../src/auth-recovery.js";
 import type { CloudObservationClient, SendTelemetryBatchInput } from "../../src/cloud-runtime.js";
 import type { Logger } from "../../src/lifecycle.js";
 
@@ -320,5 +321,101 @@ describe("InvocationTelemetryUploader", () => {
     vi.advanceTimersByTime(30_000);
 
     vi.useRealTimers();
+  });
+  it("dead-letters after bounded retries on ResourceForbiddenError and continues with the next batch", async () => {
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_forbidden_1",
+        workspaceId: "ws_forbidden",
+      }),
+    );
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_healthy_1",
+        workspaceId: "ws_healthy",
+      }),
+    );
+
+    const mockCloudClient = {
+      sendTelemetryBatch: vi
+        .fn()
+        .mockImplementation(
+          async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
+            if (input.workspaceId === "ws_forbidden") {
+              throw new ResourceForbiddenError(
+                `Cloud request forbidden for workspace ${input.workspaceId}`,
+                { workspaceId: input.workspaceId },
+              );
+            }
+            return {
+              batchId: `tb_${input.workspaceId}`,
+              status: "accepted",
+              processedCount: input.invocations.length,
+            };
+          },
+        ),
+    } as unknown as CloudObservationClient;
+
+    const uploader = new InvocationTelemetryUploader({
+      auditRepository: store.audit,
+      cloudClient: mockCloudClient,
+      logger: mockLogger,
+    });
+
+    // Cycle 1: ws_forbidden fails (attempt 1/3); ws_healthy succeeds
+    const first = await uploader.flushOnce();
+    expect(first).toEqual({ uploaded: 1 });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Failed to upload invocation telemetry batch for workspace",
+      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 1 }),
+    );
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
+
+    // Cycle 2: ws_forbidden fails (attempt 2/3)
+    const second = await uploader.flushOnce();
+    expect(second).toEqual({ uploaded: 0 });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Failed to upload invocation telemetry batch for workspace",
+      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 2 }),
+    );
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
+
+    // Cycle 3: ws_forbidden fails (attempt 3/3) -> dead-lettered and marked failed
+    const third = await uploader.flushOnce();
+    expect(third).toEqual({ uploaded: 0 });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Failed to upload invocation telemetry batch for workspace",
+      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 3, exhausted: true }),
+    );
+
+    // No rows remain pending!
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+
+    // Verify row status in database was marked as error
+    const invRow = await store.audit.getInvocation("inv_forbidden_1");
+    expect(invRow?.status).toBe("error");
+
+    // Verify dead letter was recorded
+    const deadLetters = store.conn.all<{
+      dead_letter_id: string;
+      original_event_type: string;
+      status: string;
+      retry_count: number;
+    }>("SELECT * FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';");
+    expect(deadLetters).toHaveLength(1);
+    expect(deadLetters[0].original_event_type).toBe("invocation_telemetry_batch");
+    expect(deadLetters[0].status).toBe("exhausted");
+    expect(deadLetters[0].retry_count).toBe(3);
+
+    // Cycle 4: a new batch for ws_next succeeds without being blocked by previous dead-letter
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_next_1",
+        workspaceId: "ws_next",
+      }),
+    );
+    const fourth = await uploader.flushOnce();
+    expect(fourth).toEqual({ uploaded: 1 });
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
   });
 });

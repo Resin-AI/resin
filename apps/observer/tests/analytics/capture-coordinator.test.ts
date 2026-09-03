@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { NormalizedSessionEvent, ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { ProtocolError } from "@resin/protocol";
+import { ResourceForbiddenError } from "../../src/auth-recovery.js";
 import {
   CloudObservationClient,
   NormalizationPipeline,
@@ -1119,6 +1120,91 @@ describe("TrajectoryCaptureCoordinator", () => {
       const records2 = [createPromptRecord(session.sessionId, 2)];
       await coordinator.handleRecords(session, records2, ack2);
       expect(ack2).toHaveBeenCalledTimes(1);
+    });
+    it("generic session: on ResourceForbiddenError retries up to 3 times then dead-letters, logs WARN with workspaceId, and advances via ack", async () => {
+      const pipeline = new NormalizationPipeline();
+      const deadLetterSpy = vi.spyOn(pipeline, "createAndSaveDeadLetter");
+      const warnLogs: Array<{ message: string; context?: unknown }> = [];
+      const mockLogger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn((msg: string, ctx?: unknown) => {
+          warnLogs.push({ message: msg, context: ctx });
+        }),
+        error: vi.fn(),
+      };
+
+      const mockObservationClient = createMockObservationClient({
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async () => {
+          throw new ResourceForbiddenError(
+            "Cloud request forbidden for workspace ws_forbidden_99",
+            {
+              workspaceId: "ws_forbidden_99",
+            },
+          );
+        }),
+      });
+
+      const session = createMockHarnessSession("sess_resource_forbidden_test", "active");
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        coalesceDwellMs: 0,
+        logger: mockLogger,
+      });
+
+      const records = [createPromptRecord(session.sessionId, 1)];
+
+      // Attempt 1: throws, not dead-lettered yet, ack not called
+      const ack1 = vi.fn(async () => {});
+      await expect(coordinator.handleRecords(session, records, ack1)).rejects.toThrow(
+        ResourceForbiddenError,
+      );
+      expect(ack1).not.toHaveBeenCalled();
+      expect(deadLetterSpy).not.toHaveBeenCalled();
+      expect(warnLogs).toHaveLength(1);
+      expect(warnLogs[0].context).toMatchObject({ workspaceId: "ws_forbidden_99", retries: 1 });
+
+      // Attempt 2: throws, not dead-lettered yet, ack not called
+      const ack2 = vi.fn(async () => {});
+      await expect(coordinator.handleRecords(session, records, ack2)).rejects.toThrow(
+        ResourceForbiddenError,
+      );
+      expect(ack2).not.toHaveBeenCalled();
+      expect(deadLetterSpy).not.toHaveBeenCalled();
+      expect(warnLogs).toHaveLength(2);
+      expect(warnLogs[1].context).toMatchObject({ workspaceId: "ws_forbidden_99", retries: 2 });
+
+      // Attempt 3: max retries reached -> dead-lettered, logged at WARN, does NOT throw, ack is called
+      const ack3 = vi.fn(async () => {});
+      await coordinator.handleRecords(session, records, ack3);
+      expect(ack3).toHaveBeenCalledTimes(1);
+      expect(deadLetterSpy).toHaveBeenCalledWith(
+        "observation_batch",
+        expect.objectContaining({ workspaceId: "ws_forbidden_99" }),
+        expect.stringContaining("ws_forbidden_99"),
+      );
+      expect(warnLogs).toHaveLength(3);
+      expect(warnLogs[2].message).toContain("max retries exceeded, dead-lettering");
+      expect(warnLogs[2].context).toMatchObject({ workspaceId: "ws_forbidden_99", retries: 3 });
+
+      // Subsequent batch for a different session/workspace succeeds without being blocked
+      mockObservationClient.sendObservationBatch = vi.fn(async () => ({
+        batchId: "batch_ok_next",
+        status: "accepted",
+        acceptedCount: 1,
+        rejectedCount: 0,
+        errors: [],
+      }));
+      const sessionNext = createMockHarnessSession("sess_ok_next", "active");
+      const ackNext = vi.fn(async () => {});
+      await coordinator.handleRecords(
+        sessionNext,
+        [createPromptRecord(sessionNext.sessionId, 1)],
+        ackNext,
+      );
+      expect(ackNext).toHaveBeenCalledTimes(1);
     });
 
     it("generic session: applies exponential backoff with jitter (1 s -> 60 s cap) to retryable 5xx failures per session", async () => {
