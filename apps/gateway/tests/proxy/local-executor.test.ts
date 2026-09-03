@@ -5,7 +5,7 @@ import path from "node:path";
 import type { ToolManifest } from "@resin/contracts";
 import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
+import { LocalArtifactExecutor, resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
 
@@ -20,6 +20,8 @@ interface TestManifestInput {
   limits?: ToolManifest["limits"];
   scope?: ToolManifest["scope"];
 }
+
+const hasDeno = resolveDenoExecutable() !== undefined;
 
 describe("LocalArtifactExecutor", () => {
   let tempDir: string;
@@ -154,121 +156,127 @@ describe("LocalArtifactExecutor", () => {
     ).toBe(false);
   });
 
-  it("executes tiny bundle fixture and returns output as MCP CallToolResult", async () => {
-    const toolId = "test-add-tool-002";
-    const manifestBase: TestManifestInput = {
-      id: toolId,
-      name: "adder",
-      version: "1.0.0",
-      description: "Adds numbers",
-      parameters: {
-        type: "object",
-        properties: { a: { type: "number" }, b: { type: "number" } },
-        required: ["a", "b"],
-      },
-      runtime: {
-        runtime: "deno",
-        entrypoint: "src/index.ts",
-        memoryLimitMb: 128,
-        timeoutMs: 5000,
-        cpuLimitPercent: 100,
-        maxOutputSizeBytes: 1048576,
-      },
-    };
-
-    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
-      manifestBase,
-      "export default async (ctx) => ({ result: ctx.input.a + ctx.input.b });",
-    );
-
-    const executor = new LocalArtifactExecutor({
-      cache,
-      workspaceRoot: workspaceDir,
-      allowDevKeys: true,
-    });
-
-    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
-
-    const result = await executor.execute({
-      entry: {
-        toolId,
+  it.skipIf(!hasDeno)(
+    "executes tiny bundle fixture and returns output as MCP CallToolResult",
+    async () => {
+      const toolId = "test-add-tool-002";
+      const manifestBase: TestManifestInput = {
+        id: toolId,
         name: "adder",
         version: "1.0.0",
-        artifactDigest,
-        manifestDigest,
-      },
-      manifest,
-      parameters: { a: 15, b: 27 },
-      context: ws,
-    });
+        description: "Adds numbers",
+        parameters: {
+          type: "object",
+          properties: { a: { type: "number" }, b: { type: "number" } },
+          required: ["a", "b"],
+        },
+        runtime: {
+          runtime: "deno",
+          entrypoint: "src/index.ts",
+          memoryLimitMb: 128,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 1048576,
+        },
+      };
 
-    expect(result.isError).toBeFalsy();
-    expect(result.content).toBeDefined();
-    expect(result.content.length).toBeGreaterThan(0);
-    expect(result.content[0]?.type).toBe("text");
-    const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
-    expect(parsedOutput).toEqual({ result: 42 });
-  });
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        manifestBase,
+        "export default async (ctx) => ({ result: ctx.input.a + ctx.input.b });",
+      );
 
-  it("executes bundle with standard filesystem broker rooted at workspace directory", async () => {
-    const toolId = "test-fs-tool-003";
-    const manifestBase: TestManifestInput = {
-      id: toolId,
-      name: "fs_writer",
-      version: "1.0.0",
-      description: "Writes workspace file",
-      parameters: {
-        type: "object",
-        properties: { filename: { type: "string" }, message: { type: "string" } },
-        required: ["filename", "message"],
-      },
-      runtime: {
-        runtime: "deno",
-        entrypoint: "src/index.ts",
-        memoryLimitMb: 128,
-        timeoutMs: 5000,
-        cpuLimitPercent: 100,
-        maxOutputSizeBytes: 1048576,
-      },
-    };
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        allowDevKeys: true,
+      });
 
-    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
-      manifestBase,
-      `export default async (ctx) => {
+      const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+      const result = await executor.execute({
+        entry: {
+          toolId,
+          name: "adder",
+          version: "1.0.0",
+          artifactDigest,
+          manifestDigest,
+        },
+        manifest,
+        parameters: { a: 15, b: 27 },
+        context: ws,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toBeDefined();
+      expect(result.content.length).toBeGreaterThan(0);
+      expect(result.content[0]?.type).toBe("text");
+      const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
+      expect(parsedOutput).toEqual({ result: 42 });
+    },
+  );
+
+  it.skipIf(!hasDeno)(
+    "executes bundle with standard filesystem broker rooted at workspace directory",
+    async () => {
+      const toolId = "test-fs-tool-003";
+      const manifestBase: TestManifestInput = {
+        id: toolId,
+        name: "fs_writer",
+        version: "1.0.0",
+        description: "Writes workspace file",
+        parameters: {
+          type: "object",
+          properties: { filename: { type: "string" }, message: { type: "string" } },
+          required: ["filename", "message"],
+        },
+        runtime: {
+          runtime: "deno",
+          entrypoint: "src/index.ts",
+          memoryLimitMb: 128,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 1048576,
+        },
+      };
+
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        manifestBase,
+        `export default async (ctx) => {
         await ctx.fs.writeFile(ctx.input.filename, ctx.input.message);
         const readBack = await ctx.fs.readFile(ctx.input.filename);
         return { written: readBack };
       };`,
-    );
+      );
 
-    const executor = new LocalArtifactExecutor({
-      cache,
-      workspaceRoot: workspaceDir,
-      allowDevKeys: true,
-    });
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        allowDevKeys: true,
+      });
 
-    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+      const ws = resolveWorkspaceContext({ cwd: workspaceDir });
 
-    const result = await executor.execute({
-      entry: {
-        toolId,
-        name: "fs_writer",
-        version: "1.0.0",
-        artifactDigest,
-        manifestDigest,
-      },
-      manifest,
-      parameters: { filename: "hello.txt", message: "local-artifact-broker-works" },
-      context: ws,
-    });
-    expect(result.isError).toBeFalsy();
-    const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
-    expect(parsedOutput).toEqual({ written: "local-artifact-broker-works" });
+      const result = await executor.execute({
+        entry: {
+          toolId,
+          name: "fs_writer",
+          version: "1.0.0",
+          artifactDigest,
+          manifestDigest,
+        },
+        manifest,
+        parameters: { filename: "hello.txt", message: "local-artifact-broker-works" },
+        context: ws,
+      });
+      expect(result.isError).toBeFalsy();
+      const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
+      expect(parsedOutput).toEqual({ written: "local-artifact-broker-works" });
 
-    // Verify file actually exists in workspace root on host disk
-    const onDisk = fs.readFileSync(path.join(workspaceDir, "hello.txt"), "utf8");
-    expect(onDisk).toBe("local-artifact-broker-works");
-  });
+      // Verify file actually exists in workspace root on host disk
+      const onDisk = fs.readFileSync(path.join(workspaceDir, "hello.txt"), "utf8");
+      expect(onDisk).toBe("local-artifact-broker-works");
+    },
+  );
 
   it("fails closed on manifest digest mismatch", async () => {
     const toolId = "test-tampered-tool-004";
@@ -319,7 +327,7 @@ describe("LocalArtifactExecutor", () => {
     expect(result.content[0]?.text).toContain("Manifest digest mismatch");
   });
 
-  it("enforces timeout limits", async () => {
+  it.skipIf(!hasDeno)("enforces timeout limits", async () => {
     const toolId = "test-timeout-tool-005";
     const manifestBase: TestManifestInput = {
       id: toolId,
@@ -370,7 +378,7 @@ describe("LocalArtifactExecutor", () => {
     expect(result.content[0]?.text).toMatch(/timed out/i);
   });
 
-  it("executes bundle importing only @resin/runtime successfully", async () => {
+  it.skipIf(!hasDeno)("executes bundle importing only @resin/runtime successfully", async () => {
     const toolId = "test-runtime-shim-tool-006";
     const manifestBase: TestManifestInput = {
       id: toolId,
@@ -495,65 +503,178 @@ export default defineTool(async (context: { input: { val: string } }) => {
     expect(result.content[0]?.text).toContain("zod");
   });
 
-  it("spawns resolved Deno binary directly without creating shell shims outside scratch directory", async () => {
-    const toolId = "test-no-shim-008";
-    const manifestBase: TestManifestInput = {
-      id: toolId,
-      name: "no_shim_tool",
-      version: "1.0.0",
-      description: "Verifies no shell shim is written to tmpdir",
-      parameters: {
-        type: "object",
-        properties: { text: { type: "string" } },
-        required: ["text"],
-      },
-      runtime: {
-        runtime: "deno",
-        entrypoint: "src/index.ts",
-        memoryLimitMb: 128,
-        timeoutMs: 5000,
-        cpuLimitPercent: 100,
-        maxOutputSizeBytes: 1048576,
-      },
-    };
-
-    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
-      manifestBase,
-      "export default async (ctx: { input: { text: string } }) => ({ echoed: ctx.input.text });",
-    );
-
-    const tmpdirShimBefore = fs
-      .readdirSync(os.tmpdir())
-      .filter((name) => name.startsWith("resin-deno-shim-"));
-
-    const executor = new LocalArtifactExecutor({
-      cache,
-      workspaceRoot: workspaceDir,
-      allowDevKeys: true,
-    });
-
-    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
-
-    const result = await executor.execute({
-      entry: {
-        toolId,
+  it.skipIf(!hasDeno)(
+    "spawns resolved Deno binary directly without creating shell shims outside scratch directory",
+    async () => {
+      const toolId = "test-no-shim-008";
+      const manifestBase: TestManifestInput = {
+        id: toolId,
         name: "no_shim_tool",
         version: "1.0.0",
-        artifactDigest,
-        manifestDigest,
-      },
-      manifest,
-      parameters: { text: "direct-deno-execution" },
-      context: ws,
-    });
+        description: "Verifies no shell shim is written to tmpdir",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+        },
+        runtime: {
+          runtime: "deno",
+          entrypoint: "src/index.ts",
+          memoryLimitMb: 128,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 1048576,
+        },
+      };
 
-    expect(result.isError).toBeFalsy();
-    const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
-    expect(parsedOutput).toEqual({ echoed: "direct-deno-execution" });
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        manifestBase,
+        "export default async (ctx: { input: { text: string } }) => ({ echoed: ctx.input.text });",
+      );
 
-    const tmpdirShimAfter = fs
-      .readdirSync(os.tmpdir())
-      .filter((name) => name.startsWith("resin-deno-shim-"));
-    expect(tmpdirShimAfter.length).toBe(tmpdirShimBefore.length);
+      const tmpdirShimBefore = fs
+        .readdirSync(os.tmpdir())
+        .filter((name) => name.startsWith("resin-deno-shim-"));
+
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        allowDevKeys: true,
+      });
+
+      const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+      const result = await executor.execute({
+        entry: {
+          toolId,
+          name: "no_shim_tool",
+          version: "1.0.0",
+          artifactDigest,
+          manifestDigest,
+        },
+        manifest,
+        parameters: { text: "direct-deno-execution" },
+        context: ws,
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
+      expect(parsedOutput).toEqual({ echoed: "direct-deno-execution" });
+
+      const tmpdirShimAfter = fs
+        .readdirSync(os.tmpdir())
+        .filter((name) => name.startsWith("resin-deno-shim-"));
+      expect(tmpdirShimAfter.length).toBe(tmpdirShimBefore.length);
+    },
+  );
+});
+
+describe("resolveDenoExecutable resolution order", () => {
+  let tempDir: string;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "deno-res-test-"));
+    delete process.env.RESIN_DENO_EXECUTABLE;
+    delete process.env.RESIN_HOME;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns explicit denoExecutable when it exists on disk", () => {
+    const fakeDeno = path.join(tempDir, "explicit-deno");
+    fs.writeFileSync(fakeDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    expect(resolveDenoExecutable({ denoExecutable: fakeDeno })).toBe(fakeDeno);
+  });
+
+  it("returns RESIN_DENO_EXECUTABLE env when set and exists", () => {
+    const fakeDeno = path.join(tempDir, "env-deno");
+    fs.writeFileSync(fakeDeno, "#!/bin/sh\n", { mode: 0o755 });
+    process.env.RESIN_DENO_EXECUTABLE = fakeDeno;
+
+    expect(resolveDenoExecutable()).toBe(fakeDeno);
+  });
+
+  it("explicit denoExecutable takes precedence over RESIN_DENO_EXECUTABLE", () => {
+    const explicitDeno = path.join(tempDir, "explicit-deno");
+    const envDeno = path.join(tempDir, "env-deno");
+    fs.writeFileSync(explicitDeno, "#!/bin/sh\n", { mode: 0o755 });
+    fs.writeFileSync(envDeno, "#!/bin/sh\n", { mode: 0o755 });
+    process.env.RESIN_DENO_EXECUTABLE = envDeno;
+
+    expect(resolveDenoExecutable({ denoExecutable: explicitDeno })).toBe(explicitDeno);
+  });
+
+  it("resolves from resinHome/current/deno/deno", () => {
+    const resinHomeDir = path.join(tempDir, "resin-home");
+    const denoDir = path.join(resinHomeDir, "current", "deno");
+    fs.mkdirSync(denoDir, { recursive: true });
+    const fakeDeno = path.join(denoDir, process.platform === "win32" ? "deno.exe" : "deno");
+    fs.writeFileSync(fakeDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    expect(resolveDenoExecutable({ resinHome: resinHomeDir })).toBe(fakeDeno);
+
+    process.env.RESIN_HOME = resinHomeDir;
+    expect(resolveDenoExecutable()).toBe(fakeDeno);
+  });
+
+  it("RESIN_DENO_EXECUTABLE takes precedence over resinHome", () => {
+    const envDeno = path.join(tempDir, "env-deno");
+    fs.writeFileSync(envDeno, "#!/bin/sh\n", { mode: 0o755 });
+    process.env.RESIN_DENO_EXECUTABLE = envDeno;
+
+    const resinHomeDir = path.join(tempDir, "resin-home");
+    const denoDir = path.join(resinHomeDir, "current", "deno");
+    fs.mkdirSync(denoDir, { recursive: true });
+    const fakeDeno = path.join(denoDir, process.platform === "win32" ? "deno.exe" : "deno");
+    fs.writeFileSync(fakeDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    expect(resolveDenoExecutable({ resinHome: resinHomeDir })).toBe(envDeno);
+  });
+
+  it("resolves from PATH when neither explicit, env, nor resinHome has deno", () => {
+    const pathBinDir = path.join(tempDir, "bin");
+    fs.mkdirSync(pathBinDir, { recursive: true });
+    const fakeDeno = path.join(pathBinDir, process.platform === "win32" ? "deno.exe" : "deno");
+    fs.writeFileSync(fakeDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    process.env.PATH = pathBinDir;
+    const emptyResinHome = path.join(tempDir, "empty-resin");
+    fs.mkdirSync(emptyResinHome, { recursive: true });
+
+    expect(resolveDenoExecutable({ resinHome: emptyResinHome })).toBe(fakeDeno);
+  });
+
+  it("resinHome takes precedence over PATH", () => {
+    const resinHomeDir = path.join(tempDir, "resin-home");
+    const denoDir = path.join(resinHomeDir, "current", "deno");
+    fs.mkdirSync(denoDir, { recursive: true });
+    const resinDeno = path.join(denoDir, process.platform === "win32" ? "deno.exe" : "deno");
+    fs.writeFileSync(resinDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    const pathBinDir = path.join(tempDir, "bin");
+    fs.mkdirSync(pathBinDir, { recursive: true });
+    const pathDeno = path.join(pathBinDir, process.platform === "win32" ? "deno.exe" : "deno");
+    fs.writeFileSync(pathDeno, "#!/bin/sh\n", { mode: 0o755 });
+
+    process.env.PATH = pathBinDir;
+    expect(resolveDenoExecutable({ resinHome: resinHomeDir })).toBe(resinDeno);
+  });
+
+  it("returns undefined when no executable exists anywhere", () => {
+    const emptyDir = path.join(tempDir, "empty");
+    fs.mkdirSync(emptyDir, { recursive: true });
+    process.env.PATH = emptyDir;
+
+    expect(
+      resolveDenoExecutable({
+        denoExecutable: path.join(tempDir, "nonexistent"),
+        resinHome: emptyDir,
+      }),
+    ).toBeUndefined();
   });
 });

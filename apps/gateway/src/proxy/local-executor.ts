@@ -64,25 +64,71 @@ export interface LocalArtifactExecutorOptions {
   allowDevKeys?: boolean;
   development?: boolean;
   denoExecutable?: string;
+  resinHome?: string;
   requireSignature?: boolean;
 }
 
-function findDenoBinary(custom?: string): string {
-  if (custom && fs.existsSync(custom)) return custom;
-  const home = os.homedir();
-  const candidates = [
-    path.join(home, ".resin", "current", "deno", "deno"),
-    path.join(home, ".local", "node-v24.17.0-linux-arm64", "bin", "deno"),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+function checkExecutable(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile();
+  } catch {
+    return false;
   }
+}
+
+export function resolveDenoExecutable(options?: {
+  denoExecutable?: string;
+  resinHome?: string;
+}): string | undefined {
+  // 1. Explicit denoExecutable option
+  if (options?.denoExecutable && checkExecutable(options.denoExecutable)) {
+    return options.denoExecutable;
+  }
+
+  // 2. RESIN_DENO_EXECUTABLE env
+  const envDeno = process.env.RESIN_DENO_EXECUTABLE;
+  if (envDeno && checkExecutable(envDeno)) {
+    return envDeno;
+  }
+
+  // 3. <resinHome>/current/deno/deno[.exe] where resinHome = RESIN_HOME env or ~/.resin
+  const resinHome =
+    options?.resinHome || process.env.RESIN_HOME || path.join(os.homedir(), ".resin");
+  const resinDeno = path.join(
+    resinHome,
+    "current",
+    "deno",
+    process.platform === "win32" ? "deno.exe" : "deno",
+  );
+  if (checkExecutable(resinDeno)) {
+    return resinDeno;
+  }
+  if (process.platform === "win32") {
+    const resinDenoFallback = path.join(resinHome, "current", "deno", "deno");
+    if (checkExecutable(resinDenoFallback)) {
+      return resinDenoFallback;
+    }
+  }
+
+  // 4. PATH lookup
   const paths = (process.env.PATH || "").split(path.delimiter);
   for (const p of paths) {
+    if (!p) continue;
     const candidate = path.join(p, process.platform === "win32" ? "deno.exe" : "deno");
-    if (fs.existsSync(candidate)) return candidate;
+    if (checkExecutable(candidate)) {
+      return candidate;
+    }
   }
-  return custom || "deno";
+
+  return undefined;
+}
+
+function findDenoBinary(
+  options?: { denoExecutable?: string; resinHome?: string } | string,
+): string {
+  const opts = typeof options === "string" ? { denoExecutable: options } : options;
+  return resolveDenoExecutable(opts) ?? opts?.denoExecutable ?? "deno";
 }
 
 function scanArtifactForBareImports(
@@ -189,6 +235,7 @@ export class LocalArtifactExecutor {
   private readonly allowDevKeys: boolean;
   private readonly development: boolean;
   private readonly denoExecutable?: string;
+  private readonly resinHome?: string;
   private readonly requireSignature?: boolean;
 
   constructor(options: LocalArtifactExecutorOptions) {
@@ -201,6 +248,7 @@ export class LocalArtifactExecutor {
     this.allowDevKeys = options.allowDevKeys ?? false;
     this.development = options.development ?? options.allowDevKeys ?? true;
     this.denoExecutable = options.denoExecutable;
+    this.resinHome = options.resinHome;
     this.requireSignature = options.requireSignature;
   }
 
@@ -540,7 +588,10 @@ export class LocalArtifactExecutor {
       timeoutMs,
       memoryLimitMb,
       maxOutputSizeBytes,
-      denoExecutable: findDenoBinary(this.denoExecutable),
+      denoExecutable: findDenoBinary({
+        denoExecutable: this.denoExecutable,
+        resinHome: this.resinHome,
+      }),
       brokerHandler,
       importMap: {},
       onProgress: (prog) => {

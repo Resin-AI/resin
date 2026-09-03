@@ -152,6 +152,8 @@ export async function createProductionProxyRuntime(
         cache: artifactCache,
         workspaceRoot: process.cwd(),
         allowDevKeys: options.allowDevKeys ?? false,
+        resinHome:
+          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
       });
 
     const router = new CloudInvocationRouter({
@@ -321,6 +323,8 @@ export async function createProductionProxyRuntime(
         cache: options.artifactCache ?? new ArtifactCache(),
         workspaceRoot: process.cwd(),
         allowDevKeys: options.allowDevKeys ?? false,
+        resinHome:
+          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
       }),
 
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
