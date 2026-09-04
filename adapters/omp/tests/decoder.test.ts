@@ -407,7 +407,20 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           content: "ok",
           provider: "google-antigravity",
           model: "gemini-3.8-flash",
-          usage: { input: 5978, output: 33, cacheRead: 41020, cacheWrite: 0, totalTokens: 47031 },
+          usage: {
+            input: 5978,
+            output: 33,
+            cacheRead: 41020,
+            cacheWrite: 0,
+            totalTokens: 47031,
+            cost: {
+              input: 0.0059,
+              output: 0.0001,
+              cacheRead: 0.0016,
+              cacheWrite: 0,
+              total: 0.0076,
+            },
+          },
         }),
         metadata: {},
       };
@@ -418,6 +431,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(usage.outputTokens).toBe(33);
       expect(usage.cachedInputTokens).toBe(41020);
       expect(usage.totalTokens).toBe(47031);
+      // The per-turn spend is what a tool saves; the flat $3/M fallback overstated
+      // a cache-heavy Flash session five-fold.
+      expect(usage.costMicroUsd).toBe(7600);
       expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
     });
 
