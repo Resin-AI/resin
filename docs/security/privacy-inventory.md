@@ -72,6 +72,23 @@ Before any event or diagnostic metadata is written to cloud storage or diagnosti
 - **Path & Username Redaction**: Normalizes local file paths (e.g. `/Users/alice/projects/app` → `~/app`) to prevent username leakage.
 - **High-Entropy Filtering**: Filters unstructured high-entropy strings exceeding Shannon entropy thresholds.
 
+### Metadata-only evidence: what the cloud receives per event
+
+The default `metadata-only` redaction strategy is a deterministic projection, not a filter. Every uploaded event is rebuilt from an allowlist of operational fields; nothing else is copied. Fields marked *normalized* are replaced on-device by a value-free form drawn from a finite vocabulary before upload (`apps/observer/src/analytics/evidence-normalization.ts`).
+
+| Event | Kept verbatim | Normalized on device | Dropped |
+|---|---|---|---|
+| `message`, `model_reasoning` | role, model, token/usage metrics | — | all text |
+| `tool_call` (shell tools such as `bash`) | tool name | `command` → command profile: executable basename, leading subcommand words for a fixed executable allowlist (`git`, `pnpm`, `cargo`, …), flag names, shell operators; every other argument becomes a typed placeholder (`$STR`, `$PATH`, `$SRC_FILE`, `$TEST_FILE`, `$URL`, `$NUM`, `$GLOB`); `cwd` → path pattern | quoted strings, environment values, heredoc bodies, all other parameters |
+| `tool_call` (file tools such as `read`, `write`, `edit`, `grep`) | tool name | `path`-like parameters → path pattern: home directory removed, at most the last 4 segments, hash/UUID/timestamp/version segments replaced by `*` | file contents, patches, search patterns, all other parameters |
+| `tool_call` (everything else) | tool name | parameter *shape* only (key names and primitive types) | all values |
+| `tool_result` | tool name, error flag, duration, output size | — | result body |
+| `command_exec` | exit code, duration | `command` → command profile (as above) | args, cwd, stdout, stderr |
+| `file_edit` | operation, before/after hashes, diff line counts | `filePath` → path pattern | patch |
+| `error` | error type, recoverable flag | — | message, stack, details |
+
+Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. The residual disclosure is which command-line tools, flags, file names and directory names a workspace uses—comparable to a dependency manifest—and never prompt text, code, output, or argument values. `redaction.redactionStrategy` on each uploaded event records whether its sensitive fields were `drop`ped or normalized (`mask`).
+
 ---
 
 ## 5. Configured Subprocessors & Consent Boundaries

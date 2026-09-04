@@ -239,12 +239,13 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
   });
 
-  it("projects command_exec event: strips command, args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
+  it("projects command_exec event: masks command into a value-free profile, drops args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
     const original: NormalizedCommandExecEvent = {
       ...createBaseHeaders(6),
       type: "command_exec",
-      command: "export SECRET_API_KEY='12345' && deploy.sh",
-      args: ["--token=SECRET_TOKEN_XYZ", "--dest=/var/secrets"],
+      command:
+        "export SECRET_API_KEY='hunter2secret' && ./bin/deploy.sh --token=SECRET_TOKEN_XYZ --dest=/var/secrets",
+      args: [],
       cwd: "/Users/alice/classified-project",
       exitCode: 0,
       stdout: "SECRET_STDOUT: Successfully uploaded certificate to prod",
@@ -256,7 +257,7 @@ describe("projectEventToMetadataOnly", () => {
 
     expect(projected.type).toBe("command_exec");
     if (projected.type !== "command_exec") throw new Error("Expected command_exec event");
-    expect(projected.command).toBe("");
+    expect(projected.command).toBe("export $STR && deploy --token=$STR --dest=$PATH");
     expect(projected.args).toEqual([]);
     expect(projected.cwd).toBeUndefined();
     expect(projected.stdout).toBeUndefined();
@@ -264,14 +265,97 @@ describe("projectEventToMetadataOnly", () => {
     expect(projected.exitCode).toBe(0);
     expect(projected.durationMs).toBe(1250);
     expect(projected.redaction.isRedacted).toBe(true);
-    expect(projected.redaction.redactionStrategy).toBe("drop");
+    expect(projected.redaction.redactionStrategy).toBe("mask");
     expect(projected.redaction.redactedFields).toContain("command");
     expect(projected.redaction.redactedFields).toContain("args");
     expect(projected.redaction.redactedFields).toContain("cwd");
     expect(projected.redaction.redactedFields).toContain("stdout");
     expect(projected.redaction.redactedFields).toContain("stderr");
+    const serialized = JSON.stringify(projected);
+    for (const marker of [
+      "hunter2secret",
+      "SECRET_TOKEN_XYZ",
+      "/var/secrets",
+      "alice",
+      "classified",
+      "SECRET_STDOUT",
+      "SECRET_STDERR",
+    ]) {
+      expect(serialized).not.toContain(marker);
+    }
 
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("projects command_exec event with enrichment disabled: drops the command entirely", () => {
+    const original: NormalizedCommandExecEvent = {
+      ...createBaseHeaders(6),
+      type: "command_exec",
+      command: "git status",
+      args: [],
+      exitCode: 0,
+      durationMs: 1,
+    };
+    const projected = projectEventToMetadataOnly(original, { enrichEvidence: false });
+    if (projected.type !== "command_exec") throw new Error("Expected command_exec event");
+    expect(projected.command).toBe("");
+    expect(projected.redaction.redactionStrategy).toBe("drop");
+  });
+
+  it("projects tool_call for shell tools into a command profile and for file tools into path patterns", () => {
+    const shell = projectEventToMetadataOnly(
+      {
+        ...createBaseHeaders(4),
+        type: "tool_call",
+        callId: "c_1",
+        toolName: "bash",
+        parameters: {
+          command: 'git commit -m "SECRET_MESSAGE" && pnpm test src/x.test.ts',
+          cwd: "/home/alice/repo",
+          i: "SECRET_INTENT",
+        },
+        isShadow: false,
+      },
+      { homeDir: "/home/alice" },
+    );
+    if (shell.type !== "tool_call") throw new Error("Expected tool_call");
+    expect(shell.parameters).toEqual({
+      command: "git commit -m $STR && pnpm test $TEST_FILE",
+      cwd: "…/repo",
+    });
+    expect(shell.redaction.redactionStrategy).toBe("mask");
+    expect(JSON.stringify(shell)).not.toContain("SECRET");
+    expect(JSON.stringify(shell)).not.toContain("alice");
+
+    const file = projectEventToMetadataOnly(
+      {
+        ...createBaseHeaders(5),
+        type: "tool_call",
+        callId: "c_2",
+        toolName: "write",
+        parameters: { path: "/home/alice/repo/src/auth/keys.ts", content: "SECRET_CONTENT" },
+        isShadow: false,
+      },
+      { homeDir: "/home/alice" },
+    );
+    if (file.type !== "tool_call") throw new Error("Expected tool_call");
+    expect(file.parameters).toEqual({ path: "…/repo/src/auth/keys.ts" });
+    expect(JSON.stringify(file)).not.toContain("SECRET");
+
+    const other = projectEventToMetadataOnly({
+      ...createBaseHeaders(6),
+      type: "tool_call",
+      callId: "c_3",
+      toolName: "hub",
+      parameters: { op: "send", message: "SECRET_MESSAGE" },
+      isShadow: false,
+    });
+    if (other.type !== "tool_call") throw new Error("Expected tool_call");
+    expect(other.redaction.redactionStrategy).toBe("drop");
+    expect(Object.keys(other.parameters)).toEqual([RESIN_PARAMETER_SHAPE_KEY]);
+    expect(JSON.stringify(other)).not.toContain("SECRET");
+    expect(NormalizedSessionEventSchema.safeParse(shell).success).toBe(true);
+    expect(NormalizedSessionEventSchema.safeParse(file).success).toBe(true);
   });
 
   it("projects file_edit event: strips patch while preserving filePath, operation, hashes, diffStats", () => {
@@ -296,7 +380,7 @@ describe("projectEventToMetadataOnly", () => {
     expect(projected.afterHash).toBe(original.afterHash);
     expect(projected.diffStats).toEqual(original.diffStats);
     expect(projected.redaction.isRedacted).toBe(true);
-    expect(projected.redaction.redactionStrategy).toBe("drop");
+    expect(projected.redaction.redactionStrategy).toBe("mask");
     expect(projected.redaction.redactedFields).toContain("patch");
 
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
@@ -506,7 +590,7 @@ describe("projectEventToMetadataOnly", () => {
         type: "tool_call",
         callId: "c_1",
         toolName: "bash",
-        parameters: { cmd: secretMarkers[3] },
+        parameters: { cmd: `deploy ${secretMarkers[3]}` },
       },
       {
         ...createBaseHeaders(5),
@@ -581,9 +665,20 @@ describe("projectEventToMetadataOnly", () => {
       expect(serialized).not.toContain(marker);
     }
 
+    const lowered = serialized.toLowerCase();
+    for (const marker of secretMarkers.slice(1)) {
+      // Everything except the retained executable basename (marker 5 appears
+      // only as the command's executable; its argument copies must vanish).
+      if (marker === secretMarkers[5]) {
+        expect(lowered.split(marker.toLowerCase()).length - 1).toBe(1);
+        continue;
+      }
+      expect(lowered).not.toContain(marker.toLowerCase());
+    }
+
     for (const p of projected) {
       expect(p.redaction.isRedacted).toBe(true);
-      expect(p.redaction.redactionStrategy).toBe("drop");
+      expect(["drop", "mask"]).toContain(p.redaction.redactionStrategy);
       expect(NormalizedSessionEventSchema.safeParse(p).success).toBe(true);
     }
   });
