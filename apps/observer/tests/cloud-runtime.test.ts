@@ -699,6 +699,37 @@ describe("CloudObservationClient.sendTelemetryBatch", () => {
     expect(parsedBody.metrics).toEqual([]);
   });
 
+  it("addresses the batch to the paired cloud workspace when the caller omits one", async () => {
+    // The uploader groups records by the daemon's local workspace id; that id is
+    // meaningless to the cloud, which enforces the paired workspace with a 403.
+    const identity = makeTestIdentity({
+      cloudUrl: "https://api.resin.local",
+      workspaceId: "ws_cloud_paired",
+    });
+    const inv = { ...makeValidInvocationRecord(), workspaceId: "343319f5-local-uuid" };
+    let capturedBody = "";
+    let capturedHeaders: Record<string, string> = {};
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      capturedBody = init?.body as string;
+      capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+      return new Response(
+        JSON.stringify({ batchId: "tb-response-2", status: "accepted", processedCount: 1 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const client = new CloudObservationClient({
+      identityProvider: async () => identity,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+
+    await client.sendTelemetryBatch({ invocations: [inv] });
+
+    const parsedBody = JSON.parse(capturedBody);
+    expect(parsedBody.workspaceId).toBe("ws_cloud_paired");
+    expect(capturedHeaders["x-workspace-id"]).toBe("ws_cloud_paired");
+    expect(parsedBody.invocations[0].workspaceId).toBe("343319f5-local-uuid");
+  });
+
   it("performs single forced-refresh retry on 401 and succeeds with refreshed token", async () => {
     const initialIdentity = makeTestIdentity({ accessToken: "token-expired" });
     const refreshedIdentity = makeTestIdentity({ accessToken: "token-fresh-new" });

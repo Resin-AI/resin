@@ -112,10 +112,17 @@ describe("InvocationTelemetryUploader", () => {
     const result = await uploader.flushOnce();
     expect(result).toEqual({ uploaded: 3 });
 
-    // Verify 2 batches sent (1 for ws_alpha with 2 records, 1 for ws_beta with 1 record)
+    // Verify 2 batches sent (1 for ws_alpha with 2 records, 1 for ws_beta with 1 record).
+    // Batches are grouped by the local workspace but addressed to the paired cloud
+    // workspace: the client fills that in, so the input carries no workspaceId.
     expect(capturedBatches).toHaveLength(2);
-    const alphaBatch = capturedBatches.find((b) => b.workspaceId === "ws_alpha");
-    const betaBatch = capturedBatches.find((b) => b.workspaceId === "ws_beta");
+    expect(capturedBatches.every((b) => b.workspaceId === undefined)).toBe(true);
+    const alphaBatch = capturedBatches.find((b) =>
+      b.invocations.every((i) => i.workspaceId === "ws_alpha"),
+    );
+    const betaBatch = capturedBatches.find((b) =>
+      b.invocations.every((i) => i.workspaceId === "ws_beta"),
+    );
 
     expect(alphaBatch?.invocations).toHaveLength(2);
     expect(alphaBatch?.invocations.map((i) => i.invocationId)).toEqual(["inv_ws1_1", "inv_ws1_2"]);
@@ -175,7 +182,7 @@ describe("InvocationTelemetryUploader", () => {
         .fn()
         .mockImplementation(
           async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
-            if (input.workspaceId === "ws_failing" && shouldFail) {
+            if (input.invocations[0]?.workspaceId === "ws_failing" && shouldFail) {
               throw new Error("Network unreachable (ECONNREFUSED)");
             }
             return {
@@ -341,10 +348,11 @@ describe("InvocationTelemetryUploader", () => {
         .fn()
         .mockImplementation(
           async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
-            if (input.workspaceId === "ws_forbidden") {
+            const localWorkspace = input.invocations[0]?.workspaceId;
+            if (localWorkspace === "ws_forbidden") {
               throw new ResourceForbiddenError(
-                `Cloud request forbidden for workspace ${input.workspaceId}`,
-                { workspaceId: input.workspaceId },
+                `Cloud request forbidden for workspace ${localWorkspace}`,
+                { workspaceId: localWorkspace },
               );
             }
             return {

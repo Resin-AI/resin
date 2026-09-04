@@ -104,8 +104,10 @@ export class InvocationTelemetryUploader {
 
       for (const [workspaceId, invocations] of byWorkspace.entries()) {
         try {
+          // `workspaceId` here is the daemon's local workspace identifier, which the
+          // cloud has never seen; the batch is addressed to the paired cloud
+          // workspace (the client's identity), which the cloud enforces with a 403.
           const response = await this.cloudClient.sendTelemetryBatch({
-            workspaceId,
             invocations,
           });
 
