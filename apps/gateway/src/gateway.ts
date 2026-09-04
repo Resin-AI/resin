@@ -91,6 +91,11 @@ export interface GatewayServerOptions {
   maxConcurrentRequestsPerConnection?: number;
   maxTotalConcurrentRequests?: number;
   requestTimeoutMs?: number;
+  /**
+   * Deadline for `tools/call` requests. Tool executions are bounded by their
+   * manifest limits; this is the outer ceiling (default 10 minutes).
+   */
+  toolCallTimeoutMs?: number;
   rateLimitRps?: number;
   rateLimitBurst?: number;
   harnessDetector?: (clientInfo: McpImplementationInfo) => string;
@@ -172,6 +177,7 @@ export class LocalMcpGateway {
   private readonly maxConcurrentRequestsPerConnection: number;
   private readonly maxTotalConcurrentRequests: number;
   private readonly requestTimeoutMs: number;
+  private readonly toolCallTimeoutMs: number;
   private readonly rateLimitRps: number;
   private readonly rateLimitBurst: number;
   private readonly harnessDetector: (clientInfo: McpImplementationInfo) => string;
@@ -208,6 +214,7 @@ export class LocalMcpGateway {
     this.maxConcurrentRequestsPerConnection = options.maxConcurrentRequestsPerConnection ?? 32;
     this.maxTotalConcurrentRequests = options.maxTotalConcurrentRequests ?? 128;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60000;
+    this.toolCallTimeoutMs = options.toolCallTimeoutMs ?? 600_000;
     this.rateLimitRps = options.rateLimitRps ?? 100;
     this.rateLimitBurst = options.rateLimitBurst ?? 50;
     this.harnessDetector = options.harnessDetector ?? defaultHarnessDetector;
@@ -383,9 +390,12 @@ export class LocalMcpGateway {
       };
     }
 
-    // Register request for timeout & cancellation
-    const signal = connection.registerInFlightRequest(id, method, this.requestTimeoutMs, () => {
-      this.logger?.("warn", `Request ${id} (${method}) timed out`);
+    // Register request for timeout & cancellation. Tool executions get their
+    // own ceiling so the generic request deadline cannot SIGKILL a tool that is
+    // still inside its manifest-declared limit.
+    const deadlineMs = method === "tools/call" ? this.toolCallTimeoutMs : this.requestTimeoutMs;
+    const signal = connection.registerInFlightRequest(id, method, deadlineMs, () => {
+      this.logger?.("warn", `Request ${id} (${method}) timed out after ${deadlineMs}ms`);
     });
 
     try {
@@ -616,7 +626,7 @@ export class LocalMcpGateway {
     return this.router.callTool(connection.workspaceContext, name, toolArgs, {
       signal,
       onProgress,
-      timeoutMs: this.requestTimeoutMs,
+      timeoutMs: this.toolCallTimeoutMs,
     });
   }
 
