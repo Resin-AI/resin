@@ -9,6 +9,7 @@ import {
   type ToolVersion,
   hashCanonicalContent,
 } from "@resin/contracts";
+import { commandProfileAuthorizes } from "@resin/runtime";
 import type { JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ValidationResult } from "./types.js";
 const VALID_RUNTIMES = {
@@ -272,7 +273,7 @@ export function validateToolStaging(
             if (
               envCmd.allowedCommands &&
               envCmd.allowedCommands.length > 0 &&
-              !envCmd.allowedCommands.includes(cmd)
+              !envCmd.allowedCommands.some((entry) => commandProfileAuthorizes(entry, cmd))
             ) {
               errors.push(`Command '${cmd}' is not in capability envelope allowedCommands`);
             }

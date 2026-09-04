@@ -254,6 +254,9 @@ function extractTokenComponents(
     parseNonNegativeInt(rawUsage.cached_tokens) ??
     parseNonNegativeInt(rawUsage.cachedTokens) ??
     parseNonNegativeInt(rawUsage.cache_read_tokens) ??
+    // OMP's own session usage: `{ input, output, cacheRead, cacheWrite, totalTokens }`.
+    parseNonNegativeInt(rawUsage.cacheRead) ??
+    parseNonNegativeInt(rawUsage.cache_read) ??
     parseNonNegativeInt(rawUsage.cached) ??
     parseNonNegativeInt(rawPayload.cached_input_tokens) ??
     parseNonNegativeInt(rawPayload.cachedInputTokens) ??

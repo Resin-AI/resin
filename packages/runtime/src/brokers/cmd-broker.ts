@@ -23,6 +23,10 @@ import {
   resolveCanonicalBinary,
   verifyExecutableIdentity,
 } from "../policy/canonicalizers.js";
+import {
+  COMMAND_PLACEHOLDER_CLASSES,
+  matchCommandProfileArgs,
+} from "../policy/command-template.js";
 import { withResolvers } from "../worker/protocol.js";
 import {
   BaseCapabilityBroker,
@@ -214,6 +218,14 @@ export function parseCommandLine(commandLine: string): string[] {
 }
 
 export const lexCommandLine = parseCommandLine;
+
+const COMMAND_PLACEHOLDER_PATTERN = new RegExp(
+  Object.keys(COMMAND_PLACEHOLDER_CLASSES)
+    .sort((left, right) => right.length - left.length)
+    .map((placeholder) => placeholder.replace("$", "\\$"))
+    .join("|"),
+  "g",
+);
 
 /**
  * Helper to detect sensitive or credential paths for response file validation.
@@ -735,7 +747,16 @@ export class CommandBroker extends BaseCapabilityBroker {
         if (String(commandProfile) !== commandProfile || commandProfile.trim().length === 0) {
           continue;
         }
-        const profileTokens = parseCommandLine(commandProfile);
+        // Vocabulary placeholders are policy syntax, not shell expansion: mask them so
+        // the quote-aware parser accepts the profile, then restore them per token.
+        const placeholders: string[] = [];
+        const maskedProfile = commandProfile.replace(COMMAND_PLACEHOLDER_PATTERN, (placeholder) => {
+          placeholders.push(placeholder);
+          return `__RESIN_PLACEHOLDER_${placeholders.length - 1}__`;
+        });
+        const profileTokens = parseCommandLine(maskedProfile).map((token) =>
+          token.replace(/__RESIN_PLACEHOLDER_(\d+)__/g, (_, index) => placeholders[Number(index)]),
+        );
         if (profileTokens.length === 0) {
           continue;
         }
@@ -773,11 +794,7 @@ export class CommandBroker extends BaseCapabilityBroker {
           continue;
         }
 
-        if (profileArgs.length !== rawArgs.length) {
-          continue;
-        }
-
-        const argsMatch = profileArgs.every((arg, index) => arg === rawArgs[index]);
+        const argsMatch = matchCommandProfileArgs(profileArgs, rawArgs);
         if (argsMatch) {
           matched = true;
           break;
