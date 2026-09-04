@@ -561,6 +561,10 @@ export class ToolRegistry {
     return this.safetyGateEvaluator;
   }
 
+  getInvocationRecorder(): ((record: InvocationRecord) => Promise<void>) | undefined {
+    return this.onInvocationRecorded;
+  }
+
   private initSystemMetaTools(): void {
     const metaTools = createSystemMetaTools(
       this,
