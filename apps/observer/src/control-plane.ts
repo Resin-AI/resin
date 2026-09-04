@@ -24,8 +24,17 @@ import type {
 } from "./lifecycle.js";
 import type { JsonObject } from "./normalization/redaction.js";
 
-export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = 2_000;
-export const DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS = 30_000;
+/**
+ * Desired-state poll cadence. Every poll is a billed cloud request (API Gateway, Lambda and
+ * DynamoDB reads on the server), so the daemon polls at 30 s with an ETag rather than at 2 s;
+ * `reconcileNow()` still forces an immediate cycle when local state changes.
+ */
+export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = 30_000;
+/**
+ * Device-report cadence. The cloud counts a daemon as online while a report falls inside its
+ * 150 s active window, so reporting every 60 s keeps the daemon visible at half the write cost.
+ */
+export const DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS = 60_000;
 export const CONTROL_PLANE_DEVICE_STATE_FILE_NAME = "control-plane-device-state.json";
 const MAX_CONTROL_PLANE_RESPONSE_BYTES = 512 * 1024;
 
