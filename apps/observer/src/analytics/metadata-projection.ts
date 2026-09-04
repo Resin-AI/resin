@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import {
   type DiscoveredToolEntry,
   type NormalizedBranchForkEvent,
@@ -18,6 +19,13 @@ import {
   type RedactionMeta,
   nowIso,
 } from "@resin/contracts";
+import {
+  normalizeCommandProfile,
+  normalizePathPattern,
+  projectEnrichedToolParameters,
+} from "./evidence-normalization.js";
+
+const DEFAULT_HOME_DIR = homedir();
 
 export type ParameterPrimitiveKind =
   | "string"
@@ -612,25 +620,49 @@ export function projectToolParameters(
   };
 }
 
+export interface MetadataProjectionOptions {
+  validate?: boolean;
+  parameterShapeOptions?: ParameterShapeOptions;
+  /**
+   * When true (default), shell command lines and path-like parameters are
+   * projected onto a value-free vocabulary (see evidence-normalization.ts)
+   * instead of being dropped. Set false to restore the pure shape projection.
+   */
+  enrichEvidence?: boolean;
+  /** Home directory prefix to strip from path patterns (default: os.homedir()). */
+  homeDir?: string;
+}
+
 /**
  * Exhaustive metadata-only projection for normalized session events.
  *
- * Strips all prompt/response text, reasoning tokens, tool parameters/results,
- * command strings/arguments/output, diff patches, error messages/stacks/details,
- * and unknown payload contents while remaining 100% schema-valid.
+ * Strips all prompt/response text, reasoning tokens, tool results, command
+ * output, diff patches, error messages/stacks/details, and unknown payload
+ * contents while remaining 100% schema-valid.
+ *
+ * Shell command lines, path-like tool parameters, and edited file paths are
+ * not dropped but projected onto a finite, value-free vocabulary
+ * (`git commit -m $STR`, `…/src/auth.ts`) so the cloud can recognise the kind
+ * of work without receiving its content. Everything else about tool
+ * parameters is reduced to a type shape.
  *
  * Operational fields (event identity, lifecycle transitions, tool/model names,
  * token/usage metrics, exit codes, durations) are strictly preserved.
  *
- * Redaction metadata is enriched to reflect synthetic redaction across all stripped fields.
+ * Redaction metadata reflects which fields were dropped (`drop`) or
+ * normalized (`mask`).
  */
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
-  options: { validate?: boolean; parameterShapeOptions?: ParameterShapeOptions } = {},
+  options: MetadataProjectionOptions = {},
 ): NormalizedSessionEvent {
-  const { validate = false, parameterShapeOptions } = options;
+  const { validate = false, parameterShapeOptions, enrichEvidence = true } = options;
+  const homeDir = options.homeDir ?? DEFAULT_HOME_DIR;
 
-  const buildRedaction = (fieldsToRedact: readonly string[]): RedactionMeta => {
+  const buildRedaction = (
+    fieldsToRedact: readonly string[],
+    strategy: RedactionMeta["redactionStrategy"] = "drop",
+  ): RedactionMeta => {
     const existingFields = event.redaction?.redactedFields ?? [];
     const fieldsSet = new Set<string>(existingFields);
     for (const field of fieldsToRedact) {
@@ -639,7 +671,7 @@ export function projectEventToMetadataOnly(
     return {
       isRedacted: true,
       redactedFields: Array.from(fieldsSet).sort(),
-      redactionStrategy: "drop",
+      redactionStrategy: strategy,
       scrubbedPatterns: event.redaction?.scrubbedPatterns ?? [],
       redactedAt: event.redaction?.redactedAt || nowIso(),
     };
@@ -720,13 +752,18 @@ export function projectEventToMetadataOnly(
     }
 
     case "tool_call": {
+      const enriched = enrichEvidence
+        ? projectEnrichedToolParameters(event.toolName, event.parameters, { homeDir })
+        : null;
       const callEvent: NormalizedToolCallEvent = {
         ...baseHeaders,
-        redaction: buildRedaction(["parameters"]),
+        redaction: buildRedaction(["parameters"], enriched ? "mask" : "drop"),
         type: "tool_call",
         callId: event.callId,
         toolName: event.toolName,
-        parameters: projectToolParameters(event.parameters, parameterShapeOptions),
+        parameters: enriched
+          ? enriched.parameters
+          : projectToolParameters(event.parameters, parameterShapeOptions),
         isShadow: event.isShadow,
       };
       if (event.candidateRef !== undefined) callEvent.candidateRef = event.candidateRef;
@@ -752,11 +789,19 @@ export function projectEventToMetadataOnly(
     }
 
     case "command_exec": {
+      const commandLine =
+        event.args.length > 0 && !event.command.includes(" ")
+          ? `${event.command} ${event.args.join(" ")}`
+          : event.command;
+      const profile = enrichEvidence ? normalizeCommandProfile(commandLine) : "";
       const cmdEvent: NormalizedCommandExecEvent = {
         ...baseHeaders,
-        redaction: buildRedaction(["command", "args", "cwd", "stdout", "stderr"]),
+        redaction: buildRedaction(
+          ["command", "args", "cwd", "stdout", "stderr"],
+          profile ? "mask" : "drop",
+        ),
         type: "command_exec",
-        command: "",
+        command: profile,
         args: [],
         exitCode: event.exitCode,
         durationMs: event.durationMs,
@@ -768,9 +813,9 @@ export function projectEventToMetadataOnly(
     case "file_edit": {
       const editEvent: NormalizedFileEditEvent = {
         ...baseHeaders,
-        redaction: buildRedaction(["patch"]),
+        redaction: buildRedaction(["patch", "filePath"], "mask"),
         type: "file_edit",
-        filePath: event.filePath,
+        filePath: normalizePathPattern(event.filePath, homeDir),
         operation: event.operation,
       };
       if (event.beforeHash !== undefined) editEvent.beforeHash = event.beforeHash;

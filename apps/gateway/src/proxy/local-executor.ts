@@ -569,9 +569,14 @@ export class LocalArtifactExecutor {
       };
     }
 
-    // 8. Determine timeout and resource limits from manifest
+    // 8. Determine timeout and resource limits from manifest. The manifest limit
+    // is authoritative for how long the tool may run; a caller deadline can only
+    // shorten it, never silently replace it.
+    const manifestTimeoutMs = manifest.limits?.timeoutMs ?? manifest.runtime?.timeoutMs ?? 30000;
     const timeoutMs =
-      params.timeoutMs ?? manifest.limits?.timeoutMs ?? manifest.runtime?.timeoutMs ?? 30000;
+      params.timeoutMs !== undefined
+        ? Math.min(params.timeoutMs, manifestTimeoutMs)
+        : manifestTimeoutMs;
 
     const memoryLimitMb = manifest.limits?.maxMemoryBytes
       ? Math.floor(manifest.limits.maxMemoryBytes / (1024 * 1024))
@@ -628,6 +633,18 @@ export class LocalArtifactExecutor {
             {
               type: "text",
               text,
+            },
+          ],
+        };
+      }
+
+      if (params.signal?.aborted) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Tool invocation was aborted by the caller before it completed (${result.error?.message ?? result.status}); the tool's manifest allows ${manifestTimeoutMs}ms.`,
             },
           ],
         };

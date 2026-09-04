@@ -378,6 +378,94 @@ describe("LocalArtifactExecutor", () => {
     expect(result.content[0]?.text).toMatch(/timed out/i);
   });
 
+  it.skipIf(!hasDeno)(
+    "a caller deadline can shorten but never extend the manifest timeout",
+    async () => {
+      const toolId = "test-timeout-tool-005b";
+      const manifestBase: TestManifestInput = {
+        id: toolId,
+        name: "slow_tool_b",
+        version: "1.0.0",
+        description: "Slow tool",
+        parameters: { type: "object", properties: {} },
+        runtime: {
+          runtime: "deno",
+          entrypoint: "src/index.ts",
+          memoryLimitMb: 128,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 1048576,
+        },
+        limits: { timeoutMs: 150 },
+      };
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        manifestBase,
+        "export default async () => { const end = Date.now() + 5000; while (Date.now() < end) {} return { done: true }; };",
+      );
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        allowDevKeys: true,
+      });
+      const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+      const started = Date.now();
+      const result = await executor.execute({
+        entry: { toolId, name: "slow_tool_b", version: "1.0.0", artifactDigest, manifestDigest },
+        manifest,
+        parameters: {},
+        context: ws,
+        // Far larger than the manifest limit: must not extend execution.
+        timeoutMs: 600_000,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toMatch(/timed out/i);
+      expect(Date.now() - started).toBeLessThan(4000);
+    },
+  );
+
+  it.skipIf(!hasDeno)("reports caller aborts explicitly instead of a bare SIGKILL", async () => {
+    const toolId = "test-abort-tool-005c";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "slow_tool_c",
+      version: "1.0.0",
+      description: "Slow tool",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+      limits: { timeoutMs: 5000 },
+    };
+    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+      manifestBase,
+      "export default async () => { const end = Date.now() + 5000; while (Date.now() < end) {} return { done: true }; };",
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+    const controller = new AbortController();
+    // Deno runs in a real child process; the abort must race a real wall-clock execution.
+    setTimeout(() => controller.abort(), 300);
+    const result = await executor.execute({
+      entry: { toolId, name: "slow_tool_c", version: "1.0.0", artifactDigest, manifestDigest },
+      manifest,
+      parameters: {},
+      context: ws,
+      signal: controller.signal,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toMatch(/aborted by the caller/i);
+    expect(result.content[0]?.text).toMatch(/5000ms/);
+  });
+
   it.skipIf(!hasDeno)("executes bundle importing only @resin/runtime successfully", async () => {
     const toolId = "test-runtime-shim-tool-006";
     const manifestBase: TestManifestInput = {
