@@ -209,6 +209,8 @@ describe("install.ps1 static and security invariants", () => {
 });
 
 describe("install.ps1 execution and behavioral security tests", () => {
+  // The pwsh child gets 15 s; vitest's 5 s default expired first on a loaded runner.
+  const PWSH_TEST_TIMEOUT_MS = 30_000;
   const pwshAvailable = (() => {
     try {
       const res = spawnSync("pwsh", ["-NoProfile", "-Command", "Write-Output 'OK'"], {
@@ -263,51 +265,55 @@ describe("install.ps1 execution and behavioral security tests", () => {
     });
   }
 
-  it("downloads helper when -DownloadOnly is passed with matching hash", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-test-"));
-    const helperContent = fs.existsSync(HELPER_PATH)
-      ? fs.readFileSync(HELPER_PATH)
-      : Buffer.from("// mock helper\n");
+  it(
+    "downloads helper when -DownloadOnly is passed with matching hash",
+    async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-test-"));
+      const helperContent = fs.existsSync(HELPER_PATH)
+        ? fs.readFileSync(HELPER_PATH)
+        : Buffer.from("// mock helper\n");
 
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/javascript",
-        "Content-Length": helperContent.length,
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Content-Length": helperContent.length,
+        });
+        res.end(helperContent);
       });
-      res.end(helperContent);
-    });
 
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
-    const targetPath = path.join(tmpDir, "downloaded-helper.mjs");
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
+      const targetPath = path.join(tmpDir, "downloaded-helper.mjs");
 
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
             },
-          },
-        );
-        expect(res.status).toBe(0);
-        expect(fs.existsSync(targetPath)).toBe(true);
-        const downloadedBytes = fs.readFileSync(targetPath);
-        const actualSha = crypto.createHash("sha256").update(downloadedBytes).digest("hex");
-        expect(actualSha).toBe(EXPECTED_HELPER_SHA256);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("if (-not [string]::IsNullOrWhiteSpace($DownloadOnly))");
+          );
+          expect(res.status).toBe(0);
+          expect(fs.existsSync(targetPath)).toBe(true);
+          const downloadedBytes = fs.readFileSync(targetPath);
+          const actualSha = crypto.createHash("sha256").update(downloadedBytes).digest("hex");
+          expect(actualSha).toBe(EXPECTED_HELPER_SHA256);
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("if (-not [string]::IsNullOrWhiteSpace($DownloadOnly))");
+        }
+      } finally {
+        server.close();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
-    } finally {
-      server.close();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
 
   it("ignores helper URL overrides outside test mode and retains the loopback guard", () => {
     const content = fs.readFileSync(SCRIPT_PATH, "utf8");
@@ -318,207 +324,229 @@ describe("install.ps1 execution and behavioral security tests", () => {
     expect(content).toContain("Host $($helperUri.Host) resolved to forbidden IP address");
   });
 
-  it("rejects helper download and aborts execution on SHA-256 digest mismatch", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-mismatch-"));
-    const corruptedContent = Buffer.from(
-      "// Corrupted or malicious payload\nconsole.log('pwned');\n",
-    );
+  it(
+    "rejects helper download and aborts execution on SHA-256 digest mismatch",
+    async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-mismatch-"));
+      const corruptedContent = Buffer.from(
+        "// Corrupted or malicious payload\nconsole.log('pwned');\n",
+      );
 
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/javascript",
-        "Content-Length": corruptedContent.length,
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Content-Length": corruptedContent.length,
+        });
+        res.end(corruptedContent);
       });
-      res.end(corruptedContent);
-    });
 
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
-    const targetPath = path.join(tmpDir, "should-not-exist.mjs");
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
+      const targetPath = path.join(tmpDir, "should-not-exist.mjs");
 
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
             },
-          },
-        );
-        expect(res.status).not.toBe(0);
-        expect(res.stderr).toContain("Security Error: Helper SHA-256 mismatch");
-        expect(fs.existsSync(targetPath)).toBe(false);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("Security Error: Helper SHA-256 mismatch!");
+          );
+          expect(res.status).not.toBe(0);
+          expect(res.stderr).toContain("Security Error: Helper SHA-256 mismatch");
+          expect(fs.existsSync(targetPath)).toBe(false);
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("Security Error: Helper SHA-256 mismatch!");
+        }
+      } finally {
+        server.close();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
-    } finally {
-      server.close();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
 
-  it("correctly handles destination paths with spaces, '#', and '%'", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-spaces-"));
-    const specialSubdir = path.join(tmpDir, "path with spaces # and %");
-    fs.mkdirSync(specialSubdir, { recursive: true });
-    const targetPath = path.join(specialSubdir, "helper#file%1.mjs");
+  it(
+    "correctly handles destination paths with spaces, '#', and '%'",
+    async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-spaces-"));
+      const specialSubdir = path.join(tmpDir, "path with spaces # and %");
+      fs.mkdirSync(specialSubdir, { recursive: true });
+      const targetPath = path.join(specialSubdir, "helper#file%1.mjs");
 
-    const helperContent = fs.existsSync(HELPER_PATH)
-      ? fs.readFileSync(HELPER_PATH)
-      : Buffer.from("// mock helper\n");
+      const helperContent = fs.existsSync(HELPER_PATH)
+        ? fs.readFileSync(HELPER_PATH)
+        : Buffer.from("// mock helper\n");
 
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/javascript",
-        "Content-Length": helperContent.length,
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Content-Length": helperContent.length,
+        });
+        res.end(helperContent);
       });
-      res.end(helperContent);
-    });
 
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
 
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", targetPath],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
             },
-          },
-        );
-        expect(res.status).toBe(0);
-        expect(fs.existsSync(targetPath)).toBe(true);
-        const downloadedBytes = fs.readFileSync(targetPath);
-        const actualSha = crypto.createHash("sha256").update(downloadedBytes).digest("hex");
-        expect(actualSha).toBe(EXPECTED_HELPER_SHA256);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("[System.IO.Path]::GetFullPath($DownloadOnly)");
+          );
+          expect(res.status).toBe(0);
+          expect(fs.existsSync(targetPath)).toBe(true);
+          const downloadedBytes = fs.readFileSync(targetPath);
+          const actualSha = crypto.createHash("sha256").update(downloadedBytes).digest("hex");
+          expect(actualSha).toBe(EXPECTED_HELPER_SHA256);
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("[System.IO.Path]::GetFullPath($DownloadOnly)");
+        }
+      } finally {
+        server.close();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
-    } finally {
-      server.close();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
 
-  it("rejects oversized response headers (> 64 KiB)", async () => {
-    const server = http.createServer((req, res) => {
-      const hugeHeader = `X-Large-Header: ${"A".repeat(70 * 1024)}\r\n`;
-      res.socket.write(`HTTP/1.1 200 OK\r\n${hugeHeader}Content-Length: 5\r\n\r\nhello`);
-      res.socket.end();
-    });
-
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
-
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
-            },
-          },
-        );
-        expect(res.status).not.toBe(0);
-        expect(res.stderr).toMatch(/exceeded limit of 64 KiB|Failed to download/);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("$MAX_HEADER_SIZE = 64 * 1024");
-      }
-    } finally {
-      server.close();
-    }
-  });
-
-  it("rejects oversized response bodies (> 1 MiB)", async () => {
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/javascript",
-        "Content-Length": (2 * 1024 * 1024).toString(),
+  it(
+    "rejects oversized response headers (> 64 KiB)",
+    async () => {
+      const server = http.createServer((req, res) => {
+        const hugeHeader = `X-Large-Header: ${"A".repeat(70 * 1024)}\r\n`;
+        res.socket.write(`HTTP/1.1 200 OK\r\n${hugeHeader}Content-Length: 5\r\n\r\nhello`);
+        res.socket.end();
       });
-      res.write(Buffer.alloc(1024 * 1024 + 100, "A"));
-      res.end();
-    });
 
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
 
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
             },
-          },
-        );
-        expect(res.status).not.toBe(0);
-        expect(res.stderr).toMatch(/exceeds maximum limit of 1 MiB|Failed to download/);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("$MAX_BODY_SIZE = 1024 * 1024");
+          );
+          expect(res.status).not.toBe(0);
+          expect(res.stderr).toMatch(/exceeded limit of 64 KiB|Failed to download/);
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("$MAX_HEADER_SIZE = 64 * 1024");
+        }
+      } finally {
+        server.close();
       }
-    } finally {
-      server.close();
-    }
-  });
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
 
-  it("handles aborted / prematurely closed connections fail-closed", async () => {
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, {
-        "Content-Type": "application/javascript",
-        "Content-Length": "10000",
+  it(
+    "rejects oversized response bodies (> 1 MiB)",
+    async () => {
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Content-Length": (2 * 1024 * 1024).toString(),
+        });
+        res.write(Buffer.alloc(1024 * 1024 + 100, "A"));
+        res.end();
       });
-      res.write("partial content");
-      // Abruptly destroy socket
-      res.socket.destroy();
-    });
 
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const serverPort = server.address().port;
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
 
-    try {
-      if (pwshAvailable) {
-        const res = await runPwshAsync(
-          ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
-          {
-            timeout: 15000,
-            env: {
-              ...process.env,
-              RESIN_INSTALL_TEST_ONLY: "1",
-              RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
             },
-          },
-        );
-        expect(res.status).not.toBe(0);
-        expect(res.stderr).toMatch(/Content-Length mismatch|connection reset|Failed to download/i);
-      } else {
-        const content = fs.readFileSync(SCRIPT_PATH, "utf8");
-        expect(content).toContain("Content-Length mismatch");
+          );
+          expect(res.status).not.toBe(0);
+          expect(res.stderr).toMatch(/exceeds maximum limit of 1 MiB|Failed to download/);
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("$MAX_BODY_SIZE = 1024 * 1024");
+        }
+      } finally {
+        server.close();
       }
-    } finally {
-      server.close();
-    }
-  });
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "handles aborted / prematurely closed connections fail-closed",
+    async () => {
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, {
+          "Content-Type": "application/javascript",
+          "Content-Length": "10000",
+        });
+        res.write("partial content");
+        // Abruptly destroy socket
+        res.socket.destroy();
+      });
+
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = server.address().port;
+
+      try {
+        if (pwshAvailable) {
+          const res = await runPwshAsync(
+            ["-NoProfile", "-File", SCRIPT_PATH, "-DownloadOnly", "unused.mjs"],
+            {
+              timeout: 15000,
+              env: {
+                ...process.env,
+                RESIN_INSTALL_TEST_ONLY: "1",
+                RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
+              },
+            },
+          );
+          expect(res.status).not.toBe(0);
+          expect(res.stderr).toMatch(
+            /Content-Length mismatch|connection reset|Failed to download/i,
+          );
+        } else {
+          const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+          expect(content).toContain("Content-Length mismatch");
+        }
+      } finally {
+        server.close();
+      }
+    },
+    PWSH_TEST_TIMEOUT_MS,
+  );
 
   it("rejects zero-exit helper that produces empty output", () => {
     const content = fs.readFileSync(SCRIPT_PATH, "utf8");
