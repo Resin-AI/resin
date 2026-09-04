@@ -212,7 +212,12 @@ export type SendTrajectoryObservationBatchInput =
   | TrajectoryObservation[];
 
 export interface SendTelemetryBatchInput {
-  workspaceId: string;
+  /**
+   * Cloud workspace the batch is addressed to. Defaults to the paired identity's
+   * workspace, which is the only one the cloud accepts for this device; local
+   * workspace identifiers must not be passed here.
+   */
+  workspaceId?: string;
   invocations: InvocationRecord[];
   metrics?: TelemetryMetric[];
   deviceId?: string;

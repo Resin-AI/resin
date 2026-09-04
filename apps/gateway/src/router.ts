@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
+  type InvocationRecord,
   type SafetyGateRefusal,
   type ToolParameterSchema,
+  hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
@@ -197,6 +200,40 @@ export class RegistryGatewayRouter implements GatewayRouter {
       throw new McpProtocolError(MCP_ERROR_CODES.TOOL_NOT_FOUND, `Tool '${name}' not found`);
     }
 
+    // Harnesses call evolved tools by name, not through invoke_tool. Record those
+    // calls the same way, or the invocation ledger (and every saving computed
+    // from it) only ever sees the meta-tool path.
+    const recorder = tool.isSystem ? undefined : this.registry.getInvocationRecorder();
+    const startedAtMs = Date.now();
+    const executed = await this.executeTool(context, tool, name, params, options);
+    if (recorder) {
+      const record: InvocationRecord = {
+        invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
+        sessionId: context.sessionId ?? `ses_standalone_${context.workspaceId}`,
+        workspaceId: context.workspaceId,
+        toolId: tool.toolId,
+        toolVersion: /^\d+\.\d+\.\d+/.test(tool.version) ? tool.version : "1.0.0",
+        startedAt: new Date(startedAtMs).toISOString(),
+        completedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        status: executed.isError ? "error" : "success",
+        inputDigest: hashCanonicalContent(params),
+        outputDigest: hashCanonicalContent(executed),
+      };
+      void recorder(record).catch(() => {
+        // Recording never fails the call; the uploader reconciles from what was written.
+      });
+    }
+    return executed;
+  }
+
+  private async executeTool(
+    context: WorkspaceContext,
+    tool: NonNullable<Awaited<ReturnType<ToolRegistry["getTool"]>>>,
+    name: string,
+    params: JsonRpcParams,
+    options?: ToolCallOptions,
+  ): Promise<CallToolResult> {
     const isToolDisabled = await this.registry.controls.isToolDisabled(
       context.workspaceId,
       tool.toolId,

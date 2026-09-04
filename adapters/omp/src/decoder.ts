@@ -325,10 +325,13 @@ function extractCostAndDuration(
   if (directMicro !== undefined) {
     costMicroUsd = directMicro;
   } else {
+    // OMP's own session usage prices each turn as `cost: { input, output, cacheRead,
+    // cacheWrite, total }`; the total is the provider-reported spend for the turn.
     const rawCostUsd =
       asNumber(rawUsage.cost_usd) ??
       asNumber(rawUsage.costUsd) ??
       asNumber(rawUsage.cost) ??
+      asNumber(asObject(rawUsage.cost)?.total) ??
       asNumber(rawPayload.cost_usd) ??
       asNumber(rawPayload.costUsd) ??
       asNumber(rawPayload.cost);
