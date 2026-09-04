@@ -390,6 +390,37 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
     });
 
+    it("reads OMP's native usage shape including cacheRead", () => {
+      // OMP session lines carry `usage: { input, output, cacheRead, cacheWrite, totalTokens }`;
+      // cacheRead was silently dropped, so per-turn context re-send never reached the cloud.
+      const record: RawHarnessRecord = {
+        recordId: "rec-usage-omp-native-1",
+        sessionId: "sess-usage-1",
+        harnessId: "omp",
+        sequenceNumber: 9,
+        recordType: "transcript_line",
+        timestamp: "2026-08-17T12:00:09.000Z",
+        cursor: { offset: 0, line: 9, sequence: 9, timestamp: "2026-08-17T12:00:09.000Z" },
+        rawPayload: JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "ok",
+          provider: "google-antigravity",
+          model: "gemini-3.8-flash",
+          usage: { input: 5978, output: 33, cacheRead: 41020, cacheWrite: 0, totalTokens: 47031 },
+        }),
+        metadata: {},
+      };
+      // SAFETY: Decoded event is an IntermediateMessageEvent.
+      const decoded = decoder.decode(record) as IntermediateMessageEvent;
+      const usage = decoded.providerUsage!;
+      expect(usage.inputTokens).toBe(5978);
+      expect(usage.outputTokens).toBe(33);
+      expect(usage.cachedInputTokens).toBe(41020);
+      expect(usage.totalTokens).toBe(47031);
+      expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
+    });
+
     it("defaults provider to 'omp' and leaves model undefined when omitted in raw record", () => {
       const record: RawHarnessRecord = {
         recordId: "rec-usage-defaults-1",
