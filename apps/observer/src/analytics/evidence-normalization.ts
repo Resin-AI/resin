@@ -265,8 +265,22 @@ export function tokenizeShellLine(line: string): Array<{ text: string; quoted: b
       current += c;
       continue;
     }
+    if (c === "\n") {
+      // A newline outside quotes ends the simple command, like ';'.
+      flush();
+      if (tokens.length > 0 && SHELL_OPERATORS[tokens[tokens.length - 1]?.text ?? ""] !== true) {
+        tokens.push({ text: ";", quoted: false });
+      }
+      continue;
+    }
     if (/\s/.test(c)) {
       flush();
+      continue;
+    }
+    if (c === "#" && current.length === 0) {
+      // Comment: skip to end of line.
+      const nl = line.indexOf("\n", i);
+      i = nl === -1 ? line.length : nl - 1;
       continue;
     }
     // Control operators.
@@ -329,16 +343,11 @@ function normalizeExecutable(token: string): string {
  */
 export function normalizeCommandProfile(rawCommand: unknown): string {
   if (typeof rawCommand !== "string") return "";
-  // Multi-line scripts: each line is its own simple command sequence.
   const cleaned = rawCommand.replace(/\0/g, " ").replace(/\r/g, "").trim();
   if (!cleaned) return "";
   // Heredoc bodies and anything after a heredoc marker are dropped entirely.
   const heredocIndex = cleaned.search(/<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/);
   const script = heredocIndex >= 0 ? cleaned.slice(0, heredocIndex) : cleaned;
-  const lines = script
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith("#"));
 
   const out: string[] = [];
   let atCommandStart = true;
@@ -352,73 +361,67 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
     return true;
   };
 
-  outer: for (let li = 0; li < lines.length; li++) {
-    if (li > 0 && out.length > 0 && SHELL_OPERATORS[out[out.length - 1] as string] !== true) {
-      if (!pushToken(";")) break;
+  const tokens = tokenizeShellLine(script);
+  for (const tok of tokens) {
+    const { text, quoted } = tok;
+    if (!quoted && SHELL_OPERATORS[text] === true) {
+      if (!pushToken(text)) break;
       atCommandStart = true;
+      subcommandSlots = 0;
+      seenFlag = false;
+      continue;
     }
-    const tokens = tokenizeShellLine(lines[li] as string);
-    for (const tok of tokens) {
-      const { text, quoted } = tok;
-      if (!quoted && SHELL_OPERATORS[text] === true) {
-        if (!pushToken(text)) break outer;
-        atCommandStart = true;
-        subcommandSlots = 0;
-        seenFlag = false;
-        continue;
-      }
-      if (!quoted && REDIRECTIONS[text] === true) {
-        if (!pushToken(text)) break outer;
-        // The redirection target is a positional value; keep flag state.
-        continue;
-      }
-      if (atCommandStart) {
-        if (!quoted && ENV_ASSIGNMENT.test(text)) {
-          // FOO=bar prefix assignments: keep the variable name only.
-          const name = text.slice(0, text.indexOf("="));
-          if (!pushToken(`${name}=$STR`)) break outer;
-          continue;
-        }
-        const exe = quoted ? "$STR" : normalizeExecutable(text);
-        if (!pushToken(exe)) break outer;
-        atCommandStart = SHELL_WRAPPERS[exe] === true;
-        subcommandSlots = 0;
-        subcommandBudget = SUBCOMMAND_SLOTS_BY_EXECUTABLE[exe] ?? 0;
-        seenFlag = false;
-        continue;
-      }
-      if (quoted) {
-        if (!pushToken("$STR")) break outer;
-        continue;
-      }
-      const flagValue = text.match(FLAG_WITH_VALUE);
-      if (flagValue) {
-        seenFlag = true;
-        const value = flagValue[2] ?? "";
-        if (!pushToken(`${flagValue[1]}=${value.length > 0 ? placeholderFor(value) : "$STR"}`)) {
-          break outer;
-        }
-        continue;
-      }
-      if (FLAG_TOKEN.test(text)) {
-        seenFlag = true;
-        if (!pushToken(text.slice(0, 48))) break outer;
-        continue;
-      }
-      if (
-        !seenFlag &&
-        subcommandSlots < subcommandBudget &&
-        SUBCOMMAND_WORD.test(text) &&
-        !looksLikePath(text)
-      ) {
-        subcommandSlots++;
-        if (!pushToken(text)) break outer;
-        continue;
-      }
-      // Subcommands are contiguous leading words; the first value ends them.
-      subcommandBudget = 0;
-      if (!pushToken(placeholderFor(text))) break outer;
+    if (!quoted && REDIRECTIONS[text] === true) {
+      if (!pushToken(text)) break;
+      // The redirection target is a positional value; keep flag state.
+      continue;
     }
+    if (atCommandStart) {
+      if (!quoted && ENV_ASSIGNMENT.test(text)) {
+        // FOO=bar prefix assignments: keep the variable name only.
+        const name = text.slice(0, text.indexOf("="));
+        if (!pushToken(`${name}=$STR`)) break;
+        continue;
+      }
+      const exe = quoted ? "$STR" : normalizeExecutable(text);
+      if (!pushToken(exe)) break;
+      atCommandStart = SHELL_WRAPPERS[exe] === true;
+      subcommandSlots = 0;
+      subcommandBudget = SUBCOMMAND_SLOTS_BY_EXECUTABLE[exe] ?? 0;
+      seenFlag = false;
+      continue;
+    }
+    if (quoted) {
+      if (!pushToken("$STR")) break;
+      continue;
+    }
+    const flagValue = text.match(FLAG_WITH_VALUE);
+    if (flagValue) {
+      seenFlag = true;
+      const value = flagValue[2] ?? "";
+      if (!pushToken(`${flagValue[1]}=${value.length > 0 ? placeholderFor(value) : "$STR"}`)) {
+        break;
+      }
+      continue;
+    }
+    if (FLAG_TOKEN.test(text)) {
+      seenFlag = true;
+      if (!pushToken(text.slice(0, 48))) break;
+      continue;
+    }
+    if (
+      !seenFlag &&
+      subcommandSlots < subcommandBudget &&
+      SUBCOMMAND_WORD.test(text) &&
+      !looksLikePath(text)
+    ) {
+      subcommandSlots++;
+      if (!pushToken(text)) break;
+      continue;
+    }
+    // Subcommands are contiguous leading words; the first value ends them.
+    subcommandBudget = 0;
+    if (!pushToken(placeholderFor(text))) break;
   }
 
   const profile = out.join(" ");

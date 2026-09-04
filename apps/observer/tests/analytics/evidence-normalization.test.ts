@@ -98,6 +98,13 @@ describe("normalizeCommandProfile", () => {
     expect(normalizeCommandProfile(script)).toBe("cat > $DOC_FILE");
   });
 
+  it("keeps multi-line quoted scripts as a single value", () => {
+    const script =
+      'node -e \'\nconst fs = require("fs");\nconst secret = "hunter2secret";\nfs.writeFileSync("out.json", secret);\n\'';
+    expect(normalizeCommandProfile(script)).toBe("node -e $STR");
+    expect(normalizeCommandProfile("cat <<'EOF' > x.txt\nprivate\nEOF\nls -la")).toBe("cat");
+  });
+
   it("treats multi-line scripts as sequenced commands", () => {
     expect(normalizeCommandProfile("git fetch\ngit rebase origin/main")).toBe(
       "git fetch ; git rebase $PATH",
