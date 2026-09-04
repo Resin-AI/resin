@@ -83,6 +83,23 @@ describe("normalizeCommandProfile", () => {
     expect(normalizeCommandProfile("echo -n secretword")).toBe("echo -n $STR");
   });
 
+  it("keeps well-known python -m modules and collapses project modules", () => {
+    expect(normalizeCommandProfile("python3 -m unittest tests.test_stage_load -v")).toBe(
+      "python3 -m unittest $STR -v",
+    );
+    expect(normalizeCommandProfile("python -m pytest tests/ -q")).toBe(
+      "python -m pytest $TEST_FILE -q",
+    );
+    expect(normalizeCommandProfile("python3 -m acme.internal_tool --run")).toBe(
+      "python3 -m $STR --run",
+    );
+    // Only the interpreter's -m names a module; git's -m is a message.
+    expect(normalizeCommandProfile("git commit -m unittest")).toBe("git commit -m $STR");
+    expect(normalizeCommandProfile("python3 -m unittest && python3 -m pytest")).toBe(
+      "python3 -m unittest && python3 -m pytest",
+    );
+  });
+
   it("caps subcommand slots at two", () => {
     expect(normalizeCommandProfile("aws s3 cp bucket target")).toBe("aws s3 cp $STR $STR");
   });

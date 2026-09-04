@@ -341,6 +341,36 @@ function normalizeExecutable(token: string): string {
  * Example: `git commit -m "fix auth" && pnpm test src/a.test.ts | tee out.log`
  *       -> `git commit -m $STR && pnpm test $TEST_FILE | tee $PATH`
  */
+/**
+ * Interpreters whose `-m <module>` argument names a tool, and the widely used
+ * modules that are safe to keep literally. Any other module name is a project
+ * identifier and stays `$STR`.
+ */
+const MODULE_FLAG_INTERPRETERS: Record<string, true> = {
+  python: true,
+  python3: true,
+  py: true,
+};
+
+const WELL_KNOWN_PYTHON_MODULES: Record<string, true> = {
+  unittest: true,
+  pytest: true,
+  pip: true,
+  venv: true,
+  "http.server": true,
+  "json.tool": true,
+  black: true,
+  ruff: true,
+  mypy: true,
+  flake8: true,
+  coverage: true,
+  build: true,
+  twine: true,
+  pdb: true,
+  timeit: true,
+  doctest: true,
+};
+
 export function normalizeCommandProfile(rawCommand: unknown): string {
   if (typeof rawCommand !== "string") return "";
   const cleaned = rawCommand.replace(/\0/g, " ").replace(/\r/g, "").trim();
@@ -354,6 +384,8 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
   let subcommandSlots = 0;
   let subcommandBudget = 0;
   let seenFlag = false;
+  let moduleFlagPending = false;
+  let currentExecutable = "";
 
   const pushToken = (t: string): boolean => {
     if (out.length >= MAX_PROFILE_TOKENS) return false;
@@ -369,6 +401,7 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
       atCommandStart = true;
       subcommandSlots = 0;
       seenFlag = false;
+      moduleFlagPending = false;
       continue;
     }
     if (!quoted && REDIRECTIONS[text] === true) {
@@ -389,11 +422,25 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
       subcommandSlots = 0;
       subcommandBudget = SUBCOMMAND_SLOTS_BY_EXECUTABLE[exe] ?? 0;
       seenFlag = false;
+      moduleFlagPending = false;
+      currentExecutable = exe;
       continue;
     }
     if (quoted) {
+      moduleFlagPending = false;
       if (!pushToken("$STR")) break;
       continue;
+    }
+    if (moduleFlagPending) {
+      // `python3 -m unittest …`: a well-known module names the tool being run.
+      moduleFlagPending = false;
+      if (WELL_KNOWN_PYTHON_MODULES[text] === true) {
+        if (!pushToken(text)) break;
+        continue;
+      }
+    }
+    if (text === "-m" && MODULE_FLAG_INTERPRETERS[currentExecutable] === true) {
+      moduleFlagPending = true;
     }
     const flagValue = text.match(FLAG_WITH_VALUE);
     if (flagValue) {
