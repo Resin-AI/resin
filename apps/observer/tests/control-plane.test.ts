@@ -8,11 +8,22 @@ import {
   type ControlPlaneApplyAdapter,
   ControlPlaneClient,
   ControlPlaneRuntimeModule,
+  DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS,
+  DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS,
   FileControlPlaneApplyAdapter,
 } from "../src/control-plane.js";
 import type { ModuleContext } from "../src/lifecycle.js";
 
 const temporaryDirectories: string[] = [];
+
+describe("control-plane cadence defaults", () => {
+  it("polls every 30 seconds and reports every 60 seconds to bound per-daemon cloud cost", () => {
+    expect(DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS).toBe(30_000);
+    expect(DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS).toBe(60_000);
+    // The cloud's active-daemon window is 150 s; two report intervals must fit inside it.
+    expect(DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS * 2).toBeLessThan(150_000);
+  });
+});
 
 async function testContext(): Promise<ModuleContext> {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-control-plane-"));
