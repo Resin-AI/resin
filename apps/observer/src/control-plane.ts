@@ -383,6 +383,16 @@ function safeRuntimeError<E>(error: E): string {
     .slice(0, 256);
 }
 
+function isCurrentRevision(
+  candidate: ControlPlaneRevisionVector,
+  current: ControlPlaneRevisionVector | null,
+): boolean {
+  return (
+    current === null ||
+    (candidate.workspace >= current.workspace && candidate.device >= current.device)
+  );
+}
+
 export class ControlPlaneRuntimeModule implements DaemonModule {
   readonly id = "control-plane";
   readonly name = "Cloud Desired-State Reconciliation";
@@ -399,6 +409,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private context: ModuleContext | null = null;
   private etag: string | undefined;
+  private lastRevisions: ControlPlaneRevisionVector | null = null;
   private lastRevisionToken: string | null = null;
   private lastReport: ControlPlaneDeviceReport | null = null;
   private lastReportAt = 0;
@@ -459,7 +470,9 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
     try {
       const fetched = await this.client.getEffectiveState(this.deviceId, this.etag, context.signal);
       const now = this.now();
-      if (fetched.state && fetched.state.revisionToken !== this.lastRevisionToken) {
+      const staleReply =
+        fetched.state !== null && !isCurrentRevision(fetched.state.revisions, this.lastRevisions);
+      if (fetched.state && !staleReply && fetched.state.revisionToken !== this.lastRevisionToken) {
         const applied = await this.applyAdapter.apply(
           fetched.state.desiredState,
           fetched.state.revisions,
@@ -475,6 +488,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
           observedAt: now.toISOString(),
           appliedAt: applied.appliedAt,
         };
+        if (applied.status !== "error") this.lastRevisions = fetched.state.revisions;
         await this.client.report(report, context.signal);
         this.lastReport = report;
         this.lastReportAt = now.getTime();
@@ -488,7 +502,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
         this.lastReport = report;
         this.lastReportAt = now.getTime();
       }
-      if (fetched.etag) this.etag = fetched.etag;
+      if (!staleReply && fetched.etag) this.etag = fetched.etag;
       this.lastSuccessAt = now.toISOString();
       this.lastError = null;
       this.state = "ready";
