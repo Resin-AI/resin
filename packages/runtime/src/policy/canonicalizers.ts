@@ -8,6 +8,7 @@ import type {
   NetCapability,
   SecretCapability,
 } from "@resin/contracts";
+import { COMMAND_PLACEHOLDER_CLASSES } from "./command-template.js";
 
 /**
  * Standard Error code types for canonicalization rejections.
@@ -1492,8 +1493,22 @@ export function canonicalizeCommand(cmd: string): string {
     );
   }
 
-  // Metacharacters check
-  if (containsShellMetacharacters(clean)) {
+  // Metacharacters check. Known profile placeholders are value-free policy syntax,
+  // so remove them before checking each command token.
+  const placeholderPattern = new RegExp(
+    Object.keys(COMMAND_PLACEHOLDER_CLASSES)
+      .sort((left, right) => right.length - left.length)
+      .map((placeholder) => placeholder.replace("$", "\\$"))
+      .join("|"),
+    "g",
+  );
+  const hasControlCharacters = /[\x00-\x1f\x7f]/.test(clean);
+  const hasShellMetacharacters =
+    hasControlCharacters ||
+    clean
+      .split(/\s+/)
+      .some((token) => containsShellMetacharacters(token.replace(placeholderPattern, "")));
+  if (hasShellMetacharacters) {
     throw new PolicyCanonicalizationError(
       "SHELL_METACHARACTERS_DETECTED",
       `Command contains forbidden shell metacharacters: ${clean}`,

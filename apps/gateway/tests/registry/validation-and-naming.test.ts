@@ -239,6 +239,96 @@ describe("ToolRegistry - Pre-Staging Validation & Capability Envelope Enforcemen
     ).toBe(true);
   });
 
+  it("allows templated command profiles authorized by an executable envelope entry", () => {
+    const envelope = makeEnvelope();
+    const manifest = makeManifest({
+      capabilities: {
+        ...makeManifest().capabilities,
+        command: {
+          allowShellExecution: false,
+          allowedCommands: ["node --test $TEST_FILE"],
+          allowedBinaries: ["node"],
+          forbiddenPatterns: [],
+          allowEnvPassthrough: [],
+        },
+      },
+    });
+
+    const result = validateToolStaging(manifest, undefined, envelope);
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("rejects templated command profiles with an unauthorized executable", () => {
+    const envelope = makeEnvelope();
+    const manifest = makeManifest({
+      capabilities: {
+        ...makeManifest().capabilities,
+        command: {
+          allowShellExecution: false,
+          allowedCommands: ["python3 -m unittest $STR -v"],
+          allowedBinaries: ["python3"],
+          forbiddenPatterns: [],
+          allowEnvPassthrough: [],
+        },
+      },
+    });
+
+    const result = validateToolStaging(manifest, undefined, envelope);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      "Command 'python3 -m unittest $STR -v' is not in capability envelope allowedCommands",
+    );
+  });
+
+  it("requires templated envelope command arguments to match", () => {
+    const envelope = makeEnvelope({
+      command: {
+        allowShellExecution: false,
+        allowedCommands: ["node --test $TEST_FILE"],
+        allowedBinaries: ["node"],
+        forbiddenPatterns: [],
+        allowEnvPassthrough: [],
+      },
+    });
+    const matchingManifest = makeManifest({
+      capabilities: {
+        ...makeManifest().capabilities,
+        command: {
+          allowShellExecution: false,
+          allowedCommands: ["node --test $TEST_FILE"],
+          allowedBinaries: ["node"],
+          forbiddenPatterns: [],
+          allowEnvPassthrough: [],
+        },
+      },
+    });
+    const mismatchedManifest = makeManifest({
+      capabilities: {
+        ...makeManifest().capabilities,
+        command: {
+          allowShellExecution: false,
+          allowedCommands: ["node --check $TEST_FILE"],
+          allowedBinaries: ["node"],
+          forbiddenPatterns: [],
+          allowEnvPassthrough: [],
+        },
+      },
+    });
+
+    const matchingResult = validateToolStaging(matchingManifest, undefined, envelope);
+    const mismatchedResult = validateToolStaging(mismatchedManifest, undefined, envelope);
+
+    expect(matchingResult.valid).toBe(true);
+    expect(matchingResult.errors).toHaveLength(0);
+    expect(mismatchedResult.valid).toBe(false);
+    expect(mismatchedResult.errors).toContain(
+      "Command 'node --check $TEST_FILE' is not in capability envelope allowedCommands",
+    );
+  });
+
   it("rejects new capability requests when envelope is frozen", () => {
     const frozenEnvelope = makeEnvelope({ isFrozen: true });
     const manifest = makeManifest({

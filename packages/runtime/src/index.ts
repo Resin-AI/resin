@@ -46,7 +46,7 @@ export * from "./loader/loader.js";
 // Worker Protocol, SDK, Process & Runner
 export * from "./worker/index.js";
 
-// Capability Policy Engine, Grants, Canonicalizers & Inspection
+// Capability Policy Engine, Grants, Command Templates, Canonicalizers & Inspection
 export * from "./policy/index.js";
 
 // Capability Brokers (FS, Net, Command, Audit & SDK Clients)

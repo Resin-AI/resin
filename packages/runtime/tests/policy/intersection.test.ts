@@ -49,6 +49,48 @@ const baseEnvelope: CapabilityEnvelope = {
   createdAt: new Date().toISOString(),
 };
 
+function createCommandRequest(allowedCommands: string[]): CapabilityManifest {
+  return {
+    fs: {
+      readPaths: [],
+      writePaths: [],
+      allowWorkspaceRoot: false,
+      allowTemp: false,
+      denyPaths: [],
+      maxFileSizeBytes: 10485760,
+    },
+    net: {
+      allowOutbound: false,
+      allowedDomains: [],
+      allowedHosts: [],
+      allowedPorts: [],
+      allowedProtocols: [],
+      allowLocalhost: false,
+      denyPrivateRanges: true,
+    },
+    command: {
+      allowShellExecution: false,
+      allowedCommands,
+      allowedBinaries: [],
+      forbiddenPatterns: [],
+      allowEnvPassthrough: [],
+    },
+    secrets: {
+      allowedSecretNames: [],
+      allowedPrefixes: [],
+      denyDirectRead: true,
+      injectAsEnv: true,
+    },
+    limits: {
+      maxConcurrentExecutions: 1,
+      maxCpuUsagePercent: 100,
+      maxMemoryMb: 128,
+      maxExecutionTimeMs: 30000,
+      maxOutputSizeBytes: 1048576,
+    },
+  };
+}
+
 describe("Capability Intersection", () => {
   it("computes exact least-privilege intersection when request is a valid subset", () => {
     const requested: CapabilityManifest = {
@@ -515,6 +557,49 @@ describe("Capability Intersection", () => {
 
       expect(result.violations.some((v) => v.code === "CMD_COMMAND_EXPANSION")).toBe(true);
       expect(result.grantCapabilities.command.allowedCommands).toHaveLength(0);
+    });
+
+    it("authorizes requested command profiles through envelope profiles", () => {
+      const requestedTemplate = createCommandRequest(["node --test $TEST_FILE"]);
+      const bareExecutableEnvelope: CapabilityEnvelope = {
+        ...baseEnvelope,
+        command: {
+          ...baseEnvelope.command,
+          allowedCommands: ["node"],
+        },
+      };
+
+      const bareResult = intersectCapabilities(requestedTemplate, bareExecutableEnvelope, {
+        workspaceRoot: testWorkspace,
+      });
+      expect(bareResult.grantCapabilities.command.allowedCommands).toEqual([
+        "node --test $TEST_FILE",
+      ]);
+      expect(bareResult.violations.some((v) => v.code === "CMD_COMMAND_EXPANSION")).toBe(false);
+
+      const templatedEnvelope: CapabilityEnvelope = {
+        ...baseEnvelope,
+        command: {
+          ...baseEnvelope.command,
+          allowedCommands: ["node --test $TEST_FILE"],
+        },
+      };
+      const templatedResult = intersectCapabilities(requestedTemplate, templatedEnvelope, {
+        workspaceRoot: testWorkspace,
+      });
+      expect(templatedResult.grantCapabilities.command.allowedCommands).toEqual([
+        "node --test $TEST_FILE",
+      ]);
+
+      const mismatchedResult = intersectCapabilities(
+        createCommandRequest(["node --check $TEST_FILE"]),
+        templatedEnvelope,
+        { workspaceRoot: testWorkspace },
+      );
+      expect(mismatchedResult.grantCapabilities.command.allowedCommands).toEqual([]);
+      expect(mismatchedResult.violations.some((v) => v.code === "CMD_COMMAND_EXPANSION")).toBe(
+        true,
+      );
     });
   });
 

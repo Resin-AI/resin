@@ -24,6 +24,7 @@ import {
   matchesHostPattern,
   matchesPathPattern,
 } from "./canonicalizers.js";
+import { commandProfileAuthorizes } from "./command-template.js";
 
 /**
  * Standard policy violation reason codes.
@@ -468,10 +469,9 @@ export function intersectCapabilities(
         continue;
       }
 
-      const permitted =
-        envCommands.length === 0
-          ? false // Subprocess execution requires explicit command authorization
-          : envCommands.some((c) => canonicalizeCommand(c) === canonCmd);
+      const permitted = envCommands.some((c) =>
+        commandProfileAuthorizes(canonicalizeCommand(c), canonCmd),
+      );
 
       if (permitted) {
         grantCommands.push(canonCmd);

@@ -190,6 +190,45 @@ describe("Command Broker Security & Isolation", () => {
     }
   });
 
+  it("enforces templated allowedCommands argument shapes", async () => {
+    const testDirectory = path.join(tempWorkspace, "packages", "a");
+    const testFile = path.join(testDirectory, "test.js");
+    fs.mkdirSync(testDirectory, { recursive: true });
+    fs.writeFileSync(
+      testFile,
+      'const test = require("node:test"); test("template target", () => {});',
+    );
+
+    const grant = createGrant({
+      allowedCommands: ["node --test $TEST_FILE"],
+      allowedBinaries: ["node"],
+    });
+    const ctx = {
+      invocationId: "inv_cmd_001",
+      grant,
+      workspaceRoot: tempWorkspace,
+    };
+
+    const result = await broker.execute(
+      {
+        executable: "node",
+        args: ["--test", "packages/a/test.js"],
+      },
+      ctx,
+    );
+    expect(result.exitCode).toBe(0);
+
+    await expect(
+      broker.execute({ executable: "node", args: ["--test", "-x"] }, ctx),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED_BINARY" });
+    await expect(
+      broker.execute({ executable: "node", args: ["--test"] }, ctx),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED_BINARY" });
+    await expect(
+      broker.execute({ executable: "node", args: ["--test", "$TEST_FILE"] }, ctx),
+    ).rejects.toMatchObject({ code: "FORBIDDEN_ARGUMENT_PATTERN" });
+  });
+
   it("blocks relative PATH injection executable attempts", async () => {
     const grant = createGrant({ allowedBinaries: ["node"] });
     const ctx = {

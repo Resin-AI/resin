@@ -1,6 +1,9 @@
 // Canonicalizers & Normalization
 export * from "./canonicalizers.js";
 
+// Templated Command Profile Matching
+export * from "./command-template.js";
+
 // Invocation Grants & Cryptographic Binding
 export * from "./grant.js";
 
