@@ -122,6 +122,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
   private readonly listeners = new Set<() => void>();
   private readonly unsubscribeEvents?: () => void;
   private safetyGateEvaluator?: SafetyGateEvaluator;
+  private readonly invocationRouter?: ToolInvocationRouter;
 
   constructor(
     registry: ToolRegistry,
@@ -130,6 +131,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     canaryRouter?: CanaryRouter,
   ) {
     this.registry = registry;
+    this.invocationRouter = invocationRouter;
     this.canaryRouter =
       canaryRouter ??
       new CanaryRouter({
@@ -307,6 +309,23 @@ export class RegistryGatewayRouter implements GatewayRouter {
           };
         },
       );
+    }
+
+    // Published tools must use the verified local artifact executor, which
+    // supplies capability grants and brokers. The raw-source compatibility
+    // handler has no authority to perform filesystem/command/network effects.
+    if (!tool.isSystem && this.invocationRouter) {
+      return this.invocationRouter.invoke({
+        toolId: tool.toolId,
+        name: tool.name,
+        version: tool.version,
+        manifest: tool.manifest,
+        parameters: params,
+        context,
+        signal: options?.signal,
+        onProgress: options?.onProgress,
+        timeoutMs: options?.timeoutMs,
+      });
     }
 
     if (tool.handler) {

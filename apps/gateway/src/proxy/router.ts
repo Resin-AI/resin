@@ -192,7 +192,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
    */
   async invoke(request: ToolInvocationRequest): Promise<CallToolResult> {
     return await this.forwardInvocation(
-      request.name || request.toolId,
+      request.toolId || request.name,
       request.parameters,
       request.context,
       {

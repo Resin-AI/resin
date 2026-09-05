@@ -54,6 +54,11 @@ export function matchCommandProfileArgs(profileArgs: string[], args: string[]): 
   }
 
   return profileArgs.every((profileArg, index) => {
+    // This is already one argv element, not a shell command string. Text inputs
+    // such as commit messages may contain spaces without adding arguments.
+    if (profileArg === "$STR") {
+      return args[index].length > 0 && !/[\0\r\n]/.test(args[index]);
+    }
     if (!isCommandPlaceholderToken(profileArg)) {
       return profileArg === args[index];
     }
