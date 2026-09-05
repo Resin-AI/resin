@@ -2,6 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import {
+  CONTROL_PLANE_ADAPTIVE_CADENCE,
+  CONTROL_PLANE_CADENCE_HEADER,
+  CONTROL_PLANE_CADENCE_JITTER_RATIO,
+  CONTROL_PLANE_FAST_POLL_INTERVAL_MS,
+  CONTROL_PLANE_HEARTBEAT_INTERVAL_MS,
+  CONTROL_PLANE_QUIET_POLL_INTERVAL_MS,
+  CONTROL_PLANE_QUIET_POLL_THRESHOLD,
   type ControlPlaneAppliedField,
   type ControlPlaneDesiredState,
   type ControlPlaneDeviceReport,
@@ -24,16 +31,8 @@ import type {
 } from "./lifecycle.js";
 import type { JsonObject } from "./normalization/redaction.js";
 
-/**
- * Desired-state poll cadence. Every poll is a billed cloud request (API Gateway, Lambda and
- * DynamoDB reads on the server), so the daemon polls at 30 s with an ETag rather than at 2 s;
- * `reconcileNow()` still forces an immediate cycle when local state changes.
- */
-export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = 30_000;
-/**
- * Device-report cadence. The cloud counts a daemon as online while a report falls inside its
- * 150 s active window, so reporting every 60 s keeps the daemon visible at half the write cost.
- */
+/** Legacy cadence until the effective-state server advertises adaptive support. */
+export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = CONTROL_PLANE_FAST_POLL_INTERVAL_MS;
 export const DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS = 60_000;
 export const CONTROL_PLANE_DEVICE_STATE_FILE_NAME = "control-plane-device-state.json";
 const MAX_CONTROL_PLANE_RESPONSE_BYTES = 512 * 1024;
@@ -57,6 +56,7 @@ interface EffectiveFetchResult {
   state: ControlPlaneEffectiveStateResponse | null;
   etag: string | null;
   notModified: boolean;
+  adaptiveCadence: boolean;
 }
 
 async function readBoundedJson(response: Response): Promise<JsonObject | null> {
@@ -119,9 +119,11 @@ export class ControlPlaneClient {
         headers: etag ? { "If-None-Match": etag } : undefined,
       },
     );
+    const adaptiveCadence =
+      response.headers.get(CONTROL_PLANE_CADENCE_HEADER) === CONTROL_PLANE_ADAPTIVE_CADENCE;
     if (response.status === 304) {
       await response.body?.cancel().catch(() => undefined);
-      return { state: null, etag: etag ?? null, notModified: true };
+      return { state: null, etag: etag ?? null, notModified: true, adaptiveCadence };
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
@@ -143,6 +145,7 @@ export class ControlPlaneClient {
       state: state.data,
       etag: response.headers.get("etag"),
       notModified: false,
+      adaptiveCadence,
     };
   }
 
@@ -371,9 +374,11 @@ export interface ControlPlaneRuntimeModuleOptions {
   client: ControlPlaneClient;
   deviceId: string;
   applyAdapter: ControlPlaneApplyAdapter;
+  /** Explicit intervals stay fixed (without jitter), including on adaptive servers. */
   pollIntervalMs?: number;
   reportIntervalMs?: number;
   now?: () => Date;
+  random?: () => number;
 }
 function safeRuntimeError<E>(error: E): string {
   const message = error instanceof Error ? error.message : "Unknown control-plane failure";
@@ -402,12 +407,20 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   private readonly client: ControlPlaneClient;
   private readonly deviceId: string;
   private readonly applyAdapter: ControlPlaneApplyAdapter;
-  private readonly pollIntervalMs: number;
-  private readonly reportIntervalMs: number;
+  private readonly pollIntervalMs: number | undefined;
+  private readonly reportIntervalMs: number | undefined;
   private readonly now: () => Date;
+  private readonly random: () => number;
   private state: ModuleLifecycleState = "uninitialized";
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: NodeJS.Timeout | undefined;
   private context: ModuleContext | null = null;
+  private controller: AbortController | null = null;
+  private active = false;
+  private adaptiveCadence = false;
+  private unchangedPolls = 0;
+  private nextPollAt = 0;
+  private nextReportAt = Number.POSITIVE_INFINITY;
+  private manualRequested = false;
   private etag: string | undefined;
   private lastRevisions: ControlPlaneRevisionVector | null = null;
   private lastRevisionToken: string | null = null;
@@ -415,15 +428,20 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   private lastReportAt = 0;
   private lastSuccessAt: string | null = null;
   private lastError: string | null = null;
-  private cycle: Promise<void> = Promise.resolve();
+  private pollError: string | null = null;
+  private reportError: string | null = null;
+  private cycle: Promise<void> | null = null;
+  private pollCount = 0;
+  private reportCount = 0;
 
   constructor(options: ControlPlaneRuntimeModuleOptions) {
     this.client = options.client;
     this.deviceId = options.deviceId;
     this.applyAdapter = options.applyAdapter;
-    this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS;
-    this.reportIntervalMs = options.reportIntervalMs ?? DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS;
+    this.pollIntervalMs = options.pollIntervalMs;
+    this.reportIntervalMs = options.reportIntervalMs;
     this.now = options.now ?? (() => new Date());
+    this.random = options.random ?? Math.random;
   }
 
   getState(): ModuleLifecycleState {
@@ -431,87 +449,296 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   }
 
   async start(context: ModuleContext): Promise<void> {
+    if (this.active) return this.cycle ?? undefined;
+    // Restart cannot overlap work still settling after an external abort.
+    if (this.cycle) {
+      this.state = "starting";
+      await this.cycle;
+      if (this.state !== "starting") return;
+    }
     this.state = "starting";
-    this.context = context;
-    await this.enqueueCycle();
-    this.timer = setInterval(() => {
-      void this.enqueueCycle();
-    }, this.pollIntervalMs);
-    this.timer.unref();
-    if (this.state === "starting") this.state = "ready";
+    this.controller = new AbortController();
+    const signal = context.signal
+      ? AbortSignal.any([context.signal, this.controller.signal])
+      : this.controller.signal;
+    this.context = { ...context, signal };
+    this.active = !signal.aborted;
+    if (!this.active) {
+      this.state = "stopped";
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => {
+        this.active = false;
+        this.manualRequested = false;
+        clearTimeout(this.timer);
+        this.timer = undefined;
+        if (this.state !== "stopping") this.state = "stopped";
+      },
+      { once: true },
+    );
+    this.adaptiveCadence = false;
+    this.unchangedPolls = 0;
+    // A restarted module must reapply against its new context, not accept a 304.
+    // Keep the successfully applied vector as a monotonicity guard.
+    this.etag = undefined;
+    this.lastRevisionToken = null;
+    this.lastReport = null;
+    this.lastReportAt = 0;
+    this.lastSuccessAt = null;
+    this.lastError = null;
+    this.pollError = null;
+    this.reportError = null;
+    this.nextPollAt = this.now().getTime();
+    this.nextReportAt = Number.POSITIVE_INFINITY;
+    await this.wake(true);
   }
 
   async stop(): Promise<void> {
     this.state = "stopping";
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    this.active = false;
+    this.manualRequested = false;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.controller?.abort();
     await this.cycle;
     this.context = null;
     this.state = "stopped";
   }
 
-  private enqueueCycle(): Promise<void> {
-    this.cycle = this.cycle.then(
-      () => this.reconcileOnce(),
-      () => this.reconcileOnce(),
+  private pollInterval(): number {
+    return (
+      this.pollIntervalMs ??
+      (this.adaptiveCadence && this.unchangedPolls >= CONTROL_PLANE_QUIET_POLL_THRESHOLD
+        ? CONTROL_PLANE_QUIET_POLL_INTERVAL_MS
+        : DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS)
     );
-    return this.cycle;
+  }
+
+  private reportInterval(): number {
+    return (
+      this.reportIntervalMs ??
+      (this.adaptiveCadence
+        ? CONTROL_PLANE_HEARTBEAT_INTERVAL_MS
+        : DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS)
+    );
+  }
+
+  private delay(interval: number, overridden: boolean): number {
+    if (!this.adaptiveCadence || overridden) return interval;
+    return (
+      interval * (1 + Math.max(0, Math.min(1, this.random())) * CONTROL_PLANE_CADENCE_JITTER_RATIO)
+    );
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    if (!this.active) return;
+    const deadline = Math.min(this.nextPollAt, this.nextReportAt);
+    this.timer = setTimeout(
+      () => {
+        this.timer = undefined;
+        void this.wake(false);
+      },
+      Math.max(0, deadline - this.now().getTime()),
+    );
+    this.timer.unref();
+  }
+
+  private wake(manual: boolean): Promise<void> {
+    if (!this.active) return Promise.resolve();
+    if (manual) {
+      this.unchangedPolls = 0;
+      this.manualRequested = true;
+    }
+    if (this.cycle) return this.cycle;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.cycle = promise;
+    const complete = (): void => {
+      // A wake can arrive between drain settling and this continuation.
+      if (this.active && this.manualRequested) {
+        void this.drain().then(complete, fail);
+        return;
+      }
+      this.cycle = null;
+      this.arm();
+      resolve();
+    };
+    const fail = (error: unknown): void => {
+      // Also contain unexpected adapter/logger failures at timer-driven wakes.
+      if (this.active) {
+        this.unchangedPolls = 0;
+        this.lastError = safeRuntimeError(error);
+        this.pollError = this.lastError;
+        this.state = "degraded";
+        this.nextPollAt = this.now().getTime() + this.pollInterval();
+        this.nextReportAt = Math.max(this.nextReportAt, this.nextPollAt);
+      }
+      this.cycle = null;
+      this.arm();
+      resolve();
+    };
+    void this.drain().then(complete, fail);
+    return promise;
   }
 
   async reconcileNow(): Promise<void> {
-    await this.enqueueCycle();
+    await this.wake(true);
   }
 
-  private async reconcileOnce(): Promise<void> {
-    const context = this.context;
-    if (!context || context.signal?.aborted) return;
+  private async drain(): Promise<void> {
+    do {
+      const manual = this.manualRequested;
+      this.manualRequested = false;
+      await this.reconcileOnce(manual);
+    } while (this.active && this.manualRequested);
+  }
+
+  private fail(error: unknown, context: ModuleContext): void {
+    if (!this.active) return;
+    this.unchangedPolls = 0;
+    // A heartbeat failure may shorten, but never push back, an already due poll.
+    this.nextPollAt = Math.min(
+      this.nextPollAt,
+      this.now().getTime() + this.delay(this.pollInterval(), this.pollIntervalMs !== undefined),
+    );
+    this.lastError = safeRuntimeError(error);
+    this.state = "degraded";
+    context.logger.warn("Cloud desired-state reconciliation is degraded", {
+      reason: this.lastError,
+    });
+  }
+
+  private async sendReport(
+    report: ControlPlaneDeviceReport,
+    context: ModuleContext,
+  ): Promise<void> {
+    this.reportCount += 1;
+    try {
+      await this.client.report(report, context.signal);
+    } catch (error) {
+      if (this.active) this.reportError = safeRuntimeError(error);
+      this.nextReportAt =
+        this.lastReport && isCurrentRevision(this.lastReport.revisions, this.lastRevisions)
+          ? this.now().getTime() +
+            this.delay(
+              this.pollIntervalMs ?? DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS,
+              this.pollIntervalMs !== undefined,
+            )
+          : Number.POSITIVE_INFINITY;
+      throw error;
+    }
+    if (!this.active) return;
+    this.reportError = null;
+    this.lastReport = report;
+    this.lastReportAt = this.now().getTime();
+    this.nextReportAt =
+      this.lastReportAt + this.delay(this.reportInterval(), this.reportIntervalMs !== undefined);
+  }
+
+  private async poll(context: ModuleContext, manual: boolean): Promise<void> {
+    this.pollCount += 1;
+    let reporting = false;
     try {
       const fetched = await this.client.getEffectiveState(this.deviceId, this.etag, context.signal);
-      const now = this.now();
+      if (!this.active) return;
+      if (this.adaptiveCadence !== fetched.adaptiveCadence) {
+        this.adaptiveCadence = fetched.adaptiveCadence;
+        this.unchangedPolls = 0;
+        if (this.lastReport) {
+          this.nextReportAt =
+            this.lastReportAt +
+            this.delay(this.reportInterval(), this.reportIntervalMs !== undefined);
+        }
+      }
       const staleReply =
         fetched.state !== null && !isCurrentRevision(fetched.state.revisions, this.lastRevisions);
-      if (fetched.state && !staleReply && fetched.state.revisionToken !== this.lastRevisionToken) {
+      const changed =
+        fetched.state && !staleReply && fetched.state.revisionToken !== this.lastRevisionToken;
+      if (changed && fetched.state) {
+        this.unchangedPolls = 0;
         const applied = await this.applyAdapter.apply(
           fetched.state.desiredState,
           fetched.state.revisions,
           fetched.state.revisionToken,
           context,
         );
+        if (!this.active) return;
         const report: ControlPlaneDeviceReport = {
           deviceId: this.deviceId,
           revisions: fetched.state.revisions,
           revisionToken: fetched.state.revisionToken,
           status: applied.status,
           fields: applied.fields,
-          observedAt: now.toISOString(),
+          observedAt: this.now().toISOString(),
           appliedAt: applied.appliedAt,
         };
         if (applied.status !== "error") this.lastRevisions = fetched.state.revisions;
-        await this.client.report(report, context.signal);
-        this.lastReport = report;
-        this.lastReportAt = now.getTime();
-        if (applied.status === "error") {
-          throw new Error("Cloud desired state was not applied");
-        }
+        this.pollError = applied.status === "error" ? "Cloud desired state was not applied" : null;
+        reporting = true;
+        await this.sendReport(report, context);
+        reporting = false;
+        if (!this.active) return;
+        if (applied.status === "error") throw new Error("Cloud desired state was not applied");
         this.lastRevisionToken = fetched.state.revisionToken;
-      } else if (this.lastReport && now.getTime() - this.lastReportAt >= this.reportIntervalMs) {
-        const report = { ...this.lastReport, observedAt: now.toISOString() };
-        await this.client.report(report, context.signal);
-        this.lastReport = report;
-        this.lastReportAt = now.getTime();
+      } else if (
+        !manual &&
+        !staleReply &&
+        this.lastRevisionToken !== null &&
+        this.lastReport?.revisionToken === this.lastRevisionToken &&
+        isCurrentRevision(this.lastReport.revisions, this.lastRevisions)
+      ) {
+        this.unchangedPolls = Math.min(this.unchangedPolls + 1, CONTROL_PLANE_QUIET_POLL_THRESHOLD);
+      } else {
+        this.unchangedPolls = 0;
       }
       if (!staleReply && fetched.etag) this.etag = fetched.etag;
-      this.lastSuccessAt = now.toISOString();
-      this.lastError = null;
-      this.state = "ready";
+      if (!staleReply) this.pollError = null;
     } catch (error) {
-      this.lastError = safeRuntimeError(error);
-      this.state = "degraded";
-      context.logger.warn("Cloud desired-state reconciliation is degraded", {
-        reason: this.lastError,
-      });
+      if (this.active && !reporting) this.pollError = safeRuntimeError(error);
+      throw error;
+    }
+  }
+
+  private async reconcileOnce(manual: boolean): Promise<void> {
+    const context = this.context;
+    if (!this.active || !context) return;
+    if (manual || this.now().getTime() >= this.nextPollAt) {
+      try {
+        await this.poll(context, manual);
+      } catch (error) {
+        this.fail(error, context);
+      }
+      if (!this.active) return;
+      this.nextPollAt =
+        this.now().getTime() + this.delay(this.pollInterval(), this.pollIntervalMs !== undefined);
+    }
+    if (this.lastReport && this.now().getTime() >= this.nextReportAt) {
+      // Never send an older cached acknowledgement after a newer successful apply
+      // whose report failed. The next unconditional poll retries that revision.
+      if (isCurrentRevision(this.lastReport.revisions, this.lastRevisions)) {
+        try {
+          await this.sendReport(
+            { ...this.lastReport, observedAt: this.now().toISOString() },
+            context,
+          );
+        } catch (error) {
+          this.fail(error, context);
+        }
+      } else {
+        this.nextReportAt = Number.POSITIVE_INFINITY;
+      }
+    }
+    if (this.active) {
+      // A successful heartbeat proves transport/presence, not desired-state health.
+      // Likewise, a healthy GET cannot resolve an outstanding report failure.
+      this.lastError = this.pollError ?? this.reportError;
+      this.state = this.lastError === null ? "ready" : "degraded";
+      if (this.lastError === null) this.lastSuccessAt = this.now().toISOString();
     }
   }
 
@@ -535,6 +762,12 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
       revisionToken: this.lastRevisionToken,
       lastSuccessAt: this.lastSuccessAt,
       lastError: this.lastError,
+      cadence: this.adaptiveCadence ? CONTROL_PLANE_ADAPTIVE_CADENCE : "legacy",
+      pollIntervalMs: this.pollInterval(),
+      reportIntervalMs: this.reportInterval(),
+      unchangedPolls: this.unchangedPolls,
+      pollCount: this.pollCount,
+      reportCount: this.reportCount,
       lastReport: this.lastReport
         ? {
             status: this.lastReport.status,

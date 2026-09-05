@@ -2,6 +2,24 @@ import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resi
 import { z } from "zod";
 
 /**
+ * Effective-state responses advertise this capability on both 200 and 304.
+ * Missing or unknown values require legacy 30 s polling / 60 s reporting.
+ * Adaptive servers keep devices online for at least 480 s; clients poll fast
+ * after startup, changes, manual wakes or errors, and quiet after three
+ * successful unchanged polls. Heartbeats are independent of desired-state reads
+ * and repeat only previously reported state, never acknowledging unseen revisions.
+ * Bodies and revision/ETag acknowledgement semantics are unchanged.
+ */
+export const CONTROL_PLANE_CADENCE_HEADER = "Resin-Control-Plane-Cadence";
+export const CONTROL_PLANE_ADAPTIVE_CADENCE = "adaptive-v1";
+export const CONTROL_PLANE_FAST_POLL_INTERVAL_MS = 30_000;
+export const CONTROL_PLANE_QUIET_POLL_INTERVAL_MS = 120_000;
+export const CONTROL_PLANE_QUIET_POLL_THRESHOLD = 3;
+export const CONTROL_PLANE_HEARTBEAT_INTERVAL_MS = 300_000;
+/** Positive-only jitter keeps adaptive deadlines within 100–105% of the interval. */
+export const CONTROL_PLANE_CADENCE_JITTER_RATIO = 0.05;
+
+/**
  * Cloud-backed control-plane target. Workspace state is inherited by every device;
  * device state is an explicit per-device overlay and never implies a global mutation.
  */
