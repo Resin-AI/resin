@@ -30,6 +30,26 @@ import type {
 export const OMP_PROVIDER = "omp";
 export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
+/** Recover target metadata from native edit syntax before content is redacted. */
+function editTargetPaths(parameters: DecoderMetadataRecord): string[] {
+  const input = asString(parameters.input) ?? asString(parameters.patch);
+  if (!input) return [];
+  const paths = new Set<string>();
+  // Legacy replacement blocks put the path AFTER the closing replacement marker.
+  for (const match of input.matchAll(/^>>>>\r?\npath:[ \t]*([^\r\n]+)(?:\r?\n|$)/gm)) {
+    paths.add(match[1]!.trim());
+  }
+  if (input.startsWith("*** Begin Patch") && input.trimEnd().endsWith("*** End Patch")) {
+    // Body rows are prefixed; never treat text inside a replacement as a target.
+    for (const match of input.matchAll(/^\[([^\r\n#]+)#[0-9A-Fa-f]{4}\]\r?$/gm)) {
+      paths.add(match[1]!.trim());
+    }
+    for (const match of input.matchAll(/^\*\*\* (?:Add|Update|Delete) File: ([^\r\n]+)\r?$/gm)) {
+      paths.add(match[1]!.trim());
+    }
+  }
+  return [...paths].filter(Boolean);
+}
 export type OmpTranscriptValue = DecoderMetadataValue;
 
 export interface OmpTranscriptPayload extends DecoderMetadataRecord {
@@ -1583,6 +1603,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         }
       }
       parameters = rawParamsObj ?? {};
+    }
+    if (
+      (toolName === "edit" || toolName === "apply_patch") &&
+      !parameters.path &&
+      !parameters.filePath &&
+      !parameters.targetPaths
+    ) {
+      const targetPaths = editTargetPaths(parameters);
+      if (targetPaths.length > 0) parameters = { ...parameters, targetPaths };
     }
 
     if (toolCallObj.intent !== undefined && metadata.intent === undefined) {

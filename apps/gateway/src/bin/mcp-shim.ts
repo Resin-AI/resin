@@ -39,6 +39,7 @@ Usage:
 Options:
   -s, --standalone       Enable standalone fallback (default)
   --no-standalone        Disable standalone fallback
+  --enable-tool-search  Expose search_tools (disabled by default)
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -56,11 +57,14 @@ function parseArgs(args: string[]) {
   let harnessId: string | undefined;
   let dbPath: string | undefined;
   let showHelp = false;
+  let enableToolSearch = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--help" || arg === "-h") {
       showHelp = true;
+    } else if (arg === "--enable-tool-search") {
+      enableToolSearch = true;
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -77,7 +81,16 @@ function parseArgs(args: string[]) {
     }
   }
 
-  return { standaloneMode, standaloneFallback, socketPath, cwd, harnessId, dbPath, showHelp };
+  return {
+    standaloneMode,
+    standaloneFallback,
+    enableToolSearch,
+    socketPath,
+    cwd,
+    harnessId,
+    dbPath,
+    showHelp,
+  };
 }
 
 async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -89,6 +102,7 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   }
   const shim = new McpStdioShim({
     standaloneFallback: args.standaloneFallback,
+    enableToolSearch: args.enableToolSearch,
     db: args.dbPath ? new LocalDatabaseConnection({ path: args.dbPath }) : undefined,
     socketPath: args.standaloneMode && !args.socketPath ? "" : args.socketPath,
     cwd: args.cwd,

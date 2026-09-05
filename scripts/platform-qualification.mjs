@@ -451,13 +451,16 @@ async function qualifyMcp(installedRoot, sandboxDir) {
     const listed = await rpc.request(2, "tools/list", {});
     if (listed.error) throw new Error(`MCP tools/list failed: ${JSON.stringify(listed)}`);
     const toolNames = (listed.result?.tools ?? []).map((tool) => tool.name);
-    const expectedMetaTools = ["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"];
+    const expectedMetaTools = ["get_tool_schema", "invoke_tool", "manage_tools"];
     for (const metaTool of expectedMetaTools) {
       if (!toolNames.includes(metaTool)) {
         throw new Error(
           `MCP catalog did not include essential system meta-tool ${metaTool}: ${JSON.stringify(toolNames)}`,
         );
       }
+    }
+    if (toolNames.includes("search_tools")) {
+      throw new Error("MCP catalog exposed search_tools without --enable-tool-search");
     }
     const removedUtilities = ["echo", "workspace_info", "fail_tool", "slow_tool"];
     for (const utility of removedUtilities) {
@@ -469,17 +472,18 @@ async function qualifyMcp(installedRoot, sandboxDir) {
     }
     const called = await rpc.request(3, "tools/call", {
       name: "get_tool_schema",
-      arguments: { toolId: "sys_search_tools" },
+      arguments: { toolId: "sys_invoke_tool" },
     });
     if (called.error) throw new Error(`MCP tools/call failed: ${JSON.stringify(called)}`);
     const rendered = JSON.stringify(called.result ?? {});
-    if (!rendered.includes("search_tools")) {
+    if (!rendered.includes("invoke_tool")) {
       throw new Error(`MCP get_tool_schema invocation returned unexpected result: ${rendered}`);
     }
     return {
       initialized: true,
       catalogRefresh: true,
       toolCount: toolNames.length,
+      searchDisabledByDefault: !toolNames.includes("search_tools"),
       toolInvocation: true,
     };
   } catch (error) {

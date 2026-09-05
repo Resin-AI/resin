@@ -34,6 +34,7 @@ const VERSION = process.env.RESIN_RELEASE_VERSION ?? resolveVersion();
 export interface McpCommandFlags {
   standaloneMode: boolean;
   standaloneFallback: boolean;
+  enableToolSearch: boolean;
   socketPath?: string;
   cwd?: string;
   harnessId?: string;
@@ -49,11 +50,14 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
   let harnessId: string | undefined;
   let dbPath: string | undefined;
   let showHelp = false;
+  let enableToolSearch = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--help" || arg === "-h" || arg === "help") {
       showHelp = true;
+    } else if (arg === "--enable-tool-search") {
+      enableToolSearch = true;
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -101,6 +105,7 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
   return {
     standaloneMode,
     standaloneFallback,
+    enableToolSearch,
     socketPath,
     cwd,
     harnessId,
@@ -121,6 +126,7 @@ Usage:
 Options:
   -s, --standalone       Run the in-process MCP gateway (default)
   --no-standalone        Require a daemon socket connection
+  --enable-tool-search  Expose search_tools (disabled by default)
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -158,6 +164,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
 
   const shimOptions: McpStdioShimOptions = {
     standaloneFallback: parsedArgs.standaloneFallback,
+    enableToolSearch: parsedArgs.enableToolSearch,
     db: parsedArgs.dbPath ? new LocalDatabaseConnection({ path: parsedArgs.dbPath }) : undefined,
     socketPath: parsedArgs.standaloneMode && !parsedArgs.socketPath ? "" : parsedArgs.socketPath,
     cwd: parsedArgs.cwd,

@@ -84,6 +84,9 @@ export const PATH_PARAMETER_KEYS: readonly string[] = [
   "directory",
   "dir",
   "cwd",
+  "paths",
+  "targetPaths",
+  "filePaths",
 ];
 
 export type PathAlias =
@@ -215,7 +218,7 @@ export function placeholderFor(token: string): string {
   if (URL_TOKEN.test(token)) return "$URL";
   if (GLOB_TOKEN.test(token)) return "$GLOB";
   if (looksLikePath(token)) return classifyPathAlias(token);
-  if (NUMBER_TOKEN.test(token)) return "$NUM";
+  if (NUMBER_TOKEN.test(token)) return /^[+-]/.test(token) ? `${token[0]}$NUM` : "$NUM";
   return "$STR";
 }
 
@@ -532,7 +535,7 @@ export function isShellToolName(toolName: string): boolean {
 
 export interface EnrichedParameterProjection {
   /** Parameters safe to ship verbatim (already normalized). */
-  parameters: Record<string, string>;
+  parameters: Record<string, string | string[]>;
   /** Fields that were normalized rather than dropped. */
   maskedFields: string[];
 }
@@ -551,7 +554,7 @@ export function projectEnrichedToolParameters(
     return null;
   }
   const params = rawParams as Record<string, unknown>;
-  const out: Record<string, string> = {};
+  const out: Record<string, string | string[]> = {};
   const masked: string[] = [];
 
   if (isShellToolName(toolName)) {
@@ -578,6 +581,16 @@ export function projectEnrichedToolParameters(
     const value = params[key];
     if (typeof value === "string" && value.length > 0) {
       out[key] = normalizePathPattern(value, options.homeDir);
+      masked.push(key);
+    }
+    if (
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.every((entry) => typeof entry === "string")
+    ) {
+      out[key] = [
+        ...new Set(value.slice(0, 64).map((entry) => normalizePathPattern(entry, options.homeDir))),
+      ];
       masked.push(key);
     }
   }

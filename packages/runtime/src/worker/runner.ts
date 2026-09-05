@@ -10,6 +10,7 @@ import {
   canonicalJson,
   normalizeSha256,
 } from "@resin/contracts";
+import ts from "typescript";
 import { CapabilityBrokerManager } from "../brokers/manager.js";
 import type { SecretBroker } from "../brokers/secret-broker.js";
 import { computeSha256 } from "../bundle/builder.js";
@@ -36,6 +37,7 @@ import {
   withResolvers,
 } from "./protocol.js";
 import { type BrokerRequestHandlerFn, type ToolContext, createToolContext } from "./sdk.js";
+import { TOOL_SDK_SHIM_SOURCE } from "./tool-sdk-shim.js";
 
 /**
  * Tool execution modes.
@@ -110,6 +112,30 @@ function isDenoAvailable(denoExecutable?: string): boolean {
     return false;
   }
 }
+
+// Published artifacts stay ESM for Deno. Convert only at the Node VM boundary.
+function compileVmModule(source: string, fileName: string): string {
+  const result = ts.transpileModule(source, {
+    fileName,
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.CommonJS,
+      allowJs: true,
+    },
+    reportDiagnostics: true,
+  });
+  const errors = result.diagnostics?.filter(
+    (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
+  );
+  if (errors?.length) {
+    throw new Error(
+      errors.map((error) => ts.flattenDiagnosticMessageText(error.messageText, "\n")).join("; "),
+    );
+  }
+  return result.outputText;
+}
+
+const SANDBOX_SDK_MODULE = compileVmModule(TOOL_SDK_SHIM_SOURCE, "resin-runtime.js");
 
 /**
  * In-process deterministic VM execution environment for running tools in isolated contexts.
@@ -484,17 +510,7 @@ export class DeterministicWorkerSandbox {
     const sandboxExports: CanonicalJsonRecord = {};
     const sandboxModule = { exports: sandboxExports };
 
-    // Transform ES Module export default / export const to CommonJS for Node VM script execution
-    let transformedCode = code;
-    if (transformedCode.includes("export default")) {
-      transformedCode = transformedCode.replace(/export\s+default\s+/, "module.exports = ");
-    }
-    if (transformedCode.includes("export const")) {
-      transformedCode = transformedCode.replace(
-        /export\s+const\s+([a-zA-Z0-9_$]+)\s*=/,
-        "exports.$1 =",
-      );
-    }
+    const transformedCode = compileVmModule(code, "bundle-entrypoint.ts");
 
     // Strict permissionless sandbox environment
     const sandboxGlobals = {
@@ -505,11 +521,6 @@ export class DeterministicWorkerSandbox {
         info: () => {},
         warn: () => {},
         error: () => {},
-      },
-      require: (modName: string) => {
-        throw new Error(
-          `Permission Denied: direct require('${modName}') is not allowed in sandbox`,
-        );
       },
       fetch: () => {
         throw new Error(
@@ -549,6 +560,20 @@ export class DeterministicWorkerSandbox {
     // Apply resource limits if available in current Node environment
     vm.runInContext(
       `
+      (function () {
+        const module = { exports: {} };
+        const exports = module.exports;
+        ${SANDBOX_SDK_MODULE}
+        const sdk = Object.freeze(module.exports);
+        Object.defineProperty(globalThis, "require", {
+          value: Object.freeze(function (specifier) {
+            if (specifier === "@resin/runtime") return sdk;
+            throw new Error("Permission Denied: direct require('" + specifier + "') is not allowed in sandbox");
+          }),
+          writable: false,
+          configurable: false,
+        });
+      })();
       Object.freeze(Object.prototype);
       Object.freeze(Function.prototype);
       Object.freeze(Array.prototype);

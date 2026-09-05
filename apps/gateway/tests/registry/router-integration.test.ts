@@ -1,5 +1,5 @@
 import type { ToolManifest } from "@resin/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
 import type {
@@ -90,6 +90,44 @@ function makeManifest(overrides?: Partial<ToolManifest>): ToolManifest {
 }
 
 describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
+  it("routes published direct tool calls through the configured executor, not raw source", async () => {
+    const registry = new ToolRegistry();
+    const rawHandler = vi.fn(async () => {
+      throw new Error("Raw handler must not execute");
+    });
+    const invoke = vi.fn(async () => ({
+      content: [{ type: "text" as const, text: "verified executor" }],
+    }));
+    const router = createRegistryGatewayRouter(registry, { invoke });
+    const context = {
+      workspaceId: "ws-executor",
+      projectId: "ws-executor",
+      projectRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      startupPath: "/tmp",
+      isReadOnly: false,
+      name: "executor-test",
+      source: "cwd_fallback" as const,
+      roots: [],
+    };
+    const manifest = makeManifest({ id: "stable-tool-id", name: "generated_tool" });
+    const registered = await registry.registerTool(manifest, undefined, {
+      workspaceId: context.workspaceId,
+    });
+    registered.handler = rawHandler;
+    const result = await router.callTool(context, "generated_tool", { input: "hello" });
+    expect(result.content[0].text).toBe("verified executor");
+    expect(rawHandler).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolId: "stable-tool-id",
+        name: "generated_tool",
+        parameters: { input: "hello" },
+        context,
+      }),
+    );
+  });
+
   it("lists active catalog tools via tools/list", async () => {
     const registry = new ToolRegistry();
     const router = createRegistryGatewayRouter(registry);

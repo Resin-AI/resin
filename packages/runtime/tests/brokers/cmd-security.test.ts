@@ -83,6 +83,39 @@ describe("Command Broker Security & Isolation", () => {
     expect(res.durationMs).toBeGreaterThanOrEqual(0);
   });
 
+  it("executes a fixed explicitly granted Python unittest module through canonical aliases", async () => {
+    fs.writeFileSync(
+      path.join(tempWorkspace, "resin_module_test.py"),
+      "import unittest\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, 1)\n",
+    );
+    const grant = createGrant({
+      allowedBinaries: [],
+      allowedCommands: ["python3 -m unittest $STR -v"],
+    });
+    const result = await broker.execute(
+      { executable: "python3", args: ["-m", "unittest", "resin_module_test", "-v"] },
+      { invocationId: "inv_cmd_001", grant, workspaceRoot: tempWorkspace },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("OK");
+  });
+
+  it.each([
+    { profiles: [], args: ["-m", "unittest", "resin_module_test", "-v"] },
+    { profiles: ["python3 -m $STR $STR -v"], args: ["-m", "unittest", "resin_module_test", "-v"] },
+    { profiles: ["python3 -m http.server"], args: ["-m", "http.server"] },
+    { profiles: ["python3 -munittest"], args: ["-munittest"] },
+    { profiles: ["python3 -m unittest $STR -v"], args: ["-m", "unittest", "-c", "-v"] },
+  ])("retains interpreter escape guards for $profiles / $args", async ({ profiles, args }) => {
+    const grant = createGrant({ allowedBinaries: ["python3"], allowedCommands: profiles });
+    await expect(
+      broker.execute(
+        { executable: "python3", args },
+        { invocationId: "inv_cmd_001", grant, workspaceRoot: tempWorkspace },
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN_ARGUMENT_PATTERN" });
+  });
+
   it("rejects unauthorized binary execution", async () => {
     const grant = createGrant({ allowedBinaries: ["node"] });
     const ctx = {

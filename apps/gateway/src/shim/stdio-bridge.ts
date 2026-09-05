@@ -14,9 +14,11 @@ import { ToolRegistry } from "../registry/registry.js";
 import type { ToolRegistryDatabaseOption } from "../registry/types.js";
 import { type GatewayRouter, createRegistryGatewayRouter } from "../router.js";
 import { withResolvers } from "../utils/deferred.js";
+import { type ToolSearchSurface, createToolSearchSurface } from "./tool-search-surface.js";
 export interface McpStdioShimOptions {
   socketPath?: string;
   standaloneFallback?: boolean;
+  enableToolSearch?: boolean;
   cwd?: string;
   harnessId?: string;
   maxStartupAttempts?: number;
@@ -138,6 +140,7 @@ export class McpStdioShim {
   private activeGateway?: LocalMcpGateway;
   private activeSocket?: net.Socket;
   private isRunning = false;
+  private surface?: ToolSearchSurface;
 
   constructor(options: McpStdioShimOptions = {}) {
     this.options = options;
@@ -220,8 +223,10 @@ export class McpStdioShim {
     this.activeSocket = socket;
 
     socket.once("connect", () => {
-      this.stdin.pipe(socket);
-      socket.pipe(this.stdout);
+      this.isRunning = true;
+      const transport = this.prepareTransport();
+      transport.input.pipe(socket);
+      socket.pipe(transport.output);
       resolve();
     });
 
@@ -234,6 +239,16 @@ export class McpStdioShim {
     });
 
     return promise;
+  }
+
+  private prepareTransport(): { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } {
+    if (this.options.enableToolSearch === true) {
+      return { input: this.stdin, output: this.stdout };
+    }
+    this.surface = createToolSearchSurface(this.stdout);
+    this.surface.output.pipe(this.stdout, { end: false });
+    this.stdin.pipe(this.surface.input);
+    return this.surface;
   }
 
   private async startStandaloneGateway(): Promise<void> {
@@ -367,7 +382,9 @@ export class McpStdioShim {
     });
 
     this.activeGateway = gateway;
-    await gateway.processStream(this.stdin, this.stdout, {
+    this.isRunning = true;
+    const transport = this.prepareTransport();
+    await gateway.processStream(transport.input, transport.output, {
       cwd: this.cwd,
       harnessId: this.harnessId,
     });
@@ -387,6 +404,16 @@ export class McpStdioShim {
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
+    if (this.surface) {
+      this.stdin.unpipe(this.surface.input);
+      this.surface.output.unpipe(this.stdout);
+      this.surface.input.destroy();
+      this.surface.output.destroy();
+      this.surface = undefined;
+    } else if (this.activeSocket) {
+      this.stdin.unpipe(this.activeSocket);
+      this.activeSocket.unpipe(this.stdout);
+    }
 
     if (this.activeSocket) {
       this.activeSocket.destroy();

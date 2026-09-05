@@ -82,6 +82,22 @@ describe("Command Template Policy", () => {
     expect(matchCommandProfileArgs(["literal"], ["other"])).toBe(false);
   });
 
+  it("allows spaces inside one string argument without admitting additional argv elements", () => {
+    expect(
+      matchCommandProfileArgs(
+        ["commit", "-m", "$STR"],
+        ["commit", "-m", "fix: update release notes"],
+      ),
+    ).toBe(true);
+    expect(
+      matchCommandProfileArgs(["commit", "-m", "$STR"], ["commit", "-m", "fix", "--amend"]),
+    ).toBe(false);
+    expect(matchCommandProfileArgs(["$STR"], [""])).toBe(false);
+    expect(matchCommandProfileArgs(["$STR"], ["bad\0value"])).toBe(false);
+    expect(matchCommandProfileArgs(["$STR"], ["first\nsecond"])).toBe(false);
+    expect(matchCommandProfileArgs(["$STR"], ["trailing\n"])).toBe(false);
+  });
+
   it("authorizes command profile prefixes and placeholder values", () => {
     expect(commandProfileAuthorizes("node --test", "node --test $TEST_FILE")).toBe(true);
     expect(commandProfileAuthorizes("node", "node --test $TEST_FILE")).toBe(true);
