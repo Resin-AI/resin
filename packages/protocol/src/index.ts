@@ -13,6 +13,7 @@ export * from "./envelope.js";
 
 // Device Authentication & Token Lifecycle
 export * from "./auth.js";
+export * from "./tool-access.js";
 
 // HTTP Endpoints, Data Models & OpenAPI 3.1 Specification
 export * from "./http.js";

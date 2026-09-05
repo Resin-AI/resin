@@ -11,6 +11,7 @@ import {
   normalizeSha256,
 } from "@resin/contracts";
 import { resolvePaths } from "@resin/observer";
+import { z } from "zod";
 import { computeSha256, parseTarArchive } from "../bundle/builder.js";
 import { type KeyStore, verifyBundleSignature } from "../bundle/signature.js";
 import {
@@ -933,6 +934,58 @@ export class ArtifactCache {
 
   async removeReference(digest: string, refId: string): Promise<void> {
     await this.releaseReference(digest, refId);
+  }
+
+  /** Remove one proven managed reference; shared/unreadable references preserve the bytes. */
+  async removeOwnedArtifactReference(
+    digest: string,
+    refId: string | undefined,
+    toolId: string,
+    version: string,
+  ): Promise<void> {
+    const cleanDigest = this.strictNormalizeDigest(digest);
+    if (!/^[a-f0-9]{64}$/.test(cleanDigest)) throw new Error("Invalid artifact digest");
+    await this.withRefLock(async () => {
+      if (!fs.existsSync(this.cacheDir)) return;
+      const referenceSchema = z
+        .object({
+          refId: z.string(),
+          toolId: z.string().optional(),
+          version: z.string().optional(),
+        })
+        .passthrough();
+      // Unlike ordinary cache lookup, malformed references must never look unreferenced.
+      const refs = z
+        .record(z.array(referenceSchema))
+        .parse(
+          fs.existsSync(this.refsFilePath)
+            ? JSON.parse(await fs.promises.readFile(this.refsFilePath, "utf8"))
+            : {},
+        );
+      const existing = refs[cleanDigest] ?? [];
+      const owned = existing.filter(
+        (ref) => ref.refId === refId && ref.toolId === toolId && ref.version === version,
+      );
+      if (owned.length === 0 && existing.length > 0) return;
+      const retained = existing.filter((ref) => !owned.includes(ref));
+      if (retained.length > 0) {
+        refs[cleanDigest] = retained;
+      } else {
+        // A symlinked cache parent could turn a digest deletion into deleting user files.
+        if ((await fs.promises.realpath(this.cacheDir)) !== path.resolve(this.cacheDir)) {
+          throw new Error("Refusing managed cleanup through a symlinked artifact cache");
+        }
+        await this.invalidateArtifact(cleanDigest);
+        delete refs[cleanDigest];
+      }
+      const tempFile = `${this.refsFilePath}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(tempFile, JSON.stringify(refs), { mode: 0o600, flag: "wx" });
+        await fs.promises.rename(tempFile, this.refsFilePath);
+      } finally {
+        await fs.promises.rm(tempFile, { force: true });
+      }
+    });
   }
 
   /**
