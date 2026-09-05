@@ -13,6 +13,7 @@ import {
   CloudCredentialStore,
   type CloudCredentialStoreOptions,
   type CloudRequestIdentity,
+  resolvePaths,
 } from "@resin/observer";
 import {
   type CatalogSnapshotResponse,
@@ -36,6 +37,7 @@ import {
   type CloudCatalogSyncOptions,
   type LockedSyncIdentity,
 } from "./sync.js";
+import { ManagedToolAccess } from "./tool-access.js";
 
 export interface ProductionProxyRuntimeOptions {
   credentialStore?: CloudCredentialStore;
@@ -127,6 +129,18 @@ export async function createProductionProxyRuntime(
       identity = null;
     }
   }
+  const paths = resolvePaths({ home: options.home, resinHome: options.resinHome });
+  const artifactCache =
+    options.artifactCache ??
+    new ArtifactCache({
+      cacheDir: path.join(paths.dataDir, "artifacts"),
+    });
+  const managedToolAccess = new ManagedToolAccess(
+    path.join(paths.stateDir, "managed-tool-access"),
+    artifactCache,
+    identity ?? undefined,
+  );
+  options.registry?.setManagedToolAccess(managedToolAccess);
 
   if (loadResult.status === "valid" && identity) {
     const circuitBreaker = options.circuitBreaker ?? new CloudCircuitBreaker();
@@ -145,7 +159,6 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
-    const artifactCache = options.artifactCache ?? new ArtifactCache();
     const executor =
       options.executor ??
       new LocalArtifactExecutor({
@@ -155,6 +168,7 @@ export async function createProductionProxyRuntime(
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
       });
+    executor.setManagedToolAccess(managedToolAccess);
 
     const router = new CloudInvocationRouter({
       circuitBreaker,
@@ -165,6 +179,7 @@ export async function createProductionProxyRuntime(
       localExecutor: executor,
       lockManager: options.lockManager,
     });
+    router.setManagedToolAccess(managedToolAccess);
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -174,6 +189,7 @@ export async function createProductionProxyRuntime(
     const bindWorkspaceLocks = options.bindWorkspaceLocks ?? true;
 
     const coordinator = new CloudCatalogSyncCoordinator({
+      managedToolAccess,
       client,
       cache,
       router,
@@ -249,6 +265,13 @@ export async function createProductionProxyRuntime(
           }
         }
 
+        // Entitlement checks must not depend on plan-gated project registration or catalog.
+        try {
+          await coordinator.checkToolAccess();
+        } catch {
+          // Unknown access preserves local tools; the next background cycle retries.
+        }
+        coordinator.startPeriodicSync();
         // 2. Register project if metadata exists
         let allowCloudSync = true;
         if (workspace.project && client) {
@@ -277,6 +300,7 @@ export async function createProductionProxyRuntime(
           }
         }
 
+        coordinator.setCatalogSyncEnabled(allowCloudSync);
         // 3. Perform initial sync and start periodic background sync
         if (coordinator && allowCloudSync && runtime.isCloudEnabled) {
           try {
@@ -289,19 +313,14 @@ export async function createProductionProxyRuntime(
       },
 
       async start(): Promise<void> {
-        if (coordinator && runtime.isCloudEnabled) {
-          coordinator.startPeriodicSync();
-        }
+        coordinator.startPeriodicSync();
       },
 
       async stop(): Promise<void> {
         coordinator.stopPeriodicSync();
       },
 
-      async sync(syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
-        if (!runtime.isCloudEnabled) {
-          return null;
-        }
+      async sync(_syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
         return await coordinator.sync();
       },
     };
@@ -309,7 +328,28 @@ export async function createProductionProxyRuntime(
     return runtime;
   }
 
-  // Safe local-only runtime state for missing / expired / offline / invalid / revoked credentials
+  const localExecutor =
+    options.executor ??
+    new LocalArtifactExecutor({
+      cache: artifactCache,
+      workspaceRoot: process.cwd(),
+      allowDevKeys: options.allowDevKeys ?? false,
+      resinHome: paths.homeDir,
+    });
+  localExecutor.setManagedToolAccess(managedToolAccess);
+  // Persisted positive denial remains effective even if credentials are now unavailable.
+  try {
+    const release = managedToolAccess.acquireSync();
+    if (release) {
+      try {
+        await managedToolAccess.cleanup(options.registry);
+      } finally {
+        release();
+      }
+    }
+  } catch {
+    // Invocation/discovery guards remain in place; retry on the next runtime lifecycle.
+  }
   return {
     status: loadResult.status,
     isCloudEnabled: false,
@@ -317,15 +357,7 @@ export async function createProductionProxyRuntime(
     credentialStore,
     registry: options.registry,
     lockManager: options.lockManager,
-    executor:
-      options.executor ??
-      new LocalArtifactExecutor({
-        cache: options.artifactCache ?? new ArtifactCache(),
-        workspaceRoot: process.cwd(),
-        allowDevKeys: options.allowDevKeys ?? false,
-        resinHome:
-          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
-      }),
+    executor: localExecutor,
 
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
       // Hydrate registry with locked tools locally

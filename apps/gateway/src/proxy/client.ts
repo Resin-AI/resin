@@ -9,6 +9,8 @@ import {
   normalizeSha256,
 } from "@resin/contracts";
 import {
+  type AccountToolAccessResponse,
+  AccountToolAccessResponseSchema,
   type CatalogSnapshotRequest,
   type CatalogSnapshotResponse,
   CatalogSnapshotResponseSchema,
@@ -164,6 +166,61 @@ export class CloudCatalogClient {
 
   getCircuitBreaker(): CloudCircuitBreaker {
     return this.circuitBreaker;
+  }
+
+  /**
+   * Entitlement proof is independent of catalog pauses/circuits. Failure means unknown,
+   * never inactive. The response must still belong to the identity used for this request.
+   */
+  async fetchToolAccess(
+    expected?: Pick<CloudRequestIdentity, "cloudUrl" | "accountId" | "userId">,
+  ): Promise<AccountToolAccessResponse | null> {
+    try {
+      const identity = await this.identityProvider?.();
+      if (!identity) return null;
+      if (
+        expected &&
+        (identity.cloudUrl !== expected.cloudUrl ||
+          identity.accountId !== expected.accountId ||
+          identity.userId !== expected.userId)
+      )
+        return null;
+      const response = await this.fetchFn(
+        `${identity.cloudUrl.replace(/\/+$/, "")}/v1/account/tool-access`,
+        {
+          method: "GET",
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+          headers: {
+            Accept: "application/json",
+            "Cache-Control": "no-store",
+            Authorization: `Bearer ${identity.accessToken}`,
+            "x-account-id": identity.accountId,
+            "x-user-id": identity.userId,
+            "x-workspace-id": identity.workspaceId,
+            "x-device-id": identity.deviceId,
+            "x-installation-id": identity.installationId,
+            "x-protocol-version": PROTOCOL_VERSION,
+          },
+        },
+      );
+      if (response.status !== 200 || response.redirected) return null;
+      const parsed = AccountToolAccessResponseSchema.safeParse(await response.json());
+      if (!parsed.success) return null;
+      const current = await this.identityProvider?.();
+      if (
+        !current ||
+        current.accountId !== identity.accountId ||
+        current.userId !== identity.userId ||
+        current.cloudUrl !== identity.cloudUrl ||
+        parsed.data.accountId !== identity.accountId ||
+        parsed.data.userId !== identity.userId
+      )
+        return null;
+      return parsed.data;
+    } catch {
+      return null;
+    }
   }
 
   /**

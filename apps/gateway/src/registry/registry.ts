@@ -38,6 +38,7 @@ import {
   type JsonRpcParams,
   JsonRpcParamsSchema,
 } from "../protocol/types.js";
+import type { ManagedToolAccess } from "../proxy/tool-access.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CatalogCache } from "./cache.js";
@@ -487,6 +488,7 @@ export class ToolRegistry {
   private hydrationPromise?: Promise<number>;
   private readonly dbConnection?: LocalDatabaseConnection;
   private readonly onInvocationRecorded?: (record: InvocationRecord) => Promise<void>;
+  private managedToolAccess?: ManagedToolAccess;
   constructor(
     options?:
       | ToolRegistryOptions
@@ -539,6 +541,44 @@ export class ToolRegistry {
     if (opts?.autoHydrate !== false && this.toolRepo) {
       void this.hydrateFromStore();
     }
+  }
+
+  setManagedToolAccess(access: ManagedToolAccess): void {
+    this.managedToolAccess = access;
+    this.forgetBlockedTools();
+  }
+
+  /** Re-read durable denial on discovery, including cached catalogs in sibling processes. */
+  private forgetBlockedTools(): void {
+    if (!this.managedToolAccess) return;
+    for (const tool of this.getAllRegisteredTools()) {
+      if (!this.managedToolAccess.isBlocked(tool)) continue;
+      this.registeredTools.get(tool.toolId)?.delete(tool.version);
+      if (this.latestVersions.get(tool.toolId) === tool.version)
+        this.latestVersions.delete(tool.toolId);
+      for (const active of [
+        this.systemActiveTools,
+        ...this.workspaceActiveTools.values(),
+        ...this.accountActiveTools.values(),
+        ...this.sessionActiveTools.values(),
+      ]) {
+        if (active.get(tool.toolId) === tool.version) active.delete(tool.toolId);
+      }
+      for (const [workspaceId, lock] of this.workspaceLocks) {
+        const tools = { ...lock.tools };
+        for (const [name, entry] of Object.entries(tools)) {
+          if (this.managedToolAccess.isBlocked(entry)) delete tools[name];
+        }
+        this.workspaceLocks.set(workspaceId, { ...lock, tools });
+      }
+      this.snapshotHistory.clear();
+      this.cache.invalidateAll();
+    }
+  }
+
+  async removeManagedTool(entry: V1LockedToolEntry, workspaceId?: string): Promise<void> {
+    this.forgetBlockedTools();
+    await this.toolRepo?.removeManagedToolVersion?.(entry, workspaceId);
   }
 
   /**
@@ -866,6 +906,7 @@ export class ToolRegistry {
    * Registers a tool directly into the in-memory registry.
    */
   registerToolSync(tool: RegistryTool): void {
+    if (this.managedToolAccess?.isBlocked(tool)) return;
     let versions = this.registeredTools.get(tool.toolId);
     if (!versions) {
       versions = new Map();
@@ -891,6 +932,17 @@ export class ToolRegistry {
     if (!tool.handler) {
       tool.handler = createExecutionHandler(tool);
     }
+    const handler = tool.handler;
+    tool.handler = async (context, params, options) => {
+      this.managedToolAccess?.assertAllowed(tool);
+      if (
+        this.managedToolAccess?.isManaged(tool) &&
+        this.registeredTools.get(tool.toolId)?.get(tool.version) !== tool
+      ) {
+        throw new Error("Managed tool is no longer registered");
+      }
+      return handler(context, params, options);
+    };
     versions.set(tool.version, tool);
     this.latestVersions.set(tool.toolId, tool.version);
     // If tool scope is system/global or isSystem, auto-register in system active list
@@ -977,6 +1029,7 @@ export class ToolRegistry {
    * and LRU snapshot caching.
    */
   async resolveCatalog(workspaceId: string, sessionId?: string): Promise<CatalogSnapshot> {
+    this.forgetBlockedTools();
     // 1. Check LRU Cache
     const cached = this.cache.get(workspaceId, sessionId);
     if (cached) {
@@ -1218,6 +1271,7 @@ export class ToolRegistry {
     // 5. Build Catalog Entries
     const entries: CatalogEntry[] = [];
     for (const { tool, scope } of candidateTools.values()) {
+      if (this.managedToolAccess?.isBlocked(tool)) continue;
       const exposedName = nameMap.get(tool.toolId) || sanitizeToolName(tool.name);
       const isPinned =
         Boolean(controls.pinnedVersions[tool.toolId]) ||
@@ -1289,6 +1343,7 @@ export class ToolRegistry {
     workspaceId?: string,
     sessionId?: string,
   ): Promise<RegistryTool | undefined> {
+    this.forgetBlockedTools();
     if (!toolIdOrName) {
       return undefined;
     }
