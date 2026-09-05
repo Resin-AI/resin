@@ -1,29 +1,24 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type ControlPlaneDeviceReport, ControlPlaneReportRequestSchema } from "@resin/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  CONTROL_PLANE_ADAPTIVE_CADENCE,
+  CONTROL_PLANE_CADENCE_HEADER,
+  type ControlPlaneDeviceReport,
+  ControlPlaneReportRequestSchema,
+} from "@resin/protocol";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CONTROL_PLANE_DEVICE_STATE_FILE_NAME,
   type ControlPlaneApplyAdapter,
   ControlPlaneClient,
   ControlPlaneRuntimeModule,
-  DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS,
-  DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS,
+  type ControlPlaneRuntimeModuleOptions,
   FileControlPlaneApplyAdapter,
 } from "../src/control-plane.js";
 import type { ModuleContext } from "../src/lifecycle.js";
 
 const temporaryDirectories: string[] = [];
-
-describe("control-plane cadence defaults", () => {
-  it("polls every 30 seconds and reports every 60 seconds to bound per-daemon cloud cost", () => {
-    expect(DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS).toBe(30_000);
-    expect(DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS).toBe(60_000);
-    // The cloud's active-daemon window is 150 s; two report intervals must fit inside it.
-    expect(DEFAULT_CONTROL_PLANE_REPORT_INTERVAL_MS * 2).toBeLessThan(150_000);
-  });
-});
 
 async function testContext(): Promise<ModuleContext> {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-control-plane-"));
@@ -304,16 +299,15 @@ describe("observer desired-state reconciliation", () => {
       applyAdapter: adapter,
       pollIntervalMs: 60_000,
       reportIntervalMs: 60_000,
-      now: () => {
-        const value = new Date(currentTime);
-        currentTime += 60_000;
-        return value;
-      },
+      now: () => new Date(currentTime),
     });
 
     await module.start(context);
+    currentTime += 60_000;
     await module.reconcileNow();
+    currentTime += 60_000;
     await module.reconcileNow();
+    currentTime += 60_000;
     await module.reconcileNow();
     await module.stop();
 
@@ -513,5 +507,523 @@ describe("observer desired-state reconciliation", () => {
     expect(module.getState()).toBe("degraded");
     expect((await module.healthCheck()).status).toBe("degraded");
     await module.stop();
+  });
+});
+
+describe("adaptive control-plane deadlines", () => {
+  const modules: ControlPlaneRuntimeModule[] = [];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T00:00:00.000Z"));
+  });
+
+  afterEach(async () => {
+    await Promise.all(modules.splice(0).map((module) => module.stop()));
+    vi.useRealTimers();
+  });
+
+  async function fixture(
+    options: Partial<
+      Pick<ControlPlaneRuntimeModuleOptions, "pollIntervalMs" | "reportIntervalMs" | "random">
+    > = {},
+  ) {
+    const context = await testContext();
+    const server = {
+      capability: CONTROL_PLANE_ADAPTIVE_CADENCE as string | null,
+      revision: 1,
+      force200: false,
+      getOverride: null as ((init: RequestInit) => Promise<Response>) | null,
+      reportOverride: null as
+        | ((report: ControlPlaneDeviceReport, init: RequestInit) => Promise<Response>)
+        | null,
+      applyOverride: null as ControlPlaneApplyAdapter["apply"] | null,
+    };
+    const polls: Array<{ at: number; etag: string | null }> = [];
+    const reports: Array<{ at: number; report: ControlPlaneDeviceReport }> = [];
+    const appliedTokens: string[] = [];
+    const response = () => {
+      const headers = new Headers({ ETag: `"w:${server.revision}:d:0"` });
+      if (server.capability !== null) headers.set(CONTROL_PLANE_CADENCE_HEADER, server.capability);
+      if (!server.force200 && polls.at(-1)?.etag === headers.get("etag")) {
+        return new Response(null, { status: 304, headers });
+      }
+      return new Response(
+        JSON.stringify({
+          deviceId: "device-1",
+          workspace: null,
+          device: null,
+          desiredState: {},
+          revisions: { workspace: server.revision, device: 0 },
+          revisionToken: `w:${server.revision}:d:0`,
+          report: null,
+          connectivity: "never_reported",
+        }),
+        { status: 200, headers },
+      );
+    };
+    const client = new ControlPlaneClient({
+      identityProvider: async () => ({
+        cloudUrl: "https://cloud.resin.test",
+        accessToken: "test-token",
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        deviceId: "device-1",
+        installationId: "installation-1",
+        userId: "user-1",
+      }),
+      fetchImpl: async (_input, init = {}) => {
+        if (init.method === "POST") {
+          const report = ControlPlaneReportRequestSchema.parse(
+            JSON.parse(String(init.body)),
+          ).report;
+          reports.push({ at: Date.now(), report });
+          return server.reportOverride
+            ? server.reportOverride(report, init)
+            : new Response(null, { status: 200 });
+        }
+        polls.push({ at: Date.now(), etag: new Headers(init.headers).get("if-none-match") });
+        return server.getOverride ? server.getOverride(init) : response();
+      },
+    });
+    const module = new ControlPlaneRuntimeModule({
+      client,
+      deviceId: "device-1",
+      applyAdapter: {
+        async apply(desired, revisions, token, applyContext) {
+          appliedTokens.push(token);
+          if (server.applyOverride)
+            return server.applyOverride(desired, revisions, token, applyContext);
+          return { status: "applied", fields: {}, appliedAt: new Date().toISOString() };
+        },
+      },
+      random: () => 0,
+      ...options,
+    });
+    modules.push(module);
+    return { module, context, server, polls, reports, appliedTokens, response };
+  }
+
+  it.each([false, true])(
+    "quiets only after three successful unchanged polls (200=%s)",
+    async (force200) => {
+      const f = await fixture();
+      f.server.force200 = force200;
+      await f.module.start(f.context);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(f.polls).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(f.polls).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(f.polls).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.polls).toHaveLength(5);
+      expect(f.appliedTokens).toEqual(["w:1:d:0"]);
+      expect(f.reports.map(({ report }) => report.revisionToken)).toEqual(["w:1:d:0"]);
+      expect(f.polls.slice(1).every(({ etag }) => etag === '"w:1:d:0"')).toBe(true);
+    },
+  );
+
+  it.each([null, "adaptive-v2"])(
+    "uses legacy deadlines without a recognized capability (%s)",
+    async (capability) => {
+      const f = await fixture();
+      f.server.capability = capability;
+      await f.module.start(f.context);
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(f.polls.map(({ at }) => at - f.polls[0].at)).toEqual([
+        0, 30_000, 60_000, 90_000, 120_000, 150_000, 180_000,
+      ]);
+      expect(f.reports.map(({ at }) => at - f.reports[0].at)).toEqual([
+        0, 60_000, 120_000, 180_000,
+      ]);
+    },
+  );
+
+  it.each([null, "unknown"])(
+    "falls back immediately on a 304 losing capability (%s)",
+    async (capability) => {
+      const f = await fixture();
+      await f.module.start(f.context);
+      await vi.advanceTimersByTimeAsync(90_000);
+      f.server.capability = capability;
+      await vi.advanceTimersByTimeAsync(120_000);
+      // The old 60-second heartbeat deadline is already due at the fallback read.
+      expect(f.reports.map(({ at }) => at - f.reports[0].at)).toEqual([0, 210_000]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(f.polls.map(({ at }) => at - f.polls[0].at)).toEqual([
+        0, 30_000, 60_000, 90_000, 210_000, 240_000, 270_000,
+      ]);
+      expect(f.reports.at(-1)?.at).toBe(f.reports[0].at + 270_000);
+    },
+  );
+
+  it("negotiates adaptive cadence on a 304 from a legacy server", async () => {
+    const f = await fixture();
+    f.server.capability = null;
+    await f.module.start(f.context);
+    f.server.capability = CONTROL_PLANE_ADAPTIVE_CADENCE;
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(f.reports).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(f.polls).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.polls).toHaveLength(5);
+  });
+
+  it("posts an independently due heartbeat without reading or acknowledging unseen desired state", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(210_000);
+    f.server.revision = 2;
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(f.polls).toHaveLength(5);
+    expect(f.appliedTokens).toEqual(["w:1:d:0"]);
+    expect(f.reports.map(({ at, report }) => [at - f.reports[0].at, report.revisionToken])).toEqual(
+      [
+        [0, "w:1:d:0"],
+        [300_000, "w:1:d:0"],
+      ],
+    );
+    expect(f.reports[1].report.appliedAt).toBe(f.reports[0].report.appliedAt);
+    expect(f.reports[1].report.observedAt).not.toBe(f.reports[0].report.observedAt);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.appliedTokens).toEqual(["w:1:d:0", "w:2:d:0"]);
+    expect(f.reports.at(-1)?.report.revisionToken).toBe("w:2:d:0");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.polls.at(-1)?.at).toBe(f.polls[0].at + 360_000);
+  });
+
+  it("resets quiet cadence on a manual wake and coalesces bursts while a read is inflight", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(90_000);
+    const gate = Promise.withResolvers<Response>();
+    const entered = Promise.withResolvers<void>();
+    f.server.getOverride = async () => {
+      entered.resolve();
+      return gate.promise;
+    };
+    const wake = f.module.reconcileNow();
+    await entered.promise;
+    const burst = Array.from({ length: 100 }, () => f.module.reconcileNow());
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(f.polls).toHaveLength(5);
+    f.server.getOverride = null;
+    gate.resolve(f.response());
+    await Promise.all([wake, ...burst]);
+    expect(f.polls).toHaveLength(6);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(f.polls).toHaveLength(6);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.polls).toHaveLength(7);
+  });
+
+  it("does not accumulate timer work while a heartbeat POST is inflight", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    const gate = Promise.withResolvers<Response>();
+    f.server.reportOverride = async () => gate.promise;
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(f.polls).toHaveLength(5);
+    expect(f.reports).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(f.polls).toHaveLength(5);
+    const wake = f.module.reconcileNow();
+    f.server.reportOverride = null;
+    gate.resolve(new Response(null, { status: 200 }));
+    await wake;
+    expect(f.polls).toHaveLength(6);
+    expect(f.reports).toHaveLength(2);
+  });
+
+  it("bounds jitter positively for fast polls, quiet polls and heartbeats", async () => {
+    const f = await fixture({ random: () => 1 });
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(31_499);
+    expect(f.polls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.polls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(189_000);
+    expect(f.polls.map(({ at }) => at - f.polls[0].at)).toEqual([
+      0, 31_500, 63_000, 94_500, 220_500,
+    ]);
+    await vi.advanceTimersByTimeAsync(94_499);
+    expect(f.reports).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.reports[1].at - f.reports[0].at).toBe(315_000);
+    expect(f.polls).toHaveLength(5);
+  });
+
+  it("preserves explicit cadence overrides without jitter or quiet-mode scaling", async () => {
+    const f = await fixture({ pollIntervalMs: 100, reportIntervalMs: 250, random: () => 1 });
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(f.polls.map(({ at }) => at - f.polls[0].at)).toEqual([0, 100, 200, 300, 400, 500]);
+    expect(f.reports.map(({ at }) => at - f.reports[0].at)).toEqual([0, 250, 500]);
+  });
+
+  it("resets fast on read errors while due heartbeats continue independently", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(90_000);
+    f.server.getOverride = async () => {
+      throw new Error("offline read");
+    };
+    await vi.advanceTimersByTimeAsync(210_000);
+    expect(f.polls.map(({ at }) => at - f.polls[0].at)).toEqual([
+      0, 30_000, 60_000, 90_000, 210_000, 240_000, 270_000, 300_000,
+    ]);
+    expect(f.reports.map(({ at }) => at - f.reports[0].at)).toEqual([0, 300_000]);
+    expect(f.module.getState()).toBe("degraded");
+    f.server.getOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.module.getState()).toBe("ready");
+  });
+
+  it.each(["read", "apply"])(
+    "keeps an unresolved %s failure degraded across an unaligned heartbeat",
+    async (operation) => {
+      const f = await fixture({ pollIntervalMs: 100, reportIntervalMs: 250 });
+      await f.module.start(f.context);
+      if (operation === "read") {
+        f.server.getOverride = async () => {
+          throw new Error("desired state unavailable");
+        };
+      } else {
+        f.server.revision = 2;
+        f.server.applyOverride = async () => {
+          throw new Error("configuration apply failed");
+        };
+      }
+      await vi.advanceTimersByTimeAsync(200);
+      const failed = await f.module.getDiagnostics();
+      expect(failed.state).toBe("degraded");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(f.polls).toHaveLength(3);
+      expect(f.reports.map(({ at }) => at - f.reports[0].at)).toEqual([0, 250]);
+      expect(await f.module.getDiagnostics()).toMatchObject({
+        state: "degraded",
+        lastError: failed.lastError,
+        lastSuccessAt: failed.lastSuccessAt,
+      });
+      expect((await f.module.healthCheck()).status).toBe("degraded");
+      f.server.getOverride = null;
+      f.server.applyOverride = null;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await f.module.getDiagnostics()).toMatchObject({ state: "ready", lastError: null });
+    },
+  );
+
+  it("requires report recovery rather than a successful intervening poll to clear report degradation", async () => {
+    const f = await fixture({ pollIntervalMs: 100, reportIntervalMs: 250 });
+    await f.module.start(f.context);
+    f.server.reportOverride = async () => new Response(null, { status: 503 });
+    await vi.advanceTimersByTimeAsync(250);
+    const failed = await f.module.getDiagnostics();
+    expect(failed.state).toBe("degraded");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(f.polls).toHaveLength(4);
+    expect(f.reports).toHaveLength(2);
+    expect(await f.module.getDiagnostics()).toMatchObject({
+      state: "degraded",
+      lastError: failed.lastError,
+      lastSuccessAt: failed.lastSuccessAt,
+    });
+    f.server.reportOverride = null;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(f.polls).toHaveLength(4);
+    expect(f.reports).toHaveLength(3);
+    expect(await f.module.getDiagnostics()).toMatchObject({ state: "ready", lastError: null });
+  });
+
+  it("does not postpone a due poll when a slow heartbeat fails", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    const gate = Promise.withResolvers<Response>();
+    f.server.reportOverride = async () => gate.promise;
+    await vi.advanceTimersByTimeAsync(340_000);
+    expect(f.polls).toHaveLength(5);
+    gate.resolve(new Response(null, { status: 503 }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.polls).toHaveLength(6);
+    expect(f.polls.at(-1)?.at).toBeLessThanOrEqual(f.polls[0].at + 340_001);
+    f.server.reportOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.reports.at(-1)?.report.revisionToken).toBe("w:1:d:0");
+    expect(f.module.getState()).toBe("ready");
+  });
+
+  it("retries failed apply results before acknowledging an ETag", async () => {
+    const f = await fixture();
+    f.server.applyOverride = async () => ({ status: "error", fields: {}, appliedAt: null });
+    await f.module.start(f.context);
+    expect(await f.module.getDiagnostics()).toMatchObject({ revisionToken: null });
+    f.server.applyOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.polls.map(({ etag }) => etag)).toEqual([null, null]);
+    expect(f.reports.map(({ report }) => report.status)).toEqual(["error", "applied"]);
+    expect(await f.module.getDiagnostics()).toMatchObject({ revisionToken: "w:1:d:0" });
+  });
+
+  it("retries thrown apply errors without reporting success", async () => {
+    const f = await fixture();
+    f.server.applyOverride = async () => {
+      throw new Error("apply failed");
+    };
+    await f.module.start(f.context);
+    expect(f.reports).toHaveLength(0);
+    f.server.applyOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.polls.map(({ etag }) => etag)).toEqual([null, null]);
+    expect(f.reports.map(({ report }) => report.status)).toEqual(["applied"]);
+  });
+
+  it("never sends an older cached report after a newer apply succeeds but its report fails", async () => {
+    const f = await fixture({ reportIntervalMs: 60_000 });
+    await f.module.start(f.context);
+    f.server.revision = 2;
+    f.server.reportOverride = async () => new Response(null, { status: 503 });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await f.module.getDiagnostics()).toMatchObject({ revisionToken: "w:1:d:0" });
+    f.server.revision = 1;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.reports.map(({ report }) => report.revisionToken)).toEqual(["w:1:d:0", "w:2:d:0"]);
+    f.server.revision = 2;
+    f.server.reportOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.reports.at(-1)?.report.revisionToken).toBe("w:2:d:0");
+    expect(await f.module.getDiagnostics()).toMatchObject({ revisionToken: "w:2:d:0" });
+  });
+
+  it("retries an initial report failure without spinning on an unusable heartbeat deadline", async () => {
+    const f = await fixture();
+    f.server.reportOverride = async () => new Response(null, { status: 503 });
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(f.polls).toHaveLength(4);
+    expect(f.reports).toHaveLength(4);
+    expect(f.polls.every(({ etag }) => etag === null)).toBe(true);
+    f.server.reportOverride = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await f.module.getDiagnostics()).toMatchObject({ revisionToken: "w:1:d:0" });
+  });
+
+  it.each(["stop", "abort"])(
+    "does not rearm or apply after %s during startup GET",
+    async (action) => {
+      const f = await fixture();
+      const controller = new AbortController();
+      f.context.signal = controller.signal;
+      const gate = Promise.withResolvers<Response>();
+      const entered = Promise.withResolvers<AbortSignal | null | undefined>();
+      f.server.getOverride = async (init) => {
+        entered.resolve(init.signal);
+        return gate.promise;
+      };
+      const starting = f.module.start(f.context);
+      const signal = await entered.promise;
+      const pendingWake = f.module.reconcileNow();
+      const stopping = action === "stop" ? f.module.stop() : undefined;
+      if (action === "abort") controller.abort();
+      expect(signal?.aborted).toBe(true);
+      gate.resolve(f.response());
+      await Promise.all([starting, pendingWake, stopping]);
+      await vi.advanceTimersByTimeAsync(1_000_000);
+      await f.module.reconcileNow();
+      expect(f.polls).toHaveLength(1);
+      expect(f.appliedTokens).toHaveLength(0);
+      expect(f.reports).toHaveLength(0);
+      if (action === "stop") expect(f.module.getState()).toBe("stopped");
+    },
+  );
+
+  it("does not report or rearm when stopped during apply", async () => {
+    const f = await fixture();
+    const gate = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    f.server.applyOverride = async () => {
+      entered.resolve();
+      await gate.promise;
+      return { status: "applied", fields: {}, appliedAt: new Date().toISOString() };
+    };
+    const starting = f.module.start(f.context);
+    await entered.promise;
+    const stopping = f.module.stop();
+    gate.resolve();
+    await Promise.all([starting, stopping]);
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    expect(f.reports).toHaveLength(0);
+    expect(f.polls).toHaveLength(1);
+    expect(f.module.getState()).toBe("stopped");
+  });
+
+  it("does not acknowledge an inflight report or rearm after stop", async () => {
+    const f = await fixture();
+    const gate = Promise.withResolvers<Response>();
+    const entered = Promise.withResolvers<void>();
+    f.server.reportOverride = async () => {
+      entered.resolve();
+      return gate.promise;
+    };
+    const starting = f.module.start(f.context);
+    await entered.promise;
+    const stopping = f.module.stop();
+    gate.resolve(new Response(null, { status: 200 }));
+    await Promise.all([starting, stopping]);
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    expect(await f.module.getDiagnostics()).toMatchObject({
+      state: "stopped",
+      revisionToken: null,
+    });
+    expect(f.polls).toHaveLength(1);
+    expect(f.reports).toHaveLength(1);
+  });
+
+  it("clears an idle scheduled wake on abort", async () => {
+    const f = await fixture();
+    const controller = new AbortController();
+    f.context.signal = controller.signal;
+    await f.module.start(f.context);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    expect(f.polls).toHaveLength(1);
+    expect(f.reports).toHaveLength(1);
+  });
+
+  it("restarts with an unconditional apply/report against the new context", async () => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    await f.module.stop();
+    await f.module.start({ ...f.context, config: { ...f.context.config, logLevel: "debug" } });
+    expect(f.polls.map(({ etag }) => etag)).toEqual([null, null]);
+    expect(f.appliedTokens).toEqual(["w:1:d:0", "w:1:d:0"]);
+    expect(f.reports.map(({ report }) => report.revisionToken)).toEqual(["w:1:d:0", "w:1:d:0"]);
+  });
+});
+
+describe("control-plane capability wire compatibility", () => {
+  it("recognizes the documented case-insensitive HTTP header on a 304", async () => {
+    const client = new ControlPlaneClient({
+      identityProvider: async () => ({
+        cloudUrl: "https://cloud.resin.test",
+        accessToken: "test-token",
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        deviceId: "device-1",
+        installationId: "installation-1",
+        userId: "user-1",
+      }),
+      fetchImpl: async () =>
+        new Response(null, {
+          status: 304,
+          headers: { "resin-control-plane-cadence": "adaptive-v1" },
+        }),
+    });
+    expect(await client.getEffectiveState("device-1", '"w:1:d:0"')).toMatchObject({
+      adaptiveCadence: true,
+      notModified: true,
+      etag: '"w:1:d:0"',
+    });
   });
 });
