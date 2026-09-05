@@ -183,7 +183,14 @@ function findRawUsage(
     "thinkingTokens" in rawPayload ||
     "thinking_tokens" in rawPayload ||
     "totalTokens" in rawPayload ||
-    "total_tokens" in rawPayload
+    "total_tokens" in rawPayload ||
+    "costMicroUsd" in rawPayload ||
+    "cost_micro_usd" in rawPayload ||
+    "costMicros" in rawPayload ||
+    "cost_micros" in rawPayload ||
+    "cost_usd" in rawPayload ||
+    "costUsd" in rawPayload ||
+    "cost" in rawPayload
   ) {
     return rawPayload;
   }
@@ -315,12 +322,20 @@ function extractTokenComponents(
 }
 interface ExtractedCostAndDuration {
   costMicroUsd?: number;
+  costProvenance: NonNullable<ProviderReportedUsage["costProvenance"]>;
   durationMs?: number;
 }
 
 interface ExtractedProviderAndModel {
   provider: string;
   model?: string;
+}
+
+/** Parses an explicit USD value without treating blank or invalid values as zero. */
+function parseCostUsd(value: OmpTranscriptValue | undefined | null): number | undefined {
+  const text = asString(value)?.trim().replace(/^\$/, "").trim();
+  const amount = asNumber(value) ?? (text ? Number(text) : undefined);
+  return amount !== undefined && Number.isFinite(amount) && amount >= 0 ? amount : undefined;
 }
 
 /**
@@ -331,6 +346,7 @@ function extractCostAndDuration(
   rawPayload: OmpTranscriptPayload,
 ): ExtractedCostAndDuration {
   let costMicroUsd: number | undefined;
+  let costProvenance: ExtractedCostAndDuration["costProvenance"] = "unpriced";
 
   const directMicro =
     parseNonNegativeInt(rawUsage.costMicroUsd) ??
@@ -344,34 +360,24 @@ function extractCostAndDuration(
 
   if (directMicro !== undefined) {
     costMicroUsd = directMicro;
+    costProvenance = "source_reported";
   } else {
-    // OMP's own session usage prices each turn as `cost: { input, output, cacheRead,
-    // cacheWrite, total }`; the total is the provider-reported spend for the turn.
-    const rawCostUsd =
-      asNumber(rawUsage.cost_usd) ??
-      asNumber(rawUsage.costUsd) ??
-      asNumber(rawUsage.cost) ??
-      asNumber(asObject(rawUsage.cost)?.total) ??
-      asNumber(rawPayload.cost_usd) ??
-      asNumber(rawPayload.costUsd) ??
-      asNumber(rawPayload.cost);
-
-    if (rawCostUsd !== undefined && rawCostUsd >= 0) {
-      costMicroUsd = Math.round(rawCostUsd * 1_000_000);
-    } else {
-      const rawCostStr =
-        asString(rawUsage.cost_usd) ??
-        asString(rawUsage.costUsd) ??
-        asString(rawUsage.cost) ??
-        asString(rawPayload.cost_usd) ??
-        asString(rawPayload.costUsd);
-
-      if (rawCostStr !== undefined) {
-        const trimmed = rawCostStr.trim().replace(/^\$/, "");
-        const num = Number(trimmed);
-        if (Number.isFinite(num) && num >= 0) {
-          costMicroUsd = Math.round(num * 1_000_000);
-        }
+    const sourceCostUsd =
+      parseCostUsd(rawUsage.cost_usd) ??
+      parseCostUsd(rawUsage.costUsd) ??
+      parseCostUsd(rawUsage.cost) ??
+      parseCostUsd(rawPayload.cost_usd) ??
+      parseCostUsd(rawPayload.costUsd) ??
+      parseCostUsd(rawPayload.cost);
+    // OMP's `cost: { input, output, cacheRead, cacheWrite, total }` is a harness
+    // estimate, not provider billing. Explicit scalar monetary fields take precedence.
+    const harnessCostUsd = parseCostUsd(asObject(rawUsage.cost)?.total);
+    const costUsd = sourceCostUsd ?? harnessCostUsd;
+    if (costUsd !== undefined) {
+      const converted = Math.round(costUsd * 1_000_000);
+      if (Number.isFinite(converted)) {
+        costMicroUsd = converted;
+        costProvenance = sourceCostUsd !== undefined ? "source_reported" : "harness_estimate";
       }
     }
   }
@@ -416,7 +422,7 @@ function extractCostAndDuration(
     }
   }
 
-  return { costMicroUsd, durationMs };
+  return { costMicroUsd, costProvenance, durationMs };
 }
 
 /**
@@ -518,6 +524,7 @@ function buildProviderUsage(
       provider,
       accountingVersion,
       availability: "unavailable",
+      costProvenance: "unpriced",
     };
     if (model) usageObj.model = model;
     const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
@@ -533,7 +540,7 @@ function buildProviderUsage(
     hasAnyMetrics: hasTokenMetrics,
   } = extractTokenComponents(rawUsage, rawPayload);
 
-  const { costMicroUsd, durationMs } = extractCostAndDuration(rawUsage, rawPayload);
+  const { costMicroUsd, costProvenance, durationMs } = extractCostAndDuration(rawUsage, rawPayload);
 
   const hasMetrics = hasTokenMetrics || costMicroUsd !== undefined || durationMs !== undefined;
 
@@ -543,6 +550,7 @@ function buildProviderUsage(
         provider,
         accountingVersion,
         availability: explicitAvailability,
+        costProvenance,
       };
       if (model) usageObj.model = model;
       const parsed = ProviderReportedUsageSchema.safeParse(usageObj);
@@ -564,6 +572,7 @@ function buildProviderUsage(
     provider,
     accountingVersion,
     availability,
+    costProvenance,
   };
   if (model) usageObj.model = model;
   if (inputTokens !== undefined) usageObj.inputTokens = inputTokens;

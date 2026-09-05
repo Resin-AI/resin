@@ -14,21 +14,27 @@ export interface ToolLoggerShim {
   error(message: string, context?: Record<string, unknown>): Promise<void>;
 }
 
-export type ToolHandler<TInput = unknown, TOutput = unknown> = (
-  context: ToolContext<TInput>,
-) => Promise<TOutput> | TOutput;
+export type ToolHandler<
+  TInput = unknown,
+  TOutput = unknown,
+  TContext extends { input: TInput } = ToolContext<TInput>,
+> = (context: TContext) => Promise<TOutput> | TOutput;
 
-export interface LegacyToolDefinition<TInput = unknown, TOutput = unknown> {
-  handler: (input: TInput, context: ToolContext<TInput>) => Promise<TOutput> | TOutput;
+export interface LegacyToolDefinition<
+  TInput = unknown,
+  TOutput = unknown,
+  TContext extends { input: TInput } = ToolContext<TInput>,
+> {
+  handler: (input: TInput, context: TContext) => Promise<TOutput> | TOutput;
   name?: string;
   description?: string;
   parameters?: unknown;
   outputSchema?: unknown;
 }
 
-function isToolHandlerFunction<TInput, TOutput>(
-  value: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
-): value is ToolHandler<TInput, TOutput> {
+function isToolHandlerFunction<TInput, TOutput, TContext extends { input: TInput }>(
+  value: ToolHandler<TInput, TOutput, TContext> | LegacyToolDefinition<TInput, TOutput, TContext>,
+): value is ToolHandler<TInput, TOutput, TContext> {
   const tag = Object.prototype.toString.call(value);
   return tag === "[object Function]" || tag === "[object AsyncFunction]";
 }
@@ -37,9 +43,15 @@ function isToolHandlerFunction<TInput, TOutput>(
  * Defines the canonical generated-tool ABI.
  * Function passthrough; legacy `{handler}` adapted to `(context) => handler(context.input, context)`.
  */
-export function defineTool<TInput = unknown, TOutput = unknown>(
-  handlerOrDefinition: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
-): ToolHandler<TInput, TOutput> {
+export function defineTool<
+  TInput = unknown,
+  TOutput = unknown,
+  TContext extends { input: TInput } = ToolContext<TInput>,
+>(
+  handlerOrDefinition:
+    | ToolHandler<TInput, TOutput, TContext>
+    | LegacyToolDefinition<TInput, TOutput, TContext>,
+): ToolHandler<TInput, TOutput, TContext> {
   if (isToolHandlerFunction(handlerOrDefinition)) {
     return handlerOrDefinition;
   }
@@ -49,7 +61,7 @@ export function defineTool<TInput = unknown, TOutput = unknown>(
   ) {
     throw new TypeError("defineTool requires a callable handler");
   }
-  return (context: ToolContext<TInput>) => handlerOrDefinition.handler(context.input, context);
+  return (context: TContext) => handlerOrDefinition.handler(context.input, context);
 }
 
 /**

@@ -215,8 +215,8 @@ function createToolContext(invocationId, input, options = {}) {
         const res = await requestBroker("fs", "exists", { path });
         return res.exists;
       },
-      listDir: async (path = ".") => {
-        const res = await requestBroker("fs", "listDir", { path });
+      listDir: async (path = ".", options = {}) => {
+        const res = await requestBroker("fs", "listDir", { path, ...options });
         return res.entries;
       },
       stat: async (path) => {

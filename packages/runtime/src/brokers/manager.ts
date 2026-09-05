@@ -80,6 +80,7 @@ export type BrokerExecutionResult =
   | { success: boolean }
   | ReadFileResult
   | { exists: boolean }
+  | { entries: string[] }
   | FileStatResult
   | NetResponseResult
   | CommandExecuteResult
@@ -605,6 +606,7 @@ export class CapabilityBrokerManager {
             path: String(payload.path ?? ""),
             encoding:
               payload.encoding === "utf-8" ||
+              payload.encoding === "utf-8-strict" ||
               payload.encoding === "base64" ||
               payload.encoding === "buffer"
                 ? payload.encoding
@@ -672,15 +674,18 @@ export class CapabilityBrokerManager {
           context,
         );
       case "listDirectory":
-      case "listDir":
-        return this.fs.listDirectory(
+      case "listDir": {
+        const entries = await this.fs.listDirectory(
           {
             path: payload.path !== undefined ? String(payload.path) : undefined,
             recursive:
               payload.recursive === true ? true : payload.recursive === false ? false : undefined,
+            maxEntries: payload.maxEntries === undefined ? undefined : Number(payload.maxEntries),
           },
           context,
         );
+        return action === "listDir" ? { entries } : entries;
+      }
       case "exists":
         return this.fs.exists(
           {
@@ -780,6 +785,8 @@ export class CapabilityBrokerManager {
             secretEnv,
             stdin,
             timeoutMs: Number.isFinite(payload.timeoutMs) ? Number(payload.timeoutMs) : undefined,
+            readOnlyGit: payload.readOnlyGit === true,
+            truncateOutput: payload.truncateOutput === true,
             maxOutputSizeBytes: Number.isFinite(payload.maxOutputSizeBytes)
               ? Number(payload.maxOutputSizeBytes)
               : undefined,

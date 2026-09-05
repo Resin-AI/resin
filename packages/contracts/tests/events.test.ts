@@ -180,6 +180,7 @@ describe("NormalizedSessionEvents", () => {
         cachedInputTokens: 800,
         totalTokens: 2000,
         costMicroUsd: 15000,
+        costProvenance: "source_reported" as const,
         durationMs: 1250,
       };
 
@@ -196,6 +197,7 @@ describe("NormalizedSessionEvents", () => {
       };
 
       const parsed = ProviderReportedUsageSchema.parse(minimalComplete);
+      expect(parsed).toEqual(minimalComplete);
       expect(parsed.provider).toBe("openai");
       expect(parsed.accountingVersion).toBe("1.0.0");
       expect(parsed.availability).toBe("complete");
@@ -206,8 +208,43 @@ describe("NormalizedSessionEvents", () => {
       expect(parsed.reasoningTokens).toBeUndefined();
       expect(parsed.cachedInputTokens).toBeUndefined();
       expect(parsed.costMicroUsd).toBeUndefined();
+      expect(parsed).not.toHaveProperty("costProvenance");
       expect(parsed.durationMs).toBeUndefined();
     });
+
+    it.each([
+      { costMicroUsd: 0, costProvenance: "source_reported" },
+      { costMicroUsd: 0, costProvenance: "harness_estimate" },
+      { costMicroUsd: 7600, costProvenance: "harness_estimate" },
+      { costProvenance: "unpriced" },
+    ])("preserves explicit cost accounting $costProvenance / $costMicroUsd", (cost) => {
+      const usage = {
+        provider: "example-provider",
+        accountingVersion: "1.0.0",
+        availability: "complete",
+        totalTokens: 2000,
+        ...cost,
+      };
+      expect(ProviderReportedUsageSchema.parse(usage)).toEqual(usage);
+    });
+
+    it.each(["provider_billed", "", null, 0])(
+      "rejects invalid cost provenance %j",
+      (costProvenance) => {
+        const result = ProviderReportedUsageSchema.safeParse({
+          provider: "example-provider",
+          accountingVersion: "1.0.0",
+          availability: "partial",
+          costProvenance,
+        });
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.issues).toEqual(
+            expect.arrayContaining([expect.objectContaining({ path: ["costProvenance"] })]),
+          );
+        }
+      },
+    );
 
     it("allows explicit null for optional components in complete usage", () => {
       const completeWithNulls = {

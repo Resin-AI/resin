@@ -34,6 +34,7 @@ import {
   type BrokerContext,
   BrokerSecurityError,
 } from "./base.js";
+import { prepareReadOnlyGit } from "./read-only-git.js";
 import type { SecretBroker } from "./secret-broker.js";
 
 const PYTHON_TEST_MODULES: Record<string, true> = { unittest: true, pytest: true };
@@ -50,6 +51,8 @@ export interface CommandExecuteParams {
   stdin?: string | SecretReference;
   timeoutMs?: number;
   maxOutputSizeBytes?: number;
+  readOnlyGit?: boolean;
+  truncateOutput?: boolean;
   secretEnv?: Record<string, SecretReference | string>;
 }
 
@@ -61,6 +64,7 @@ export interface CommandExecuteResult {
   stdout: string;
   stderr: string;
   durationMs: number;
+  truncated?: boolean;
 }
 
 export interface SanitizedChildEnvironment {
@@ -993,7 +997,12 @@ export class CommandBroker extends BaseCapabilityBroker {
       params.timeoutMs ?? limits?.maxExecutionTimeMs ?? 30000,
       limits?.maxExecutionTimeMs ?? 30000,
     );
-    const maxOutputBytes = limits?.maxOutputSizeBytes ?? 10485760; // 10MB default
+    const maxOutputBytes = Math.min(
+      params.maxOutputSizeBytes ?? limits?.maxOutputSizeBytes ?? 10485760,
+      limits?.maxOutputSizeBytes ?? 10485760,
+    );
+    if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1)
+      throw new BrokerSecurityError("OPERATION_NOT_PERMITTED", "Invalid command output bound");
 
     const secretBroker = this.secretBroker ?? context.secretBroker;
     const redactor = secretBroker?.getRedactor();
@@ -1052,6 +1061,7 @@ export class CommandBroker extends BaseCapabilityBroker {
           }
         }
       }
+      if (params.readOnlyGit) Object.assign(childEnv, prepareReadOnlyGit(executable, args, cwd));
 
       // 3. Subprocess execution with process group termination and timeout protection
       const rawResult = await this.spawnSubprocess({
@@ -1062,6 +1072,7 @@ export class CommandBroker extends BaseCapabilityBroker {
         stdin: resolvedStdin,
         timeoutMs,
         maxOutputBytes,
+        truncateOutput: params.truncateOutput === true,
       });
 
       // 4. Output Redaction
@@ -1087,6 +1098,7 @@ export class CommandBroker extends BaseCapabilityBroker {
         stdout: sanitizedStdout,
         stderr: sanitizedStderr,
         durationMs: Date.now() - startTime,
+        ...(rawResult.truncated ? { truncated: true } : {}),
       };
     } catch (error) {
       const isSecErr = error instanceof BrokerSecurityError;
@@ -1137,6 +1149,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     stdin?: string;
     timeoutMs: number;
     maxOutputBytes: number;
+    truncateOutput?: boolean;
   }): Promise<CommandExecuteResult> {
     const { promise, resolve, reject } = withResolvers<CommandExecuteResult>();
     const startTime = Date.now();
@@ -1186,8 +1199,8 @@ export class CommandBroker extends BaseCapabilityBroker {
       }
     };
 
-    let stdoutData = "";
-    let stderrData = "";
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let totalBytes = 0;
     let timedOut = false;
     let killedForSize = false;
@@ -1200,32 +1213,23 @@ export class CommandBroker extends BaseCapabilityBroker {
       }, 50);
     }, options.timeoutMs);
 
-    if (options.stdin && child.stdin) {
-      child.stdin.write(options.stdin);
-      child.stdin.end();
-    }
+    if (child.stdin) child.stdin.end(options.stdin);
 
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      const str = chunk.toString();
-      totalBytes += Buffer.byteLength(str);
-      if (totalBytes > options.maxOutputBytes) {
+    const collect = (target: Buffer[], chunk: Buffer | string) => {
+      if (killedForSize) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const available = options.maxOutputBytes - totalBytes;
+      if (bytes.length > available) {
+        if (options.truncateOutput && available > 0) target.push(bytes.subarray(0, available));
         killedForSize = true;
         killProcessGroup("SIGKILL");
         return;
       }
-      stdoutData += str;
-    });
-
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      const str = chunk.toString();
-      totalBytes += Buffer.byteLength(str);
-      if (totalBytes > options.maxOutputBytes) {
-        killedForSize = true;
-        killProcessGroup("SIGKILL");
-        return;
-      }
-      stderrData += str;
-    });
+      totalBytes += bytes.length;
+      target.push(bytes);
+    };
+    child.stdout?.on("data", (chunk: Buffer | string) => collect(stdoutChunks, chunk));
+    child.stderr?.on("data", (chunk: Buffer | string) => collect(stderrChunks, chunk));
 
     child.on("error", (err) => {
       clearTimeout(timer);
@@ -1252,7 +1256,7 @@ export class CommandBroker extends BaseCapabilityBroker {
         return;
       }
 
-      if (killedForSize) {
+      if (killedForSize && !options.truncateOutput) {
         reject(
           new BrokerSecurityError(
             "MAX_OUTPUT_EXCEEDED",
@@ -1265,8 +1269,9 @@ export class CommandBroker extends BaseCapabilityBroker {
 
       resolve({
         exitCode: code ?? (signal ? 1 : 0),
-        stdout: stdoutData,
-        stderr: stderrData,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        ...(killedForSize ? { truncated: true } : {}),
         durationMs: Date.now() - startTime,
       });
     });
