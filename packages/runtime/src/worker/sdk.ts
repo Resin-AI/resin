@@ -11,6 +11,7 @@ import {
   isSecretReference,
 } from "@resin/contracts";
 import type { WorkerMessageType } from "./protocol.js";
+import { defineTool as defineToolShim } from "./tool-sdk-shim.js";
 
 // Re-export secret reference types and helpers for tool authors
 export {
@@ -243,9 +244,14 @@ export interface LegacyToolDefinition<TInput = unknown, TOutput = unknown> {
 }
 
 /**
- * Defines the canonical generated-tool ABI. Re-exported from dependency-free tool-sdk-shim.
+ * Defines the canonical generated-tool ABI using the public, broker-typed context.
+ * The dependency-free shim only passes through handlers/adapts the legacy input;
+ * the worker bootstrap and createToolContext supply the full public context.
  */
-export { defineTool } from "./tool-sdk-shim.js";
+type DefineTool = <TInput = unknown, TOutput = unknown>(
+  handlerOrDefinition: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
+) => ToolHandler<TInput, TOutput>;
+export const defineTool: DefineTool = defineToolShim;
 
 export type BrokerRequestHandlerFn = (
   service: "fs" | "net" | "cmd" | "secret",

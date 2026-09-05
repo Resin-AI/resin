@@ -7,6 +7,8 @@ import {
   componentContractDigest,
 } from "@resin/contracts";
 import ts from "typescript";
+import { COMPONENT_RUNTIME_TYPESCRIPT } from "./component-runtime-source.js";
+export type { ComponentComposition } from "@resin/contracts";
 
 export interface ComponentArtifact {
   contract: ComponentContract;
@@ -264,19 +266,18 @@ export function compileComponentComposition(
     if (!hasDefault) throw new Error("Missing component default handler");
     return `(() => {\n${statements.join("\n")}\n})()`;
   });
-  const source = `import { defineTool } from "@resin/runtime";
-const validate = ${assertComponentValue.toString()};
-const execute = ${executeComponentComposition.toString()};
-const composition = ${JSON.stringify(composition)};
+  const source = `import { defineTool, type ToolContext, type ComponentComposition } from "@resin/runtime";
+${COMPONENT_RUNTIME_TYPESCRIPT}
+const composition: ComponentComposition = ${JSON.stringify(composition)};
 const contracts = ${JSON.stringify(artifacts.map((artifact) => artifact.contract))};
-const handlers = [${handlers.join(",\n")}];
-export default defineTool(async (context) => execute(composition, context.input, async (index, input) => {
-  validate(contracts[index].inputSchema, input);
-  const output = await handlers[index]({ ...context, input });
-  validate(contracts[index].outputSchema, output);
+const handlers: unknown[] = [${handlers.join(",\n")}];
+export default defineTool(async (context: ToolContext<Record<string, unknown>>) => executeComponentComposition(composition, context.input, async (index, input) => {
+  assertComponentValue(contracts[index].inputSchema, input);
+  const handler = handlers[index];
+  if (typeof handler !== "function") throw new Error("Invalid component handler");
+  const output: unknown = await handler({ ...context, input });
+  assertComponentValue(contracts[index].outputSchema, output);
   return output;
-}, validate));`;
-  return ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
-  }).outputText;
+}));`;
+  return source;
 }

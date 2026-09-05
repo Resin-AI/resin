@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import {
   ComponentCompositionSchema,
   ComponentContractSchema,
   componentContractDigest,
 } from "@resin/contracts";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import { COMPONENT_RUNTIME_TYPESCRIPT } from "../../src/workflow/component-runtime-source.js";
 import {
   assertComponentValue,
   compileComponentComposition,
@@ -53,8 +56,11 @@ const composition = ComponentCompositionSchema.parse({
 
 // The VM is test-only. Production code is compiled as data, never executed by the compiler.
 async function executeCompiled(text: string, input: unknown) {
-  const script = text
-    .replace('import { defineTool } from "@resin/runtime";', "")
+  const script = ts
+    .transpileModule(text, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    })
+    .outputText.replace('import { defineTool } from "@resin/runtime";', "")
     .replace("export default ", "globalThis.handler = ");
   const sandbox = {
     structuredClone,
@@ -67,6 +73,21 @@ async function executeCompiled(text: string, input: unknown) {
 }
 
 describe("immutable component compositions", () => {
+  it("keeps the typed sandbox helper snapshot identical to its verified implementation", () => {
+    const implementation = readFileSync(
+      new URL("../../src/workflow/components.ts", import.meta.url),
+      "utf8",
+    );
+    const typed = implementation
+      .slice(
+        implementation.indexOf("export function assertComponentValue"),
+        implementation.indexOf("/** Reject impossible bindings"),
+      )
+      .replaceAll("export function ", "function ")
+      .replaceAll("export async function ", "async function ")
+      .trim();
+    expect(COMPONENT_RUNTIME_TYPESCRIPT).toBe(typed);
+  });
   it("compiles and executes a pinned multi-step graph using the existing tool ABI", async () => {
     const compiled = compileComponentComposition(composition, [
       { contract, source },

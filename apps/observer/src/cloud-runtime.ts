@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import {
   ISOTimestampSchema,
   IdentifierSchema,
@@ -476,6 +477,11 @@ export class CloudObservationClient {
     ObservationBatchRequestSchema.parse(requestPayload);
 
     const endpoint = `${identity.cloudUrl.replace(/\/+$/, "")}/v1/observations/batch`;
+    // Transport compression leaves the validated logical envelope unchanged.
+    const serialized = JSON.stringify(requestPayload);
+    const plainBytes = Buffer.byteLength(serialized);
+    const compressed = plainBytes >= 4096 ? gzipSync(serialized, { level: 1 }) : undefined;
+    const useCompression = compressed !== undefined && compressed.byteLength < plainBytes;
 
     let response: Response;
     try {
@@ -483,6 +489,7 @@ export class CloudObservationClient {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(useCompression ? { "Content-Encoding": "gzip" } : {}),
           Authorization: `Bearer ${identity.accessToken}`,
           "x-account-id": identity.accountId,
           "x-workspace-id": identity.workspaceId,
@@ -490,7 +497,7 @@ export class CloudObservationClient {
           "x-installation-id": identity.installationId,
           "x-protocol-version": PROTOCOL_VERSION,
         },
-        body: JSON.stringify(requestPayload),
+        body: useCompression ? new Uint8Array(compressed) : serialized,
       });
     } catch (error) {
       const refreshedIdentity = await this.recoverFromAuthError(error, identity, isRetry);
