@@ -243,6 +243,7 @@ describe("real host platform qualification", () => {
     expect(lane.checks.daemon.diagnostics).toBe(true);
     expect(lane.checks.mcp.catalogRefresh).toBe(true);
     expect(lane.checks.mcp.toolInvocation).toBe(true);
+    expect(lane.checks.mcp.searchDisabledByDefault).toBe(true);
     expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
     expect(lane.checks.cleanHome.telemetryEnabled).toBe(true);
     expect(lane.checks.cleanHome.noLegacyTokens).toBe(true);
