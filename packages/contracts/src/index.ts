@@ -11,6 +11,7 @@ export * from "./events.js";
 
 // Tools & Manifests
 export * from "./tools.js";
+export * from "./components.js";
 
 // Capabilities & Envelopes
 export * from "./capabilities.js";

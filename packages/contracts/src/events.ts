@@ -9,20 +9,21 @@ import {
 } from "./common.js";
 
 /**
- * Availability state of provider-reported usage metrics.
- * - complete: provider returned authoritative accounting including totalTokens.
- * - partial: provider returned some usage metrics, but total or breakdown may be incomplete.
- * - unavailable: provider does not report token accounting; usage is never inferred.
+ * Availability state of reported usage metrics, independent of cost provenance.
+ * - complete: source returned token accounting including totalTokens.
+ * - partial: source returned some usage metrics, but total or breakdown may be incomplete.
+ * - unavailable: source does not report token accounting; usage is never inferred.
  */
 export const ProviderUsageAvailabilitySchema = z.enum(["complete", "partial", "unavailable"]);
 
 export type ProviderUsageAvailability = z.infer<typeof ProviderUsageAvailabilitySchema>;
 
 /**
- * Normalized provider-reported usage schema.
- * Records authoritative provider accounting for model executions.
- * Explicit nonnegative token, cost, and duration components matching cloud trajectory usage.
+ * Normalized usage reported by a provider or harness for model executions.
+ * Explicit nonnegative token, cost, and duration components use canonical units.
  * Missing/unsupported components remain absent/null rather than synthesized.
+ * Cost provenance distinguishes source monetary fields from harness estimates;
+ * neither source-reported values nor estimates establish provider billing.
  */
 export const ProviderReportedUsageSchema = z
   .object({
@@ -36,6 +37,8 @@ export const ProviderReportedUsageSchema = z
     cachedInputTokens: z.number().int().nonnegative().optional().nullable(),
     totalTokens: z.number().int().nonnegative().optional().nullable(),
     costMicroUsd: z.number().int().nonnegative().optional().nullable(),
+    // Omission supports legacy records; unpriced means no usable monetary value, not free.
+    costProvenance: z.enum(["source_reported", "harness_estimate", "unpriced"]).optional(),
     durationMs: z.number().int().nonnegative().optional().nullable(),
   })
   .strict()

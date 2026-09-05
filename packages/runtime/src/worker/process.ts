@@ -104,6 +104,8 @@ export class WorkerProcess {
   private readonly logs: LogMessage[] = [];
   private readonly progress: ProgressMessage[] = [];
   private timeoutTimer: NodeJS.Timeout | null = null;
+  private readonly pendingBrokerWork = new Set<Promise<void>>();
+  private isFinalizationScheduled = false;
 
   constructor(private readonly options: WorkerProcessOptions) {}
 
@@ -122,6 +124,7 @@ export class WorkerProcess {
     input: CanonicalJsonValue,
     context?: { sessionId?: string; workspaceId?: string; toolId?: string; version?: string },
   ): Promise<WorkerExecutionResult> {
+    this.isFinalizationScheduled = false;
     const startTime = Date.now();
     const timeoutMs = this.options.timeoutMs ?? 30000;
     const denoPath = resolveDenoBinary(this.options.denoExecutable);
@@ -162,30 +165,25 @@ export class WorkerProcess {
       }
     }
 
-    let importMapArg: string | undefined;
-    if (this.options.importMap) {
-      const mergedMap: Record<string, string> = {
-        "@resin/runtime": shimFilePath,
-        ...this.options.importMap,
-      };
-      const importMapPath = path.join(this.scratchDir, "import_map.json");
-      fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
-      importMapArg = `--import-map=${importMapPath}`;
-
-      for (const target of Object.values(this.options.importMap)) {
-        if (!target) continue;
-        const filePath = target.startsWith("file://")
-          ? fileURLToPath(target)
-          : path.resolve(target);
-        const dir = path.dirname(filePath);
-        allowReadSet.add(dir);
-        allowReadSet.add(filePath);
-        try {
-          allowReadSet.add(fs.realpathSync(dir));
-          allowReadSet.add(fs.realpathSync(filePath));
-        } catch {
-          // Ignore path resolution errors
-        }
+    // The canonical SDK must be available even when no custom dependency map is supplied.
+    const mergedMap: Record<string, string> = {
+      ...this.options.importMap,
+      "@resin/runtime": shimFilePath,
+    };
+    const importMapPath = path.join(this.scratchDir, "import_map.json");
+    fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
+    const importMapArg = `--import-map=${importMapPath}`;
+    for (const target of Object.values(mergedMap)) {
+      if (!target) continue;
+      const filePath = target.startsWith("file://") ? fileURLToPath(target) : path.resolve(target);
+      const dir = path.dirname(filePath);
+      allowReadSet.add(dir);
+      allowReadSet.add(filePath);
+      try {
+        allowReadSet.add(fs.realpathSync(dir));
+        allowReadSet.add(fs.realpathSync(filePath));
+      } catch {
+        // Ignore path resolution errors
       }
     }
 
@@ -268,7 +266,7 @@ export class WorkerProcess {
     }, timeoutMs);
 
     // 4. Stdio Handling
-    this.childProcess.stdout?.on("data", async (chunk: Buffer) => {
+    this.childProcess.stdout?.on("data", (chunk: Buffer) => {
       observedOutputBytes += chunk.length;
       if (observedOutputBytes > maxOutputBytes) {
         this.terminateProcessTree("SIGKILL");
@@ -287,7 +285,7 @@ export class WorkerProcess {
       try {
         const messages = this.decoder.push(chunk);
         for (const msg of messages) {
-          await this.handleIncomingMessage(msg, invocationId, startTime, finalize);
+          this.handleIncomingMessage(msg, invocationId, startTime, finalize);
         }
       } catch (decodeErr) {
         this.logs.push({
@@ -339,6 +337,9 @@ export class WorkerProcess {
 
     this.childProcess.on("close", (code, signal) => {
       if (isSettled) return;
+      if (this.isFinalizationScheduled && (code === 0 || code === null)) {
+        return;
+      }
       const isCrash = code !== 0 && code !== null;
       finalize({
         status: "error",
@@ -394,12 +395,35 @@ export class WorkerProcess {
     return promise;
   }
 
-  private async handleIncomingMessage(
+  private scheduleFinalization(action: () => Promise<void>): void {
+    if (this.isFinalizationScheduled) return;
+    this.isFinalizationScheduled = true;
+    void (async () => {
+      try {
+        await action();
+      } catch (err: unknown) {
+        if (!this.isDisposed) {
+          this.logs.push({
+            id: `log_finalize_err_${Date.now()}`,
+            type: "log",
+            timestamp: Date.now(),
+            version: "1.0.0",
+            invocationId: "unknown",
+            level: "error",
+            message: `Finalization error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      }
+    })();
+  }
+
+  private handleIncomingMessage(
     msg: WorkerMessage,
     invocationId: string,
     startTime: number,
     finalize: (res: WorkerExecutionResult) => void,
-  ): Promise<void> {
+  ): void {
+    if (this.isDisposed) return;
     switch (msg.type) {
       case "progress": {
         this.progress.push(msg);
@@ -416,41 +440,47 @@ export class WorkerProcess {
         break;
       }
       case "broker_request": {
-        await this.handleBrokerRequest(msg);
+        this.dispatchBrokerRequest(msg, invocationId);
         break;
       }
       case "result": {
-        finalize({
-          status: "success",
-          output: msg.output,
-          durationMs: msg.durationMs || Date.now() - startTime,
-          resourceUsage: msg.resourceUsage,
-          logs: this.logs,
-          progress: this.progress,
+        this.scheduleFinalization(async () => {
+          await this.waitForPendingBrokerWork();
+          finalize({
+            status: "success",
+            output: msg.output,
+            durationMs: msg.durationMs || Date.now() - startTime,
+            resourceUsage: msg.resourceUsage,
+            logs: this.logs,
+            progress: this.progress,
+          });
         });
         break;
       }
       case "error": {
-        const isValidation = msg.errorType === "validation_error";
-        const isTimeout = msg.errorType === "timeout";
-        const isCancelled = msg.errorType === "cancelled";
-        finalize({
-          status: isValidation
-            ? "validation_error"
-            : isTimeout
-              ? "timeout"
-              : isCancelled
-                ? "cancelled"
-                : "error",
-          error: {
-            type: msg.errorType,
-            message: msg.message,
-            stack: msg.stack,
-            details: msg.details,
-          },
-          durationMs: Date.now() - startTime,
-          logs: this.logs,
-          progress: this.progress,
+        this.scheduleFinalization(async () => {
+          await this.waitForPendingBrokerWork();
+          const isValidation = msg.errorType === "validation_error";
+          const isTimeout = msg.errorType === "timeout";
+          const isCancelled = msg.errorType === "cancelled";
+          finalize({
+            status: isValidation
+              ? "validation_error"
+              : isTimeout
+                ? "timeout"
+                : isCancelled
+                  ? "cancelled"
+                  : "error",
+            error: {
+              type: msg.errorType,
+              message: msg.message,
+              stack: msg.stack,
+              details: msg.details,
+            },
+            durationMs: Date.now() - startTime,
+            logs: this.logs,
+            progress: this.progress,
+          });
         });
         break;
       }
@@ -459,7 +489,43 @@ export class WorkerProcess {
     }
   }
 
-  private async handleBrokerRequest(msg: BrokerRequestMessage): Promise<void> {
+  private dispatchBrokerRequest(msg: BrokerRequestMessage, invocationId: string): void {
+    if (this.isDisposed) return;
+    const { promise: task, resolve } = withResolvers<void>();
+    this.pendingBrokerWork.add(task);
+
+    void (async () => {
+      try {
+        await this.handleBrokerRequest(msg, invocationId);
+      } catch (err: unknown) {
+        if (!this.isDisposed) {
+          this.logs.push({
+            id: `log_broker_err_${Date.now()}`,
+            type: "log",
+            timestamp: Date.now(),
+            version: "1.0.0",
+            invocationId,
+            level: "error",
+            message: `Broker dispatch error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      } finally {
+        this.pendingBrokerWork.delete(task);
+        resolve();
+      }
+    })();
+  }
+
+  private async waitForPendingBrokerWork(): Promise<void> {
+    while (this.pendingBrokerWork.size > 0 && !this.isDisposed) {
+      await Promise.allSettled(Array.from(this.pendingBrokerWork));
+    }
+  }
+
+  private async handleBrokerRequest(
+    msg: BrokerRequestMessage,
+    invocationId: string,
+  ): Promise<void> {
     if (!this.options.brokerHandler) {
       const response: BrokerResponseMessage = {
         id: `brsp_${Date.now()}`,
@@ -473,12 +539,12 @@ export class WorkerProcess {
           message: "No broker request handler registered on host",
         },
       };
-      this.writeMessage(response);
+      this.sendBrokerResponse(response, invocationId);
       return;
     }
-
     try {
       const result = await this.options.brokerHandler(msg.service, msg.action, msg.payload);
+      if (this.isDisposed) return;
       const response: BrokerResponseMessage = {
         id: `brsp_${Date.now()}`,
         type: "broker_response",
@@ -488,8 +554,9 @@ export class WorkerProcess {
         success: true,
         payload: result,
       };
-      this.writeMessage(response);
+      this.sendBrokerResponse(response, invocationId);
     } catch (err: unknown) {
+      if (this.isDisposed) return;
       const response: BrokerResponseMessage = {
         id: `brsp_${Date.now()}`,
         type: "broker_response",
@@ -502,16 +569,44 @@ export class WorkerProcess {
           message: err instanceof Error ? err.message : String(err),
         },
       };
+      this.sendBrokerResponse(response, invocationId);
+    }
+  }
+
+  private sendBrokerResponse(response: BrokerResponseMessage, invocationId: string): void {
+    if (this.isDisposed) return;
+    try {
       this.writeMessage(response);
+    } catch (writeErr: unknown) {
+      if (this.isDisposed) return;
+      this.logs.push({
+        id: `log_broker_write_err_${Date.now()}`,
+        type: "log",
+        timestamp: Date.now(),
+        version: "1.0.0",
+        invocationId,
+        level: "error",
+        message: `Failed to write broker response: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
+      });
     }
   }
 
   private writeMessage(msg: WorkerMessage): void {
     if (!this.childProcess || !this.childProcess.stdin || this.childProcess.stdin.destroyed) {
-      return;
+      if (this.isDisposed) {
+        return;
+      }
+      throw new Error("Worker process stdin is not writable");
     }
-    const line = WorkerFrameEncoder.encodeNDJSON(msg);
-    this.childProcess.stdin.write(line);
+    try {
+      const line = WorkerFrameEncoder.encodeNDJSON(msg);
+      this.childProcess.stdin.write(line);
+    } catch (err) {
+      if (this.isDisposed) {
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -565,6 +660,8 @@ export class WorkerProcess {
   cleanup(): void {
     if (this.isDisposed) return;
     this.isDisposed = true;
+    this.isFinalizationScheduled = false;
+    this.pendingBrokerWork.clear();
 
     if (this.timeoutTimer) {
       clearTimeout(this.timeoutTimer);

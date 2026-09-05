@@ -11,6 +11,7 @@ import {
   isSecretReference,
 } from "@resin/contracts";
 import type { WorkerMessageType } from "./protocol.js";
+import { defineTool as defineToolShim } from "./tool-sdk-shim.js";
 
 // Re-export secret reference types and helpers for tool authors
 export {
@@ -30,14 +31,19 @@ export {
 export interface FsBrokerClient {
   readFile(
     filePath: string,
-    encoding?: "utf-8" | "base64" | "buffer",
+    encoding?: "utf-8" | "utf-8-strict" | "base64" | "buffer",
   ): Promise<string | Uint8Array>;
   writeFile(filePath: string, content: string | Uint8Array): Promise<void>;
   exists(filePath: string): Promise<boolean>;
-  listDir(dirPath?: string): Promise<string[]>;
-  stat(
-    targetPath: string,
-  ): Promise<{ size: number; isFile: boolean; isDirectory: boolean; mtime: string }>;
+  listDir(dirPath?: string, options?: { maxEntries?: number }): Promise<string[]>;
+  stat(targetPath: string): Promise<{
+    size: number;
+    isFile: boolean;
+    isDirectory: boolean;
+    mtime: string;
+    isSymbolicLink?: boolean;
+    mode?: number;
+  }>;
   removeFile(filePath: string): Promise<void>;
 }
 
@@ -89,9 +95,11 @@ export interface CmdBrokerClient {
       stdin?: string | SecretReference;
       timeoutMs?: number;
       maxOutputSizeBytes?: number;
+      readOnlyGit?: boolean;
+      truncateOutput?: boolean;
       secretEnv?: Record<string, SecretReference | string>;
     },
-  ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  ): Promise<{ exitCode: number; stdout: string; stderr: string; truncated?: boolean }>;
 }
 
 /**
@@ -243,9 +251,14 @@ export interface LegacyToolDefinition<TInput = unknown, TOutput = unknown> {
 }
 
 /**
- * Defines the canonical generated-tool ABI. Re-exported from dependency-free tool-sdk-shim.
+ * Defines the canonical generated-tool ABI using the public, broker-typed context.
+ * The dependency-free shim only passes through handlers/adapts the legacy input;
+ * the worker bootstrap and createToolContext supply the full public context.
  */
-export { defineTool } from "./tool-sdk-shim.js";
+type DefineTool = <TInput = unknown, TOutput = unknown>(
+  handlerOrDefinition: ToolHandler<TInput, TOutput> | LegacyToolDefinition<TInput, TOutput>,
+) => ToolHandler<TInput, TOutput>;
+export const defineTool: DefineTool = defineToolShim;
 
 export type BrokerRequestHandlerFn = (
   service: "fs" | "net" | "cmd" | "secret",
@@ -269,7 +282,10 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
   }
 
   readonly fs: FsBrokerClient = {
-    readFile: async (filePath: string, encoding: "utf-8" | "base64" | "buffer" = "utf-8") => {
+    readFile: async (
+      filePath: string,
+      encoding: "utf-8" | "utf-8-strict" | "base64" | "buffer" = "utf-8",
+    ) => {
       const res = await this.request<{ content: string | Uint8Array }>("fs", "readFile", {
         path: filePath,
         encoding,
@@ -289,8 +305,11 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
       const res = await this.request<{ exists: boolean }>("fs", "exists", { path: filePath });
       return res.exists;
     },
-    listDir: async (dirPath = ".") => {
-      const res = await this.request<{ entries: string[] }>("fs", "listDir", { path: dirPath });
+    listDir: async (dirPath = ".", options = {}) => {
+      const res = await this.request<{ entries: string[] }>("fs", "listDir", {
+        path: dirPath,
+        ...options,
+      });
       return res.entries;
     },
     stat: async (targetPath: string) => {
@@ -299,6 +318,8 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
         isFile: boolean;
         isDirectory: boolean;
         mtime: string;
+        isSymbolicLink?: boolean;
+        mode?: number;
       }>("fs", "stat", { path: targetPath });
     },
     removeFile: async (filePath: string) => {
@@ -376,18 +397,21 @@ export class DefaultToolBrokerClient implements ToolBrokerClient {
         stdin?: string | SecretReference;
         timeoutMs?: number;
         maxOutputSizeBytes?: number;
+        readOnlyGit?: boolean;
+        truncateOutput?: boolean;
         secretEnv?: Record<string, SecretReference | string>;
       } = {},
     ) => {
-      return await this.request<{ exitCode: number; stdout: string; stderr: string }>(
-        "cmd",
-        "exec",
-        {
-          command,
-          args,
-          ...options,
-        },
-      );
+      return await this.request<{
+        exitCode: number;
+        stdout: string;
+        stderr: string;
+        truncated?: boolean;
+      }>("cmd", "exec", {
+        command,
+        args,
+        ...options,
+      });
     },
   };
 

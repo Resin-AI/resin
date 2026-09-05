@@ -384,58 +384,175 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(usage.cachedInputTokens).toBe(500);
       expect(usage.reasoningTokens).toBe(120);
       expect(usage.costMicroUsd).toBe(12500);
+      expect(usage.costProvenance).toBe("source_reported");
       expect(usage.durationMs).toBe(1840);
-
-      // Validate against shared schema
-      expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
     });
 
-    it("reads OMP's native usage shape including cacheRead", () => {
-      // OMP session lines carry `usage: { input, output, cacheRead, cacheWrite, totalTokens }`;
-      // cacheRead was silently dropped, so per-turn context re-send never reached the cloud.
+    it.each([
+      { total: 0.0076, costMicroUsd: 7600, costProvenance: "harness_estimate" },
+      { total: 0, costMicroUsd: 0, costProvenance: "harness_estimate" },
+      { total: undefined, costMicroUsd: undefined, costProvenance: "unpriced" },
+    ])(
+      "reads native OMP usage with cost total $total and cacheRead",
+      ({ total, costMicroUsd, costProvenance }) => {
+        // OMP session lines carry `usage: { input, output, cacheRead, cacheWrite, totalTokens }`;
+        // cacheRead was silently dropped, so per-turn context re-send never reached the cloud.
+        const record: RawHarnessRecord = {
+          recordId: "rec-usage-omp-native-1",
+          sessionId: "sess-usage-1",
+          harnessId: "omp",
+          sequenceNumber: 9,
+          recordType: "transcript_line",
+          timestamp: "2026-08-17T12:00:09.000Z",
+          cursor: { offset: 0, line: 9, sequence: 9, timestamp: "2026-08-17T12:00:09.000Z" },
+          rawPayload: JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "ok",
+            provider: "google-antigravity",
+            model: "gemini-3.8-flash",
+            usage: {
+              input: 5978,
+              output: 33,
+              cacheRead: 41020,
+              cacheWrite: 0,
+              totalTokens: 47031,
+              cost: {
+                input: 0.0059,
+                output: 0.0001,
+                cacheRead: 0.0016,
+                cacheWrite: 0,
+                total,
+              },
+            },
+          }),
+          metadata: {},
+        };
+        // SAFETY: Decoded event is an IntermediateMessageEvent.
+        const decoded = decoder.decode(record) as IntermediateMessageEvent;
+        const usage = decoded.providerUsage!;
+        expect(usage.inputTokens).toBe(5978);
+        expect(usage.outputTokens).toBe(33);
+        expect(usage.cachedInputTokens).toBe(41020);
+        expect(usage.totalTokens).toBe(47031);
+        expect(usage.availability).toBe("complete");
+        expect(usage.costMicroUsd).toBe(costMicroUsd);
+        expect(usage.costProvenance).toBe(costProvenance);
+        if (costMicroUsd === undefined) expect(usage).not.toHaveProperty("costMicroUsd");
+      },
+    );
+
+    it.each([
+      {
+        name: "scalar USD zero overrides a positive harness estimate",
+        fields: { cost_usd: 0, cost: { total: 0.0076 } },
+        costMicroUsd: 0,
+      },
+      {
+        name: "micro USD zero overrides a positive scalar",
+        fields: { cost_micro_usd: 0, cost_usd: 0.0076 },
+        costMicroUsd: 0,
+      },
+      {
+        name: "string micro USD remains exact",
+        fields: { costMicroUsd: "12345" },
+        costMicroUsd: 12345,
+      },
+      {
+        name: "string scalar USD zero is reported",
+        fields: { costUsd: "$0" },
+        costMicroUsd: 0,
+      },
+      {
+        name: "string scalar cost is converted to micro USD",
+        fields: { cost: "$0.0035" },
+        costMicroUsd: 3500,
+      },
+      {
+        name: "blank scalar cost is not free",
+        fields: { costUsd: " " },
+        costMicroUsd: undefined,
+      },
+      {
+        name: "null scalar cost is not free",
+        fields: { costUsd: null },
+        costMicroUsd: undefined,
+      },
+    ])("preserves source monetary fields: $name", ({ fields, costMicroUsd }) => {
       const record: RawHarnessRecord = {
-        recordId: "rec-usage-omp-native-1",
-        sessionId: "sess-usage-1",
+        recordId: "rec-usage-source-cost",
+        sessionId: "sess-usage-source-cost",
         harnessId: "omp",
-        sequenceNumber: 9,
+        sequenceNumber: 1,
         recordType: "transcript_line",
-        timestamp: "2026-08-17T12:00:09.000Z",
-        cursor: { offset: 0, line: 9, sequence: 9, timestamp: "2026-08-17T12:00:09.000Z" },
+        timestamp: "2026-08-17T12:00:00.000Z",
+        cursor: { offset: 0, line: 1, sequence: 1, timestamp: "2026-08-17T12:00:00.000Z" },
         rawPayload: JSON.stringify({
           type: "message",
           role: "assistant",
-          content: "ok",
-          provider: "google-antigravity",
-          model: "gemini-3.8-flash",
-          usage: {
-            input: 5978,
-            output: 33,
-            cacheRead: 41020,
-            cacheWrite: 0,
-            totalTokens: 47031,
-            cost: {
-              input: 0.0059,
-              output: 0.0001,
-              cacheRead: 0.0016,
-              cacheWrite: 0,
-              total: 0.0076,
-            },
-          },
+          content: "Cost report.",
+          usage: { ...fields, input_tokens: 100, output_tokens: 20 },
         }),
         metadata: {},
       };
-      // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decoded = decoder.decode(record) as IntermediateMessageEvent;
-      const usage = decoded.providerUsage!;
-      expect(usage.inputTokens).toBe(5978);
-      expect(usage.outputTokens).toBe(33);
-      expect(usage.cachedInputTokens).toBe(41020);
-      expect(usage.totalTokens).toBe(47031);
-      // The per-turn spend is what a tool saves; the flat $3/M fallback overstated
-      // a cache-heavy Flash session five-fold.
-      expect(usage.costMicroUsd).toBe(7600);
-      expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
+      expect(decoded.providerUsage).toEqual({
+        provider: "omp",
+        accountingVersion: "omp-v1",
+        availability: "partial",
+        inputTokens: 100,
+        outputTokens: 20,
+        costProvenance: costMicroUsd === undefined ? "unpriced" : "source_reported",
+        ...(costMicroUsd === undefined ? {} : { costMicroUsd }),
+      });
+      if (costMicroUsd === undefined) {
+        expect(decoded.providerUsage).not.toHaveProperty("costMicroUsd");
+      }
     });
+
+    it.each([
+      { costUsd: 0.0035, costMicroUsd: 3500 },
+      { costUsd: 0, costMicroUsd: 0 },
+    ])(
+      "preserves top-level monetary-only records with cost $costUsd",
+      ({ costUsd, costMicroUsd }) => {
+        const record: RawHarnessRecord = {
+          recordId: "rec-usage-top-level-cost",
+          sessionId: "sess-usage-top-level-cost",
+          harnessId: "omp",
+          sequenceNumber: 1,
+          recordType: "transcript_line",
+          timestamp: "2026-08-17T12:00:00.000Z",
+          cursor: { offset: 0, line: 1, sequence: 1, timestamp: "2026-08-17T12:00:00.000Z" },
+          rawPayload: JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "Monetary-only report.",
+            costUsd,
+          }),
+          metadata: {},
+        };
+        const scalar = decoder.decode(record) as IntermediateMessageEvent;
+        expect(scalar.providerUsage).toEqual({
+          provider: "omp",
+          accountingVersion: "omp-v1",
+          availability: "partial",
+          costMicroUsd,
+          costProvenance: "source_reported",
+        });
+
+        const micro = decoder.decode({
+          ...record,
+          rawPayload: JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "Monetary-only report.",
+            costMicroUsd,
+          }),
+        }) as IntermediateMessageEvent;
+        expect(micro.providerUsage).toEqual(scalar.providerUsage);
+      },
+    );
 
     it("defaults provider to 'omp' and leaves model undefined when omitted in raw record", () => {
       const record: RawHarnessRecord = {
@@ -470,6 +587,8 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(usage.inputTokens).toBe(200);
       expect(usage.outputTokens).toBe(80);
       expect(usage.totalTokens).toBe(280);
+      expect(usage).not.toHaveProperty("costMicroUsd");
+      expect(usage.costProvenance).toBe("unpriced");
 
       expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
     });
@@ -574,6 +693,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(usage.outputTokens).toBeUndefined();
       expect(usage.totalTokens).toBeUndefined();
       expect(usage.costMicroUsd).toBe(5000);
+      expect(usage.costProvenance).toBe("source_reported");
       expect(usage.durationMs).toBe(450);
       expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
     });
@@ -637,6 +757,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(usage.cachedInputTokens).toBeUndefined();
       expect(usage.reasoningTokens).toBeUndefined();
       expect(usage.costMicroUsd).toBeUndefined();
+      expect(usage.costProvenance).toBe("unpriced");
       expect(usage.durationMs).toBeUndefined();
 
       expect(() => ProviderReportedUsageSchema.parse(usage)).not.toThrow();
@@ -888,6 +1009,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       // SAFETY: Decoded event is an IntermediateMessageEvent.
       const decodedCostUsd = decoder.decode(costUsdRecord) as IntermediateMessageEvent;
       expect(decodedCostUsd.providerUsage?.costMicroUsd).toBe(3500);
+      expect(decodedCostUsd.providerUsage?.costProvenance).toBe("source_reported");
 
       // 3. Top-level token fields
       const topLevelRecord: RawHarnessRecord = {

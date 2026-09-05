@@ -31,7 +31,7 @@ export interface FileStatResult {
 
 export interface ReadFileParams {
   path: string;
-  encoding?: "utf-8" | "base64" | "buffer";
+  encoding?: "utf-8" | "utf-8-strict" | "base64" | "buffer";
 }
 
 export interface ReadFileResult {
@@ -71,6 +71,7 @@ export interface CreateDirectoryParams {
 export interface ListDirectoryParams {
   path?: string;
   recursive?: boolean;
+  maxEntries?: number;
 }
 
 /**
@@ -487,10 +488,10 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       }
 
       const stat = fs.statSync(targetPath);
-      if (stat.isDirectory()) {
+      if (!stat.isFile()) {
         throw new BrokerSecurityError(
           "OPERATION_NOT_PERMITTED",
-          `Cannot readFile on directory: ${params.path}`,
+          `Cannot readFile on non-regular file: ${params.path}`,
         );
       }
 
@@ -507,7 +508,12 @@ export class FilesystemBroker extends BaseCapabilityBroker {
 
       const encoding = params.encoding ?? "utf-8";
       const buffer = fs.readFileSync(targetPath);
-      const content = encoding === "base64" ? buffer.toString("base64") : buffer.toString("utf-8");
+      const content =
+        encoding === "base64"
+          ? buffer.toString("base64")
+          : encoding === "utf-8-strict"
+            ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer)
+            : buffer.toString("utf-8");
 
       this.recordAudit(
         "readFile",
@@ -877,6 +883,9 @@ export class FilesystemBroker extends BaseCapabilityBroker {
     const grant = this.validateGrant(context);
     const fsCap: FsCapability = grant.capabilities.fs ?? {};
     const dirPath = params.path ?? ".";
+    const maxEntries = params.maxEntries ?? 10000;
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 10000)
+      throw new BrokerSecurityError("OPERATION_NOT_PERMITTED", "Invalid directory entry bound");
 
     try {
       const targetPath = this.resolveAndAuthorizePath(dirPath, "read", context, fsCap);
@@ -895,33 +904,42 @@ export class FilesystemBroker extends BaseCapabilityBroker {
       const workspaceRoot = normalizeSlashes(path.resolve(context.workspaceRoot ?? process.cwd()));
       const entries: string[] = [];
       const readEntries = (currentDir: string, relativePrefix: string) => {
-        const dirents = fs.readdirSync(currentDir, { withFileTypes: true });
-        for (const dirent of dirents) {
-          const entryRel = relativePrefix ? `${relativePrefix}/${dirent.name}` : dirent.name;
-          const fullEntryPath = normalizeSlashes(path.join(currentDir, dirent.name));
+        const directory = fs.opendirSync(currentDir);
+        try {
+          for (let dirent = directory.readSync(); dirent; dirent = directory.readSync()) {
+            const entryRel = relativePrefix ? `${relativePrefix}/${dirent.name}` : dirent.name;
+            const fullEntryPath = normalizeSlashes(path.join(currentDir, dirent.name));
 
-          const denyPaths: readonly string[] = fsCap.denyPaths ?? [];
-          const isDenied = denyPaths.some(
-            (p) =>
-              matchesPathPattern(fullEntryPath, p, workspaceRoot) ||
-              matchesPathPattern(entryRel, p, workspaceRoot),
-          );
-          const isSensitive =
-            isCredentialOrSensitivePath(fullEntryPath, workspaceRoot) ||
-            isCredentialOrSensitivePath(entryRel, workspaceRoot);
-          const readPaths: readonly string[] = fsCap.readPaths ?? [];
-          const isExplicitAllowed = readPaths.some((p) =>
-            isExplicitNonWildcardMatch(p, fullEntryPath, workspaceRoot),
-          );
+            const denyPaths: readonly string[] = fsCap.denyPaths ?? [];
+            const isDenied = denyPaths.some(
+              (p) =>
+                matchesPathPattern(fullEntryPath, p, workspaceRoot) ||
+                matchesPathPattern(entryRel, p, workspaceRoot),
+            );
+            const isSensitive =
+              isCredentialOrSensitivePath(fullEntryPath, workspaceRoot) ||
+              isCredentialOrSensitivePath(entryRel, workspaceRoot);
+            const readPaths: readonly string[] = fsCap.readPaths ?? [];
+            const isExplicitAllowed = readPaths.some((p) =>
+              isExplicitNonWildcardMatch(p, fullEntryPath, workspaceRoot),
+            );
 
-          if (isDenied || (isSensitive && !isExplicitAllowed)) {
-            continue;
+            if (isDenied || (isSensitive && !isExplicitAllowed)) {
+              continue;
+            }
+
+            entries.push(entryRel);
+            if (entries.length > maxEntries)
+              throw new BrokerSecurityError(
+                "MAX_OUTPUT_EXCEEDED",
+                "Directory listing exceeds entry bound",
+              );
+            if (params.recursive && dirent.isDirectory()) {
+              readEntries(path.join(currentDir, dirent.name), entryRel);
+            }
           }
-
-          entries.push(entryRel);
-          if (params.recursive && dirent.isDirectory()) {
-            readEntries(path.join(currentDir, dirent.name), entryRel);
-          }
+        } finally {
+          directory.closeSync();
         }
       };
 

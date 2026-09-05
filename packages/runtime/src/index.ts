@@ -40,6 +40,7 @@ export * from "./loader/inspector.js";
 
 // Workflow Execution Engine, Compensation & Binding Resolution
 export * from "./workflow/index.js";
+export * from "./workflow/components.js";
 // Tool Bundle Loader
 export * from "./loader/loader.js";
 
