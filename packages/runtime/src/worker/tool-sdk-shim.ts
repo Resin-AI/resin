@@ -1,27 +1,17 @@
 /**
  * Dependency-free ESM Tool SDK shim for tools executed in isolated worker sandboxes.
- * This file contains no external imports and exports both TypeScript types/functions
- * and the string source (TOOL_SDK_SHIM_SOURCE) written into worker scratch directories.
+ * Runtime imports are deliberately absent; handler types share the public SDK context.
+ * The string source (TOOL_SDK_SHIM_SOURCE) is written into worker scratch directories.
  */
+import type { ToolContext } from "./sdk.js";
+
+export type { ToolContext } from "./sdk.js";
 
 export interface ToolLoggerShim {
   debug(message: string, context?: Record<string, unknown>): Promise<void>;
   info(message: string, context?: Record<string, unknown>): Promise<void>;
   warn(message: string, context?: Record<string, unknown>): Promise<void>;
   error(message: string, context?: Record<string, unknown>): Promise<void>;
-}
-
-export interface ToolContext<TInput = unknown> {
-  broker: unknown;
-  logger: ToolLoggerShim;
-  progress: (percentage: number, message?: string, stepId?: string) => Promise<void>;
-  input: TInput;
-  invocationId: string;
-  metadata?: Record<string, unknown>;
-  fs: unknown;
-  net: unknown;
-  cmd: unknown;
-  secret: unknown;
 }
 
 export type ToolHandler<TInput = unknown, TOutput = unknown> = (
