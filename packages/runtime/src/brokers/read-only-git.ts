@@ -94,13 +94,14 @@ export function prepareReadOnlyGit(
   if (
     /\\\r?\n/.test(config) ||
     /^\s*\[\s*(?:include|includeif|filter|diff|merge|submodule)(?:\s|\])/im.test(config) ||
-    /partialclone|promisor/i.test(config)
+    /partialclone|promisor|worktreeconfig/i.test(config)
   )
     fail();
   const overrides: Record<string, string> = {
     "core.fsmonitor": "false",
     "core.hooksPath": os.devNull,
     "core.attributesFile": os.devNull,
+    "core.excludesFile": os.devNull,
     "core.untrackedCache": "false",
     "core.pager": "",
     "core.bare": "false",

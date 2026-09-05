@@ -80,6 +80,7 @@ export type BrokerExecutionResult =
   | { success: boolean }
   | ReadFileResult
   | { exists: boolean }
+  | { entries: string[] }
   | FileStatResult
   | NetResponseResult
   | CommandExecuteResult
@@ -673,8 +674,8 @@ export class CapabilityBrokerManager {
           context,
         );
       case "listDirectory":
-      case "listDir":
-        return this.fs.listDirectory(
+      case "listDir": {
+        const entries = await this.fs.listDirectory(
           {
             path: payload.path !== undefined ? String(payload.path) : undefined,
             recursive:
@@ -683,6 +684,8 @@ export class CapabilityBrokerManager {
           },
           context,
         );
+        return action === "listDir" ? { entries } : entries;
+      }
       case "exists":
         return this.fs.exists(
           {

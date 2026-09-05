@@ -95,12 +95,27 @@ describe("real Deno read-only broker path", () => {
     expect(fs.existsSync(path.join(root, "sentinel"))).toBe(false);
     expect(fs.readFileSync(path.join(root, ".git/index"))).toEqual(before);
   });
-  it.each(["include", "filter", "alternates", "symlink"])(
+  it("does not read a configured external excludes file", async () => {
+    const { root, git } = fixture();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "resin-git-excludes-"));
+    roots.push(outside);
+    fs.writeFileSync(path.join(outside, "ignore"), "untracked.txt\n");
+    fs.writeFileSync(path.join(root, "untracked.txt"), "visible");
+    git("config", "core.excludesFile", path.join(outside, "ignore"));
+    const result = await execute(
+      root,
+      `return context.broker.cmd.exec("git", ${JSON.stringify(statusArgs)}, { readOnlyGit: true });`,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.output).toMatchObject({ stdout: "?? untracked.txt\u0000" });
+  });
+  it.each(["include", "filter", "alternates", "symlink", "worktree-config"])(
     "rejects unsafe repository configuration: %s",
     async (kind) => {
       const { root, git } = fixture();
       if (kind === "include") git("config", "include.path", "/outside/config");
       if (kind === "filter") git("config", "filter.untrusted.clean", "touch sentinel");
+      if (kind === "worktree-config") git("config", "extensions.worktreeConfig", "true");
       if (kind === "alternates")
         fs.writeFileSync(path.join(root, ".git/objects/info/alternates"), "/outside/objects");
       if (kind === "symlink") fs.symlinkSync("/outside", path.join(root, ".git/escape"));
@@ -146,6 +161,14 @@ describe("real Deno read-only broker path", () => {
     const metadata = await execute(root, 'return context.broker.fs.stat("file.txt");');
     expect(metadata.error).toBeUndefined();
     expect(metadata.status).toBe("success");
+    const present = await execute(root, 'return context.broker.fs.exists("file.txt");');
+    expect(present.output).toBe(true);
+    const readableListing = await execute(
+      root,
+      'return context.broker.fs.listDir(".", { maxEntries: 100 });',
+    );
+    expect(readableListing.error).toBeUndefined();
+    expect(readableListing.output).toContain("file.txt");
     expect(metadata.output).toMatchObject({ isSymbolicLink: false, isFile: true });
     const invalid = await execute(
       root,
