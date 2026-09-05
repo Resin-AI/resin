@@ -8,6 +8,8 @@ import { McpStdioShim, checkDaemonReachable } from "../src/shim/stdio-bridge.js"
 
 describe("Stdio Shim & Bridge Lifecycle", () => {
   it("parses CLI flags accurately", () => {
+    expect(parseArgs([]).enableToolSearch).toBe(false);
+    expect(parseArgs(["--enable-tool-search"]).enableToolSearch).toBe(true);
     const args1 = parseArgs(["--standalone", "--cwd", "/custom/dir", "--harness", "claude"]);
     expect(args1.standaloneFallback).toBe(true);
     expect(args1.cwd).toBe("/custom/dir");
@@ -48,7 +50,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     }
   });
 
-  it("resolves only system meta-tools during standalone tools/list without utility tools", async () => {
+  it.each([false, true])("standalone catalog respects enableToolSearch=%s", async (enabled) => {
     const nonExistentSocket = path.join(
       os.tmpdir(),
       `test-absent-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
@@ -58,6 +60,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     const stderr = new stream.PassThrough();
 
     const shim = new McpStdioShim({
+      enableToolSearch: enabled,
       socketPath: nonExistentSocket,
       standaloneFallback: true,
       maxStartupAttempts: 0,
@@ -117,7 +120,11 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
 
       const tools = await listResultPromise;
       const toolNames = tools.map((t) => t.name).sort();
-      expect(toolNames).toEqual(["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]);
+      expect(toolNames).toEqual(
+        enabled
+          ? ["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]
+          : ["get_tool_schema", "invoke_tool", "manage_tools"],
+      );
       expect(toolNames).not.toContain("echo");
       expect(toolNames).not.toContain("workspace_info");
       expect(toolNames).not.toContain("fail_tool");

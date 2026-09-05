@@ -36,6 +36,8 @@ import {
 } from "./base.js";
 import type { SecretBroker } from "./secret-broker.js";
 
+const PYTHON_TEST_MODULES: Record<string, true> = { unittest: true, pytest: true };
+
 /**
  * Standard parameters for brokered command execution.
  */
@@ -740,6 +742,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     // 5. Validate against canonical approved command tuples or explicit broad binaries
     const allowedCommands = cmdCap.allowedCommands ?? [];
     const allowedBinaries = cmdCap.allowedBinaries ?? [];
+    let authorizedPythonTestModule = false;
 
     if (allowedCommands.length > 0) {
       let matched = false;
@@ -797,6 +800,12 @@ export class CommandBroker extends BaseCapabilityBroker {
         const argsMatch = matchCommandProfileArgs(profileArgs, rawArgs);
         if (argsMatch) {
           matched = true;
+          // A fixed, explicitly granted test runner is not an arbitrary module
+          // escape. Broad binary grants and placeholder module names still deny -m.
+          authorizedPythonTestModule =
+            /^python(?:[23](?:\.\d+)*)?(?:\.exe)?$/i.test(path.basename(identity.realPath)) &&
+            profileArgs[0] === "-m" &&
+            Object.hasOwn(PYTHON_TEST_MODULES, profileArgs[1] ?? "");
           break;
         }
       }
@@ -858,8 +867,9 @@ export class CommandBroker extends BaseCapabilityBroker {
       }
 
       if (
-        isInterpreterEscape(identity.realPath, arg, rawArgs[i + 1]) ||
-        isInterpreterEscape(binary, arg, rawArgs[i + 1])
+        (isInterpreterEscape(identity.realPath, arg, rawArgs[i + 1]) ||
+          isInterpreterEscape(binary, arg, rawArgs[i + 1])) &&
+        !(i === 0 && arg === "-m" && authorizedPythonTestModule)
       ) {
         throw new BrokerSecurityError(
           "FORBIDDEN_ARGUMENT_PATTERN",
