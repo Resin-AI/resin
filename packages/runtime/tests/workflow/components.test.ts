@@ -98,6 +98,44 @@ describe("immutable component compositions", () => {
     });
     await expect(executeCompiled(compiled, { value: "1" })).rejects.toThrow("number");
   });
+  it("preserves omitted optional inputs so component defaults can run", async () => {
+    const optional = { ...object, required: [] };
+    const unit = { ...contract, inputSchema: optional };
+    const code =
+      'import { defineTool, type ToolContext } from "@resin/runtime"; export default defineTool((context: ToolContext<{value?: number}>) => ({value: context.input.value ?? 7}));';
+    const graph = ComponentCompositionSchema.parse({
+      ...composition,
+      inputSchema: optional,
+      steps: [
+        {
+          id: "optional",
+          component: {
+            contractDigest: componentContractDigest(unit),
+            sourceDigest: createHash("sha256").update(code).digest("hex"),
+          },
+          inputs: { value: { from: "input", path: ["value"] } },
+        },
+      ],
+      outputs: { value: { from: "step", step: "optional", path: ["value"] } },
+    });
+    const compiled = compileComponentComposition(graph, [{ contract: unit, source: code }]);
+    expect(await executeCompiled(compiled, {})).toEqual({ value: 7 });
+    expect(await executeCompiled(compiled, { value: 0 })).toEqual({ value: 0 });
+    const seen = vi.fn(async (_index, input) => ({ value: input.value ?? 7 }));
+    expect(await executeComponentComposition(graph, {}, seen)).toEqual({ value: 7 });
+    expect(seen).toHaveBeenCalledWith(0, {});
+    const requiredGraph = structuredClone(graph);
+    requiredGraph.steps[0].component = reference;
+    const requiredCompiled = compileComponentComposition(requiredGraph, [{ contract, source }]);
+    await expect(executeCompiled(requiredCompiled, {})).rejects.toThrow();
+    const unboundOutput = {
+      ...graph,
+      outputs: { value: { from: "input" as const, path: ["value"] } },
+    };
+    await expect(executeComponentComposition(unboundOutput, {}, seen)).rejects.toThrow(
+      "Unresolved",
+    );
+  });
   it("rejects changed source and contracts instead of silently replacing versions", () => {
     expect(() =>
       compileComponentComposition(composition, [

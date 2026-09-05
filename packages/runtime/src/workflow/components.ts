@@ -117,18 +117,34 @@ export async function executeComponentComposition(
 ): Promise<Record<string, unknown>> {
   validate(composition.inputSchema, input);
   const completed: Record<string, unknown> = Object.create(null);
-  function bind(binding: ComponentComposition["outputs"][string]): unknown {
+  function bind(
+    binding: ComponentComposition["outputs"][string],
+    allowOmittedInput = false,
+  ): unknown {
     if (binding.from === "literal") return structuredClone(binding.value);
     let value: unknown = binding.from === "input" ? input : completed[binding.step];
+    let schema = binding.from === "input" ? composition.inputSchema : undefined;
     for (const key of binding.path) {
       if (
         ["__proto__", "prototype", "constructor"].includes(key) ||
         !value ||
-        typeof value !== "object" ||
-        !Object.hasOwn(value, key)
+        typeof value !== "object"
       )
         throw new Error("Unresolved component binding");
+      const properties = schema?.properties as Record<string, Record<string, unknown>> | undefined;
+      if (!Object.hasOwn(value, key)) {
+        if (
+          allowOmittedInput &&
+          binding.from === "input" &&
+          properties &&
+          Object.hasOwn(properties, key) &&
+          !(Array.isArray(schema?.required) && schema.required.includes(key))
+        )
+          return undefined;
+        throw new Error("Unresolved component binding");
+      }
       value = (value as Record<string, unknown>)[key];
+      schema = properties?.[key];
     }
     if (value === undefined) throw new Error("Unresolved component binding");
     return structuredClone(value);
@@ -136,7 +152,10 @@ export async function executeComponentComposition(
   for (const [index, step] of composition.steps.entries()) {
     if (Object.hasOwn(completed, step.id)) throw new Error("Duplicate component step");
     const inputs = Object.fromEntries(
-      Object.entries(step.inputs).map(([key, binding]) => [key, bind(binding)]),
+      Object.entries(step.inputs).flatMap(([key, binding]) => {
+        const value = bind(binding, true);
+        return value === undefined ? [] : [[key, value]];
+      }),
     );
     completed[step.id] = await invoke(index, inputs);
   }
