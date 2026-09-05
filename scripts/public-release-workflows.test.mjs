@@ -1116,6 +1116,15 @@ describe("Public Release Workflows Contract", () => {
       expect(checkAll).toContain("pnpm run release:verify:test");
     });
 
+    it("installs pinned Deno before the unit suite instead of skipping real broker tests", () => {
+      const steps = ci.doc.jobs["test-unit"].steps;
+      const setup = steps.findIndex((step) => step.uses?.startsWith("denoland/setup-deno@"));
+      expect(setup).toBeGreaterThan(-1);
+      expect(steps[setup].uses).toMatch(/^denoland\/setup-deno@[a-f0-9]{40}$/);
+      expect(steps[setup].with["deno-version"]).toBe("2.9.5");
+      expect(steps.findIndex((step) => step.run === "pnpm test")).toBeGreaterThan(setup);
+    });
+
     it("builds workspace packages before every test job that imports workspace outputs", () => {
       const jobCommands = {
         "test-unit": "pnpm test",
