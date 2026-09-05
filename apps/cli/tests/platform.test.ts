@@ -28,6 +28,7 @@ describe("Platform Detection and Validation", () => {
     const info = detectPlatform({
       platform: "darwin",
       env: {},
+      release: "24.0.0",
       arch: "arm64",
       nodeVersion: "v22.4.0",
     });

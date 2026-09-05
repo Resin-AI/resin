@@ -1,6 +1,7 @@
+import dns from "node:dns";
 import http from "node:http";
 import type { CapabilityLimits, NetCapability } from "@resin/contracts";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrokerSecurityError, NetworkBroker } from "../../src/brokers/index.js";
 import { createInvocationGrant } from "../../src/policy/grant.js";
 
@@ -246,7 +247,7 @@ describe("Network Broker Security & Isolation", () => {
   });
 
   it("blocks alternate numeric IP encodings (hex, octal, dword) targeting private/loopback/metadata addresses", async () => {
-    const grant = createGrant();
+    const grant = createGrant({ allowLocalhost: false });
     const ctx = { invocationId: "inv_net_001", grant };
 
     const alternateEncodings = [
@@ -254,26 +255,31 @@ describe("Network Broker Security & Isolation", () => {
       "http://0x7f000001/", // hex 127.0.0.1
       "http://0177.0.0.1/", // octal 127.0.0.1
       "http://2852039166/", // dword 169.254.169.254
-      "http://instance-data/",
-      "http://metadata.google.internal/",
       "http://100.100.100.200/",
     ];
 
     for (const url of alternateEncodings) {
-      await expect(broker.request({ url }, ctx)).rejects.toThrow(BrokerSecurityError);
-      try {
-        await broker.request({ url }, ctx);
-      } catch (err) {
-        expect(err).toBeInstanceOf(BrokerSecurityError);
-        if (err instanceof BrokerSecurityError) {
-          expect([
-            "BLOCKED_IP_RANGE",
-            "DISALLOWED_HOST",
-            "NETWORK_ERROR",
-            "DNS_RESOLUTION_FAILED",
-          ]).toContain(err.code);
-        }
+      await expect(broker.request({ url }, ctx)).rejects.toMatchObject({
+        code: "BLOCKED_IP_RANGE",
+      });
+    }
+  });
+
+  it("blocks metadata hostnames resolving to private IP addresses", async () => {
+    const grant = createGrant();
+    const ctx = { invocationId: "inv_net_001", grant };
+    const lookup = vi
+      .spyOn(dns.promises, "lookup")
+      .mockResolvedValue([{ address: "169.254.169.254", family: 4 }]);
+
+    try {
+      for (const url of ["http://instance-data/", "http://metadata.google.internal/"]) {
+        await expect(broker.request({ url }, ctx)).rejects.toMatchObject({
+          code: "BLOCKED_IP_RANGE",
+        });
       }
+    } finally {
+      lookup.mockRestore();
     }
   });
 

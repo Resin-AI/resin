@@ -149,6 +149,7 @@ describe("Platform Matrix Qualification Suite", () => {
         platform: "darwin",
         arch: "x64",
         env: {},
+        release: "24.0.0",
       });
 
       expect(info.os).toBe("darwin");
@@ -163,6 +164,7 @@ describe("Platform Matrix Qualification Suite", () => {
         platform: "darwin",
         arch: "arm64",
         env: {},
+        release: "24.0.0",
       });
 
       expect(info.os).toBe("darwin");
@@ -598,7 +600,9 @@ describe("Platform Matrix Qualification Suite", () => {
     });
 
     it("accepts valid macOS platforms", () => {
-      const info = validatePlatform(detectPlatform({ platform: "darwin", arch: "arm64" }));
+      const info = validatePlatform(
+        detectPlatform({ platform: "darwin", arch: "arm64", env: {}, release: "24.0.0" }),
+      );
       expect(info.os).toBe("darwin");
     });
 
