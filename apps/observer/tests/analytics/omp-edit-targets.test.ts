@@ -1,9 +1,9 @@
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
-import { normalizeCommandProfile } from "../../../apps/observer/src/analytics/evidence-normalization.js";
-import { projectEventToMetadataOnly } from "../../../apps/observer/src/analytics/metadata-projection.js";
-import { NormalizationPipeline } from "../../../apps/observer/src/normalization/pipeline.js";
-import { OmpRecordDecoder } from "../src/decoder.js";
+import { normalizeCommandProfile } from "../../src/analytics/evidence-normalization.js";
+import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
+import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
 async function projectEdit(input: string, truncate = 65536) {
   const pipeline = new NormalizationPipeline({ redactionConfig: { maxStringLength: truncate } });
