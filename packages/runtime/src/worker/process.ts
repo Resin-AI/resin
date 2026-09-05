@@ -162,30 +162,25 @@ export class WorkerProcess {
       }
     }
 
-    let importMapArg: string | undefined;
-    if (this.options.importMap) {
-      const mergedMap: Record<string, string> = {
-        "@resin/runtime": shimFilePath,
-        ...this.options.importMap,
-      };
-      const importMapPath = path.join(this.scratchDir, "import_map.json");
-      fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
-      importMapArg = `--import-map=${importMapPath}`;
-
-      for (const target of Object.values(this.options.importMap)) {
-        if (!target) continue;
-        const filePath = target.startsWith("file://")
-          ? fileURLToPath(target)
-          : path.resolve(target);
-        const dir = path.dirname(filePath);
-        allowReadSet.add(dir);
-        allowReadSet.add(filePath);
-        try {
-          allowReadSet.add(fs.realpathSync(dir));
-          allowReadSet.add(fs.realpathSync(filePath));
-        } catch {
-          // Ignore path resolution errors
-        }
+    // The canonical SDK must be available even when no custom dependency map is supplied.
+    const mergedMap: Record<string, string> = {
+      ...this.options.importMap,
+      "@resin/runtime": shimFilePath,
+    };
+    const importMapPath = path.join(this.scratchDir, "import_map.json");
+    fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
+    const importMapArg = `--import-map=${importMapPath}`;
+    for (const target of Object.values(mergedMap)) {
+      if (!target) continue;
+      const filePath = target.startsWith("file://") ? fileURLToPath(target) : path.resolve(target);
+      const dir = path.dirname(filePath);
+      allowReadSet.add(dir);
+      allowReadSet.add(filePath);
+      try {
+        allowReadSet.add(fs.realpathSync(dir));
+        allowReadSet.add(fs.realpathSync(filePath));
+      } catch {
+        // Ignore path resolution errors
       }
     }
 
