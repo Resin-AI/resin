@@ -30,6 +30,7 @@ import {
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import type { ManagedToolAccess } from "./tool-access.js";
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -237,6 +238,7 @@ export class LocalArtifactExecutor {
   private readonly denoExecutable?: string;
   private readonly resinHome?: string;
   private readonly requireSignature?: boolean;
+  private managedToolAccess?: ManagedToolAccess;
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -250,6 +252,10 @@ export class LocalArtifactExecutor {
     this.denoExecutable = options.denoExecutable;
     this.resinHome = options.resinHome;
     this.requireSignature = options.requireSignature;
+  }
+
+  setManagedToolAccess(access: ManagedToolAccess): void {
+    this.managedToolAccess = access;
   }
 
   getWorkspaceRoot(): string {
@@ -302,6 +308,7 @@ export class LocalArtifactExecutor {
 
   async execute(params: LocalArtifactExecuteParams): Promise<CallToolResult> {
     const { entry, parameters, context } = params;
+    this.managedToolAccess?.assertAllowed(entry);
     const artifactDir = this.cache.getArtifactPath(entry.artifactDigest);
 
     if (!fs.existsSync(artifactDir)) {
@@ -618,6 +625,7 @@ export class LocalArtifactExecutor {
     params.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
+      this.managedToolAccess?.assertAllowed(entry);
       const result = await worker.execute(invocationId, parameters, {
         sessionId: context.sessionId,
         workspaceId: context.workspaceId,

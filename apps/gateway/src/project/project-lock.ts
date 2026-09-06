@@ -531,12 +531,21 @@ export class ProjectLockManager {
   /**
    * Removes a tool completely from the committed lockfile.
    */
-  remove(name: string): V1ToolLock {
+  remove(name: string, expected?: V1LockedToolEntry): V1ToolLock {
     return this.withLock(() => {
       const currentLock = this.readLock();
       if (!currentLock.tools[name]) {
         return currentLock;
       }
+      const existing = currentLock.tools[name];
+      if (
+        expected &&
+        (existing.toolId !== expected.toolId ||
+          existing.version !== expected.version ||
+          existing.manifestDigest !== expected.manifestDigest ||
+          existing.artifactDigest !== expected.artifactDigest)
+      )
+        return currentLock;
 
       const updatedTools = { ...currentLock.tools };
       delete updatedTools[name];

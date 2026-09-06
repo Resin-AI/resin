@@ -9,7 +9,10 @@ import {
   ToolManifestSchema,
   type ToolVersion,
   ToolVersionSchema,
+  type V1LockedToolEntry,
   canonicalJson,
+  hashCanonicalContent,
+  normalizeSha256,
 } from "@resin/contracts";
 import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
@@ -44,6 +47,77 @@ export interface HarnessInstallationRecord {
  */
 export class ToolRepository {
   constructor(private readonly conn: LocalDatabaseConnection) {}
+
+  /** Delete only an ownership-verified immutable tuple, preserving unrelated versions and rows. */
+  async removeManagedToolVersion(entry: V1LockedToolEntry, workspaceId?: string): Promise<void> {
+    await this.conn.transaction(async () => {
+      const manifest = await this.getManifest(entry.toolId);
+      if (manifest?.version === entry.version) {
+        const { digest: _, ...content } = manifest;
+        const digest = hashCanonicalContent(content);
+        if (
+          normalizeSha256(digest) !== normalizeSha256(entry.manifestDigest) &&
+          manifest.metadata?.manifestDigest !== entry.manifestDigest
+        )
+          return;
+      }
+      this.conn.run(
+        `DELETE FROM tool_versions WHERE tool_id = ? AND version = ?
+         AND replace(manifest_digest, 'sha256:', '') = ?
+         AND replace(artifact_digest, 'sha256:', '') = ?;`,
+        [
+          entry.toolId,
+          entry.version,
+          normalizeSha256(entry.manifestDigest, false),
+          normalizeSha256(entry.artifactDigest, false),
+        ],
+      );
+      this.conn.run(
+        `DELETE FROM tool_manifests WHERE tool_id = ? AND version = ?
+         AND NOT EXISTS (SELECT 1 FROM tool_versions WHERE tool_id = ?);`,
+        [entry.toolId, entry.version, entry.toolId],
+      );
+      if (workspaceId) {
+        this.conn.run(
+          "DELETE FROM deployment_records WHERE workspace_id = ? AND tool_id = ? AND tool_version = ?;",
+          [workspaceId, entry.toolId, entry.version],
+        );
+        this.conn.run(
+          "DELETE FROM installations WHERE workspace_id = ? AND tool_id = ? AND tool_version = ?;",
+          [workspaceId, entry.toolId, entry.version],
+        );
+      }
+      const rows = this.conn.all<{ snapshot_id: string; tools_json: string }>(
+        "SELECT snapshot_id, tools_json FROM catalog_snapshots;",
+      );
+      for (const row of rows) {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(row.tools_json);
+        } catch {
+          continue;
+        }
+        const parsed = CatalogSnapshotSchema.shape.tools.safeParse(raw);
+        if (!parsed.success) continue;
+        let changed = false;
+        for (const [name, tool] of Object.entries(parsed.data)) {
+          if (
+            tool.toolId === entry.toolId &&
+            tool.version === entry.version &&
+            normalizeSha256(tool.manifestDigest) === normalizeSha256(entry.manifestDigest)
+          ) {
+            delete parsed.data[name];
+            changed = true;
+          }
+        }
+        if (changed)
+          this.conn.run(
+            "UPDATE catalog_snapshots SET tools_json = ?, digest = ? WHERE snapshot_id = ?;",
+            [canonicalJson(parsed.data), hashCanonicalContent(parsed.data), row.snapshot_id],
+          );
+      }
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Tool Manifests

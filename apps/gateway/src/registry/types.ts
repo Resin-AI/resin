@@ -166,6 +166,7 @@ export interface ToolRepoLike {
   saveToolVersion?(version: ToolVersion): Promise<void>;
   getToolVersion?(toolId: string, version: string): Promise<ToolVersion | null>;
   listToolVersions?(toolId?: string): Promise<ToolVersion[]>;
+  removeManagedToolVersion?(entry: V1LockedToolEntry, workspaceId?: string): Promise<void>;
   saveCatalogSnapshot?(snapshot: CatalogSnapshot): Promise<void>;
   getCatalogSnapshot?(snapshotDigest: string): Promise<CatalogSnapshot | null>;
   getLatestCatalogSnapshot?(workspaceId: string): Promise<CatalogSnapshot | null>;

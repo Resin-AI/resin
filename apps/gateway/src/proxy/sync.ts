@@ -36,6 +36,7 @@ import type { CloudCatalogCache } from "./cache.js";
 import type { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CloudCatalogClient } from "./client.js";
 import type { CloudInvocationRouter } from "./router.js";
+import type { ManagedToolAccess } from "./tool-access.js";
 
 export interface LockedSyncIdentity extends TrustIdentity {
   keyStore?: SigningKeyStore;
@@ -97,6 +98,7 @@ export interface CloudCatalogSyncOptions {
   onOfflineDegraded?: (toolName: string, reason: string) => void;
   allowDevKeys?: boolean;
   isPinned?: (toolId: string) => boolean;
+  managedToolAccess?: ManagedToolAccess;
 }
 
 export interface ToolLockTuple {
@@ -162,6 +164,7 @@ export class CloudCatalogSyncCoordinator {
   private isRunningPeriodic = false;
   private inFlightSync: Promise<CatalogSnapshotResponse> | null = null;
   private readonly options: CloudCatalogSyncOptions;
+  private catalogSyncEnabled = true;
 
   constructor(options: CloudCatalogSyncOptions) {
     this.options = options;
@@ -226,14 +229,62 @@ export class CloudCatalogSyncCoordinator {
    * Performs an immediate sync cycle (deduplicating concurrent callers).
    */
   async sync(): Promise<CatalogSnapshotResponse> {
-    if (this.inFlightSync) {
-      return this.inFlightSync;
-    }
+    return this.runSync(true);
+  }
 
-    this.inFlightSync = this.syncOnce().finally(() => {
+  setCatalogSyncEnabled(enabled: boolean): void {
+    this.catalogSyncEnabled = enabled;
+  }
+
+  async checkToolAccess(): Promise<void> {
+    await this.runSync(false);
+  }
+
+  private emptySnapshot(): CatalogSnapshotResponse {
+    return {
+      snapshotVersion: "local",
+      generatedAt: new Date().toISOString(),
+      tools: [],
+      activeDeployments: [],
+      checksum: hashCanonicalContent({ tools: [], activeDeployments: [] }),
+    };
+  }
+
+  private async runSync(includeCatalog: boolean): Promise<CatalogSnapshotResponse> {
+    if (this.inFlightSync) return this.inFlightSync;
+    this.inFlightSync = (async () => {
+      const access = this.options.managedToolAccess;
+      const release = access?.acquireSync();
+      if (access && !release) return this.emptySnapshot();
+      try {
+        if (access) {
+          await this.registry?.hydrateFromStore();
+          access.adopt(this.registry, this.lockManager);
+          const confirmation = await this.client.fetchToolAccess(access.identity);
+          if (confirmation) {
+            try {
+              access.confirm(confirmation);
+            } catch (error) {
+              this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+            }
+          }
+          if (access.isInactive()) this.cache.clear();
+          try {
+            await access.cleanup(this.registry);
+          } catch (error) {
+            this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+          }
+          if (access.isInactive()) return this.emptySnapshot();
+        }
+        return includeCatalog && this.catalogSyncEnabled
+          ? await this.syncCatalogOnce()
+          : this.emptySnapshot();
+      } finally {
+        release?.();
+      }
+    })().finally(() => {
       this.inFlightSync = null;
     });
-
     return this.inFlightSync;
   }
 
@@ -241,6 +292,10 @@ export class CloudCatalogSyncCoordinator {
    * Executes a single synchronization pass.
    */
   async syncOnce(): Promise<CatalogSnapshotResponse> {
+    return this.sync();
+  }
+
+  private async syncCatalogOnce(): Promise<CatalogSnapshotResponse> {
     if (this.circuitBreaker && !this.circuitBreaker.canExecute()) {
       this.options.onSyncCircuitBroken?.();
       return this.executeOfflineSync();
@@ -406,6 +461,7 @@ export class CloudCatalogSyncCoordinator {
         }
 
         let result: ReconcileResult;
+        this.options.managedToolAccess?.record(candidateEntry, this.workspaceId, this.lockManager);
         try {
           result = this.lockManager.reconcileQualified(candidateEntry);
         } catch (reconcileError: unknown) {
@@ -432,6 +488,15 @@ export class CloudCatalogSyncCoordinator {
             currentLock = result.lock;
             this.options.onToolQualified?.(candidateEntry, "updated");
           }
+        }
+        const managedEntry = currentLock.tools[manifest.name];
+        if (
+          managedEntry?.toolId === candidateEntry.toolId &&
+          managedEntry.version === candidateEntry.version &&
+          managedEntry.artifactDigest === candidateEntry.artifactDigest &&
+          managedEntry.manifestDigest === candidateEntry.manifestDigest
+        ) {
+          this.options.managedToolAccess?.record(managedEntry, this.workspaceId, this.lockManager);
         }
       }
     }
@@ -502,6 +567,11 @@ export class CloudCatalogSyncCoordinator {
     const entries = Object.entries(lock.tools);
 
     for (const [toolName, entry] of entries) {
+      if (
+        this.options.managedToolAccess?.isInactive() ||
+        this.options.managedToolAccess?.isBlocked(entry)
+      )
+        continue;
       if (entry.status === "disabled") {
         continue;
       }
@@ -908,6 +978,7 @@ export class CloudCatalogSyncCoordinator {
         manifestDigest,
         artifactDigest,
         scope: "workspace",
+        accountId: this.options.managedToolAccess?.identity?.accountId,
         status: "active",
         workspaceId,
         handler: this.router.createToolHandler(tool.id),
@@ -918,6 +989,17 @@ export class CloudCatalogSyncCoordinator {
           workspaceId,
         },
       };
+      const managedEntry = V1LockedToolEntrySchema.safeParse({
+        toolId: tool.id,
+        name: tool.name,
+        version: tool.version,
+        manifestDigest,
+        artifactDigest,
+        status: "active",
+      });
+      if (managedEntry.success) {
+        this.options.managedToolAccess?.record(managedEntry.data, workspaceId);
+      }
 
       this.registry.registerToolSync(registryTool);
 

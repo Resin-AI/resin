@@ -11,6 +11,7 @@ import type { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CloudIdentityProvider, CloudRequestIdentity } from "./client.js";
 import type { LocalArtifactExecutor } from "./local-executor.js";
+import type { ManagedToolAccess } from "./tool-access.js";
 export interface TraceContext {
   traceId: string;
   spanId: string;
@@ -74,6 +75,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
   private localExecutor?: LocalArtifactExecutor;
   private lockManager?: ProjectLockManager;
   private isPaused = false;
+  private managedToolAccess?: ManagedToolAccess;
   fallbackHandler?: (
     toolIdOrName: string,
     params: JsonRpcParams,
@@ -92,6 +94,10 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     this.invocationForwarder = options.invocationForwarder;
     this.localExecutor = options.localExecutor;
     this.lockManager = options.lockManager;
+  }
+
+  setManagedToolAccess(access: ManagedToolAccess): void {
+    this.managedToolAccess = access;
   }
 
   pauseCloudCalls(): void {
@@ -222,6 +228,12 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     options?: ToolCallOptions,
     manifest?: ToolManifest,
   ): Promise<CallToolResult> {
+    if (this.managedToolAccess?.isInactive()) {
+      throw new McpProtocolError(
+        MCP_ERROR_CODES.TOOL_NOT_FOUND,
+        "Managed tool access is unavailable",
+      );
+    }
     if (this.localExecutor) {
       const activeEntry = this.resolveActiveLockEntry(toolIdOrName, workspaceContext);
       if (activeEntry && this.localExecutor.canExecute(activeEntry)) {
