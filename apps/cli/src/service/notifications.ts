@@ -36,6 +36,7 @@ export interface StatusNotificationSnapshot {
   service: {
     installed: boolean;
     active: boolean;
+    status: "active" | "stopped" | "not_installed" | "externally_managed";
   };
   ipc: {
     connected: boolean;
@@ -248,8 +249,8 @@ export function deriveStatusActionableNotifications(
   const active: ActionableNotification[] = [];
 
   const daemonNeedsAttention =
-    !snapshot.service.installed ||
-    !snapshot.service.active ||
+    (snapshot.service.status !== "externally_managed" &&
+      (!snapshot.service.installed || !snapshot.service.active)) ||
     !snapshot.ipc.connected ||
     !snapshot.ipc.responsive ||
     snapshot.daemon.health === "stopped" ||

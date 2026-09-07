@@ -54,6 +54,52 @@ function createMockRunner(
   };
 }
 
+describe("externally managed daemon", () => {
+  it.each(["linux", "darwin", "wsl"] as const)(
+    "blocks every supervisor operation on %s even with HOME overridden",
+    async (platform) => {
+      const fsBridge = createMockFsBridge();
+      const runner = createMockRunner();
+      vi.stubEnv("HOME", "/isolated-home");
+      vi.stubEnv("RESIN_NO_SERVICE", "1");
+      try {
+        const manager = createUserServiceManager({
+          platform,
+          homeDir: "/isolated-home",
+          fsBridge,
+          runner,
+          env: { RESIN_NO_SERVICE: "0" },
+        });
+        expect(await manager.status()).toMatchObject({
+          installed: false,
+          active: false,
+          enabled: false,
+          state: "externally_managed",
+        });
+        expect(await manager.isInstalled()).toBe(false);
+        for (const mutate of [
+          () => manager.install(),
+          () => manager.uninstall(),
+          () => manager.start(),
+          () => manager.stop(),
+          () => manager.restart(),
+          () => manager.reload?.(),
+          () => manager.enable?.(),
+          () => manager.disable?.(),
+        ]) {
+          await expect(mutate()).rejects.toThrow("RESIN_NO_SERVICE=1");
+        }
+        expect(() => manager.getUnitPath()).toThrow("RESIN_NO_SERVICE=1");
+        expect(() => manager.getUnitDefinition()).toThrow("RESIN_NO_SERVICE=1");
+        expect(runner.executed).toEqual([]);
+        expect(fsBridge.files.size).toBe(0);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+});
+
 describe("SystemdUserServiceManager", () => {
   const homeDir = "/home/testuser";
   const resinHome = "/home/testuser/.resin";

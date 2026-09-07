@@ -8,12 +8,14 @@ import { z } from "zod";
 import {
   type InitCommandOptions,
   initCommand,
+  parseInitFlags,
   resolveInitReleaseContext,
 } from "../src/commands/init.js";
 import { performPairing } from "../src/commands/login.js";
 import { logoutCommand } from "../src/commands/logout.js";
 import type { InstallerPairingMutation } from "../src/installer/installer.js";
 import { DEFAULT_DEVICE_AUTH_SCOPES } from "../src/service/auth-bootstrap.js";
+import * as serviceManagerModule from "../src/service/manager.js";
 
 const ACCESS_TOKEN = "access-token-must-never-be-printed";
 const REFRESH_TOKEN = "refresh-token-must-never-be-printed";
@@ -118,6 +120,7 @@ describe("init onboarding & pairing workflow", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(home, { recursive: true, force: true });
     await fs.rm(workspace, { recursive: true, force: true });
   });
@@ -151,6 +154,107 @@ describe("init onboarding & pairing workflow", () => {
         entryPath: sourceEntry,
       }),
     ).toEqual({ releaseMode: "local-test", localSourceRoot: sourceRoot });
+  });
+
+  it("supports --no-service in parsing and help", async () => {
+    expect(parseInitFlags(["--no-service"]).noService).toBe(true);
+    expect(parseInitFlags([]).noService).toBeUndefined();
+    const result = await captureOutput(() => initCommand(["--help"]));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--no-service");
+    expect(result.stdout).toContain("RESIN_NO_SERVICE=1");
+    expect(result.stdout).toContain("resin-daemon --foreground");
+  });
+
+  it("pairs and configures without supervisor calls or readiness checks under --no-service", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const createManager = vi
+      .spyOn(serviceManagerModule, "createUserServiceManager")
+      .mockImplementation(() => {
+        throw new Error("No service manager may be used");
+      });
+    const serviceRunner = { run: vi.fn() };
+    const readinessVerifier = vi.fn();
+    const result = await captureOutput(() =>
+      initCommand(["--no-service", "--auto-approve", "--home", home, "--workspace", workspace], {
+        releaseMode: "local-test",
+        customFsBridge: bridge,
+        customFetch: successfulDeviceFetch() as typeof fetch,
+        openBrowser: async () => true,
+        setupService: true,
+        autoStartService: true,
+        serviceRunner,
+        readinessVerifier,
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(createManager).not.toHaveBeenCalled();
+    expect(serviceRunner.run).not.toHaveBeenCalled();
+    expect(readinessVerifier).not.toHaveBeenCalled();
+    expect(await bridge.readFile(path.join(home, ".claude.json"))).toContain("resin");
+    const credentials = await fs.readFile(
+      path.join(home, ".resin", "state", "device-token.json"),
+      "utf8",
+    );
+    expect(JSON.parse(credentials).accessToken).toBe(ACCESS_TOKEN);
+    expect(result.stdout).toContain("Daemon startup and readiness were not checked");
+    expect(result.stdout).toContain("resin-daemon --foreground");
+    expect(result.stdout).not.toContain("installation completed successfully");
+    expect(result.stdout).not.toContain("initialization complete");
+  });
+
+  it("honors RESIN_NO_SERVICE for local-only JSON configuration without claiming readiness", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const serviceRunner = { run: vi.fn() };
+    const readinessVerifier = vi.fn();
+    const result = await captureOutput(() =>
+      initCommand(["--json", "--local-only", "--non-interactive", "-y", "--home", home], {
+        releaseMode: "local-test",
+        env: { RESIN_NO_SERVICE: "1" },
+        customFsBridge: bridge,
+        setupService: true,
+        autoStartService: true,
+        serviceRunner,
+        readinessVerifier,
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(serviceRunner.run).not.toHaveBeenCalled();
+    expect(readinessVerifier).not.toHaveBeenCalled();
+    const summary = JSON.parse(result.stdout);
+    expect(summary.success).toBe(true);
+    expect(summary.pairing.localOnly).toBe(true);
+    expect(summary.serviceSetup).toBeUndefined();
+    expect(summary.daemonReadiness).toBeUndefined();
+    expect(
+      summary.journal.steps.find((step: { name: string }) => step.name === "verify").details,
+    ).toMatchObject({
+      allConfigured: true,
+      onboardingReady: false,
+      daemonManagement: "external",
+      nextStep: expect.stringContaining("resin-daemon --foreground"),
+    });
+  });
+
+  it("still attempts service installation by default and reports supervisor failures", async () => {
+    const serviceRunner = {
+      run: vi.fn(async () => ({
+        stdout: "",
+        stderr: "service supervisor unavailable",
+        exitCode: 1,
+      })),
+    };
+    const result = await captureOutput(() =>
+      initCommand(["--local-only", "--non-interactive", "-y", "--home", home], {
+        releaseMode: "local-test",
+        env: {},
+        customFsBridge: new InMemoryConfigFsBridge(),
+        serviceRunner,
+      }),
+    );
+    expect(result.exitCode).toBe(1);
+    expect(serviceRunner.run).toHaveBeenCalled();
+    expect(result.stderr).toContain("Daemon service setup failed");
   });
   it("displays formatted capability and privacy plan in verbose mode and proceeds on explicit interactive approval", async () => {
     const bridge = new InMemoryConfigFsBridge();

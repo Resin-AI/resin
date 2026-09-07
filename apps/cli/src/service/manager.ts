@@ -564,7 +564,7 @@ export interface UserServiceManagerOptions {
 
 export interface UserServiceManager {
   readonly name: string;
-  readonly platform: "systemd" | "launchd" | "wsl";
+  readonly platform: "systemd" | "launchd" | "wsl" | "external";
   install(options?: ServiceInstallOptions): Promise<ServiceInstallResult>;
   uninstall(): Promise<ServiceUninstallResult>;
   start(): Promise<void>;
@@ -1477,6 +1477,73 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
   }
 }
 
+class ExternalUserServiceManager implements UserServiceManager {
+  readonly name = "external";
+  readonly platform = "external" as const;
+
+  private unavailable(): never {
+    throw new Error(
+      "User service management is disabled by RESIN_NO_SERVICE=1. Run resin-daemon --foreground or manage the daemon externally.",
+    );
+  }
+
+  async install(): Promise<ServiceInstallResult> {
+    return this.unavailable();
+  }
+
+  async uninstall(): Promise<ServiceUninstallResult> {
+    return this.unavailable();
+  }
+
+  async start(): Promise<void> {
+    this.unavailable();
+  }
+
+  async stop(): Promise<void> {
+    this.unavailable();
+  }
+
+  async restart(): Promise<void> {
+    this.unavailable();
+  }
+
+  async reload(): Promise<void> {
+    this.unavailable();
+  }
+
+  async enable(): Promise<void> {
+    this.unavailable();
+  }
+
+  async disable(): Promise<void> {
+    this.unavailable();
+  }
+
+  async status(): Promise<ServiceStatusInfo> {
+    return {
+      installed: false,
+      active: false,
+      enabled: false,
+      serviceName: "externally-managed",
+      unitPath: "",
+      state: "externally_managed",
+      rawStatus: "User service management disabled by RESIN_NO_SERVICE=1",
+    };
+  }
+
+  async isInstalled(): Promise<boolean> {
+    return false;
+  }
+
+  getUnitDefinition(): string {
+    return this.unavailable();
+  }
+
+  getUnitPath(): string {
+    return this.unavailable();
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Factory Function
 // -----------------------------------------------------------------------------
@@ -1484,6 +1551,9 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
 export function createUserServiceManager(
   options: UserServiceManagerOptions = {},
 ): UserServiceManager {
+  if (process.env.RESIN_NO_SERVICE === "1" || options.env?.RESIN_NO_SERVICE === "1") {
+    return new ExternalUserServiceManager();
+  }
   if (options.platform) {
     if (options.platform === "wsl") {
       return new WslUserServiceManager(options);

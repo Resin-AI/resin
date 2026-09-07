@@ -35,6 +35,7 @@ export interface InitCommandFlags {
   gatewayUrl?: string;
   home?: string;
   localOnly?: boolean;
+  noService?: boolean;
   cloudUrl?: string;
   help?: boolean;
   autoRepair?: boolean;
@@ -89,6 +90,8 @@ export function parseInitFlags(args: string[]): InitCommandFlags {
       flags.rollbackInstall = true;
     } else if (arg === "--local-only") {
       flags.localOnly = true;
+    } else if (arg === "--no-service") {
+      flags.noService = true;
     } else if (arg === "--auto-repair") {
       flags.autoRepair = true;
     } else if (arg === "--no-auto-repair") {
@@ -141,15 +144,15 @@ Usage:
 One-command install: verify the signed release, present the capability and
 privacy plan, pair this device with Resin Cloud (unless --local-only), write
 owner-only cloud credentials, register detected harnesses at the gateway URL,
-and install/start/health-check the non-root user service.
+and install/start/health-check the non-root user service unless --no-service.
 
 Pairing opens the complete verification URL in a browser and always prints
 that URL plus the user code. Sign in or create an account, then review the
 identity and workspace in the Console before approving. Cloud credentials
 are stored at ~/.resin/state/device-token.json (mode 0600) with an ancillary
 vault copy. They are distinct from the local IPC token. Failed pairing does
-not leave a partial credential replacement. If a user service is already
-running, pairing restarts it so the daemon reloads credentials.
+not leave a partial credential replacement. Unless --no-service is set, pairing
+restarts an already-running user service so the daemon reloads credentials.
 
 The first Git workspace the gateway sees creates stable .resin/project.json
 and .resin/resin.lock files. Local MCP (search_tools, get_tool_schema,
@@ -164,6 +167,9 @@ Options:
   --auto-approve, -y, --yes  Approve the capability and privacy plan without a prompt.
                              Does not skip pairing.
   --local-only               Skip cloud pairing and install for local MCP use only.
+  --no-service               Configure and pair without installing, starting, or checking a service.
+                             Run resin-daemon --foreground or manage the daemon externally.
+                             RESIN_NO_SERVICE=1 also disables user service management.
   --cloud-url <url>          Resin Cloud origin (default: https://api.resin.sh).
   --harness <name>           Limit harness registration to one of: claude-code, codex-cli, omp.
   --workspace <dir>          Target project workspace directory.
@@ -271,6 +277,7 @@ export async function initCommand(
   const isQuiet = verbosity === "quiet";
   const isVerbose = verbosity === "verbose";
   const isRealInstall = !flags.dryRun && !flags.rollbackInstall;
+  const noService = flags.noService === true || env.RESIN_NO_SERVICE === "1";
   const cancellationController = new AbortController();
   const cancelForSignal = (signal: "SIGINT" | "SIGTERM") => {
     if (!cancellationController.signal.aborted) {
@@ -328,6 +335,7 @@ export async function initCommand(
           fsBridge: options.customFsBridge,
           timeoutMs: options.authorizationTimeoutMs,
           abortSignal: cancellationController.signal,
+          restartService: !noService,
           stdout: isQuiet || flags.nonInteractive ? { write: () => true } : options.stdout,
         });
       };
@@ -366,8 +374,8 @@ export async function initCommand(
       process.env.RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES === "1",
     fsBridge: options.customFsBridge,
     serviceRunner: options.serviceRunner,
-    setupService: options.setupService ?? isRealInstall,
-    autoStartService: options.autoStartService ?? isRealInstall,
+    setupService: !noService && (options.setupService ?? isRealInstall),
+    autoStartService: !noService && (options.autoStartService ?? isRealInstall),
     readinessVerifier: options.readinessVerifier,
     pairing: pairingCallback,
     abortSignal: cancellationController.signal,
@@ -423,7 +431,11 @@ export async function initCommand(
       stdoutWriter.write(`${JSON.stringify(result, null, 2)}\n`);
     } else if (!isQuiet) {
       const stdoutWriter = options.stdout ?? process.stdout;
-      stdoutWriter.write("Resin initialization complete.\n");
+      stdoutWriter.write(
+        noService && isRealInstall
+          ? "Resin configuration and pairing complete. Daemon startup and readiness were not checked. Run resin-daemon --foreground or manage the daemon externally before using Resin.\n"
+          : "Resin initialization complete.\n",
+      );
     }
 
     return 0;

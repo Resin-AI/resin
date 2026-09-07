@@ -122,7 +122,7 @@ export interface DaemonStatusSummary {
     enabled: boolean;
     platform: string;
     serviceName: string;
-    status: "active" | "stopped" | "not_installed";
+    status: "active" | "stopped" | "not_installed" | "externally_managed";
     pid: number | null;
   };
   ipc: {
@@ -351,6 +351,7 @@ export async function fetchDaemonStatusSummary(
     homeDir: home,
     resinHome,
     fsBridge,
+    env: env.RESIN_NO_SERVICE === "1" ? { RESIN_NO_SERVICE: "1" } : undefined,
   });
   let service: DaemonStatusSummary["service"] = {
     installed: false,
@@ -371,7 +372,14 @@ export async function fetchDaemonStatusSummary(
       enabled: Boolean(rawStatus.enabled),
       platform: sanitizeServiceIdentifier(serviceManager.platform, "unknown"),
       serviceName: sanitizeServiceIdentifier(rawStatus.serviceName, "resin.service"),
-      status: active ? "active" : installed ? "stopped" : "not_installed",
+      status:
+        serviceManager.platform === "external"
+          ? "externally_managed"
+          : active
+            ? "active"
+            : installed
+              ? "stopped"
+              : "not_installed",
       pid: safePositiveInteger(rawStatus.pid),
     };
   } catch {
@@ -618,9 +626,15 @@ export function formatStatusForTerminal(summary: DaemonStatusSummary): string {
   lines.push("  [Daemon Service]");
   lines.push(`  Platform:   ${service.platform}`);
   lines.push(`  Unit:       ${service.serviceName}`);
-  lines.push(
-    `  State:      ${service.active ? "RUNNING (active)" : service.installed ? "STOPPED (inactive)" : "NOT INSTALLED"}`,
-  );
+  const serviceState =
+    service.status === "externally_managed"
+      ? "EXTERNALLY MANAGED (foreground)"
+      : service.active
+        ? "RUNNING (active)"
+        : service.installed
+          ? "STOPPED (inactive)"
+          : "NOT INSTALLED";
+  lines.push(`  State:      ${serviceState}`);
   if (service.pid !== null && service.pid !== undefined) lines.push(`  PID:        ${service.pid}`);
 
   lines.push("  [IPC & Subsystems]");
@@ -1343,7 +1357,12 @@ function deriveDaemonHealth(
 ): DaemonStatusSummary["daemon"]["health"] {
   if (!service.active && !ipcConnected) return "stopped";
   if (reportedHealth === "starting") return "starting";
-  if (!service.active || !ipcConnected || lockfileState !== "healthy") return "degraded";
+  if (
+    (!service.active && service.status !== "externally_managed") ||
+    !ipcConnected ||
+    lockfileState !== "healthy"
+  )
+    return "degraded";
   if (reportedHealth === null) return "unknown";
   return reportedHealth === "fully-ready" ? "healthy" : "degraded";
 }
@@ -1398,7 +1417,15 @@ function buildRemediations(input: {
       remediations.push(remediation);
     }
   };
-  if (!input.service.installed) {
+  if (input.service.status === "externally_managed") {
+    if (!input.ipcConnected) {
+      add({
+        code: "start_daemon",
+        message: "The externally managed daemon IPC endpoint is unreachable.",
+        command: "resin-daemon --foreground",
+      });
+    }
+  } else if (!input.service.installed) {
     add({
       code: "install_daemon",
       message: "The Resin daemon is not installed.",
@@ -1600,7 +1627,10 @@ function formatIpcErrorCode(value: IpcErrorCode | string | null | undefined): st
 
 function deriveLegacyOverallStatus(summary: DaemonStatusSummary): OverallStatus {
   if (!summary.service.active && !summary.ipc.connected) return "stopped";
-  return summary.service.active && summary.ipc.connected ? "healthy" : "degraded";
+  return (summary.service.active || summary.service.status === "externally_managed") &&
+    summary.ipc.connected
+    ? "healthy"
+    : "degraded";
 }
 
 function writeStatusCommandError(json: boolean, code: string, exitCode: number): void {
