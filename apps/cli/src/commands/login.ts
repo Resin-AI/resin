@@ -106,6 +106,7 @@ export interface PerformPairingOptions {
   nonInteractive?: boolean;
   noBrowser?: boolean;
   force?: boolean;
+  restartService?: boolean;
   customFetch?: typeof fetch;
   openBrowser?: BrowserLauncher;
   fsBridge?: ConfigFsBridge;
@@ -244,8 +245,10 @@ export async function performPairing(
   const deviceId = options.deviceId || result.deviceId || result.claims.deviceId;
   const userId = result.claims.userId ?? result.claims.subject;
 
-  // Detect active user service and reload/restart it through existing service APIs
-  await restartActiveServiceIfRunning(home, options.fsBridge);
+  // Externally managed daemons must reload credentials without touching user services.
+  if (options.restartService !== false && process.env.RESIN_NO_SERVICE !== "1") {
+    await restartActiveServiceIfRunning(home, options.fsBridge);
+  }
 
   return {
     paired: true,

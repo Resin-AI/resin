@@ -27,7 +27,7 @@ function healthyStatus(
   overrides: Partial<StatusNotificationSnapshot> = {},
 ): StatusNotificationSnapshot {
   return {
-    service: { installed: true, active: true },
+    service: { installed: true, active: true, status: "active" },
     ipc: { connected: true, responsive: true },
     daemon: { health: "healthy", lockfile: { state: "healthy" } },
     cloud: { status: "valid" },
@@ -140,7 +140,7 @@ describe("CLI actionable notifications", () => {
   it("derives only intervention-required severities without healthy-state noise", () => {
     const degraded = deriveStatusActionableNotifications(
       healthyStatus({
-        service: { installed: true, active: false },
+        service: { installed: true, active: false, status: "stopped" },
         ipc: { connected: false, responsive: false },
         daemon: { health: "stopped", lockfile: { state: "stale" } },
         cloud: { status: "expired" },
@@ -164,6 +164,25 @@ describe("CLI actionable notifications", () => {
       { id: CLI_NOTIFICATION_IDS.network, severity: "warning", source: "network" },
     ]);
     expect(deriveStatusActionableNotifications(healthyStatus(), NOW)).toEqual([]);
+  });
+
+  it("uses runtime evidence rather than supervisor state for externally managed daemons", () => {
+    const snapshot = healthyStatus({
+      service: { installed: false, active: false, status: "externally_managed" },
+    });
+    expect(deriveStatusActionableNotifications(snapshot, NOW)).toEqual([]);
+    expect(
+      deriveStatusActionableNotifications(
+        { ...snapshot, ipc: { connected: false, responsive: false } },
+        NOW,
+      ).map((notification) => notification.id),
+    ).toEqual([CLI_NOTIFICATION_IDS.daemon]);
+    expect(
+      deriveStatusActionableNotifications(
+        { ...snapshot, daemon: { health: "degraded", lockfile: { state: "stale" } } },
+        NOW,
+      ).map((notification) => notification.id),
+    ).toEqual([CLI_NOTIFICATION_IDS.daemon]);
   });
 
   it("keeps diagnostic secrets and transcript text out of notification content", () => {
@@ -214,7 +233,7 @@ describe("CLI actionable notifications", () => {
 
   it("renders compact severity and remediation lines without terminal control injection", () => {
     const safeRuntimeValue = deriveStatusActionableNotifications(
-      healthyStatus({ service: { installed: true, active: false } }),
+      healthyStatus({ service: { installed: true, active: false, status: "stopped" } }),
       NOW,
     )[0];
     const unsafeRuntimeValue: ActionableNotification = {

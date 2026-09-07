@@ -1,10 +1,17 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
+import { resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import { main } from "../../src/bin/cli.js";
-import { repairState, runDiagnostics } from "../../src/commands/doctor.js";
+import {
+  doctorCommand,
+  repairCommand,
+  repairState,
+  runDiagnostics,
+} from "../../src/commands/doctor.js";
 import { initCommand } from "../../src/commands/init.js";
 import {
   type SupportedHarnessId,
@@ -773,6 +780,43 @@ describe("harness health production triggers", () => {
 });
 
 describe("doctor repair harness integration", () => {
+  it.each(["doctor", "repair"] as const)(
+    "refuses %s repair before touching externally managed runtime or harness state",
+    async (command) => {
+      const bridge = new MtimeMemoryBridge();
+      const lockPath = resolvePaths({ home: HOME }).lockFilePath;
+      const lockContent = JSON.stringify({ pid: process.pid });
+      await bridge.writeFile(lockPath, lockContent);
+      const writes = vi.spyOn(bridge, "writeFile");
+      const copies = vi.spyOn(bridge, "copyFile");
+      const removals = vi.spyOn(bridge, "unlink");
+      const directories = vi.spyOn(bridge, "mkdirp");
+      const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+      try {
+        const options = { fsBridge: bridge, env: { HOME, RESIN_NO_SERVICE: "1" } };
+        const args = ["--json", "--auto-repair"];
+        const exitCode =
+          command === "doctor"
+            ? await doctorCommand([...args, "--fix"], options)
+            : await repairCommand(args, options);
+        expect(exitCode).toBe(1);
+        expect(stdout).toHaveBeenCalledWith(expect.stringContaining("RESIN_NO_SERVICE=1"));
+        expect(await bridge.readFile(lockPath)).toBe(lockContent);
+        expect(writes).not.toHaveBeenCalled();
+        expect(copies).not.toHaveBeenCalled();
+        expect(removals).not.toHaveBeenCalled();
+        expect(directories).not.toHaveBeenCalled();
+        await expect(repairState(options)).rejects.toThrow("RESIN_NO_SERVICE=1");
+        expect(await bridge.readFile(lockPath)).toBe(lockContent);
+        expect(writes).not.toHaveBeenCalled();
+        expect(removals).not.toHaveBeenCalled();
+        expect(directories).not.toHaveBeenCalled();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
   it("repairs harness registration through HarnessHealthCoordinator", async () => {
     const bridge = new MtimeMemoryBridge();
     const coordinator = new HarnessHealthCoordinator({

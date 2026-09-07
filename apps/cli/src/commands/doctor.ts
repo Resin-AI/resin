@@ -154,9 +154,27 @@ export function createDoctorUserServiceManager(options: {
     resinHome: path.join(home, ".resin"),
     daemonPath: sourcePaths?.daemonPath,
     supervisorEntryPath: sourcePaths?.supervisorEntryPath,
-    env: sourceRoot ? { RESIN_LOCAL_SOURCE_ROOT: sourceRoot } : undefined,
+    env: {
+      ...(sourceRoot ? { RESIN_LOCAL_SOURCE_ROOT: sourceRoot } : {}),
+      ...(options.env.RESIN_NO_SERVICE === "1" ? { RESIN_NO_SERVICE: "1" } : {}),
+    },
     fsBridge: options.fsBridge,
   });
+}
+
+function assertRepairServiceManagement(
+  env: NodeJS.ProcessEnv,
+  serviceManager?: UserServiceManager,
+): void {
+  if (
+    process.env.RESIN_NO_SERVICE === "1" ||
+    env.RESIN_NO_SERVICE === "1" ||
+    serviceManager?.platform === "external"
+  ) {
+    throw new Error(
+      "Repair is disabled for externally managed daemons (RESIN_NO_SERVICE=1). No runtime or harness state was changed; manage the foreground daemon externally.",
+    );
+  }
 }
 
 async function runHarnessHealthSafely(
@@ -657,6 +675,7 @@ export async function repairState(options: {
     ? path.resolve(options.home)
     : path.resolve(options.env?.HOME ?? os.homedir());
   const env = options.env ?? (options.home === undefined ? process.env : { HOME: customHome });
+  assertRepairServiceManagement(env, options.serviceManager);
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -1003,6 +1022,9 @@ export async function doctorCommand(
       ? path.resolve(flags.home)
       : path.resolve(options.env?.HOME ?? os.homedir());
     const env = { ...(options.env ?? process.env), HOME: customHome };
+    if (shouldFix) {
+      assertRepairServiceManagement(env, options.serviceManager);
+    }
     const fsBridge = options.fsBridge ?? defaultFsBridge;
     const serviceManager =
       options.serviceManager ??

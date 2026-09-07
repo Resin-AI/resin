@@ -136,7 +136,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(verifyStep?.details).toMatchObject({
       allConfigured: true,
       installedHarnessCount: 3,
-      onboardingReady: true,
+      onboardingReady: false,
     });
 
     // Verify Claude, Codex, OMP configs were written

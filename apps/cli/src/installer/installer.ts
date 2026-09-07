@@ -853,9 +853,8 @@ export class ResinInstaller {
       const verifyDetails: JournalDetails = {
         allConfigured,
         installedHarnessCount: installedHarnesses.length,
-        onboardingReady:
-          allConfigured &&
-          (!options.setupService || dryRun || daemonReadinessResult?.ready === true),
+        onboardingReady: allConfigured && daemonReadinessResult?.ready === true,
+        daemonManagement: options.setupService ? "user-service" : "external",
       };
       if (serviceSetupResult) {
         verifyDetails.serviceHealthy = serviceSetupResult.healthy;
@@ -864,6 +863,10 @@ export class ResinInstaller {
         verifyDetails.ipcReady = daemonReadinessResult.ipcReady;
         verifyDetails.cloudReady = daemonReadinessResult.cloudReady;
         verifyDetails.daemonHealthStatus = daemonReadinessResult.healthStatus;
+      }
+      if (!options.setupService && !dryRun) {
+        verifyDetails.nextStep =
+          "Run resin-daemon --foreground or manage the daemon externally; daemon readiness has not been checked.";
       }
       this.journal.completeStep("verify", verifyDetails);
 
@@ -879,7 +882,11 @@ export class ResinInstaller {
         await this.journal.save(journalFilePath, this.fsBridge);
       }
 
-      this.log("\n✔ Resin installation completed successfully!\n");
+      this.log(
+        options.setupService || dryRun
+          ? "\nResin installation completed successfully!\n"
+          : "\nResin configuration complete. Daemon startup and readiness were not checked; run resin-daemon --foreground or manage the daemon externally.\n",
+      );
 
       return {
         success: true,

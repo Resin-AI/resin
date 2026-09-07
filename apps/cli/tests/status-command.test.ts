@@ -109,60 +109,77 @@ describe("status command & collector", () => {
     expect(claudeHarness?.configured).toBe(true);
   });
 
-  it("collects status through active local socket without requiring IPC auth token", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-status-ipc-"));
-    const socketPath = path.join(tempDir, "daemon.sock");
+  it.each([false, true])(
+    "collects live IPC status with external management=%s",
+    async (external) => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-status-ipc-"));
+      const socketPath = path.join(tempDir, "daemon.sock");
 
-    const server = net.createServer((socket) => {
-      const decoder = new FrameDecoder();
-      socket.on("data", (chunk) => {
-        for (const message of decoder.push(chunk)) {
-          const req = message as { id?: string; method?: string };
-          if (req.method === "ping") {
-            socket.write(
-              encodeFrame({
-                id: req.id,
-                result: { pong: true, timestamp: Date.now() },
-              }),
-            );
-          } else if (req.method === "getHealth") {
-            socket.write(
-              encodeFrame({
-                id: req.id,
-                result: {
-                  status: "healthy",
-                  version: "0.2.0",
-                  uptimeSeconds: 120,
-                },
-              }),
-            );
+      const server = net.createServer((socket) => {
+        const decoder = new FrameDecoder();
+        socket.on("data", (chunk) => {
+          for (const message of decoder.push(chunk)) {
+            const req = message as { id?: string; method?: string };
+            if (req.method === "ping") {
+              socket.write(
+                encodeFrame({
+                  id: req.id,
+                  result: { pong: true, timestamp: Date.now() },
+                }),
+              );
+            } else if (req.method === "getHealth") {
+              socket.write(
+                encodeFrame({
+                  id: req.id,
+                  result: {
+                    status: "healthy",
+                    version: "0.2.0",
+                    uptimeSeconds: 120,
+                  },
+                }),
+              );
+            }
           }
+        });
+      });
+
+      await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+      try {
+        const summary = await collectStatus({
+          home: homeDir,
+          socket: socketPath,
+          env: { RESIN_NO_SERVICE: external ? "1" : "0" },
+          fsBridge: createMockFsBridge({
+            [socketPath]: "socket",
+          }),
+        });
+
+        expect(summary.ipc.connected).toBe(true);
+        expect(summary.ipc.socketPresent).toBe(true);
+        expect(summary.ipc.pingLatencyMs).toBeGreaterThanOrEqual(0);
+        expect(summary.ipc.daemonVersion).toBe("0.2.0");
+        expect(summary.ipc.uptimeSeconds).toBe(120);
+        expect(summary.ipc.errorCode).toBeNull();
+        if (external) {
+          expect(summary.service).toMatchObject({
+            installed: false,
+            active: false,
+            enabled: false,
+            status: "externally_managed",
+            platform: "external",
+          });
+          expect(summary.remediations.some((item) => item.code === "install_daemon")).toBe(false);
+          const terminal = formatStatusForTerminal(summary);
+          expect(terminal).toContain("EXTERNALLY MANAGED (foreground)");
+          expect(terminal).not.toContain("State:      NOT INSTALLED");
         }
-      });
-    });
-
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-
-    try {
-      const summary = await collectStatus({
-        home: homeDir,
-        socket: socketPath,
-        fsBridge: createMockFsBridge({
-          [socketPath]: "socket",
-        }),
-      });
-
-      expect(summary.ipc.connected).toBe(true);
-      expect(summary.ipc.socketPresent).toBe(true);
-      expect(summary.ipc.pingLatencyMs).toBeGreaterThanOrEqual(0);
-      expect(summary.ipc.daemonVersion).toBe("0.2.0");
-      expect(summary.ipc.uptimeSeconds).toBe(120);
-      expect(summary.ipc.errorCode).toBeNull();
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("formats terminal output with all essential sections", async () => {
     const summary = {
