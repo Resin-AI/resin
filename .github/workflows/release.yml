@@ -8,9 +8,8 @@ on:
         required: true
         type: string
       release_tag:
-        description: Exact protected release tag (e.g. v1.0.3)
-        required: false
-        default: "v1.0.3"
+        description: Exact protected release tag matching the candidate
+        required: true
         type: string
       confirm_promotion:
         description: Type 'PROMOTE_PRODUCTION' for production or 'PROMOTE_STAGING' for staging
@@ -51,7 +50,7 @@ jobs:
       id-token: write
     env:
       RELEASE_SHA: ${{ inputs.commit_sha }}
-      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.3' }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
       TARGET_ENV: ${{ inputs.environment || 'production' }}
       CONFIRM_PROMOTION: ${{ inputs.confirm_promotion }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}

@@ -9,6 +9,7 @@ const ROOT_DIR = process.cwd();
 const PRIVILEGED_RELEASE_WORKFLOWS = [
   ".github/workflows/release.yml",
   ".github/workflows/release-candidate.yml",
+  ".github/workflows/channel-renewal.yml",
   ".github/workflows/production-operational-evidence.yml",
   ".github/workflows/security-scan.yml",
 ];

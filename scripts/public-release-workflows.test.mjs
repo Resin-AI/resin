@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -143,7 +144,8 @@ describe("Public Release Workflows Contract", () => {
     it("defines workflow_dispatch trigger with commit_sha and four public release gate run IDs", () => {
       expect(inputs).toBeDefined();
       expect(inputs.commit_sha?.required).toBe(true);
-      expect(inputs.release_tag?.default).toBe("v1.0.3");
+      expect(inputs.release_tag?.required).toBe(true);
+      expect(inputs.release_tag?.default).toBeUndefined();
       expect(inputs.ci_run_id?.required).toBe(true);
       expect(inputs.platform_qualification_run_id?.required).toBe(true);
       expect(inputs.system_qualification_run_id?.required).toBe(true);
@@ -234,6 +236,50 @@ describe("Public Release Workflows Contract", () => {
       expect(checkoutStep).toBeDefined();
       expect(checkoutStep.with?.ref).toContain("RELEASE_SHA");
       expect(checkoutStep.with?.["fetch-depth"]).toBe(0);
+    });
+
+    it("rejects an upstream run from another repository even when every other qualification matches", () => {
+      const script = jobs["build-and-sign"].steps.find((step) => step.id === "gates").run;
+      const start = script.indexOf("validate_run() {");
+      const end = script.indexOf('\nvalidate_run "$CI_RUN_ID"', start);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      const gate = script.slice(start, end);
+      const run = (repository) =>
+        spawnSync(
+          "bash",
+          [
+            "-c",
+            `
+        set -euo pipefail
+        gh() { printf '%s' "$RUN_INFO"; }
+        ${gate}
+        validate_run 123 .github/workflows/ci.yml "CI suite"
+        printf '\\nQUALIFIED\\n'
+      `,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_REPOSITORY: "Resin-AI/resin",
+              RELEASE_SHA: "a".repeat(40),
+              RUN_INFO: JSON.stringify({
+                head_repository: { full_name: repository },
+                path: ".github/workflows/ci.yml",
+                head_sha: "a".repeat(40),
+                status: "completed",
+                conclusion: "success",
+              }),
+            },
+          },
+        );
+      const accepted = run("Resin-AI/resin");
+      expect(accepted.status, accepted.stderr).toBe(0);
+      expect(accepted.stdout).toContain("QUALIFIED");
+      const rejected = run("untrusted/fork");
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stdout).not.toContain("QUALIFIED");
     });
 
     it("validates every supplied upstream run via actions/runs/<id> without polling fallbacks", () => {
@@ -392,6 +438,8 @@ describe("Public Release Workflows Contract", () => {
     it("defines workflow_dispatch with required environment choice and candidate_run_id", () => {
       expect(inputs).toBeDefined();
       expect(inputs.commit_sha?.required).toBe(true);
+      expect(inputs.release_tag?.required).toBe(true);
+      expect(inputs.release_tag?.default).toBeUndefined();
       expect(inputs.confirm_promotion?.required).toBe(true);
       expect(inputs.candidate_run_id?.required).toBe(true);
       expect(inputs.environment?.type).toBe("choice");
@@ -804,6 +852,33 @@ describe("Public Release Workflows Contract", () => {
       for (const priv of PRIVATE_NAMES) {
         expect(splitConfig.publicPackages).not.toContain(priv);
       }
+    });
+  });
+
+  describe("Channel renewal authorization", () => {
+    it("keeps scheduled expiry monitoring read-only and channel writes manually approved", () => {
+      const workflow = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"));
+      expect(workflow).not.toBeNull();
+      const { monitor, renew } = workflow.doc.jobs;
+      expect(workflow.doc.on.schedule).toBeDefined();
+      expect(renew.if).toContain("github.event_name == 'workflow_dispatch'");
+      expect(renew.environment).toBe("production");
+      expect(renew.concurrency).toEqual({
+        group: "release-production",
+        "cancel-in-progress": false,
+      });
+      expect(renew.permissions).toEqual({ contents: "read", "id-token": "write" });
+      expect(renew.env?.RESIN_RELEASE_PRIVATE_KEY_PEM).toBeUndefined();
+      const signer = renew.steps.find((step) => step.env?.RESIN_RELEASE_PRIVATE_KEY_PEM);
+      expect(signer.run).toContain("renew-channel");
+      expect(signer.env.CONFIRM_RENEWAL).toBe("${{ inputs.confirmation }}");
+      expect(signer.run).toContain('--confirmation "$CONFIRM_RENEWAL"');
+      expect(monitor.permissions).toEqual({ contents: "read" });
+      expect(monitor.environment).toBeUndefined();
+      expect(JSON.stringify(monitor)).not.toMatch(/secrets\.|id-token|configure-aws-credentials/);
+      expect(JSON.stringify(monitor)).toContain("check-channel-expiry");
+      expect(JSON.stringify(monitor)).toContain("::error::");
+      expect(JSON.stringify(monitor)).not.toContain("continue-on-error");
     });
   });
 

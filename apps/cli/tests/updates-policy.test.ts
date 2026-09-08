@@ -616,7 +616,10 @@ describe("cross-process update lock", () => {
   it("safely recovers a stale lock whose local owner is dead", async () => {
     const lockPath = await createTemporaryLockPath();
     const hostname = "fixture-host";
-    const staleOwnerPid = 4_101;
+    const staleOwnerPid = process.pid;
+    // Even a PID present on the host must use the injected liveness fixture,
+    // not a real process incarnation that can bypass the dead-owner branch.
+    const getProcessIdentity = vi.fn(() => null);
     const isProcessAlive = vi.fn((pid: number) => pid !== staleOwnerPid);
     await writeLockMetadata(lockPath, {
       version: UPDATE_LOCK_METADATA_VERSION,
@@ -633,7 +636,8 @@ describe("cross-process update lock", () => {
       timeoutMs: 0,
       clock: () => 10_000,
       isProcessAlive,
-      pid: 4_102,
+      getProcessIdentity,
+      pid: staleOwnerPid + 1,
       hostname,
       processIdentity: fixtureProcessIdentity("contender-start-1"),
       createOwnerId: () => "replacement-owner",
@@ -647,7 +651,8 @@ describe("cross-process update lock", () => {
         timeoutMs: 0,
         clock: () => 10_000,
         isProcessAlive,
-        pid: 4_103,
+        getProcessIdentity,
+        pid: staleOwnerPid + 2,
         hostname,
         processIdentity: fixtureProcessIdentity("contender-start-2"),
         createOwnerId: () => "refused-owner",

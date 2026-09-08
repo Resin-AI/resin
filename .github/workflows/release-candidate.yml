@@ -8,9 +8,8 @@ on:
         required: true
         type: string
       release_tag:
-        description: Exact protected release tag (e.g. v1.0.3)
-        required: false
-        default: "v1.0.3"
+        description: Exact protected release tag for this candidate
+        required: true
         type: string
       ci_run_id:
         description: GitHub Actions run ID of successful CI run on exact commit_sha
@@ -46,7 +45,7 @@ jobs:
       unsigned_artifact_id: ${{ steps.upload-unsigned.outputs.artifact-id }}
     env:
       RELEASE_SHA: ${{ inputs.commit_sha }}
-      RELEASE_TAG: ${{ inputs.release_tag || 'v1.0.3' }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
       CI_RUN_ID: ${{ inputs.ci_run_id }}
       PLATFORM_QUALIFICATION_RUN_ID: ${{ inputs.platform_qualification_run_id }}
       SYSTEM_QUALIFICATION_RUN_ID: ${{ inputs.system_qualification_run_id }}
@@ -137,6 +136,7 @@ jobs:
 
             if [ "$run_repo" != "$GITHUB_REPOSITORY" ]; then
               echo "::error::$label run $run_id repository ($run_repo) does not match $GITHUB_REPOSITORY"
+              exit 1
             fi
 
             if [ "$run_path" != "$expected_path" ]; then

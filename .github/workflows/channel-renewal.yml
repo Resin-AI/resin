@@ -1,0 +1,123 @@
+name: Channel Metadata Freshness
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only check, healthy same-version renewal, or explicitly approved expired-source restoration
+        required: true
+        default: check
+        type: choice
+        options:
+          - check
+          - renew
+          - restore
+      confirmation:
+        description: RENEW_CHANNEL_PRODUCTION for renew; RESTORE_EXPIRED_CHANNEL_PRODUCTION for restore
+        required: false
+        type: string
+  schedule:
+    - cron: "17 */3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: Check public channel expiry without credentials
+    if: ${{ github.event_name == 'schedule' || inputs.operation == 'check' }}
+    runs-on: resin-vm-linux-arm64
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pinned public verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Verify public signatures and six-hour renewal headroom
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! node --experimental-strip-types scripts/publish-public-release.mjs check-channel-expiry; then
+            echo "::error::Public channel freshness check failed. An authorized operator must inspect and renew metadata."
+            echo "Public channel freshness check failed; operator action required." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # Failure remains a failed Actions run for repository Actions notification subscribers.
+
+  renew:
+    name: Authorized channel-only metadata renewal
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.operation == 'renew' || inputs.operation == 'restore') }}
+    runs-on: resin-vm-linux-arm64
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: release-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate explicit authorization before assuming credentials
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CONFIRM_RENEWAL: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_PROTECTED" != "true" ]; then
+            echo "::error::Renewal requires a protected workflow ref and production environment approval."
+            exit 1
+          fi
+          if [ "$OPERATION" = "renew" ]; then
+            expected="RENEW_CHANNEL_PRODUCTION"
+          elif [ "$OPERATION" = "restore" ]; then
+            expected="RESTORE_EXPIRED_CHANNEL_PRODUCTION"
+          else
+            exit 1
+          fi
+          if [ "$CONFIRM_RENEWAL" != "$expected" ]; then
+            echo "::error::Explicit channel renewal confirmation is missing or incorrect."
+            exit 1
+          fi
+      - name: Checkout approved public renewal implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Assume approved channel renewal role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.RESIN_CHANNEL_RENEWAL_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Renew only signed channel freshness and verify canonical readback
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CONFIRM_RENEWAL: ${{ inputs.confirmation }}
+          RESIN_DISTRIBUTION_BUCKET: ${{ secrets.RESIN_DISTRIBUTION_BUCKET }}
+          RESIN_DISTRIBUTION_ID: ${{ secrets.RESIN_DISTRIBUTION_ID }}
+          RESIN_RELEASE_KEY_ID: ${{ vars.RESIN_RELEASE_KEY_ID }}
+          RESIN_RELEASE_PUBLIC_KEY_PEM: ${{ vars.RESIN_RELEASE_PUBLIC_KEY_PEM }}
+          RESIN_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.RESIN_RELEASE_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$OPERATION" = "restore" ]; then
+            args+=(--restore-expired)
+          fi
+          node --experimental-strip-types scripts/publish-public-release.mjs renew-channel \
+            --confirmation "$CONFIRM_RENEWAL" "${args[@]}" \
+            | tee "$RUNNER_TEMP/channel-renewal-receipt.json"
+          cat "$RUNNER_TEMP/channel-renewal-receipt.json" >> "$GITHUB_STEP_SUMMARY"
