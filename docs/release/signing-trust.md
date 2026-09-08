@@ -22,7 +22,7 @@ Release signing secrets and configuration are bound exclusively to the `producti
 
 - **Required Reviewers**: Release deployment requires explicit approval from designated Release Stewards / Security Admins.
 - **Admin Bypass Decision**: While organization admins possess technical bypass capabilities, release signing policy **prohibits unreviewed admin bypasses** except in declared, documented SEV-1 emergency incidents (see Section 5).
-- **Deployment Branch Protection**: Deployments to `production` are restricted to tags matching `v*.*.*` originating from qualified `main` commits.
+- **Deployment Branch Protection**: The `production` environment permits protected workflow refs, with required human approval before environment-scoped signing credentials become available; it is not tag-only. Release publication still qualifies the exact release tag and commit, while channel renewal/restoration may run from a protected branch such as `main` with the operation's explicit confirmation and the same production approval gate.
 - **Auditability**:
   - Workflow strictly enforces exact 40-character commit SHA matching against protected release tags.
   - Automated cryptographic qualification gates must pass 100% of checks before signing keys are loaded into runner memory.

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Read-only check, healthy same-version renewal, or explicitly approved expired-source restoration
+        description: Read-only check, renewal, expired-source restoration, or notification drill
         required: true
         default: check
         type: choice
@@ -12,8 +12,9 @@ on:
           - check
           - renew
           - restore
+          - notification-drill
       confirmation:
-        description: RENEW_CHANNEL_PRODUCTION for renew; RESTORE_EXPIRED_CHANNEL_PRODUCTION for restore
+        description: RENEW_CHANNEL_PRODUCTION for renew; RESTORE_EXPIRED_CHANNEL_PRODUCTION for restore; NOTIFY_CHANNEL_MONITOR_DRILL for notification-drill
         required: false
         type: string
   schedule:
@@ -25,12 +26,33 @@ permissions:
 jobs:
   monitor:
     name: Check public channel expiry without credentials
-    if: ${{ github.event_name == 'schedule' || inputs.operation == 'check' }}
+    if: ${{ github.event_name == 'schedule' || inputs.operation == 'check' || inputs.operation == 'notification-drill' }}
     runs-on: resin-vm-linux-arm64
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
+      - name: Validate notification drill authorization
+        id: drill-authorization
+        if: ${{ inputs.operation == 'notification-drill' }}
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] || [ "$WORKFLOW_REF" != "refs/heads/main" ] || [ "$REF_PROTECTED" != "true" ] || [ "$CONFIRMATION" != "NOTIFY_CHANNEL_MONITOR_DRILL" ]; then
+            echo "::error::Notification drill requires protected main and explicit NOTIFY_CHANNEL_MONITOR_DRILL confirmation."
+            exit 1
+          fi
+      - name: Intentional diagnostic monitor failure (DRILL; no metadata changes)
+        if: ${{ inputs.operation == 'notification-drill' }}
+        shell: bash
+        run: |
+          echo "::error::DRILL: intentional monitor failure to exercise the incident notification route; no metadata was changed."
+          exit 1
       - name: Checkout pinned public verifier
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -49,7 +71,7 @@ jobs:
             echo "Public channel freshness check failed; operator action required." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          # Failure remains a failed Actions run for repository Actions notification subscribers.
+          # Notification submission never changes this failed verification result.
 
   renew:
     name: Authorized channel-only metadata renewal
@@ -121,3 +143,132 @@ jobs:
             --confirmation "$CONFIRM_RENEWAL" "${args[@]}" \
             | tee "$RUNNER_TEMP/channel-renewal-receipt.json"
           cat "$RUNNER_TEMP/channel-renewal-receipt.json" >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    name: Submit channel failure notification (SNS submission only)
+    needs: [monitor, renew]
+    # always() is required: one of these mutually exclusive dependencies is skipped.
+    # Reject unauthorized drills here as well as in monitor, before accessing credentials.
+    if: >-
+      ${{ always() &&
+          (needs.monitor.result == 'failure' || needs.renew.result == 'failure') &&
+          github.ref == 'refs/heads/main' && github.ref_protected == true &&
+          (inputs.operation != 'notification-drill' ||
+           (github.event_name == 'workflow_dispatch' && inputs.confirmation == 'NOTIFY_CHANNEL_MONITOR_DRILL')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-monitoring
+    permissions:
+      id-token: write
+    steps:
+      - name: Validate notification configuration before assuming credentials
+        shell: bash
+        env:
+          NOTIFICATION_ROLE: ${{ secrets.RESIN_CHANNEL_NOTIFICATION_ROLE_ARN }}
+          NOTIFICATION_TOPIC: ${{ secrets.RESIN_CHANNEL_NOTIFICATION_TOPIC_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NOTIFICATION_ROLE" ] || [ -z "$NOTIFICATION_TOPIC" ]; then
+            echo "::error::Channel notification configuration is missing; no submission occurred."
+            exit 1
+          fi
+      - name: Assume notification-only role
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.RESIN_CHANNEL_NOTIFICATION_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          unset-current-credentials: true
+      - name: Submit notification and record safe submission receipt
+        id: submission
+        shell: python
+        env:
+          NOTIFICATION_TOPIC: ${{ secrets.RESIN_CHANNEL_NOTIFICATION_TOPIC_ARN }}
+          OPERATION: ${{ inputs.operation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          MONITOR_RESULT: ${{ needs.monitor.result }}
+          RENEW_RESULT: ${{ needs.renew.result }}
+        run: |
+          import datetime
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          def timestamp():
+              return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+          drill = os.environ.get("OPERATION") == "notification-drill"
+          if (os.environ.get("GITHUB_REF") != "refs/heads/main"
+              or os.environ.get("REF_PROTECTED") != "true"
+              or (drill and (os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                            or os.environ.get("CONFIRMATION") != "NOTIFY_CHANNEL_MONITOR_DRILL"))):
+              sys.exit("Notification authorization rejected; no submission occurred.")
+          results = {"monitor": os.environ["MONITOR_RESULT"], "renew": os.environ["RENEW_RESULT"]}
+          if "failure" not in results.values():
+              sys.exit("Notification requires a failed monitor or renewal job.")
+          classification = "drill" if drill else "incident"
+          receipt = {
+              "schemaVersion": 1,
+              "classification": classification,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "commit": os.environ["GITHUB_SHA"],
+              "runUrl": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "jobResults": results,
+              "startedAt": timestamp(),
+              "submissionStatus": "failed",
+              "snsMessageId": None,
+              "submittedAt": None,
+              "humanDelivery": "not_verified",
+              "humanAcknowledgment": "not_verified",
+          }
+          message = {
+              "type": "resin.channel.notification.v1",
+              "classification": classification,
+              "summary": ("DRILL: intentional channel monitor failure; no metadata changed."
+                          if drill else "INCIDENT: channel freshness verification or renewal failed; operator action required."),
+              "runUrl": receipt["runUrl"],
+              "runId": receipt["runId"],
+              "runAttempt": receipt["runAttempt"],
+              "jobResults": results,
+              "startedAt": receipt["startedAt"],
+          }
+          try:
+              topic = os.environ.get("NOTIFICATION_TOPIC", "")
+              if not topic:
+                  raise ValueError("Missing notification topic")
+              response = subprocess.run(
+                  ["aws", "sns", "publish", "--topic-arn", topic,
+                   "--subject", f"Resin channel {classification.upper()}",
+                   "--message", json.dumps(message), "--output", "json", "--no-cli-pager"],
+                  capture_output=True, text=True, check=True, timeout=60,
+              )
+              message_id = json.loads(response.stdout).get("MessageId")
+              if not isinstance(message_id, str) or not re.fullmatch(
+                  r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", message_id
+              ):
+                  raise ValueError("Invalid SNS submission response")
+              receipt.update(submissionStatus="submitted", snsMessageId=message_id, submittedAt=timestamp())
+          except Exception:
+              # Never echo provider errors, endpoints, topic ARNs, or credentials.
+              print("::error::Channel notification submission failed or could not be confirmed.")
+          receipt["completedAt"] = timestamp()
+          pathlib.Path(os.environ["RUNNER_TEMP"], "channel-notification-receipt.json").write_text(
+              json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"Channel {classification}: SNS submission {receipt['submissionStatus']}; human delivery and acknowledgment NOT VERIFIED.\n")
+          sys.exit(0 if receipt["submissionStatus"] == "submitted" else 1)
+      - name: Upload notification submission receipt
+        if: ${{ always() && steps.submission.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: channel-notification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/channel-notification-receipt.json
+          if-no-files-found: error
+          retention-days: 30
