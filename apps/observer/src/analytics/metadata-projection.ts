@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import {
   type DiscoveredToolEntry,
+  InvocationUsageEstimateSchema,
   type NormalizedBranchForkEvent,
   type NormalizedCommandExecEvent,
   type NormalizedCompactionEvent,
@@ -17,6 +18,8 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   type RedactionMeta,
+  TOOL_IO_UTF8_METHOD,
+  estimatePayloadTokens,
   nowIso,
 } from "@resin/contracts";
 import {
@@ -684,11 +687,56 @@ export function projectEventToMetadataOnly(
   const sessionKind: "user" | "agent" | undefined =
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
-  const metadata: { scenarioId: string; sessionKind?: "user" | "agent" } = { scenarioId };
+  const metadata: Record<string, unknown> = { scenarioId };
   if (sessionKind !== undefined) {
     metadata.sessionKind = sessionKind;
   }
 
+  const existingEstimate = event.metadata?.resinTokenEstimateV1;
+  if (existingEstimate) {
+    const parsedEstimate = InvocationUsageEstimateSchema.safeParse(existingEstimate);
+    if (parsedEstimate.success) {
+      metadata.resinTokenEstimateV1 = {
+        method: parsedEstimate.data.method,
+        inputTokens: parsedEstimate.data.inputTokens,
+        outputTokens: parsedEstimate.data.outputTokens,
+        discoveryTokens: parsedEstimate.data.discoveryTokens,
+        totalTokens: parsedEstimate.data.totalTokens,
+      };
+    }
+  }
+
+  if (!metadata.resinTokenEstimateV1) {
+    if (event.type === "tool_call") {
+      const toolCall = event as NormalizedToolCallEvent;
+      if (toolCall.parameters !== undefined) {
+        const inputTokens = estimatePayloadTokens(toolCall.parameters);
+        if (inputTokens !== undefined) {
+          metadata.resinTokenEstimateV1 = {
+            method: TOOL_IO_UTF8_METHOD,
+            inputTokens,
+            outputTokens: 0,
+            discoveryTokens: 0,
+            totalTokens: inputTokens,
+          };
+        }
+      }
+    } else if (event.type === "tool_result") {
+      const toolResult = event as NormalizedToolResultEvent;
+      if (toolResult.result !== undefined) {
+        const outputTokens = estimatePayloadTokens(toolResult.result);
+        if (outputTokens !== undefined) {
+          metadata.resinTokenEstimateV1 = {
+            method: TOOL_IO_UTF8_METHOD,
+            inputTokens: 0,
+            outputTokens,
+            discoveryTokens: 0,
+            totalTokens: outputTokens,
+          };
+        }
+      }
+    }
+  }
   const baseHeaders = {
     eventId: event.eventId,
     schemaVersion: event.schemaVersion,

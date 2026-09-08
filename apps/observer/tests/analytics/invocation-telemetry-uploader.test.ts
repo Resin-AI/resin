@@ -71,6 +71,13 @@ describe("InvocationTelemetryUploader", () => {
       invocationId: "inv_ws1_1",
       workspaceId: "ws_alpha",
       startedAt: "2026-08-27T10:01:00.000Z",
+      usageEstimate: {
+        method: "tool_io_utf8_v1",
+        inputTokens: 11,
+        outputTokens: 22,
+        discoveryTokens: 33,
+        totalTokens: 66,
+      },
     });
     const inv2 = makeInvocation({
       invocationId: "inv_ws1_2",
@@ -126,6 +133,8 @@ describe("InvocationTelemetryUploader", () => {
 
     expect(alphaBatch?.invocations).toHaveLength(2);
     expect(alphaBatch?.invocations.map((i) => i.invocationId)).toEqual(["inv_ws1_1", "inv_ws1_2"]);
+    expect(alphaBatch?.invocations[0].usageEstimate).toEqual(inv1.usageEstimate);
+    expect(alphaBatch?.invocations[1].usageEstimate).toBeUndefined();
     expect(betaBatch?.invocations).toHaveLength(1);
     expect(betaBatch?.invocations[0].invocationId).toBe("inv_ws2_1");
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { descriptorSafeCanonicalJsonStringify } from "./canonical.js";
 import { CapabilityEnvelopeSchema } from "./capabilities.js";
 import {
   ISOTimestampSchema,
@@ -109,6 +110,205 @@ export const InvocationErrorDetailsSchema = z.object({
 export type InvocationErrorDetails = z.infer<typeof InvocationErrorDetailsSchema>;
 
 /**
+ * Canonical method tag for deterministic serialized UTF-8 tool-I/O estimation.
+ */
+export const TOOL_IO_UTF8_METHOD = "tool_io_utf8_v1" as const;
+
+/**
+ * Transparent estimated tool-I/O usage metrics for an invocation or tool event.
+ * Represents serialized UTF-8 bytes / 4 rounded up for tool exchange payloads,
+ * distinct from whole-session or provider-billed model context/reasoning.
+ */
+export const InvocationUsageEstimateSchema = z
+  .object({
+    method: z.literal(TOOL_IO_UTF8_METHOD),
+    inputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    outputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    discoveryTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    totalTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .refine((val) => val.totalTokens === val.inputTokens + val.outputTokens + val.discoveryTokens, {
+    message: "totalTokens must equal sum of inputTokens, outputTokens, and discoveryTokens",
+  });
+
+export type InvocationUsageEstimate = z.infer<typeof InvocationUsageEstimateSchema>;
+
+/**
+ * Estimates UTF-8 byte length of a serialized payload.
+ * Returns undefined if payload is missing (undefined) or unserializable.
+ * A literal JSON null is valid 4 UTF-8 bytes ("null").
+ */
+export function estimatePayloadBytes(payload: unknown): number | undefined {
+  if (payload === undefined) {
+    return undefined;
+  }
+  if (typeof payload === "string") {
+    return Buffer.byteLength(payload, "utf8");
+  }
+  try {
+    const serialized = descriptorSafeCanonicalJsonStringify(payload);
+    if (serialized === "undefined" || serialized === undefined) {
+      return undefined;
+    }
+    return Buffer.byteLength(serialized, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Converts a UTF-8 byte count to estimated tool-I/O tokens (bytes / 4 rounded up).
+ * Rejects invalid inputs (negative, non-integer, non-finite, out of safe bounds) rather than faking zero.
+ */
+export function bytesToTokens(bytes: number): number {
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new TypeError(
+      `Invalid byte count: expected finite non-negative safe integer, got ${String(bytes)}`,
+    );
+  }
+  return Math.ceil(bytes / 4);
+}
+
+/**
+ * Estimates tool-I/O tokens for a payload (bytes / 4 rounded up).
+ * Returns undefined if payload is missing or unserializable.
+ */
+export function estimatePayloadTokens(payload: unknown): number | undefined {
+  const bytes = estimatePayloadBytes(payload);
+  if (bytes === undefined) {
+    return undefined;
+  }
+  return bytesToTokens(bytes);
+}
+
+/**
+ * Constructs an InvocationUsageEstimate from input, output, and discovery tokens.
+ * Rejects invalid fractional tokens or out-of-safe-bound numbers rather than flooring them.
+ * Returns undefined if either input or output tokens are undefined or invalid.
+ */
+export function createUsageEstimate(options: {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+  discoveryTokens?: number;
+}): InvocationUsageEstimate | undefined {
+  const { inputTokens, outputTokens, discoveryTokens = 0 } = options;
+  if (
+    inputTokens === undefined ||
+    outputTokens === undefined ||
+    !Number.isSafeInteger(inputTokens) ||
+    !Number.isSafeInteger(outputTokens) ||
+    !Number.isSafeInteger(discoveryTokens) ||
+    inputTokens < 0 ||
+    outputTokens < 0 ||
+    discoveryTokens < 0
+  ) {
+    return undefined;
+  }
+  const totalTokens = inputTokens + outputTokens + discoveryTokens;
+  if (!Number.isSafeInteger(totalTokens)) {
+    return undefined;
+  }
+
+  return {
+    method: TOOL_IO_UTF8_METHOD,
+    inputTokens,
+    outputTokens,
+    discoveryTokens,
+    totalTokens,
+  };
+}
+
+/**
+ * Creates a safely bounded tool-I/O token estimate for a normalized tool event.
+ * Only the relevant component is nonzero (inputTokens for tool_call, outputTokens for tool_result).
+ * Discovery tokens are 0 on raw events.
+ * Missing/unserializable payload => absent (undefined), not fake zero.
+ * Complete empty input counts serialized {} bytes (2 bytes => 1 token), not missing.
+ * Explicitly excludes whole-session model context, reasoning, and provider billing.
+ */
+export function createEventTokenEstimate(
+  type: "tool_call" | "tool_result",
+  payload: unknown,
+): InvocationUsageEstimate | undefined {
+  if (payload === undefined) {
+    return undefined;
+  }
+  const tokens = estimatePayloadTokens(payload);
+  if (tokens === undefined) {
+    return undefined;
+  }
+  if (type === "tool_call") {
+    return {
+      method: TOOL_IO_UTF8_METHOD,
+      inputTokens: tokens,
+      outputTokens: 0,
+      discoveryTokens: 0,
+      totalTokens: tokens,
+    };
+  }
+  return {
+    method: TOOL_IO_UTF8_METHOD,
+    inputTokens: 0,
+    outputTokens: tokens,
+    discoveryTokens: 0,
+    totalTokens: tokens,
+  };
+}
+
+/**
+ * Annotates a normalized tool event with metadata.resinTokenEstimateV1 from its original payload
+ * before privacy projection, preserving only validated numeric metadata.
+ * Missing/unserializable payload leaves estimate absent.
+ * Explicitly excludes model reasoning or whole-session context.
+ */
+export function annotateEventWithTokenEstimate<
+  T extends {
+    type: string;
+    metadata?: Record<string, unknown>;
+    parameters?: Record<string, unknown>;
+    result?: unknown;
+  },
+>(event: T): T {
+  const existing = event.metadata?.resinTokenEstimateV1;
+  if (existing) {
+    const parsed = InvocationUsageEstimateSchema.safeParse(existing);
+    if (parsed.success) {
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          resinTokenEstimateV1: {
+            method: parsed.data.method,
+            inputTokens: parsed.data.inputTokens,
+            outputTokens: parsed.data.outputTokens,
+            discoveryTokens: parsed.data.discoveryTokens,
+            totalTokens: parsed.data.totalTokens,
+          },
+        },
+      };
+    }
+  }
+
+  let estimate: InvocationUsageEstimate | undefined;
+  if (event.type === "tool_call") {
+    estimate = createEventTokenEstimate("tool_call", event.parameters);
+  } else if (event.type === "tool_result") {
+    estimate = createEventTokenEstimate("tool_result", event.result);
+  }
+
+  if (!estimate) {
+    return event;
+  }
+
+  return {
+    ...event,
+    metadata: {
+      ...event.metadata,
+      resinTokenEstimateV1: estimate,
+    },
+  };
+}
+/**
  * 5. InvocationRecord: Execution log for a single tool call through the gateway.
  */
 export const InvocationRecordSchema = z.object({
@@ -125,6 +325,7 @@ export const InvocationRecordSchema = z.object({
   outputDigest: Sha256DigestSchema.optional(),
   errorDetails: InvocationErrorDetailsSchema.optional(),
   resourceUsage: InvocationResourceUsageSchema.optional(),
+  usageEstimate: InvocationUsageEstimateSchema.optional(),
 });
 
 export type InvocationRecord = z.infer<typeof InvocationRecordSchema>;

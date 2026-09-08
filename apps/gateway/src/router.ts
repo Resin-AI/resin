@@ -1,12 +1,22 @@
 import { randomUUID } from "node:crypto";
 import {
   type InvocationRecord,
+  type InvocationUsageEstimate,
   type SafetyGateRefusal,
+  TOOL_IO_UTF8_METHOD,
   type ToolParameterSchema,
+  bytesToTokens,
+  createUsageEstimate,
+  estimatePayloadBytes,
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
+import {
+  SessionDiscoveryTracker as DefaultSessionDiscoveryTracker,
+  type SessionDiscoveryTracker,
+  isDiscoveryTool,
+} from "./meta/discovery-tracker.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   GET_TOOL_SCHEMA_MANIFEST,
@@ -171,15 +181,18 @@ export class RegistryGatewayRouter implements GatewayRouter {
   private readonly unsubscribeEvents?: () => void;
   private safetyGateEvaluator?: SafetyGateEvaluator;
   private readonly invocationRouter?: ToolInvocationRouter;
+  private readonly discoveryTracker: SessionDiscoveryTracker;
 
   constructor(
     registry: ToolRegistry,
     invocationRouter?: ToolInvocationRouter,
     safetyGateEvaluator?: SafetyGateEvaluator,
     canaryRouter?: CanaryRouter,
+    discoveryTracker?: SessionDiscoveryTracker,
   ) {
     this.registry = registry;
     this.invocationRouter = invocationRouter;
+    this.discoveryTracker = discoveryTracker ?? DefaultSessionDiscoveryTracker.getInstance();
     this.canaryRouter =
       canaryRouter ??
       new CanaryRouter({
@@ -268,10 +281,37 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const recorder = tool.isSystem ? undefined : this.registry.getInvocationRecorder();
     const startedAtMs = Date.now();
     const executed = await this.executeTool(context, tool, name, params, options);
-    if (recorder) {
+    const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
+
+    if (tool.isSystem) {
+      if (isDiscoveryTool(name) || isDiscoveryTool(tool.toolId)) {
+        const inBytes = estimatePayloadBytes(params);
+        const outBytes = estimatePayloadBytes(executed);
+        if (inBytes !== undefined && outBytes !== undefined) {
+          this.discoveryTracker.recordDiscoveryOverhead(
+            sessionId,
+            bytesToTokens(inBytes) + bytesToTokens(outBytes),
+          );
+        }
+      }
+    } else if (recorder) {
+      const inBytes = estimatePayloadBytes(params);
+      const outBytes = estimatePayloadBytes(executed);
+      let usageEstimate: InvocationUsageEstimate | undefined;
+      if (inBytes !== undefined && outBytes !== undefined) {
+        const inputTokens = bytesToTokens(inBytes);
+        const outputTokens = bytesToTokens(outBytes);
+        const discoveryTokens = this.discoveryTracker.consumeDiscoveryTokens(sessionId);
+        usageEstimate = createUsageEstimate({
+          inputTokens,
+          outputTokens,
+          discoveryTokens,
+        });
+      }
+
       const record: InvocationRecord = {
         invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
-        sessionId: context.sessionId ?? `ses_standalone_${context.workspaceId}`,
+        sessionId,
         workspaceId: context.workspaceId,
         toolId: tool.toolId,
         toolVersion: /^\d+\.\d+\.\d+/.test(tool.version) ? tool.version : "1.0.0",
@@ -281,6 +321,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         status: executed.isError ? "error" : "success",
         inputDigest: hashCanonicalContent(params),
         outputDigest: hashCanonicalContent(executed),
+        ...(usageEstimate ? { usageEstimate } : {}),
       };
       void recorder(record).catch(() => {
         // Recording never fails the call; the uploader reconciles from what was written.
