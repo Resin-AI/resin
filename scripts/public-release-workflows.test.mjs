@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
@@ -879,6 +881,273 @@ describe("Public Release Workflows Contract", () => {
       expect(JSON.stringify(monitor)).toContain("check-channel-expiry");
       expect(JSON.stringify(monitor)).toContain("::error::");
       expect(JSON.stringify(monitor)).not.toContain("continue-on-error");
+    });
+  });
+
+  describe("Channel failure notification submission", () => {
+    const workflow = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"));
+    const { monitor, renew, notify } = workflow.doc.jobs;
+    const submission = notify.steps.find((step) => step.id === "submission");
+    const confirmation = "NOTIFY_CHANNEL_MONITOR_DRILL";
+    function predicate(expression, overrides = {}) {
+      const context = {
+        always: () => true,
+        github: { event_name: "workflow_dispatch", ref: "refs/heads/main", ref_protected: true },
+        inputs: { operation: "check", confirmation: "" },
+        needs: { monitor: { result: "failure" }, renew: { result: "skipped" } },
+        ...overrides,
+      };
+      return vm.runInNewContext(expression.replace(/^\$\{\{|\}\}$/g, "").trim(), context);
+    }
+
+    it("routes either failure across skipped dependencies without treating success or cancellation as failure", () => {
+      expect(notify.needs).toEqual(["monitor", "renew"]);
+      expect(notify.if).toContain("always()");
+      for (const monitorResult of ["success", "failure", "skipped", "cancelled"]) {
+        for (const renewResult of ["success", "failure", "skipped", "cancelled"]) {
+          expect(
+            predicate(notify.if, {
+              needs: { monitor: { result: monitorResult }, renew: { result: renewResult } },
+            }),
+          ).toBe(monitorResult === "failure" || renewResult === "failure");
+        }
+      }
+      expect(
+        predicate(monitor.if, {
+          github: { event_name: "schedule" },
+          inputs: {},
+        }),
+      ).toBe(true);
+      expect(predicate(renew.if, { inputs: { operation: "notification-drill" } })).toBe(false);
+      expect(workflow.doc.on.schedule).toEqual([{ cron: "17 */3 * * *" }]);
+    });
+
+    it("requires confirmed protected-main drills and does not send on rejected diagnostic requests", () => {
+      expect(workflow.doc.on.workflow_dispatch.inputs.operation.options).toContain(
+        "notification-drill",
+      );
+      for (const event of ["workflow_dispatch", "schedule"]) {
+        for (const ref of ["refs/heads/main", "refs/heads/untrusted"]) {
+          for (const protectedRef of [true, false]) {
+            for (const value of [confirmation, "", "$(touch /tmp/should-not-exist)"]) {
+              expect(
+                predicate(notify.if, {
+                  github: { event_name: event, ref, ref_protected: protectedRef },
+                  inputs: { operation: "notification-drill", confirmation: value },
+                }),
+              ).toBe(
+                event === "workflow_dispatch" &&
+                  ref === "refs/heads/main" &&
+                  protectedRef &&
+                  value === confirmation,
+              );
+            }
+          }
+        }
+      }
+      const guard = monitor.steps.find((step) => step.id === "drill-authorization");
+      for (const value of [confirmation, "", "'; exit 0; #"]) {
+        const result = spawnSync("bash", ["-c", guard.run], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            EVENT_NAME: "workflow_dispatch",
+            WORKFLOW_REF: "refs/heads/main",
+            REF_PROTECTED: "true",
+            CONFIRMATION: value,
+          },
+        });
+        expect(result.status).toBe(value === confirmation ? 0 : 1);
+      }
+      const diagnostic = monitor.steps[1];
+      expect(diagnostic.name).toContain("Intentional diagnostic");
+      expect(diagnostic.if).toBe("${{ inputs.operation == 'notification-drill' }}");
+      expect(spawnSync("bash", ["-c", diagnostic.run]).status).toBe(1);
+      expect(monitor.steps[2].uses).toContain("actions/checkout@");
+      expect(diagnostic.run).not.toMatch(/renew-channel|aws|publish-public-release/);
+    });
+
+    it("isolates the SNS role and topic from monitoring and signing and fails closed on missing configuration", () => {
+      expect(notify.environment).toBe("release-monitoring");
+      expect(notify.permissions).toEqual({ "id-token": "write" });
+      expect(notify["runs-on"]).toBe("ubuntu-latest");
+      expect(notify.steps.some((step) => step.uses?.startsWith("actions/checkout"))).toBe(false);
+      const serialized = JSON.stringify(notify);
+      expect([...new Set(serialized.match(/secrets\.[A-Z_]+/g))].sort()).toEqual([
+        "secrets.RESIN_CHANNEL_NOTIFICATION_ROLE_ARN",
+        "secrets.RESIN_CHANNEL_NOTIFICATION_TOPIC_ARN",
+      ]);
+      expect(serialized).not.toMatch(
+        /RESIN_RELEASE_|RESIN_DISTRIBUTION_|RESIN_CHANNEL_RENEWAL_|arn:aws|discord/i,
+      );
+      expect(
+        notify.steps.find((step) => step.uses?.startsWith("aws-actions/")).with[
+          "mask-aws-account-id"
+        ],
+      ).toBe(true);
+      for (const job of [monitor, renew, notify]) {
+        expect(JSON.stringify(job)).not.toContain("continue-on-error");
+        for (const step of job.steps) {
+          expect(step.run ?? "").not.toContain("${{");
+        }
+      }
+      for (const role of ["", "configured"]) {
+        for (const topic of ["", "configured"]) {
+          const result = spawnSync("bash", ["-c", notify.steps[0].run], {
+            encoding: "utf8",
+            env: { ...process.env, NOTIFICATION_ROLE: role, NOTIFICATION_TOPIC: topic },
+          });
+          expect(result.status).toBe(role && topic ? 0 : 1);
+        }
+      }
+      const upload = notify.steps.find((step) => step.uses?.startsWith("actions/upload-artifact"));
+      expect(upload.if).toBe("${{ always() && steps.submission.outcome != 'skipped' }}");
+      expect(upload.with["if-no-files-found"]).toBe("error");
+      expect(upload.with.path).toBe("${{ runner.temp }}/channel-notification-receipt.json");
+      expect(upload.with.name).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+    });
+
+    function runSubmission(
+      overrides = {},
+      response = { MessageId: "12345678-1234-1234-1234-123456789abc" },
+      fail = false,
+    ) {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "resin-notification-test-"));
+      try {
+        // Execute the exact workflow script with the AWS process replaced, never live AWS.
+        const harness = `
+import json, os, pathlib, subprocess
+from unittest.mock import patch
+def publish(args, **kwargs):
+    pathlib.Path(os.environ["RUNNER_TEMP"], "call.json").write_text(json.dumps(args))
+    if os.environ["MOCK_FAIL"] == "true":
+        raise subprocess.CalledProcessError(1, args, stderr="private-provider-error")
+    return subprocess.CompletedProcess(args, 0, os.environ["MOCK_RESPONSE"], "")
+with patch("subprocess.run", side_effect=publish):
+    exec(compile(os.environ["SCRIPT"], "<workflow-submission>", "exec"))
+`;
+        const result = spawnSync("python3", ["-c", harness], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RUNNER_TEMP: directory,
+            GITHUB_STEP_SUMMARY: path.join(directory, "summary"),
+            GITHUB_REF: "refs/heads/main",
+            REF_PROTECTED: "true",
+            GITHUB_EVENT_NAME: "workflow_dispatch",
+            GITHUB_REPOSITORY: "example/public",
+            GITHUB_RUN_ID: "123",
+            GITHUB_RUN_ATTEMPT: "2",
+            GITHUB_SHA: "a".repeat(40),
+            GITHUB_SERVER_URL: "https://github.com",
+            OPERATION: "check",
+            CONFIRMATION: "",
+            MONITOR_RESULT: "failure",
+            RENEW_RESULT: "skipped",
+            NOTIFICATION_TOPIC: "private-topic-placeholder",
+            MOCK_RESPONSE: JSON.stringify(response),
+            MOCK_FAIL: String(fail),
+            SCRIPT: submission.run,
+            ...overrides,
+          },
+        });
+        const optional = (name) =>
+          fs.existsSync(path.join(directory, name))
+            ? fs.readFileSync(path.join(directory, name), "utf8")
+            : null;
+        return {
+          ...result,
+          receipt: JSON.parse(optional("channel-notification-receipt.json")),
+          call: JSON.parse(optional("call.json")),
+          summary: optional("summary"),
+        };
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    }
+
+    it("records only SNS submission evidence with distinct drill and incident labels", () => {
+      for (const drill of [true, false]) {
+        const result = runSubmission(
+          drill ? { OPERATION: "notification-drill", CONFIRMATION: confirmation } : {},
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.receipt).toMatchObject({
+          classification: drill ? "drill" : "incident",
+          repository: "example/public",
+          runId: "123",
+          runAttempt: "2",
+          commit: "a".repeat(40),
+          runUrl: "https://github.com/example/public/actions/runs/123",
+          submissionStatus: "submitted",
+          snsMessageId: "12345678-1234-1234-1234-123456789abc",
+          humanDelivery: "not_verified",
+          humanAcknowledgment: "not_verified",
+        });
+        for (const field of ["startedAt", "submittedAt", "completedAt"]) {
+          expect(Number.isNaN(Date.parse(result.receipt[field]))).toBe(false);
+        }
+        expect(result.call.slice(0, 3)).toEqual(["aws", "sns", "publish"]);
+        const message = JSON.parse(result.call[result.call.indexOf("--message") + 1]);
+        expect(message).toEqual({
+          type: "resin.channel.notification.v1",
+          classification: drill ? "drill" : "incident",
+          summary: drill
+            ? "DRILL: intentional channel monitor failure; no metadata changed."
+            : "INCIDENT: channel freshness verification or renewal failed; operator action required.",
+          runUrl: result.receipt.runUrl,
+          runId: result.receipt.runId,
+          runAttempt: result.receipt.runAttempt,
+          jobResults: result.receipt.jobResults,
+          startedAt: result.receipt.startedAt,
+        });
+        expect(message.classification).toBe(drill ? "drill" : "incident");
+        expect(message.summary).toContain(drill ? "DRILL:" : "INCIDENT:");
+        expect(JSON.stringify(result.receipt)).not.toContain("private-topic-placeholder");
+        expect(result.summary).toContain("human delivery and acknowledgment NOT VERIFIED");
+      }
+    });
+
+    it("propagates provider and malformed-response failures without leaking provider details", () => {
+      for (const [response, fail] of [
+        [{}, true],
+        [{}, false],
+        [{ MessageId: "private-provider-error" }, false],
+      ]) {
+        const result = runSubmission({}, response, fail);
+        expect(result.status).toBe(1);
+        expect(result.receipt).toMatchObject({
+          submissionStatus: "failed",
+          snsMessageId: null,
+          submittedAt: null,
+        });
+        expect(result.stdout + result.stderr + JSON.stringify(result.receipt)).not.toMatch(
+          /private-provider-error|private-topic-placeholder/,
+        );
+      }
+    });
+
+    it("cannot submit even if a rejected drill reaches the submission step", () => {
+      for (const overrides of [
+        { OPERATION: "notification-drill", CONFIRMATION: "" },
+        {
+          OPERATION: "notification-drill",
+          CONFIRMATION: confirmation,
+          GITHUB_EVENT_NAME: "schedule",
+        },
+        { GITHUB_REF: "refs/heads/untrusted" },
+        { REF_PROTECTED: "false" },
+        { MONITOR_RESULT: "success", RENEW_RESULT: "skipped" },
+      ]) {
+        const result = runSubmission(overrides);
+        expect(result.status).toBe(1);
+        expect(result.call).toBeNull();
+        expect(result.receipt).toBeNull();
+      }
+      const missingTopic = runSubmission({ NOTIFICATION_TOPIC: "" });
+      expect(missingTopic.status).toBe(1);
+      expect(missingTopic.call).toBeNull();
+      expect(missingTopic.receipt.submissionStatus).toBe("failed");
     });
   });
 
