@@ -117,16 +117,17 @@ describe("publish-public-release", () => {
       workflowRunAttempt: "1",
     };
 
+    const evidenceJson = JSON.stringify({ release: RELEASE_VERSION });
     const evidenceMetadata = {
       json: "release-evidence.json",
       markdown: "RELEASE-EVIDENCE.md",
-      jsonSha256: crypto.createHash("sha256").update("{}").digest("hex"),
+      jsonSha256: crypto.createHash("sha256").update(evidenceJson).digest("hex"),
       markdownSha256: crypto.createHash("sha256").update("# Evidence").digest("hex"),
       status: "QUALIFIED",
       mode: "test",
     };
 
-    fs.writeFileSync(path.join(releaseDir, "release-evidence.json"), "{}");
+    fs.writeFileSync(path.join(releaseDir, "release-evidence.json"), evidenceJson);
     fs.writeFileSync(path.join(releaseDir, "RELEASE-EVIDENCE.md"), "# Evidence");
     fs.writeFileSync(path.join(releaseDir, "sbom.json"), "{}");
     fs.writeFileSync(path.join(releaseDir, "vulnerability-scan-evidence.json"), "{}");
@@ -498,6 +499,123 @@ describe("publish-public-release", () => {
   });
 
   describe("candidate verification & tampering", () => {
+    function rewriteSignedEvidence(fixture, evidence, version = RELEASE_VERSION) {
+      const evidenceJson = JSON.stringify(evidence);
+      fs.writeFileSync(path.join(releaseDir, "release-evidence.json"), evidenceJson);
+      const { signatures: _manifestSignatures, ...manifest } = fixture.manifest;
+      manifest.version = version;
+      manifest.releaseIdentity.version = version;
+      manifest.evidence.jsonSha256 = crypto.createHash("sha256").update(evidenceJson).digest("hex");
+      for (const asset of Object.values(manifest.assets)) {
+        asset.url = `/releases/v1/artifacts/v${version}/${asset.filename}`;
+      }
+      const manifestJson = JSON.stringify({
+        ...manifest,
+        signatures: [signReleasePayload(manifest, testSigningKey)],
+      });
+      fs.writeFileSync(path.join(releaseDir, `manifest-${RELEASE_VERSION}.json`), manifestJson);
+      fs.writeFileSync(path.join(releaseDir, "manifest.json"), manifestJson);
+      const { signatures: _channelSignatures, ...channels } = fixture.channels;
+      channels.currentVersion = version;
+      channels.channels.stable.version = version;
+      channels.channels.stable.manifestUrl = `/releases/v1/manifests/manifest-${version}.json`;
+      channels.channels.stable.manifestDigest = crypto
+        .createHash("sha256")
+        .update(manifestJson)
+        .digest("hex");
+      fs.writeFileSync(
+        path.join(releaseDir, "channels.json"),
+        JSON.stringify({ ...channels, signatures: [signReleasePayload(channels, testSigningKey)] }),
+      );
+    }
+
+    it.each(["1.0.49", "1.0.3"])(
+      "checks signed custom-version candidate evidence %s with RELEASE_TAG in a fresh process",
+      async (evidenceRelease) => {
+        const fixture = setupFixtureReleaseDir();
+        rewriteSignedEvidence(fixture, { release: evidenceRelease }, "1.0.49");
+        const { stdout } = await execFileAsync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `
+            import { verifyCandidate } from "./scripts/publish-public-release.mjs";
+            try {
+              const result = await verifyCandidate(JSON.parse(process.argv[1]));
+              console.log(JSON.stringify(result));
+            } catch (error) {
+              console.log(JSON.stringify({ error: error.message }));
+            }
+          `,
+            JSON.stringify({ releaseDir, trustedKeys, testOnly: true }),
+          ],
+          { cwd: process.cwd(), env: { ...process.env, RELEASE_TAG: "v1.0.49" } },
+        );
+        if (evidenceRelease === "1.0.49") {
+          expect(JSON.parse(stdout)).toMatchObject({
+            status: "verified",
+            releaseVersion: "1.0.49",
+          });
+        } else {
+          expect(JSON.parse(stdout).error).toMatch(
+            /evidence release '1.0.3'.*manifest version '1.0.49'/,
+          );
+        }
+      },
+    );
+
+    it.each(["0.9.0", undefined, null, 103])(
+      "rejects signed evidence with mismatched or missing release %j before receipts or uploads",
+      async (release) => {
+        const fixture = setupFixtureReleaseDir();
+        rewriteSignedEvidence(fixture, { release });
+        const receiptDir = path.join(tempRoot, "receipts");
+        const options = { releaseDir, keyPair: testSigningKey, testOnly: true, receiptDir };
+        await expect(verifyCandidate(options)).rejects.toThrow(
+          /evidence release.*manifest version/,
+        );
+        expect(fs.existsSync(path.join(receiptDir, "verify-candidate-receipt.json"))).toBe(false);
+        let calls = 0;
+        await expect(
+          publishImmutable({
+            ...options,
+            bucket: "fixture-bucket",
+            runner: async () => {
+              calls++;
+              throw new Error("Unexpected upload operation");
+            },
+          }),
+        ).rejects.toThrow(/evidence release.*manifest version/);
+        expect(calls).toBe(0);
+        expect(fs.existsSync(path.join(receiptDir, "publish-immutable-receipt.json"))).toBe(false);
+      },
+    );
+
+    it("rejects a validly signed manifest for a different selected release", async () => {
+      const fixture = setupFixtureReleaseDir();
+      rewriteSignedEvidence(fixture, { release: "9.9.9" }, "9.9.9");
+      await expect(
+        verifyCandidate({ releaseDir, keyPair: testSigningKey, testOnly: true }),
+      ).rejects.toThrow(/manifest version.*selected release version/);
+    });
+
+    it("rejects matching-version evidence not bound by the signed manifest digest", async () => {
+      setupFixtureReleaseDir();
+      fs.appendFileSync(path.join(releaseDir, "release-evidence.json"), "\n");
+      await expect(
+        verifyCandidate({ releaseDir, keyPair: testSigningKey, testOnly: true }),
+      ).rejects.toThrow(/evidence digest.*signed manifest/);
+    });
+
+    it("rejects missing evidence before candidate success", async () => {
+      setupFixtureReleaseDir();
+      fs.rmSync(path.join(releaseDir, "release-evidence.json"));
+      await expect(
+        verifyCandidate({ releaseDir, keyPair: testSigningKey, testOnly: true }),
+      ).rejects.toThrow(/release-evidence.json missing/);
+    });
+
     it("successfully verifies valid candidate layout", async () => {
       setupFixtureReleaseDir();
       const receiptDir = path.join(tempRoot, "receipts");

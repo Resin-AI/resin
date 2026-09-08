@@ -585,6 +585,28 @@ export async function cloudFrontCreateInvalidation(params, options = {}) {
   };
 }
 
+function validateCandidateEvidenceVersion(releaseDir, manifest) {
+  if (manifest.version !== RELEASE_VERSION) {
+    throw new Error(
+      `Candidate manifest version '${manifest.version}' does not match selected release version '${RELEASE_VERSION}'.`,
+    );
+  }
+  const evidencePath = path.join(releaseDir, "release-evidence.json");
+  if (!fs.existsSync(evidencePath)) {
+    throw new Error("Candidate release-evidence.json missing.");
+  }
+  const evidenceBytes = fs.readFileSync(evidencePath);
+  const evidence = JSON.parse(evidenceBytes.toString("utf8"));
+  if (evidence?.release !== manifest.version) {
+    throw new Error(
+      `Candidate evidence release '${evidence?.release}' does not match manifest version '${manifest.version}'.`,
+    );
+  }
+  if (sha256Hex(evidenceBytes) !== manifest.evidence?.jsonSha256) {
+    throw new Error("Candidate evidence digest does not match signed manifest.");
+  }
+}
+
 /**
  * Builds the deterministic upload plan for a release candidate.
  */
@@ -610,6 +632,7 @@ export function createUploadPlan(options = {}) {
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const manifestSha256 = fileSha256(manifestPath);
+  validateCandidateEvidenceVersion(releaseDir, manifest);
   const version = manifest.version || RELEASE_VERSION;
 
   const channelsPath = options.channelsPath || path.join(releaseDir, "channels.json");
@@ -1026,6 +1049,9 @@ export async function verifyCandidate(options = {}) {
         `Candidate manifest signature verification failed: ${manifestSigResult.reason}`,
       );
     }
+
+    // Bind the selected release to the evidence bytes covered by the signed manifest.
+    validateCandidateEvidenceVersion(releaseDir, manifest);
 
     // Verify all platform artifacts
     const verifiedAssets = [];
