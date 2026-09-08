@@ -19,7 +19,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-export const RELEASE_VERSION = "1.0.3";
+// Match package-release's selected tag contract, including the local fixture default.
+export const RELEASE_VERSION = (process.env.RELEASE_TAG || "v1.0.3").replace(/^v/, "");
 export const PARENT_EPIC_ID = "#22";
 
 /**

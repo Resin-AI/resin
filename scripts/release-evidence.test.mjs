@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -34,6 +35,37 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
     } catch {
       // ignore
     }
+  });
+
+  it.each([
+    ["", "1.0.3"],
+    ["v1.0.49", "1.0.49"],
+    ["v1.2.0-rc.1", "1.2.0-rc.1"],
+    ["1.0.49", "1.0.49"],
+  ])("uses selected release tag %j consistently with packaging", (releaseTag, version) => {
+    // A fresh process exercises import-time environment selection, not cached test modules.
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { generateReleaseEvidence, formatReleaseEvidenceMarkdown } from "./scripts/generate-release-evidence.mjs";
+          import { RELEASE_VERSION } from "./scripts/package-release.mjs";
+          const evidence = generateReleaseEvidence({ testOnly: true });
+          console.log(JSON.stringify({
+            release: evidence.release,
+            packageVersion: RELEASE_VERSION,
+            markdown: formatReleaseEvidenceMarkdown(evidence),
+          }));
+        `,
+      ],
+      { cwd: rootDir, env: { ...process.env, RELEASE_TAG: releaseTag }, encoding: "utf8" },
+    );
+    const result = JSON.parse(output);
+    expect(result.release).toBe(version);
+    expect(result.packageVersion).toBe(version);
+    expect(result.markdown).toContain(`**Release Version**: \`v${version}\``);
   });
 
   describe("1. Authoritative Milestones Traceability Matrix (Parent #22 & REM-001 to REM-020)", () => {
