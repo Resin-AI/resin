@@ -58,7 +58,7 @@ export async function buildInstallHelper(options = {}) {
     options.entryPoint || path.resolve(rootDir, "apps/cli/src/installer/bootstrap-entry.ts");
   const defaultOutputPath = path.resolve(rootDir, "apps/cli/install/install-helper-v1.mjs");
   const outputPath = options.outputPath || defaultOutputPath;
-  const shouldWrite = options.write ?? true;
+  const shouldWrite = options.check ? false : (options.write ?? true);
   const shouldSyncInstallerPins =
     options.syncInstallerPins ?? path.resolve(outputPath) === defaultOutputPath;
   const bannerText = options.banner ?? DEFAULT_BANNER;
@@ -87,6 +87,13 @@ export async function buildInstallHelper(options = {}) {
   const outputBuffer = Buffer.from(outputFile.contents);
   const sha256 = crypto.createHash("sha256").update(outputBuffer).digest("hex");
 
+  if (
+    options.check &&
+    (!fs.existsSync(outputPath) || !fs.readFileSync(outputPath).equals(outputBuffer))
+  ) {
+    throw new Error("Install helper is out of date; run node scripts/build-install-helper.mjs.");
+  }
+
   if (shouldWrite) {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, outputBuffer);
@@ -114,7 +121,7 @@ if (
   const isTestOnly = process.argv.includes("--test-only");
 
   try {
-    const result = await buildInstallHelper({ write: !isCheck && !isTestOnly });
+    const result = await buildInstallHelper({ write: !isCheck && !isTestOnly, check: isCheck });
     if (isCheck) {
       console.log(`Bundle verified deterministically (SHA-256: ${result.sha256}).`);
     } else {

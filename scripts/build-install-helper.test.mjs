@@ -22,6 +22,25 @@ describe("build-install-helper", () => {
     expect(Buffer.compare(build1.bytes, build2.bytes)).toBe(0);
   });
 
+  it("requires the checked-in helper to match the current bootstrap source", async () => {
+    const result = await buildInstallHelper({ rootDir, write: false });
+    expect(fs.readFileSync(result.outputPath).equals(result.bytes)).toBe(true);
+  });
+
+  it("check mode rejects a stale helper without overwriting it", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-helper-check-"));
+    const outputPath = path.join(tmpDir, "helper.mjs");
+    fs.writeFileSync(outputPath, "// stale helper\n");
+    try {
+      await expect(buildInstallHelper({ rootDir, outputPath, check: true })).rejects.toThrow(
+        /out of date/,
+      );
+      expect(fs.readFileSync(outputPath, "utf8")).toBe("// stale helper\n");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not recreate the removed version-local resin-mcp launcher", async () => {
     const result = await buildInstallHelper({ rootDir, write: false });
 

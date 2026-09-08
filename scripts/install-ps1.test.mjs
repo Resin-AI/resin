@@ -9,11 +9,14 @@ import process from "node:process";
 import { describe, expect, it } from "vitest";
 
 const EXPECTED_HELPER_URL = "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs";
-const EXPECTED_HELPER_SHA256 = "977d1e23f921c9c3e3fcb7ff7de592d1c99583b4b362fbfecef76cd76c4ba096";
 const EXPECTED_MIN_NODE_VERSION = 22;
 
 const SCRIPT_PATH = path.resolve(process.cwd(), "apps/cli/install/install.ps1");
 const HELPER_PATH = path.resolve(process.cwd(), "apps/cli/install/install-helper-v1.mjs");
+const EXPECTED_HELPER_SHA256 = crypto
+  .createHash("sha256")
+  .update(fs.readFileSync(HELPER_PATH))
+  .digest("hex");
 
 describe("install.ps1 static and security invariants", () => {
   it("declares pinned helper constants matching project policy", () => {

@@ -78,6 +78,8 @@ export const PUBLISHER_MODES = Object.freeze([
   "promote",
   "record-smoke",
   "freeze",
+  "renew-channel",
+  "check-channel-expiry",
 ]);
 
 export const INSTALLER_FILENAMES = Object.freeze([
@@ -534,6 +536,7 @@ export async function s3PutObject(params, options = {}) {
     }
   }
   if (options.region) args.push("--region", options.region);
+  if (params.ifMatch) args.push("--if-match", params.ifMatch);
 
   try {
     const result = await runAwsCli(args, options);
@@ -2475,6 +2478,310 @@ export async function freeze(options = {}) {
   return writeReceipt(options.receiptDir, "freeze", receipt);
 }
 
+// These source-only modes are not used by the self-contained candidate publisher.
+// Load the actual installer verifier lazily so archived publication tools remain standalone.
+async function channelRenewalTrust(options) {
+  const verifier = await import("../apps/cli/src/installer/channel-verifier.ts");
+  const { PRODUCTION_RELEASE_TRUST_RECORD } = await import("../apps/cli/src/release-trust.ts");
+  if (options.trustedKeys && options.testOnly !== true) {
+    throw new Error(
+      "Channel renewal trust overrides are test-only; production uses installer-pinned roots.",
+    );
+  }
+  const trustedKeys =
+    options.testOnly === true && options.trustedKeys
+      ? options.trustedKeys
+      : Object.fromEntries(
+          PRODUCTION_RELEASE_TRUST_RECORD.trustedKeys.map((key) => [key.keyId, key]),
+        );
+  if (Object.keys(trustedKeys).length === 0)
+    throw new Error("Channel renewal requires pinned trust.");
+  return { ...verifier, trustedKeys, trustedReleaseKeys: Object.values(trustedKeys) };
+}
+
+function channelRenewalTime(options) {
+  const now = new Date(options.now ?? Date.now());
+  if (!Number.isFinite(now.getTime())) throw new Error("Invalid channel renewal time.");
+  return now;
+}
+
+function validateChannelFreshness(channel, now, restoreExpired = false) {
+  const updatedAt = Date.parse(channel.updatedAt);
+  const expiresAt = Date.parse(channel.expiresAt);
+  if (channel.schemaVersion !== "2.0.0" || channel.metadataVersion !== 1) {
+    throw new Error("Unsupported channel schema or metadata version.");
+  }
+  if (
+    !Number.isFinite(updatedAt) ||
+    !Number.isFinite(expiresAt) ||
+    updatedAt > now.getTime() ||
+    expiresAt <= updatedAt ||
+    expiresAt - updatedAt > DEFAULT_CHANNEL_TTL_MS
+  ) {
+    throw new Error("Invalid channel freshness timestamps or TTL.");
+  }
+  if (!restoreExpired && now.getTime() >= expiresAt) {
+    throw new Error("Source channel has expired; separately confirmed restoration is required.");
+  }
+  return updatedAt;
+}
+
+function authenticateReleaseDocument(document, trust, currentTime, revokedKeyIds = []) {
+  const { signatures, ...payload } = document;
+  if (!Array.isArray(signatures) || signatures.length === 0) {
+    throw new Error("Release document signature is missing.");
+  }
+  for (const signature of signatures) {
+    if (revokedKeyIds.includes(signature.keyId))
+      throw new Error("Release signature key is revoked.");
+    const result = verifyReleasePayloadSignature(payload, signature, trust.trustedKeys, {
+      currentTime,
+    });
+    if (!result.valid) throw new Error(`Release signature verification failed: ${result.reason}`);
+  }
+}
+
+function verifyRenewalChannels(channel, trust, now) {
+  if (
+    !channel.channels ||
+    Array.isArray(channel.channels) ||
+    typeof channel.channels !== "object" ||
+    !channel.channels.stable ||
+    channel.channels.stable.version !== channel.currentVersion
+  ) {
+    throw new Error("Invalid current channel release identity.");
+  }
+  for (const name of Object.keys(channel.channels)) {
+    const result = trust.verifyChannelMetadata(channel, {
+      channel: name,
+      now,
+      trustedReleaseKeys: trust.trustedReleaseKeys,
+      revokedKeyIds: channel.revokedKeyIds,
+      currentInstalledVersion: channel.channels[name].version,
+    });
+    if (!result.valid) throw new Error(`Channel verification failed: ${result.errors.join("; ")}`);
+  }
+}
+
+function validateRenewalIdentity(identity, version) {
+  if (
+    !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) ||
+    !identity ||
+    (identity.version !== undefined && identity.version !== version) ||
+    identity.repository !== "Resin-AI/resin" ||
+    !/^[0-9a-f]{40}$/.test(identity.commitSha)
+  ) {
+    throw new Error("Invalid release identity in renewal source.");
+  }
+}
+
+async function fetchRenewalBytes(url, options) {
+  const response = await (options.fetch || globalThis.fetch)(url, {
+    method: "GET",
+    redirect: "manual",
+    credentials: "omit",
+    headers: { Accept: "application/json" },
+  });
+  if (response.status !== 200)
+    throw new Error(`Anonymous release readback failed: HTTP ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function readOriginChannel(bucket, options) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-renew-channel-"));
+  try {
+    const outputPath = path.join(tempDir, "channels.json");
+    const args = ["s3api", "get-object", "--bucket", bucket, "--key", CHANNELS_S3_KEY];
+    if (options.region) args.push("--region", options.region);
+    args.push(outputPath);
+    const result = await runAwsCli(args, options);
+    const { ETag: eTag } = JSON.parse(result.stdout);
+    if (typeof eTag !== "string" || !/^"[^"\r\n]+"$/.test(eTag)) {
+      throw new Error(
+        "Origin channel GET did not supply a valid ETag; refusing unconditional renewal.",
+      );
+    }
+    return { bytes: fs.readFileSync(outputPath), eTag };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Renew only the authoritative channel object. Restoration authenticates the ORIGINAL
+ * stale payload at its signed issuance time; clients and manifests retain current-time expiry.
+ */
+export async function renewChannel(options = {}) {
+  const confirmation =
+    options.restoreExpired === true
+      ? "RESTORE_EXPIRED_CHANNEL_PRODUCTION"
+      : "RENEW_CHANNEL_PRODUCTION";
+  if (options.confirmation !== confirmation) {
+    throw new Error(`Channel renewal confirmation must be '${confirmation}'.`);
+  }
+  if (
+    options.keyPrefix ||
+    (options.baseUrl && options.baseUrl !== PRODUCTION_BASE_URL) ||
+    options.expiresAt !== undefined ||
+    options.ttlMs !== undefined
+  ) {
+    throw new Error(
+      "Channel renewal uses only the canonical production key and fixed maximum 24h TTL.",
+    );
+  }
+  const bucket = options.bucket || process.env.RESIN_DISTRIBUTION_BUCKET;
+  const distributionId = options.distributionId || process.env.RESIN_DISTRIBUTION_ID;
+  if (!bucket || !distributionId)
+    throw new Error("Channel renewal requires distribution bucket and ID.");
+  const trust = await channelRenewalTrust(options);
+  const now = channelRenewalTime(options);
+  const origin = await readOriginChannel(bucket, options);
+  const source = JSON.parse(origin.bytes.toString("utf8"));
+  const issuedAt = validateChannelFreshness(source, now, options.restoreExpired === true);
+  // No field is removed or rewritten before original-payload authentication.
+  const sourceTime = options.restoreExpired === true ? new Date(issuedAt) : now;
+  authenticateReleaseDocument(source, trust, sourceTime, source.revokedKeyIds);
+  verifyRenewalChannels(source, trust, sourceTime);
+  validateRenewalIdentity(source.releaseIdentity, source.currentVersion);
+
+  let expiryMs = now.getTime() + DEFAULT_CHANNEL_TTL_MS;
+  const manifests = new Map();
+  for (const channel of Object.values(source.channels)) {
+    const expectedPath = `/releases/v1/manifests/manifest-${channel.version}.json`;
+    if (
+      channel.manifestUrl !== expectedPath &&
+      channel.manifestUrl !== `${PRODUCTION_BASE_URL}${expectedPath}`
+    ) {
+      throw new Error("Channel manifest URL does not match release identity.");
+    }
+    if (!/^[0-9a-f]{64}$/.test(channel.manifestDigest)) {
+      throw new Error("Channel manifest digest is invalid.");
+    }
+    let bytes = manifests.get(expectedPath);
+    if (!bytes) {
+      bytes = await fetchRenewalBytes(`${PRODUCTION_BASE_URL}${expectedPath}`, options);
+      manifests.set(expectedPath, bytes);
+    }
+    if (sha256Hex(bytes) !== channel.manifestDigest)
+      throw new Error("Referenced manifest digest mismatch.");
+    const manifest = JSON.parse(bytes.toString("utf8"));
+    authenticateReleaseDocument(manifest, trust, now, source.revokedKeyIds);
+    const result = trust.verifyManifest(manifest, {
+      now,
+      trustedReleaseKeys: trust.trustedReleaseKeys,
+      revokedKeyIds: source.revokedKeyIds,
+      expectedDigest: channel.manifestDigest,
+      rawManifestBytes: bytes,
+      minSupportedVersion: channel.minSupportedVersion || source.minSupportedVersion,
+    });
+    if (!result.valid) throw new Error(`Manifest verification failed: ${result.errors.join("; ")}`);
+    validateRenewalIdentity(manifest.releaseIdentity, channel.version);
+    const identity =
+      channel.releaseIdentity ||
+      (channel.version === source.currentVersion ? source.releaseIdentity : undefined);
+    if (
+      manifest.schemaVersion !== "2.0.0" ||
+      manifest.version !== channel.version ||
+      (identity && canonicalJson(identity) !== canonicalJson(manifest.releaseIdentity))
+    ) {
+      throw new Error("Referenced manifest release identity mismatch.");
+    }
+    const manifestExpiry = Date.parse(manifest.expiresAt);
+    if (!Number.isFinite(manifestExpiry) || manifestExpiry <= now.getTime()) {
+      throw new Error("Referenced manifest has expired or invalid expiry.");
+    }
+    expiryMs = Math.min(expiryMs, manifestExpiry);
+  }
+
+  const { signatures: _oldSignatures, ...payload } = source;
+  const renewedPayload = {
+    ...payload,
+    updatedAt: now.toISOString(),
+    expiresAt: new Date(expiryMs).toISOString(),
+  };
+  const keyPair = resolveSigningKey(options);
+  const renewed = {
+    ...renewedPayload,
+    signatures: [{ ...signReleasePayload(renewedPayload, keyPair), signedAt: now.toISOString() }],
+  };
+  authenticateReleaseDocument(renewed, trust, now, source.revokedKeyIds);
+  verifyRenewalChannels(renewed, trust, now);
+  const renewedBytes = Buffer.from(`${JSON.stringify(renewed, null, 2)}\n`);
+  const afterSha256 = sha256Hex(renewedBytes);
+  const publicationTime = channelRenewalTime(options);
+  validateChannelFreshness(source, publicationTime, options.restoreExpired === true);
+  validateChannelFreshness(renewed, publicationTime);
+  await s3PutObject(
+    {
+      bucket,
+      key: CHANNELS_S3_KEY,
+      body: renewedBytes,
+      ifMatch: origin.eTag,
+      cacheControl: CHANNELS_CACHE_CONTROL,
+      contentType: "application/json",
+      metadata: { sha256: afterSha256 },
+    },
+    options,
+  );
+  const invalidation = await cloudFrontCreateInvalidation(
+    {
+      distributionId,
+      paths: [CHANNELS_INVALIDATION_PATH],
+    },
+    options,
+  );
+  await runAwsCli(
+    [
+      "cloudfront",
+      "wait",
+      "invalidation-completed",
+      "--distribution-id",
+      distributionId,
+      "--id",
+      invalidation.invalidationId,
+    ],
+    options,
+  );
+  const readback = await fetchRenewalBytes(`${PRODUCTION_BASE_URL}/${CHANNELS_S3_KEY}`, options);
+  if (sha256Hex(readback) !== afterSha256)
+    throw new Error("Canonical channel readback digest mismatch.");
+  const readbackTime = channelRenewalTime(options);
+  const readbackChannel = JSON.parse(readback.toString("utf8"));
+  validateChannelFreshness(readbackChannel, readbackTime);
+  authenticateReleaseDocument(readbackChannel, trust, readbackTime, source.revokedKeyIds);
+  verifyRenewalChannels(readbackChannel, trust, readbackTime);
+  // Receipt deliberately contains no bucket, distribution, credentials, or operator routing.
+  return writeReceipt(options.receiptDir, "renew-channel", {
+    phase: "renew-channel",
+    status: "verified",
+    restoredExpired: options.restoreExpired === true,
+    version: source.currentVersion,
+    commitSha: source.releaseIdentity.commitSha,
+    beforeSha256: sha256Hex(origin.bytes),
+    afterSha256,
+    updatedAt: renewed.updatedAt,
+    expiresAt: renewed.expiresAt,
+    canonicalUrl: `${PRODUCTION_BASE_URL}/${CHANNELS_S3_KEY}`,
+  });
+}
+
+/** Read-only public monitor. A failed command triggers ordinary Actions failure notifications. */
+export async function checkChannelExpiry(options = {}) {
+  const trust = await channelRenewalTrust(options);
+  const now = channelRenewalTime(options);
+  const bytes = await fetchRenewalBytes(`${PRODUCTION_BASE_URL}/${CHANNELS_S3_KEY}`, options);
+  const channel = JSON.parse(bytes.toString("utf8"));
+  validateChannelFreshness(channel, now);
+  authenticateReleaseDocument(channel, trust, now, channel.revokedKeyIds);
+  verifyRenewalChannels(channel, trust, now);
+  if (Date.parse(channel.expiresAt) - now.getTime() <= 6 * 60 * 60 * 1000) {
+    throw new Error(
+      `Channel expires at ${channel.expiresAt}; authorized renewal required within 6h.`,
+    );
+  }
+  return { status: "healthy", version: channel.currentVersion, expiresAt: channel.expiresAt };
+}
+
 /**
  * Main dispatcher supporting all fixed publisher modes.
  */
@@ -2494,6 +2801,10 @@ export async function publishPublicRelease(mode, options = {}) {
       return recordSmoke(options);
     case "freeze":
       return freeze(options);
+    case "renew-channel":
+      return renewChannel(options);
+    case "check-channel-expiry":
+      return checkChannelExpiry(options);
     default:
       throw new Error(
         `Unknown publisher mode '${mode}'. Supported modes: ${PUBLISHER_MODES.join(", ")}`,
@@ -2599,6 +2910,12 @@ export function parseCliArgs(argv) {
       options.keyPrefix = arg.slice(13);
     } else if (arg.startsWith("--prefix=")) {
       options.keyPrefix = arg.slice(9);
+    } else if (arg === "--confirmation") {
+      options.confirmation = argv[++i];
+    } else if (arg.startsWith("--confirmation=")) {
+      options.confirmation = arg.slice(15);
+    } else if (arg === "--restore-expired") {
+      options.restoreExpired = true;
     }
   }
   return { mode, options };

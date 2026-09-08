@@ -1337,108 +1337,121 @@ describe("bootstrap-entry", () => {
       expect(result.error).toContain("timed out");
     });
 
-    it("executes auto-onboarding when interactive and uninitialized on fresh install", async () => {
-      const home = path.join(
-        os.tmpdir(),
-        `resin-auto-onboard-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      );
-      testHomes.push(home);
+    it.each([true, undefined])(
+      "streams non-verbose onboarding output (interactive: %s)",
+      async (interactive) => {
+        const home = path.join(
+          os.tmpdir(),
+          `resin-auto-onboard-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        );
+        testHomes.push(home);
 
-      const releaseBytes = tarGz({
-        "bin/resin": "#!/bin/sh\necho resin-binary\n",
-        "package.json": JSON.stringify({ name: "resin", version: "1.0.0" }),
-      });
-
-      const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
-      const publicKeyHex = publicKey
-        .export({ type: "spki", format: "der" })
-        .subarray(12)
-        .toString("hex");
-
-      const keyId = "test-onboard-signer";
-      const trustedKey = { keyId, publicKeyHex };
-
-      const fixtures = createSignedReleaseFixtures({
-        version: "1.0.0",
-        keyId,
-        publicKeyHex,
-        privateKey,
-        releaseBytes,
-      });
-
-      let serverPort = 0;
-      const server = http.createServer((req, res) => {
-        if (req.url === "/channels.json") {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(fixtures.channelBytes);
-          return;
-        }
-        if (req.url === fixtures.manifestPath) {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(fixtures.manifestBytes);
-          return;
-        }
-        if (req.url === fixtures.tarballPath) {
-          res.writeHead(200, { "content-type": "application/gzip" });
-          res.end(releaseBytes);
-          return;
-        }
-        if (req.url === fixtures.denoPath) {
-          res.writeHead(200, { "content-type": "application/zip" });
-          res.end(fixtures.denoBytes);
-          return;
-        }
-        res.writeHead(404);
-        res.end();
-      });
-
-      await new Promise<void>((resolve) => {
-        server.listen(0, "127.0.0.1", () => {
-          const addr = server.address();
-          serverPort = addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0;
-          resolve();
-        });
-      });
-
-      try {
-        let onboardingInvoked = false;
-        let invokedCliPath = "";
-        let invokedArgs: string[] = [];
-
-        const result = await bootstrapInstall({
-          channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
-          allowInsecureHttpForTests: true,
-          allowOverrides: true,
-          trustedReleaseKeys: [trustedKey],
-          resinHome: home,
-          platform: defaultTestPlatform,
-          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
-          autoOnboard: true,
-          isInteractive: true,
-          env: { RESIN_ALLOW_ROOT: "1" },
-          onboardingRunner: async (cliPath, args) => {
-            onboardingInvoked = true;
-            invokedCliPath = cliPath;
-            invokedArgs = args ?? [];
-            return {
-              attempted: true,
-              skipped: false,
-              success: true,
-              exitCode: 0,
-            };
-          },
+        const releaseBytes = tarGz({
+          "bin/resin": "#!/bin/sh\necho resin-binary\n",
+          "package.json": JSON.stringify({ name: "resin", version: "1.0.0" }),
         });
 
-        expect(result.success).toBe(true);
-        expect(onboardingInvoked).toBe(true);
-        expect(invokedCliPath).toBe(path.join(home, "bin", "resin"));
-        expect(invokedArgs).toEqual(["init", "--auto-approve"]);
-        expect(result.onboarding?.attempted).toBe(true);
-        expect(result.onboarding?.success).toBe(true);
-      } finally {
-        server.close();
-      }
-    });
+        const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+        const publicKeyHex = publicKey
+          .export({ type: "spki", format: "der" })
+          .subarray(12)
+          .toString("hex");
+
+        const keyId = "test-onboard-signer";
+        const trustedKey = { keyId, publicKeyHex };
+
+        const fixtures = createSignedReleaseFixtures({
+          version: "1.0.0",
+          keyId,
+          publicKeyHex,
+          privateKey,
+          releaseBytes,
+        });
+
+        let serverPort = 0;
+        const server = http.createServer((req, res) => {
+          if (req.url === "/channels.json") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(fixtures.channelBytes);
+            return;
+          }
+          if (req.url === fixtures.manifestPath) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(fixtures.manifestBytes);
+            return;
+          }
+          if (req.url === fixtures.tarballPath) {
+            res.writeHead(200, { "content-type": "application/gzip" });
+            res.end(releaseBytes);
+            return;
+          }
+          if (req.url === fixtures.denoPath) {
+            res.writeHead(200, { "content-type": "application/zip" });
+            res.end(fixtures.denoBytes);
+            return;
+          }
+          res.writeHead(404);
+          res.end();
+        });
+
+        await new Promise<void>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            serverPort = addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0;
+            resolve();
+          });
+        });
+
+        try {
+          let onboardingInvoked = false;
+          let invokedCliPath = "";
+          let invokedArgs: string[] = [];
+          const logs: string[] = [];
+
+          const result = await bootstrapInstall({
+            channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
+            allowInsecureHttpForTests: true,
+            allowOverrides: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome: home,
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            autoOnboard: true,
+            isInteractive: interactive,
+            verbose: false,
+            logger: (message) => logs.push(message),
+            env: { RESIN_ALLOW_ROOT: "1" },
+            onboardingRunner: async (cliPath, args, options) => {
+              onboardingInvoked = true;
+              invokedCliPath = cliPath;
+              invokedArgs = args ?? [];
+              const onboarding = await defaultOnboardingRunner(
+                process.execPath,
+                [
+                  "-e",
+                  'process.stdout.write("Navigate to: https://example.invalid/device\\nEnter code: TEST-CODE\\n"); process.stderr.write("Waiting for browser approval\\n");',
+                ],
+                { ...options, interactive: false },
+              );
+              // Output must reach the user before bootstrap prints its final result.
+              expect(logs.join("\n")).toContain("https://example.invalid/device");
+              expect(logs.join("\n")).toContain("TEST-CODE");
+              expect(logs.join("\n")).toContain("Waiting for browser approval");
+              return onboarding;
+            },
+          });
+
+          expect(result.success).toBe(true);
+          expect(onboardingInvoked).toBe(true);
+          expect(invokedCliPath).toBe(path.join(home, "bin", "resin"));
+          expect(invokedArgs).toEqual(["init", "--auto-approve"]);
+          expect(result.onboarding?.attempted).toBe(true);
+          expect(result.onboarding?.success).toBe(true);
+        } finally {
+          server.close();
+        }
+      },
+    );
 
     it("fails the install and rolls back activation when onboarding is cancelled", async () => {
       const home = path.join(

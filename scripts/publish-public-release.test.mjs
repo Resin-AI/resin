@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 
+import { verifyChannelMetadata } from "../apps/cli/src/installer/channel-verifier.ts";
+
 import {
   PINNED_DENO_RUNTIME,
   PINNED_DENO_UPSTREAM_ASSETS,
@@ -31,6 +33,7 @@ import {
   REQUIRED_ARTIFACT_PLATFORMS,
   REQUIRED_RUNTIME_PLATFORMS,
   applyKeyPrefix,
+  checkChannelExpiry,
   createUploadPlan,
   deriveInvalidationPath,
   derivePublicUrl,
@@ -42,6 +45,7 @@ import {
   promote,
   publishImmutable,
   recordSmoke,
+  renewChannel,
   runPostReleaseSmokeTests,
   validateInstallerResults,
   validateKeyPrefix,
@@ -184,6 +188,284 @@ describe("publish-public-release", () => {
 
     return { manifest, manifestSha256, channels, assets, releaseIdentity };
   }
+
+  describe("channel-only renewal", () => {
+    const now = new Date("2030-01-02T12:00:00.000Z");
+    const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+    const sign = (document, key) => {
+      const { signatures: _signatures, ...payload } = document;
+      return { ...payload, signatures: [signReleasePayload(payload, key)] };
+    };
+
+    function renewalFixture({ expired = false, race = false, staleReadback = false } = {}) {
+      const fixture = setupFixtureReleaseDir();
+      const { version: _identityVersion, ...releaseIdentity } = fixture.releaseIdentity;
+      const manifest = sign(
+        {
+          ...fixture.manifest,
+          releaseIdentity,
+          releaseDate: "2030-01-01T00:00:00.000Z",
+          expiresAt: "2030-06-01T00:00:00.000Z",
+        },
+        testSigningKey,
+      );
+      const manifestBytes = Buffer.from(JSON.stringify(manifest));
+      const channel = sign(
+        {
+          ...fixture.channels,
+          releaseIdentity,
+          updatedAt: expired ? "2030-01-01T00:00:00.000Z" : "2030-01-02T00:00:00.000Z",
+          expiresAt: expired ? "2030-01-02T00:00:00.000Z" : "2030-01-03T00:00:00.000Z",
+          channels: {
+            stable: { ...fixture.channels.channels.stable, manifestDigest: digest(manifestBytes) },
+            beta: { ...fixture.channels.channels.stable, manifestDigest: digest(manifestBytes) },
+          },
+          revokedVersions: ["0.0.9"],
+          revokedKeyIds: ["resin-release-v1", "retired-release-key"],
+          rollbackReferences: {
+            targetVersion: "0.1.0",
+            minSafeVersion: "0.1.0",
+            instructionsUrl: "https://resin.sh/rollback",
+          },
+        },
+        testSigningKey,
+      );
+      const state = {
+        source: Buffer.from(JSON.stringify(channel)),
+        manifestBytes,
+        writes: [],
+        invalidations: [],
+        published: null,
+      };
+      const options = {
+        bucket: "fixture-bucket",
+        distributionId: "fixture-distribution",
+        confirmation: "RENEW_CHANNEL_PRODUCTION",
+        keyPair: testSigningKey,
+        trustedKeys,
+        testOnly: true,
+        now,
+        runner: async (_command, args) => {
+          if (args[1] === "get-object") {
+            expect(args[args.indexOf("--key") + 1]).toBe(CHANNELS_S3_KEY);
+            fs.writeFileSync(args.at(-1), state.source);
+            return { stdout: JSON.stringify({ ETag: '"source-etag"' }) };
+          }
+          if (args[1] === "put-object") {
+            expect(args[args.indexOf("--if-match") + 1]).toBe('"source-etag"');
+            if (race) throw new Error("PreconditionFailed: concurrent channel update");
+            state.writes.push(args[args.indexOf("--key") + 1]);
+            state.published = fs.readFileSync(args[args.indexOf("--body") + 1]);
+            return { stdout: "{}" };
+          }
+          if (args[1] === "create-invalidation") {
+            state.invalidations.push(args.slice(args.indexOf("--paths") + 1));
+            return { stdout: JSON.stringify({ Invalidation: { Id: "renewal-invalidation" } }) };
+          }
+          if (args[1] === "wait") return { stdout: "" };
+          throw new Error(`Unexpected AWS operation: ${args.join(" ")}`);
+        },
+        fetch: async (url, init) => {
+          expect(init.redirect).toBe("manual");
+          expect(init.credentials).toBe("omit");
+          expect(init.headers?.Authorization).toBeUndefined();
+          if (url === `${PRODUCTION_BASE_URL}/${CHANNELS_S3_KEY}`) {
+            return new Response(staleReadback ? state.source : state.published || state.source);
+          }
+          expect(url).toBe(
+            `${PRODUCTION_BASE_URL}/releases/v1/manifests/manifest-${RELEASE_VERSION}.json`,
+          );
+          return new Response(state.manifestBytes);
+        },
+      };
+      return { state, options, channel };
+    }
+
+    it("refuses renewal without an origin ETag", async () => {
+      const { state, options } = renewalFixture();
+      const runner = options.runner;
+      options.runner = async (command, args) => {
+        const result = await runner(command, args);
+        return args[1] === "get-object" ? { stdout: "{}" } : result;
+      };
+      await expect(renewChannel(options)).rejects.toThrow(/ETag/);
+      expect(state.writes).toEqual([]);
+    });
+
+    it("rejects a source that expires while referenced manifests are being fetched", async () => {
+      const { state, options } = renewalFixture();
+      const fetch = options.fetch;
+      options.fetch = async (url, init) => {
+        const response = await fetch(url, init);
+        options.now = new Date("2030-01-03T00:00:01.000Z");
+        return response;
+      };
+      await expect(renewChannel(options)).rejects.toThrow(/expired/i);
+      expect(state.writes).toEqual([]);
+    });
+
+    it("renews the same release with installer-valid freshness and only a conditional channel write", async () => {
+      const { state, options, channel } = renewalFixture();
+      const receipt = await renewChannel(options);
+      const renewed = JSON.parse(state.published);
+      const {
+        signatures: _oldSig,
+        updatedAt: _oldUpdate,
+        expiresAt: _oldExpiry,
+        ...before
+      } = channel;
+      const { signatures: _newSig, updatedAt, expiresAt, ...after } = renewed;
+      expect(after).toEqual(before);
+      expect(updatedAt).toBe(now.toISOString());
+      expect(Date.parse(expiresAt) - now.getTime()).toBe(DEFAULT_CHANNEL_TTL_MS);
+      expect(state.writes).toEqual([CHANNELS_S3_KEY]);
+      expect(state.invalidations).toEqual([["/releases/v1/channels.json"]]);
+      expect(receipt.beforeSha256).toBe(digest(state.source));
+      expect(receipt.afterSha256).toBe(digest(state.published));
+      expect(
+        verifyChannelMetadata(renewed, {
+          now,
+          currentInstalledVersion: RELEASE_VERSION,
+          trustedReleaseKeys: Object.values(trustedKeys),
+        }).valid,
+      ).toBe(true);
+    });
+
+    it("requires separate restoration authorization and never makes stale metadata valid to clients", async () => {
+      const { options, state, channel } = renewalFixture({ expired: true });
+      expect(
+        verifyChannelMetadata(channel, { now, trustedReleaseKeys: Object.values(trustedKeys) })
+          .valid,
+      ).toBe(false);
+      await expect(renewChannel(options)).rejects.toThrow(/expired/i);
+      await expect(renewChannel({ ...options, restoreExpired: true })).rejects.toThrow(
+        /confirmation/i,
+      );
+      expect(state.writes).toEqual([]);
+      await renewChannel({
+        ...options,
+        restoreExpired: true,
+        confirmation: "RESTORE_EXPIRED_CHANNEL_PRODUCTION",
+      });
+      expect(
+        verifyChannelMetadata(JSON.parse(state.published), {
+          now,
+          trustedReleaseKeys: Object.values(trustedKeys),
+        }).valid,
+      ).toBe(true);
+    });
+
+    it("authenticates the original expired bytes before restoration", async () => {
+      const { options, state, channel } = renewalFixture({ expired: true });
+      state.source = Buffer.from(JSON.stringify({ ...channel, revokedVersions: [] }));
+      await expect(
+        renewChannel({
+          ...options,
+          restoreExpired: true,
+          confirmation: "RESTORE_EXPIRED_CHANNEL_PRODUCTION",
+        }),
+      ).rejects.toThrow(/signature/i);
+      expect(state.writes).toEqual([]);
+    });
+
+    it("does not derive source trust from the replacement signing key", async () => {
+      const { options, state } = renewalFixture();
+      await expect(renewChannel({ ...options, trustedKeys: {} })).rejects.toThrow(
+        /trust|signature/i,
+      );
+      await expect(renewChannel({ ...options, testOnly: false })).rejects.toThrow(
+        /trust|override/i,
+      );
+      expect(state.writes).toEqual([]);
+    });
+
+    it("rejects a revoked source signer or active release before publishing", async () => {
+      for (const revokedField of ["revokedKeyIds", "revokedVersions"]) {
+        const { options, state, channel } = renewalFixture();
+        state.source = Buffer.from(
+          JSON.stringify(
+            sign(
+              {
+                ...channel,
+                [revokedField]: [
+                  revokedField === "revokedKeyIds" ? testSigningKey.keyId : RELEASE_VERSION,
+                ],
+              },
+              testSigningKey,
+            ),
+          ),
+        );
+        await expect(renewChannel(options)).rejects.toThrow(/revoked/i);
+        expect(state.writes).toEqual([]);
+      }
+    });
+
+    it("rejects stale, mismatched, or corrupted referenced manifests before publishing", async () => {
+      for (const change of ["expiry", "identity", "digest", "signature"]) {
+        const { options, state, channel } = renewalFixture();
+        const manifest = JSON.parse(state.manifestBytes);
+        if (change === "expiry") manifest.expiresAt = "2030-01-02T00:00:00.000Z";
+        if (change === "identity") manifest.releaseIdentity.commitSha = "f".repeat(40);
+        if (change === "signature")
+          manifest.assets[Object.keys(manifest.assets)[0]].sha256 = "f".repeat(64);
+        state.manifestBytes = Buffer.from(
+          JSON.stringify(change === "signature" ? manifest : sign(manifest, testSigningKey)),
+        );
+        if (change !== "digest") {
+          for (const entry of Object.values(channel.channels))
+            entry.manifestDigest = digest(state.manifestBytes);
+          state.source = Buffer.from(JSON.stringify(sign(channel, testSigningKey)));
+        } else {
+          state.manifestBytes = Buffer.from("corrupt");
+        }
+        await expect(renewChannel(options)).rejects.toThrow(/expired|identity|digest|signature/i);
+        expect(state.writes).toEqual([]);
+      }
+    });
+
+    it("bounds renewed freshness by the earliest referenced manifest expiry", async () => {
+      const { options, state, channel } = renewalFixture();
+      const manifest = sign(
+        { ...JSON.parse(state.manifestBytes), expiresAt: "2030-01-02T18:00:00.000Z" },
+        testSigningKey,
+      );
+      state.manifestBytes = Buffer.from(JSON.stringify(manifest));
+      for (const entry of Object.values(channel.channels))
+        entry.manifestDigest = digest(state.manifestBytes);
+      state.source = Buffer.from(JSON.stringify(sign(channel, testSigningKey)));
+      await renewChannel(options);
+      expect(JSON.parse(state.published).expiresAt).toBe(manifest.expiresAt);
+    });
+
+    it("does not overwrite a racing promotion and reports stale canonical readback", async () => {
+      const racing = renewalFixture({ race: true });
+      await expect(renewChannel(racing.options)).rejects.toThrow(/PreconditionFailed/);
+      expect(racing.state.writes).toEqual([]);
+      expect(racing.state.invalidations).toEqual([]);
+      const stale = renewalFixture({ staleReadback: true });
+      await expect(renewChannel(stale.options)).rejects.toThrow(/readback.*digest/i);
+      expect(stale.state.writes).toEqual([CHANNELS_S3_KEY]);
+    });
+
+    it("checks public expiry without origin credentials and fails with renewal headroom", async () => {
+      const { options, state, channel } = renewalFixture();
+      expect((await checkChannelExpiry(options)).status).toBe("healthy");
+      state.source = Buffer.from(
+        JSON.stringify(
+          sign(
+            {
+              ...channel,
+              expiresAt: "2030-01-02T17:00:00.000Z",
+            },
+            testSigningKey,
+          ),
+        ),
+      );
+      await expect(checkChannelExpiry(options)).rejects.toThrow(/expires|renewal/i);
+      expect(state.writes).toEqual([]);
+      expect(state.invalidations).toEqual([]);
+    });
+  });
 
   describe("path traversal prevention", () => {
     it("rejects path traversal and absolute paths", () => {

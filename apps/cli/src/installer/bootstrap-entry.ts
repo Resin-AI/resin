@@ -1377,7 +1377,7 @@ export async function bootstrapInstall(
       skipReason,
     };
   } else {
-    logVerbose("==> Authorizing this device, configuring detected editors, and starting Resin...");
+    log("==> Authorizing this device, configuring detected editors, and starting Resin...");
     const onboardingRunner = options.onboardingRunner ?? defaultOnboardingRunner;
     const onboardingArgs = options.onboardingArgs
       ? [...options.onboardingArgs]
@@ -1388,7 +1388,7 @@ export async function bootstrapInstall(
         timeoutMs: options.onboardingTimeoutMs ?? DEFAULT_ONBOARDING_TIMEOUT_MS,
         env: options.env,
         interactive: options.isInteractive,
-        logger: isVerbose ? log : undefined,
+        logger: log,
       });
     } catch (error: unknown) {
       onboardingResult = {
