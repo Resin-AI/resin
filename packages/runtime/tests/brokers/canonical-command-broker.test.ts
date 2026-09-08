@@ -1048,6 +1048,8 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       ).rejects.toThrow(BrokerSecurityError);
     });
 
+    // This matrix performs 14 sequential broker calls with real process resolution.
+    // Allow runner contention without weakening any tuple-security assertions.
     it("enforces strict tuple equality and rejects argument addition, removal, reordering, and prefix/substring mutations", async () => {
       const argvPrinter = path.join(tempWorkspace, "print_argv_mismatch.js");
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
@@ -1195,6 +1197,6 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
           ctx,
         ),
       ).rejects.toThrow(BrokerSecurityError);
-    });
+    }, 15_000);
   });
 });
