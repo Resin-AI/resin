@@ -168,6 +168,20 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
 }
 
 /**
+ * Static initialization instructions returned to MCP clients during capability negotiation.
+ *
+ * Guides discovery and safe usage of matching Resin workflows while preventing scope expansion
+ * and mandating verification of actual task effects.
+ */
+export const DEFAULT_GATEWAY_INSTRUCTIONS =
+  "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
+  "get_tool_schema provides inputs, capabilities, and limits. " +
+  "Prefer an active matching workflow only when it performs exactly the user's authorized task; " +
+  "do not expand scope or side effects merely to fit a tool. " +
+  "When no suitable workflow is available, use native tools. " +
+  "Check tool errors and actual task effects before claiming success.";
+
+/**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.
  */
 export class LocalMcpGateway {
@@ -536,7 +550,7 @@ export class LocalMcpGateway {
       protocolVersion: LATEST_PROTOCOL_VERSION,
       capabilities: connection.serverCapabilities,
       serverInfo: this.serverInfo,
-      instructions: "Resin Autonomous MCP Gateway",
+      instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
     };
   }
 
