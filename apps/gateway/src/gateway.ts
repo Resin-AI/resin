@@ -170,6 +170,29 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
 }
 
 /**
+ * Static initialization instructions returned to MCP clients during capability negotiation.
+ *
+ * Guides discovery and safe usage of matching Resin workflows while preventing scope expansion
+ * and mandating verification of actual task effects.
+ */
+export const DEFAULT_GATEWAY_INSTRUCTIONS =
+  "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace). Honor explicit user tool choices and restrictions.\n" +
+  "When a matching tool may exist, search the live registry before using native tools for project work. " +
+  'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
+  "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
+  "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
+  "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
+  "they do not require or confirm a native catalog refresh. " +
+  "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
+  "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
+  "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
+  "get_tool_schema provides inputs, capabilities, and limits. " +
+  "Prefer an active matching workflow only when it performs exactly the user's authorized task; " +
+  "do not expand scope or side effects merely to fit a tool. " +
+  "When no suitable workflow is available, use native tools. " +
+  "Check tool errors and actual task effects before claiming success.";
+
+/**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.
  */
 export class LocalMcpGateway {
@@ -549,16 +572,7 @@ export class LocalMcpGateway {
       protocolVersion: LATEST_PROTOCOL_VERSION,
       capabilities: connection.serverCapabilities,
       serverInfo: this.serverInfo,
-      instructions:
-        "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace). Honor explicit user tool choices and restrictions.\n" +
-        "When a matching tool may exist, search the live registry before using native tools for project work. " +
-        'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
-        "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
-        "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
-        "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
-        "they do not require or confirm a native catalog refresh. " +
-        "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
-        "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.",
+      instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
     };
   }
 
