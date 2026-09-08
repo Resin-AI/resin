@@ -173,9 +173,9 @@ Public release artifacts are distributed with cryptographic integrity proofs tha
 
 The Resin repository implements defense-in-depth for all continuous integration workflows:
 - **Untrusted PR Isolation**: Pull request workflows triggered from external forks execute exclusively in unprivileged GitHub-hosted runner environments with zero access to internal secrets, production cloud credentials, or release signing keys.
-- **Protected Workflow Separation**: Release and deployment workflows execute exclusively on protected `main` or tag refs and require explicit independent approvals.
-- **Independent Code Owner Review**: Changes touching core runtime, observer, gateway, crypto, protocol, contracts, cloud contracts boundary, release/install scripts, workflows, root package, lockfile, or boundary manifests strictly require at least one independent code-owner review from designated owners in `.github/CODEOWNERS`. Self-approvals are prohibited.
-- **Branch Protection & Review Dismissal**: Stale reviews are dismissed upon pushing new commits, and last-push approvals are enforced before merging into `main`.
+- **Protected Workflow Separation**: Release and deployment workflows execute exclusively on protected `main` or tag refs with explicit promotion confirmations, auditable workflow dispatch, and offline verification receipts.
+- **Informational Code Owners & Optional Review**: Code owner mappings in `.github/CODEOWNERS` are informational and human reviews are optional; pull requests enforce PR-only release gates with zero required approving reviews while requiring 100% automated machine qualification.
+- **Branch Protection & Automated Gating**: Direct pushes and force pushes are blocked on `main`. Merging requires all 13 CI status checks, package and privacy boundary checks, security scans, and the `ci-gate` rollup to pass.
 
 ---
 

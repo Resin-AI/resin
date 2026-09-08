@@ -193,6 +193,27 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS =
   "Check tool errors and actual task effects before claiming success.";
 
 /**
+ * Initialization instructions returned to MCP clients when tool search is disabled for the connection.
+ *
+ * Directs clients to read-only tool discovery using manage_tools instead of search_tools.
+ */
+export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS =
+  "Before native project work, use manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool. Native search_tools is disabled for this connection. Honor explicit user tool choices and restrictions.\n" +
+  'When a matching tool may exist, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
+  "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
+  "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
+  "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
+  "they do not require or confirm a native catalog refresh. " +
+  "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
+  "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
+  "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
+  "get_tool_schema provides inputs, capabilities, and limits. " +
+  "Prefer an active matching workflow only when it performs exactly the user's authorized task; " +
+  "do not expand scope or side effects merely to fit a tool. " +
+  "When no suitable workflow is available, use native tools. " +
+  "Check tool errors and actual task effects before claiming success.";
+
+/**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.
  */
 export class LocalMcpGateway {

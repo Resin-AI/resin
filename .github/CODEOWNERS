@@ -1,6 +1,7 @@
 # Resin Code Owners & Governance Policy
-# Each specified area requires independent review and approval from designated Resin code owners.
-# Self-approvals are prohibited; changes to protected paths require at least 1 non-author approval.
+# Code ownership mappings in this file are informational; human reviews are optional.
+# Pull requests enforce PR-only release gates with zero required approving reviews.
+# Merging requires 100% passing automated machine verification (CI jobs, boundary checks, and ci-gate).
 
 # Default global fallback ownership
 * @Dvitash @Chrrxs

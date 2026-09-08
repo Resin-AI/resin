@@ -1,7 +1,13 @@
 import { Transform } from "node:stream";
+import { DEFAULT_GATEWAY_INSTRUCTIONS, DISABLED_SEARCH_GATEWAY_INSTRUCTIONS } from "../gateway.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../protocol/framing.js";
 import { InitializeParamsSchema, type JsonRpcId, type JsonRpcMessage } from "../protocol/types.js";
+
+export { DISABLED_SEARCH_GATEWAY_INSTRUCTIONS };
+
+export const CONNECTION_DISABLED_SEARCH_REASON =
+  "Disabled for this connection (start MCP shim with --enable-tool-search to enable)";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -13,26 +19,137 @@ function isSearch(value: unknown): boolean {
   return typeof value === "string" && ["search_tools", "sys_search_tools"].includes(value.trim());
 }
 
+function isInvoke(value: unknown): boolean {
+  return typeof value === "string" && ["invoke_tool", "sys_invoke_tool"].includes(value.trim());
+}
+interface ResolvedCall {
+  targetTool: string;
+  targetArgs: Record<string, unknown> | undefined;
+}
+
+function resolveTargetCall(name: unknown, args: unknown): ResolvedCall | undefined {
+  if (typeof name !== "string") return undefined;
+  let currentName = name.trim();
+  let currentArgs = record(args);
+
+  while (isInvoke(currentName)) {
+    if (!currentArgs) break;
+    // Match invoke_tool's public-name precedence; tool_name is only a fallback to name.
+    const publicName = [currentArgs.name, currentArgs.tool_name]
+      .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+      ?.trim();
+    const toolId = typeof currentArgs.toolId === "string" ? currentArgs.toolId.trim() : "";
+    const metaNames = [
+      "get_tool_schema",
+      "sys_get_tool_schema",
+      "manage_tools",
+      "sys_manage_tools",
+      "invoke_tool",
+      "sys_invoke_tool",
+    ];
+    // Unknown names can fall back to a registered ID. Conflicts are rejected by the
+    // backend and error responses are never rewritten here.
+    const target = publicName && metaNames.includes(publicName) ? publicName : toolId || publicName;
+    if (!target) break;
+    currentName = target;
+    currentArgs = record(currentArgs.parameters ?? currentArgs.arguments);
+  }
+
+  return { targetTool: currentName, targetArgs: currentArgs };
+}
+
 function targetsSearch(name: unknown, args: unknown): boolean {
   if (isSearch(name)) return true;
-  if (typeof name !== "string" || !["invoke_tool", "sys_invoke_tool"].includes(name.trim()))
-    return false;
+  if (typeof name !== "string" || !isInvoke(name)) return false;
   let params = record(args);
   // All aliases share one nested argument object; visit it once, not once per alias.
   while (params) {
     const targets = [params.name, params.tool_name, params.toolId];
     if (targets.some(isSearch)) return true;
-    if (
-      !targets.some(
-        (target) =>
-          typeof target === "string" && ["invoke_tool", "sys_invoke_tool"].includes(target.trim()),
-      )
-    )
-      return false;
+    if (!targets.some((target) => typeof target === "string" && isInvoke(target))) return false;
     params = record(params.parameters ?? params.arguments);
   }
   return false;
 }
+
+type MetadataCallType = "list_versions" | "status" | "get_tool_schema";
+
+function classifyMetadataCall(name: unknown, args: unknown): MetadataCallType | undefined {
+  const resolved = resolveTargetCall(name, args);
+  if (!resolved) return undefined;
+  if (["get_tool_schema", "sys_get_tool_schema"].includes(resolved.targetTool)) {
+    return "get_tool_schema";
+  }
+  if (["manage_tools", "sys_manage_tools"].includes(resolved.targetTool)) {
+    const action = resolved.targetArgs?.action;
+    if (action === "list_versions" || action === "status") return action;
+  }
+  return undefined;
+}
+
+function transformMetadataResult(
+  message: JsonRpcMessage,
+  callType: MetadataCallType,
+): JsonRpcMessage {
+  if (!("result" in message) || message.error !== undefined) return message;
+  const result = record(message.result);
+  if (
+    !result ||
+    result.isError === true ||
+    !Array.isArray(result.content) ||
+    result.content.length === 0
+  ) {
+    return message;
+  }
+  const firstContent = record(result.content[0]);
+  if (!firstContent || firstContent.type !== "text" || typeof firstContent.text !== "string") {
+    return message;
+  }
+
+  try {
+    const payload = record(JSON.parse(firstContent.text));
+    if (!payload) return message;
+    let changed = false;
+    const markDisabled = (value: unknown) => {
+      const tool = record(value);
+      if (!tool || !(isSearch(tool.toolId) || isSearch(tool.name))) return;
+      tool.isDisabled = true;
+      tool.disabledReason = CONNECTION_DISABLED_SEARCH_REASON;
+      if (callType === "list_versions" && Array.isArray(tool.installedVersions)) {
+        for (const version of tool.installedVersions) {
+          const entry = record(version);
+          if (entry) entry.isActive = false;
+        }
+      }
+      changed = true;
+    };
+    // Use the resolved response identity, not the request's competing identifier aliases.
+    // Preserve lifecycle status: availability is a connection-local override only.
+    if (callType === "list_versions" && Array.isArray(payload.tools)) {
+      for (const tool of payload.tools) markDisabled(tool);
+    } else {
+      markDisabled(payload);
+    }
+    if (!changed) return message;
+
+    return {
+      ...message,
+      result: {
+        ...result,
+        content: [
+          {
+            ...firstContent,
+            text: JSON.stringify(payload, null, 2),
+          },
+          ...result.content.slice(1),
+        ],
+      },
+    };
+  } catch {
+    return message;
+  }
+}
+
 export interface ToolSearchSurface {
   input: Transform;
   output: Transform;
@@ -44,6 +161,8 @@ export function createToolSearchSurface(
   enableSearch = false,
 ): ToolSearchSurface {
   const lists = new Set<JsonRpcId>();
+  const initializeIds = new Set<JsonRpcId>();
+  const pendingMetadataCalls = new Map<JsonRpcId, MetadataCallType>();
   let clientIdentified = false;
   let codexClient = false;
   let searchEnabled = enableSearch;
@@ -88,6 +207,7 @@ export function createToolSearchSurface(
           codexClient = name === "codex-mcp-client" || name === "openai-codex-cli";
           searchEnabled = enableSearch || codexClient;
         }
+        initializeIds.add(message.id);
       }
       if (
         !searchEnabled &&
@@ -100,41 +220,76 @@ export function createToolSearchSurface(
             id: message.id,
             error: {
               code: MCP_ERROR_CODES.TOOL_NOT_FOUND,
-              message: "Tool 'search_tools' not found",
+              message:
+                "Tool 'search_tools' is disabled for this connection. " +
+                'Use manage_tools with {"action":"list_versions","scope":"workspace"} ' +
+                "for read-only discovery, or start the MCP shim with --enable-tool-search.",
             },
           });
         return undefined;
+      }
+      if (
+        !searchEnabled &&
+        message.method === "tools/call" &&
+        "id" in message &&
+        message.id !== null
+      ) {
+        const metaType = classifyMetadataCall(message.params?.name, message.params?.arguments);
+        if (metaType) {
+          pendingMetadataCalls.set(message.id, metaType);
+        }
       }
       if (message.method === "tools/list" && "id" in message) lists.add(message.id);
       return message;
     }),
     output: transform((message) => {
-      if (
-        !("method" in message) &&
-        lists.delete(message.id) &&
-        "result" in message &&
-        (codexClient || !searchEnabled)
-      ) {
-        const result = record(message.result);
-        if (result && Array.isArray(result.tools))
-          return {
-            jsonrpc: "2.0",
-            id: message.id,
-            result: {
-              ...result,
-              tools: result.tools.filter((tool) => {
-                const name = record(tool)?.name;
-                if (!codexClient) return !isSearch(name);
-                // A stable facade keeps discovery live without caching individual tools.
-                return (
-                  name === "search_tools" ||
-                  name === "get_tool_schema" ||
-                  name === "invoke_tool" ||
-                  name === "manage_tools"
-                );
-              }),
-            },
-          };
+      if (!("method" in message) && "id" in message && message.id !== null) {
+        if (initializeIds.delete(message.id)) {
+          if (!searchEnabled && "result" in message && message.error === undefined) {
+            const result = record(message.result);
+            if (result && typeof result.instructions === "string") {
+              return {
+                ...message,
+                result: {
+                  ...result,
+                  instructions: result.instructions.includes(DEFAULT_GATEWAY_INSTRUCTIONS)
+                    ? result.instructions.replace(
+                        DEFAULT_GATEWAY_INSTRUCTIONS,
+                        DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+                      )
+                    : `${DISABLED_SEARCH_GATEWAY_INSTRUCTIONS}\n${result.instructions}`,
+                },
+              };
+            }
+          }
+        }
+        const metaType = pendingMetadataCalls.get(message.id);
+        if (metaType) {
+          pendingMetadataCalls.delete(message.id);
+          return transformMetadataResult(message, metaType);
+        }
+        if (lists.delete(message.id) && "result" in message && (codexClient || !searchEnabled)) {
+          const result = record(message.result);
+          if (result && Array.isArray(result.tools))
+            return {
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                ...result,
+                tools: result.tools.filter((tool) => {
+                  const name = record(tool)?.name;
+                  if (!codexClient) return !isSearch(name);
+                  // A stable facade keeps discovery live without caching individual tools.
+                  return (
+                    name === "search_tools" ||
+                    name === "get_tool_schema" ||
+                    name === "invoke_tool" ||
+                    name === "manage_tools"
+                  );
+                }),
+              },
+            };
+        }
       }
       return message;
     }),

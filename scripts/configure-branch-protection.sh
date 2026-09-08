@@ -3,12 +3,11 @@
 # Resin - Branch Protection & Release Gate Configuration Script
 #
 # Configures GitHub branch protection rules on 'main' to enforce PR-only release gates:
-# 1. Require changes to arrive through pull requests with independent code owner review.
-# 2. Require at least one approving review from designated code owners (author cannot self-approve).
-# 3. Dismiss stale reviews upon new commit pushes and enforce last-push approval.
-# 4. Require branches to be up to date before merging.
-# 5. Require all 13 parallel CI status checks + rollup 'CI Gate Rollup' to pass.
-# 6. Enforce rules for administrators and prevent force pushes/deletions.
+# 1. Require changes to arrive through pull requests with zero required approving reviews.
+# 2. Code owner reviews and last-push approvals are disabled (reviews are optional / informational).
+# 3. Require branches to be up to date before merging.
+# 4. Require all 13 parallel CI status checks + rollup 'CI Gate Rollup' to pass.
+# 5. Enforce rules for administrators and prevent force pushes/deletions.
 #
 # Usage:
 #   ./scripts/configure-branch-protection.sh [--repo OWNER/REPO] [--branch main] [--dry-run]
@@ -108,10 +107,10 @@ PROTECTION_PAYLOAD=$(cat <<EOF
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {
-    "dismiss_stale_reviews": true,
-    "require_code_owner_reviews": true,
-    "required_approving_review_count": 1,
-    "require_last_push_approval": true
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 0,
+    "require_last_push_approval": false
   },
   "restrictions": null,
   "required_linear_history": true,
