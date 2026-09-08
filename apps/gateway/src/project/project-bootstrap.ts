@@ -13,7 +13,7 @@ import {
   validateV1ProjectMetadata,
   validateV1ToolLock,
 } from "@resin/contracts";
-import { canonicalizePath, findGitRoot } from "../workspace-resolver.js";
+import { canonicalizePath, findGitRoot, resolveProjectResinDir } from "../workspace-resolver.js";
 import type {
   ProjectBootstrapOptions,
   ProjectBootstrapResult,
@@ -298,10 +298,10 @@ export function atomicWriteJsonSync(
  * Validates and reads project metadata from .resin/project.json.
  */
 export function readProjectMetadata(projectRootOrResinDir: string): V1ProjectMetadata {
-  const resinDir = projectRootOrResinDir.endsWith(".resin")
-    ? projectRootOrResinDir
-    : path.join(projectRootOrResinDir, ".resin");
-
+  const resinDir =
+    path.basename(projectRootOrResinDir) === ".resin"
+      ? projectRootOrResinDir
+      : resolveProjectResinDir(projectRootOrResinDir);
   const projectJsonPath = path.join(resinDir, "project.json");
   if (!fs.existsSync(projectJsonPath)) {
     throw new Error(`Project metadata not found at '${projectJsonPath}'`);
@@ -333,10 +333,10 @@ export function readProjectMetadata(projectRootOrResinDir: string): V1ProjectMet
  * Validates and reads tool lockfile from .resin/resin.lock.
  */
 export function readToolLock(projectRootOrResinDir: string): V1ToolLock {
-  const resinDir = projectRootOrResinDir.endsWith(".resin")
-    ? projectRootOrResinDir
-    : path.join(projectRootOrResinDir, ".resin");
-
+  const resinDir =
+    path.basename(projectRootOrResinDir) === ".resin"
+      ? projectRootOrResinDir
+      : resolveProjectResinDir(projectRootOrResinDir);
   const lockPath = path.join(resinDir, "resin.lock");
   if (!fs.existsSync(lockPath)) {
     throw new Error(`Tool lockfile not found at '${lockPath}'`);
@@ -369,10 +369,10 @@ export function writeProjectMetadata(
   projectRootOrResinDir: string,
   metadata: V1ProjectMetadata,
 ): void {
-  const resinDir = projectRootOrResinDir.endsWith(".resin")
-    ? projectRootOrResinDir
-    : path.join(projectRootOrResinDir, ".resin");
-
+  const resinDir =
+    path.basename(projectRootOrResinDir) === ".resin"
+      ? projectRootOrResinDir
+      : resolveProjectResinDir(projectRootOrResinDir);
   const validated = validateV1ProjectMetadata(metadata);
   const target = path.join(resinDir, "project.json");
   atomicWriteJsonSync(target, validated);
@@ -382,10 +382,10 @@ export function writeProjectMetadata(
  * Writes tool lockfile atomically to .resin/resin.lock.
  */
 export function writeToolLock(projectRootOrResinDir: string, lock: V1ToolLock): void {
-  const resinDir = projectRootOrResinDir.endsWith(".resin")
-    ? projectRootOrResinDir
-    : path.join(projectRootOrResinDir, ".resin");
-
+  const resinDir =
+    path.basename(projectRootOrResinDir) === ".resin"
+      ? projectRootOrResinDir
+      : resolveProjectResinDir(projectRootOrResinDir);
   const validated = validateV1ToolLock(lock);
   const target = path.join(resinDir, "resin.lock");
   atomicWriteJsonSync(target, validated);
@@ -475,12 +475,17 @@ export function bootstrapProject(
     throw new Error(`Project root is not a directory: '${projectRoot}'`);
   }
 
-  // Check case collision for .resin in projectRoot
-  checkCaseCollision(projectRoot, ".resin");
+  const resinDir = resolveProjectResinDir(projectRoot);
+  const targetParent = path.dirname(resinDir);
 
-  const resinDir = path.join(projectRoot, ".resin");
+  // Check case collision for .resin in targetParent (and projectRoot if different)
+  checkCaseCollision(targetParent, ".resin");
+  if (targetParent !== projectRoot) {
+    checkCaseCollision(projectRoot, ".resin");
+  }
+
   const isExplicitReadOnly = options.readOnly === true;
-  const isFsReadOnly = isDirectoryReadOnly(projectRoot);
+  const isFsReadOnly = isDirectoryReadOnly(targetParent) || isDirectoryReadOnly(projectRoot);
 
   if (isExplicitReadOnly || isFsReadOnly) {
     return loadExistingReadOnlyMetadata(projectRoot, resinDir);
