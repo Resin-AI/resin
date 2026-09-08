@@ -4,7 +4,7 @@ import type { NudgePayload, NudgeScope } from "./types.js";
  * Standard invariant meta-tools reminder text instructing harnesses to use safe discovery tools.
  */
 export const DEFAULT_META_TOOLS_REMINDER =
-  "Always use invariant meta-tools (evolve_search_tools, evolve_get_tool_schema, evolve_invoke_tool) to dynamically discover, inspect, and invoke tools.";
+  'If a tool is needed and the native catalog is stale, discover matching enabled tools with manage_tools({"action":"list_versions","scope":"workspace"}) without toolId, name, or tool_name; inspect get_tool_schema, then call invoke_tool. These stable meta-tools use the live registry without requiring or confirming a native refresh. Honor explicit user tool choices and restrictions; discovery does not require changing tool state.';
 
 /**
  * Regex for valid, safe tool identifiers.

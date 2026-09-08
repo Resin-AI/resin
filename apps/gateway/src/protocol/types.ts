@@ -186,10 +186,24 @@ export const McpToolInputSchema = z.object({
 });
 export type McpToolInput = z.infer<typeof McpToolInputSchema>;
 
+/**
+ * Advisory hints for MCP hosts, not authorization or runtime capability grants.
+ */
+export const McpToolAnnotationsSchema = z.object({
+  title: z.string().optional(),
+  readOnlyHint: z.boolean().optional(),
+  destructiveHint: z.boolean().optional(),
+  idempotentHint: z.boolean().optional(),
+  openWorldHint: z.boolean().optional(),
+});
+export type McpToolAnnotations = z.infer<typeof McpToolAnnotationsSchema>;
+
 export const McpToolSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   inputSchema: McpToolInputSchema,
+  outputSchema: z.record(z.unknown()).optional(),
+  annotations: McpToolAnnotationsSchema.optional(),
 });
 export type McpTool = z.infer<typeof McpToolSchema>;
 
@@ -235,6 +249,7 @@ export type CallToolParams = z.infer<typeof CallToolParamsSchema>;
 
 export interface CallToolResult {
   content: McpContent[];
+  structuredContent?: JsonRpcParams;
   isError?: boolean;
   _meta?: JsonRpcParams;
 }

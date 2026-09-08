@@ -69,7 +69,7 @@ const SEARCH_TOOLS_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.SEARCH_TOOLS,
   version: "1.0.0",
   description:
-    "Discovers and searches available tools in the caller's scoped catalog by query, tags, capabilities, or scope with capability summaries and pagination.",
+    "Read-only live lookup of tools available in the caller's scope, including new tools absent from a stale initial native catalog. Before native project work, use query=<task> when a matching tool may exist, then get_tool_schema and invoke_tool. Honors user tool restrictions; supports tags, capabilities, scope, summaries, and pagination. Does not refresh the native catalog.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -136,7 +136,7 @@ const GET_TOOL_SCHEMA_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.GET_TOOL_SCHEMA,
   version: "1.0.0",
   description:
-    "Retrieves complete parameter schemas, output schemas, capabilities, limits, provenance, and status for a tool without leaking source code or secrets.",
+    "Inspects a tool in the current live registry, including tools missing from a cached native catalog. After discovering a matching enabled tool with search_tools (or manage_tools action=list_versions when search is unavailable), use its toolId here before invoke_tool. Returns parameter and output schemas, capabilities, limits, provenance, and status without leaking source code or secrets.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -184,7 +184,7 @@ const INVOKE_TOOL_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.INVOKE_TOOL,
   version: "1.0.0",
   description:
-    "Invokes an active tool with strict parameter schema validation, context preservation, execution limits, timeout support, and cancellation.",
+    "Invokes an active tool from the current live registry, even if it was added after the client's initial tools/list. Discover matching enabled tools with search_tools (or manage_tools action=list_versions when search is unavailable) and inspect get_tool_schema first. Preserves parameter validation, caller context, capability checks, execution limits, timeouts, and cancellation; does not refresh the native catalog.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -244,7 +244,7 @@ const MANAGE_TOOLS_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.MANAGE_TOOLS,
   version: "1.0.0",
   description:
-    "Manages tool versions, user pinning, disabling/enabling, rollbacks, and inspects tool status.",
+    'Discovers tools in the current live registry as well as managing tool state. When search_tools is unavailable, use read-only workspace discovery with {"action":"list_versions","scope":"workspace"} and omit toolId, name, and tool_name; returns accessible tool identifiers, versions, pinning, and isDisabled. Inspect a matching enabled tool with get_tool_schema, then call invoke_tool even if the native catalog is stale. State-changing actions (pin, unpin, disable, enable, rollback, clear_override) are not needed for discovery and should only be used when requested.',
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -260,15 +260,17 @@ const MANAGE_TOOLS_RAW: ToolManifest = {
           "rollback",
           "clear_override",
         ],
-        description: "Management action to perform.",
+        description:
+          "Use list_versions for read-only live discovery; omit the tool identifier to enumerate accessible tools. Other actions inspect status or change tool state.",
       },
       toolId: {
         type: "string",
-        description: "Tool identifier.",
+        description: "Tool identifier. Omit for list_versions to discover all accessible tools.",
       },
       name: {
         type: "string",
-        description: "Exposed name of the tool.",
+        description:
+          "Exposed name of the tool. Omit for list_versions to discover all accessible tools.",
       },
       version: {
         type: "string",
