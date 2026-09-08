@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { isBuiltin } from "node:module";
 import os from "node:os";
@@ -21,10 +22,13 @@ import {
   BundleSignatureDataSchema,
   CapabilityBrokerManager,
   type CapabilityPolicyEngine,
+  DEFAULT_BUNDLE_LIMITS,
   type KeyStore,
   ToolBundleLoader,
   WorkerProcess,
   createInvocationGrant,
+  encodeDeterministicTar,
+  validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
@@ -217,13 +221,17 @@ function scanArtifactForBareImports(
 }
 
 function matchesManifestDigest(manifest: ToolManifest, expectedDigest: string): boolean {
-  const normExpected = normalizeSha256(expectedDigest, false);
-  const digest1 = normalizeSha256(computeManifestDigest(manifest), false);
-  if (digest1 === normExpected) return true;
-  const digest2 = normalizeSha256(computeSha256(canonicalJson(manifest)), false);
-  if (digest2 === normExpected) return true;
-  if (manifest.digest && normalizeSha256(manifest.digest, false) === normExpected) return true;
-  return false;
+  try {
+    const normExpected = normalizeSha256(expectedDigest, false);
+    const digest1 = normalizeSha256(computeManifestDigest(manifest), false);
+    if (digest1 === normExpected) return true;
+    const digest2 = normalizeSha256(computeSha256(canonicalJson(manifest)), false);
+    if (digest2 === normExpected) return true;
+    if (manifest.digest && normalizeSha256(manifest.digest, false) === normExpected) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export class LocalArtifactExecutor {
@@ -306,6 +314,196 @@ export class LocalArtifactExecutor {
     return true;
   }
 
+  private async verifyDeterministicArchiveRehash(
+    artifactDir: string,
+    entry: LocalArtifactEntry,
+    manifest: ToolManifest,
+  ): Promise<{ verified: boolean; error?: string }> {
+    if (!entry.artifactDigest) {
+      return { verified: false, error: "Missing artifact digest" };
+    }
+    try {
+      const root = fs.lstatSync(artifactDir);
+      if (root.isSymbolicLink() || !root.isDirectory()) {
+        return { verified: false, error: "Artifact root must be a regular directory" };
+      }
+    } catch {
+      return { verified: false, error: "Artifact root is unavailable" };
+    }
+
+    // 1. Identity must strictly match
+    if (manifest.id !== entry.toolId) {
+      return {
+        verified: false,
+        error: `Tool ID mismatch: expected '${entry.toolId}', got '${manifest.id}'`,
+      };
+    }
+    if (entry.version && manifest.version !== entry.version) {
+      return {
+        verified: false,
+        error: `Version mismatch: expected '${entry.version}', got '${manifest.version}'`,
+      };
+    }
+    if (entry.name && manifest.name !== entry.name) {
+      return {
+        verified: false,
+        error: `Name mismatch: expected '${entry.name}', got '${manifest.name}'`,
+      };
+    }
+
+    // 2. If signature is required or entry declares signatureIdentity, verify signature.json
+    const sigPath = path.join(artifactDir, BUNDLE_FILE_SIGNATURE);
+    const hasSig = fs.existsSync(sigPath);
+    if (this.requireSignature || Boolean(entry.signatureIdentity?.keyId)) {
+      if (!hasSig) {
+        return {
+          verified: false,
+          error: "Bundle signature is required in production but signature.json is missing",
+        };
+      }
+    }
+
+    if (hasSig) {
+      try {
+        const sigContent = fs.readFileSync(sigPath, "utf8");
+        const sigData = BundleSignatureDataSchema.parse(JSON.parse(sigContent));
+
+        if (entry.signatureIdentity?.keyId && sigData.keyId !== entry.signatureIdentity.keyId) {
+          return {
+            verified: false,
+            error: `Signature keyId mismatch: expected '${entry.signatureIdentity.keyId}', got '${sigData.keyId}'`,
+          };
+        }
+
+        const loader = this.getLoader();
+        const keyStore = this.keyStore ?? loader.keyStore;
+        if (keyStore) {
+          const sigResult = await verifyBundleSignature(sigData, keyStore, {
+            allowDevKeys: this.allowDevKeys,
+          });
+          if (!sigResult.valid) {
+            return {
+              verified: false,
+              error: `Signature verification failed: ${sigResult.error ?? sigResult.reason}`,
+            };
+          }
+        }
+      } catch (err) {
+        return { verified: false, error: `Signed bundle inspection failed: ${err}` };
+      }
+    }
+
+    // 3. Collect regular files, enforce bundle limits, reject symlinks and path traversal
+    const maxFiles = DEFAULT_BUNDLE_LIMITS.maxFileCount ?? 1000;
+    const maxBytes = DEFAULT_BUNDLE_LIMITS.maxBundleSizeBytes ?? 50 * 1024 * 1024;
+    const maxSingleFileBytes = DEFAULT_BUNDLE_LIMITS.maxFileSizeBytes ?? 10 * 1024 * 1024;
+
+    const filesToArchive: Array<{ path: string; content: Buffer; executable: boolean }> = [];
+    let totalSizeBytes = 0;
+
+    const collectFiles = (currentDir: string, relBase = ""): boolean => {
+      let dirents: fs.Dirent[];
+      try {
+        dirents = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        return false;
+      }
+
+      for (const ent of dirents) {
+        const fullPath = path.join(currentDir, ent.name);
+        const relPath = relBase ? `${relBase}/${ent.name}` : ent.name;
+
+        try {
+          validateBundleEntryPath(relPath);
+        } catch {
+          return false;
+        }
+
+        let lstat: fs.Stats;
+        try {
+          lstat = fs.lstatSync(fullPath);
+        } catch {
+          return false;
+        }
+
+        if (
+          lstat.isSymbolicLink() ||
+          lstat.isFIFO() ||
+          lstat.isSocket() ||
+          lstat.isBlockDevice() ||
+          lstat.isCharacterDevice()
+        ) {
+          return false;
+        }
+
+        if (lstat.isDirectory()) {
+          if (!collectFiles(fullPath, relPath)) {
+            return false;
+          }
+        } else if (lstat.isFile()) {
+          // Exclude only known cache extraction metadata file
+          if (relPath === ".extracted") {
+            continue;
+          }
+          if (lstat.size > maxSingleFileBytes) {
+            return false;
+          }
+          totalSizeBytes += lstat.size;
+          if (totalSizeBytes > maxBytes) {
+            return false;
+          }
+
+          let content: Buffer;
+          try {
+            content = fs.readFileSync(fullPath);
+          } catch {
+            return false;
+          }
+
+          if (content.byteLength !== lstat.size) return false;
+          filesToArchive.push({
+            path: relPath,
+            content,
+            executable: (lstat.mode & 0o111) !== 0,
+          });
+          if (filesToArchive.length > maxFiles) {
+            return false;
+          }
+        } else {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    if (!collectFiles(artifactDir, "")) {
+      return {
+        verified: false,
+        error: "Artifact directory contains invalid files, symlinks, or exceeds bundle limits",
+      };
+    }
+
+    // 4. Reconstruct deterministic tar archive and verify against entry.artifactDigest
+    try {
+      const normEntryDigest = normalizeSha256(entry.artifactDigest, false);
+      const { archive } = encodeDeterministicTar(filesToArchive);
+      const recomputedDigest = createHash("sha256").update(archive).digest("hex");
+      if (recomputedDigest !== normEntryDigest) {
+        return {
+          verified: false,
+          error: `Archive rehash digest '${recomputedDigest}' does not match locked artifactDigest '${normEntryDigest}'`,
+        };
+      }
+    } catch (err) {
+      return {
+        verified: false,
+        error: `Failed to reconstruct deterministic tar archive: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    return { verified: true };
+  }
+
   async execute(params: LocalArtifactExecuteParams): Promise<CallToolResult> {
     const { entry, parameters, context } = params;
     this.managedToolAccess?.assertAllowed(entry);
@@ -360,18 +558,25 @@ export class LocalArtifactExecutor {
       };
     }
 
-    // 2. Fail closed on manifest digest mismatch
+    // 2. Fail closed on manifest digest mismatch unless verified via deterministic archive rehash
     if (entry.manifestDigest && !matchesManifestDigest(manifest, entry.manifestDigest)) {
-      const computed = computeManifestDigest(manifest);
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}`,
-          },
-        ],
-      };
+      const rehashResult = await this.verifyDeterministicArchiveRehash(
+        artifactDir,
+        entry,
+        manifest,
+      );
+      if (!rehashResult.verified) {
+        const computed = computeManifestDigest(manifest);
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}`,
+            },
+          ],
+        };
+      }
     }
 
     // 3. Extracted metadata integrity check

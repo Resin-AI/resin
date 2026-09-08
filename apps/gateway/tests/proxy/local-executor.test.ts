@@ -2,8 +2,16 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ToolManifest } from "@resin/contracts";
-import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
+import { type ToolManifest, canonicalJson } from "@resin/contracts";
+import {
+  ArtifactCache,
+  type GeneratedKeyPair,
+  InMemoryKeyStore,
+  type KeyStore,
+  encodeDeterministicTar,
+  generateBundleKeyPair,
+  signBundlePayload,
+} from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LocalArtifactExecutor, resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
@@ -84,6 +92,184 @@ describe("LocalArtifactExecutor", () => {
     });
 
     return { artifactDigest, manifestDigest, manifest: fullManifest };
+  }
+  async function installRehashBundleToCache(
+    manifestInput: TestManifestInput,
+    sourceCode: string,
+    options: {
+      tamperManifest?: boolean;
+      tamperJointManifestAndIntegrity?: boolean;
+      extraFile?: boolean;
+      missingFile?: boolean;
+      addSymlink?: boolean;
+    } = {},
+  ): Promise<{
+    artifactDigest: string;
+    manifestDigest: string;
+    manifest: ToolManifest;
+    artifactDir: string;
+  }> {
+    const manifestWithDefaults = {
+      capabilities: {},
+      limits: {},
+      scope: "workspace" as const,
+      createdAt: "2026-09-02T00:00:00.000Z",
+      ...manifestInput,
+    };
+    const manifestDigest = computeManifestDigest(manifestWithDefaults as ToolManifest);
+    const fullManifest = { ...manifestWithDefaults, digest: manifestDigest } as ToolManifest;
+
+    const manifestContent = JSON.stringify(fullManifest);
+    const manifestSha = crypto.createHash("sha256").update(manifestContent).digest("hex");
+    const sourceSha = crypto.createHash("sha256").update(sourceCode).digest("hex");
+
+    const integrityMap: Record<string, string> = {
+      "manifest.json": manifestSha,
+      "src/index.ts": sourceSha,
+    };
+
+    const files = [
+      { path: "manifest.json", content: manifestContent },
+      { path: "src/index.ts", content: sourceCode },
+      { path: "integrity.json", content: JSON.stringify(integrityMap) },
+    ];
+
+    const { archive: plainTar } = encodeDeterministicTar(files);
+    const artifactDigest = crypto.createHash("sha256").update(plainTar).digest("hex");
+
+    const stagingDir = await cache.createStagingDirectory(artifactDigest);
+    const targetManifest = path.join(stagingDir, "manifest.json");
+    const targetSource = path.join(stagingDir, "src/index.ts");
+    const targetIntegrity = path.join(stagingDir, "integrity.json");
+
+    fs.mkdirSync(path.dirname(targetSource), { recursive: true });
+
+    const tamperedManifestContent = JSON.stringify({
+      ...fullManifest,
+      description: "tampered-content",
+      capabilities: { command: { allowShellExecution: true } },
+    });
+    const tamperedManifestSha = crypto
+      .createHash("sha256")
+      .update(tamperedManifestContent)
+      .digest("hex");
+
+    if (!options.missingFile) {
+      fs.writeFileSync(
+        targetManifest,
+        options.tamperJointManifestAndIntegrity || options.tamperManifest
+          ? tamperedManifestContent
+          : manifestContent,
+        "utf8",
+      );
+    }
+    fs.writeFileSync(targetSource, sourceCode, "utf8");
+
+    const effectiveIntegrityMap = options.tamperJointManifestAndIntegrity
+      ? { ...integrityMap, "manifest.json": tamperedManifestSha }
+      : integrityMap;
+    fs.writeFileSync(targetIntegrity, JSON.stringify(effectiveIntegrityMap), "utf8");
+
+    if (options.extraFile) {
+      fs.writeFileSync(path.join(stagingDir, "injected_evil.txt"), "evil content", "utf8");
+    }
+
+    if (options.addSymlink) {
+      try {
+        fs.symlinkSync(targetSource, path.join(stagingDir, "symlink.ts"));
+      } catch {
+        // ignore symlink creation failure on platforms where unprivileged symlinks are disabled
+      }
+    }
+
+    await cache.commitStagingDirectory(stagingDir, artifactDigest, {
+      digest: artifactDigest,
+      extractedAt: new Date().toISOString(),
+      fileCount: 3,
+      totalSizeBytes: plainTar.length,
+      entrypoint: "src/index.ts",
+      verified: true,
+    });
+
+    const artifactDir = cache.getArtifactPath(artifactDigest);
+    return { artifactDigest, manifestDigest, manifest: fullManifest, artifactDir };
+  }
+
+  async function installSignedBundleToCache(
+    manifestInput: TestManifestInput,
+    sourceCode: string,
+    keyStore: KeyStore,
+    keyPair: GeneratedKeyPair,
+    options: { tamperManifest?: boolean; wrongKeyId?: boolean } = {},
+  ): Promise<{
+    artifactDigest: string;
+    manifestDigest: string;
+    manifest: ToolManifest;
+    artifactDir: string;
+  }> {
+    const manifestWithDefaults = {
+      capabilities: {},
+      limits: {},
+      scope: "workspace" as const,
+      createdAt: "2026-09-02T00:00:00.000Z",
+      ...manifestInput,
+    };
+    const manifestDigest = computeManifestDigest(manifestWithDefaults as ToolManifest);
+    const fullManifest = { ...manifestWithDefaults, digest: manifestDigest } as ToolManifest;
+
+    const manifestContent = JSON.stringify(fullManifest);
+    const manifestSha = crypto.createHash("sha256").update(manifestContent).digest("hex");
+    const sourceSha = crypto.createHash("sha256").update(sourceCode).digest("hex");
+
+    const fileDigests: Record<string, string> = {
+      "manifest.json": manifestSha,
+      "src/index.ts": sourceSha,
+    };
+
+    const initialFiles = [
+      { path: "manifest.json", content: manifestContent },
+      { path: "src/index.ts", content: sourceCode },
+    ];
+    const { archive: unsignedTar } = encodeDeterministicTar(initialFiles);
+    const bundleDigest = crypto.createHash("sha256").update(unsignedTar).digest("hex");
+
+    const sigData = signBundlePayload(bundleDigest, fileDigests, {
+      keyId: options.wrongKeyId ? "wrong-key-id" : keyPair.keyId,
+      algorithm: keyPair.algorithm,
+      privateKeyPem: keyPair.privateKeyPem,
+    });
+
+    const files = [...initialFiles, { path: "signature.json", content: JSON.stringify(sigData) }];
+    const { archive: signedTar } = encodeDeterministicTar(files);
+    const artifactDigest = crypto.createHash("sha256").update(signedTar).digest("hex");
+
+    const stagingDir = await cache.createStagingDirectory(artifactDigest);
+    const targetManifest = path.join(stagingDir, "manifest.json");
+    const targetSource = path.join(stagingDir, "src/index.ts");
+    const targetSig = path.join(stagingDir, "signature.json");
+
+    fs.mkdirSync(path.dirname(targetSource), { recursive: true });
+    fs.writeFileSync(
+      targetManifest,
+      options.tamperManifest
+        ? JSON.stringify({ ...fullManifest, description: "tampered-content" })
+        : manifestContent,
+      "utf8",
+    );
+    fs.writeFileSync(targetSource, sourceCode, "utf8");
+    fs.writeFileSync(targetSig, JSON.stringify(sigData), "utf8");
+
+    await cache.commitStagingDirectory(stagingDir, artifactDigest, {
+      digest: artifactDigest,
+      extractedAt: new Date().toISOString(),
+      fileCount: 3,
+      totalSizeBytes: signedTar.length,
+      entrypoint: "src/index.ts",
+      verified: true,
+    });
+
+    const artifactDir = cache.getArtifactPath(artifactDigest);
+    return { artifactDigest, manifestDigest, manifest: fullManifest, artifactDir };
   }
 
   it("canExecute verifies presence, manifest and version in cache", async () => {
@@ -301,6 +487,13 @@ describe("LocalArtifactExecutor", () => {
       "export default async () => ({ status: 'ok' });",
     );
 
+    // Tamper the manifest on disk so it does not match the archive digest
+    const artifactDir = cache.getArtifactPath(artifactDigest);
+    fs.writeFileSync(
+      path.join(artifactDir, "manifest.json"),
+      JSON.stringify({ ...manifest, description: "tampered-manifest" }),
+      "utf8",
+    );
     const executor = new LocalArtifactExecutor({
       cache,
       workspaceRoot: workspaceDir,
@@ -317,6 +510,497 @@ describe("LocalArtifactExecutor", () => {
         version: "1.0.0",
         artifactDigest,
         manifestDigest: "0".repeat(64), // Mismatch!
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("accepts verified bundle fallback when manifestDigest differs from lock entry but archive rehash matches artifactDigest", async () => {
+    const toolId = "test-rehash-fallback-001";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "rehash_tool",
+      version: "1.0.2",
+      description: "Fallback tool with deterministic archive rehash",
+      parameters: { type: "object", properties: { path: { type: "string" } } },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'rehash_fallback_ok' });",
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    // Pinned lock entry has a differing canonical cloud digest
+    const entry = {
+      toolId,
+      name: "rehash_tool",
+      version: "1.0.2",
+      artifactDigest,
+      manifestDigest: "c72bd5dbd06c85922191108e15346308d863232442416200a0d0ff5b26e3b595",
+    };
+
+    expect(executor.canExecute(entry)).toBe(true);
+
+    const result = await executor.execute({
+      entry,
+      manifest,
+      parameters: { path: "README.md" },
+      context: ws,
+    });
+
+    if (result.isError) {
+      expect(result.content[0]?.text).not.toContain("Manifest digest mismatch");
+    } else {
+      expect(result.content[0]?.text).toContain("rehash_fallback_ok");
+    }
+  });
+
+  it("rejects bundle fallback on joint manifest and integrity.json tampering (archive rehash mismatch)", async () => {
+    const toolId = "test-joint-tamper-002";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "joint_tampered_tool",
+      version: "1.0.0",
+      description: "Legitimate description",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    // Both manifest.json and integrity.json are tampered so their digests match each other,
+    // but the deterministic archive rehash fails against the locked entry.artifactDigest.
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'should_not_run' });",
+      { tamperJointManifestAndIntegrity: true },
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "joint_tampered_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "c72bd5dbd06c85922191108e15346308d863232442416200a0d0ff5b26e3b595",
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("rejects bundle fallback when extra file is injected into artifact directory", async () => {
+    const toolId = "test-extra-file-003";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "extra_file_tool",
+      version: "1.0.0",
+      description: "Tool with injected extra file",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+      { extraFile: true },
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "extra_file_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "1".repeat(64),
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("rejects bundle fallback when file is missing from artifact directory", async () => {
+    const toolId = "test-missing-file-004";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "missing_file_tool",
+      version: "1.0.0",
+      description: "Tool with missing manifest file",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+      { missingFile: true },
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "missing_file_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "2".repeat(64),
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("rejects bundle fallback when symlink exists in artifact directory", async () => {
+    const toolId = "test-symlink-005";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "symlink_tool",
+      version: "1.0.0",
+      description: "Tool with symlink",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+      { addSymlink: true },
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "symlink_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "3".repeat(64),
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("rejects bundle fallback when tool identity does not match entry", async () => {
+    const toolId = "test-identity-tool-006";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "identity_tool",
+      version: "1.0.0",
+      description: "Tool with valid rehash but mismatched entry identity",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const { artifactDigest, manifest } = await installRehashBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    // Entry toolId differs from manifest.id
+    const result = await executor.execute({
+      entry: {
+        toolId: "completely-different-id",
+        name: "identity_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "4".repeat(64),
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("accepts verified signed bundle fallback when manifestDigest differs from lock entry", async () => {
+    const toolId = "test-signed-tool-007";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "signed_tool",
+      version: "1.0.0",
+      description: "Signed tool bundle",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const keyPair = generateBundleKeyPair("ed25519", "test-key-007");
+    const keyStore = new InMemoryKeyStore([
+      {
+        keyId: keyPair.keyId,
+        algorithm: "ed25519",
+        publicKeyPem: keyPair.publicKeyPem,
+        trustLevel: "development",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    const { artifactDigest, manifest } = await installSignedBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'signed_ok' });",
+      keyStore,
+      keyPair,
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      keyStore,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const entry = {
+      toolId,
+      name: "signed_tool",
+      version: "1.0.0",
+      artifactDigest,
+      manifestDigest: "5".repeat(64),
+      signatureIdentity: { keyId: keyPair.keyId },
+    };
+
+    expect(executor.canExecute(entry)).toBe(true);
+
+    const result = await executor.execute({
+      entry,
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    if (result.isError) {
+      expect(result.content[0]?.text).not.toContain("Manifest digest mismatch");
+    } else {
+      expect(result.content[0]?.text).toContain("signed_ok");
+    }
+  });
+
+  it("rejects signed bundle fallback when manifest is tampered", async () => {
+    const toolId = "test-signed-tamper-008";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "signed_tamper_tool",
+      version: "1.0.0",
+      description: "Signed tool with tampered manifest",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const keyPair = generateBundleKeyPair("ed25519", "test-key-008");
+    const keyStore = new InMemoryKeyStore([
+      {
+        keyId: keyPair.keyId,
+        algorithm: "ed25519",
+        publicKeyPem: keyPair.publicKeyPem,
+        trustLevel: "development",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    const { artifactDigest, manifest } = await installSignedBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+      keyStore,
+      keyPair,
+      { tamperManifest: true },
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      keyStore,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "signed_tamper_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "6".repeat(64),
+        signatureIdentity: { keyId: keyPair.keyId },
+      },
+      manifest,
+      parameters: {},
+      context: ws,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
+  });
+
+  it("rejects signed bundle fallback when signing key is untrusted", async () => {
+    const toolId = "test-untrusted-key-009";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "untrusted_key_tool",
+      version: "1.0.0",
+      description: "Signed tool with untrusted key",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+
+    const keyPair = generateBundleKeyPair("ed25519", "untrusted-key-009");
+    const emptyKeyStore = new InMemoryKeyStore([]);
+
+    const { artifactDigest, manifest } = await installSignedBundleToCache(
+      manifestBase,
+      "export default async () => ({ status: 'ok' });",
+      emptyKeyStore,
+      keyPair,
+    );
+
+    const executor = new LocalArtifactExecutor({
+      cache,
+      keyStore: emptyKeyStore,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: false,
+    });
+
+    const ws = resolveWorkspaceContext({ cwd: workspaceDir });
+
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "untrusted_key_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest: "7".repeat(64),
       },
       manifest,
       parameters: {},

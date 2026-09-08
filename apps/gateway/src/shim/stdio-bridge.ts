@@ -361,7 +361,7 @@ export class McpStdioShim {
         },
       });
 
-      if (cloudRuntime.isCloudEnabled && registry && cloudRuntime.router) {
+      if (registry && cloudRuntime.router) {
         router = createRegistryGatewayRouter(registry, cloudRuntime.router);
       }
     } catch {

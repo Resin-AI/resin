@@ -13,6 +13,7 @@ const OwnerSchema = AccountToolAccessResponseSchema.extend({
   cloudUrl: z.string().url(),
   revocationId: z.string().optional(),
   proofId: z.string().optional(),
+  epoch: z.number().int().nonnegative().optional(),
 });
 const ManagedEntrySchema = z.object({
   owner: z.string().regex(/^[a-f0-9]{64}$/),
@@ -28,6 +29,15 @@ export interface ManagedToolIdentity {
   cloudUrl: string;
   accountId: string;
   userId: string;
+}
+export interface ManagedToolConfirmation {
+  cloudUrl?: string;
+  accountId?: string;
+  userId?: string;
+  toolAccess?: AccountToolAccessResponse["toolAccess"];
+  proofId?: string;
+  revocationId?: string;
+  epoch?: number;
 }
 interface ManagedToolTuple {
   toolId: string;
@@ -57,8 +67,13 @@ export class ManagedToolAccess {
   private readonly pendingProofBases = new Map<string, string | undefined>();
   private readonly knownOwners = new Map<string, Owner>();
   private readonly knownEntries = new Map<string, ManagedEntry>();
+  private receiptDirectoryRevision?: string;
+  private receiptNames: string[] = [];
   private readonly ownersDir: string;
   private readonly entriesDir: string;
+  private db?: DatabaseSync;
+  private authorityAvailable = false;
+
   constructor(
     readonly stateDir: string,
     readonly artifactCache: ArtifactCache,
@@ -72,24 +87,216 @@ export class ManagedToolAccess {
     return key([new URL(identity.cloudUrl).origin, identity.accountId]);
   }
 
+  private getDb(): DatabaseSync {
+    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    if (fs.realpathSync(this.stateDir) !== path.resolve(this.stateDir)) {
+      throw new Error("Refusing managed state access through a symlinked state directory");
+    }
+    if (!this.db) {
+      const dbPath = path.join(this.stateDir, "tool-access.db");
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 50;");
+        this.initDb(db);
+        this.db = db;
+      } catch (error) {
+        try {
+          db.close();
+        } catch {}
+        throw error;
+      }
+    }
+    return this.db;
+  }
+
+  private initDb(db: DatabaseSync): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS owner_authorizations (
+        owner_key TEXT PRIMARY KEY,
+        cloud_url TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        tool_access TEXT NOT NULL,
+        revocation_id TEXT,
+        proof_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    this.seedLegacyOwners(db);
+  }
+
+  private seedLegacyOwners(db: DatabaseSync): void {
+    if (!fs.existsSync(this.ownersDir)) return;
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO owner_authorizations (
+        owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    for (const name of this.files(this.ownersDir)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      const ownerKey = name.slice(0, -5);
+      try {
+        const owner = OwnerSchema.parse(
+          JSON.parse(fs.readFileSync(path.join(this.ownersDir, name), "utf8")),
+        );
+        if (name === `${this.ownerKey(owner)}.json`) {
+          insert.run(
+            ownerKey,
+            owner.cloudUrl,
+            owner.accountId,
+            owner.userId,
+            owner.toolAccess,
+            owner.revocationId ?? null,
+            owner.proofId ?? crypto.randomUUID(),
+            owner.epoch ?? 0,
+            Date.now(),
+          );
+        }
+      } catch {
+        /* Unreadable data is not proof of inactivity. */
+      }
+    }
+  }
+
+  private importLegacyDenialIfPresent(ownerKey: string): void {
+    const file = path.join(this.ownersDir, `${ownerKey}.json`);
+    if (!fs.existsSync(file)) return;
+    try {
+      const owner = OwnerSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+      if (owner.toolAccess !== "subscription_inactive") return;
+      if (this.ownerKey(owner) !== ownerKey) return;
+
+      const db = this.getDb();
+      const rows = db
+        .prepare(`
+        INSERT INTO owner_authorizations (
+          owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch, updated_at
+        ) VALUES (?, ?, ?, ?, 'subscription_inactive', ?, ?, 1, ?)
+        ON CONFLICT(owner_key) DO UPDATE SET
+          tool_access = 'subscription_inactive',
+          revocation_id = CASE
+            WHEN owner_authorizations.tool_access = 'subscription_inactive' AND owner_authorizations.revocation_id IS NOT NULL
+              THEN owner_authorizations.revocation_id
+            ELSE excluded.revocation_id
+          END,
+          proof_id = excluded.proof_id,
+          epoch = owner_authorizations.epoch + 1,
+          updated_at = excluded.updated_at
+        RETURNING owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch;
+      `)
+        .all(
+          ownerKey,
+          owner.cloudUrl,
+          owner.accountId,
+          owner.userId,
+          owner.revocationId ?? crypto.randomUUID(),
+          owner.proofId ?? crypto.randomUUID(),
+          Date.now(),
+        ) as unknown as Array<{
+        owner_key: string;
+        cloud_url: string;
+        account_id: string;
+        user_id: string;
+        tool_access: "subscription_inactive";
+        revocation_id: string | null;
+        proof_id: string;
+        epoch: number;
+      }>;
+
+      if (rows.length > 0) {
+        const row = rows[0];
+        const canonicalRevocationId = row.revocation_id ?? undefined;
+        // Mirror canonical revocation/proof/epoch back to disk so future observations never diverge
+        const canonicalOwner: Owner = {
+          schemaVersion: "1.0.0",
+          cloudUrl: row.cloud_url,
+          accountId: row.account_id,
+          userId: row.user_id,
+          toolAccess: "subscription_inactive",
+          revocationId: canonicalRevocationId,
+          proofId: row.proof_id,
+          epoch: Number(row.epoch),
+        };
+        this.write(file, canonicalOwner);
+        this.knownOwners.set(ownerKey, canonicalOwner);
+      }
+    } catch {
+      /* Unreadable data is not proof of inactivity */
+    }
+  }
+
   private readOwners(): Map<string, Owner> {
-    const owners = new Map(this.knownOwners);
+    const owners = new Map<string, Owner>(this.knownOwners);
+    let dbSucceeded = false;
+    try {
+      const db = this.getDb();
+      const rows = db
+        .prepare(`
+        SELECT owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch
+        FROM owner_authorizations;
+      `)
+        .all() as unknown as Array<{
+        owner_key: string;
+        cloud_url: string;
+        account_id: string;
+        user_id: string;
+        tool_access: "allowed" | "subscription_inactive";
+        revocation_id: string | null;
+        proof_id: string;
+        epoch: number;
+      }>;
+      for (const row of rows) {
+        const owner: Owner = {
+          schemaVersion: "1.0.0",
+          cloudUrl: row.cloud_url,
+          accountId: row.account_id,
+          userId: row.user_id,
+          toolAccess: row.tool_access,
+          revocationId: row.revocation_id ?? undefined,
+          proofId: row.proof_id,
+          epoch: Number(row.epoch),
+        };
+        owners.set(row.owner_key, owner);
+        this.knownOwners.set(row.owner_key, owner);
+      }
+      dbSucceeded = true;
+    } catch {
+      // Authoritative DB read failed. Do not blindly trust allowed JSON on authority failure.
+    }
+    this.authorityAvailable = dbSucceeded;
+
+    // Check disk accounts directory to honor live legacy process revocations
     if (fs.existsSync(this.ownersDir)) {
       for (const name of this.files(this.ownersDir)) {
         if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+        const ownerKey = name.slice(0, -5);
         try {
           const owner = OwnerSchema.parse(
             JSON.parse(fs.readFileSync(path.join(this.ownersDir, name), "utf8")),
           );
-          if (name === `${this.ownerKey(owner)}.json`) {
-            owners.set(name.slice(0, -5), owner);
-            this.knownOwners.set(name.slice(0, -5), owner);
+          if (name !== `${this.ownerKey(owner)}.json`) continue;
+
+          const existing = owners.get(ownerKey);
+          if (owner.toolAccess === "subscription_inactive") {
+            // Live legacy revocation: import into authoritative DB so CAS cannot overwrite it!
+            if (dbSucceeded && existing?.toolAccess !== "subscription_inactive") {
+              this.importLegacyDenialIfPresent(ownerKey);
+            }
+            owners.set(ownerKey, owner);
+            this.knownOwners.set(ownerKey, owner);
+          } else if (!existing && !dbSucceeded && !this.knownOwners.has(ownerKey)) {
+            // Only adopt legacy allowed if DB succeeded or fresh uninitialized cold process
+            // Never trust legacy allowed over unknown DB state where a denial mirror write may have failed!
+          } else if (existing?.toolAccess === "subscription_inactive") {
+            // NEVER import legacy allowed over authoritative denial
           }
         } catch {
           /* Unreadable data is not proof of inactivity. */
         }
       }
     }
+
     for (const [id, owner] of this.deniedInMemory) {
       if (owners.get(id)?.proofId === this.pendingProofBases.get(id)) owners.set(id, owner);
       else {
@@ -100,10 +307,14 @@ export class ManagedToolAccess {
     return owners;
   }
 
-  private entries(): ManagedEntry[] {
+  private entries(tool?: ManagedToolTuple): ManagedEntry[] {
     if (!fs.existsSync(this.entriesDir)) return [...this.knownEntries.values()];
-    for (const name of this.files(this.entriesDir)) {
+    for (const name of this.receiptFiles()) {
       if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      // Receipt filenames bind the tool tuple; only activation proof changes in place.
+      // Discover new receipts, but do not reread every other tool for each catalog entry.
+      const known = this.knownEntries.get(name);
+      if (tool && known && known.entry.toolId !== tool.toolId) continue;
       try {
         const entry = ManagedEntrySchema.parse(
           JSON.parse(fs.readFileSync(path.join(this.entriesDir, name), "utf8")),
@@ -114,6 +325,22 @@ export class ManagedToolAccess {
       }
     }
     return [...this.knownEntries.values()];
+  }
+
+  private receiptFiles(): string[] {
+    try {
+      const stat = fs.statSync(this.entriesDir, { bigint: true });
+      const revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      if (revision !== this.receiptDirectoryRevision) {
+        // Cache names, never activation contents. Atomic additions/replacements change
+        // the directory revision; matching receipts are still reread on every check.
+        this.receiptNames = fs.readdirSync(this.entriesDir);
+        this.receiptDirectoryRevision = revision;
+      }
+      return this.receiptNames;
+    } catch {
+      return this.files(this.entriesDir);
+    }
   }
 
   private files(directory: string): string[] {
@@ -138,70 +365,262 @@ export class ManagedToolAccess {
     }
   }
 
-  /** Serialize managed sync/download/removal across standalone processes. Busy cycles retry later. */
-  acquireSync(): (() => void) | undefined {
-    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
-    if (fs.realpathSync(this.stateDir) !== path.resolve(this.stateDir)) {
-      throw new Error("Refusing managed synchronization through a symlinked state directory");
+  captureConfirmation(): ManagedToolConfirmation {
+    if (!this.identity) {
+      return {};
     }
-    const database = new DatabaseSync(path.join(this.stateDir, "sync.db"));
-    try {
-      database.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;");
-      return () => {
-        try {
-          database.exec("COMMIT;");
-        } finally {
-          database.close();
-        }
+    const id = this.ownerKey(this.identity);
+    const owner = this.readOwners().get(id);
+    if (!owner) {
+      return {
+        cloudUrl: new URL(this.identity.cloudUrl).origin,
+        accountId: this.identity.accountId,
+        userId: this.identity.userId,
       };
-    } catch (error) {
-      database.close();
-      if (error instanceof Error && "errcode" in error && error.errcode === 5) return undefined;
-      throw error;
     }
+    return {
+      cloudUrl: owner.cloudUrl,
+      accountId: owner.accountId,
+      userId: owner.userId,
+      toolAccess: owner.toolAccess,
+      proofId: owner.proofId,
+      revocationId: owner.revocationId,
+      epoch: owner.epoch,
+    };
   }
 
-  confirm(response: AccountToolAccessResponse): void {
+  confirm(
+    response: AccountToolAccessResponse,
+    observed: ManagedToolConfirmation = this.captureConfirmation(),
+  ): ManagedToolConfirmation | undefined {
     if (
       !this.identity ||
       response.accountId !== this.identity.accountId ||
       response.userId !== this.identity.userId
-    )
-      return;
-    const previous = this.readOwners().get(this.ownerKey(this.identity));
-    const owner = OwnerSchema.parse({
-      ...response,
-      cloudUrl: new URL(this.identity.cloudUrl).origin,
-      proofId: crypto.randomUUID(),
-      revocationId:
-        response.toolAccess === "subscription_inactive"
-          ? previous?.toolAccess === "subscription_inactive"
-            ? previous.revocationId
-            : crypto.randomUUID()
-          : previous?.revocationId,
-    });
-    const id = this.ownerKey(owner);
-    if (owner.toolAccess === "subscription_inactive") {
-      this.deniedInMemory.set(id, owner);
-      this.pendingProofBases.set(id, this.knownOwners.get(id)?.proofId);
+    ) {
+      return undefined;
     }
-    // Persist before allowing restoration; a failed write retains the previous denial.
+
+    const cloudUrl = new URL(this.identity.cloudUrl).origin;
+    const id = this.ownerKey(this.identity);
+    const now = Date.now();
+
+    if (response.toolAccess === "subscription_inactive") {
+      const previous = this.knownOwners.get(id);
+      const newRevocationId =
+        previous?.toolAccess === "subscription_inactive" && previous.revocationId
+          ? previous.revocationId
+          : crypto.randomUUID();
+      const newProofId = crypto.randomUUID();
+      const provisionalOwner: Owner = {
+        schemaVersion: "1.0.0",
+        cloudUrl,
+        accountId: response.accountId,
+        userId: response.userId,
+        toolAccess: "subscription_inactive",
+        revocationId: newRevocationId,
+        proofId: newProofId,
+        epoch: (previous?.epoch ?? 0) + 1,
+      };
+
+      // Retain in-memory denial BEFORE any fallible persistence (original safety semantics)
+      this.deniedInMemory.set(id, provisionalOwner);
+      this.pendingProofBases.set(id, previous?.proofId);
+
+      try {
+        const db = this.getDb();
+        const stmt = db.prepare(`
+          INSERT INTO owner_authorizations (
+            owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch, updated_at
+          ) VALUES (
+            ?, ?, ?, ?, 'subscription_inactive', ?, ?, 1, ?
+          )
+          ON CONFLICT(owner_key) DO UPDATE SET
+            tool_access = 'subscription_inactive',
+            revocation_id = CASE
+              WHEN owner_authorizations.tool_access = 'subscription_inactive' AND owner_authorizations.revocation_id IS NOT NULL
+                THEN owner_authorizations.revocation_id
+              ELSE excluded.revocation_id
+            END,
+            proof_id = excluded.proof_id,
+            epoch = owner_authorizations.epoch + 1,
+            updated_at = excluded.updated_at
+          RETURNING owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch;
+        `);
+
+        const rows = stmt.all(
+          id,
+          cloudUrl,
+          response.accountId,
+          response.userId,
+          newRevocationId,
+          newProofId,
+          now,
+        ) as unknown as Array<{
+          owner_key: string;
+          cloud_url: string;
+          account_id: string;
+          user_id: string;
+          tool_access: "subscription_inactive";
+          revocation_id: string | null;
+          proof_id: string;
+          epoch: number;
+        }>;
+
+        const row = rows[0];
+        const canonicalRevocationId = row.revocation_id ?? undefined;
+        const canonicalOwner: Owner = {
+          schemaVersion: "1.0.0",
+          cloudUrl: row.cloud_url,
+          accountId: row.account_id,
+          userId: row.user_id,
+          toolAccess: "subscription_inactive",
+          revocationId: canonicalRevocationId,
+          proofId: row.proof_id,
+          epoch: Number(row.epoch),
+        };
+
+        // Mirrored JSON on disk constructed from actual SQL RETURNING row
+        this.write(path.join(this.ownersDir, `${id}.json`), canonicalOwner);
+        this.deniedInMemory.delete(id);
+        this.pendingProofBases.delete(id);
+        this.knownOwners.set(id, canonicalOwner);
+
+        return {
+          cloudUrl: canonicalOwner.cloudUrl,
+          accountId: canonicalOwner.accountId,
+          userId: canonicalOwner.userId,
+          toolAccess: "subscription_inactive",
+          proofId: canonicalOwner.proofId,
+          revocationId: canonicalOwner.revocationId,
+          epoch: canonicalOwner.epoch,
+        };
+      } catch (error) {
+        // Persistence failed, but in-memory denial is preserved and authoritative
+        this.knownOwners.set(id, provisionalOwner);
+        throw error;
+      }
+    }
+
+    // Before attempting allowance CAS: import any verified live legacy denial into the DB
+    // so a stale observed allowance cannot match an old allowed DB row and overwrite the denial!
+    this.importLegacyDenialIfPresent(id);
+
+    const newProofId = crypto.randomUUID();
+    const observedRevocationId = observed.revocationId ?? null;
+    const observedProofId = observed.proofId ?? null;
+    const observedToolAccess = observed.toolAccess ?? null;
+
+    const db = this.getDb();
+    const stmt = db.prepare(`
+      INSERT INTO owner_authorizations (
+        owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch, updated_at
+      )
+      SELECT ?, ?, ?, ?, 'allowed', ?, ?, 1, ?
+      WHERE (? IS NULL AND (? IS NULL OR ? != 'subscription_inactive'))
+         OR EXISTS (SELECT 1 FROM owner_authorizations WHERE owner_key = ?)
+      ON CONFLICT(owner_key) DO UPDATE SET
+        tool_access = 'allowed',
+        revocation_id = owner_authorizations.revocation_id,
+        proof_id = excluded.proof_id,
+        epoch = owner_authorizations.epoch + 1,
+        updated_at = excluded.updated_at
+      WHERE (
+        (owner_authorizations.tool_access != 'subscription_inactive' AND (
+          (owner_authorizations.revocation_id IS NULL AND ? IS NULL) OR
+          owner_authorizations.revocation_id = ?
+        ))
+        OR
+        (owner_authorizations.tool_access = 'subscription_inactive' AND
+         ? = 'subscription_inactive' AND
+         owner_authorizations.proof_id = ? AND
+         (
+           (owner_authorizations.revocation_id IS NULL AND ? IS NULL) OR
+           owner_authorizations.revocation_id = ?
+         )
+        )
+      )
+      RETURNING owner_key, cloud_url, account_id, user_id, tool_access, revocation_id, proof_id, epoch;
+    `);
+
+    const rows = stmt.all(
+      id,
+      cloudUrl,
+      response.accountId,
+      response.userId,
+      observedRevocationId,
+      newProofId,
+      now,
+      observedProofId,
+      observedToolAccess,
+      observedToolAccess,
+      id,
+      observedRevocationId,
+      observedRevocationId,
+      observedToolAccess,
+      observedProofId,
+      observedRevocationId,
+      observedRevocationId,
+    ) as unknown as Array<{
+      owner_key: string;
+      cloud_url: string;
+      account_id: string;
+      user_id: string;
+      tool_access: "allowed";
+      revocation_id: string | null;
+      proof_id: string;
+      epoch: number;
+    }>;
+
+    if (rows.length === 0) {
+      return undefined;
+    }
+
+    const row = rows[0];
+    const owner: Owner = {
+      schemaVersion: "1.0.0",
+      cloudUrl: row.cloud_url,
+      accountId: row.account_id,
+      userId: row.user_id,
+      toolAccess: "allowed",
+      revocationId: row.revocation_id ?? undefined,
+      proofId: row.proof_id,
+      epoch: Number(row.epoch),
+    };
+
     this.write(path.join(this.ownersDir, `${id}.json`), owner);
-    this.deniedInMemory.delete(id);
-    this.pendingProofBases.delete(id);
     this.knownOwners.set(id, owner);
+
+    return {
+      cloudUrl: owner.cloudUrl,
+      accountId: owner.accountId,
+      userId: owner.userId,
+      toolAccess: "allowed",
+      proofId: owner.proofId,
+      revocationId: owner.revocationId,
+      epoch: owner.epoch,
+    };
   }
 
   isInactive(): boolean {
+    const owners = this.readOwners();
     return Boolean(
       this.identity &&
-        this.readOwners().get(this.ownerKey(this.identity))?.toolAccess === "subscription_inactive",
+        (!this.authorityAvailable ||
+          owners.get(this.ownerKey(this.identity))?.toolAccess === "subscription_inactive"),
     );
   }
 
   isBlocked(tool: ManagedToolTuple): boolean {
     const owners = this.readOwners();
-    const entries = this.entries().filter((record) => sameEntry(tool, record.entry));
+    const entries = this.entries(tool).filter((record) => sameEntry(tool, record.entry));
+
+    // If authoritative storage is unavailable, fail-closed on all proven managed tuples (including credentialless)
+    // Sys and unmanaged tools (which have no recorded managed receipts) remain unblocked
+    if (!this.authorityAvailable && entries.length > 0) {
+      return true;
+    }
+
     if (this.identity) {
       const currentOwner = this.ownerKey(this.identity);
       const currentEntries = entries.filter((record) => record.owner === currentOwner);
@@ -211,8 +630,9 @@ export class ManagedToolAccess {
           currentEntries.every(
             (record) => record.activationId !== owners.get(currentOwner)?.revocationId,
           ))
-      )
+      ) {
         return true;
+      }
     }
     return (
       entries.some(
@@ -233,7 +653,7 @@ export class ManagedToolAccess {
   }
 
   isManaged(tool: ManagedToolTuple): boolean {
-    return this.entries().some((record) => sameEntry(tool, record.entry));
+    return this.entries(tool).some((record) => sameEntry(tool, record.entry));
   }
 
   record(
@@ -241,8 +661,23 @@ export class ManagedToolAccess {
     workspaceId?: string,
     lockManager?: ProjectLockManager,
     adopting = false,
+    confirmation?: ManagedToolConfirmation,
   ): void {
     if (!this.identity) return;
+    const owners = this.readOwners();
+    // A prior transient failure must be retried before accepting any new receipt.
+    if (!this.authorityAvailable) return;
+
+    // Validate confirmation identity if provided
+    if (confirmation) {
+      if (
+        (confirmation.accountId && confirmation.accountId !== this.identity.accountId) ||
+        (confirmation.userId && confirmation.userId !== this.identity.userId)
+      ) {
+        return;
+      }
+    }
+
     const receipt = {
       owner: this.ownerKey(this.identity),
       entry,
@@ -252,9 +687,40 @@ export class ManagedToolAccess {
     };
     const file = path.join(this.entriesDir, `${key(receipt)}.json`);
     if (adopting && fs.existsSync(file)) return;
+
+    const currentOwner = owners.get(receipt.owner);
+    let activationId: string | undefined;
+    if (adopting) {
+      activationId = undefined;
+    } else if (confirmation) {
+      activationId =
+        confirmation.toolAccess === "subscription_inactive" ? undefined : confirmation.revocationId;
+    } else {
+      activationId = currentOwner?.revocationId;
+    }
+
+    // Protect against overwriting a newer valid receipt at same filename with a stale confirmation
+    if (fs.existsSync(file)) {
+      try {
+        const existing = ManagedEntrySchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+        const existingActive =
+          existing.activationId !== undefined &&
+          existing.activationId === currentOwner?.revocationId;
+        const incomingActive =
+          activationId !== undefined && activationId === currentOwner?.revocationId;
+
+        // Conservative rejection: do not overwrite an active receipt with a stale/unactivated one
+        if (existingActive && !incomingActive) {
+          return;
+        }
+      } catch {
+        /* Overwrite malformed existing record */
+      }
+    }
+
     const record = ManagedEntrySchema.parse({
       ...receipt,
-      activationId: adopting ? undefined : this.readOwners().get(receipt.owner)?.revocationId,
+      activationId,
     });
     this.write(file, record);
   }
@@ -298,19 +764,52 @@ export class ManagedToolAccess {
     }
   }
 
+  /**
+   * Live cleanup invoked during production sync/runtime. Non-destructive: immediately hides
+   * blocked tools from in-memory dispatch without deleting shared locks, DB records, or cache bytes.
+   */
   async cleanup(registry?: ToolRegistry): Promise<void> {
+    if (registry) {
+      registry.setManagedToolAccess(this);
+    }
+  }
+
+  /**
+   * Quiescent maintenance only. Never called during production sync/runtime.
+   * Performs physical eviction of lockfile entries, registry state, and owned artifact bytes
+   * for permanently inactive accounts when no other active owner shares the artifacts.
+   */
+  async purgeInactiveTools(registry?: ToolRegistry): Promise<void> {
     const owners = this.readOwners();
     const records = this.entries();
     const failures: unknown[] = [];
-    // Receipts survive cleanup to prevent stale handlers and snapshots from rehydrating.
     for (const record of records) {
-      if (owners.get(record.owner)?.toolAccess !== "subscription_inactive") continue;
-      const shared = records.some(
+      const freshOwners = this.readOwners();
+      const currentOwner = freshOwners.get(record.owner);
+      if (currentOwner?.toolAccess !== "subscription_inactive") continue;
+
+      const freshRecords = this.entries();
+      const cleanRecordDigest = record.entry.artifactDigest.replace(/^sha256:/, "");
+
+      // Check if this artifact digest is used by ANY active tool in the system
+      const isArtifactReferencedByActiveTool = freshRecords.some((other) => {
+        const otherOwner = freshOwners.get(other.owner);
+        const otherCleanDigest = other.entry.artifactDigest.replace(/^sha256:/, "");
+        if (otherCleanDigest !== cleanRecordDigest) return false;
+        return (
+          otherOwner?.toolAccess !== "subscription_inactive" &&
+          other.activationId === otherOwner?.revocationId
+        );
+      });
+      if (isArtifactReferencedByActiveTool) continue;
+
+      const shared = freshRecords.some(
         (other) =>
           other.owner !== record.owner &&
           sameEntry(record.entry, other.entry) &&
-          owners.get(other.owner)?.toolAccess !== "subscription_inactive",
+          freshOwners.get(other.owner)?.toolAccess !== "subscription_inactive",
       );
+
       try {
         if (
           record.lockPath &&
@@ -321,12 +820,12 @@ export class ManagedToolAccess {
         ) {
           const sharedLock =
             shared &&
-            records.some(
+            freshRecords.some(
               (other) =>
                 other.owner !== record.owner &&
                 other.lockPath === record.lockPath &&
                 sameEntry(record.entry, other.entry) &&
-                owners.get(other.owner)?.toolAccess !== "subscription_inactive",
+                freshOwners.get(other.owner)?.toolAccess !== "subscription_inactive",
             );
           if (!sharedLock) {
             if (fs.realpathSync(record.lockPath) !== path.resolve(record.lockPath)) {
@@ -348,18 +847,24 @@ export class ManagedToolAccess {
         failures.push(error);
       }
       try {
-        if (!shared) {
-          await this.artifactCache.removeOwnedArtifactReference(
-            record.entry.artifactDigest,
-            record.projectId ? `${record.projectId}:${record.entry.name}` : undefined,
-            record.entry.toolId,
-            record.entry.version,
-          );
-        }
+        await this.artifactCache.removeOwnedArtifactReference(
+          record.entry.artifactDigest,
+          record.projectId ? `${record.projectId}:${record.entry.name}` : undefined,
+          record.entry.toolId,
+          record.entry.version,
+        );
       } catch (error) {
         failures.push(error);
       }
     }
-    if (failures.length > 0) throw new AggregateError(failures, "Managed tool cleanup will retry");
+    if (failures.length > 0) throw new AggregateError(failures, "Managed tool purge will retry");
+  }
+
+  close(): void {
+    try {
+      this.db?.close();
+    } catch {}
+    this.db = undefined;
+    this.authorityAvailable = false;
   }
 }
