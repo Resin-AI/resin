@@ -32,12 +32,14 @@ import {
   type ProgressNotificationParams,
 } from "./protocol/types.js";
 import type { ProductionProxyRuntime } from "./proxy/runtime.js";
+import { CatalogResponseNotices } from "./refresh/catalog-response-notices.js";
 import { CatalogRefreshCoordinator, type RefreshCoordinatorOptions } from "./refresh/index.js";
 import { ToolRegistry } from "./registry/registry.js";
 import {
   type GatewayRouter,
   RegistryGatewayRouter,
   createRegistryGatewayRouter,
+  toNativeToolCatalog,
 } from "./router.js";
 import { type WorkspaceContext, resolveWorkspaceContext } from "./workspace-resolver.js";
 export type GatewayLogMeta =
@@ -174,6 +176,15 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
  * and mandating verification of actual task effects.
  */
 export const DEFAULT_GATEWAY_INSTRUCTIONS =
+  "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace). Honor explicit user tool choices and restrictions.\n" +
+  "When a matching tool may exist, search the live registry before using native tools for project work. " +
+  'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
+  "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
+  "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
+  "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
+  "they do not require or confirm a native catalog refresh. " +
+  "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
+  "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
   "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
   "get_tool_schema provides inputs, capabilities, and limits. " +
   "Prefer an active matching workflow only when it performs exactly the user's authorized task; " +
@@ -208,6 +219,7 @@ export class LocalMcpGateway {
   private readonly messageWriters = new Map<string, (msg: JsonRpcMessage) => void>();
   private isClosed = false;
   private unsubscribeRouterListener?: () => void;
+  private readonly catalogNotices: CatalogResponseNotices;
 
   constructor(options: GatewayServerOptions = {}) {
     let internalRegistry: ToolRegistry | undefined;
@@ -235,9 +247,16 @@ export class LocalMcpGateway {
     this.logger = options.logger;
     this.onWorkspaceReady = options.onWorkspaceReady;
     this.cloudRuntime = options.cloudRuntime;
+    this.catalogNotices = new CatalogResponseNotices({
+      listTools: (context) =>
+        this.router.listCatalogNoticeTools?.(context) ?? this.router.listTools(context),
+      getGeneration: () => this.router.getCatalogGeneration?.(),
+      redact: redactSensitiveText,
+    });
 
     if (this.router.onToolListChanged) {
       this.unsubscribeRouterListener = this.router.onToolListChanged(() => {
+        this.catalogNotices.markChanged();
         this.broadcastToolListChanged();
       });
     }
@@ -289,6 +308,7 @@ export class LocalMcpGateway {
         refillRatePerSec: this.rateLimitRps,
       },
       onClose: () => {
+        this.catalogNotices.reset(connection);
         this.connections.delete(connection.connectionId);
         this.messageWriters.delete(connection.connectionId);
       },
@@ -424,7 +444,7 @@ export class LocalMcpGateway {
           break;
 
         case "tools/list":
-          result = await this.handleToolsList(connection, params);
+          result = await this.handleToolsList(connection, params, signal);
           break;
 
         case "tools/call":
@@ -494,6 +514,7 @@ export class LocalMcpGateway {
           cwd: connection.workspaceContext.canonicalRoot,
           harnessId: connection.harnessId,
         });
+        this.catalogNotices.reset(connection);
         connection.updateWorkspace(updated);
         break;
       }
@@ -533,6 +554,7 @@ export class LocalMcpGateway {
       clientInfo: params.clientInfo,
       cwd: connection.workspaceContext.canonicalRoot,
     });
+    this.catalogNotices.reset(connection);
     connection.updateWorkspace(workspace);
     connection.isInitialized = true;
 
@@ -571,6 +593,7 @@ export class LocalMcpGateway {
   private async handleToolsList(
     connection: McpConnection,
     _params: GatewayCallParams,
+    signal: AbortSignal,
   ): Promise<ListToolsResult> {
     if (!connection.isInitialized) {
       throw new McpProtocolError(
@@ -579,12 +602,15 @@ export class LocalMcpGateway {
       );
     }
 
-    const tools = await this.router.listTools(connection.workspaceContext);
+    const context = connection.workspaceContext;
+    const tools = await (this.router.listCatalogNoticeTools?.(context) ??
+      this.router.listTools(context));
+    this.catalogNotices.observeList(connection, context, tools, signal);
     this.refreshCoordinator?.recordToolsListObserved(
       connection.connectionId,
       connection.workspaceContext.workspaceId,
     );
-    return { tools };
+    return { tools: toNativeToolCatalog(tools) };
   }
   /**
    * Handles `tools/call` request.
@@ -637,11 +663,13 @@ export class LocalMcpGateway {
     const toolArgs: JsonRpcParams =
       rawParams && isParamsObject(rawParams.arguments) ? rawParams.arguments : {};
 
-    return this.router.callTool(connection.workspaceContext, name, toolArgs, {
-      signal,
-      onProgress,
-      timeoutMs: this.toolCallTimeoutMs,
-    });
+    return this.catalogNotices.call(connection, signal, (context) =>
+      this.router.callTool(context, name, toolArgs, {
+        signal,
+        onProgress,
+        timeoutMs: this.toolCallTimeoutMs,
+      }),
+    );
   }
 
   /**
@@ -802,6 +830,7 @@ export class LocalMcpGateway {
   close(): void {
     if (this.isClosed) return;
     this.isClosed = true;
+    this.catalogNotices.close();
 
     if (this.unsubscribeRouterListener) {
       this.unsubscribeRouterListener();

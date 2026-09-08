@@ -8,6 +8,23 @@ import {
 } from "../../src/refresh/index.js";
 
 describe("CatalogRefreshCoordinator - Safe Nudges & Defense", () => {
+  it("offers read-only live discovery using callable stable meta-tool names", () => {
+    const payload = buildSafeNudgePayload({
+      catalogRevision: 2,
+      scope: { workspaceId: "ws-stale-client" },
+      addedToolIds: ["new_project_tool"],
+    });
+    expect(payload.noticeMessage).toContain(
+      'manage_tools({"action":"list_versions","scope":"workspace"})',
+    );
+    expect(payload.noticeMessage).toMatch(/without toolId, name, or tool_name/);
+    expect(payload.noticeMessage).toMatch(/get_tool_schema[\s\S]*invoke_tool/);
+    expect(payload.noticeMessage).toMatch(/without requiring or confirming a native refresh/);
+    expect(payload.noticeMessage).toMatch(/Honor explicit user tool choices and restrictions/);
+    expect(payload.noticeMessage).toMatch(/does not require changing tool state/);
+    expect(payload.noticeMessage).not.toMatch(/evolve_|search_tools/);
+  });
+
   describe("Prompt Injection Defense & Sanitization", () => {
     it("sanitizes valid tool IDs cleanly without mutation", () => {
       expect(sanitizeToolId("fast_ast_grep")).toBe("fast_ast_grep");

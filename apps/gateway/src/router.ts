@@ -8,12 +8,18 @@ import {
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
+import {
+  GET_TOOL_SCHEMA_MANIFEST,
+  SEARCH_TOOLS_MANIFEST,
+  SYSTEM_META_TOOL_IDS,
+} from "./meta/system-tools.js";
 import { MCP_ERROR_CODES, McpProtocolError } from "./protocol/errors.js";
 import type {
   CallToolResult,
   JsonRpcParamValue,
   JsonRpcParams,
   McpTool,
+  McpToolAnnotations,
   McpToolInput,
 } from "./protocol/types.js";
 import { CanaryRouter } from "./registry/canary-router.js";
@@ -24,6 +30,7 @@ import {
   createEvolvedToolHandler,
   extractToolRepo,
 } from "./registry/index.js";
+import type { CatalogEntry, RegistryTool } from "./registry/types.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
 
 export interface ToolCallOptions {
@@ -38,8 +45,24 @@ export type ToolHandler = (
   options?: ToolCallOptions,
 ) => Promise<CallToolResult>;
 
+/** Same active native catalog, with internal-only metadata for notice comparison. */
+export interface CatalogNoticeTool extends McpTool {
+  catalogOutputSchema?: McpTool["outputSchema"];
+}
+
+/** Internal notice metadata must never advertise an unsupported MCP output contract. */
+export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
+  return tools.map((tool) => {
+    if (!("catalogOutputSchema" in tool)) return tool;
+    const { catalogOutputSchema: _catalogOutputSchema, ...nativeTool } = tool;
+    return nativeTool;
+  });
+}
+
 export interface GatewayRouter {
   listTools(context: WorkspaceContext): Promise<McpTool[]>;
+  listCatalogNoticeTools?(context: WorkspaceContext): Promise<CatalogNoticeTool[]>;
+  getCatalogGeneration?(): number;
   callTool(
     context: WorkspaceContext,
     name: string,
@@ -113,6 +136,31 @@ function toMcpInputSchema(rawSchema?: JsonRpcParams | ToolParameterSchema): McpT
   }
   return result;
 }
+
+const READ_ONLY_DISCOVERY_ANNOTATIONS: Readonly<McpToolAnnotations> = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+});
+
+function discoveryAnnotations(tool: CatalogEntry | RegistryTool): McpToolAnnotations | undefined {
+  // Require the reserved ID and canonical built-in manifest digest, never a
+  // generated name or self-declared metadata. Digests survive snapshot decoding.
+  // Hosts interpret these advisory hints; authorization and runtime gates do not.
+  if (
+    (tool.toolId === SYSTEM_META_TOOL_IDS.SEARCH_TOOLS &&
+      tool.manifest.id === SYSTEM_META_TOOL_IDS.SEARCH_TOOLS &&
+      tool.manifest.digest === SEARCH_TOOLS_MANIFEST.digest) ||
+    (tool.toolId === SYSTEM_META_TOOL_IDS.GET_TOOL_SCHEMA &&
+      tool.manifest.id === SYSTEM_META_TOOL_IDS.GET_TOOL_SCHEMA &&
+      tool.manifest.digest === GET_TOOL_SCHEMA_MANIFEST.digest)
+  ) {
+    return READ_ONLY_DISCOVERY_ANNOTATIONS;
+  }
+  return undefined;
+}
+
 /**
  * Dynamic GatewayRouter implementation backed by a ToolRegistry.
  */
@@ -159,8 +207,16 @@ export class RegistryGatewayRouter implements GatewayRouter {
     return this.safetyGateEvaluator;
   }
   async listTools(context: WorkspaceContext): Promise<McpTool[]> {
+    return toNativeToolCatalog(await this.listCatalogNoticeTools(context));
+  }
+
+  getCatalogGeneration(): number {
+    return this.registry.getCatalogGeneration();
+  }
+
+  async listCatalogNoticeTools(context: WorkspaceContext): Promise<CatalogNoticeTool[]> {
     const snapshot = await this.registry.resolveCatalog(context.workspaceId, context.sessionId);
-    const mcpTools: McpTool[] = [];
+    const mcpTools: CatalogNoticeTool[] = [];
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
@@ -169,6 +225,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
           name: entry.exposedName,
           description: entry.description || entry.manifest?.description || `Tool ${entry.name}`,
           inputSchema: schema,
+          catalogOutputSchema: entry.outputSchema ?? entry.manifest?.outputSchema,
+          annotations: discoveryAnnotations(entry),
         });
       }
     } else {
@@ -184,6 +242,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
             name: tool.exposedName || tool.name,
             description: tool.description || tool.manifest?.description || `Tool ${tool.name}`,
             inputSchema: schema,
+            catalogOutputSchema: tool.outputSchema ?? tool.manifest?.outputSchema,
+            annotations: discoveryAnnotations(tool),
           });
         }
       }

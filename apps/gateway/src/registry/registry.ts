@@ -1023,6 +1023,11 @@ export class ToolRegistry {
     return registered;
   }
 
+  /** Changes synchronously with catalog invalidation, before debounced notifications. */
+  getCatalogGeneration(): number {
+    return this.cache.getGeneration();
+  }
+
   /**
    * Resolves the visible tool catalog for a workspace and optional session,
    * applying scope hierarchy, user pins/disables, name collision resolution,
@@ -1030,6 +1035,7 @@ export class ToolRegistry {
    */
   async resolveCatalog(workspaceId: string, sessionId?: string): Promise<CatalogSnapshot> {
     this.forgetBlockedTools();
+    const generation = this.cache.getGeneration();
     // 1. Check LRU Cache
     const cached = this.cache.get(workspaceId, sessionId);
     if (cached) {
@@ -1321,7 +1327,11 @@ export class ToolRegistry {
       entries,
       sessionId,
     });
-    this.cache.set(workspaceId, sessionId, snapshot);
+    // An invalidation during hydration/control lookup must not repopulate the
+    // active cache with a snapshot assembled against an earlier catalog.
+    if (generation === this.cache.getGeneration()) {
+      this.cache.set(workspaceId, sessionId, snapshot);
+    }
     this.recordSnapshot(snapshot);
 
     if (this.toolRepo?.saveCatalogSnapshot) {

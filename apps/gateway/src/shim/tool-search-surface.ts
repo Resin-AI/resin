@@ -1,7 +1,7 @@
 import { Transform } from "node:stream";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../protocol/framing.js";
-import type { JsonRpcId, JsonRpcMessage } from "../protocol/types.js";
+import { InitializeParamsSchema, type JsonRpcId, type JsonRpcMessage } from "../protocol/types.js";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -39,8 +39,14 @@ export interface ToolSearchSurface {
 }
 
 /** A per-stdio-client view. Never mutates the daemon's shared catalog. */
-export function createToolSearchSurface(output: NodeJS.WritableStream): ToolSearchSurface {
+export function createToolSearchSurface(
+  output: NodeJS.WritableStream,
+  enableSearch = false,
+): ToolSearchSurface {
   const lists = new Set<JsonRpcId>();
+  let clientIdentified = false;
+  let codexClient = false;
+  let searchEnabled = enableSearch;
   const send = (message: JsonRpcMessage) => output.write(encodeMcpMessage(message));
   const transform = (filter: (message: JsonRpcMessage) => JsonRpcMessage | undefined) => {
     const decoder = new McpFrameDecoder();
@@ -72,7 +78,19 @@ export function createToolSearchSurface(output: NodeJS.WritableStream): ToolSear
   return {
     input: transform((message) => {
       if (!("method" in message)) return message;
+      if (message.method === "initialize" && "id" in message && !clientIdentified) {
+        const parsed = InitializeParamsSchema.safeParse(message.params);
+        if (parsed.success) {
+          clientIdentified = true;
+          // Exact public MCP client names, not the gateway's broad harness-name heuristic.
+          // This is a connection-local discovery surface, never an authorization decision.
+          const name = parsed.data.clientInfo.name;
+          codexClient = name === "codex-mcp-client" || name === "openai-codex-cli";
+          searchEnabled = enableSearch || codexClient;
+        }
+      }
       if (
+        !searchEnabled &&
         message.method === "tools/call" &&
         targetsSearch(message.params?.name, message.params?.arguments)
       ) {
@@ -91,7 +109,12 @@ export function createToolSearchSurface(output: NodeJS.WritableStream): ToolSear
       return message;
     }),
     output: transform((message) => {
-      if (!("method" in message) && lists.delete(message.id) && "result" in message) {
+      if (
+        !("method" in message) &&
+        lists.delete(message.id) &&
+        "result" in message &&
+        (codexClient || !searchEnabled)
+      ) {
         const result = record(message.result);
         if (result && Array.isArray(result.tools))
           return {
@@ -99,7 +122,17 @@ export function createToolSearchSurface(output: NodeJS.WritableStream): ToolSear
             id: message.id,
             result: {
               ...result,
-              tools: result.tools.filter((tool) => !isSearch(record(tool)?.name)),
+              tools: result.tools.filter((tool) => {
+                const name = record(tool)?.name;
+                if (!codexClient) return !isSearch(name);
+                // A stable facade keeps discovery live without caching individual tools.
+                return (
+                  name === "search_tools" ||
+                  name === "get_tool_schema" ||
+                  name === "invoke_tool" ||
+                  name === "manage_tools"
+                );
+              }),
             },
           };
       }

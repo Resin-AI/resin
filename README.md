@@ -57,6 +57,14 @@ Search for tools that can inspect this repository's structure.
 4. The local MCP gateway makes active tools available to coding agents.
 5. Each tool runs within its declared capability limits.
 
+## Coding agent compatibility
+
+Codex CLI uses four stable MCP tools: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Newly available tools are reached through these same routes, without restarting the session. Claude Code and Oh My Pi retain their native dynamic tool catalogs.
+
+After a connection's initial catalog baseline, Resin includes a brief notice of catalog changes in the next successful Resin tool response. Notices coalesce pending changes: new or updated tools include names and short descriptions from the connection's visible catalog; removals receive a generic notice. Notices are bounded and do not include tool arguments, results, or secrets.
+
+No custom harness, extra daemon, refresh script, or repeated configuration edits are needed. Reconnect to the updated server once after a software update to use this behavior. Codex's native permission choices still apply: read-only discovery does not authorize execution or management. Resin cannot send an unsolicited model message; the agent must first interact with Resin, and it is not guaranteed to search for or use Resin on every task.
+
 ## Documentation
 
 - [Getting Started](docs/user/getting-started.md)
