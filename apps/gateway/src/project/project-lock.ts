@@ -11,6 +11,7 @@ import {
   assertSafeCommittedMetadata,
   validateV1ToolLock,
 } from "@resin/contracts";
+import { resolveProjectResinDir } from "../workspace-resolver.js";
 import { atomicWriteJsonSync } from "./project-bootstrap.js";
 import type { ProjectLockManagerOptions, ReconcileOutcome, ReconcileResult } from "./types.js";
 
@@ -118,7 +119,7 @@ export class ProjectLockManager {
         ? path.dirname(directPath)
         : path.basename(directPath) === ".resin"
           ? directPath
-          : path.join(directPath, ".resin");
+          : resolveProjectResinDir(directPath);
 
       const projectJsonPath = path.join(resinDir, "project.json");
       const lockJsonPath = path.join(resinDir, "resin.lock");
@@ -157,7 +158,7 @@ export class ProjectLockManager {
       this.resinDir = normalizedPath;
       this.lockPath = path.join(this.resinDir, "resin.lock");
     } else {
-      this.resinDir = path.join(normalizedPath, ".resin");
+      this.resinDir = resolveProjectResinDir(normalizedPath);
       this.lockPath = path.join(this.resinDir, "resin.lock");
     }
   }

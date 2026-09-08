@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,8 @@ import {
   canonicalizePath,
   findGitRoot,
   generateWorkspaceId,
+  resolveGitMetadata,
+  resolveProjectResinDir,
   resolveWorkspaceContext,
   uriOrPathToFsPath,
 } from "../src/workspace-resolver.js";
@@ -725,6 +728,447 @@ describe("Workspace Resolver & Project Bootstrap", () => {
         expect(conn.workspaceContext.resinDir).toBe(path.join(canonicalizePath(baseDir), ".resin"));
         expect(fs.existsSync(path.join(baseDir, ".resin", "project.json"))).toBe(true);
         expect(fs.existsSync(path.join(baseDir, ".resin", "resin.lock"))).toBe(true);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("Linked Git Worktrees & Precedence Semantics", () => {
+    it("shares main repository .resin and project identity from a linked worktree", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-real-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "feature-wt");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        // Bootstrap main project
+        const mainBoot = bootstrapProject(mainDir, { projectName: "main-project" });
+        expect(fs.existsSync(path.join(mainDir, ".resin", "project.json"))).toBe(true);
+        expect(fs.existsSync(path.join(mainDir, ".resin", "resin.lock"))).toBe(true);
+
+        // Create real git worktree
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "feature-branch"], {
+          cwd: mainDir,
+        });
+
+        // Resolve git metadata
+        const meta = resolveGitMetadata(wtDir);
+        expect(meta).toBeDefined();
+        expect(meta?.isLinkedWorktree).toBe(true);
+        expect(meta?.worktreeRoot).toBe(canonicalizePath(wtDir));
+        expect(meta?.primaryRoot).toBe(canonicalizePath(mainDir));
+
+        // Resolve workspace context from the linked worktree
+        const ctx = resolveWorkspaceContext({ cwd: wtDir });
+        expect(ctx.projectId).toBe(mainBoot.projectId);
+        expect(ctx.workspaceId).toBe(mainBoot.projectId);
+        // Execution cwd / projectRoot stays feature checkout
+        expect(ctx.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(ctx.canonicalRoot).toBe(canonicalizePath(wtDir));
+        expect(ctx.startupPath).toBe(canonicalizePath(wtDir));
+        expect(ctx.gitRoot).toBe(canonicalizePath(wtDir));
+        // .resin and lockfile are shared from main
+        expect(ctx.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+        expect(ctx.projectJsonPath).toBe(
+          path.join(canonicalizePath(mainDir), ".resin", "project.json"),
+        );
+        expect(ctx.lockPath).toBe(path.join(canonicalizePath(mainDir), ".resin", "resin.lock"));
+        expect(ctx.project?.projectId).toBe(mainBoot.projectId);
+        expect(ctx.lock?.projectId).toBe(mainBoot.projectId);
+
+        // Verify no .resin directory was created in the linked worktree
+        expect(fs.existsSync(path.join(wtDir, ".resin"))).toBe(false);
+
+        // Verify readProjectMetadata and readToolLock read from main repo
+        expect(readProjectMetadata(wtDir).projectId).toBe(mainBoot.projectId);
+        expect(readToolLock(wtDir).projectId).toBe(mainBoot.projectId);
+
+        // Nested subfolder in linked worktree
+        const subfolder = path.join(wtDir, "src", "nested", "pkg");
+        fs.mkdirSync(subfolder, { recursive: true });
+        const subCtx = resolveWorkspaceContext({ cwd: subfolder });
+        expect(subCtx.projectId).toBe(mainBoot.projectId);
+        expect(subCtx.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(subCtx.startupPath).toBe(canonicalizePath(subfolder));
+        expect(subCtx.gitRoot).toBe(canonicalizePath(wtDir));
+        expect(subCtx.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+        expect(fs.existsSync(path.join(subfolder, ".resin"))).toBe(false);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("gateway initialize on linked worktree shares main project and keeps execution/startup cwd in feature checkout", async () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-gw-wt-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "feature-checkout");
+      const subfolder = path.join(wtDir, "services", "feature");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        const mainBoot = bootstrapProject(mainDir, { projectName: "shared-main" });
+
+        // Create real git worktree
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "feature-x"], { cwd: mainDir });
+        fs.mkdirSync(subfolder, { recursive: true });
+
+        const router = new FakeGatewayRouter();
+        const gateway = new LocalMcpGateway({ router, enableRefreshCoordinator: false });
+        const conn = gateway.createConnection();
+
+        const initReq = {
+          jsonrpc: "2.0" as const,
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            clientInfo: { name: "test-client", version: "1.0.0" },
+            capabilities: {},
+            rootUri: pathToFileURL(subfolder).href,
+          },
+        };
+
+        const resp = (await gateway.handleMessage(
+          conn.connectionId,
+          initReq,
+        )) as JsonRpcSuccessResponse<InitializeResult>;
+
+        expect(resp.error).toBeUndefined();
+        expect(conn.isInitialized).toBe(true);
+
+        // Verify execution / startup cwd stays in the feature checkout
+        expect(conn.workspaceContext.startupPath).toBe(canonicalizePath(subfolder));
+        expect(conn.workspaceContext.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(conn.workspaceContext.canonicalRoot).toBe(canonicalizePath(wtDir));
+        expect(conn.workspaceContext.gitRoot).toBe(canonicalizePath(wtDir));
+        expect(conn.workspaceContext.roots[0].path).toBe(canonicalizePath(subfolder));
+
+        // Verify project identity and lock are shared from main
+        expect(conn.workspaceContext.projectId).toBe(mainBoot.projectId);
+        expect(conn.workspaceContext.workspaceId).toBe(mainBoot.projectId);
+        expect(conn.workspaceContext.project?.projectId).toBe(mainBoot.projectId);
+        expect(conn.workspaceContext.lock?.projectId).toBe(mainBoot.projectId);
+        expect(conn.workspaceContext.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+        expect(conn.workspaceContext.projectJsonPath).toBe(
+          path.join(canonicalizePath(mainDir), ".resin", "project.json"),
+        );
+        expect(conn.workspaceContext.lockPath).toBe(
+          path.join(canonicalizePath(mainDir), ".resin", "resin.lock"),
+        );
+
+        // Feature checkout has NO separate .resin created
+        expect(fs.existsSync(path.join(wtDir, ".resin"))).toBe(false);
+        expect(fs.existsSync(path.join(subfolder, ".resin"))).toBe(false);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("main existing state wins over stale linked-worktree .resin from old behavior", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-precedence-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "wt-stale");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        const mainBoot = bootstrapProject(mainDir, { projectName: "main-primary" });
+        const mainProjectId = mainBoot.projectId;
+
+        // Real worktree
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "b-stale"], { cwd: mainDir });
+
+        // Simulate old behavior: a stale, distinct .resin was created in the worktree
+        const staleResinDir = path.join(wtDir, ".resin");
+        fs.mkdirSync(staleResinDir, { recursive: true });
+        const staleProjectId = "00000000-0000-4000-8000-000000000001";
+        writeProjectMetadata(staleResinDir, {
+          schemaKind: "project_metadata",
+          schemaVersion: "1.0.0",
+          projectId: staleProjectId,
+          name: "stale-worktree-project",
+          createdAt: new Date().toISOString(),
+        });
+        writeToolLock(staleResinDir, {
+          schemaKind: "tool_lock",
+          schemaVersion: "1.0.0",
+          projectId: staleProjectId,
+          updatedAt: new Date().toISOString(),
+          tools: {},
+        });
+
+        // Main existing state must win:
+        const resolvedResin = resolveProjectResinDir(wtDir);
+        expect(resolvedResin).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+
+        const ctx = resolveWorkspaceContext({ cwd: wtDir });
+        expect(ctx.projectId).toBe(mainProjectId);
+        expect(ctx.projectId).not.toBe(staleProjectId);
+        expect(ctx.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(ctx.gitRoot).toBe(canonicalizePath(wtDir));
+        expect(ctx.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+
+        // readProjectMetadata and readToolLock from worktree path must return main state
+        expect(readProjectMetadata(wtDir).projectId).toBe(mainProjectId);
+        expect(readToolLock(wtDir).projectId).toBe(mainProjectId);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+    it("existing empty main .resin directory wins over stale linked-worktree metadata", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-empty-main-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "wt-stale-empty-main");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        // Main has an existing, empty .resin directory (no project.json or resin.lock yet)
+        const mainResinDir = path.join(mainDir, ".resin");
+        fs.mkdirSync(mainResinDir, { recursive: true });
+
+        // Real worktree
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "b-stale-empty"], {
+          cwd: mainDir,
+        });
+
+        // Worktree has stale metadata
+        const staleResinDir = path.join(wtDir, ".resin");
+        fs.mkdirSync(staleResinDir, { recursive: true });
+        const staleProjectId = "00000000-0000-4000-8000-000000000002";
+        writeProjectMetadata(staleResinDir, {
+          schemaKind: "project_metadata",
+          schemaVersion: "1.0.0",
+          projectId: staleProjectId,
+          name: "stale-wt",
+          createdAt: new Date().toISOString(),
+        });
+
+        // The existing empty main .resin directory must win:
+        const resolvedResin = resolveProjectResinDir(wtDir);
+        expect(resolvedResin).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+
+        // Bootstrapping from the worktree bootstraps in main repo .resin
+        const ctx = resolveWorkspaceContext({ cwd: wtDir });
+        expect(ctx.projectId).not.toBe(staleProjectId);
+        expect(ctx.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+        expect(fs.existsSync(path.join(mainResinDir, "project.json"))).toBe(true);
+        expect(fs.existsSync(path.join(mainResinDir, "resin.lock"))).toBe(true);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("resolves worktrees created from another linked worktree using real git fixtures", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-chained-real-"));
+      const mainDir = path.join(baseDir, "main");
+      const wt1Dir = path.join(baseDir, "wt1");
+      const wt2Dir = path.join(baseDir, "wt2");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        const mainBoot = bootstrapProject(mainDir, { projectName: "main-repo" });
+
+        // wt1 created from main
+        execFileSync("git", ["worktree", "add", "-q", wt1Dir, "-b", "b1"], { cwd: mainDir });
+
+        // wt2 created from wt1 (worktree created from another linked worktree)
+        execFileSync("git", ["worktree", "add", "-q", wt2Dir, "-b", "b2"], { cwd: wt1Dir });
+
+        const meta2 = resolveGitMetadata(wt2Dir);
+        expect(meta2).toBeDefined();
+        expect(meta2?.isLinkedWorktree).toBe(true);
+        expect(meta2?.worktreeRoot).toBe(canonicalizePath(wt2Dir));
+        expect(meta2?.primaryRoot).toBe(canonicalizePath(mainDir));
+
+        const ctx2 = resolveWorkspaceContext({ cwd: wt2Dir });
+        expect(ctx2.projectId).toBe(mainBoot.projectId);
+        expect(ctx2.projectRoot).toBe(canonicalizePath(wt2Dir));
+        expect(ctx2.gitRoot).toBe(canonicalizePath(wt2Dir));
+        expect(ctx2.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+        expect(fs.existsSync(path.join(wt2Dir, ".resin"))).toBe(false);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("bootstraps in main repository root when starting in a fresh linked worktree without existing state", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-fresh-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "wt-fresh");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        // No .resin in main, no .resin in wt
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "b-fresh"], { cwd: mainDir });
+
+        // Bootstrap initiated from the worktree
+        const res = bootstrapProject(wtDir);
+        expect(res.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(res.resinDir).toBe(path.join(canonicalizePath(mainDir), ".resin"));
+
+        // Created in main repository, NOT in the worktree
+        expect(fs.existsSync(path.join(mainDir, ".resin", "project.json"))).toBe(true);
+        expect(fs.existsSync(path.join(mainDir, ".resin", "resin.lock"))).toBe(true);
+        expect(fs.existsSync(path.join(wtDir, ".resin"))).toBe(false);
+
+        // Main repo now shares this exact project identity
+        const mainCtx = resolveWorkspaceContext({ cwd: mainDir });
+        expect(mainCtx.projectId).toBe(res.projectId);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("preserves standalone behavior for repository without shared state when worktree has own .resin", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-wt-standalone-"));
+      const mainDir = path.join(baseDir, "main");
+      const wtDir = path.join(baseDir, "wt-solo");
+
+      try {
+        fs.mkdirSync(mainDir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: mainDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: mainDir });
+
+        // Main has NO .resin
+        execFileSync("git", ["worktree", "add", "-q", wtDir, "-b", "b-solo"], { cwd: mainDir });
+
+        // Worktree has its own standalone .resin
+        const wtResin = path.join(wtDir, ".resin");
+        fs.mkdirSync(wtResin, { recursive: true });
+        const soloId = "11111111-2222-4000-8000-333333333333";
+        writeProjectMetadata(wtResin, {
+          schemaKind: "project_metadata",
+          schemaVersion: "1.0.0",
+          projectId: soloId,
+          name: "solo-wt",
+          createdAt: new Date().toISOString(),
+        });
+        writeToolLock(wtResin, {
+          schemaKind: "tool_lock",
+          schemaVersion: "1.0.0",
+          projectId: soloId,
+          updatedAt: new Date().toISOString(),
+          tools: {},
+        });
+
+        // Preserves standalone behavior because main has no shared state
+        expect(resolveProjectResinDir(wtDir)).toBe(path.join(canonicalizePath(wtDir), ".resin"));
+        const ctx = resolveWorkspaceContext({ cwd: wtDir });
+        expect(ctx.projectId).toBe(soloId);
+        expect(ctx.projectRoot).toBe(canonicalizePath(wtDir));
+        expect(ctx.resinDir).toBe(path.join(canonicalizePath(wtDir), ".resin"));
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("treats Git submodules as independent projects without linking to superproject", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-submodule-"));
+      const superDir = path.join(baseDir, "super");
+      const subDir = path.join(baseDir, "child");
+
+      try {
+        fs.mkdirSync(superDir, { recursive: true });
+        fs.mkdirSync(subDir, { recursive: true });
+
+        execFileSync("git", ["init", "-q"], { cwd: superDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: superDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: superDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init-super"], {
+          cwd: superDir,
+        });
+
+        execFileSync("git", ["init", "-q"], { cwd: subDir });
+        execFileSync("git", ["config", "user.name", "test"], { cwd: subDir });
+        execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: subDir });
+        execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init-sub"], { cwd: subDir });
+
+        // Bootstrap superproject
+        const superBoot = bootstrapProject(superDir, { projectName: "super-project" });
+
+        // Add real submodule
+        execFileSync(
+          "git",
+          [
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            subDir,
+            "modules/child-service",
+          ],
+          { cwd: superDir },
+        );
+
+        const actualSubDir = path.join(superDir, "modules", "child-service");
+        const meta = resolveGitMetadata(actualSubDir);
+        expect(meta).toBeDefined();
+        expect(meta?.isLinkedWorktree).toBe(false);
+        expect(meta?.worktreeRoot).toBe(canonicalizePath(actualSubDir));
+        expect(meta?.primaryRoot).toBe(canonicalizePath(actualSubDir));
+
+        // Resolving submodule must NOT inherit superproject identity
+        const subCtx = resolveWorkspaceContext({ cwd: actualSubDir });
+        expect(subCtx.projectId).not.toBe(superBoot.projectId);
+        expect(subCtx.projectRoot).toBe(canonicalizePath(actualSubDir));
+        expect(subCtx.resinDir).toBe(path.join(canonicalizePath(actualSubDir), ".resin"));
+        expect(fs.existsSync(path.join(actualSubDir, ".resin", "project.json"))).toBe(true);
+      } finally {
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    });
+
+    it("treats repositories with --separate-git-dir as independent projects", () => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-separate-git-"));
+      const workDir = path.join(baseDir, "checkout");
+      const gitDir = path.join(baseDir, "standalone.git");
+
+      try {
+        execFileSync("git", ["init", "-q", `--separate-git-dir=${gitDir}`, workDir]);
+
+        const meta = resolveGitMetadata(workDir);
+        expect(meta).toBeDefined();
+        expect(meta?.isLinkedWorktree).toBe(false);
+        expect(meta?.worktreeRoot).toBe(canonicalizePath(workDir));
+        expect(meta?.primaryRoot).toBe(canonicalizePath(workDir));
+
+        const ctx = resolveWorkspaceContext({ cwd: workDir });
+        expect(ctx.projectRoot).toBe(canonicalizePath(workDir));
+        expect(ctx.resinDir).toBe(path.join(canonicalizePath(workDir), ".resin"));
+        expect(fs.existsSync(path.join(workDir, ".resin", "project.json"))).toBe(true);
       } finally {
         fs.rmSync(baseDir, { recursive: true, force: true });
       }
