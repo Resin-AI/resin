@@ -1,8 +1,15 @@
-import type { ToolManifest } from "@resin/contracts";
+import {
+  type ToolManifest,
+  V1_SCHEMA_KINDS,
+  V1_SCHEMA_VERSION,
+  hashCanonicalContent,
+} from "@resin/contracts";
+import { ArtifactCache } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { MCP_ERROR_CODES, McpProtocolError } from "../../src/protocol/errors.js";
 import { CloudCatalogCache } from "../../src/proxy/cache.js";
 import { CloudCircuitBreaker } from "../../src/proxy/circuit-breaker.js";
+import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
@@ -256,4 +263,53 @@ describe("Cloud Invocation Router & Forwarding", () => {
       }
     }
   });
+  it.each(["1.0.0", "2.0.0"])(
+    "only forwards the canonical cached manifest matching the pinned version (catalog %s)",
+    async (catalogVersion) => {
+      const pinned = makeTool("11111111-1111-4111-8111-111111111111");
+      const cached = { ...pinned, version: catalogVersion };
+      cached.digest = computeManifestDigest(cached);
+      const catalogCache = new CloudCatalogCache();
+      const snapshotContent = { tools: [cached], activeDeployments: [] };
+      catalogCache.setSnapshot(
+        {
+          ...snapshotContent,
+          snapshotVersion: "v1",
+          generatedAt: new Date().toISOString(),
+          checksum: hashCanonicalContent(snapshotContent),
+        },
+        { workspaceId: mockWorkspaceContext.workspaceId },
+      );
+      const localExecutor = new LocalArtifactExecutor({
+        cache: new ArtifactCache({ cacheDir: "/unused-test-cache" }),
+      });
+      vi.spyOn(localExecutor, "canExecute").mockReturnValue(true);
+      const execute = vi.spyOn(localExecutor, "execute").mockResolvedValue({ content: [] });
+      const router = new CloudInvocationRouter({ catalogCache, localExecutor });
+      const context: WorkspaceContext = {
+        ...mockWorkspaceContext,
+        lock: {
+          schemaKind: V1_SCHEMA_KINDS.TOOL_LOCK,
+          schemaVersion: V1_SCHEMA_VERSION,
+          projectId: "22222222-2222-4222-8222-222222222222",
+          updatedAt: new Date().toISOString(),
+          tools: {
+            [pinned.name]: {
+              toolId: pinned.id,
+              name: pinned.name,
+              version: pinned.version,
+              manifestDigest: computeManifestDigest(pinned),
+              artifactDigest: "a".repeat(64),
+              status: "active",
+            },
+          },
+        },
+      };
+      await router.forwardInvocation(pinned.id, { city: "London" }, context);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0][0].manifest).toEqual(
+        catalogVersion === pinned.version ? cached : undefined,
+      );
+    },
+  );
 });

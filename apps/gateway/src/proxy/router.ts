@@ -237,9 +237,18 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     if (this.localExecutor) {
       const activeEntry = this.resolveActiveLockEntry(toolIdOrName, workspaceContext);
       if (activeEntry && this.localExecutor.canExecute(activeEntry)) {
+        const cachedManifest =
+          this.catalogCache?.getTool(activeEntry.toolId, workspaceContext.workspaceId)?.manifest ??
+          this.catalogCache?.getTool(activeEntry.name, workspaceContext.workspaceId)?.manifest;
+        const resolvedManifest =
+          manifest ??
+          (cachedManifest?.id === activeEntry.toolId &&
+          cachedManifest.version === activeEntry.version
+            ? cachedManifest
+            : undefined);
         return await this.localExecutor.execute({
           entry: activeEntry,
-          manifest,
+          manifest: resolvedManifest,
           parameters: params,
           context: workspaceContext,
           signal: options?.signal,

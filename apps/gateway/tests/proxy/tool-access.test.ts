@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -249,12 +250,16 @@ describe("Managed removal and restart protection", () => {
     );
     await sync.checkToolAccess();
     await sync.checkToolAccess();
+    expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
+    expect(await registry.getTool(local.id, identity.workspaceId)).toBeDefined();
+    await expect(saved(context, {})).rejects.toThrow();
+    // Live cleanup hides tools from dispatch while retaining shared bytes until quiescent purge
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+    await access.purgeInactiveTools(registry);
     expect(manager.read().tools[tool.name]).toBeUndefined();
     expect(manager.read().tools[local.name]).toBeDefined();
     expect(fs.readFileSync(path.join(root, "project", "user.txt"), "utf8")).toBe("keep me");
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
-    expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
-    expect(await registry.getTool(local.id, identity.workspaceId)).toBeDefined();
     await expect(saved(context, {})).rejects.toThrow();
     const restarted = new ManagedToolAccess(access.stateDir, artifactCache);
     expect(restarted.isBlocked(entry(tool))).toBe(true);
@@ -311,10 +316,10 @@ describe("Managed removal and restart protection", () => {
     access.record(entry(tool));
     access.confirm(confirmation("subscription_inactive"));
     fs.writeFileSync(artifactCache.refsFilePath, "{");
-    await expect(access.cleanup()).rejects.toThrow();
+    await expect(access.purgeInactiveTools()).rejects.toThrow();
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
     fs.writeFileSync(artifactCache.refsFilePath, "{}");
-    await access.cleanup();
+    await access.purgeInactiveTools();
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
   });
 
@@ -364,6 +369,7 @@ describe("Managed removal and restart protection", () => {
       await coordinator(async () =>
         Response.json(confirmation("subscription_inactive")),
       ).checkToolAccess();
+      await access.purgeInactiveTools(registry);
       expect(await store.tools.getManifest(tool.id)).toBeNull();
       expect(await store.tools.getManifest(local.id)).not.toBeNull();
       await registry.hydrateFromStore();
@@ -384,7 +390,7 @@ describe("Managed removal and restart protection", () => {
     }
   });
 
-  it("releases the shared lease when a sync fails so later confirmed cleanup can proceed", async () => {
+  it("continues entitlement checks after hydration failure and permits later quiescent purge", async () => {
     const tool = manifest();
     cacheTool(tool);
     access.record(entry(tool));
@@ -392,12 +398,13 @@ describe("Managed removal and restart protection", () => {
       throw new Error("read failure");
     });
     const sync = coordinator(async () => Response.json(confirmation("subscription_inactive")));
-    await expect(sync.checkToolAccess()).rejects.toThrow("read failure");
     await sync.checkToolAccess();
+    await sync.checkToolAccess();
+    await access.purgeInactiveTools();
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
   });
 
-  it("serializes competing synchronizers while catalog work is in flight, then removes its result", async () => {
+  it("allows competing synchronizers while catalog work is in flight and rejects stale activation", async () => {
     const tool = manifest();
     const pending = Promise.withResolvers<CatalogSnapshotResponse>();
     const started = Promise.withResolvers<void>();
@@ -425,7 +432,7 @@ describe("Managed removal and restart protection", () => {
     await second.checkToolAccess(); // cannot interleave with the first process's lease
     pending.resolve(snapshot([tool]));
     await running;
-    expect(await registry.getTool(tool.id, identity.workspaceId)).toBeDefined();
+    expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
     await second.checkToolAccess();
     expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
     await first.sync();
@@ -458,13 +465,14 @@ describe("Managed removal and restart protection", () => {
     fs.mkdirSync(path.join(root, "project"));
     const workspace = resolveWorkspaceContext({ cwd: path.join(root, "project") });
     await runtime.onWorkspaceReady(workspace);
+    await runtime.sync();
     expect(runtime.isCloudEnabled).toBe(false);
     state = "subscription_inactive";
     await runtime.sync();
     await runtime.stop();
     expect(accessRequests).toBeGreaterThanOrEqual(2);
-    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
     expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
   });
 
   it("preserves a symlinked project lock target while removing independently owned cache bytes", async () => {
@@ -478,7 +486,7 @@ describe("Managed removal and restart protection", () => {
     fs.renameSync(manager.lockPath, target);
     fs.symlinkSync(target, manager.lockPath);
     access.confirm(confirmation("subscription_inactive"));
-    await expect(access.cleanup()).rejects.toThrow();
+    await expect(access.purgeInactiveTools()).rejects.toThrow();
     expect(fs.readFileSync(target, "utf8")).toBe(original);
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
     await expect(
@@ -517,6 +525,570 @@ describe("Managed removal and restart protection", () => {
         context: resolveWorkspaceContext({ cwd: root, disableBootstrap: true }),
       }),
     ).rejects.toThrow("Managed tool access is unavailable");
-    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(false);
+    // Live deactivation preserves shared bytes; only quiescent maintenance may evict them.
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+  });
+});
+
+describe("Lock-free concurrent authorization and stale-protection semantics", () => {
+  it("supports independent simultaneous owners without locking or cross-blocking", async () => {
+    const toolA = manifest("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "tool_a");
+    const toolB = manifest("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "tool_b");
+    cacheTool(toolA);
+    cacheTool(toolB);
+
+    const identityA = { ...identity, accountId: "account-alpha", userId: "user-alpha" };
+    const identityB = { ...identity, accountId: "account-beta", userId: "user-beta" };
+
+    const accessA = new ManagedToolAccess(access.stateDir, artifactCache, identityA);
+    const accessB = new ManagedToolAccess(access.stateDir, artifactCache, identityB);
+
+    const confA = accessA.confirm({
+      ...confirmation("allowed"),
+      accountId: identityA.accountId,
+      userId: identityA.userId,
+    });
+    const confB = accessB.confirm({
+      ...confirmation("allowed"),
+      accountId: identityB.accountId,
+      userId: identityB.userId,
+    });
+
+    expect(confA?.toolAccess).toBe("allowed");
+    expect(confB?.toolAccess).toBe("allowed");
+
+    accessA.record(entry(toolA), "ws-a", undefined, false, confA);
+    accessB.record(entry(toolB), "ws-b", undefined, false, confB);
+
+    expect(accessA.isBlocked(entry(toolA))).toBe(false);
+    expect(accessB.isBlocked(entry(toolB))).toBe(false);
+
+    // Deny owner A: owner A is blocked, but owner B remains active and unaffected
+    accessA.confirm({
+      ...confirmation("subscription_inactive"),
+      accountId: identityA.accountId,
+      userId: identityA.userId,
+    });
+    expect(accessA.isInactive()).toBe(true);
+    expect(accessA.isBlocked(entry(toolA))).toBe(true);
+    expect(accessB.isInactive()).toBe(false);
+    expect(accessB.isBlocked(entry(toolB))).toBe(false);
+  });
+
+  it("rejects a stale allowance after denial so durable negative authorization always wins", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    // Initial state: unconfirmed / allowed
+    const observedBeforeDenial = access.captureConfirmation();
+
+    // Concurrent denial occurs and is durably persisted
+    const denial = access.confirm(confirmation("subscription_inactive"));
+    expect(denial?.toolAccess).toBe("subscription_inactive");
+    expect(access.isInactive()).toBe(true);
+
+    // Stale response fetched based on pre-denial observation arrives with "allowed"
+    const staleResult = access.confirm(confirmation("allowed"), observedBeforeDenial);
+    expect(staleResult).toBeUndefined(); // Stale allowance rejected!
+
+    // Durable denial is preserved
+    expect(access.isInactive()).toBe(true);
+    access.record(entry(tool), identity.workspaceId);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+
+  it("allows renewal when observed state reflects the denial epoch, requiring re-activation", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    access.record(entry(tool), identity.workspaceId);
+    access.confirm(confirmation("subscription_inactive"));
+    expect(access.isInactive()).toBe(true);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    // Observe the inactive state prior to cloud renewal check
+    const observedInactive = access.captureConfirmation();
+    expect(observedInactive.toolAccess).toBe("subscription_inactive");
+
+    // Cloud confirms subscription is now allowed
+    const renewed = access.confirm(confirmation("allowed"), observedInactive);
+    expect(renewed).toBeDefined();
+    expect(renewed?.toolAccess).toBe("allowed");
+    expect(access.isInactive()).toBe(false);
+
+    // Renewal alone is not activation: pre-denial recorded tool remains blocked until re-recorded
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    // Re-recording with renewed confirmation unblocks the tool
+    access.record(entry(tool), identity.workspaceId, undefined, false, renewed);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+  });
+
+  it("never stamps a stale activation with a newer revocation epoch", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    // First confirmation: allowed
+    const allowedConfirmation = access.confirm(confirmation("allowed"));
+    expect(allowedConfirmation?.toolAccess).toBe("allowed");
+
+    // Async download / reconciliation in flight... during this time, a denial occurs!
+    const denialConfirmation = access.confirm(confirmation("subscription_inactive"));
+    expect(denialConfirmation?.toolAccess).toBe("subscription_inactive");
+
+    // In-flight sync finishes and attempts to record using the earlier allowed confirmation
+    access.record(entry(tool), identity.workspaceId, undefined, false, allowedConfirmation);
+
+    // Because activation receipt was bound to the pre-denial epoch, it is immediately blocked
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+
+  it("preserves shared artifacts during cleanup when another owner remains active", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    const identityA = { ...identity, accountId: "account-share-a", userId: "user-share-a" };
+    const identityB = { ...identity, accountId: "account-share-b", userId: "user-share-b" };
+
+    const accessA = new ManagedToolAccess(access.stateDir, artifactCache, identityA);
+    const accessB = new ManagedToolAccess(access.stateDir, artifactCache, identityB);
+
+    const confA = accessA.confirm({
+      ...confirmation("allowed"),
+      accountId: identityA.accountId,
+      userId: identityA.userId,
+    });
+    const confB = accessB.confirm({
+      ...confirmation("allowed"),
+      accountId: identityB.accountId,
+      userId: identityB.userId,
+    });
+
+    accessA.record(entry(tool), "ws-a", undefined, false, confA);
+    accessB.record(entry(tool), "ws-b", undefined, false, confB);
+
+    await artifactCache.addReference(entry(tool).artifactDigest, {
+      refId: `share:${tool.name}`,
+      toolId: tool.id,
+      version: tool.version,
+    });
+
+    // Owner A is revoked
+    accessA.confirm({
+      ...confirmation("subscription_inactive"),
+      accountId: identityA.accountId,
+      userId: identityA.userId,
+    });
+    expect(accessA.isInactive()).toBe(true);
+
+    // Owner A cleans up: because Owner B is active and shares the artifact, artifact must not be removed
+    await accessA.cleanup(registry);
+
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+    expect(accessA.isBlocked(entry(tool))).toBe(true);
+    expect(accessB.isBlocked(entry(tool))).toBe(false);
+  });
+
+  it("imports and honors legacy JSON owner metadata without existing database", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    const accountsDir = path.join(access.stateDir, "accounts");
+    fs.mkdirSync(accountsDir, { recursive: true });
+
+    // Compute owner key manually matching legacy format
+    const legacyCloudOrigin = new URL(identity.cloudUrl).origin;
+    const legacyOwnerKey = crypto
+      .createHash("sha256")
+      .update(JSON.stringify([legacyCloudOrigin, identity.accountId]))
+      .digest("hex");
+
+    const legacyRevocationId = crypto.randomUUID();
+    const legacyOwner = {
+      schemaVersion: "1.0.0",
+      accountId: identity.accountId,
+      userId: identity.userId,
+      cloudUrl: legacyCloudOrigin,
+      toolAccess: "subscription_inactive",
+      revocationId: legacyRevocationId,
+      proofId: crypto.randomUUID(),
+    };
+
+    fs.writeFileSync(path.join(accountsDir, `${legacyOwnerKey}.json`), JSON.stringify(legacyOwner));
+
+    // Fresh ManagedToolAccess instance on the existing stateDir with only legacy files
+    const legacyAccess = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    expect(legacyAccess.isInactive()).toBe(true);
+
+    const captured = legacyAccess.captureConfirmation();
+    expect(captured.toolAccess).toBe("subscription_inactive");
+    expect(captured.revocationId).toBe(legacyRevocationId);
+
+    // Renewal can proceed from legacy captured state
+    const renewed = legacyAccess.confirm(confirmation("allowed"), captured);
+    expect(renewed).toBeDefined();
+    expect(renewed?.toolAccess).toBe("allowed");
+    expect(legacyAccess.isInactive()).toBe(false);
+  });
+
+  it("retains in-memory denial when persistence throws so negative authorization is fail-closed", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+    access.record(entry(tool), identity.workspaceId);
+
+    // Mock write to throw during confirm denial persistence
+    vi.spyOn(access as unknown as { write: () => unknown }, "write").mockImplementationOnce(() => {
+      throw new Error("disk failure during denial persistence");
+    });
+
+    // Confirmation throws error due to persistence failure
+    expect(() => access.confirm(confirmation("subscription_inactive"), {})).toThrow(
+      "disk failure during denial persistence",
+    );
+
+    // Denial is nevertheless retained in memory!
+    expect(access.isInactive()).toBe(true);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+
+  it("honors live legacy process revocations without allowing legacy allowance to overwrite database denial", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+    access.record(entry(tool), identity.workspaceId);
+
+    // Database has allowed confirmation
+    access.confirm(confirmation("allowed"));
+    expect(access.isInactive()).toBe(false);
+
+    // Another live legacy process writes a revocation directly to accounts directory
+    const legacyCloudOrigin = new URL(identity.cloudUrl).origin;
+    const legacyOwnerKey = crypto
+      .createHash("sha256")
+      .update(JSON.stringify([legacyCloudOrigin, identity.accountId]))
+      .digest("hex");
+    const accountsDir = path.join(access.stateDir, "accounts");
+    fs.mkdirSync(accountsDir, { recursive: true });
+
+    const legacyRevocation = {
+      schemaVersion: "1.0.0",
+      accountId: identity.accountId,
+      userId: identity.userId,
+      cloudUrl: legacyCloudOrigin,
+      toolAccess: "subscription_inactive",
+      revocationId: crypto.randomUUID(),
+      proofId: crypto.randomUUID(),
+    };
+    fs.writeFileSync(
+      path.join(accountsDir, `${legacyOwnerKey}.json`),
+      JSON.stringify(legacyRevocation),
+    );
+
+    // readOwners honors the live legacy denial
+    expect(access.isInactive()).toBe(true);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    // Conversely: if DB has denial, a stale legacy file with "allowed" must NEVER overwrite it
+    access.confirm(confirmation("subscription_inactive"));
+    const staleLegacyAllowed = {
+      schemaVersion: "1.0.0",
+      accountId: identity.accountId,
+      userId: identity.userId,
+      cloudUrl: legacyCloudOrigin,
+      toolAccess: "allowed",
+      proofId: crypto.randomUUID(),
+    };
+    fs.writeFileSync(
+      path.join(accountsDir, `${legacyOwnerKey}.json`),
+      JSON.stringify(staleLegacyAllowed),
+    );
+
+    // Authoritative denial remains winning
+    expect(access.isInactive()).toBe(true);
+  });
+
+  it("prevents stale confirmation from overwriting newer active receipt and validates confirmation identity", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    // Initial valid allowed confirmation & record
+    const conf1 = access.confirm(confirmation("allowed"));
+    expect(conf1?.toolAccess).toBe("allowed");
+    access.record(entry(tool), identity.workspaceId, undefined, false, conf1);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // Denial occurs, then renewal occurs, creating a new active epoch
+    access.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    const renewed = access.confirm(confirmation("allowed"), access.captureConfirmation());
+    expect(renewed?.toolAccess).toBe("allowed");
+
+    // Re-record with renewed confirmation makes it active under new epoch
+    access.record(entry(tool), identity.workspaceId, undefined, false, renewed);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // A stale in-flight worker now attempts to record with conf1 (from before the denial/renewal)
+    access.record(entry(tool), identity.workspaceId, undefined, false, conf1);
+
+    // The newer active receipt is preserved; not overwritten with the stale pre-denial activation!
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // Also: mismatched confirmation identity is rejected
+    const mismatchedConf: ManagedToolConfirmation = {
+      ...renewed,
+      accountId: "wrong-account",
+    };
+    // Should be rejected and not touch the record
+    access.record(entry(tool), identity.workspaceId, undefined, false, mismatchedConf);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+  });
+
+  it("deterministically rejects stale allowed CAS when live legacy JSON denial arrives in flight", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+    access.record(entry(tool), identity.workspaceId);
+
+    // Initial state: positive allowed confirmed in DB
+    const initialAllowed = access.confirm(confirmation("allowed"));
+    expect(initialAllowed?.toolAccess).toBe("allowed");
+    expect(access.isInactive()).toBe(false);
+
+    // Agent captures pre-denial observation for an in-flight network request
+    const observedAllowed = access.captureConfirmation();
+    expect(observedAllowed.toolAccess).toBe("allowed");
+
+    // Barrier interleaving: before the in-flight network response is confirmed,
+    // an external legacy process writes a positive denial to accounts/${ownerKey}.json
+    const legacyCloudOrigin = new URL(identity.cloudUrl).origin;
+    const legacyOwnerKey = crypto
+      .createHash("sha256")
+      .update(JSON.stringify([legacyCloudOrigin, identity.accountId]))
+      .digest("hex");
+    const accountsDir = path.join(access.stateDir, "accounts");
+    fs.mkdirSync(accountsDir, { recursive: true });
+
+    const liveLegacyRevocation = {
+      schemaVersion: "1.0.0",
+      accountId: identity.accountId,
+      userId: identity.userId,
+      cloudUrl: legacyCloudOrigin,
+      toolAccess: "subscription_inactive",
+      revocationId: crypto.randomUUID(),
+      proofId: crypto.randomUUID(),
+    };
+    fs.writeFileSync(
+      path.join(accountsDir, `${legacyOwnerKey}.json`),
+      JSON.stringify(liveLegacyRevocation),
+    );
+
+    // Now the in-flight allowed response arrives and calls confirm(allowed, observedAllowed)
+    const result = access.confirm(confirmation("allowed"), observedAllowed);
+
+    // Stale allowance MUST be rejected: confirm returns undefined!
+    expect(result).toBeUndefined();
+
+    // Authoritative denial is imported into DB and enforced
+    expect(access.isInactive()).toBe(true);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+
+  it("proves live cleanup never invokes async destructive cache API while concurrent renewal succeeds", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+    register(tool);
+    access.record(entry(tool), identity.workspaceId);
+
+    // Denial occurs
+    access.confirm(confirmation("subscription_inactive"));
+    expect(access.isInactive()).toBe(true);
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    // Spy on destructive cache API to verify live cleanup NEVER invokes it
+    const removeRefSpy = vi.spyOn(artifactCache, "removeOwnedArtifactReference");
+
+    // Run live cleanup (production non-destructive cleanup)
+    await access.cleanup(registry);
+
+    // In-memory tool registry immediately forgets the blocked tool
+    expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
+
+    // Destructive cache API was NEVER called during live cleanup
+    expect(removeRefSpy).not.toHaveBeenCalled();
+
+    // Artifact remains intact and cached
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+
+    // Concurrent renewal succeeds immediately without race conditions
+    const renewed = access.confirm(confirmation("allowed"), access.captureConfirmation());
+    expect(renewed?.toolAccess).toBe("allowed");
+    access.record(entry(tool), identity.workspaceId, undefined, false, renewed);
+
+    // Tool is unblocked immediately and still has its cached artifact
+    expect(access.isBlocked(entry(tool))).toBe(false);
+    expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+  });
+
+  it("avoids renewal deadlock when two independent workers observe allowed, both deny, and one renews", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+
+    const accessA = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    const accessB = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+
+    // Initial state: allowed confirmed in DB
+    accessA.confirm(confirmation("allowed"));
+    accessA.record(entry(tool), identity.workspaceId);
+    expect(accessA.isBlocked(entry(tool))).toBe(false);
+
+    // Both independent instances capture confirmation while allowed
+    const obsA = accessA.captureConfirmation();
+    const obsB = accessB.captureConfirmation();
+    expect(obsA.toolAccess).toBe("allowed");
+    expect(obsB.toolAccess).toBe("allowed");
+
+    // Both instances confirm denial independently
+    const denialA = accessA.confirm(confirmation("subscription_inactive"), obsA);
+    const denialB = accessB.confirm(confirmation("subscription_inactive"), obsB);
+
+    expect(denialA?.toolAccess).toBe("subscription_inactive");
+    expect(denialB?.toolAccess).toBe("subscription_inactive");
+
+    // Both MUST share the exact same canonical revocationId epoch!
+    expect(denialA?.revocationId).toBeDefined();
+    expect(denialB?.revocationId).toBeDefined();
+    expect(denialB?.revocationId).toBe(denialA?.revocationId);
+
+    // Both capture the current inactive state
+    const inactiveObsA = accessA.captureConfirmation();
+    const inactiveObsB = accessB.captureConfirmation();
+
+    expect(inactiveObsA.revocationId).toBe(denialA?.revocationId);
+    expect(inactiveObsB.revocationId).toBe(denialA?.revocationId);
+
+    // Now renewal occurs: CAS must match the canonical revocationId without deadlock
+    const renewedA = accessA.confirm(confirmation("allowed"), inactiveObsA);
+    expect(renewedA).toBeDefined();
+    expect(renewedA?.toolAccess).toBe("allowed");
+    expect(renewedA?.revocationId).toBe(denialA?.revocationId);
+
+    expect(accessA.isInactive()).toBe(false);
+    expect(accessB.isInactive()).toBe(false);
+
+    // Re-record with renewed confirmation unblocks the tool
+    accessA.record(entry(tool), identity.workspaceId, undefined, false, renewedA);
+    expect(accessA.isBlocked(entry(tool))).toBe(false);
+    expect(accessB.isBlocked(entry(tool))).toBe(false);
+  });
+
+  it("fails closed on proven managed tuples across warm and cold processes when DB read fails after mirror write failure", async () => {
+    const tool = manifest();
+    cacheTool(tool);
+    access.record(entry(tool), identity.workspaceId);
+
+    // Initial state: positive confirmation
+    access.confirm(confirmation("allowed"));
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // Denial committed to SQLite DB, but file mirror write fails
+    // (Leaving accounts/${id}.json with the old "allowed" confirmation!)
+    const accountsFile = path.join(
+      access.stateDir,
+      "accounts",
+      `${crypto
+        .createHash("sha256")
+        .update(JSON.stringify([new URL(identity.cloudUrl).origin, identity.accountId]))
+        .digest("hex")}.json`,
+    );
+    const staleAllowedJson = fs.readFileSync(accountsFile, "utf8");
+
+    // Commit denial to DB
+    access.confirm(confirmation("subscription_inactive"));
+    expect(access.isInactive()).toBe(true);
+
+    // Restore the stale allowed JSON to simulate failed mirror write
+    fs.writeFileSync(accountsFile, staleAllowedJson);
+
+    // 1. Warm process: subsequent DB read fails (e.g. temporary SQLite I/O failure)
+    vi.spyOn(access as unknown as { getDb: () => unknown }, "getDb").mockImplementationOnce(() => {
+      throw new Error("temporary DB failure");
+    });
+
+    // Proven managed tuple must be blocked (fail-closed, does not trust stale allowed JSON!)
+    expect(access.isBlocked(entry(tool))).toBe(true);
+
+    // Sys and unmanaged tuples are NOT blocked
+    expect(access.isBlocked({ toolId: "unmanaged-system-tool" })).toBe(false);
+
+    // 2. Cold process: new ManagedToolAccess instance (even credentialless) where DB read fails
+    const cold = new ManagedToolAccess(access.stateDir, artifactCache);
+    vi.spyOn(cold as unknown as { getDb: () => unknown }, "getDb").mockImplementationOnce(() => {
+      throw new Error("cold DB failure");
+    });
+
+    // Proven managed tuple is blocked even in cold credentialless process
+    expect(cold.isBlocked(entry(tool))).toBe(true);
+
+    // Sys and unmanaged tuples remain unblocked
+    expect(cold.isBlocked({ toolId: "unmanaged-system-tool" })).toBe(false);
+  });
+
+  it("recovers cleanly on retry when getDb throws during initial pragma or table setup", async () => {
+    const freshStateDir = path.join(root, "fresh-state");
+    const freshAccess = new ManagedToolAccess(freshStateDir, artifactCache, identity);
+
+    // Induce throw during initDb on first attempt
+    const initialize = vi
+      .spyOn(freshAccess as unknown as { initDb: (db: unknown) => void }, "initDb")
+      .mockImplementationOnce(() => {
+        throw new Error("pragma or schema setup failure");
+      });
+
+    // Initialization failure is contained and fails closed, rather than crashing the gateway.
+    expect(freshAccess.isInactive()).toBe(true);
+    expect(initialize).toHaveBeenCalledOnce();
+
+    // Verify broken connection was NOT cached: freshAccess db property must be undefined
+    expect(Reflect.get(freshAccess, "db")).toBeUndefined();
+
+    // Second attempt (retry): initDb succeeds normally without being stuck on broken connection
+    const conf = freshAccess.confirm(confirmation("allowed"));
+    expect(conf?.toolAccess).toBe("allowed");
+    expect(Reflect.get(freshAccess, "db")).toBeDefined();
+    expect(freshAccess.isInactive()).toBe(false);
+  });
+  it("rereads only matching receipts while observing new receipts and sibling renewal", () => {
+    const target = manifest();
+    access.confirm(confirmation("allowed"));
+    access.record(entry(target));
+    for (let index = 0; index < 20; index++) {
+      access.record(entry(manifest(crypto.randomUUID(), `unrelated_${index}`)));
+    }
+    expect(access.isBlocked(entry(target))).toBe(false);
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+    expect(access.isBlocked(entry(target))).toBe(false);
+    const receiptPrefix = `${path.join(access.stateDir, "tools")}${path.sep}`;
+    expect(
+      reads.mock.calls.filter(([file]) => String(file).startsWith(receiptPrefix)),
+    ).toHaveLength(1);
+    expect(
+      listings.mock.calls.filter(
+        ([directory]) => directory === path.join(access.stateDir, "tools"),
+      ),
+    ).toHaveLength(0);
+    listings.mockRestore();
+    reads.mockRestore();
+
+    const sibling = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    sibling.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(target))).toBe(true);
+    sibling.confirm(confirmation("allowed"));
+    sibling.record(entry(target));
+    expect(access.isBlocked(entry(target))).toBe(false);
+
+    const added = manifest(crypto.randomUUID(), "added_by_sibling");
+    sibling.record(entry(added));
+    expect(access.isManaged(entry(added))).toBe(true);
+    expect(access.isBlocked(entry(added))).toBe(false);
   });
 });

@@ -13,7 +13,11 @@ import {
   normalizeSha256,
 } from "@resin/contracts";
 import type { LocalPreactivationChecker, SigningKeyStore } from "@resin/observer";
-import type { CatalogSnapshotResponse, StreamCatalogInvalidation } from "@resin/protocol";
+import type {
+  AccountToolAccessResponse,
+  CatalogSnapshotResponse,
+  StreamCatalogInvalidation,
+} from "@resin/protocol";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
@@ -36,7 +40,7 @@ import type { CloudCatalogCache } from "./cache.js";
 import type { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CloudCatalogClient } from "./client.js";
 import type { CloudInvocationRouter } from "./router.js";
-import type { ManagedToolAccess } from "./tool-access.js";
+import type { ManagedToolAccess, ManagedToolConfirmation } from "./tool-access.js";
 
 export interface LockedSyncIdentity extends TrustIdentity {
   keyStore?: SigningKeyStore;
@@ -200,6 +204,7 @@ export class CloudCatalogSyncCoordinator {
     return this.artifactCache;
   }
 
+  private activeConfirmation?: ManagedToolConfirmation;
   getTransferClient(): ArtifactBytesDownloader | undefined {
     return this.transferClient;
   }
@@ -254,34 +259,65 @@ export class CloudCatalogSyncCoordinator {
     if (this.inFlightSync) return this.inFlightSync;
     this.inFlightSync = (async () => {
       const access = this.options.managedToolAccess;
-      const release = access?.acquireSync();
-      if (access && !release) return this.emptySnapshot();
-      try {
-        if (access) {
+      if (access) {
+        try {
           await this.registry?.hydrateFromStore();
           access.adopt(this.registry, this.lockManager);
-          const confirmation = await this.client.fetchToolAccess(access.identity);
-          if (confirmation) {
-            try {
-              access.confirm(confirmation);
-            } catch (error) {
-              this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
-            }
+        } catch (error) {
+          this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+        const observedConfirmation = access.captureConfirmation?.();
+        let confirmation: AccountToolAccessResponse | null = null;
+        try {
+          confirmation = await this.client.fetchToolAccess(access.identity);
+        } catch (error) {
+          this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+        let acceptedConfirmation: ManagedToolConfirmation | undefined = undefined;
+        let confirmationRejected = false;
+        if (confirmation) {
+          try {
+            acceptedConfirmation = access.confirm(confirmation, observedConfirmation);
+          } catch (error) {
+            this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
           }
-          if (access.isInactive()) this.cache.clear();
+          if (!acceptedConfirmation) {
+            confirmationRejected = true;
+          }
+          // Stale allowance protection: confirm() returns undefined when stale.
+          // Must NOT fall back to observed confirmation; activeConfirmation remains undefined
+          // so new activations are skipped.
+          this.activeConfirmation = acceptedConfirmation;
+        } else {
+          // Offline or network error: retain captured proof under existing offline trust guards
+          this.activeConfirmation = observedConfirmation;
+        }
+        if (access.isInactive()) {
+          this.cache.clear();
           try {
             await access.cleanup(this.registry);
           } catch (error) {
             this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
           }
-          if (access.isInactive()) return this.emptySnapshot();
+          return this.emptySnapshot();
         }
-        return includeCatalog && this.catalogSyncEnabled
-          ? await this.syncCatalogOnce()
-          : this.emptySnapshot();
-      } finally {
-        release?.();
+        if (confirmationRejected) {
+          // A non-null cloud confirmation was rejected as stale/invalid (e.g. CAS mismatch against intervening revocation).
+          // Do NOT enter new catalog activation or stamp new epochs.
+          // Restore ONLY already authorized verified local tools without mutable record/adopt.
+          if (includeCatalog && this.lockManager) {
+            return await this.executeOfflineSync();
+          }
+          return this.emptySnapshot();
+        }
       }
+      if (includeCatalog && this.catalogSyncEnabled) {
+        return await this.syncCatalogOnce();
+      }
+      if (includeCatalog && this.lockManager) {
+        return await this.executeOfflineSync();
+      }
+      return this.emptySnapshot();
     })().finally(() => {
       this.inFlightSync = null;
     });
@@ -377,6 +413,18 @@ export class CloudCatalogSyncCoordinator {
           const cachedTool = this.cache.getTool(entry.toolId, this.workspaceId);
           if (cachedTool) {
             tools.push(cachedTool.manifest);
+          } else {
+            const regTool =
+              this.registry?.getToolVersion(entry.toolId, entry.version) ??
+              this.registry?.getToolVersion(entry.name, entry.version);
+            if (regTool?.manifest) {
+              tools.push(regTool.manifest);
+            } else if (this.artifactCache) {
+              const manifest = this.artifactCache.getArtifactManifest(entry.artifactDigest);
+              if (manifest && manifest.id === entry.toolId && manifest.version === entry.version) {
+                tools.push(manifest);
+              }
+            }
           }
         }
       } catch {
@@ -461,7 +509,15 @@ export class CloudCatalogSyncCoordinator {
         }
 
         let result: ReconcileResult;
-        this.options.managedToolAccess?.record(candidateEntry, this.workspaceId, this.lockManager);
+        if (this.activeConfirmation) {
+          this.options.managedToolAccess?.record(
+            candidateEntry,
+            this.workspaceId,
+            this.lockManager,
+            false,
+            this.activeConfirmation,
+          );
+        }
         try {
           result = this.lockManager.reconcileQualified(candidateEntry);
         } catch (reconcileError: unknown) {
@@ -496,7 +552,15 @@ export class CloudCatalogSyncCoordinator {
           managedEntry.artifactDigest === candidateEntry.artifactDigest &&
           managedEntry.manifestDigest === candidateEntry.manifestDigest
         ) {
-          this.options.managedToolAccess?.record(managedEntry, this.workspaceId, this.lockManager);
+          if (this.activeConfirmation) {
+            this.options.managedToolAccess?.record(
+              managedEntry,
+              this.workspaceId,
+              this.lockManager,
+              false,
+              this.activeConfirmation,
+            );
+          }
         }
       }
     }
@@ -508,7 +572,7 @@ export class CloudCatalogSyncCoordinator {
   /**
    * Synchronizes locked tools in offline mode.
    */
-  private async reconcileLockedToolsOffline(): Promise<LockedToolSyncSummary> {
+  async reconcileLockedToolsOffline(): Promise<LockedToolSyncSummary> {
     if (!this.lockManager) {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
@@ -997,8 +1061,14 @@ export class CloudCatalogSyncCoordinator {
         artifactDigest,
         status: "active",
       });
-      if (managedEntry.success) {
-        this.options.managedToolAccess?.record(managedEntry.data, workspaceId);
+      if (managedEntry.success && this.activeConfirmation) {
+        this.options.managedToolAccess?.record(
+          managedEntry.data,
+          workspaceId,
+          undefined,
+          false,
+          this.activeConfirmation,
+        );
       }
 
       this.registry.registerToolSync(registryTool);
