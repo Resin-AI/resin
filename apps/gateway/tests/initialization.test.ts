@@ -87,6 +87,13 @@ describe("MCP Initialization & Capability Negotiation", () => {
       )) as JsonRpcSuccessResponse<InitializeResult>;
       expect(resp.error).toBeUndefined();
       expect(conn.harnessId).toBe("codex");
+      // Codex's deferred tool-source context can retain only the first 250 characters.
+      const sourceSummary = resp.result.instructions?.split("\n", 1)[0] ?? "";
+      expect(sourceSummary.length).toBeLessThanOrEqual(250);
+      expect(sourceSummary).toMatch(/search_tools.*get_tool_schema.*invoke_tool/);
+      expect(sourceSummary).toContain("manage_tools");
+      expect(sourceSummary).toContain("list_versions");
+      expect(sourceSummary).toContain("scope=workspace");
       expect(conn.isInitialized).toBe(true);
       expect(conn.hasReceivedInitializedNotification).toBe(false);
       await gateway.handleMessage(conn.connectionId, {

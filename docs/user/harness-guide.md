@@ -9,7 +9,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 | Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
 | **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
-| **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Local TOML/JSON Log Tailing | Session Restart Required |
+| **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Local TOML/JSON Log Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
@@ -63,6 +63,21 @@ Resin automatically registers the gateway MCP server in `~/.codex/config.toml`:
 url = "http://127.0.0.1:9400/mcp/sse"
 ```
 
+### Stable Tool Gateway
+
+For Codex clients identified as `codex-mcp-client` or `openai-codex-cli`, Resin advertises only four stable MCP tools:
+
+| Tool | Purpose |
+|------|---------|
+| `search_tools` | Discover tools in the current visible catalog |
+| `get_tool_schema` | Inspect a tool's input schema |
+| `invoke_tool` | Run a discovered tool |
+| `manage_tools` | Manage tools |
+
+Codex can discover and use newly available tools through these routes even when it does not refresh its native MCP tool list. Search and schema lookup are marked read-only; this does not grant permission to execute or manage tools. `invoke_tool` and `manage_tools` remain subject to the host's authorization, including Codex's native permission choices.
+
+Reconnect to the updated Resin server once after a software update to obtain this behavior. Subsequent catalog changes do not require a session restart, custom harness, extra daemon, refresh script, or repeated configuration edits.
+
 ### Session Observation
 
 Codex CLI session logs are tailed from `~/.codex/sessions/`. Resin's observer extracts normalized events (`tool_discovery`, `tool_call`, `tool_result`, `error`) and updates local usage counters.
@@ -97,11 +112,21 @@ OMP sessions connect directly to the Gateway's SSE endpoint and receive real-tim
 
 ## 4. Real-Time Tool Catalog Refresh
 
-When a new tool is synthesized or promoted, agents do not need to restart their sessions:
+### Native Dynamic Catalogs
 
-1. **SSE Push Notification**: The Gateway broadcasts `notifications/tools/list_changed` across all open SSE client streams.
-2. **Dynamic Invalidation**: The harness invalidates its local tool cache and invokes `tools/list` to fetch the updated catalog.
-3. **Instant Availability**: Newly promoted tools can be discovered immediately via `search_tools`.
+Claude Code and Oh My Pi retain their native dynamic tool catalogs. For clients that support catalog refresh, the Gateway sends `notifications/tools/list_changed`; the harness can invalidate its tool cache and request the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`.
+
+Codex instead uses the stable gateway described above. Its four advertised tools do not change when the underlying catalog changes, so newly available tools do not depend on native tool-list refresh.
+
+### Catalog Notices in Tool Responses
+
+Each connection starts with a baseline of its visible catalog. When that catalog changes, Resin appends a brief notice to the next successful Resin tool response, once for the pending changes. Changes coalesce between responses rather than generating repeated messages:
+
+- New and updated tools include their names and short descriptions, scoped to what the connection can see.
+- Removed tools produce a generic removal notice rather than exposing removed tool details.
+- Notices are bounded and contain no tool arguments, results, or secrets. Use `search_tools` and `get_tool_schema` for current discovery and input details.
+
+These notices complement native catalog refresh; they are not unsolicited messages to the model. The agent must first interact with Resin to receive a notice. Resin does not guarantee that an agent will search for tools by default or use Resin on every task. To start discovery explicitly, ask the agent to search Resin for a tool relevant to the task.
 
 ---
 

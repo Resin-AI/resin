@@ -242,10 +242,7 @@ export class McpStdioShim {
   }
 
   private prepareTransport(): { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } {
-    if (this.options.enableToolSearch === true) {
-      return { input: this.stdin, output: this.stdout };
-    }
-    this.surface = createToolSearchSurface(this.stdout);
+    this.surface = createToolSearchSurface(this.stdout, this.options.enableToolSearch === true);
     this.surface.output.pipe(this.stdout, { end: false });
     this.stdin.pipe(this.surface.input);
     return this.surface;

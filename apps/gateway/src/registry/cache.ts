@@ -12,9 +12,15 @@ const DEFAULT_CACHE_SIZE = 100;
 export class CatalogCache {
   private readonly maxSize: number;
   private readonly cache = new Map<string, CatalogSnapshotRecord>();
+  private generation = 0;
 
   constructor(options?: CatalogCacheOptions) {
     this.maxSize = options?.maxSize && options.maxSize > 0 ? options.maxSize : DEFAULT_CACHE_SIZE;
+  }
+
+  /** Synchronous invalidation generation, including invalidations of empty caches. */
+  getGeneration(): number {
+    return this.generation;
   }
 
   private makeKey(workspaceId: string, sessionId?: string, revision?: number): string {
@@ -78,6 +84,7 @@ export class CatalogCache {
    * Invalidates all cache entries for a specific workspace.
    */
   invalidateWorkspace(workspaceId: string): void {
+    this.generation += 1;
     const prefix = `${workspaceId}:`;
     for (const key of this.cache.keys()) {
       if (key.startsWith(prefix)) {
@@ -90,6 +97,7 @@ export class CatalogCache {
    * Invalidates all cache entries for a specific session within a workspace.
    */
   invalidateSession(workspaceId: string, sessionId: string): void {
+    this.generation += 1;
     const prefix = `${workspaceId}:${sessionId}:`;
     for (const key of this.cache.keys()) {
       if (key.startsWith(prefix)) {
@@ -102,6 +110,7 @@ export class CatalogCache {
    * Clears the entire cache.
    */
   invalidateAll(): void {
+    this.generation += 1;
     this.cache.clear();
   }
 
