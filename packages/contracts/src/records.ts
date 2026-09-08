@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { canonicalJsonStringify, descriptorSafeCanonicalJsonStringify } from "./canonical.js";
+import { descriptorSafeCanonicalJsonStringify } from "./canonical.js";
 import { CapabilityEnvelopeSchema } from "./capabilities.js";
 import {
   ISOTimestampSchema,
