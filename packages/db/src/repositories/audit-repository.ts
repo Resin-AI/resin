@@ -26,8 +26,8 @@ export class AuditRepository {
     this.conn.run(
       `INSERT INTO invocation_records (
         invocation_id, session_id, workspace_id, tool_id, tool_version,
-        started_at, completed_at, duration_ms, status, input_digest, output_digest, error_details_json, resource_usage_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        started_at, completed_at, duration_ms, status, input_digest, output_digest, error_details_json, resource_usage_json, usage_estimate_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(invocation_id) DO UPDATE SET
         session_id = excluded.session_id,
         workspace_id = excluded.workspace_id,
@@ -40,7 +40,8 @@ export class AuditRepository {
         input_digest = excluded.input_digest,
         output_digest = excluded.output_digest,
         error_details_json = excluded.error_details_json,
-        resource_usage_json = excluded.resource_usage_json;`,
+        resource_usage_json = excluded.resource_usage_json,
+        usage_estimate_json = excluded.usage_estimate_json;`,
       [
         validated.invocationId,
         validated.sessionId,
@@ -55,6 +56,7 @@ export class AuditRepository {
         validated.outputDigest ?? null,
         validated.errorDetails ? canonicalJson(validated.errorDetails) : null,
         validated.resourceUsage ? canonicalJson(validated.resourceUsage) : null,
+        validated.usageEstimate ? canonicalJson(validated.usageEstimate) : null,
       ],
     );
   }
@@ -74,6 +76,7 @@ export class AuditRepository {
       output_digest: string | null;
       error_details_json: string | null;
       resource_usage_json: string | null;
+      usage_estimate_json: string | null;
     }>("SELECT * FROM invocation_records WHERE invocation_id = ?;", [invocationId]);
 
     if (!row) {
@@ -94,6 +97,7 @@ export class AuditRepository {
       outputDigest: row.output_digest ?? undefined,
       errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
       resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
+      usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
     });
   }
 
@@ -148,6 +152,7 @@ export class AuditRepository {
       output_digest: string | null;
       error_details_json: string | null;
       resource_usage_json: string | null;
+      usage_estimate_json: string | null;
     }>(sql, params);
 
     return rows.map((row) =>
@@ -165,6 +170,7 @@ export class AuditRepository {
         outputDigest: row.output_digest ?? undefined,
         errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
         resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
+        usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
       }),
     );
   }
@@ -186,6 +192,7 @@ export class AuditRepository {
       output_digest: string | null;
       error_details_json: string | null;
       resource_usage_json: string | null;
+      usage_estimate_json: string | null;
     }>(sql, [limit]);
 
     return rows.map((row) =>
@@ -203,6 +210,7 @@ export class AuditRepository {
         outputDigest: row.output_digest ?? undefined,
         errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
         resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
+        usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
       }),
     );
   }

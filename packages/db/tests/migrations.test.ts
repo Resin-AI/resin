@@ -21,18 +21,19 @@ describe("MigrationRunner", () => {
 
     const result = await runner.migrate();
     expect(result.initialVersion).toBe(0);
-    expect(result.targetVersion).toBe(2);
-    expect(result.appliedVersions).toEqual([1, 2]);
+    expect(result.targetVersion).toBe(3);
+    expect(result.appliedVersions).toEqual([1, 2, 3]);
     expect(result.integrityOk).toBe(true);
 
-    expect(runner.getCurrentVersion()).toBe(2);
+    expect(runner.getCurrentVersion()).toBe(3);
     const applied = runner.getAppliedMigrations();
-    expect(applied).toHaveLength(2);
+    expect(applied).toHaveLength(3);
     expect(applied[0].version).toBe(1);
     expect(applied[0].name).toBe("001_initial_local_schema");
     expect(applied[1].version).toBe(2);
     expect(applied[1].name).toBe("002_add_invocation_records_uploaded_at");
-
+    expect(applied[2].version).toBe(3);
+    expect(applied[2].name).toBe("003_add_invocation_records_usage_estimate");
     // Verify key tables exist and are queryable
     const testTables = [
       "workspaces",
@@ -65,9 +66,9 @@ describe("MigrationRunner", () => {
     // Verify v2 migration column and index exist
     const tableInfo = conn.all<{ name: string }>("PRAGMA table_info(invocation_records);");
     expect(tableInfo.some((col) => col.name === "uploaded_at")).toBe(true);
+    expect(tableInfo.some((col) => col.name === "usage_estimate_json")).toBe(true);
     const indexList = conn.all<{ name: string }>("PRAGMA index_list(invocation_records);");
     expect(indexList.some((idx) => idx.name === "idx_invocation_records_uploaded_at")).toBe(true);
-
     conn.close();
   });
 
@@ -77,13 +78,12 @@ describe("MigrationRunner", () => {
 
     const runner = new MigrationRunner(conn);
     const firstRun = await runner.migrate();
-    expect(firstRun.appliedVersions).toEqual([1, 2]);
+    expect(firstRun.appliedVersions).toEqual([1, 2, 3]);
 
     const secondRun = await runner.migrate();
     expect(secondRun.appliedVersions).toHaveLength(0);
-    expect(secondRun.initialVersion).toBe(2);
-    expect(secondRun.targetVersion).toBe(2);
-
+    expect(secondRun.initialVersion).toBe(3);
+    expect(secondRun.targetVersion).toBe(3);
     conn.close();
   });
 

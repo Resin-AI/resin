@@ -1,4 +1,4 @@
-import { NormalizedSessionEventSchema } from "@resin/contracts";
+import { NormalizedSessionEventSchema, TOOL_IO_UTF8_METHOD } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { NormalizationPipeline } from "../../src/normalization/index.js";
@@ -165,5 +165,111 @@ describe("NormalizationPipeline Scenario ID & Metadata", () => {
     if (resInvalid[0].status === "success") {
       expect(resInvalid[0].event.metadata?.sessionKind).toBe("user");
     }
+  });
+
+  describe("Tool-I/O Token Estimation & Redaction Pipeline", () => {
+    it("estimates 1 token for explicit result: null in tool_result without falling back to output", async () => {
+      const pipeline = new NormalizationPipeline();
+      const rawRecord: RawHarnessRecord = {
+        recordId: "rec_null_result_1",
+        sessionId,
+        harnessId: "test_harness",
+        sequenceNumber: 10,
+        timestamp,
+        recordType: "custom",
+        rawPayload: {
+          type: "tool_result",
+          callId: "call_null_result_1",
+          toolName: "void_fn",
+          result: null,
+          output: "Should be ignored because result property is present and null",
+          isError: false,
+          executionDurationMs: 10,
+        },
+        cursor: { offset: 0, line: 10, sequence: 10, timestamp },
+        metadata: {},
+      };
+
+      const results = await pipeline.processRecord(rawRecord);
+      expect(results[0].status).toBe("success");
+      if (results[0].status === "success") {
+        const estimate = results[0].event.metadata?.resinTokenEstimateV1;
+        expect(estimate).toEqual({
+          method: TOOL_IO_UTF8_METHOD,
+          inputTokens: 0,
+          outputTokens: 1, // "null" is 4 UTF-8 bytes => 1 token
+          discoveryTokens: 0,
+          totalTokens: 1,
+        });
+      }
+    });
+
+    it("estimates 1 token for explicit parameters: null in tool_call", async () => {
+      const pipeline = new NormalizationPipeline();
+      const rawRecord: RawHarnessRecord = {
+        recordId: "rec_null_params_1",
+        sessionId,
+        harnessId: "test_harness",
+        sequenceNumber: 11,
+        timestamp,
+        recordType: "custom",
+        rawPayload: {
+          type: "tool_call",
+          callId: "call_null_params_1",
+          toolName: "null_param_tool",
+          parameters: null,
+          isShadow: false,
+        },
+        cursor: { offset: 0, line: 11, sequence: 11, timestamp },
+        metadata: {},
+      };
+
+      const results = await pipeline.processRecord(rawRecord);
+      expect(results[0].status).toBe("success");
+      if (results[0].status === "success") {
+        const estimate = results[0].event.metadata?.resinTokenEstimateV1;
+        expect(estimate).toEqual({
+          method: TOOL_IO_UTF8_METHOD,
+          inputTokens: 1, // "null" is 4 UTF-8 bytes => 1 token
+          outputTokens: 0,
+          discoveryTokens: 0,
+          totalTokens: 1,
+        });
+      }
+    });
+
+    it("estimates tokens from raw payload before privacy redaction runs", async () => {
+      const pipeline = new NormalizationPipeline();
+      // Long sensitive string that will be redacted
+      const sensitiveOutput = "SECRET_KEY_1234567890_VERY_LONG_VALUE_ABCD_EFGH_IJKL_MNOP";
+      const rawRecord: RawHarnessRecord = {
+        recordId: "rec_raw_estimator_1",
+        sessionId,
+        harnessId: "test_harness",
+        sequenceNumber: 12,
+        timestamp,
+        recordType: "custom",
+        rawPayload: {
+          type: "tool_result",
+          callId: "call_raw_estimator_1",
+          toolName: "credential_fetcher",
+          result: { token: sensitiveOutput },
+          isError: false,
+          executionDurationMs: 45,
+        },
+        cursor: { offset: 0, line: 12, sequence: 12, timestamp },
+        metadata: {},
+      };
+
+      const results = await pipeline.processRecord(rawRecord);
+      expect(results[0].status).toBe("success");
+      if (results[0].status === "success") {
+        const estimate = results[0].event.metadata?.resinTokenEstimateV1;
+        expect(estimate).toBeDefined();
+        expect(estimate?.method).toBe(TOOL_IO_UTF8_METHOD);
+        expect(estimate?.outputTokens).toBeGreaterThan(0);
+        expect(estimate?.totalTokens).toBe(estimate?.outputTokens);
+      }
+    });
   });
 });

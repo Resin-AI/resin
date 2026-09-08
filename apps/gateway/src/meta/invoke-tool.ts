@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import {
   type InvocationRecord,
+  type InvocationUsageEstimate,
+  TOOL_IO_UTF8_METHOD,
+  bytesToTokens,
+  createUsageEstimate,
+  estimatePayloadBytes,
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
@@ -11,11 +16,15 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import {
+  SessionDiscoveryTracker as DefaultSessionDiscoveryTracker,
+  type SessionDiscoveryTracker,
+  isDiscoveryTool,
+} from "./discovery-tracker.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
 import { isSystemMetaTool } from "./system-tools.js";
 import { validateParameters } from "./validator-helper.js";
-
 export interface InvokeToolParams {
   toolId?: string;
   name?: string;
@@ -29,8 +38,8 @@ export interface InvokeToolParams {
 export interface CreateInvokeToolHandlerOptions {
   safetyGateEvaluator?: SafetyGateEvaluator;
   onInvocationRecorded?: (record: InvocationRecord) => Promise<void>;
+  discoveryTracker?: SessionDiscoveryTracker;
 }
-
 function normalizeIdentifier(value: JsonRpcParamValue | undefined): string | undefined {
   return value &&
     Object.prototype.toString.call(value) === "[object String]" &&
@@ -61,6 +70,7 @@ export function createInvokeToolHandler(
   let safetyGateEvaluator: SafetyGateEvaluator | undefined;
   let onInvocationRecorded: ((record: InvocationRecord) => Promise<void>) | undefined =
     onInvocationRecordedHook;
+  let discoveryTracker: SessionDiscoveryTracker = DefaultSessionDiscoveryTracker.getInstance();
 
   if (safetyGateEvaluatorOrOptions) {
     if ("canExecuteTool" in safetyGateEvaluatorOrOptions) {
@@ -70,9 +80,11 @@ export function createInvokeToolHandler(
       if (!onInvocationRecorded) {
         onInvocationRecorded = safetyGateEvaluatorOrOptions.onInvocationRecorded;
       }
+      if (safetyGateEvaluatorOrOptions.discoveryTracker) {
+        discoveryTracker = safetyGateEvaluatorOrOptions.discoveryTracker;
+      }
     }
   }
-
   return async (
     context: WorkspaceContext,
     params: JsonRpcParams,
@@ -178,13 +190,29 @@ export function createInvokeToolHandler(
     );
     const recordedToolId = resolvedTool.toolId;
     const recordedToolVersion = resolvedTool.version;
+    const isRecordedDiscoveryTool =
+      isDiscoveryTool(resolvedTool.toolId) || isDiscoveryTool(resolvedTool.name);
 
     const recordInvocation = (
       status: "success" | "error" | "timeout" | "rejected_capability",
       result?: CallToolResult,
       errorMessage?: string,
     ) => {
-      if (!onInvocationRecorded || isMetaTool) {
+      const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
+      if (isMetaTool) {
+        if (isRecordedDiscoveryTool) {
+          const inBytes = estimatePayloadBytes(params);
+          const outBytes = result !== undefined ? estimatePayloadBytes(result) : undefined;
+          if (inBytes !== undefined && outBytes !== undefined) {
+            discoveryTracker.recordDiscoveryOverhead(
+              sessionId,
+              bytesToTokens(inBytes) + bytesToTokens(outBytes),
+            );
+          }
+        }
+        return;
+      }
+      if (!onInvocationRecorded) {
         return;
       }
       try {
@@ -197,10 +225,23 @@ export function createInvokeToolHandler(
           recordedToolVersion && semVerRegex.test(recordedToolVersion)
             ? recordedToolVersion
             : "1.0.0";
-        const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
         const inputDigest = hashCanonicalContent(targetParams);
         const outputDigest = result ? hashCanonicalContent(result) : undefined;
         const invocationId = `inv_${randomUUID().replace(/-/g, "")}`;
+
+        const inputBytes = estimatePayloadBytes(params);
+        const outputBytes = result !== undefined ? estimatePayloadBytes(result) : undefined;
+        let usageEstimate: InvocationUsageEstimate | undefined;
+        if (inputBytes !== undefined && outputBytes !== undefined) {
+          const inputTokens = bytesToTokens(inputBytes);
+          const outputTokens = bytesToTokens(outputBytes);
+          const discoveryTokens = discoveryTracker.consumeDiscoveryTokens(sessionId);
+          usageEstimate = createUsageEstimate({
+            inputTokens,
+            outputTokens,
+            discoveryTokens,
+          });
+        }
 
         const record: InvocationRecord = {
           invocationId,
@@ -227,6 +268,7 @@ export function createInvokeToolHandler(
                 },
               }
             : {}),
+          ...(usageEstimate ? { usageEstimate } : {}),
         };
 
         Promise.resolve()

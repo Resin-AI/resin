@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 import {
   type DeadLetterRecord,
   DeadLetterRecordSchema,
+  InvocationUsageEstimateSchema,
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   type RedactionMeta,
+  TOOL_IO_UTF8_METHOD,
   canonicalJson,
+  estimatePayloadTokens,
   nowIso,
 } from "@resin/contracts";
 import type {
@@ -304,6 +307,52 @@ export class NormalizationPipeline {
     mergedMetadata.sessionKind =
       rawSessionKind === "agent" || rawSessionKind === "user" ? rawSessionKind : "user";
 
+    if (!mergedMetadata.resinTokenEstimateV1) {
+      if (intermediate.type === "tool_call") {
+        const rawParams = intermediate.parameters;
+        if (rawParams !== undefined) {
+          const inputTokens = estimatePayloadTokens(rawParams);
+          if (inputTokens !== undefined) {
+            mergedMetadata.resinTokenEstimateV1 = {
+              method: TOOL_IO_UTF8_METHOD,
+              inputTokens,
+              outputTokens: 0,
+              discoveryTokens: 0,
+              totalTokens: inputTokens,
+            };
+          }
+        }
+      } else if (intermediate.type === "tool_result") {
+        const rawResult = intermediate.result;
+        if (rawResult !== undefined) {
+          const outputTokens = estimatePayloadTokens(rawResult);
+          if (outputTokens !== undefined) {
+            mergedMetadata.resinTokenEstimateV1 = {
+              method: TOOL_IO_UTF8_METHOD,
+              inputTokens: 0,
+              outputTokens,
+              discoveryTokens: 0,
+              totalTokens: outputTokens,
+            };
+          }
+        }
+      }
+    } else {
+      const parsedEstimate = InvocationUsageEstimateSchema.safeParse(
+        mergedMetadata.resinTokenEstimateV1,
+      );
+      if (parsedEstimate.success) {
+        mergedMetadata.resinTokenEstimateV1 = {
+          method: parsedEstimate.data.method,
+          inputTokens: parsedEstimate.data.inputTokens,
+          outputTokens: parsedEstimate.data.outputTokens,
+          discoveryTokens: parsedEstimate.data.discoveryTokens,
+          totalTokens: parsedEstimate.data.totalTokens,
+        };
+      } else {
+        delete mergedMetadata.resinTokenEstimateV1;
+      }
+    }
     const fullEventCandidate = {
       schemaVersion: schemaVersionParsed.success
         ? schemaVersionParsed.data

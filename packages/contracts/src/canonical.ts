@@ -150,3 +150,111 @@ export function hashCanonicalContent<T>(value: T, options: CanonicalHashOptions 
  * Alias for hashCanonicalContent.
  */
 export const hashCanonical = hashCanonicalContent;
+
+/**
+ * Safely serializes an untrusted payload to canonical JSON using descriptor-only property access.
+ * Rejects any object with accessor properties (getters/setters) WITHOUT invoking them,
+ * protecting privacy-sensitive envelopes from poison-getter side effects.
+ * Bounded by maxDepth and maxNodes to prevent recursion denial-of-service.
+ */
+export function descriptorSafeCanonicalJsonStringify(
+  value: unknown,
+  options?: { maxDepth?: number; maxNodes?: number },
+): string | undefined {
+  const maxDepth = options?.maxDepth ?? 64;
+  const maxNodes = options?.maxNodes ?? 10_000;
+  let nodesCount = 0;
+  const seen = new WeakSet<object>();
+
+  function serialize(val: unknown, depth: number): string | undefined {
+    nodesCount++;
+    if (nodesCount > maxNodes || depth > maxDepth) throw new TypeError("Payload limit exceeded");
+    if (val === null) {
+      return "null";
+    }
+    if (val === undefined) {
+      return undefined;
+    }
+    if (typeof val === "boolean") {
+      return val ? "true" : "false";
+    }
+    if (typeof val === "number") {
+      if (!Number.isFinite(val)) {
+        throw new TypeError("Non-finite payload number");
+      }
+      return String(val);
+    }
+    if (typeof val === "string") {
+      return JSON.stringify(val);
+    }
+    if (typeof val === "bigint" || typeof val === "symbol" || typeof val === "function") {
+      throw new TypeError("Unsupported payload value");
+    }
+
+    if (typeof val !== "object") {
+      return undefined;
+    }
+
+    const obj = val as object;
+    if (seen.has(obj)) {
+      throw new TypeError("Circular payload");
+    }
+    seen.add(obj);
+
+    try {
+      if (Array.isArray(obj)) {
+        const serializedItems: string[] = [];
+        for (let i = 0; i < obj.length; i++) {
+          const desc = Object.getOwnPropertyDescriptor(obj, String(i));
+          if (desc && !("value" in desc)) {
+            throw new TypeError("Payload accessor");
+          }
+          const itemVal = desc?.value;
+          const itemSerialized = serialize(itemVal, depth + 1);
+          serializedItems.push(itemSerialized === undefined ? "null" : itemSerialized);
+        }
+        return `[${serializedItems.join(",")}]`;
+      }
+
+      const ownToJSONDesc = Object.getOwnPropertyDescriptor(obj, "toJSON");
+      if (ownToJSONDesc && !("value" in ownToJSONDesc)) {
+        throw new TypeError("Payload accessor");
+      }
+      if (ownToJSONDesc) throw new TypeError("Custom JSON representation");
+      const prototype = Object.getPrototypeOf(obj);
+      if (prototype !== null && prototype !== Object.prototype) {
+        throw new TypeError("Non-JSON payload object");
+      }
+
+      const keys = Object.getOwnPropertyNames(obj);
+      keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+      const serializedMembers: string[] = [];
+      for (const key of keys) {
+        const desc = Object.getOwnPropertyDescriptor(obj, key);
+        if (!desc) {
+          continue;
+        }
+        if (!("value" in desc)) {
+          throw new TypeError("Payload accessor");
+        }
+        if (!desc.enumerable) {
+          continue;
+        }
+        const memberSerialized = serialize(desc.value, depth + 1);
+        if (memberSerialized !== undefined) {
+          serializedMembers.push(`${JSON.stringify(key)}:${memberSerialized}`);
+        }
+      }
+      return `{${serializedMembers.join(",")}}`;
+    } finally {
+      seen.delete(obj);
+    }
+  }
+
+  try {
+    return serialize(value, 0);
+  } catch {
+    return undefined;
+  }
+}

@@ -4997,11 +4997,12 @@ var init_deployments = __esm({
 });
 
 // packages/contracts/dist/records.js
-var WorkspaceRecordSchema, DeviceRecordSchema, InstallationRecordSchema, CatalogToolSummarySchema, CatalogSnapshotSchema, InvocationResourceUsageSchema, InvocationErrorDetailsSchema, InvocationRecordSchema, AuditActorSchema, AuditRecordSchema, TelemetryRecordSchema, SyncCursorSchema, DeadLetterRecordSchema, VerificationDigestsSchema, VerificationChecksSchema, ProbeResultEntrySchema, VerificationEvidenceRecordSchema, RecordVisibilitySchema, PersonalOwnershipRecordSchema, WorkspaceOwnershipRecordSchema, RecordOwnershipSchema, SessionRecordBaseSchema, PersonalSessionRecordSchema, WorkspaceSessionRecordSchema, SessionRecordSchema, EvidenceSetRecordBaseSchema, PersonalEvidenceSetRecordSchema, WorkspaceEvidenceSetRecordSchema, EvidenceSetRecordSchema;
+var WorkspaceRecordSchema, DeviceRecordSchema, InstallationRecordSchema, CatalogToolSummarySchema, CatalogSnapshotSchema, InvocationResourceUsageSchema, InvocationErrorDetailsSchema, TOOL_IO_UTF8_METHOD, InvocationUsageEstimateSchema, InvocationRecordSchema, AuditActorSchema, AuditRecordSchema, TelemetryRecordSchema, SyncCursorSchema, DeadLetterRecordSchema, VerificationDigestsSchema, VerificationChecksSchema, ProbeResultEntrySchema, VerificationEvidenceRecordSchema, RecordVisibilitySchema, PersonalOwnershipRecordSchema, WorkspaceOwnershipRecordSchema, RecordOwnershipSchema, SessionRecordBaseSchema, PersonalSessionRecordSchema, WorkspaceSessionRecordSchema, SessionRecordSchema, EvidenceSetRecordBaseSchema, PersonalEvidenceSetRecordSchema, WorkspaceEvidenceSetRecordSchema, EvidenceSetRecordSchema;
 var init_records = __esm({
   "packages/contracts/dist/records.js"() {
     "use strict";
     init_zod();
+    init_canonical();
     init_capabilities();
     init_common();
     init_tools();
@@ -5062,6 +5063,16 @@ var init_records = __esm({
       message: external_exports.string(),
       stack: external_exports.string().optional()
     });
+    TOOL_IO_UTF8_METHOD = "tool_io_utf8_v1";
+    InvocationUsageEstimateSchema = external_exports.object({
+      method: external_exports.literal(TOOL_IO_UTF8_METHOD),
+      inputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      outputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      discoveryTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      totalTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+    }).refine((val) => val.totalTokens === val.inputTokens + val.outputTokens + val.discoveryTokens, {
+      message: "totalTokens must equal sum of inputTokens, outputTokens, and discoveryTokens"
+    });
     InvocationRecordSchema = external_exports.object({
       invocationId: IdentifierSchema,
       sessionId: IdentifierSchema,
@@ -5075,7 +5086,8 @@ var init_records = __esm({
       inputDigest: Sha256DigestSchema,
       outputDigest: Sha256DigestSchema.optional(),
       errorDetails: InvocationErrorDetailsSchema.optional(),
-      resourceUsage: InvocationResourceUsageSchema.optional()
+      resourceUsage: InvocationResourceUsageSchema.optional(),
+      usageEstimate: InvocationUsageEstimateSchema.optional()
     });
     AuditActorSchema = external_exports.object({
       type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),

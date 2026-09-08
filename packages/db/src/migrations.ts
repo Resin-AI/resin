@@ -383,6 +383,13 @@ CREATE INDEX IF NOT EXISTS idx_invocation_records_uploaded_at ON invocation_reco
 `;
 
 /**
+ * Migration 003: Add usage_estimate_json column to invocation_records for transparent estimated tool-I/O savings.
+ */
+export const MIGRATION_003_SQL = `
+ALTER TABLE invocation_records ADD COLUMN usage_estimate_json TEXT;
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -397,6 +404,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "002_add_invocation_records_uploaded_at",
     sql: MIGRATION_002_SQL,
     checksum: hashCanonicalContent(MIGRATION_002_SQL),
+  },
+  {
+    version: 3,
+    name: "003_add_invocation_records_usage_estimate",
+    sql: MIGRATION_003_SQL,
+    checksum: hashCanonicalContent(MIGRATION_003_SQL),
   },
 ];
 
