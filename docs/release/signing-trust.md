@@ -16,17 +16,18 @@ Resin releases use Ed25519 signatures to verify distributed binaries and release
 - **Client-Side Root Pinning**: CLI clients embed a static trust root bundle (`apps/cli/dist/release-trust.json`, Schema `2.0.0`) containing valid public keys in active-first order. Each bundled Schema 2.0.0 record requires and cross-checks `keyId`, `algorithm` (`Ed25519`), `trustDomain` (`production`), `publicKeyPem` (SPKI PEM), `publicKeyHex` (raw 32-byte Ed25519 root in lowercase hex), and `publicKeyFingerprintSha256` (SHA-256 digest of the SPKI DER public key). The client parses the PEM to confirm it represents an Ed25519 key, verifying that the derived raw root and DER SHA-256 fingerprint strictly match the record metadata. The client preserves full key identities (`TrustedReleaseKey { keyId, publicKeyHex }`) across all verification stages and enforces active-first ordering when matching signatures.
 - **Strict Production Trust & Emergency Overrides**: Client production trust accepts semantic non-test and non-revoked IDs only (rejecting digit-only numeric IDs such as `"10"` or `"12345"`, test IDs matching `test-only-*`, and revoked IDs in `REVOKED_RELEASE_KEY_IDS`). Emergency trust override via `RESIN_TRUSTED_RELEASE_PUBLIC_KEYS` requires an explicitly configured, strict non-empty JSON array of exact `{ "keyId": "...", "publicKeyHex": "..." }` objects. Any blank string, extra fields, comma-separated lists, duplicate IDs/keys, or malformed hex fails closed immediately rather than falling back to bundled trust.
 
-### 1.2 GitHub Environment & Admin Bypass Custody Policy
+### 1.2 GitHub Environment & Custody Policy
 
-Release signing secrets and configuration are bound exclusively to the `production` GitHub Environment with strict custody rules:
+Release signing secrets and configuration are bound exclusively to the `production` GitHub Environment with strict custody and automated gating rules:
 
-- **Required Reviewers**: Release deployment requires explicit approval from designated Release Stewards / Security Admins.
-- **Admin Bypass Decision**: While organization admins possess technical bypass capabilities, release signing policy **prohibits unreviewed admin bypasses** except in declared, documented SEV-1 emergency incidents (see Section 5).
-- **Deployment Branch Protection**: The `production` environment permits protected workflow refs, with required human approval before environment-scoped signing credentials become available; it is not tag-only. Release publication still qualifies the exact release tag and commit, while channel renewal/restoration may run from a protected branch such as `main` with the operation's explicit confirmation and the same production approval gate.
-- **Auditability**:
+- **No Mandatory Human Reviewers**: The `production` GitHub Environment enforces no mandatory human environment reviewers. Deployment and signing authorization rely on automated machine verification gates, protected branch refs, auditable `workflow_dispatch`, explicit promotion confirmation inputs, offline verification receipts, and cryptographic signatures.
+- **Protected Workflow Refs & Custody**: Removing human approval does not authorize bypassing automated gates, extracting signing secrets, or weakening signing configuration. Environment credentials remain restricted to authorized workflows on protected refs.
+- **Deployment Branch Protection & Promotion Gates**: The `production` environment permits protected workflow refs without mandatory human reviewer gates; it is not tag-only. Release publication still qualifies the exact release tag and commit, while channel renewal/restoration may run from a protected branch such as `main` with the operation's explicit confirmation and existing verification gates.
+- **Auditability & Machine Verification Receipts**:
   - Workflow strictly enforces exact 40-character commit SHA matching against protected release tags.
+  - Production promotion requires `confirm_promotion=PROMOTE_PRODUCTION`; channel operations retain their own explicit confirmation inputs.
   - Automated cryptographic qualification gates must pass 100% of checks before signing keys are loaded into runner memory.
-  - Immutable GitHub Actions audit logs track the executing operator's identity and timestamp.
+  - Immutable GitHub Actions audit logs track the executing operator's identity, dispatch parameters, and timestamp.
 
 ---
 

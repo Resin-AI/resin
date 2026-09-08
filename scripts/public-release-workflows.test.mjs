@@ -1547,6 +1547,28 @@ with patch("subprocess.run", side_effect=publish):
       }
     });
 
+    it("verifies configure-branch-protection.sh configures PR-only workflow with zero required approving reviews and disabled code-owner gating", () => {
+      const scriptPath = path.join(ROOT_DIR, "scripts", "configure-branch-protection.sh");
+      const scriptContent = fs.readFileSync(scriptPath, "utf8");
+
+      const match = scriptContent.match(
+        /PROTECTION_PAYLOAD=\$\(cat <<EOF\s*\n([\s\S]*?)\nEOF\s*\)/,
+      );
+      expect(match).toBeTruthy();
+      const payload = JSON.parse(match[1]);
+
+      expect(payload.enforce_admins).toBe(true);
+      expect(payload.required_pull_request_reviews).toBeDefined();
+      expect(payload.required_pull_request_reviews.required_approving_review_count).toBe(0);
+      expect(payload.required_pull_request_reviews.require_code_owner_reviews).toBe(false);
+      expect(payload.required_pull_request_reviews.require_last_push_approval).toBe(false);
+      expect(payload.required_pull_request_reviews.dismiss_stale_reviews).toBe(false);
+      expect(payload.allow_force_pushes).toBe(false);
+      expect(payload.allow_deletions).toBe(false);
+      expect(payload.required_linear_history).toBe(true);
+      expect(payload.required_conversation_resolution).toBe(true);
+    });
+
     it("retains 5-lane platform qualification coverage in platform-qualification.yml on GitHub-hosted runners", () => {
       const platformJob = platformQualification.doc.jobs["platform-artifacts"];
       expect(platformJob).toBeDefined();
