@@ -143,6 +143,16 @@ export async function createProductionProxyRuntime(
   options.registry?.setManagedToolAccess(managedToolAccess);
 
   if (loadResult.status === "valid" && identity) {
+    const lifecycleAbort = new AbortController();
+    const fetchWithLifecycle: typeof fetch = async (input, init) => {
+      lifecycleAbort.signal.throwIfAborted();
+      return await (options.fetchFn ?? globalThis.fetch)(input, {
+        ...init,
+        signal: init?.signal
+          ? AbortSignal.any([init.signal, lifecycleAbort.signal])
+          : lifecycleAbort.signal,
+      });
+    };
     const circuitBreaker = options.circuitBreaker ?? new CloudCircuitBreaker();
     const identityProvider: CloudIdentityProvider = async (opts) => {
       return await credentialStore.getRequestIdentity(opts);
@@ -154,7 +164,7 @@ export async function createProductionProxyRuntime(
       baseUrl: identity.cloudUrl,
       identityProvider,
       circuitBreaker,
-      fetchFn: options.fetchFn,
+      fetchFn: fetchWithLifecycle,
     });
 
     const cache = options.cache ?? new CloudCatalogCache();
@@ -210,6 +220,7 @@ export async function createProductionProxyRuntime(
       onOfflineDegraded: options.onOfflineDegraded,
       isPinned: options.isPinned,
     });
+    const backgroundTasks = new Set<Promise<unknown>>();
 
     const runtime: ProductionProxyRuntime = {
       status: "valid",
@@ -265,50 +276,86 @@ export async function createProductionProxyRuntime(
           }
         }
 
-        // Entitlement checks must not depend on plan-gated project registration or catalog.
+        // 1c. Reconcile verified local locked tools immediately on workspace ready
+        //     so tools are available on cold start before network calls, even under contention or offline
         try {
-          await coordinator.checkToolAccess();
+          await coordinator.reconcileLockedToolsOffline();
         } catch {
-          // Unknown access preserves local tools; the next background cycle retries.
+          // Non-fatal for initial local restore
         }
+
+        // 2. Start periodic background sync for ongoing retries/refresh
         coordinator.startPeriodicSync();
-        // 2. Register project if metadata exists
-        let allowCloudSync = true;
-        if (workspace.project && client) {
-          try {
-            const regRequest: ProjectRegistrationRequest = {
-              project: workspace.project,
-              visibility: "workspace",
-            };
-            const regResponse = await client.registerProject(regRequest);
 
-            if (regResponse.outcome === "fork_required") {
-              // Foreign / fork-required registration: never substitute stable local project identity,
-              // transition cloud runtime to local-only/paused and disable cloud sync without throwing.
-              allowCloudSync = false;
-              runtime.isCloudEnabled = false;
-            } else if (regResponse.projectId !== workspace.project.projectId) {
-              // ID substitution: transition to local-only/paused without throwing, preserve local project
-              allowCloudSync = false;
-              runtime.isCloudEnabled = false;
+        // 3. Entitlement check, project registration, and online catalog sync run in a
+        //    tracked background task so onWorkspaceReady returns promptly without blocking MCP initialization.
+        if (!lifecycleAbort.signal.aborted) {
+          const bgTask = (async () => {
+            if (lifecycleAbort.signal.aborted) return;
+
+            // Step A: Entitlement check
+            try {
+              await coordinator.checkToolAccess();
+            } catch {
+              // Unknown access preserves local tools; periodic retries handle refresh
             }
-          } catch {
-            // Cloud registration failures (offline, network error, foreign project ID substitution, etc.)
-            // degrade safely to local-only without disrupting local MCP initialization.
-            allowCloudSync = false;
-            runtime.isCloudEnabled = false;
-          }
-        }
 
-        coordinator.setCatalogSyncEnabled(allowCloudSync);
-        // 3. Perform initial sync and start periodic background sync
-        if (coordinator && allowCloudSync && runtime.isCloudEnabled) {
-          try {
-            await coordinator.sync();
-          } catch {
-            // Offline degradation handled internally in sync coordinator
-          }
-          coordinator.startPeriodicSync();
+            if (lifecycleAbort.signal.aborted) return;
+
+            // Step B: Project registration if metadata exists
+            let allowCloudSync = true;
+            if (workspace.project && client) {
+              try {
+                const regRequest: ProjectRegistrationRequest = {
+                  project: workspace.project,
+                  visibility: "workspace",
+                };
+                const regResponse = await client.registerProject(regRequest, {
+                  signal: lifecycleAbort.signal,
+                });
+
+                if (regResponse.outcome === "fork_required") {
+                  allowCloudSync = false;
+                  runtime.isCloudEnabled = false;
+                } else if (regResponse.projectId !== workspace.project.projectId) {
+                  allowCloudSync = false;
+                  runtime.isCloudEnabled = false;
+                }
+              } catch {
+                allowCloudSync = false;
+                runtime.isCloudEnabled = false;
+              }
+            }
+
+            coordinator.setCatalogSyncEnabled(allowCloudSync);
+
+            if (lifecycleAbort.signal.aborted) return;
+
+            // Step C: Initial online sync with fallback
+            if (coordinator && allowCloudSync && runtime.isCloudEnabled) {
+              try {
+                await coordinator.sync();
+              } catch {
+                try {
+                  await coordinator.reconcileLockedToolsOffline();
+                } catch {
+                  // Non-fatal
+                }
+              }
+            } else if (coordinator) {
+              try {
+                await coordinator.reconcileLockedToolsOffline();
+              } catch {
+                // Non-fatal
+              }
+            }
+          })();
+
+          backgroundTasks.add(bgTask);
+          void bgTask.then(
+            () => backgroundTasks.delete(bgTask),
+            () => backgroundTasks.delete(bgTask),
+          );
         }
       },
 
@@ -317,10 +364,15 @@ export async function createProductionProxyRuntime(
       },
 
       async stop(): Promise<void> {
+        lifecycleAbort.abort();
         coordinator.stopPeriodicSync();
+        if (backgroundTasks.size > 0) {
+          await Promise.allSettled([...backgroundTasks]);
+          backgroundTasks.clear();
+        }
       },
-
       async sync(_syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
+        await Promise.all([...backgroundTasks]);
         return await coordinator.sync();
       },
     };
@@ -337,16 +389,10 @@ export async function createProductionProxyRuntime(
       resinHome: paths.homeDir,
     });
   localExecutor.setManagedToolAccess(managedToolAccess);
+
   // Persisted positive denial remains effective even if credentials are now unavailable.
   try {
-    const release = managedToolAccess.acquireSync();
-    if (release) {
-      try {
-        await managedToolAccess.cleanup(options.registry);
-      } finally {
-        release();
-      }
-    }
+    await managedToolAccess.cleanup(options.registry);
   } catch {
     // Invocation/discovery guards remain in place; retry on the next runtime lifecycle.
   }
@@ -360,6 +406,14 @@ export async function createProductionProxyRuntime(
     executor: localExecutor,
 
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
+      const workspaceRoot =
+        workspace.projectRoot ??
+        workspace.canonicalRoot ??
+        (workspace.lockPath ? path.dirname(path.dirname(workspace.lockPath)) : undefined) ??
+        workspace.roots?.[0]?.path;
+      if (workspaceRoot) {
+        localExecutor.setWorkspaceRoot(workspaceRoot);
+      }
       // Hydrate registry with locked tools locally
       if (workspace.lock && options.registry) {
         if (

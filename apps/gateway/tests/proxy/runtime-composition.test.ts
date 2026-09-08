@@ -397,6 +397,7 @@ describe("Production Runtime Composition & Credential Security", () => {
     });
 
     await runtimeFork.onWorkspaceReady(ws);
+    await runtimeFork.sync();
     expect(ws.project!.projectId).toBe(originalProjectId);
     expect(runtimeFork.isCloudEnabled).toBe(false);
 
@@ -418,6 +419,7 @@ describe("Production Runtime Composition & Credential Security", () => {
     });
 
     await runtimeSub.onWorkspaceReady(ws);
+    await runtimeSub.sync();
     expect(ws.project!.projectId).toBe(originalProjectId);
     expect(runtimeSub.isCloudEnabled).toBe(false);
   });
@@ -632,6 +634,7 @@ describe("Production Runtime Composition & Credential Security", () => {
     });
 
     await runtime.onWorkspaceReady(ws);
+    await runtime.sync();
 
     // Verify composed runtime/onWorkspaceReady path reached /v1/projects and authenticated /v1/catalog/snapshot separately
     expect(recordedRequests.length).toBeGreaterThanOrEqual(2);
@@ -864,8 +867,8 @@ describe("Production Runtime Composition & Credential Security", () => {
       expect(runtime.isCloudEnabled).toBe(true);
 
       await runtime.onWorkspaceReady(ws);
+      await runtime.sync();
       await runtime.stop();
-
       const lock = new ProjectLockManager({
         lockPath: ws.lockPath!,
         projectId: ws.projectId,
