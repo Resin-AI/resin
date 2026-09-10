@@ -1,5 +1,5 @@
 import { hashCanonicalContent } from "@resin/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LocalDatabaseConnection } from "../src/connection.js";
 import {
   BUILT_IN_MIGRATIONS,
@@ -84,6 +84,87 @@ describe("MigrationRunner", () => {
     expect(secondRun.appliedVersions).toHaveLength(0);
     expect(secondRun.initialVersion).toBe(3);
     expect(secondRun.targetVersion).toBe(3);
+    conn.close();
+  });
+
+  it("runs full integrity check twice when new migrations are applied", async () => {
+    const conn = new LocalDatabaseConnection({ inMemory: true });
+    conn.open();
+    const integrityCheckSpy = vi.spyOn(conn, "integrityCheck");
+
+    const runner = new MigrationRunner(conn);
+    const result = await runner.migrate();
+
+    expect(integrityCheckSpy).toHaveBeenCalledTimes(2);
+    expect(result.appliedVersions).toEqual([1, 2, 3]);
+    expect(result.integrityOk).toBe(true);
+    conn.close();
+  });
+
+  it("runs full integrity check once on an already-current database and returns integrityOk true with empty appliedVersions", async () => {
+    const conn = new LocalDatabaseConnection({ inMemory: true });
+    conn.open();
+
+    const runner = new MigrationRunner(conn);
+    await runner.migrate();
+
+    const integrityCheckSpy = vi.spyOn(conn, "integrityCheck");
+    const result = await runner.migrate();
+
+    expect(integrityCheckSpy).toHaveBeenCalledTimes(1);
+    expect(result.appliedVersions).toEqual([]);
+    expect(result.integrityOk).toBe(true);
+    expect(result.initialVersion).toBe(3);
+    expect(result.targetVersion).toBe(3);
+    conn.close();
+  });
+
+  it("rejects failed pre-migration integrity check on no-op migration", async () => {
+    const conn = new LocalDatabaseConnection({ inMemory: true });
+    conn.open();
+
+    const runner = new MigrationRunner(conn);
+    await runner.migrate();
+
+    vi.spyOn(conn, "integrityCheck").mockReturnValue({
+      ok: false,
+      details: ["malformed database schema"],
+    });
+
+    let thrownError: unknown;
+    try {
+      await runner.migrate();
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(MigrationIntegrityError);
+    expect((thrownError as Error).message).toMatch(
+      /Pre-migration integrity check failed: malformed database schema/,
+    );
+    conn.close();
+  });
+
+  it("rejects failed post-migration integrity check when applying migrations", async () => {
+    const conn = new LocalDatabaseConnection({ inMemory: true });
+    conn.open();
+
+    vi.spyOn(conn, "integrityCheck")
+      .mockReturnValueOnce({ ok: true, details: ["ok"] })
+      .mockReturnValueOnce({ ok: false, details: ["corrupted index detected"] });
+
+    const runner = new MigrationRunner(conn);
+    let thrownError: unknown;
+    try {
+      await runner.migrate();
+    } catch (error) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(MigrationIntegrityError);
+    expect((thrownError as Error).message).toMatch(
+      /Post-migration integrity check failed: corrupted index detected/,
+    );
     conn.close();
   });
 
