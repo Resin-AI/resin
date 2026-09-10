@@ -35,8 +35,38 @@ describe("resin mcp command", () => {
     });
     expect(help).toContain("--enable-tool-search");
     expect(help).toContain("disabled by default");
+    expect(help).toContain("--full-catalog");
+    expect(help).toContain("--cwd");
   });
 
+  it("parses full catalog opt-out", () => {
+    expect(parseMcpArgs([]).fullCatalog).toBe(false);
+    expect(parseMcpArgs(["--full-catalog"]).fullCatalog).toBe(true);
+  });
+
+  it("preserves --cwd across arguments parsing and propagates to shim", async () => {
+    expect(parseMcpArgs(["--cwd", "/custom/work/dir"]).cwd).toBe("/custom/work/dir");
+    expect(parseMcpArgs(["-C", "/short/work/dir"]).cwd).toBe("/short/work/dir");
+    await expect(
+      mcpCommand(["--cwd", "/custom/work/dir"], {
+        shimFactory: (options) => {
+          expect(options.cwd).toBe("/custom/work/dir");
+          return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
+        },
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it.each([false, true])("propagates fullCatalog=%s to the shim", async (full) => {
+    await expect(
+      mcpCommand(full ? ["--full-catalog"] : [], {
+        shimFactory: (options) => {
+          expect(options.fullCatalog).toBe(full);
+          return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
+        },
+      }),
+    ).resolves.toBe(0);
+  });
   it.each([false, true])("propagates enableToolSearch=%s to the shim", async (enabled) => {
     await expect(
       mcpCommand(enabled ? ["--enable-tool-search"] : [], {

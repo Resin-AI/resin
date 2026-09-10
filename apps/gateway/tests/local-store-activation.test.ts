@@ -9,6 +9,7 @@ import { LocalDatabaseConnection, MigrationRunner, ToolRepository } from "@resin
 import { ArtifactCache } from "@resin/runtime";
 import { describe, expect, it } from "vitest";
 import { LocalMcpGateway } from "../src/gateway.js";
+import { McpFrameDecoder } from "../src/protocol/framing.js";
 import type {
   CallToolResult,
   JsonRpcNotification,
@@ -327,72 +328,100 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
     }
   });
 
-  it("serves published tools in standalone McpStdioShim when backed by local store", async () => {
-    const { conn, toolRepo } = await setupTestDb();
+  it.each([false, true])(
+    "serves locally published tools with fullCatalog=%s",
+    async (fullCatalog) => {
+      const { conn, toolRepo } = await setupTestDb();
 
-    const { manifest, toolVersion } = makeEvolvedTool("standalone_evolved_tool");
-    await toolRepo.saveManifest(manifest);
-    await toolRepo.saveToolVersion(toolVersion);
+      const { manifest, toolVersion } = makeEvolvedTool("standalone_evolved_tool");
+      await toolRepo.saveManifest(manifest);
+      await toolRepo.saveToolVersion(toolVersion);
 
-    const stdin = new stream.PassThrough();
-    const stdout = new stream.PassThrough();
-    const stderr = new stream.PassThrough();
+      const stdin = new stream.PassThrough();
+      const stdout = new stream.PassThrough();
+      const stderr = new stream.PassThrough();
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-local-store-shim-"));
-    const shim = new McpStdioShim({
-      standaloneFallback: true,
-      db: conn,
-      maxStartupAttempts: 0,
-      cwd: tmpDir,
-      stdin,
-      stdout,
-      stderr,
-    });
-
-    try {
-      const status = await shim.start();
-      expect(status.mode).toBe("standalone_inprocess");
-
-      let receivedData = "";
-      const { promise: listReceived, resolve: resolveList } = withResolvers<void>();
-      stdout.on("data", (chunk) => {
-        const text = chunk.toString("utf8");
-        receivedData += text;
-        if (receivedData.includes("standalone_evolved_tool")) {
-          resolveList();
-        }
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-local-store-shim-"));
+      const shim = new McpStdioShim({
+        standaloneFallback: true,
+        fullCatalog,
+        db: conn,
+        maxStartupAttempts: 0,
+        cwd: tmpDir,
+        stdin,
+        stdout,
+        stderr,
       });
 
-      // Send initialize with explicit isolated rootUri
-      const initReq: JsonRpcRequest = {
-        jsonrpc: "2.0",
-        id: "init_1",
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          clientInfo: { name: "test-harness", version: "1.0.0" },
-          capabilities: {},
-          rootUri: pathToFileURL(tmpDir).href,
-        },
-      };
-      stdin.write(`${JSON.stringify(initReq)}\n`);
+      try {
+        const status = await shim.start();
+        expect(status.mode).toBe("standalone_inprocess");
 
-      // Send tools/list
-      const listReq: JsonRpcRequest = {
-        jsonrpc: "2.0",
-        id: "list_1",
-        method: "tools/list",
-        params: {},
-      };
-      stdin.write(`${JSON.stringify(listReq)}\n`);
+        const decoder = new McpFrameDecoder();
+        const { promise: listReceived, resolve: resolveList } =
+          withResolvers<JsonRpcSuccessResponse<ListToolsResult>>();
+        const { promise: callReceived, resolve: resolveCall } =
+          withResolvers<JsonRpcSuccessResponse<CallToolResult>>();
+        stdout.on("data", (chunk) => {
+          for (const message of decoder.push(chunk)) {
+            if ("method" in message) continue;
+            if (message.id === "list_1") {
+              resolveList(message as JsonRpcSuccessResponse<ListToolsResult>);
+            } else if (message.id === "call_1") {
+              resolveCall(message as JsonRpcSuccessResponse<CallToolResult>);
+            }
+          }
+        });
 
-      await listReceived;
+        // Send initialize with explicit isolated rootUri
+        const initReq: JsonRpcRequest = {
+          jsonrpc: "2.0",
+          id: "init_1",
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            clientInfo: { name: "test-harness", version: "1.0.0" },
+            capabilities: {},
+            rootUri: pathToFileURL(tmpDir).href,
+          },
+        };
+        stdin.write(`${JSON.stringify(initReq)}\n`);
 
-      expect(receivedData).toContain("standalone_evolved_tool");
-      expect(receivedData).toContain("invoke_tool");
-    } finally {
-      await shim.stop();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+        // Send tools/list
+        const listReq: JsonRpcRequest = {
+          jsonrpc: "2.0",
+          id: "list_1",
+          method: "tools/list",
+          params: {},
+        };
+        stdin.write(`${JSON.stringify(listReq)}\n`);
+
+        const listResponse = await listReceived;
+        expect(listResponse.error).toBeUndefined();
+        const names = listResponse.result.tools.map((tool) => tool.name);
+        expect(names.includes("standalone_evolved_tool")).toBe(fullCatalog);
+        expect(names).toContain("invoke_tool");
+
+        // Hiding native descriptors must never disable a hydrated published tool.
+        stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: "call_1",
+            method: "tools/call",
+            params: { name: "standalone_evolved_tool", arguments: { query: "\\d+" } },
+          })}\n`,
+        );
+        const callResponse = await callReceived;
+        expect(callResponse.error).toBeUndefined();
+        expect(callResponse.result.isError).not.toBe(true);
+        expect(JSON.parse(callResponse.result.content[0].text)).toMatchObject({
+          status: "executed",
+          tool: "standalone_evolved_tool",
+        });
+      } finally {
+        await shim.stop();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

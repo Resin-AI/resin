@@ -244,7 +244,7 @@ const MANAGE_TOOLS_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.MANAGE_TOOLS,
   version: "1.0.0",
   description:
-    'Discovers tools in the current live registry as well as managing tool state. When search_tools is unavailable, use read-only workspace discovery with {"action":"list_versions","scope":"workspace"} and omit toolId, name, and tool_name; returns accessible tool identifiers, versions, pinning, and isDisabled. Inspect a matching enabled tool with get_tool_schema, then call invoke_tool even if the native catalog is stale. State-changing actions (pin, unpin, disable, enable, rollback, clear_override) are not needed for discovery and should only be used when requested.',
+    'Discovers tools in the current live registry as well as managing tool state. When search_tools is unavailable, use read-only workspace discovery with {"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"} and omit toolId, name, and tool_name; returns accessible tool identifiers, versions, pinning, and isDisabled. Reuse known IDs and schemas until delta notices report changes. Inspect a matching enabled tool with get_tool_schema, then call invoke_tool even if the native catalog is stale. State-changing actions (pin, unpin, disable, enable, rollback, clear_override) are not needed for discovery and should only be used when requested.',
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -280,6 +280,40 @@ const MANAGE_TOOLS_RAW: ToolManifest = {
         type: "string",
         enum: ["session", "workspace", "account", "system"],
         description: "Target scope hierarchy for the action. Defaults to workspace.",
+      },
+      compact: {
+        type: "boolean",
+        description:
+          "Optional boolean. When true, returns compact active tool summaries with bounded descriptions. Defaults to false (legacy full version inventory) unless query, limit, offset, or includeDisabled are specified.",
+      },
+      query: {
+        type: "string",
+        description:
+          "Optional case-insensitive keyword filter against tool names, IDs, and descriptions for list_versions discovery.",
+      },
+      limit: {
+        type: "integer",
+        description:
+          "Maximum number of tools to return in compact list_versions discovery (default: 20, max: 100).",
+        minimum: 1,
+        maximum: 100,
+      },
+      offset: {
+        type: "integer",
+        description:
+          "Number of tools to skip for pagination in compact list_versions discovery (default: 0).",
+        minimum: 0,
+      },
+      includeDisabled: {
+        type: "boolean",
+        description:
+          "Whether to include disabled tools in compact list_versions discovery (default: false).",
+      },
+      excludeToolIds: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional array of tool identifiers to exclude from compact list_versions discovery before sort and pagination.",
       },
     },
     required: ["action"],

@@ -128,20 +128,16 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
             .parse(response.result)
             .tools.map((tool) => tool.name);
           expect(tools.includes("search_tools")).toBe(searchable);
-          expect(tools.includes("sys_search_tools")).toBe(searchable && !codexClient);
           expect(tools).toContain("get_tool_schema");
           expect(tools).toContain("invoke_tool");
-          if (codexClient) {
-            expect(tools.sort()).toEqual([
-              "get_tool_schema",
-              "invoke_tool",
-              "manage_tools",
-              "search_tools",
-            ]);
-          } else {
-            expect(tools).toContain("echo");
-            if (refresh === 1) expect(tools).toContain("fresh_generated_tool");
-          }
+          expect(tools).toContain("manage_tools");
+          expect(tools.sort()).toEqual(
+            searchable
+              ? ["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]
+              : ["get_tool_schema", "invoke_tool", "manage_tools"],
+          );
+          expect(tools).not.toContain("echo");
+          expect(tools).not.toContain("fresh_generated_tool");
           router.registerTool(
             { name: "fresh_generated_tool", inputSchema: { type: "object" } },
             async () => ({ content: [] }),
@@ -227,9 +223,12 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
   );
 });
 
-function createSurfaceClient(enableSearch = false) {
+function createSurfaceClient(
+  enableSearch: boolean | { enableSearch?: boolean; fullCatalog?: boolean } = false,
+  fullCatalog = false,
+) {
   const output = new PassThrough();
-  const surface = createToolSearchSurface(output, enableSearch);
+  const surface = createToolSearchSurface(output, enableSearch, fullCatalog);
   const forwarded: JsonRpcMessage[] = [];
   const received: JsonRpcMessage[] = [];
   const inputDecoder = new McpFrameDecoder();

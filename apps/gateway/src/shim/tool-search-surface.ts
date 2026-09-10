@@ -74,22 +74,47 @@ function targetsSearch(name: unknown, args: unknown): boolean {
 
 type MetadataCallType = "list_versions" | "status" | "get_tool_schema";
 
-function classifyMetadataCall(name: unknown, args: unknown): MetadataCallType | undefined {
+interface PendingMetadataCall {
+  type: MetadataCallType;
+  includeDisabled?: boolean;
+  compact?: boolean;
+}
+
+function classifyMetadataCall(name: unknown, args: unknown): PendingMetadataCall | undefined {
   const resolved = resolveTargetCall(name, args);
   if (!resolved) return undefined;
-  if (["get_tool_schema", "sys_get_tool_schema"].includes(resolved.targetTool)) {
-    return "get_tool_schema";
+  const target = resolved.targetTool;
+  if (["get_tool_schema", "sys_get_tool_schema"].includes(target)) {
+    return { type: "get_tool_schema" };
   }
-  if (["manage_tools", "sys_manage_tools"].includes(resolved.targetTool)) {
+  if (["manage_tools", "sys_manage_tools"].includes(target)) {
     const action = resolved.targetArgs?.action;
-    if (action === "list_versions" || action === "status") return action;
+    if (action === "status") {
+      return { type: "status" };
+    }
+    if (action === "list_versions") {
+      const a = resolved.targetArgs;
+      const compact =
+        a?.compact === true ||
+        (a?.compact !== false &&
+          (a?.query !== undefined ||
+            a?.limit !== undefined ||
+            a?.offset !== undefined ||
+            a?.includeDisabled !== undefined ||
+            a?.excludeToolIds !== undefined));
+      return {
+        type: "list_versions",
+        includeDisabled: a?.includeDisabled === true,
+        compact,
+      };
+    }
   }
   return undefined;
 }
 
 function transformMetadataResult(
   message: JsonRpcMessage,
-  callType: MetadataCallType,
+  pending: PendingMetadataCall,
 ): JsonRpcMessage {
   if (!("result" in message) || message.error !== undefined) return message;
   const result = record(message.result);
@@ -110,27 +135,56 @@ function transformMetadataResult(
     const payload = record(JSON.parse(firstContent.text));
     if (!payload) return message;
     let changed = false;
-    const markDisabled = (value: unknown) => {
-      const tool = record(value);
-      if (!tool || !(isSearch(tool.toolId) || isSearch(tool.name))) return;
-      tool.isDisabled = true;
-      tool.disabledReason = CONNECTION_DISABLED_SEARCH_REASON;
-      if (callType === "list_versions" && Array.isArray(tool.installedVersions)) {
-        for (const version of tool.installedVersions) {
-          const entry = record(version);
-          if (entry) entry.isActive = false;
+
+    const isCompact =
+      pending.type === "list_versions" &&
+      (pending.compact || ("total" in payload && typeof payload.total === "number"));
+
+    if (pending.type === "list_versions" && Array.isArray(payload.tools)) {
+      if (isCompact) {
+        if (pending.includeDisabled) {
+          for (const item of payload.tools) {
+            const tool = record(item);
+            if (tool && (isSearch(tool.toolId) || isSearch(tool.name))) {
+              tool.isDisabled = true;
+              tool.disabledReason = CONNECTION_DISABLED_SEARCH_REASON;
+              changed = true;
+            }
+          }
+        }
+      } else {
+        for (const item of payload.tools) {
+          const tool = record(item);
+          if (tool && (isSearch(tool.toolId) || isSearch(tool.name))) {
+            tool.isDisabled = true;
+            tool.disabledReason = CONNECTION_DISABLED_SEARCH_REASON;
+            if (Array.isArray(tool.installedVersions)) {
+              for (const version of tool.installedVersions) {
+                const entry = record(version);
+                if (entry) entry.isActive = false;
+              }
+            }
+            changed = true;
+          }
         }
       }
-      changed = true;
-    };
-    // Use the resolved response identity, not the request's competing identifier aliases.
-    // Preserve lifecycle status: availability is a connection-local override only.
-    if (callType === "list_versions" && Array.isArray(payload.tools)) {
-      for (const tool of payload.tools) markDisabled(tool);
     } else {
-      markDisabled(payload);
+      if (isSearch(payload.toolId) || isSearch(payload.name)) {
+        payload.isDisabled = true;
+        payload.disabledReason = CONNECTION_DISABLED_SEARCH_REASON;
+        if (pending.type === "list_versions" && Array.isArray(payload.installedVersions)) {
+          for (const version of payload.installedVersions) {
+            const entry = record(version);
+            if (entry) entry.isActive = false;
+          }
+        }
+        changed = true;
+      }
     }
+
     if (!changed) return message;
+
+    const text = isCompact ? JSON.stringify(payload) : JSON.stringify(payload, null, 2);
 
     return {
       ...message,
@@ -139,7 +193,7 @@ function transformMetadataResult(
         content: [
           {
             ...firstContent,
-            text: JSON.stringify(payload, null, 2),
+            text,
           },
           ...result.content.slice(1),
         ],
@@ -155,14 +209,28 @@ export interface ToolSearchSurface {
   output: Transform;
 }
 
+export interface ToolSearchSurfaceOptions {
+  enableSearch?: boolean;
+  fullCatalog?: boolean;
+}
+
 /** A per-stdio-client view. Never mutates the daemon's shared catalog. */
 export function createToolSearchSurface(
   output: NodeJS.WritableStream,
-  enableSearch = false,
+  optionsOrEnableSearch: boolean | ToolSearchSurfaceOptions = false,
+  fullCatalogLegacy = false,
 ): ToolSearchSurface {
+  const enableSearch =
+    typeof optionsOrEnableSearch === "boolean"
+      ? optionsOrEnableSearch
+      : (optionsOrEnableSearch?.enableSearch ?? false);
+  const fullCatalog =
+    typeof optionsOrEnableSearch === "boolean"
+      ? fullCatalogLegacy
+      : (optionsOrEnableSearch?.fullCatalog ?? fullCatalogLegacy);
   const lists = new Set<JsonRpcId>();
   const initializeIds = new Set<JsonRpcId>();
-  const pendingMetadataCalls = new Map<JsonRpcId, MetadataCallType>();
+  const pendingMetadataCalls = new Map<JsonRpcId, PendingMetadataCall>();
   let clientIdentified = false;
   let codexClient = false;
   let searchEnabled = enableSearch;
@@ -234,9 +302,25 @@ export function createToolSearchSurface(
         "id" in message &&
         message.id !== null
       ) {
-        const metaType = classifyMetadataCall(message.params?.name, message.params?.arguments);
-        if (metaType) {
-          pendingMetadataCalls.set(message.id, metaType);
+        const pending = classifyMetadataCall(message.params?.name, message.params?.arguments);
+        if (pending) {
+          pendingMetadataCalls.set(message.id, pending);
+          if (pending.type === "list_versions" && pending.compact && !pending.includeDisabled) {
+            const resolved = resolveTargetCall(message.params?.name, message.params?.arguments);
+            if (resolved?.targetArgs) {
+              const currentExclude = resolved.targetArgs.excludeToolIds;
+              if (currentExclude === undefined) {
+                resolved.targetArgs.excludeToolIds = ["sys_search_tools", "search_tools"];
+              } else if (
+                Array.isArray(currentExclude) &&
+                currentExclude.every((id: unknown) => typeof id === "string")
+              ) {
+                resolved.targetArgs.excludeToolIds = Array.from(
+                  new Set([...currentExclude, "sys_search_tools", "search_tools"]),
+                );
+              }
+            }
+          }
         }
       }
       if (message.method === "tools/list" && "id" in message) lists.add(message.id);
@@ -263,12 +347,12 @@ export function createToolSearchSurface(
             }
           }
         }
-        const metaType = pendingMetadataCalls.get(message.id);
-        if (metaType) {
+        const pending = pendingMetadataCalls.get(message.id);
+        if (pending) {
           pendingMetadataCalls.delete(message.id);
-          return transformMetadataResult(message, metaType);
+          return transformMetadataResult(message, pending);
         }
-        if (lists.delete(message.id) && "result" in message && (codexClient || !searchEnabled)) {
+        if (lists.delete(message.id) && "result" in message) {
           const result = record(message.result);
           if (result && Array.isArray(result.tools))
             return {
@@ -278,14 +362,19 @@ export function createToolSearchSurface(
                 ...result,
                 tools: result.tools.filter((tool) => {
                   const name = record(tool)?.name;
-                  if (!codexClient) return !isSearch(name);
-                  // A stable facade keeps discovery live without caching individual tools.
-                  return (
-                    name === "search_tools" ||
+                  if (typeof name !== "string") return false;
+                  if (fullCatalog) {
+                    return searchEnabled ? true : !isSearch(name);
+                  }
+                  // Stable facade exposes system meta tools only
+                  if (
                     name === "get_tool_schema" ||
                     name === "invoke_tool" ||
                     name === "manage_tools"
-                  );
+                  ) {
+                    return true;
+                  }
+                  return searchEnabled && name === "search_tools";
                 }),
               },
             };

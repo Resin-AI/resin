@@ -35,6 +35,7 @@ export interface McpCommandFlags {
   standaloneMode: boolean;
   standaloneFallback: boolean;
   enableToolSearch: boolean;
+  fullCatalog: boolean;
   socketPath?: string;
   cwd?: string;
   harnessId?: string;
@@ -51,6 +52,7 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
   let dbPath: string | undefined;
   let showHelp = false;
   let enableToolSearch = false;
+  let fullCatalog = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -58,6 +60,8 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
       showHelp = true;
     } else if (arg === "--enable-tool-search") {
       enableToolSearch = true;
+    } else if (arg === "--full-catalog") {
+      fullCatalog = true;
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -106,6 +110,7 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
     standaloneMode,
     standaloneFallback,
     enableToolSearch,
+    fullCatalog,
     socketPath,
     cwd,
     harnessId,
@@ -127,6 +132,7 @@ Options:
   -s, --standalone       Run the in-process MCP gateway (default)
   --no-standalone        Require a daemon socket connection
   --enable-tool-search  Expose search_tools (disabled by default)
+  --full-catalog        Expose full native tool catalog instead of stable facade
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -165,6 +171,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
   const shimOptions: McpStdioShimOptions = {
     standaloneFallback: parsedArgs.standaloneFallback,
     enableToolSearch: parsedArgs.enableToolSearch,
+    fullCatalog: parsedArgs.fullCatalog,
     db: parsedArgs.dbPath ? new LocalDatabaseConnection({ path: parsedArgs.dbPath }) : undefined,
     socketPath: parsedArgs.standaloneMode && !parsedArgs.socketPath ? "" : parsedArgs.socketPath,
     cwd: parsedArgs.cwd,
