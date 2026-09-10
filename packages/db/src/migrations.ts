@@ -507,7 +507,8 @@ export class MigrationRunner {
       newlyApplied.push(migration.version);
     }
 
-    const postCheck = this.conn.integrityCheck();
+    // Unchanged schemas already passed the full precheck; real migrations still receive post-validation.
+    const postCheck = newlyApplied.length > 0 ? this.conn.integrityCheck() : preCheck;
     if (!postCheck.ok) {
       throw new MigrationIntegrityError(
         `Post-migration integrity check failed: ${postCheck.details.join("; ")}`,
