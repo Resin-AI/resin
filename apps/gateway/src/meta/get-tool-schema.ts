@@ -6,6 +6,7 @@ import type {
 } from "@resin/contracts";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
+import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { isToolInScope } from "./search-tools.js";
@@ -77,11 +78,15 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
 
     const controls = await registry.controls.getControls(context.workspaceId);
 
-    // Look up installed tools matching the identifier
+    // Use the same scoped name resolver as invocation, including catalog collision aliases.
+    // Installed-version fallback preserves metadata inspection for disabled tools.
+    const canonicalTool = await registry.getTool(trimmedId, context.workspaceId, context.sessionId);
     const allInstalled = registry.getAllRegisteredTools();
     const matchingTools = allInstalled.filter(
       (t) =>
-        (t.toolId === trimmedId || t.name === trimmedId || t.exposedName === trimmedId) &&
+        (canonicalTool
+          ? t.toolId === canonicalTool.toolId
+          : t.toolId === trimmedId || t.name === trimmedId || t.exposedName === trimmedId) &&
         isToolInScope(t, context),
     );
 
@@ -98,7 +103,7 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
     }
 
     // Resolve target version
-    let resolvedTool = matchingTools[0];
+    let resolvedTool = canonicalTool ?? matchingTools[0];
     if (requestedVersion) {
       const byVersion = matchingTools.find((t) => t.version === requestedVersion);
       if (!byVersion) {
@@ -113,7 +118,7 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
         };
       }
       resolvedTool = byVersion;
-    } else {
+    } else if (!canonicalTool) {
       // Check if pinned
       const pinnedVer = controls.pinnedVersions[resolvedTool.toolId];
       if (pinnedVer) {
@@ -209,9 +214,16 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
           : undefined,
       evolutionCycle: Number.isFinite(evolutionCycleRaw) ? Number(evolutionCycleRaw) : undefined,
     };
+    const catalog = canonicalTool
+      ? await registry.resolveCatalog(context.workspaceId, context.sessionId)
+      : undefined;
+    // SAFETY: Registry catalogs carrying entries are CatalogSnapshotRecord instances.
+    const catalogRecord =
+      catalog && "entries" in catalog ? (catalog as CatalogSnapshotRecord) : undefined;
+    const catalogEntry = catalogRecord?.entries?.[resolvedTool.toolId];
     const response: GetToolSchemaResponse = {
       toolId: resolvedTool.toolId,
-      name: resolvedTool.exposedName || resolvedTool.name,
+      name: catalogEntry?.exposedName || resolvedTool.exposedName || resolvedTool.name,
       version: resolvedTool.version,
       scope: resolvedTool.scope ?? "workspace",
       status: isDisabled ? "disabled" : resolvedTool.status || "active",

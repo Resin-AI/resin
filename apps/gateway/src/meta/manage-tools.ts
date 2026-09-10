@@ -2,6 +2,7 @@ import type { ProductionSafetyGateStatus } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
+import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { isToolInScope } from "./search-tools.js";
@@ -23,6 +24,12 @@ export interface ManageToolsParams {
   tool_name?: string;
   version?: string;
   scope?: "session" | "workspace" | "account" | "system";
+  compact?: boolean;
+  query?: string;
+  limit?: number;
+  offset?: number;
+  includeDisabled?: boolean;
+  excludeToolIds?: string[];
 }
 
 /**
@@ -85,6 +92,61 @@ export function createManageToolsHandler(
 
     switch (action) {
       case "list_versions": {
+        if (params.compact !== undefined && typeof params.compact !== "boolean") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Parameter 'compact' must be a boolean." }],
+          };
+        }
+        if (params.query !== undefined && typeof params.query !== "string") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Parameter 'query' must be a string." }],
+          };
+        }
+        if (
+          params.limit !== undefined &&
+          (typeof params.limit !== "number" ||
+            !Number.isInteger(params.limit) ||
+            params.limit < 1 ||
+            params.limit > 100)
+        ) {
+          return {
+            isError: true,
+            content: [
+              { type: "text", text: "Parameter 'limit' must be an integer between 1 and 100." },
+            ],
+          };
+        }
+        if (
+          params.offset !== undefined &&
+          (typeof params.offset !== "number" ||
+            !Number.isInteger(params.offset) ||
+            params.offset < 0)
+        ) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Parameter 'offset' must be a non-negative integer." }],
+          };
+        }
+        if (params.includeDisabled !== undefined && typeof params.includeDisabled !== "boolean") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Parameter 'includeDisabled' must be a boolean." }],
+          };
+        }
+        if (
+          params.excludeToolIds !== undefined &&
+          (!Array.isArray(params.excludeToolIds) ||
+            !params.excludeToolIds.every((id: unknown) => typeof id === "string"))
+        ) {
+          return {
+            isError: true,
+            content: [
+              { type: "text", text: "Parameter 'excludeToolIds' must be an array of strings." },
+            ],
+          };
+        }
         const allInstalled = registry.getAllRegisteredTools();
 
         if (toolId) {
@@ -141,6 +203,14 @@ export function createManageToolsHandler(
           };
         }
 
+        const isCompact =
+          params.compact === true ||
+          (params.compact !== false &&
+            (params.query !== undefined ||
+              params.limit !== undefined ||
+              params.offset !== undefined ||
+              params.includeDisabled !== undefined ||
+              params.excludeToolIds !== undefined));
         // List all tools and their installed versions
         const grouped = new Map<string, typeof allInstalled>();
         for (const t of allInstalled) {
@@ -150,24 +220,186 @@ export function createManageToolsHandler(
           grouped.set(t.toolId, list);
         }
 
-        const resultTools = Array.from(grouped.entries()).map(([tid, toolList]) => {
-          const pinnedVer = controls.pinnedVersions[tid];
-          const isDisabled = controls.disabledTools.includes(tid) && !toolList[0].isSystem;
+        if (!isCompact) {
+          const resultTools = Array.from(grouped.entries()).map(([tid, toolList]) => {
+            const pinnedVer = controls.pinnedVersions[tid];
+            const isDisabled = controls.disabledTools.includes(tid) && !toolList[0].isSystem;
+            return {
+              toolId: tid,
+              name: toolList[0].exposedName || toolList[0].name,
+              scope: toolList[0].scope ?? "workspace",
+              pinnedVersion: pinnedVer,
+              isDisabled,
+              versions: toolList.map((t) => t.version),
+            };
+          });
+
           return {
-            toolId: tid,
-            name: toolList[0].exposedName || toolList[0].name,
-            scope: toolList[0].scope ?? "workspace",
-            pinnedVersion: pinnedVer,
-            isDisabled,
-            versions: toolList.map((t) => t.version),
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ tools: resultTools }, null, 2),
+              },
+            ],
           };
-        });
+        }
+        const limit = typeof params.limit === "number" ? params.limit : 20;
+        const offset = typeof params.offset === "number" ? params.offset : 0;
+        const includeDisabled = params.includeDisabled === true;
+        const query =
+          typeof params.query === "string" ? params.query.trim().toLowerCase() : undefined;
+        const excludeSet = new Set(
+          Array.isArray(params.excludeToolIds) ? params.excludeToolIds : [],
+        );
+        // Derive active summaries from ONE registry.resolveCatalog(workspaceId, sessionId)
+        const snapshot = await registry.resolveCatalog(workspaceId, context.sessionId);
+        const snapshotRecord =
+          "entries" in snapshot && snapshot.entries && typeof snapshot.entries === "object"
+            ? (snapshot as CatalogSnapshotRecord)
+            : undefined;
+
+        interface CompactToolSummary {
+          toolId: string;
+          name: string;
+          scope: string;
+          version: string;
+          description: string;
+          isDisabled: boolean;
+        }
+
+        const summaries: CompactToolSummary[] = [];
+        const seenToolIds = new Set<string>();
+
+        // Scoped registered tools to join by exact id/version for description and fallback exposedName
+        const scopedTools = allInstalled.filter((t) => isToolInScope(t, context));
+        const toolByIdAndVer = new Map<string, (typeof allInstalled)[number]>();
+        for (const t of scopedTools) {
+          toolByIdAndVer.set(`${t.toolId}:${t.version}`, t);
+        }
+
+        // Iterate Object.entries(snapshot.tools) for active summary version/toolId
+        for (const [toolId, summary] of Object.entries(snapshot.tools)) {
+          const matchedTool = toolByIdAndVer.get(`${summary.toolId}:${summary.version}`);
+          const catalogEntry = snapshotRecord?.entries?.[summary.toolId];
+          const exposedName =
+            catalogEntry?.exposedName ||
+            matchedTool?.exposedName ||
+            matchedTool?.name ||
+            summary.toolId;
+
+          if (
+            excludeSet.has(summary.toolId) ||
+            excludeSet.has(toolId) ||
+            (exposedName && excludeSet.has(exposedName))
+          ) {
+            continue;
+          }
+
+          seenToolIds.add(summary.toolId);
+          seenToolIds.add(toolId);
+          if (exposedName) seenToolIds.add(exposedName);
+
+          const toolDesc =
+            catalogEntry?.manifest?.description ||
+            matchedTool?.manifest?.description ||
+            matchedTool?.description ||
+            "";
+
+          if (query) {
+            const matchesId =
+              summary.toolId.toLowerCase().includes(query) || toolId.toLowerCase().includes(query);
+            const matchesName =
+              exposedName.toLowerCase().includes(query) ||
+              (matchedTool ? matchedTool.name.toLowerCase().includes(query) : false);
+            const matchesDesc = toolDesc.toLowerCase().includes(query);
+            if (!matchesId && !matchesName && !matchesDesc) {
+              continue;
+            }
+          }
+
+          const description = toolDesc.length > 160 ? toolDesc.slice(0, 160) : toolDesc;
+
+          summaries.push({
+            toolId: summary.toolId,
+            name: exposedName,
+            scope: summary.scope,
+            version: summary.version,
+            description,
+            isDisabled: false,
+          });
+        }
+
+        // includeDisabled may append inaccessible-by-policy registered scoped tools marked disabled,
+        // never label unavailable versions active
+        if (includeDisabled) {
+          const disabledGrouped = new Map<string, typeof allInstalled>();
+          for (const t of scopedTools) {
+            if (seenToolIds.has(t.toolId)) continue;
+            if (
+              excludeSet.has(t.toolId) ||
+              excludeSet.has(t.name) ||
+              (t.exposedName && excludeSet.has(t.exposedName))
+            ) {
+              continue;
+            }
+            const list = disabledGrouped.get(t.toolId) ?? [];
+            list.push(t);
+            disabledGrouped.set(t.toolId, list);
+          }
+
+          for (const [tid, list] of disabledGrouped.entries()) {
+            const pinnedVer = controls.pinnedVersions[tid];
+            const repTool =
+              (pinnedVer ? list.find((t) => t.version === pinnedVer) : undefined) ??
+              list[list.length - 1];
+            if (!repTool) continue;
+
+            const toolName = repTool.exposedName || repTool.name;
+            const toolDesc = repTool.manifest?.description || repTool.description || "";
+
+            if (query) {
+              const matchesId = tid.toLowerCase().includes(query);
+              const matchesName =
+                toolName.toLowerCase().includes(query) ||
+                repTool.name.toLowerCase().includes(query);
+              const matchesDesc = toolDesc.toLowerCase().includes(query);
+              if (!matchesId && !matchesName && !matchesDesc) {
+                continue;
+              }
+            }
+
+            const description = toolDesc.length > 160 ? toolDesc.slice(0, 160) : toolDesc;
+            const scope = repTool.scope ?? (repTool.sessionId ? "session" : "workspace");
+
+            summaries.push({
+              toolId: tid,
+              name: toolName,
+              scope,
+              version: repTool.version,
+              description,
+              isDisabled: true,
+            });
+          }
+        }
+
+        // Deterministic stable sort before pagination
+        summaries.sort((a, b) => a.name.localeCompare(b.name) || a.toolId.localeCompare(b.toolId));
+
+        const total = summaries.length;
+        const paginated = summaries.slice(offset, offset + limit);
+        const hasMore = offset + limit < total;
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ tools: resultTools }, null, 2),
+              text: JSON.stringify({
+                tools: paginated,
+                total,
+                limit,
+                offset,
+                hasMore,
+              }),
             },
           ],
         };

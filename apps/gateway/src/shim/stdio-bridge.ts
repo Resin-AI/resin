@@ -19,6 +19,7 @@ export interface McpStdioShimOptions {
   socketPath?: string;
   standaloneFallback?: boolean;
   enableToolSearch?: boolean;
+  fullCatalog?: boolean;
   cwd?: string;
   harnessId?: string;
   maxStartupAttempts?: number;
@@ -242,7 +243,11 @@ export class McpStdioShim {
   }
 
   private prepareTransport(): { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } {
-    this.surface = createToolSearchSurface(this.stdout, this.options.enableToolSearch === true);
+    this.surface = createToolSearchSurface(
+      this.stdout,
+      this.options.enableToolSearch === true,
+      this.options.fullCatalog === true,
+    );
     this.surface.output.pipe(this.stdout, { end: false });
     this.stdin.pipe(this.surface.input);
     return this.surface;

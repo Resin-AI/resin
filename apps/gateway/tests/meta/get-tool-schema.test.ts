@@ -13,8 +13,9 @@ import {
 } from "../../src/meta/get-tool-schema.js";
 import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
-import { computeManifestDigest } from "../../src/registry/validator.js";
+import { computeManifestDigest, computeSha256 } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
+import { makeV1ToolLockFixture } from "../registry/fixtures.js";
 
 function parseResponseJson(result: CallToolResult): GetToolSchemaResponse {
   const first = result.content[0];
@@ -206,6 +207,68 @@ describe("get_tool_schema Meta-Tool", () => {
     const data = parseResponseJson(res);
     expect(data.isDisabled).toBe(true);
     expect(data.status).toBe("disabled");
+  });
+
+  it("defaults to the locked active version while allowing explicit installed-version metadata", async () => {
+    const registry = new ToolRegistry();
+    const handler = createGetToolSchemaHandler(registry);
+    const context = makeContext("ws-schema-lock");
+    const toolId = "550e8400-e29b-41d4-a716-446655440001";
+    const sourceCode = "export default function() { return 'ok'; }";
+    const artifactDigest = computeSha256(sourceCode);
+    const artifact = ToolArtifactSchema.parse({
+      artifactDigest,
+      bundleReference: {
+        uri: `memory://${artifactDigest}`,
+        hash: artifactDigest,
+        sizeBytes: Buffer.byteLength(sourceCode, "utf8"),
+        format: "embedded",
+      },
+      entrypoint: "index.js",
+      sourceCode,
+      checksums: {},
+    });
+    const v1 = makeManifest({ id: toolId, version: "1.0.0" });
+    const v2 = makeManifest({ id: toolId, version: "2.0.0" });
+    await registry.registerTool(v1, artifact, { workspaceId: context.workspaceId });
+    await registry.registerTool(v2, artifact, { workspaceId: context.workspaceId });
+    registry.bindWorkspaceLock(
+      context.workspaceId,
+      makeV1ToolLockFixture({
+        calculator: {
+          toolId,
+          name: "calculator",
+          version: "1.0.0",
+          manifestDigest: v1.digest,
+          artifactDigest,
+          status: "active",
+        },
+      }),
+    );
+
+    const active = await handler(context, { toolId });
+    expect(active.isError, JSON.stringify(active)).toBeFalsy();
+    expect(parseResponseJson(active).version).toBe("1.0.0");
+    const explicit = await handler(context, { toolId, version: "2.0.0" });
+    expect(explicit.isError, JSON.stringify(explicit)).toBeFalsy();
+    expect(parseResponseJson(explicit).version).toBe("2.0.0");
+  });
+
+  it("does not expose another session's tool through canonical or installed-version lookup", async () => {
+    const registry = new ToolRegistry();
+    const handler = createGetToolSchemaHandler(registry);
+    const manifest = makeManifest({ id: "session_private", scope: "session" });
+    await registry.registerTool(manifest, undefined, {
+      workspaceId: "ws-private",
+      sessionId: "ses-owner",
+    });
+    const owner = await handler(makeContext("ws-private", "ses-owner"), { toolId: manifest.id });
+    expect(owner.isError).toBeFalsy();
+    for (const identifier of [{ toolId: manifest.id }, { name: manifest.name, version: "1.0.0" }]) {
+      const other = await handler(makeContext("ws-private", "ses-other"), identifier);
+      expect(other.isError).toBe(true);
+      expect(other.content[0].text).toContain("not found or not accessible");
+    }
   });
 
   it("never leaks raw source code, bundles, or private credentials in schema response", async () => {

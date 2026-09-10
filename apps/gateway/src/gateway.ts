@@ -176,13 +176,14 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
  * and mandating verification of actual task effects.
  */
 export const DEFAULT_GATEWAY_INSTRUCTIONS =
-  "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace). Honor explicit user tool choices and restrictions.\n" +
-  "When a matching tool may exist, search the live registry before using native tools for project work. " +
-  'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
+  "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>). Honor user tool choices.\n" +
+  "Reuse known tool IDs and schemas until delta change notices indicate updates; do not perform repeated full catalog listings.\n" +
+  "When a matching tool may exist, search the live registry with a scoped query before using native tools for project work. " +
+  'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"}), omitting toolId, name, and tool_name. ' +
   "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
   "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
   "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
-  "they do not require or confirm a native catalog refresh. " +
+  "they do not require or confirm a native catalog refresh. Reuse known IDs and schemas until delta notices report changes. " +
   "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
   "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
   "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
@@ -198,12 +199,11 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS =
  * Directs clients to read-only tool discovery using manage_tools instead of search_tools.
  */
 export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS =
-  "Before native project work, use manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool. Native search_tools is disabled for this connection. Honor explicit user tool choices and restrictions.\n" +
-  'When a matching tool may exist, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace"}), omitting toolId, name, and tool_name. ' +
-  "For a matching entry with isDisabled=false, use get_tool_schema with its toolId to inspect its current schema and status, " +
-  "then use invoke_tool with that toolId and schema-valid parameters if it is active and suitable. " +
+  "Before native project work, use manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool. Native search_tools is disabled for this connection. Honor user tool choices.\n" +
+  "Reuse known tool IDs and schemas until delta change notices indicate updates; do not perform repeated full catalog listings.\n" +
+  'When a matching tool may exist, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"}), omitting toolId, name, and tool_name. ' +
   "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +
-  "they do not require or confirm a native catalog refresh. " +
+  "they do not require or confirm a native catalog refresh. Reuse known IDs and schemas until delta notices report changes. " +
   "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
   "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
   "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +

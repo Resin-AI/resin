@@ -40,6 +40,7 @@ Options:
   -s, --standalone       Enable standalone fallback (default)
   --no-standalone        Disable standalone fallback
   --enable-tool-search  Expose search_tools (disabled by default)
+  --full-catalog        Expose full native tool catalog instead of stable facade
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -58,6 +59,7 @@ function parseArgs(args: string[]) {
   let dbPath: string | undefined;
   let showHelp = false;
   let enableToolSearch = false;
+  let fullCatalog = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -65,6 +67,8 @@ function parseArgs(args: string[]) {
       showHelp = true;
     } else if (arg === "--enable-tool-search") {
       enableToolSearch = true;
+    } else if (arg === "--full-catalog") {
+      fullCatalog = true;
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -85,6 +89,7 @@ function parseArgs(args: string[]) {
     standaloneMode,
     standaloneFallback,
     enableToolSearch,
+    fullCatalog,
     socketPath,
     cwd,
     harnessId,
@@ -103,6 +108,7 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const shim = new McpStdioShim({
     standaloneFallback: args.standaloneFallback,
     enableToolSearch: args.enableToolSearch,
+    fullCatalog: args.fullCatalog,
     db: args.dbPath ? new LocalDatabaseConnection({ path: args.dbPath }) : undefined,
     socketPath: args.standaloneMode && !args.socketPath ? "" : args.socketPath,
     cwd: args.cwd,
