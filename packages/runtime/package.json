@@ -26,6 +26,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/worker/sdk.d.ts",
+      "import": "./dist/worker/sdk.js",
+      "default": "./dist/worker/sdk.js"
     }
   },
   "scripts": {
