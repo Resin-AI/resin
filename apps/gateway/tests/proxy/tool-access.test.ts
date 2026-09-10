@@ -1091,4 +1091,273 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     expect(access.isManaged(entry(added))).toBe(true);
     expect(access.isBlocked(entry(added))).toBe(false);
   });
+
+  it("indexes thousands of synthetic receipts and verifies warm target lookups, cross-process denial, failclosed durability, and redundant mkdir elimination", async () => {
+    const target = manifest();
+    access.confirm(confirmation("allowed"));
+    access.record(entry(target));
+
+    const toolsDir = path.join(access.stateDir, "tools");
+    const syntheticOwner = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(["https://cloud.example.test", "account-a"]))
+      .digest("hex");
+    for (let i = 0; i < 1200; i++) {
+      const syntheticToolId = crypto.randomUUID();
+      const syntheticEntry = {
+        toolId: syntheticToolId,
+        name: `synthetic_${i}`,
+        version: "1.0.0",
+        manifestDigest: "0".repeat(64),
+        artifactDigest: "a".repeat(64),
+        status: "active" as const,
+      };
+      const receipt = {
+        owner: syntheticOwner,
+        entry: syntheticEntry,
+      };
+      const fileKey = crypto.createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
+      const receiptPath = path.join(toolsDir, `${fileKey}.json`);
+      fs.writeFileSync(
+        receiptPath,
+        JSON.stringify({
+          ...receipt,
+          activationId: undefined,
+        }),
+      );
+    }
+
+    // Warm discovery with initial query
+    expect(access.isBlocked(entry(target))).toBe(false);
+
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+    const mkdirs = vi.spyOn(fs, "mkdirSync");
+
+    // 5 warm iterations of isBlocked and isManaged for target
+    for (let i = 0; i < 5; i++) {
+      expect(access.isBlocked(entry(target))).toBe(false);
+      expect(access.isManaged(entry(target))).toBe(true);
+    }
+
+    const receiptPrefix = `${toolsDir}${path.sep}`;
+    const targetReads = reads.mock.calls.filter(([file]) => String(file).startsWith(receiptPrefix));
+    // Exactly 1 read per query (5 isBlocked + 5 isManaged = 10 reads)
+    expect(targetReads).toHaveLength(10);
+    const readPaths = new Set(targetReads.map(([f]) => String(f)));
+    // All 10 reads visited the single target receipt path, not the other 1200 synthetic files
+    expect(readPaths.size).toBe(1);
+
+    // Warm directory: 0 readdirSync calls on toolsDir
+    const toolListings = listings.mock.calls.filter(([dir]) => dir === toolsDir);
+    expect(toolListings).toHaveLength(0);
+
+    // Redundant mkdirSync eliminated when DB is already open
+    const stateDirMkdirs = mkdirs.mock.calls.filter(([dir]) => dir === access.stateDir);
+    expect(stateDirMkdirs).toHaveLength(0);
+
+    // Unknown/unmanaged tool lookup on warm directory: 0 file reads and 0 readdir
+    const unknownTool = manifest(crypto.randomUUID(), "unknown");
+    reads.mockClear();
+    expect(access.isManaged(entry(unknownTool))).toBe(false);
+    expect(access.isBlocked(entry(unknownTool))).toBe(false);
+    const unknownReads = reads.mock.calls.filter(([file]) =>
+      String(file).startsWith(receiptPrefix),
+    );
+    expect(unknownReads).toHaveLength(0);
+
+    listings.mockRestore();
+    reads.mockRestore();
+    mkdirs.mockRestore();
+
+    // Live cross-process denial and reactivation observing SQLite immediately
+    const sibling = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    sibling.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(target))).toBe(true);
+    expect(access.isInactive()).toBe(true);
+
+    sibling.confirm(confirmation("allowed"));
+    sibling.record(entry(target));
+    expect(access.isBlocked(entry(target))).toBe(false);
+    expect(access.isInactive()).toBe(false);
+
+    // New receipt / new tuple
+    const newTool = manifest(crypto.randomUUID(), "new_tool");
+    expect(access.isManaged(entry(newTool))).toBe(false);
+    sibling.record(entry(newTool));
+    expect(access.isManaged(entry(newTool))).toBe(true);
+    expect(access.isBlocked(entry(newTool))).toBe(false);
+
+    // Fail-closed provenance on deleted receipt file
+    const targetFile = [...readPaths][0];
+    expect(fs.existsSync(targetFile)).toBe(true);
+    fs.unlinkSync(targetFile);
+    expect(fs.existsSync(targetFile)).toBe(false);
+
+    // Retains known receipt (fail-closed provenance policy)
+    expect(access.isManaged(entry(target))).toBe(true);
+    expect(access.isBlocked(entry(target))).toBe(false);
+
+    // If sibling denies while receipt is deleted, denial is honored immediately
+    sibling.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(target))).toBe(true);
+
+    // Fail-closed provenance on corrupted receipt file
+    sibling.confirm(confirmation("allowed"));
+    fs.writeFileSync(targetFile, "{ corrupt receipt json");
+    expect(access.isManaged(entry(target))).toBe(true);
+    expect(access.isBlocked(entry(target))).toBe(true);
+
+    // Overwriting corrupt receipt with valid record restores access
+    sibling.record(entry(target));
+    expect(access.isBlocked(entry(target))).toBe(false);
+
+    // Arbitrary directory change and atomic replacement
+    const atomicTemp = `${targetFile}.atomic.tmp`;
+    fs.writeFileSync(atomicTemp, fs.readFileSync(targetFile, "utf8"));
+    fs.renameSync(atomicTemp, targetFile);
+    expect(access.isBlocked(entry(target))).toBe(false);
+    expect(access.isManaged(entry(target))).toBe(true);
+  });
+
+  it("retries unresolved receipts upon in-place repair without directory revision change and enforces authority unavailable failclosed and cross-account deny", async () => {
+    const inplaceTool = manifest(crypto.randomUUID(), "inplace_tool");
+    const toolsDir = path.join(access.stateDir, "tools");
+    const syntheticOwner = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(["https://cloud.example.test", "account-a"]))
+      .digest("hex");
+    const receipt = {
+      owner: syntheticOwner,
+      entry: entry(inplaceTool),
+    };
+    const fileKey = crypto.createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
+    const inplacePath = path.join(toolsDir, `${fileKey}.json`);
+    // Write initial malformed file
+    fs.mkdirSync(toolsDir, { recursive: true });
+    fs.writeFileSync(inplacePath, "{ unparseable initial json");
+
+    // Warm access discovery runs; malformed file fails to parse and is tracked in unresolvedReceiptNames
+    expect(access.isManaged(entry(inplaceTool))).toBe(false);
+    expect(access.isBlocked(entry(inplaceTool))).toBe(false);
+
+    // Repair the file IN-PLACE without rename and preserve directory revision
+    const statBefore = fs.statSync(toolsDir, { bigint: true });
+    const fixedContent = JSON.stringify({
+      ...receipt,
+      activationId: "active-revocation-token",
+    });
+    const fd = fs.openSync(inplacePath, "r+");
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, fixedContent, 0, "utf8");
+    fs.closeSync(fd);
+
+    // Verify directory stat dev:ino:mtimeNs:ctimeNs did NOT change
+    const statAfter = fs.statSync(toolsDir, { bigint: true });
+    const revBefore = `${statBefore.dev}:${statBefore.ino}:${statBefore.mtimeNs}:${statBefore.ctimeNs}`;
+    const revAfter = `${statAfter.dev}:${statAfter.ino}:${statAfter.mtimeNs}:${statAfter.ctimeNs}`;
+    expect(revAfter).toBe(revBefore);
+
+    // On next lookup without directory revision change, retryUnresolved reads the repaired file
+    expect(access.isManaged(entry(inplaceTool))).toBe(true);
+    expect(access.isBlocked(entry(inplaceTool))).toBe(true);
+
+    // Authority unavailable: fail closed on proven managed tuples, unblocked on unmanaged
+    const unmanagedTool = manifest(crypto.randomUUID(), "unmanaged_tool");
+    expect(access.isManaged(entry(unmanagedTool))).toBe(false);
+    expect(access.isBlocked(entry(unmanagedTool))).toBe(false);
+
+    // Use existing DB failure mock pattern to force authority failure
+    const dbFailureMock = vi
+      .spyOn(access as unknown as { getDb: () => unknown }, "getDb")
+      .mockImplementation(() => {
+        throw new Error("temporary DB failure");
+      });
+    expect(access.isBlocked(entry(inplaceTool))).toBe(true);
+    expect(access.isBlocked(entry(unmanagedTool))).toBe(false);
+
+    // Restore DB failure mock before confirming recovery
+    dbFailureMock.mockRestore();
+    access.confirm(confirmation("allowed"));
+    expect(access.isInactive()).toBe(false);
+
+    // Cross-account deny / cross-owner equality:
+    const otherIdentity: CloudRequestIdentity = {
+      ...identity,
+      accountId: "account-b",
+      userId: "user-b",
+    };
+    const otherAccess = new ManagedToolAccess(access.stateDir, artifactCache, otherIdentity);
+    otherAccess.confirm({
+      schemaVersion: "1.0.0",
+      accountId: "account-b",
+      userId: "user-b",
+      toolAccess: "allowed",
+    });
+    otherAccess.record(entry(inplaceTool));
+
+    // Account A still has stale activation on its own receipt, so A remains blocked!
+    expect(access.isBlocked(entry(inplaceTool))).toBe(true);
+    // Account B has a fresh active activation, so B is unblocked!
+    expect(otherAccess.isBlocked(entry(inplaceTool))).toBe(false);
+
+    // Credentialless caller observes valid active owner (B) and is unblocked
+    const credentialless = new ManagedToolAccess(access.stateDir, artifactCache);
+    expect(credentialless.isBlocked(entry(inplaceTool))).toBe(false);
+
+    // When account-b is revoked, cross-owner deny is observed
+    otherAccess.confirm({
+      schemaVersion: "1.0.0",
+      accountId: "account-b",
+      userId: "user-b",
+      toolAccess: "subscription_inactive",
+    });
+    expect(otherAccess.isBlocked(entry(inplaceTool))).toBe(true);
+    expect(access.isBlocked(entry(inplaceTool))).toBe(true);
+    expect(credentialless.isBlocked(entry(inplaceTool))).toBe(true);
+
+    // Failure-recovery: transient read error on unresolved receipt does NOT delete it from unresolved set
+    const retryRecoveryTool = manifest(crypto.randomUUID(), "retry_recovery_tool");
+    const recoveryReceipt = {
+      owner: syntheticOwner,
+      entry: entry(retryRecoveryTool),
+    };
+    const recoveryKey = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(recoveryReceipt))
+      .digest("hex");
+    const recoveryPath = path.join(toolsDir, `${recoveryKey}.json`);
+    fs.writeFileSync(recoveryPath, "{ malformed before transient eacces");
+
+    // Trigger discovery to place in unresolvedReceiptNames
+    expect(access.isManaged(entry(retryRecoveryTool))).toBe(false);
+
+    // Simulate transient read error during retry (e.g. EACCES on ancestor)
+    const originalReadFile = fs.readFileSync;
+    const transientErrorSpy = vi.spyOn(fs, "readFileSync").mockImplementation((p, opts) => {
+      if (String(p) === recoveryPath) {
+        const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      return originalReadFile(p, opts);
+    });
+
+    // Lookup triggers retryUnresolved which hits the transient error; receipt must be retained in unresolved set
+    expect(access.isManaged(entry(retryRecoveryTool))).toBe(false);
+    transientErrorSpy.mockRestore();
+
+    // Now write valid content in-place without directory revision change
+    const validRecoveryContent = JSON.stringify({
+      ...recoveryReceipt,
+      activationId: "active-token",
+    });
+    const recoveryFd = fs.openSync(recoveryPath, "r+");
+    fs.ftruncateSync(recoveryFd, 0);
+    fs.writeSync(recoveryFd, validRecoveryContent, 0, "utf8");
+    fs.closeSync(recoveryFd);
+
+    // On next lookup, retryUnresolved recovers and parses the receipt!
+    expect(access.isManaged(entry(retryRecoveryTool))).toBe(true);
+  });
 });

@@ -1425,4 +1425,79 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       isSessionDirectoryName("2026-09-03T06-32-24-000Z_00000000-0000-0000-0000-000000000000"),
     ).toBe(false);
   });
+
+  it("excludes known internal cache subtrees (agent/cache) during OMP traversal while preserving legitimate transcripts and explicit custom roots", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-cache-exclusion-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "my-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+
+      // 1. Legitimate user session in .omp/sessions
+      const userSessionDir = path.join(ompHome, "sessions");
+      await fsp.mkdir(userSessionDir, { recursive: true });
+      const userSessionFile = path.join(
+        userSessionDir,
+        "2026-09-03T06-32-24-000Z_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d.jsonl",
+      );
+      await fsp.writeFile(
+        userSessionFile,
+        `${JSON.stringify({ type: "session", version: 3, id: "user-sess-1", cwd: wsPath })}\n`,
+      );
+
+      // 2. Legitimate subagent transcript in .omp/agent/sessions/<ws>/<session-dir>/agent.jsonl
+      const subagentDir = path.join(
+        ompHome,
+        "agent",
+        "sessions",
+        "-my-project",
+        "2026-09-03T06-32-24-000Z_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+      );
+      await fsp.mkdir(subagentDir, { recursive: true });
+      const subagentFile = path.join(subagentDir, "scout.jsonl");
+      await fsp.writeFile(
+        subagentFile,
+        `${JSON.stringify({ type: "session", version: 3, id: "subagent-sess-1", cwd: wsPath })}\n`,
+      );
+
+      // 3. Known internal cache subtree: .omp/agent/cache/composer/.../recent-sessions.jsonl
+      const composerCacheDir = path.join(ompHome, "agent", "cache", "composer");
+      await fsp.mkdir(composerCacheDir, { recursive: true });
+      const cacheFile = path.join(composerCacheDir, "recent-sessions.jsonl");
+      await fsp.writeFile(
+        cacheFile,
+        `${JSON.stringify({ type: "session", version: 3, id: "cache-sess-1", cwd: wsPath })}\n`,
+      );
+
+      // 4. Additional nested cache file
+      const nestedCacheDir = path.join(composerCacheDir, "sub");
+      await fsp.mkdir(nestedCacheDir, { recursive: true });
+      const nestedCacheFile = path.join(nestedCacheDir, "extra-cache.jsonl");
+      await fsp.writeFile(
+        nestedCacheFile,
+        `${JSON.stringify({ type: "session", version: 3, id: "cache-sess-2", cwd: wsPath })}\n`,
+      );
+
+      // Traversal from OMP root must find user & subagent transcripts, but exclude the cache files
+      const discoveredFromRoot = await collectTranscriptFiles([ompHome]);
+      expect(discoveredFromRoot).toContain(userSessionFile);
+      expect(discoveredFromRoot).toContain(subagentFile);
+      expect(discoveredFromRoot).not.toContain(cacheFile);
+      expect(discoveredFromRoot).not.toContain(nestedCacheFile);
+
+      // Traversal via buildOmpDiscoveryCatalog must also exclude cache sessions
+      const catalog = await buildOmpDiscoveryCatalog({ ompHome, customHome: ompHome });
+      const allSessions = catalog.getAllSessions();
+      const discoveredIds = allSessions.map((s) => s.sessionId);
+      expect(discoveredIds).not.toContain("cache-sess-1");
+      expect(discoveredIds).not.toContain("cache-sess-2");
+
+      // Custom explicit root directly targeting the cache directory must NOT be rejected
+      const discoveredFromExplicit = await collectTranscriptFiles([composerCacheDir]);
+      expect(discoveredFromExplicit).toContain(cacheFile);
+      expect(discoveredFromExplicit).toContain(nestedCacheFile);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

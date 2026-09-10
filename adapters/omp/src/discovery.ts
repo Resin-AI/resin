@@ -933,6 +933,41 @@ interface TraversalTask {
   dir: string;
   depth: number;
 }
+/**
+ * Checks whether a directory or path belongs to a known internal OMP cache subtree
+ * (e.g. ~/.omp/agent/cache or .omp/cache) that must be excluded when traversing
+ * OMP roots during session discovery.
+ */
+export function isKnownInternalCacheSubtree(
+  name: string,
+  parentDir: string,
+  fullPath: string,
+): boolean {
+  const lowerName = name.toLowerCase();
+  const parentBase = path.basename(parentDir).toLowerCase();
+
+  // Direct entry into "cache" directory under "agent", ".omp", or "omp"
+  if (
+    lowerName === "cache" &&
+    (parentBase === "agent" || parentBase === ".omp" || parentBase === "omp")
+  ) {
+    return true;
+  }
+
+  // Path contains /agent/cache/ or /.omp/cache/
+  const normalized = path.resolve(fullPath);
+  const cacheRegex = /(?:^|[\\/])(?:[.]?omp[\\/])?agent[\\/]cache(?:[\\/]|$)/i;
+  if (cacheRegex.test(normalized)) {
+    return true;
+  }
+
+  const ompCacheRegex = /(?:^|[\\/])[.]?omp[\\/]cache(?:[\\/]|$)/i;
+  if (ompCacheRegex.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * Traverses directory roots with bounded concurrency (breadth-first in waves) up to depth 4
@@ -942,9 +977,9 @@ export async function collectTranscriptFiles(roots: string[], concurrency = 32):
   const discoveredFiles: string[] = [];
   const discoveredFileSet = new Set<string>();
   const visitedDirs = new Set<string>();
+  const explicitRootPaths = roots.map((r) => path.resolve(r));
 
   let currentLevel: TraversalTask[] = roots.map((dir) => ({ dir, depth: 0 }));
-
   while (currentLevel.length > 0) {
     const nextLevel: TraversalTask[] = [];
     let nextIndex = 0;
@@ -965,6 +1000,23 @@ export async function collectTranscriptFiles(roots: string[], concurrency = 32):
 
           for (const entry of entries) {
             const fullPath = path.join(item.dir, entry.name);
+            const resolvedPath = path.resolve(fullPath);
+
+            // Exclude known internal cache subtrees (e.g. agent/cache) when traversing OMP roots,
+            // unless the caller explicitly passed a custom transcript root targeting that cache path.
+            if (isKnownInternalCacheSubtree(entry.name, item.dir, fullPath)) {
+              const isExplicitCacheTarget = explicitRootPaths.some(
+                (root) =>
+                  isKnownInternalCacheSubtree(path.basename(root), path.dirname(root), root) &&
+                  (resolvedPath === root ||
+                    resolvedPath.startsWith(root + path.sep) ||
+                    root.startsWith(resolvedPath + path.sep)),
+              );
+              if (!isExplicitCacheTarget) {
+                continue;
+              }
+            }
+
             if (entry.isDirectory()) {
               if (item.depth + 1 <= 4) {
                 nextLevel.push({ dir: fullPath, depth: item.depth + 1 });

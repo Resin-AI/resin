@@ -67,6 +67,8 @@ export class ManagedToolAccess {
   private readonly pendingProofBases = new Map<string, string | undefined>();
   private readonly knownOwners = new Map<string, Owner>();
   private readonly knownEntries = new Map<string, ManagedEntry>();
+  private readonly toolIndex = new Map<string, Set<string>>();
+  private readonly unresolvedReceiptNames = new Set<string>();
   private receiptDirectoryRevision?: string;
   private receiptNames: string[] = [];
   private readonly ownersDir: string;
@@ -88,7 +90,9 @@ export class ManagedToolAccess {
   }
 
   private getDb(): DatabaseSync {
-    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    if (!this.db) {
+      fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    }
     if (fs.realpathSync(this.stateDir) !== path.resolve(this.stateDir)) {
       throw new Error("Refusing managed state access through a symlinked state directory");
     }
@@ -307,40 +311,134 @@ export class ManagedToolAccess {
     return owners;
   }
 
-  private entries(tool?: ManagedToolTuple): ManagedEntry[] {
-    if (!fs.existsSync(this.entriesDir)) return [...this.knownEntries.values()];
-    for (const name of this.receiptFiles()) {
+  private addKnownEntry(name: string, entry: ManagedEntry): void {
+    this.unresolvedReceiptNames.delete(name);
+    const existing = this.knownEntries.get(name);
+    if (existing && existing.entry.toolId !== entry.entry.toolId) {
+      const oldSet = this.toolIndex.get(existing.entry.toolId);
+      if (oldSet) {
+        oldSet.delete(name);
+        if (oldSet.size === 0) {
+          this.toolIndex.delete(existing.entry.toolId);
+        }
+      }
+    }
+    this.knownEntries.set(name, entry);
+    let set = this.toolIndex.get(entry.entry.toolId);
+    if (!set) {
+      set = new Set<string>();
+      this.toolIndex.set(entry.entry.toolId, set);
+    }
+    set.add(name);
+  }
+
+  private syncDiscovery(): void {
+    if (!fs.existsSync(this.entriesDir)) return;
+    let revision: string;
+    try {
+      const stat = fs.statSync(this.entriesDir, { bigint: true });
+      revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch {
+      return;
+    }
+    if (revision === this.receiptDirectoryRevision) {
+      return;
+    }
+
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.entriesDir);
+    } catch {
+      return;
+    }
+
+    this.receiptDirectoryRevision = revision;
+    this.receiptNames = names;
+
+    for (const unresolved of this.unresolvedReceiptNames) {
+      if (!names.includes(unresolved)) {
+        this.unresolvedReceiptNames.delete(unresolved);
+      }
+    }
+
+    for (const name of names) {
       if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
       // Receipt filenames bind the tool tuple; only activation proof changes in place.
-      // Discover new receipts, but do not reread every other tool for each catalog entry.
-      const known = this.knownEntries.get(name);
-      if (tool && known && known.entry.toolId !== tool.toolId) continue;
+      if (this.knownEntries.has(name)) {
+        this.unresolvedReceiptNames.delete(name);
+        continue;
+      }
+      // Newly discovered receipt: read it now so we can index its toolId
       try {
-        const entry = ManagedEntrySchema.parse(
-          JSON.parse(fs.readFileSync(path.join(this.entriesDir, name), "utf8")),
-        );
-        this.knownEntries.set(name, entry);
+        const file = path.join(this.entriesDir, name);
+        const content = fs.readFileSync(file, "utf8");
+        const entry = ManagedEntrySchema.parse(JSON.parse(content));
+        this.addKnownEntry(name, entry);
       } catch {
-        /* Never delete using malformed ownership records. */
+        // Unreadable or malformed newly discovered record: track for retry without broad scan
+        this.unresolvedReceiptNames.add(name);
+      }
+    }
+  }
+
+  private retryUnresolved(): void {
+    if (this.unresolvedReceiptNames.size === 0) return;
+    for (const name of this.unresolvedReceiptNames) {
+      const file = path.join(this.entriesDir, name);
+      try {
+        const content = fs.readFileSync(file, "utf8");
+        const entry = ManagedEntrySchema.parse(JSON.parse(content));
+        this.addKnownEntry(name, entry);
+      } catch {
+        // Retain in unresolvedReceiptNames until successful parse or directory listing proves absence
+      }
+    }
+  }
+
+  private entries(tool?: ManagedToolTuple): ManagedEntry[] {
+    this.syncDiscovery();
+    this.retryUnresolved();
+
+    if (tool) {
+      const filenames = this.toolIndex.get(tool.toolId);
+      if (!filenames || filenames.size === 0) {
+        return [];
+      }
+      const result: ManagedEntry[] = [];
+      for (const name of filenames) {
+        // Refresh matching receipt contents on EVERY lookup
+        try {
+          const file = path.join(this.entriesDir, name);
+          const content = fs.readFileSync(file, "utf8");
+          const entry = ManagedEntrySchema.parse(JSON.parse(content));
+          this.addKnownEntry(name, entry);
+          result.push(entry);
+        } catch {
+          // Keep known receipts when files gone/unreadable as current failclosed provenance policy
+          const fallback = this.knownEntries.get(name);
+          if (fallback) {
+            result.push(fallback);
+          }
+        }
+      }
+      return result;
+    }
+
+    // Global entries() for purge and cross-owner equality: refresh all known receipts from disk
+    if (fs.existsSync(this.entriesDir)) {
+      for (const name of this.receiptNames) {
+        if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+        try {
+          const file = path.join(this.entriesDir, name);
+          const content = fs.readFileSync(file, "utf8");
+          const entry = ManagedEntrySchema.parse(JSON.parse(content));
+          this.addKnownEntry(name, entry);
+        } catch {
+          /* Keep known receipts when files gone/unreadable */
+        }
       }
     }
     return [...this.knownEntries.values()];
-  }
-
-  private receiptFiles(): string[] {
-    try {
-      const stat = fs.statSync(this.entriesDir, { bigint: true });
-      const revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
-      if (revision !== this.receiptDirectoryRevision) {
-        // Cache names, never activation contents. Atomic additions/replacements change
-        // the directory revision; matching receipts are still reread on every check.
-        this.receiptNames = fs.readdirSync(this.entriesDir);
-        this.receiptDirectoryRevision = revision;
-      }
-      return this.receiptNames;
-    } catch {
-      return this.files(this.entriesDir);
-    }
   }
 
   private files(directory: string): string[] {
@@ -713,6 +811,19 @@ export class ManagedToolAccess {
         if (existingActive && !incomingActive) {
           return;
         }
+
+        // Avoid rewriting identical JSON every sync, which invalidates directory revision for all processes
+        if (
+          existing.activationId === activationId &&
+          existing.owner === receipt.owner &&
+          existing.workspaceId === receipt.workspaceId &&
+          existing.projectId === receipt.projectId &&
+          existing.lockPath === receipt.lockPath &&
+          sameEntry(receipt.entry, existing.entry)
+        ) {
+          this.addKnownEntry(path.basename(file), existing);
+          return;
+        }
       } catch {
         /* Overwrite malformed existing record */
       }
@@ -723,8 +834,8 @@ export class ManagedToolAccess {
       activationId,
     });
     this.write(file, record);
+    this.addKnownEntry(path.basename(file), record);
   }
-
   /** Pre-upgrade catalog manifests carry explicit cloud account ownership; local locks do not. */
   adopt(registry: ToolRegistry | undefined, lockManager?: ProjectLockManager): void {
     if (!this.identity || !registry) return;

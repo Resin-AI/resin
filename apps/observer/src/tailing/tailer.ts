@@ -48,6 +48,14 @@ export interface TailerSessionOptions {
 }
 
 /**
+ * Waiter registration for event-based delivery progress notifications.
+ */
+export interface TailerProgressWaiter {
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
+/**
  * Per-session tailer tracking state.
  */
 export interface TailerSessionContext {
@@ -71,6 +79,8 @@ export interface TailerSessionContext {
   needsAuthRecoveryProbe: boolean;
   unsubscribeSource?: () => void;
   authRecoveryUnsubscribe?: () => void;
+  progressWaiters?: Set<TailerProgressWaiter>;
+  lastDeliveryError?: Error;
 }
 /**
  * Record delivery callback type providing downstream with records and an atomic ack function.
@@ -501,6 +511,7 @@ export class TranscriptTailer extends EventEmitter {
       context.latestAckedCursor = latestInBatch.cursor;
       context.inFlightBatches = Math.max(0, context.inFlightBatches - 1);
       context.hasInFlightBatch = context.inFlightBatches > 0;
+      context.lastDeliveryError = undefined;
 
       if (context.isRestoringDurablePending && !context.queue.hasDurablePending) {
         context.isRestoringDurablePending = false;
@@ -515,6 +526,9 @@ export class TranscriptTailer extends EventEmitter {
       if (context.queue.size > 0) {
         void this.dispatchQueue(context);
       }
+
+      // 5. Notify progress waiters of durable ack
+      this.notifyProgress(context);
     };
 
     const deliveryPromise = (async () => {
@@ -523,6 +537,7 @@ export class TranscriptTailer extends EventEmitter {
         if (isAuthRecoveryProbe) {
           context.needsAuthRecoveryProbe = false;
           context.isAuthDegraded = false;
+          context.lastDeliveryError = undefined;
           context.latestEmittedCursor = latestInBatch.cursor;
           this.emit("auth:recovered", {
             sessionId: context.session.sessionId,
@@ -530,8 +545,13 @@ export class TranscriptTailer extends EventEmitter {
           });
           context.queue.resume();
           void this.dispatchQueue(context);
+          this.notifyProgress(context);
         }
       } catch (err: unknown) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (context.isTerminalizing) {
+          context.lastDeliveryError = error;
+        }
         context.inFlightBatches = Math.max(0, context.inFlightBatches - 1);
         context.hasInFlightBatch = context.inFlightBatches > 0;
         if (err instanceof AuthRecoveryError) {
@@ -549,12 +569,14 @@ export class TranscriptTailer extends EventEmitter {
             }
             context.authRecoveryUnsubscribe = undefined;
             context.isAuthDegraded = false;
+            context.lastDeliveryError = undefined;
             this.emit("auth:recovered", {
               sessionId: context.session.sessionId,
               pendingCount: context.queue.pendingCount,
             });
             context.queue.resume();
             void this.dispatchQueue(context);
+            this.notifyProgress(context);
           });
           this.emit("auth:degraded", {
             sessionId: context.session.sessionId,
@@ -563,6 +585,7 @@ export class TranscriptTailer extends EventEmitter {
             pendingCount: context.queue.pendingCount,
             persisted,
           });
+          this.notifyProgress(context, err);
           return;
         }
 
@@ -571,16 +594,14 @@ export class TranscriptTailer extends EventEmitter {
           context.isPaused = true;
           context.needsAuthRecoveryProbe = true;
           context.watcher?.pause();
+          this.notifyProgress(context, error);
           return;
         }
 
         for (const record of batch) {
-          context.queue.nack(
-            record.recordId,
-            err instanceof Error ? err : String(err),
-            "UNHANDLED_ERROR",
-          );
+          context.queue.nack(record.recordId, error, "UNHANDLED_ERROR");
         }
+        this.notifyProgress(context, error);
       }
     })();
 
@@ -647,6 +668,7 @@ export class TranscriptTailer extends EventEmitter {
     const context = this.sessions.get(sessionId);
     if (context) {
       context.queue.pause();
+      this.notifyProgress(context, new Error(`Session ${sessionId} was paused`));
     }
   }
 
@@ -657,8 +679,72 @@ export class TranscriptTailer extends EventEmitter {
     const context = this.sessions.get(sessionId);
     if (context && !context.isAuthDegraded) {
       context.queue.resume();
+      this.notifyProgress(context);
     }
   }
+  /**
+   * Registers a progress waiter for a session context that resolves on durable ack
+   * or rejects on delivery failure, detach, or close.
+   */
+  private waitForProgress(context: TailerSessionContext): Promise<void> {
+    if (this.isClosed || !this.sessions.has(context.session.sessionId)) {
+      return Promise.reject(
+        new Error(
+          `Cannot wait for progress: session ${context.session.sessionId} is closed or detached`,
+        ),
+      );
+    }
+    if (context.isPaused || context.queue.isPaused || context.isAuthDegraded) {
+      return Promise.reject(
+        new Error(
+          `Cannot wait for progress: session ${context.session.sessionId} is paused or auth-degraded with ${context.queue.size} pending records`,
+        ),
+      );
+    }
+    if (context.lastDeliveryError) {
+      const err = context.lastDeliveryError;
+      context.lastDeliveryError = undefined;
+      return Promise.reject(err);
+    }
+    if (context.queue.size === 0 && !context.hasInFlightBatch && !context.inFlightDelivery) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      if (!context.progressWaiters) {
+        context.progressWaiters = new Set();
+      }
+      const waiter: TailerProgressWaiter = {
+        resolve: () => {
+          context.progressWaiters?.delete(waiter);
+          resolve();
+        },
+        reject: (err: Error) => {
+          context.progressWaiters?.delete(waiter);
+          reject(err);
+        },
+      };
+      context.progressWaiters.add(waiter);
+    });
+  }
+
+  /**
+   * Notifies all progress waiters for a session context of durable ack progress or an abort error.
+   */
+  private notifyProgress(context: TailerSessionContext, err?: Error): void {
+    if (!context.progressWaiters || context.progressWaiters.size === 0) {
+      return;
+    }
+    const waiters = Array.from(context.progressWaiters);
+    context.progressWaiters.clear();
+    for (const waiter of waiters) {
+      if (err) {
+        waiter.reject(err);
+      } else {
+        waiter.resolve();
+      }
+    }
+  }
+
   /**
    * Delivers updated terminal session state downstream with an empty record batch
    * prior to detachment, allowing consumers to synthesize terminal lifecycle events.
@@ -677,7 +763,7 @@ export class TranscriptTailer extends EventEmitter {
 
     // Mark terminalizing to prevent any concurrent or background pumpSession from starting
     context.isTerminalizing = true;
-
+    context.lastDeliveryError = undefined;
     try {
       // 1. Stop background watcher and unsubscribe source pushes so no concurrent background ingestion occurs
       if (context.watcher) {
@@ -703,8 +789,19 @@ export class TranscriptTailer extends EventEmitter {
           );
         }
 
+        if (this.isClosed || !this.sessions.has(session.sessionId)) {
+          throw new Error(
+            `Cannot deliver terminal state for session ${session.sessionId}: session was detached or tailer closed`,
+          );
+        }
+
         if (context.inFlightDelivery) {
           await context.inFlightDelivery;
+        }
+        if (context.lastDeliveryError) {
+          const err = context.lastDeliveryError;
+          context.lastDeliveryError = undefined;
+          throw err;
         }
 
         const maxInFlight = context.options.maxInFlightBatches ?? this.defaultMaxInFlightBatches;
@@ -718,17 +815,29 @@ export class TranscriptTailer extends EventEmitter {
           if (context.inFlightDelivery) {
             await context.inFlightDelivery;
           }
+          if (context.lastDeliveryError) {
+            const err = context.lastDeliveryError;
+            context.lastDeliveryError = undefined;
+            throw err;
+          }
+        }
+
+        if (context.inFlightBatches >= maxInFlight) {
+          await this.waitForProgress(context);
+          continue;
         }
 
         const incoming = await context.source.readNext(batchSize);
         if (incoming.length > 0) {
           await this.handleIncomingRecords(context, incoming);
-        } else if (
-          context.queue.size === 0 &&
-          !context.hasInFlightBatch &&
-          !context.inFlightDelivery
-        ) {
-          break;
+        } else {
+          // EOF on source. Recheck state before waiting to avoid lost wakeup:
+          if (context.queue.size === 0 && !context.hasInFlightBatch && !context.inFlightDelivery) {
+            break;
+          }
+
+          // Source is at EOF but batches are still in flight or queued waiting for ack
+          await this.waitForProgress(context);
         }
       }
 
@@ -744,6 +853,7 @@ export class TranscriptTailer extends EventEmitter {
       }
     } catch (err: unknown) {
       context.isTerminalizing = false;
+      context.lastDeliveryError = undefined;
       throw err;
     }
   }
@@ -772,6 +882,12 @@ export class TranscriptTailer extends EventEmitter {
       context.unsubscribeSource();
       context.unsubscribeSource = undefined;
     }
+
+    // Wake / cancel any pending progress waiters for this session safely
+    this.notifyProgress(
+      context,
+      new Error(`Session ${sessionId} was detached before acknowledgement completed`),
+    );
 
     await context.source.close();
     context.queue.clear(true);

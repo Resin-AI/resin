@@ -2,9 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createInMemoryStateStore } from "@resin/db";
-import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
+import type {
+  HarnessSession,
+  RawHarnessRecord,
+  SessionEventSource,
+} from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  type SourceCursor,
   SourceCursorManager,
   TranscriptTailer,
   TranscriptWatcher,
@@ -564,6 +569,330 @@ describe("Sequential Record Delivery and Atomic Checkpointing", () => {
     await acks[1]();
     savedCursor = await cursorManager.getCursor(session.sessionId);
     expect(savedCursor?.sequence).toBe(4);
+
+    await tailer.close();
+    store.close();
+  });
+
+  it("bounds readNext calls independently of delayed ack duration during terminalization", async () => {
+    const store = await createInMemoryStateStore();
+    const cursorManager = new SourceCursorManager({ store });
+
+    const lines = [
+      JSON.stringify({ type: "prompt", text: "Line 1" }),
+      JSON.stringify({ type: "prompt", text: "Line 2" }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({
+      cursorManager,
+      defaultBatchSize: 2,
+    });
+
+    const receivedCalls: Array<{ status: string; count: number }> = [];
+    let readNextCallCount = 0;
+    const ackGate = Promise.withResolvers<void>();
+    const batchDelivered = Promise.withResolvers<void>();
+
+    // Delayed ack handler: returns immediately without awaiting ack,
+    // and defers ack invocation until released via ackGate
+    tailer.onRecords((sess, records, ack) => {
+      receivedCalls.push({ status: sess.status, count: records.length });
+      if (records.length > 0) {
+        batchDelivered.resolve();
+        void (async () => {
+          await ackGate.promise;
+          await ack();
+        })();
+      }
+    });
+
+    const session: HarnessSession = {
+      sessionId: "session-delayed-ack",
+      workspaceId: "ws-1",
+      harnessId: "test-harness",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    const watcher = new TranscriptWatcher({
+      filePath: transcriptPath,
+      pollingIntervalMs: 50,
+      autoStart: false,
+    });
+
+    const listeners = new Set<(records: RawHarnessRecord[]) => void | Promise<void>>();
+    const source: SessionEventSource = {
+      sessionId: session.sessionId,
+      harnessId: session.harnessId,
+      async readNext(batchSize?: number): Promise<RawHarnessRecord[]> {
+        readNextCallCount++;
+        const lines = await watcher.readNext(batchSize);
+        return lines.map((l) => ({
+          recordId: `rec-${l.cursor.sequence}`,
+          sessionId: session.sessionId,
+          harnessId: session.harnessId,
+          sequenceNumber: l.cursor.sequence,
+          timestamp: l.cursor.timestamp,
+          recordType: "transcript_line",
+          rawPayload: l.parsedJson ?? l.lineText,
+          cursor: l.cursor,
+          metadata: { byteLength: l.byteLength },
+        }));
+      },
+      onRecords(callback: (records: RawHarnessRecord[]) => void | Promise<void>): () => void {
+        listeners.add(callback);
+        return () => {
+          listeners.delete(callback);
+        };
+      },
+      async checkpoint(cursor: SourceCursor): Promise<void> {
+        watcher.seek(cursor.offset, cursor.line, cursor.sequence);
+      },
+      getCursor(): SourceCursor | null {
+        return watcher.getCursor();
+      },
+      async detectRotation(): Promise<boolean> {
+        return false;
+      },
+      async close(): Promise<void> {
+        watcher.stop();
+        listeners.clear();
+      },
+    };
+
+    await tailer.attachSession(session, source);
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    // Trigger notifyTerminalState; it drains records, reaches EOF, and suspends waiting for ack
+    const notifyPromise = tailer.notifyTerminalState(completedSession);
+
+    // Wait until batch has been delivered downstream
+    await batchDelivered.promise;
+
+    // While waiting for delayed ack, readNext call count must be strictly bounded (e.g. <= 2)
+    // rather than spinning in a while loop
+    expect(readNextCallCount).toBeLessThanOrEqual(2);
+    expect(receivedCalls).toHaveLength(1);
+    expect(receivedCalls[0]).toEqual({ status: "active", count: 2 });
+
+    // Release delayed ack
+    ackGate.resolve();
+    await notifyPromise;
+
+    // Terminal callback is only delivered after the delayed ack completes
+    expect(receivedCalls).toHaveLength(2);
+    expect(receivedCalls[1]).toEqual({ status: "completed", count: 0 });
+
+    // readNext call count remains strictly bounded post-terminalization
+    expect(readNextCallCount).toBeLessThanOrEqual(3);
+
+    // Verify SQLite checkpoint was committed
+    const savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor?.sequence).toBe(2);
+
+    await tailer.close();
+    store.close();
+  });
+
+  it("cancels pending terminal wait safely when ack is omitted and session is detached or closed", async () => {
+    const store = await createInMemoryStateStore();
+    const cursorManager = new SourceCursorManager({ store });
+
+    const lines = [JSON.stringify({ type: "prompt", text: "Line 1" })];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({
+      cursorManager,
+      defaultBatchSize: 1,
+    });
+
+    const receivedCalls: Array<{ status: string; count: number }> = [];
+    const batchDelivered = Promise.withResolvers<void>();
+
+    // Handler receives batch but NEVER calls ack()
+    tailer.onRecords((sess, records) => {
+      receivedCalls.push({ status: sess.status, count: records.length });
+      if (records.length > 0) {
+        batchDelivered.resolve();
+      }
+    });
+
+    const session: HarnessSession = {
+      sessionId: "session-omitted-ack",
+      workspaceId: "ws-1",
+      harnessId: "test-harness",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 50 });
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    // notifyTerminalState starts and reaches wait state
+    const notifyPromise = tailer.notifyTerminalState(completedSession);
+    await batchDelivered.promise;
+
+    // Detach session while notifyTerminalState is waiting for omitted ack
+    const detachPromise = tailer.detachSession(session.sessionId);
+
+    // notifyTerminalState must reject / cancel safely rather than hanging or marking terminal
+    await expect(notifyPromise).rejects.toThrow(/detached before acknowledgement completed/);
+    await detachPromise;
+
+    // Terminal empty-record callback must NEVER have been called
+    expect(receivedCalls.filter((c) => c.count === 0)).toHaveLength(0);
+
+    // Checkpoint must NOT be committed in SQLite
+    const savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor).toBeNull();
+
+    await tailer.close();
+    store.close();
+  });
+
+  it("delivers multi-batch records and terminal event in strict sequential order", async () => {
+    const store = await createInMemoryStateStore();
+    const cursorManager = new SourceCursorManager({ store });
+
+    const lines = [
+      JSON.stringify({ type: "prompt", text: "Batch 1 Item 1" }),
+      JSON.stringify({ type: "prompt", text: "Batch 1 Item 2" }),
+      JSON.stringify({ type: "prompt", text: "Batch 2 Item 1" }),
+      JSON.stringify({ type: "prompt", text: "Batch 2 Item 2" }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({
+      cursorManager,
+      defaultBatchSize: 2,
+      defaultMaxInFlightBatches: 2,
+    });
+
+    const deliveryLog: Array<{ status: string; count: number; texts: string[] }> = [];
+
+    tailer.onRecords(async (sess, records, ack) => {
+      deliveryLog.push({
+        status: sess.status,
+        count: records.length,
+        texts: records.map((r) => {
+          const payload = r.rawPayload;
+          if (
+            payload &&
+            typeof payload === "object" &&
+            "text" in payload &&
+            typeof payload.text === "string"
+          ) {
+            return payload.text;
+          }
+          return "";
+        }),
+      });
+      if (records.length > 0) {
+        await ack();
+      }
+    });
+
+    const session: HarnessSession = {
+      sessionId: "session-multi-batch-order",
+      workspaceId: "ws-1",
+      harnessId: "test-harness",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 50 });
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    await tailer.notifyTerminalState(completedSession);
+    expect(deliveryLog).toHaveLength(3);
+    expect(deliveryLog[0]).toEqual({
+      status: "active",
+      count: 2,
+      texts: ["Batch 1 Item 1", "Batch 1 Item 2"],
+    });
+    expect(deliveryLog[1]).toEqual({
+      status: "active",
+      count: 2,
+      texts: ["Batch 2 Item 1", "Batch 2 Item 2"],
+    });
+    expect(deliveryLog[2]).toEqual({
+      status: "completed",
+      count: 0,
+      texts: [],
+    });
+
+    const savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor?.sequence).toBe(4);
+
+    await tailer.close();
+    store.close();
+  });
+
+  it("rejects notifyTerminalState when an in-flight or pending delivery fails", async () => {
+    const store = await createInMemoryStateStore();
+    const cursorManager = new SourceCursorManager({ store });
+
+    const lines = [JSON.stringify({ type: "prompt", text: "Line to fail" })];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({
+      cursorManager,
+      defaultBatchSize: 1,
+    });
+
+    const receivedCalls: Array<{ status: string; count: number }> = [];
+
+    // Handler throws an error on record delivery
+    tailer.onRecords((sess, records) => {
+      receivedCalls.push({ status: sess.status, count: records.length });
+      if (records.length > 0) {
+        throw new Error("Downstream pipeline failure");
+      }
+    });
+
+    const session: HarnessSession = {
+      sessionId: "session-delivery-failure",
+      workspaceId: "ws-1",
+      harnessId: "test-harness",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 50 });
+
+    const completedSession: HarnessSession = {
+      ...session,
+      status: "completed",
+    };
+
+    // notifyTerminalState must reject due to downstream delivery failure
+    await expect(tailer.notifyTerminalState(completedSession)).rejects.toThrow(
+      /Downstream pipeline failure/,
+    );
+
+    // Terminal empty-record callback must NEVER have been called
+    expect(receivedCalls.filter((c) => c.count === 0)).toHaveLength(0);
+
+    // Cursor must NOT be committed
+    const savedCursor = await cursorManager.getCursor(session.sessionId);
+    expect(savedCursor).toBeNull();
 
     await tailer.close();
     store.close();
