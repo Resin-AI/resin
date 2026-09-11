@@ -71,6 +71,9 @@ export class ManagedToolAccess {
   private readonly unresolvedReceiptNames = new Set<string>();
   private receiptDirectoryRevision?: string;
   private receiptNames: string[] = [];
+  private ownerDirectoryRevision?: string;
+  private ownerNames: string[] = [];
+  private readonly ownerFileCache = new Map<string, { revision: string; owner: Owner }>();
   private readonly ownersDir: string;
   private readonly entriesDir: string;
   private db?: DatabaseSync;
@@ -272,31 +275,26 @@ export class ManagedToolAccess {
 
     // Check disk accounts directory to honor live legacy process revocations
     if (fs.existsSync(this.ownersDir)) {
-      for (const name of this.files(this.ownersDir)) {
+      for (const name of this.ownerFiles()) {
         if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
         const ownerKey = name.slice(0, -5);
-        try {
-          const owner = OwnerSchema.parse(
-            JSON.parse(fs.readFileSync(path.join(this.ownersDir, name), "utf8")),
-          );
-          if (name !== `${this.ownerKey(owner)}.json`) continue;
+        const owner = this.readOwnerFile(name);
+        if (!owner) continue;
+        if (name !== `${this.ownerKey(owner)}.json`) continue;
 
-          const existing = owners.get(ownerKey);
-          if (owner.toolAccess === "subscription_inactive") {
-            // Live legacy revocation: import into authoritative DB so CAS cannot overwrite it!
-            if (dbSucceeded && existing?.toolAccess !== "subscription_inactive") {
-              this.importLegacyDenialIfPresent(ownerKey);
-            }
-            owners.set(ownerKey, owner);
-            this.knownOwners.set(ownerKey, owner);
-          } else if (!existing && !dbSucceeded && !this.knownOwners.has(ownerKey)) {
-            // Only adopt legacy allowed if DB succeeded or fresh uninitialized cold process
-            // Never trust legacy allowed over unknown DB state where a denial mirror write may have failed!
-          } else if (existing?.toolAccess === "subscription_inactive") {
-            // NEVER import legacy allowed over authoritative denial
+        const existing = owners.get(ownerKey);
+        if (owner.toolAccess === "subscription_inactive") {
+          // Live legacy revocation: import into authoritative DB so CAS cannot overwrite it!
+          if (dbSucceeded && existing?.toolAccess !== "subscription_inactive") {
+            this.importLegacyDenialIfPresent(ownerKey);
           }
-        } catch {
-          /* Unreadable data is not proof of inactivity. */
+          owners.set(ownerKey, owner);
+          this.knownOwners.set(ownerKey, owner);
+        } else if (!existing && !dbSucceeded && !this.knownOwners.has(ownerKey)) {
+          // Only adopt legacy allowed if DB succeeded or fresh uninitialized cold process
+          // Never trust legacy allowed over unknown DB state where a denial mirror write may have failed!
+        } else if (existing?.toolAccess === "subscription_inactive") {
+          // NEVER import legacy allowed over authoritative denial
         }
       }
     }
@@ -395,6 +393,55 @@ export class ManagedToolAccess {
     }
   }
 
+  /**
+   * Cache the owners directory listing by directory revision.
+   *
+   * Revocation checks run once per catalog entry, so re-listing this directory on
+   * every check made tool discovery the gateway's dominant CPU cost.
+   */
+  private ownerFiles(): string[] {
+    try {
+      const stat = fs.statSync(this.ownersDir, { bigint: true });
+      const revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      if (revision !== this.ownerDirectoryRevision) {
+        this.ownerNames = fs.readdirSync(this.ownersDir);
+        this.ownerDirectoryRevision = revision;
+      }
+      return this.ownerNames;
+    } catch {
+      return this.files(this.ownersDir);
+    }
+  }
+
+  /**
+   * Read one owner file, reusing the parsed value until its own revision changes.
+   *
+   * A directory revision cannot observe an in-place rewrite, so each file carries
+   * its own mtime/size revision. Live legacy revocations are therefore still
+   * honored, without an open+parse for every tool check.
+   */
+  private readOwnerFile(name: string): Owner | undefined {
+    const file = path.join(this.ownersDir, name);
+    let revision: string;
+    try {
+      const stat = fs.statSync(file, { bigint: true });
+      revision = `${stat.mtimeNs}:${stat.size}`;
+    } catch {
+      this.ownerFileCache.delete(name);
+      return undefined;
+    }
+    const cached = this.ownerFileCache.get(name);
+    if (cached && cached.revision === revision) return cached.owner;
+    try {
+      const owner = OwnerSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+      this.ownerFileCache.set(name, { revision, owner });
+      return owner;
+    } catch {
+      /* Unreadable data is not proof of inactivity. */
+      return undefined;
+    }
+  }
+
   private entries(tool?: ManagedToolTuple): ManagedEntry[] {
     this.syncDiscovery();
     this.retryUnresolved();
@@ -458,6 +505,10 @@ export class ManagedToolAccess {
     try {
       fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600, flag: "wx" });
       fs.renameSync(temp, file);
+      // A rename can preserve mtime granularity; never serve the previous parse.
+      if (path.dirname(file) === this.ownersDir) {
+        this.ownerFileCache.delete(path.basename(file));
+      }
     } finally {
       fs.rmSync(temp, { force: true });
     }

@@ -1092,6 +1092,43 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     expect(access.isBlocked(entry(added))).toBe(false);
   });
 
+  it("caches the owners directory and reuses parses while honoring live revocations", async () => {
+    const target = manifest();
+    access.confirm(confirmation("allowed"));
+    access.record(entry(target));
+    expect(access.isBlocked(entry(target))).toBe(false);
+
+    const ownersDir = path.join(access.stateDir, "accounts");
+    const ownerPrefix = `${ownersDir}${path.sep}`;
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+
+    // Repeated ownership checks must not re-list or re-parse the owners directory.
+    for (let index = 0; index < 25; index++) {
+      access.isBlocked(entry(target));
+      access.isManaged(entry(target));
+    }
+    expect(reads.mock.calls.filter(([file]) => String(file).startsWith(ownerPrefix))).toHaveLength(
+      0,
+    );
+    expect(listings.mock.calls.filter(([directory]) => directory === ownersDir)).toHaveLength(0);
+    listings.mockRestore();
+    reads.mockRestore();
+
+    // A live legacy revocation written in place must still be observed.
+    const ownerFile = fs.readdirSync(ownersDir).find((name) => name.endsWith(".json"));
+    expect(ownerFile).toBeDefined();
+    const ownerPath = path.join(ownersDir, ownerFile!);
+    const revoked = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+    fs.writeFileSync(
+      ownerPath,
+      JSON.stringify({ ...revoked, toolAccess: "subscription_inactive" }),
+      { mode: 0o600 },
+    );
+    const revived = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    expect(revived.isBlocked(entry(target))).toBe(true);
+  });
+
   it("indexes thousands of synthetic receipts and verifies warm target lookups, cross-process denial, failclosed durability, and redundant mkdir elimination", async () => {
     const target = manifest();
     access.confirm(confirmation("allowed"));
