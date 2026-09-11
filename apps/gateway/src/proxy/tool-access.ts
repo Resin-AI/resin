@@ -74,6 +74,7 @@ export class ManagedToolAccess {
   private ownerDirectoryRevision?: string;
   private ownerNames: string[] = [];
   private readonly ownerFileCache = new Map<string, { revision: string; owner: Owner }>();
+  private ownersSnapshot?: Map<string, Owner>;
   private readonly receiptFileCache = new Map<string, { revision: string; entry: ManagedEntry }>();
   private readonly ownersDir: string;
   private readonly entriesDir: string;
@@ -234,7 +235,25 @@ export class ManagedToolAccess {
     }
   }
 
+  /**
+   * Reuse a single ownership read across a batch of tool checks.
+   *
+   * Catalog adoption and sync visit every registered tool. Each visit previously
+   * re-read the owners directory, so a large catalog walked it thousands of times
+   * per second and dominated process CPU.
+   */
+  withOwnerSnapshot<T>(fn: () => T): T {
+    if (this.ownersSnapshot) return fn();
+    this.ownersSnapshot = this.readOwners();
+    try {
+      return fn();
+    } finally {
+      this.ownersSnapshot = undefined;
+    }
+  }
+
   private readOwners(): Map<string, Owner> {
+    if (this.ownersSnapshot) return this.ownersSnapshot;
     const owners = new Map<string, Owner>(this.knownOwners);
     let dbSucceeded = false;
     try {
@@ -844,6 +863,23 @@ export class ManagedToolAccess {
     confirmation?: ManagedToolConfirmation,
   ): void {
     if (!this.identity) return;
+
+    // Adoption of an already-recorded receipt is a pure no-op. Resolve it before any
+    // ownership read: adopting runs once per registered tool, so reading the owners
+    // directory here made a catalog pass walk it thousands of times per second.
+    const ownerKey = this.ownerKey(this.identity);
+    const receiptFile = path.join(
+      this.entriesDir,
+      `${key({
+        owner: ownerKey,
+        entry,
+        workspaceId,
+        projectId: lockManager?.projectId,
+        lockPath: lockManager?.lockPath,
+      })}.json`,
+    );
+    if (adopting && fs.existsSync(receiptFile)) return;
+
     const owners = this.readOwners();
     // A prior transient failure must be retried before accepting any new receipt.
     if (!this.authorityAvailable) return;
@@ -859,14 +895,13 @@ export class ManagedToolAccess {
     }
 
     const receipt = {
-      owner: this.ownerKey(this.identity),
+      owner: ownerKey,
       entry,
       workspaceId,
       projectId: lockManager?.projectId,
       lockPath: lockManager?.lockPath,
     };
-    const file = path.join(this.entriesDir, `${key(receipt)}.json`);
-    if (adopting && fs.existsSync(file)) return;
+    const file = receiptFile;
 
     const currentOwner = owners.get(receipt.owner);
     let activationId: string | undefined;
@@ -931,11 +966,26 @@ export class ManagedToolAccess {
         if (!byToolId.has(entry.toolId)) byToolId.set(entry.toolId, entry);
       }
     }
+    // Resolve ownership once for the whole pass; record() is called per tool and each
+    // call would otherwise re-read the owners directory.
+    this.withOwnerSnapshot(() =>
+      this.adoptRegisteredTools(registry, lockManager, byName, byToolId),
+    );
+  }
+
+  private adoptRegisteredTools(
+    registry: ToolRegistry,
+    lockManager: ProjectLockManager | undefined,
+    byName: Record<string, V1LockedToolEntry>,
+    byToolId: Map<string, V1LockedToolEntry>,
+  ): void {
+    const identity = this.identity;
+    if (!identity) return;
     for (const tool of registry.getAllRegisteredTools()) {
       const meta = tool.manifest.metadata;
       if (
         !meta ||
-        meta.accountId !== this.identity.accountId ||
+        meta.accountId !== identity.accountId ||
         (meta.source !== "registry" && meta.source !== "cloud")
       )
         continue;

@@ -141,6 +141,56 @@ function coordinator(
   });
 }
 
+describe("Adopting an already-recorded catalog", () => {
+  it("reads the owners directory once for the whole pass, not once per tool", () => {
+    const tools = Array.from({ length: 200 }, (_, index) =>
+      manifest(crypto.randomUUID(), `adopted_${index}`),
+    );
+    access.confirm(confirmation("allowed"));
+    for (const tool of tools) {
+      register(tool);
+      cacheTool(tool);
+    }
+
+    // Warm so the first adopt is not counted.
+    access.adopt(registry, undefined);
+
+    const ownersDir = path.join(access.stateDir, "accounts");
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+    const stats = vi.spyOn(fs, "statSync");
+
+    access.adopt(registry, undefined);
+
+    // Adoption visits every registered tool; each visit previously re-read the owners
+    // directory, which made a large catalog spin the process at full CPU.
+    const ownerTouches = [
+      ...reads.mock.calls.map(([file]) => String(file)),
+      ...listings.mock.calls.map(([dir]) => String(dir)),
+      ...stats.mock.calls.map(([file]) => String(file)),
+    ].filter((target) => target.startsWith(ownersDir));
+    expect(ownerTouches.length).toBeLessThanOrEqual(2);
+    reads.mockRestore();
+    listings.mockRestore();
+    stats.mockRestore();
+    expect(tools.length).toBe(200);
+  });
+
+  it("still honors a live revocation discovered during adoption", () => {
+    const tool = manifest();
+    register(tool);
+    cacheTool(tool);
+    access.confirm(confirmation("allowed"));
+    access.adopt(registry, undefined);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // A sibling revokes, then a later adoption must not resurrect access.
+    const sibling = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    sibling.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+});
+
 describe("Reconciling an unchanged catalog", () => {
   it("does not re-read or re-clone the lockfile per manifest once confirmed", async () => {
     const lockPath = path.join(root, "resin.lock");

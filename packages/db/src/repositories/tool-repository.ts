@@ -17,6 +17,14 @@ import {
 import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
 /**
+ * Catalog snapshots retained per workspace.
+ *
+ * Matches the retention engine default so a state file stays bounded even when
+ * periodic compaction has not run yet.
+ */
+export const CATALOG_SNAPSHOT_KEEP_COUNT = 5;
+
+/**
  * Harness plugin installation record.
  */
 export type HarnessPluginMetadataValue =
@@ -374,6 +382,22 @@ export class ToolRepository {
         canonicalJson(validated.tools),
         validated.digest,
       ],
+    );
+    // Bound per-workspace history as we write. Every catalog sync appended a full
+    // snapshot and nothing pruned them, so a daemon could accumulate millions of
+    // rows (tens of gigabytes) and then fail its own startup integrity scan.
+    this.conn.run(
+      `DELETE FROM catalog_snapshots
+       WHERE workspace_id = ?
+         AND snapshot_id NOT IN (
+           SELECT snapshot_id FROM (
+             SELECT snapshot_id,
+                    ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY timestamp DESC, rowid DESC) AS rn
+             FROM catalog_snapshots
+             WHERE workspace_id = ?
+           ) WHERE rn <= ?
+         );`,
+      [validated.workspaceId, validated.workspaceId, CATALOG_SNAPSHOT_KEEP_COUNT],
     );
   }
 

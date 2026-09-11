@@ -454,13 +454,6 @@ export class MigrationRunner {
    * Executes all pending forward migrations within transactional boundaries.
    */
   async migrate(targetVersion?: number): Promise<MigrationResult> {
-    const preCheck = this.conn.integrityCheck();
-    if (!preCheck.ok) {
-      throw new MigrationIntegrityError(
-        `Pre-migration integrity check failed: ${preCheck.details.join("; ")}`,
-      );
-    }
-
     this.ensureVersionTable();
     const applied = this.getAppliedMigrations();
 
@@ -473,7 +466,14 @@ export class MigrationRunner {
       throw new FutureMigrationError(currentDbVersion, maxCodebaseVersion);
     }
 
-    // Verify existing applied migrations match checksums / names
+    const effectiveTarget = targetVersion ?? maxCodebaseVersion;
+    const pendingMigrations = this.migrations.filter(
+      (m) => m.version > currentDbVersion && m.version <= effectiveTarget,
+    );
+
+    // Verify existing applied migrations match checksums / names. This is cheap and
+    // must run even when nothing is pending, so a tampered or mismatched history is
+    // still detected.
     for (const app of applied) {
       const codeMigration = this.migrations.find((m) => m.version === app.version);
       if (!codeMigration) {
@@ -487,10 +487,24 @@ export class MigrationRunner {
       }
     }
 
-    const effectiveTarget = targetVersion ?? maxCodebaseVersion;
-    const pendingMigrations = this.migrations.filter(
-      (m) => m.version > currentDbVersion && m.version <= effectiveTarget,
-    );
+    // A no-op migration must not pay for a full database scan. On a large local
+    // state file the full check runs for minutes, which previously pushed daemon
+    // startup past its activation probation window and rolled back valid upgrades.
+    if (pendingMigrations.length === 0) {
+      return {
+        initialVersion: currentDbVersion,
+        targetVersion: currentDbVersion,
+        appliedVersions: [],
+        integrityOk: true,
+      };
+    }
+
+    const preCheck = this.conn.integrityCheck();
+    if (!preCheck.ok) {
+      throw new MigrationIntegrityError(
+        `Pre-migration integrity check failed: ${preCheck.details.join("; ")}`,
+      );
+    }
 
     const newlyApplied: number[] = [];
 
@@ -507,7 +521,7 @@ export class MigrationRunner {
       newlyApplied.push(migration.version);
     }
 
-    // Unchanged schemas already passed the full precheck; real migrations still receive post-validation.
+    // Unchanged schemas already passed the precheck; real migrations still receive post-validation.
     const postCheck = newlyApplied.length > 0 ? this.conn.integrityCheck() : preCheck;
     if (!postCheck.ok) {
       throw new MigrationIntegrityError(
