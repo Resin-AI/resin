@@ -91,6 +91,14 @@ export class ProjectLockManager {
   readonly lockTimeoutMs: number;
   readonly staleLockThresholdMs: number;
   readonly readOnly: boolean;
+  /**
+   * Last validated lockfile plus the file revision it was parsed from.
+   *
+   * `readLock()` is called per registered tool during catalog adoption and per
+   * manifest during sync reconciliation, so re-reading and re-validating the whole
+   * lockfile each time made those walks quadratic in the number of tools.
+   */
+  private lockReadCache?: { revision: string; lock: V1ToolLock };
 
   constructor(options: ProjectLockManagerOptions);
   constructor(lockPath: string, projectId?: string);
@@ -286,6 +294,7 @@ export class ProjectLockManager {
    */
   readLock(): V1ToolLock {
     if (!fs.existsSync(this.lockPath)) {
+      this.lockReadCache = undefined;
       return {
         schemaKind: V1_SCHEMA_KINDS.TOOL_LOCK,
         schemaVersion: V1_SCHEMA_VERSION,
@@ -296,6 +305,22 @@ export class ProjectLockManager {
     }
 
     assertNotSymlink(this.lockPath, "'resin.lock'");
+
+    // Reuse the validated parse while the lockfile is unchanged. The revision covers
+    // in-place writes (mtime/ctime/size) and atomic replacement (inode), so a
+    // concurrent writer in another process is still observed.
+    let revision: string | undefined;
+    try {
+      const stat = fs.statSync(this.lockPath, { bigint: true });
+      revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+    } catch {
+      revision = undefined;
+    }
+    if (revision !== undefined && this.lockReadCache?.revision === revision) {
+      // Defensive copy: callers previously received a fresh object per call, so a
+      // mutation must not leak into the shared cache or into other callers.
+      return structuredClone(this.lockReadCache.lock);
+    }
 
     let raw: string;
     try {
@@ -321,7 +346,13 @@ export class ProjectLockManager {
       );
     }
 
-    return lock;
+    if (revision !== undefined) {
+      this.lockReadCache = { revision, lock };
+    } else {
+      this.lockReadCache = undefined;
+    }
+
+    return structuredClone(lock);
   }
 
   /**
@@ -343,6 +374,23 @@ export class ProjectLockManager {
     options?: { follow?: boolean; advance?: boolean },
   ): ReconcileResult {
     const validatedEntry = V1LockedToolEntrySchema.parse(candidateEntry);
+
+    // Fast path: when no mutation is possible (`follow`/`advance` are not requested
+    // and the candidate already matches the committed entry exactly), the outcome is
+    // "unchanged" and no write can occur. Resolving it from the cached read avoids a
+    // lockfile mutex acquisition per manifest during catalog sync.
+    if (!options?.follow && !options?.advance) {
+      const existing = this.readLock().tools[validatedEntry.name];
+      if (
+        existing &&
+        existing.version === validatedEntry.version &&
+        existing.manifestDigest === validatedEntry.manifestDigest &&
+        existing.artifactDigest === validatedEntry.artifactDigest &&
+        existing.envelopeDigest === validatedEntry.envelopeDigest
+      ) {
+        return { outcome: "unchanged", lock: this.readLock() };
+      }
+    }
 
     return this.withLock(() => {
       const currentLock = this.readLock();
