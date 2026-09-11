@@ -390,20 +390,6 @@ ALTER TABLE invocation_records ADD COLUMN usage_estimate_json TEXT;
 `;
 
 /**
- * Migration 004: Durable per-workspace catalog-snapshot revision high-water mark.
- *
- * catalog_snapshots is retention-pruned and shared with non-revision registry
- * snapshots, so the highest surviving _revN row is not a reliable allocator. This
- * counter persists the next revision independently of which snapshot rows remain.
- */
-export const MIGRATION_004_SQL = `
-CREATE TABLE IF NOT EXISTS catalog_snapshot_counters (
-  workspace_id TEXT PRIMARY KEY,
-  next_revision INTEGER NOT NULL
-);
-`;
-
-/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -424,12 +410,6 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "003_add_invocation_records_usage_estimate",
     sql: MIGRATION_003_SQL,
     checksum: hashCanonicalContent(MIGRATION_003_SQL),
-  },
-  {
-    version: 4,
-    name: "004_catalog_snapshot_counters",
-    sql: MIGRATION_004_SQL,
-    checksum: hashCanonicalContent(MIGRATION_004_SQL),
   },
 ];
 

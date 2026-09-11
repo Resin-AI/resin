@@ -11,7 +11,7 @@ import {
 } from "../src/migrations.js";
 
 describe("MigrationRunner", () => {
-  it("runs initial migration on a fresh database and creates all 21 tables", async () => {
+  it("runs initial migration on a fresh database and creates all 20 tables", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
 
@@ -21,20 +21,18 @@ describe("MigrationRunner", () => {
 
     const result = await runner.migrate();
     expect(result.initialVersion).toBe(0);
-    expect(result.targetVersion).toBe(4);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4]);
+    expect(result.targetVersion).toBe(3);
+    expect(result.appliedVersions).toEqual([1, 2, 3]);
     expect(result.integrityOk).toBe(true);
 
-    expect(runner.getCurrentVersion()).toBe(4);
+    expect(runner.getCurrentVersion()).toBe(3);
     const applied = runner.getAppliedMigrations();
-    expect(applied).toHaveLength(4);
+    expect(applied).toHaveLength(3);
     expect(applied[0].version).toBe(1);
     expect(applied[0].name).toBe("001_initial_local_schema");
     expect(applied[1].version).toBe(2);
     expect(applied[1].name).toBe("002_add_invocation_records_uploaded_at");
     expect(applied[2].version).toBe(3);
-    expect(applied[3].version).toBe(4);
-    expect(applied[3].name).toBe("004_catalog_snapshot_counters");
     expect(applied[2].name).toBe("003_add_invocation_records_usage_estimate");
     // Verify key tables exist and are queryable
     const testTables = [
@@ -58,7 +56,6 @@ describe("MigrationRunner", () => {
       "audit_records",
       "local_outbox",
       "local_inbox",
-      "catalog_snapshot_counters",
     ];
 
     for (const table of testTables) {
@@ -81,12 +78,12 @@ describe("MigrationRunner", () => {
 
     const runner = new MigrationRunner(conn);
     const firstRun = await runner.migrate();
-    expect(firstRun.appliedVersions).toEqual([1, 2, 3, 4]);
+    expect(firstRun.appliedVersions).toEqual([1, 2, 3]);
 
     const secondRun = await runner.migrate();
     expect(secondRun.appliedVersions).toHaveLength(0);
-    expect(secondRun.initialVersion).toBe(4);
-    expect(secondRun.targetVersion).toBe(4);
+    expect(secondRun.initialVersion).toBe(3);
+    expect(secondRun.targetVersion).toBe(3);
     conn.close();
   });
 
@@ -100,7 +97,7 @@ describe("MigrationRunner", () => {
 
     // Real migrations keep the full structural verification.
     expect(integrityCheckSpy).toHaveBeenCalledTimes(2);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4]);
+    expect(result.appliedVersions).toEqual([1, 2, 3]);
     expect(result.integrityOk).toBe(true);
     conn.close();
   });
@@ -121,8 +118,8 @@ describe("MigrationRunner", () => {
     expect(integrityCheckSpy).toHaveBeenCalledTimes(0);
     expect(result.appliedVersions).toEqual([]);
     expect(result.integrityOk).toBe(true);
-    expect(result.initialVersion).toBe(4);
-    expect(result.targetVersion).toBe(4);
+    expect(result.initialVersion).toBe(3);
+    expect(result.targetVersion).toBe(3);
     conn.close();
   });
 
