@@ -2121,6 +2121,11 @@ export class ToolRegistry {
       try {
         if ("listManifests" in repo && repo.listManifests instanceof Function) {
           const manifests = await repo.listManifests();
+          // Build all RegistryTools first (async getToolVersion per manifest), then
+          // register them in one synchronous pass under a single owner snapshot. The
+          // snapshot must NOT span the awaits — a revocation landing mid-await would be
+          // masked — so it wraps only the synchronous registerToolSync loop.
+          const pending: Array<{ tool: RegistryTool; toolId: string; version: string }> = [];
           for (const manifest of manifests) {
             const toolId = manifest.id;
             let versionObj: ToolVersion | null = null;
@@ -2150,27 +2155,26 @@ export class ToolRegistry {
                 manifest.outputSchema && manifest.outputSchema instanceof Object
                   ? (manifest.outputSchema as JsonRpcParams)
                   : undefined;
-              const registryTool: RegistryTool = {
+              pending.push({
+                tool: {
+                  toolId,
+                  name: manifest.name || toolId,
+                  exposedName: manifest.name || toolId,
+                  version: versionObj.version,
+                  description: manifest.description || `Tool ${manifest.name || toolId}`,
+                  // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
+                  scope: (manifest.scope as ToolScopeHierarchy) || "global",
+                  workspaceId: options?.workspaceId,
+                  parameters: params,
+                  status: versionObj.status || "active",
+                  outputSchema,
+                  manifest,
+                  artifact: versionObj.artifact,
+                  handler,
+                },
                 toolId,
-                name: manifest.name || toolId,
-                exposedName: manifest.name || toolId,
                 version: versionObj.version,
-                description: manifest.description || `Tool ${manifest.name || toolId}`,
-                // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
-                scope: (manifest.scope as ToolScopeHierarchy) || "global",
-                workspaceId: options?.workspaceId,
-                parameters: params,
-                status: versionObj.status || "active",
-                outputSchema,
-                manifest,
-                artifact: versionObj.artifact,
-                handler,
-              };
-              this.registerToolSync(registryTool);
-              if (!options?.workspaceId && !this.systemActiveTools.has(toolId)) {
-                this.systemActiveTools.set(toolId, versionObj.version);
-              }
-              loadedCount++;
+              });
             } else {
               const handler = createEvolvedToolHandler({ manifest });
               // SAFETY: Manifest parameters conform to JSON-RPC parameter record structure.
@@ -2183,27 +2187,40 @@ export class ToolRegistry {
                 manifest.outputSchema && manifest.outputSchema instanceof Object
                   ? (manifest.outputSchema as JsonRpcParams)
                   : undefined;
-              const registryTool: RegistryTool = {
+              pending.push({
+                tool: {
+                  toolId,
+                  name: manifest.name || toolId,
+                  exposedName: manifest.name || toolId,
+                  version: manifest.version,
+                  description: manifest.description || `Tool ${manifest.name || toolId}`,
+                  // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
+                  scope: (manifest.scope as ToolScopeHierarchy) || "global",
+                  workspaceId: options?.workspaceId,
+                  parameters: params,
+                  status: "active",
+                  outputSchema,
+                  manifest,
+                  handler,
+                },
                 toolId,
-                name: manifest.name || toolId,
-                exposedName: manifest.name || toolId,
                 version: manifest.version,
-                description: manifest.description || `Tool ${manifest.name || toolId}`,
-                // SAFETY: Manifest scope conforms to ToolScopeHierarchy.
-                scope: (manifest.scope as ToolScopeHierarchy) || "global",
-                workspaceId: options?.workspaceId,
-                parameters: params,
-                status: "active",
-                outputSchema,
-                manifest,
-                handler,
-              };
-              this.registerToolSync(registryTool);
+              });
+            }
+          }
+
+          // Synchronous registration under one owner snapshot — no awaits inside.
+          const releaseOwners = this.managedToolAccess?.beginOwnerSnapshot();
+          try {
+            for (const { tool, toolId, version } of pending) {
+              this.registerToolSync(tool);
               if (!options?.workspaceId && !this.systemActiveTools.has(toolId)) {
-                this.systemActiveTools.set(toolId, manifest.version);
+                this.systemActiveTools.set(toolId, version);
               }
               loadedCount++;
             }
+          } finally {
+            releaseOwners?.();
           }
         }
 

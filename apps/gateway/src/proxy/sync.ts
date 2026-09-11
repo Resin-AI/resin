@@ -651,16 +651,29 @@ export class CloudCatalogSyncCoordinator {
 
     const entries = Object.entries(lock.tools);
 
-    for (const [toolName, entry] of entries) {
-      if (
-        this.options.managedToolAccess?.isInactive() ||
-        this.options.managedToolAccess?.isBlocked(entry)
-      )
-        continue;
-      if (entry.status === "disabled") {
-        continue;
+    // Pre-filter blocked/inactive entries under a single owner snapshot. The snapshot
+    // is opened and released synchronously here — it must NOT span the async download
+    // loop below, or a revocation landing mid-await would be masked. This collapses
+    // the per-tool readOwners() statx calls into one directory read.
+    const eligible: Array<[string, (typeof entries)[number][1]]> = [];
+    const releaseOwners = this.options.managedToolAccess?.beginOwnerSnapshot?.();
+    try {
+      for (const [toolName, entry] of entries) {
+        if (
+          this.options.managedToolAccess?.isInactive() ||
+          this.options.managedToolAccess?.isBlocked(entry)
+        )
+          continue;
+        if (entry.status === "disabled") {
+          continue;
+        }
+        eligible.push([toolName, entry]);
       }
+    } finally {
+      releaseOwners?.();
+    }
 
+    for (const [toolName, entry] of eligible) {
       try {
         if (this.artifactCache) {
           let isArtifactCached = this.artifactCache.isArtifactCached(entry.artifactDigest);
