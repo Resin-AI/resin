@@ -551,28 +551,34 @@ export class ToolRegistry {
   /** Re-read durable denial on discovery, including cached catalogs in sibling processes. */
   private forgetBlockedTools(): void {
     if (!this.managedToolAccess) return;
-    for (const tool of this.getAllRegisteredTools()) {
-      if (!this.managedToolAccess.isBlocked(tool)) continue;
-      this.registeredTools.get(tool.toolId)?.delete(tool.version);
-      if (this.latestVersions.get(tool.toolId) === tool.version)
-        this.latestVersions.delete(tool.toolId);
-      for (const active of [
-        this.systemActiveTools,
-        ...this.workspaceActiveTools.values(),
-        ...this.accountActiveTools.values(),
-        ...this.sessionActiveTools.values(),
-      ]) {
-        if (active.get(tool.toolId) === tool.version) active.delete(tool.toolId);
-      }
-      for (const [workspaceId, lock] of this.workspaceLocks) {
-        const tools = { ...lock.tools };
-        for (const [name, entry] of Object.entries(tools)) {
-          if (this.managedToolAccess.isBlocked(entry)) delete tools[name];
+    // Synchronous sweep over every registered tool; resolve ownership once for the pass.
+    const releaseOwners = this.managedToolAccess.beginOwnerSnapshot();
+    try {
+      for (const tool of this.getAllRegisteredTools()) {
+        if (!this.managedToolAccess.isBlocked(tool)) continue;
+        this.registeredTools.get(tool.toolId)?.delete(tool.version);
+        if (this.latestVersions.get(tool.toolId) === tool.version)
+          this.latestVersions.delete(tool.toolId);
+        for (const active of [
+          this.systemActiveTools,
+          ...this.workspaceActiveTools.values(),
+          ...this.accountActiveTools.values(),
+          ...this.sessionActiveTools.values(),
+        ]) {
+          if (active.get(tool.toolId) === tool.version) active.delete(tool.toolId);
         }
-        this.workspaceLocks.set(workspaceId, { ...lock, tools });
+        for (const [workspaceId, lock] of this.workspaceLocks) {
+          const tools = { ...lock.tools };
+          for (const [name, entry] of Object.entries(tools)) {
+            if (this.managedToolAccess.isBlocked(entry)) delete tools[name];
+          }
+          this.workspaceLocks.set(workspaceId, { ...lock, tools });
+        }
+        this.snapshotHistory.clear();
+        this.cache.invalidateAll();
       }
-      this.snapshotHistory.clear();
-      this.cache.invalidateAll();
+    } finally {
+      releaseOwners();
     }
   }
 
@@ -1276,47 +1282,57 @@ export class ToolRegistry {
 
     // 5. Build Catalog Entries
     const entries: CatalogEntry[] = [];
-    for (const { tool, scope } of candidateTools.values()) {
-      if (this.managedToolAccess?.isBlocked(tool)) continue;
-      const exposedName = nameMap.get(tool.toolId) || sanitizeToolName(tool.name);
-      const isPinned =
-        Boolean(controls.pinnedVersions[tool.toolId]) ||
-        Boolean(controls.pinnedVersions[tool.name]) ||
-        (tool.exposedName ? Boolean(controls.pinnedVersions[tool.exposedName]) : false);
+    // Resolve ownership once for this synchronous build: isBlocked() runs per candidate
+    // tool and each call re-validated the owners directory, which dominated CPU for
+    // large catalogs. No await occurs inside this scope.
+    const releaseOwners = this.managedToolAccess?.beginOwnerSnapshot();
+    try {
+      for (const { tool, scope } of candidateTools.values()) {
+        if (this.managedToolAccess?.isBlocked(tool)) continue;
+        const exposedName = nameMap.get(tool.toolId) || sanitizeToolName(tool.name);
+        const isPinned =
+          Boolean(controls.pinnedVersions[tool.toolId]) ||
+          Boolean(controls.pinnedVersions[tool.name]) ||
+          (tool.exposedName ? Boolean(controls.pinnedVersions[tool.exposedName]) : false);
 
-      const parametersValue = tool.parameters ?? tool.manifest.parameters;
-      const outputSchemaValue = tool.outputSchema ?? tool.manifest.outputSchema;
-      const parameters =
-        parametersValue === undefined ? undefined : JsonRpcParamsSchema.parse(parametersValue);
-      const outputSchema =
-        outputSchemaValue === undefined ? undefined : JsonRpcParamsSchema.parse(outputSchemaValue);
-      const metadata =
-        tool.metadata === undefined ? undefined : JsonRpcParamsSchema.parse(tool.metadata);
+        const parametersValue = tool.parameters ?? tool.manifest.parameters;
+        const outputSchemaValue = tool.outputSchema ?? tool.manifest.outputSchema;
+        const parameters =
+          parametersValue === undefined ? undefined : JsonRpcParamsSchema.parse(parametersValue);
+        const outputSchema =
+          outputSchemaValue === undefined
+            ? undefined
+            : JsonRpcParamsSchema.parse(outputSchemaValue);
+        const metadata =
+          tool.metadata === undefined ? undefined : JsonRpcParamsSchema.parse(tool.metadata);
 
-      const entry: CatalogEntry = {
-        toolId: tool.toolId,
-        name: tool.name,
-        version: tool.version,
-        manifest: tool.manifest,
-        manifestDigest:
-          tool.manifestDigest || tool.manifest.digest || computeManifestDigest(tool.manifest),
-        artifactDigest: tool.artifactDigest || tool.artifact?.artifactDigest,
-        envelopeDigest: tool.envelopeDigest,
-        scope,
-        status: tool.status || "active",
-        exposedName,
-        parameters,
-        outputSchema,
-        artifact: tool.artifact,
-        handler: tool.handler,
-        sourceCode: tool.sourceCode,
-        workspaceId,
-        sessionId,
-        isPinned,
-        isDisabled: false,
-        metadata,
-      };
-      entries.push(entry);
+        const entry: CatalogEntry = {
+          toolId: tool.toolId,
+          name: tool.name,
+          version: tool.version,
+          manifest: tool.manifest,
+          manifestDigest:
+            tool.manifestDigest || tool.manifest.digest || computeManifestDigest(tool.manifest),
+          artifactDigest: tool.artifactDigest || tool.artifact?.artifactDigest,
+          envelopeDigest: tool.envelopeDigest,
+          scope,
+          status: tool.status || "active",
+          exposedName,
+          parameters,
+          outputSchema,
+          artifact: tool.artifact,
+          handler: tool.handler,
+          sourceCode: tool.sourceCode,
+          workspaceId,
+          sessionId,
+          isPinned,
+          isDisabled: false,
+          metadata,
+        };
+        entries.push(entry);
+      }
+    } finally {
+      releaseOwners?.();
     }
 
     // 6. Compute Monotonic Revision and Build Snapshot
