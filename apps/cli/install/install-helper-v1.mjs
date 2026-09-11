@@ -5251,6 +5251,133 @@ var init_records = __esm({
   }
 });
 
+// packages/contracts/dist/opportunity.js
+var OptionalCostUsdSchema, TriggerTypeSchema, CoverageStatusSchema, OpportunityHashOutcomeSchema, WorkflowClusterMetricsSchema, EstimatedSavedWorkSchema, EpisodeSignatureSchema, WorkflowClusterSummarySchema, TriggerMetricsSchema, TriggerResultSchema, SuppressionResultSchema, CoverageResultSchema, LocalVerdictsSchema, ProvenPatternDtoSchema, OpportunityHashCacheEntrySchema;
+var init_opportunity = __esm({
+  "packages/contracts/dist/opportunity.js"() {
+    "use strict";
+    init_zod();
+    init_common();
+    OptionalCostUsdSchema = external_exports.number().nonnegative().nullable().optional();
+    TriggerTypeSchema = external_exports.enum(["normal_frequency", "exceptional_waste", "none"]);
+    CoverageStatusSchema = external_exports.enum(["net_new", "update_candidate", "covered", "duplicate"]);
+    OpportunityHashOutcomeSchema = external_exports.enum([
+      "published",
+      "in_progress",
+      "rejected_on_merit",
+      "failed_infra",
+      "not_dispatched"
+    ]);
+    WorkflowClusterMetricsSchema = external_exports.object({
+      totalTokens: external_exports.number().int().nonnegative(),
+      totalCostUsd: external_exports.number().nonnegative().nullable(),
+      avgDurationMs: external_exports.number().nonnegative(),
+      avgTokens: external_exports.number().nonnegative(),
+      totalRetries: external_exports.number().int().nonnegative(),
+      avgStepCount: external_exports.number().nonnegative()
+    });
+    EstimatedSavedWorkSchema = external_exports.object({
+      estimatedDurationSavedMs: external_exports.number().nonnegative(),
+      estimatedTokensSaved: external_exports.number().int().nonnegative(),
+      estimatedStepsSaved: external_exports.number().nonnegative(),
+      savedDurationMs: external_exports.number().nonnegative(),
+      savedTokens: external_exports.number().int().nonnegative(),
+      estimatedCostSavedUsd: OptionalCostUsdSchema,
+      savedCostUsd: OptionalCostUsdSchema,
+      savedToolCalls: external_exports.number().int().nonnegative(),
+      confidence: external_exports.number().min(0).max(1)
+    });
+    EpisodeSignatureSchema = external_exports.object({
+      signatureId: IdentifierSchema,
+      structuralHash: external_exports.string().min(1),
+      operations: external_exports.array(external_exports.string()),
+      toolClasses: external_exports.array(external_exports.string()),
+      commandPatterns: external_exports.array(external_exports.string()),
+      normalizedPaths: external_exports.array(external_exports.string()),
+      argumentSchemaHashes: external_exports.array(external_exports.string()),
+      semanticOperations: external_exports.array(external_exports.unknown()).optional(),
+      stepCount: external_exports.number().int().nonnegative(),
+      durationMs: external_exports.number().nonnegative(),
+      tokenCount: external_exports.number().int().nonnegative(),
+      retryCount: external_exports.number().int().nonnegative(),
+      estimatedCostUsd: OptionalCostUsdSchema
+    });
+    WorkflowClusterSummarySchema = external_exports.object({
+      clusterId: IdentifierSchema,
+      structuralHash: external_exports.string().min(1),
+      episodeCount: external_exports.number().int().nonnegative(),
+      distinctSessionIds: external_exports.array(IdentifierSchema),
+      scenarioIds: external_exports.array(IdentifierSchema),
+      distinctScenarioCount: external_exports.number().int().nonnegative(),
+      completedOccurrences: external_exports.number().int().nonnegative(),
+      firstSeenAt: ISOTimestampSchema,
+      lastSeenAt: ISOTimestampSchema,
+      evidenceEventIds: external_exports.array(IdentifierSchema),
+      metrics: WorkflowClusterMetricsSchema
+    });
+    TriggerMetricsSchema = external_exports.object({
+      occurrenceCount: external_exports.number().int().nonnegative(),
+      durationMs: external_exports.number().nonnegative(),
+      tokenCount: external_exports.number().int().nonnegative(),
+      retryCount: external_exports.number().int().nonnegative(),
+      estimatedCostUsd: OptionalCostUsdSchema,
+      stepCount: external_exports.number().int().nonnegative().optional()
+    });
+    TriggerResultSchema = external_exports.object({
+      triggered: external_exports.boolean(),
+      triggerType: TriggerTypeSchema,
+      reason: external_exports.string(),
+      description: external_exports.string(),
+      evidenceEventIds: external_exports.array(IdentifierSchema),
+      metrics: TriggerMetricsSchema
+    });
+    SuppressionResultSchema = external_exports.object({
+      suppressed: external_exports.boolean(),
+      reason: external_exports.string(),
+      details: external_exports.string(),
+      excludedOperationIds: external_exports.array(IdentifierSchema).optional(),
+      excludedEventIds: external_exports.array(IdentifierSchema).optional(),
+      matchedPattern: external_exports.string().optional()
+    });
+    CoverageResultSchema = external_exports.object({
+      status: CoverageStatusSchema,
+      matchingToolId: IdentifierSchema.optional(),
+      matchingToolName: external_exports.string().optional(),
+      similarityScore: external_exports.number().min(0).max(1),
+      overlapRatio: external_exports.number().min(0).max(1),
+      reason: external_exports.string(),
+      suggestedActions: external_exports.array(external_exports.string()).optional()
+    });
+    LocalVerdictsSchema = external_exports.object({
+      trigger: TriggerResultSchema,
+      suppression: SuppressionResultSchema,
+      coverage: CoverageResultSchema,
+      estimatedSavedWork: EstimatedSavedWorkSchema
+    });
+    ProvenPatternDtoSchema = external_exports.object({
+      schemaVersion: SchemaVersionSchema,
+      patternId: IdentifierSchema,
+      idempotencyKey: IdentifierSchema,
+      accountId: IdentifierSchema,
+      workspaceId: IdentifierSchema,
+      engineVersion: SchemaVersionSchema,
+      signature: EpisodeSignatureSchema,
+      cluster: WorkflowClusterSummarySchema,
+      localVerdicts: LocalVerdictsSchema,
+      evidenceEventIds: external_exports.array(IdentifierSchema),
+      recurrence: external_exports.unknown().optional()
+    });
+    OpportunityHashCacheEntrySchema = external_exports.object({
+      structuralHash: external_exports.string().min(1),
+      outcome: OpportunityHashOutcomeSchema,
+      lastSeenAt: ISOTimestampSchema,
+      attempts: external_exports.number().int().nonnegative(),
+      syncedAt: ISOTimestampSchema.nullable(),
+      expiresAt: ISOTimestampSchema
+    });
+  }
+});
+
 // packages/contracts/dist/safety-gate.js
 var CURRENT_SAFETY_GATE_VERSION, SafetyAttestationRecordSchema, UnmetRequirementSchema, ProductionSafetyGateStatusSchema, SafetyGateRefusalSchema;
 var init_safety_gate = __esm({
@@ -6649,6 +6776,7 @@ var init_dist = __esm({
     init_versions();
     init_deployments();
     init_records();
+    init_opportunity();
     init_safety_gate();
     init_qualification();
     init_v1();
@@ -10903,6 +11031,18 @@ var MAX_IPC_PROBE_RESPONSE_BYTES = 64 * 1024;
 
 // apps/observer/dist/config.js
 init_zod();
+var OpportunityTrackingConfigSchema = external_exports.object({
+  /** Enables continuous per-session local opportunity detection. */
+  enabled: external_exports.boolean().default(true),
+  /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
+  synthesisCostUsd: external_exports.number().nonnegative().default(0.05),
+  /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
+  minDispatchConfidence: external_exports.number().min(0).max(1).default(0.5),
+  /** Rolling per-session episode window bound. */
+  maxEpisodesPerSession: external_exports.number().int().positive().default(64),
+  /** Pattern outbox upload cadence and hash-cache reconciliation interval, in milliseconds. */
+  uploadIntervalMs: external_exports.number().int().positive().default(3e5)
+}).strict();
 var DaemonConfigSchema = external_exports.object({
   version: external_exports.string().default("0.1.0"),
   logLevel: external_exports.enum(["debug", "info", "warn", "error", "silent"]).default("info"),
@@ -10919,6 +11059,7 @@ var DaemonConfigSchema = external_exports.object({
   workerExecutionTimeoutMs: external_exports.number().int().positive().default(3e4),
   moduleConfigs: external_exports.record(external_exports.string(), external_exports.record(external_exports.string(), external_exports.unknown())).default({}),
   captureUserSessionsOnly: external_exports.boolean().default(true),
+  opportunityTracking: OpportunityTrackingConfigSchema.default({}),
   custom: external_exports.record(external_exports.string(), external_exports.unknown()).default({})
 });
 var ConfigRecoveryWarningSchema = external_exports.object({
@@ -11698,6 +11839,72 @@ CREATE INDEX IF NOT EXISTS idx_invocation_records_uploaded_at ON invocation_reco
 var MIGRATION_003_SQL = `
 ALTER TABLE invocation_records ADD COLUMN usage_estimate_json TEXT;
 `;
+var MIGRATION_004_SQL = `
+-- 1. Session Signatures
+CREATE TABLE IF NOT EXISTS session_signatures (
+  signature_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  structural_hash TEXT NOT NULL,
+  episode_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_signatures_session_id ON session_signatures(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_signatures_structural_hash ON session_signatures(structural_hash);
+CREATE INDEX IF NOT EXISTS idx_session_signatures_episode_id ON session_signatures(episode_id);
+
+-- 2. Workflow Clusters
+CREATE TABLE IF NOT EXISTS workflow_clusters (
+  cluster_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  structural_hash TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  occurrence_count INTEGER NOT NULL DEFAULT 0,
+  evidence_event_ids_json TEXT NOT NULL DEFAULT '[]',
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  engine_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_clusters_structural_hash ON workflow_clusters(structural_hash);
+CREATE INDEX IF NOT EXISTS idx_workflow_clusters_workspace_id ON workflow_clusters(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_clusters_last_seen_at ON workflow_clusters(last_seen_at);
+
+-- 3. Cluster Episodes
+CREATE TABLE IF NOT EXISTS cluster_episodes (
+  cluster_id TEXT NOT NULL,
+  episode_id TEXT NOT NULL,
+  session_id TEXT,
+  PRIMARY KEY (cluster_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cluster_episodes_session_id ON cluster_episodes(session_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_episodes_episode_id ON cluster_episodes(episode_id);
+
+-- 4. Opportunity Hash Cache
+CREATE TABLE IF NOT EXISTS opportunity_hash_cache (
+  structural_hash TEXT PRIMARY KEY,
+  outcome TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  source_revision TEXT,
+  synced_at TEXT,
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opportunity_hash_cache_last_seen_at ON opportunity_hash_cache(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_opportunity_hash_cache_expires_at ON opportunity_hash_cache(expires_at);
+
+-- 5. Pattern Outbox
+CREATE TABLE IF NOT EXISTS pattern_outbox (
+  pattern_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  workspace_id TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  uploaded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pattern_outbox_workspace_id ON pattern_outbox(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_pattern_outbox_created_at ON pattern_outbox(created_at);
+CREATE INDEX IF NOT EXISTS idx_pattern_outbox_uploaded_at ON pattern_outbox(uploaded_at);
+`;
 var BUILT_IN_MIGRATIONS = [
   {
     version: 1,
@@ -11716,6 +11923,12 @@ var BUILT_IN_MIGRATIONS = [
     name: "003_add_invocation_records_usage_estimate",
     sql: MIGRATION_003_SQL,
     checksum: hashCanonicalContent(MIGRATION_003_SQL)
+  },
+  {
+    version: 4,
+    name: "004_add_local_opportunity_tables",
+    sql: MIGRATION_004_SQL,
+    checksum: hashCanonicalContent(MIGRATION_004_SQL)
   }
 ];
 
@@ -11732,6 +11945,9 @@ init_dist();
 init_dist();
 
 // packages/db/dist/repositories/audit-repository.js
+init_dist();
+
+// packages/db/dist/repositories/opportunity-local-repository.js
 init_dist();
 
 // apps/observer/dist/sync/coordinator.js
@@ -11944,6 +12160,271 @@ var TelemetryPrivacyCheckpointSchema = external_exports.discriminatedUnion("vers
   LegacyTelemetryPrivacyCheckpointSchema,
   CurrentTelemetryPrivacyCheckpointSchema
 ]);
+
+// apps/observer/dist/opportunity/session-opportunity-tracker.js
+init_dist();
+
+// apps/observer/dist/opportunity/clustering.js
+init_dist();
+
+// apps/observer/dist/opportunity/episode.js
+init_dist();
+var DEFAULT_IDLE_GAP_THRESHOLD_MS = 5 * 60 * 1e3;
+
+// apps/observer/dist/opportunity/signature.js
+init_dist();
+
+// apps/observer/dist/opportunity/parameter-shape.js
+init_dist();
+var RESIN_PARAMETER_SHAPE_KEY2 = "__resinParameterShapeV1";
+var BLOCKED_PROPERTIES = Object.fromEntries(["__proto__", "constructor", "prototype", RESIN_PARAMETER_SHAPE_KEY2].map((key) => [
+  key,
+  true
+]));
+
+// apps/observer/dist/opportunity/signature.js
+var LOW_SIGNAL_COMMANDS = Object.fromEntries([
+  // pure output / formatting
+  "echo",
+  "printf",
+  "yes",
+  // inspection / viewers
+  "cat",
+  "ls",
+  "dir",
+  "pwd",
+  "head",
+  "tail",
+  "wc",
+  "less",
+  "more",
+  "tree",
+  // text filters / readers
+  "grep",
+  "egrep",
+  "fgrep",
+  "sed",
+  "awk",
+  "cut",
+  "tr",
+  "sort",
+  "uniq",
+  "comm",
+  "diff",
+  "jq",
+  "xargs",
+  "tee",
+  // diagnostics / process inspection
+  "pgrep",
+  "pkill",
+  "ps",
+  "stat",
+  "file",
+  "which",
+  "whereis",
+  "type",
+  "env",
+  "printenv",
+  "uname",
+  "hostname",
+  "whoami",
+  "id",
+  "date",
+  "uptime",
+  "df",
+  "du",
+  "free",
+  "nproc",
+  "arch",
+  // shell plumbing / control flow
+  "cd",
+  "test",
+  "[",
+  "[[",
+  "true",
+  "false",
+  "set",
+  "export",
+  "unset",
+  "read",
+  "wait",
+  "sleep",
+  "clear",
+  "history",
+  "jobs",
+  "bg",
+  "fg",
+  "kill",
+  "trap",
+  "shift",
+  "eval",
+  "for",
+  "while",
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "function",
+  "return",
+  "exit",
+  "break",
+  "continue",
+  "in",
+  "select",
+  "until",
+  "time",
+  // tokenization artifacts
+  "_str",
+  "_arg",
+  "_path",
+  "_cmd",
+  "cmd",
+  "sh",
+  "bash",
+  "zsh",
+  "dash"
+].map((name) => [name, true]));
+var LOW_SIGNAL_TOOLS = Object.fromEntries(["read", "glob", "grep", "list", "ls", "find", "search", "view", "cat", "stat"].map((name) => [
+  name,
+  true
+]));
+
+// apps/observer/dist/opportunity/suppression.js
+var TRIVIAL_COMMANDS = Object.fromEntries(["echo", "pwd", "whoami", "hostname", "date", "true", "false", "clear"].map((name) => [
+  name,
+  true
+]));
+var RESERVED_TOOL_NAMES = Object.fromEntries([
+  "unknown",
+  "generic",
+  "custom",
+  "auto",
+  "auto_general",
+  "general",
+  "passthrough",
+  "unknown_passthrough",
+  "session_lifecycle",
+  "message",
+  "thinking",
+  "undefined",
+  "null",
+  "nan",
+  "none",
+  "__proto__",
+  "proto",
+  "prototype",
+  "constructor",
+  "search_tools",
+  "get_tool_schema",
+  "invoke_tool",
+  "manage_tools"
+].map((name) => [name, true]));
+var RESERVED_OR_BUILTIN_TOOL_NAMES = Object.fromEntries([
+  // Meta tools
+  "search_tools",
+  "get_tool_schema",
+  "invoke_tool",
+  "manage_tools",
+  // Shell / command tools
+  "bash",
+  "sh",
+  "exec",
+  "command_exec",
+  "shell",
+  "terminal",
+  "exec_command",
+  "cmd",
+  // File tools
+  "file_read",
+  "read",
+  "read_file",
+  "cat",
+  "head",
+  "tail",
+  "view",
+  "file_edit",
+  "edit",
+  "write",
+  "write_file",
+  "patch",
+  "replace",
+  "sed",
+  // Search tools
+  "grep",
+  "glob",
+  "find",
+  "search",
+  "rg",
+  "ripgrep",
+  "ag",
+  // System / runtime tools & keywords
+  "eval",
+  "computer",
+  "web_search",
+  "browser",
+  "system",
+  "admin",
+  "root",
+  "process",
+  "spawn",
+  "node",
+  "python",
+  // Generic placeholders
+  "unknown",
+  "generic",
+  "custom",
+  "auto",
+  "auto_general",
+  "general",
+  "passthrough",
+  "unknown_passthrough",
+  "undefined",
+  "null",
+  "nan",
+  "none",
+  "message",
+  "thinking",
+  "session_lifecycle",
+  // Prototype pollution & object properties
+  "__proto__",
+  "proto",
+  "prototype",
+  "constructor",
+  "object",
+  "function",
+  "tostring",
+  "valueof",
+  "hasownproperty",
+  "isprototypeof",
+  "propertyisenumerable",
+  "__definegetter__",
+  "__definesetter__",
+  "__lookupgetter__",
+  "__lookupsetter__"
+].map((name) => [name, true]));
+var COMMAND_PLACEHOLDER_CLASSES = {
+  $STR: "[^\\s]+",
+  $NUM: "-?\\d+(\\.\\d+)?",
+  $URL: "https?://[^\\s]+",
+  $GLOB: "[^\\s]+",
+  $PATH: "[^\\s-][^\\s]*",
+  $SRC_FILE: "[^\\s-][^\\s]*",
+  $TEST_FILE: "[^\\s-][^\\s]*",
+  $CONFIG_FILE: "[^\\s-][^\\s]*",
+  $DOC_FILE: "[^\\s-][^\\s]*",
+  $BUILD_DIR: "[^\\s-][^\\s]*",
+  $TMP_DIR: "[^\\s-][^\\s]*"
+};
+var PLACEHOLDER_PATTERN = new RegExp(Object.keys(COMMAND_PLACEHOLDER_CLASSES).sort((left, right) => right.length - left.length).map((placeholder) => placeholder.replace("$", "\\$")).join("|"), "g");
+
+// apps/observer/dist/opportunity/session-opportunity-tracker.js
+var DEFAULT_HASH_CACHE_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1e3;
+var DEFAULT_HASH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 
 // apps/cli/src/service/auth-bootstrap.ts
 var DEFAULT_DEVICE_AUTH_SCOPES = Object.freeze([
