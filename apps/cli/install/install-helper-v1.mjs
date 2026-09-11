@@ -12212,7 +12212,6 @@ var LOW_SIGNAL_COMMANDS = Object.fromEntries([
   "comm",
   "diff",
   "jq",
-  "xargs",
   "tee",
   // diagnostics / process inspection
   "pgrep",
@@ -12223,7 +12222,6 @@ var LOW_SIGNAL_COMMANDS = Object.fromEntries([
   "which",
   "whereis",
   "type",
-  "env",
   "printenv",
   "uname",
   "hostname",
@@ -12257,7 +12255,6 @@ var LOW_SIGNAL_COMMANDS = Object.fromEntries([
   "kill",
   "trap",
   "shift",
-  "eval",
   "for",
   "while",
   "if",
@@ -12277,17 +12274,12 @@ var LOW_SIGNAL_COMMANDS = Object.fromEntries([
   "in",
   "select",
   "until",
-  "time",
-  // tokenization artifacts
+  // tokenization artifacts (NOT real shell interpreters — `bash -c …`/`sh deploy.sh`
+  // wrap real work and must stay in the signature)
   "_str",
   "_arg",
   "_path",
-  "_cmd",
-  "cmd",
-  "sh",
-  "bash",
-  "zsh",
-  "dash"
+  "_cmd"
 ].map((name) => [name, true]));
 var LOW_SIGNAL_TOOLS = Object.fromEntries(["read", "glob", "grep", "list", "ls", "find", "search", "view", "cat", "stat"].map((name) => [
   name,
