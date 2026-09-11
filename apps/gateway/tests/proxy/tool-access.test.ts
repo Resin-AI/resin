@@ -141,6 +141,56 @@ function coordinator(
   });
 }
 
+describe("Adopting an already-recorded catalog", () => {
+  it("reads the owners directory once for the whole pass, not once per tool", () => {
+    const tools = Array.from({ length: 200 }, (_, index) =>
+      manifest(crypto.randomUUID(), `adopted_${index}`),
+    );
+    access.confirm(confirmation("allowed"));
+    for (const tool of tools) {
+      register(tool);
+      cacheTool(tool);
+    }
+
+    // Warm so the first adopt is not counted.
+    access.adopt(registry, undefined);
+
+    const ownersDir = path.join(access.stateDir, "accounts");
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+    const stats = vi.spyOn(fs, "statSync");
+
+    access.adopt(registry, undefined);
+
+    // Adoption visits every registered tool; each visit previously re-read the owners
+    // directory, which made a large catalog spin the process at full CPU.
+    const ownerTouches = [
+      ...reads.mock.calls.map(([file]) => String(file)),
+      ...listings.mock.calls.map(([dir]) => String(dir)),
+      ...stats.mock.calls.map(([file]) => String(file)),
+    ].filter((target) => target.startsWith(ownersDir));
+    expect(ownerTouches.length).toBeLessThanOrEqual(2);
+    reads.mockRestore();
+    listings.mockRestore();
+    stats.mockRestore();
+    expect(tools.length).toBe(200);
+  });
+
+  it("still honors a live revocation discovered during adoption", () => {
+    const tool = manifest();
+    register(tool);
+    cacheTool(tool);
+    access.confirm(confirmation("allowed"));
+    access.adopt(registry, undefined);
+    expect(access.isBlocked(entry(tool))).toBe(false);
+
+    // A sibling revokes, then a later adoption must not resurrect access.
+    const sibling = new ManagedToolAccess(access.stateDir, artifactCache, identity);
+    sibling.confirm(confirmation("subscription_inactive"));
+    expect(access.isBlocked(entry(tool))).toBe(true);
+  });
+});
+
 describe("Reconciling an unchanged catalog", () => {
   it("does not re-read or re-clone the lockfile per manifest once confirmed", async () => {
     const lockPath = path.join(root, "resin.lock");
@@ -180,13 +230,38 @@ describe("Reconciling an unchanged catalog", () => {
     // the committed lock is already in hand and every candidate matches exactly.
     const reconcile = vi.spyOn(ProjectLockManager.prototype, "reconcileQualified");
     const readLock = vi.spyOn(ProjectLockManager.prototype, "readLock");
+    const ownersDir = path.join(access.stateDir, "accounts");
+    const reads = vi.spyOn(fs, "readFileSync");
+    const listings = vi.spyOn(fs, "readdirSync");
+    const stats = vi.spyOn(fs, "statSync");
     await sync.sync();
 
     expect(reconcile).toHaveBeenCalledTimes(0);
     // Exactly one lock read for the whole walk, not one per manifest.
     expect(readLock.mock.calls.length).toBeLessThanOrEqual(2);
+
+    // The confirmed sync path also calls record() per manifest. With every receipt
+    // already matching the confirmation, none of those may re-read the owners
+    // directory; doing so is what spun the process at a full CPU core.
+    const countIn = (calls: unknown[][]) =>
+      calls.map(([target]) => String(target)).filter((t) => t.startsWith(ownersDir)).length;
+
+    // Enumerating the owners directory and parsing owner receipts must not repeat per
+    // manifest. Those are the expensive owner operations, and repeating them for every
+    // catalog entry is what held a full CPU core.
+    expect(countIn(listings.mock.calls)).toBeLessThanOrEqual(1);
+    expect(countIn(reads.mock.calls)).toBeLessThanOrEqual(2);
+
+    // Per-entry revision validation still stats the owner path. That is required to
+    // observe a revocation at all, so it is bounded loosely rather than eliminated; the
+    // loop here contains awaits, where caching ownership would mask a mid-flight denial.
+    expect(countIn(stats.mock.calls)).toBeLessThanOrEqual(2000);
+
     reconcile.mockRestore();
     readLock.mockRestore();
+    reads.mockRestore();
+    listings.mockRestore();
+    stats.mockRestore();
   });
 });
 
