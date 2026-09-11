@@ -1,15 +1,20 @@
 import type { NormalizedSessionEvent, ProvenPatternDto } from "@resin/contracts";
-import { createInMemoryStateStore, type LocalStateStore } from "@resin/db";
+import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type SessionEventSink,
   TrajectoryCaptureCoordinator,
 } from "../../src/analytics/capture-coordinator.js";
 import {
-  createCaptureDependentRegistration,
   TelemetryCaptureController,
+  createCaptureDependentRegistration,
 } from "../../src/bin/daemon.js";
-import type { DaemonModule, Logger, ModuleContext, ModuleLifecycleState } from "../../src/lifecycle.js";
+import type {
+  DaemonModule,
+  Logger,
+  ModuleContext,
+  ModuleLifecycleState,
+} from "../../src/lifecycle.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 import { OpportunityTrackingModule } from "../../src/opportunity-module.js";
 import { DaemonSupervisor } from "../../src/supervisor.js";

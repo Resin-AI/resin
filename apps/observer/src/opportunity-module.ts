@@ -16,7 +16,7 @@ import type {
   ModuleLifecycleState,
 } from "./lifecycle.js";
 import type { JsonObject } from "./normalization/redaction.js";
-import { createKillSwitchManager, type KillSwitchManager } from "./observability/kill-switches.js";
+import { type KillSwitchManager, createKillSwitchManager } from "./observability/kill-switches.js";
 import { SessionOpportunityTracker } from "./opportunity/session-opportunity-tracker.js";
 import type { TrajectoryCaptureRuntimeModule } from "./trajectory-capture-module.js";
 
@@ -262,11 +262,7 @@ export class OpportunityTrackingModule implements DaemonModule {
   private attachCaptureSink(context: ModuleContext): void {
     const captureModule = context.getModule<TrajectoryCaptureRuntimeModule>("trajectory-capture");
     const tracker = this.tracker;
-    if (
-      !captureModule ||
-      typeof captureModule.getCaptureCoordinator !== "function" ||
-      !tracker
-    ) {
+    if (!captureModule || typeof captureModule.getCaptureCoordinator !== "function" || !tracker) {
       this.logger?.warn(
         "Trajectory capture coordinator unavailable; opportunity tracking stays detached",
       );

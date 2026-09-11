@@ -3,7 +3,7 @@ import {
   ProvenPatternDtoSchema,
   hashCanonicalContent,
 } from "@resin/contracts";
-import { createInMemoryStateStore, type LocalStateStore } from "@resin/db";
+import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import type { HarnessSession } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SessionOpportunityTracker } from "../../src/opportunity/session-opportunity-tracker.js";

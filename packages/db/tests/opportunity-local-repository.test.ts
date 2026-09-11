@@ -183,9 +183,11 @@ describe("OpportunityLocalRepository", () => {
     await repo.linkClusterEpisode("clu_01", "ep_01", "sess_01");
     await repo.linkClusterEpisode("clu_01", "ep_01", "sess_01");
     await repo.linkClusterEpisode("clu_01", "ep_02");
-    const episodes = store.getConnection().all<{ cluster_id: string; episode_id: string }>(
-      "SELECT cluster_id, episode_id FROM cluster_episodes WHERE cluster_id = 'clu_01' ORDER BY episode_id;",
-    );
+    const episodes = store
+      .getConnection()
+      .all<{ cluster_id: string; episode_id: string }>(
+        "SELECT cluster_id, episode_id FROM cluster_episodes WHERE cluster_id = 'clu_01' ORDER BY episode_id;",
+      );
     expect(episodes).toHaveLength(2);
 
     // hash cache

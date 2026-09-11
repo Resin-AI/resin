@@ -3,7 +3,7 @@ import {
   ProvenPatternDtoSchema,
   hashCanonicalContent,
 } from "@resin/contracts";
-import { createInMemoryStateStore, type LocalStateStore } from "@resin/db";
+import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import type { HarnessSession } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -121,7 +121,7 @@ describe("OpportunityTrackingModule", () => {
       config: { opportunityTracking: {} } as never,
       paths: {} as never,
       logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      getModule: <T,>(id: string) =>
+      getModule: <T>(id: string) =>
         id === "trajectory-capture"
           ? ({ getCaptureCoordinator: () => coordinator } as unknown as T)
           : undefined,
@@ -141,11 +141,10 @@ describe("OpportunityTrackingModule", () => {
         isTerminal: false,
         isAttributed: true,
       });
-      await sink?.(
-        session,
-        [buildTerminalEvent(sessionId, startedAt + 6_000)],
-        { isTerminal: true, isAttributed: true },
-      );
+      await sink?.(session, [buildTerminalEvent(sessionId, startedAt + 6_000)], {
+        isTerminal: true,
+        isAttributed: true,
+      });
     }
 
     const pending = await store.opportunities.listPendingPatterns();

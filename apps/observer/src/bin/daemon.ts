@@ -35,6 +35,7 @@ import {
   ACTIONABLE_NOTIFICATION_OBSERVATION_INTERVAL_MS,
   reconcileObservedNotifications,
 } from "../notifications.js";
+import { OpportunityTrackingModule } from "../opportunity-module.js";
 import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
 import {
   type ConfigReloadResult,
@@ -44,7 +45,6 @@ import {
   type ModuleStatusReport,
 } from "../supervisor.js";
 import { SourceCursorManager } from "../tailing/cursor-manager.js";
-import { OpportunityTrackingModule } from "../opportunity-module.js";
 import {
   type RemoteTelemetryConsentSnapshot,
   TrajectoryCaptureRuntimeModule,
