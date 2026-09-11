@@ -311,4 +311,47 @@ describe("DeploymentActivator", () => {
     );
     expect(row?.count).toBeLessThanOrEqual(5);
   });
+
+  it("allocates a fresh snapshot revision even when the wall clock moves backward", async () => {
+    const manifest = createSampleToolManifest("clock-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    const manifest2 = createSampleToolManifest("clock-tool", "2.0.0");
+    await activator.stageTool(manifest2);
+
+    // Activate once at the real time, then again with the clock stepped backward so the
+    // second snapshot carries an earlier timestamp than the first. A timestamp-ordered
+    // "latest" lookup would then pick the older rev and collide on snapshot_id.
+    const realNow = Date.now;
+    try {
+      await activator.activate({ workspaceId: "ws-clock", toolId: "clock-tool", version: "1.0.0" });
+
+      // Step the clock back an hour and activate a second revision.
+      Date.now = () => realNow() - 3_600_000;
+      const second = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "2.0.0",
+      });
+      expect(second.success).toBe(true);
+
+      // A third activation at the regressed time must still allocate a fresh rev.
+      const third = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "1.0.0",
+      });
+      expect(third.success).toBe(true);
+
+      const ids = store.conn
+        .all<{ snapshot_id: string }>(
+          "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY rowid;",
+          ["ws-clock"],
+        )
+        .map((r) => r.snapshot_id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      Date.now = realNow;
+    }
+  });
 });

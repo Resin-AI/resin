@@ -872,20 +872,18 @@ export class DeploymentActivator {
       }
 
       // Determine next revision number
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
-        [params.workspaceId],
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      const revPrefix = `snap_${params.workspaceId}_rev`;
+      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) {
-          nextRev = Number.parseInt(match[1], 10) + 1;
-        }
-      }
+      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1117,20 +1115,18 @@ export class DeploymentActivator {
         };
       }
 
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
-        [params.workspaceId],
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      const revPrefix = `snap_${params.workspaceId}_rev`;
+      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) {
-          nextRev = Number.parseInt(match[1], 10) + 1;
-        }
-      }
+      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1234,18 +1230,18 @@ export class DeploymentActivator {
           status: "active",
         };
       }
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
-        [params.workspaceId],
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      const revPrefix = `snap_${params.workspaceId}_rev`;
+      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) nextRev = Number.parseInt(match[1], 10) + 1;
-      }
+      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
