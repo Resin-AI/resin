@@ -13,6 +13,7 @@ import {
   type InstallationRecord,
   type SafetyGateRefusal,
   type ToolManifest,
+  ToolManifestSchema,
   type ToolVersion,
   canonicalJson,
   hashCanonicalContent,
@@ -553,27 +554,77 @@ export class DeploymentActivator {
           envelope = CapabilityEnvelopeSchema.parse(
             JSON.parse(wsEnvelopeRow.capability_envelope_json),
           );
-        } catch {
-          // Ignored
+        } catch (parseErr) {
+          // Fail closed: a malformed or missing envelope must not silently skip the
+          // capability gate, or a corrupt row would permit unrestricted activation.
+          throw new EnvelopeViolationError(
+            `Workspace capability envelope is missing or invalid: ${
+              parseErr instanceof Error ? parseErr.message : String(parseErr)
+            }`,
+            { toolId: params.toolId, version: params.version },
+          );
         }
       }
 
-      let manifestToVerify: ToolManifest | undefined = params.manifest;
-      if (!manifestToVerify) {
-        const tvRow = this.conn.get<{ manifest_json: string }>(
-          "SELECT manifest_json FROM tool_versions WHERE tool_id = ? AND version = ?;",
-          [params.toolId, params.version],
-        );
-        if (tvRow?.manifest_json) {
-          try {
-            manifestToVerify = JSON.parse(tvRow.manifest_json);
-          } catch {
-            // Ignored
+      const isBypass = isSafetyGateBypassTool(params.toolId);
+      let manifestToVerify: ToolManifest | undefined;
+      if (!isBypass) {
+        // Non-bypass tools require the stored (tool_id, version) manifest. A missing
+        // or malformed row must fail closed — otherwise the capability gate below is
+        // skipped and the tool activates unchecked. Retrieval and JSON parsing live
+        // inside the converting try so a SyntaxError cannot escape to the suppressing
+        // outer catch.
+        let rawManifest: unknown;
+        try {
+          const tvRow = this.conn.get<{ manifest_json: string }>(
+            "SELECT manifest_json FROM tool_versions WHERE tool_id = ? AND version = ?;",
+            [params.toolId, params.version],
+          );
+          if (!tvRow?.manifest_json) {
+            throw new EnvelopeViolationError(
+              `No manifest found for ${params.toolId}@${params.version}; cannot verify capabilities`,
+              { toolId: params.toolId, version: params.version },
+            );
+          }
+          rawManifest = JSON.parse(tvRow.manifest_json);
+          manifestToVerify = ToolManifestSchema.parse(rawManifest);
+        } catch (parseErr) {
+          if (parseErr instanceof EnvelopeViolationError) throw parseErr;
+          throw new EnvelopeViolationError(
+            `Manifest for ${params.toolId}@${params.version} is invalid: ${
+              parseErr instanceof Error ? parseErr.message : String(parseErr)
+            }`,
+            { toolId: params.toolId, version: params.version },
+          );
+        }
+        if (manifestToVerify.id !== params.toolId || manifestToVerify.version !== params.version) {
+          throw new EnvelopeViolationError(
+            `Manifest identity mismatch: expected ${params.toolId}@${params.version}, got ${manifestToVerify.id}@${manifestToVerify.version}`,
+            { toolId: params.toolId, version: params.version },
+          );
+        }
+        // A caller-supplied manifest must be identical to the stored one; otherwise a
+        // caller could underdeclare capabilities for an already-staged tool and have
+        // the weaker document policy-checked while the stored version activates.
+        if (params.manifest !== undefined) {
+          const storedDigest = crypto
+            .createHash("sha256")
+            .update(canonicalJson(manifestToVerify))
+            .digest("hex");
+          const callerDigest = crypto
+            .createHash("sha256")
+            .update(canonicalJson(ToolManifestSchema.parse(params.manifest)))
+            .digest("hex");
+          if (storedDigest !== callerDigest) {
+            throw new EnvelopeViolationError(
+              `Caller-supplied manifest for ${params.toolId}@${params.version} does not match the staged manifest`,
+              { toolId: params.toolId, version: params.version },
+            );
           }
         }
       }
 
-      if (envelope && manifestToVerify && !isSafetyGateBypassTool(params.toolId)) {
+      if (envelope && manifestToVerify && !isBypass) {
         const precheck = await this.preactivationChecker.checkPreactivation({
           manifest: manifestToVerify,
           workspaceId: params.workspaceId,
@@ -713,7 +764,7 @@ export class DeploymentActivator {
     let previousActiveVersion: string | undefined;
     await this.conn.transaction(async () => {
       // 1. Ensure workspace exists
-      let wsRow = this.conn.get<{
+      const wsRow = this.conn.get<{
         workspace_id: string;
         active_tools_json: string;
         capability_envelope_json: string;
@@ -723,24 +774,12 @@ export class DeploymentActivator {
       );
 
       if (!wsRow) {
-        this.conn.run(
-          `INSERT INTO workspaces (
-            workspace_id, root_path, name, config_json, capability_envelope_json,
-            active_tools_json, created_at, updated_at
-          ) VALUES (?, ?, ?, '{}', '{}', '{}', ?, ?);`,
-          [
-            params.workspaceId,
-            `/workspaces/${params.workspaceId}`,
-            params.workspaceId,
-            timestamp,
-            timestamp,
-          ],
+        // No workspace row means no capability envelope to gate against. Refuse rather
+        // than persist an invalid '{}' envelope that would fail closed on the next read.
+        throw new EnvelopeViolationError(
+          `Workspace ${params.workspaceId} has no capability envelope; cannot activate`,
+          { toolId: params.toolId, version: params.version },
         );
-        wsRow = {
-          workspace_id: params.workspaceId,
-          active_tools_json: "{}",
-          capability_envelope_json: "{}",
-        };
       }
 
       const activeTools: Record<string, string> = JSON.parse(wsRow.active_tools_json || "{}");

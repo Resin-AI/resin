@@ -17,6 +17,28 @@ describe("DeploymentActivator", () => {
     store.close();
   });
 
+  /** Seeds a workspace row with a valid, permissive capability envelope. */
+  async function seedWorkspace(workspaceId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await store.sessions.saveWorkspace({
+      workspaceId,
+      rootPath: `/workspaces/${workspaceId}`,
+      name: workspaceId,
+      config: {},
+      capabilityEnvelope: {
+        envelopeId: `env-${workspaceId}`,
+        workspaceId,
+        version: "1.0.0",
+        fs: { allowWorkspaceRoot: true, allowTemp: true },
+        net: { allowOutbound: true },
+        command: { allowShellExecution: true },
+        createdAt: now,
+      },
+      activeTools: {},
+      createdAt: now,
+    });
+  }
+
   it("stages tool manifest and tool version in SQLite", async () => {
     const manifest = createSampleToolManifest("formatter", "1.0.0");
     await activator.stageTool(manifest, {
@@ -49,6 +71,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("linter", "1.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-test");
     const result = await activator.activate({
       workspaceId: "ws-test",
       toolId: "linter",
@@ -88,6 +111,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("canary-tool", "2.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-canary");
     const result = await activator.activate({
       workspaceId: "ws-canary",
       toolId: "canary-tool",
@@ -113,6 +137,7 @@ describe("DeploymentActivator", () => {
     // Initial activation
     const v1 = createSampleToolManifest("resilient-tool", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-atomic");
     await activator.activate({
       workspaceId: "ws-atomic",
       toolId: "resilient-tool",
@@ -179,6 +204,7 @@ describe("DeploymentActivator", () => {
     // Deploy v1
     const v1 = createSampleToolManifest("calc", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-rb");
     await activator.activate({ workspaceId: "ws-rb", toolId: "calc", version: "1.0.0" });
 
     // Deploy v2
@@ -215,6 +241,7 @@ describe("DeploymentActivator", () => {
   it("rolls back first-installed tool to uninstalled state", async () => {
     const v1 = createSampleToolManifest("standalone", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-first");
     await activator.activate({ workspaceId: "ws-first", toolId: "standalone", version: "1.0.0" });
 
     const rbResult = await activator.rollback({
@@ -238,6 +265,7 @@ describe("DeploymentActivator", () => {
   it("handles suspend, resume, and retire lifecycle transitions cleanly", async () => {
     const manifest = createSampleToolManifest("lifecycle-tool", "1.0.0");
     await activator.stageTool(manifest);
+    await seedWorkspace("ws-life");
     await activator.activate({
       workspaceId: "ws-life",
       toolId: "lifecycle-tool",
@@ -295,6 +323,7 @@ describe("DeploymentActivator", () => {
     // catalog_snapshots row directly (bypassing ToolRepository), so without pruning this
     // table would grow one row per transition forever.
     for (let i = 0; i < 12; i += 1) {
+      await seedWorkspace("ws-bound");
       await activator.activate({
         workspaceId: "ws-bound",
         toolId: "bounded-tool",
@@ -322,6 +351,7 @@ describe("DeploymentActivator", () => {
     try {
       // Fill the retention bound (5 rows) at the real, current time.
       for (let i = 0; i < 5; i += 1) {
+        await seedWorkspace("ws-clock");
         const r = await activator.activate({
           workspaceId: "ws-clock",
           toolId: "clock-tool",
@@ -369,6 +399,7 @@ describe("DeploymentActivator", () => {
     await activator.stageTool(manifest);
 
     // One activation allocates rev1 via the durable counter.
+    await seedWorkspace("ws-counter");
     const first = await activator.activate({
       workspaceId: "ws-counter",
       toolId: "counter-tool",
@@ -407,6 +438,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("cfg-tool", "1.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-cfg");
     const first = await activator.activate({
       workspaceId: "ws-cfg",
       toolId: "cfg-tool",
@@ -464,6 +496,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("seed-tool", "1.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-seed");
     const first = await activator.activate({
       workspaceId: "ws-seed",
       toolId: "seed-tool",
@@ -502,5 +535,52 @@ describe("DeploymentActivator", () => {
     expect(second.success).toBe(true);
     // Caller-supplied 9999 must be ignored; the counter continues from the real mark.
     expect(second.snapshot.snapshotId).toBe("snap_ws-seed_rev2");
+  });
+
+  it("rejects activation when the staged manifest_json is malformed", async () => {
+    const manifest = createSampleToolManifest("corrupt-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    await seedWorkspace("ws-corrupt");
+
+    // Corrupt the stored manifest JSON.
+    store.conn.run(
+      "UPDATE tool_versions SET manifest_json = ? WHERE tool_id = ? AND version = ?;",
+      ["{not valid json", "corrupt-tool", "1.0.0"],
+    );
+
+    await expect(
+      activator.activate({ workspaceId: "ws-corrupt", toolId: "corrupt-tool", version: "1.0.0" }),
+    ).rejects.toThrow(/invalid|cannot verify/i);
+
+    // No deployment or activation state was written.
+    const dep = store.conn.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM deployment_records WHERE workspace_id = 'ws-corrupt';",
+    );
+    expect(dep?.c ?? 0).toBe(0);
+  });
+
+  it("rejects a caller manifest that underdeclares capabilities vs the staged manifest", async () => {
+    const manifest = createSampleToolManifest("mismatch-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    await seedWorkspace("ws-mismatch");
+
+    // Same id/version but weaker capabilities — must not authorize the stored manifest.
+    const weaker = createSampleToolManifest("mismatch-tool", "1.0.0", {
+      capabilities: { fs: { readPaths: [], writePaths: [] } },
+    });
+
+    await expect(
+      activator.activate({
+        workspaceId: "ws-mismatch",
+        toolId: "mismatch-tool",
+        version: "1.0.0",
+        manifest: weaker,
+      }),
+    ).rejects.toThrow(/does not match|mismatch/i);
+
+    const dep = store.conn.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM deployment_records WHERE workspace_id = 'ws-mismatch';",
+    );
+    expect(dep?.c ?? 0).toBe(0);
   });
 });
