@@ -1,5 +1,5 @@
 import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeploymentActivator } from "../../src/sync/activator.js";
 import type { CatalogChangeEvent } from "../../src/sync/types.js";
 import { createSampleToolManifest } from "./fixtures.js";
@@ -318,34 +318,10 @@ describe("DeploymentActivator", () => {
     const manifest2 = createSampleToolManifest("clock-tool", "2.0.0");
     await activator.stageTool(manifest2);
 
-    // Activate once at the real time, then again with the clock stepped backward so the
-    // second snapshot carries an earlier timestamp than the first. A timestamp-ordered
-    // "latest" lookup would then pick the older rev and collide on snapshot_id.
-    const realNow = Date.now;
+    const realNow = Date.now();
     try {
-      await activator.activate({ workspaceId: "ws-clock", toolId: "clock-tool", version: "1.0.0" });
-
-      // Step the clock back an hour and activate a second revision.
-      Date.now = () => realNow() - 3_600_000;
-      const second = await activator.activate({
-        workspaceId: "ws-clock",
-        toolId: "clock-tool",
-        version: "2.0.0",
-      });
-      expect(second.success).toBe(true);
-
-      // A third activation at the regressed time must still allocate a fresh rev.
-      const third = await activator.activate({
-        workspaceId: "ws-clock",
-        toolId: "clock-tool",
-        version: "1.0.0",
-      });
-      expect(third.success).toBe(true);
-
-      // Drive past the retention bound while the clock is still regressed. Each new
-      // revision must be kept (not pruned as "oldest by timestamp") and must not be
-      // re-allocated, or the returned snapshot would silently not persist.
-      for (let i = 0; i < 6; i += 1) {
+      // Fill the retention bound (5 rows) at the real, current time.
+      for (let i = 0; i < 5; i += 1) {
         const r = await activator.activate({
           workspaceId: "ws-clock",
           toolId: "clock-tool",
@@ -354,18 +330,37 @@ describe("DeploymentActivator", () => {
         expect(r.success).toBe(true);
       }
 
+      // Step the clock back an hour. The next revisions carry earlier timestamps than
+      // every retained row, so a timestamp-ordered pruner would delete them on insert
+      // and a timestamp-ordered allocator would reuse their revision.
+      vi.setSystemTime(realNow - 3_600_000);
+      const rev6 = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "1.0.0",
+      });
+      expect(rev6.success).toBe(true);
+      const rev7 = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "2.0.0",
+      });
+      expect(rev7.success).toBe(true);
+
       const ids = store.conn
         .all<{ snapshot_id: string }>(
           "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY rowid;",
           ["ws-clock"],
         )
         .map((r) => r.snapshot_id);
-      expect(new Set(ids).size).toBe(ids.length);
-      // Retention keeps the newest-by-insertion revisions; the highest rev must survive.
+      // Still bounded at 5, and the two regressed-clock revisions must have persisted.
+      expect(ids.length).toBe(5);
       const revs = ids.map((id) => Number(id.match(/_rev(\d+)$/)?.[1] ?? 0));
-      expect(Math.max(...revs)).toBeGreaterThanOrEqual(8);
+      expect(revs).toContain(6);
+      expect(revs).toContain(7);
+      expect(new Set(ids).size).toBe(ids.length);
     } finally {
-      Date.now = realNow;
+      vi.useRealTimers();
     }
   });
 });
