@@ -77,27 +77,34 @@ export class SessionRepository {
 
   async saveWorkspace(workspace: WorkspaceRecord): Promise<void> {
     const validated = WorkspaceRecordSchema.parse(workspace);
-    // Preserve the internal revision high-water mark across config upserts. The
-    // activator stores it in config_json; a normal workspace save must not erase it.
-    const existing = this.conn.get<{ config_json: string }>(
-      "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
-      [validated.workspaceId],
-    );
-    let preservedNextRev: unknown;
-    if (existing) {
-      try {
-        const cfg = JSON.parse(existing.config_json) as Record<string, unknown>;
-        preservedNextRev = cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY];
-      } catch {
-        preservedNextRev = undefined;
+    // Read existing config and upsert atomically so a concurrent activation cannot
+    // lose the counter between the SELECT and the write. The reserved key is stripped
+    // from caller input unconditionally and only a positive safe-integer stored value
+    // is restored, so callers can neither seed nor overwrite it.
+    await this.conn.transaction((conn) => {
+      const existing = conn.get<{ config_json: string }>(
+        "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
+        [validated.workspaceId],
+      );
+      let preservedNextRev: number | undefined;
+      if (existing) {
+        try {
+          const cfg = JSON.parse(existing.config_json) as Record<string, unknown>;
+          const v = cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY];
+          if (typeof v === "number" && Number.isSafeInteger(v) && v > 0) {
+            preservedNextRev = v;
+          }
+        } catch {
+          preservedNextRev = undefined;
+        }
       }
-    }
-    const mergedConfig: Record<string, unknown> = { ...validated.config };
-    if (typeof preservedNextRev === "number") {
-      mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY] = preservedNextRev;
-    }
-    this.conn.run(
-      `INSERT INTO workspaces (
+      const mergedConfig: Record<string, unknown> = { ...validated.config };
+      delete mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY];
+      if (preservedNextRev !== undefined) {
+        mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY] = preservedNextRev;
+      }
+      conn.run(
+        `INSERT INTO workspaces (
         workspace_id, root_path, name, config_json, capability_envelope_json, active_tools_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(workspace_id) DO UPDATE SET
@@ -107,17 +114,18 @@ export class SessionRepository {
         capability_envelope_json = excluded.capability_envelope_json,
         active_tools_json = excluded.active_tools_json,
         updated_at = excluded.updated_at;`,
-      [
-        validated.workspaceId,
-        validated.rootPath,
-        validated.name,
-        canonicalJson(mergedConfig),
-        canonicalJson(validated.capabilityEnvelope),
-        canonicalJson(validated.activeTools),
-        validated.createdAt,
-        validated.updatedAt ?? null,
-      ],
-    );
+        [
+          validated.workspaceId,
+          validated.rootPath,
+          validated.name,
+          canonicalJson(mergedConfig),
+          canonicalJson(validated.capabilityEnvelope),
+          canonicalJson(validated.activeTools),
+          validated.createdAt,
+          validated.updatedAt ?? null,
+        ],
+      );
+    });
   }
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceRecord | null> {

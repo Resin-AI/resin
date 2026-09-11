@@ -459,4 +459,48 @@ describe("DeploymentActivator", () => {
     expect(second.success).toBe(true);
     expect(second.snapshot.snapshotId).toBe("snap_ws-cfg_rev2");
   });
+
+  it("does not let a workspace config save seed or replace the revision counter", async () => {
+    const manifest = createSampleToolManifest("seed-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    const first = await activator.activate({
+      workspaceId: "ws-seed",
+      toolId: "seed-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true); // rev1
+
+    const now = new Date().toISOString();
+    const permissive = {
+      envelopeId: "env-seed",
+      workspaceId: "ws-seed",
+      version: "1.0.0",
+      fs: { allowWorkspaceRoot: true, allowTemp: true },
+      net: { allowOutbound: true },
+      command: { allowShellExecution: true },
+      createdAt: now,
+    };
+
+    // A caller tries to seed the reserved key to a huge value via config.
+    await store.sessions.saveWorkspace({
+      workspaceId: "ws-seed",
+      rootPath: "/workspaces/ws-seed",
+      name: "ws-seed",
+      config: { catalogSnapshotNextRev: 9999 },
+      capabilityEnvelope: permissive,
+      activeTools: { "seed-tool": "1.0.0" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const second = await activator.activate({
+      workspaceId: "ws-seed",
+      toolId: "seed-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    // Caller-supplied 9999 must be ignored; the counter continues from the real mark.
+    expect(second.snapshot.snapshotId).toBe("snap_ws-seed_rev2");
+  });
 });
