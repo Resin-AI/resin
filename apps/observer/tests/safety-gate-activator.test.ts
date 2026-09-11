@@ -2,6 +2,7 @@ import { SAFETY_GATE_ERROR_CODES, UNSAFE_DEV_OVERRIDE_ENV_VAR } from "@resin/con
 import { createInMemoryStateStore } from "@resin/db";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditTrailManager, DeploymentActivator, buildSanitizedEnv } from "../src/index.js";
+import { createSampleCapabilityEnvelope, createSampleToolManifest } from "./sync/fixtures.js";
 
 describe("Observer Safety Gate Activator & Worker Environment Sanitization", () => {
   const originalEnv = { ...process.env };
@@ -72,6 +73,16 @@ describe("Observer Safety Gate Activator & Worker Environment Sanitization", () 
         auditTrail,
       });
 
+      // Seed a valid workspace envelope and stage the manifest so the request
+      // reaches the safety gate rather than failing on missing data first.
+      const env = createSampleCapabilityEnvelope("ws_test_01");
+      store.conn.run(
+        `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
+         VALUES ('ws_test_01', '/workspaces/ws_test_01', 'ws_test_01', ?, '{}', datetime('now'), datetime('now'));`,
+        [JSON.stringify(env)],
+      );
+      await activator.stageTool(createSampleToolManifest("generated_tool_abc", "1.0.0"));
+
       await expect(
         activator.activate({
           workspaceId: "ws_test_01",
@@ -110,6 +121,16 @@ describe("Observer Safety Gate Activator & Worker Environment Sanitization", () 
         safetyGate: overrideGate,
         auditTrail,
       });
+
+      // Seed a valid workspace envelope and stage the tool manifest so the
+      // capability gate has real data to evaluate.
+      const env = createSampleCapabilityEnvelope("ws_test_02");
+      store.conn.run(
+        `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
+         VALUES ('ws_test_02', '/workspaces/ws_test_02', 'ws_test_02', ?, '{}', datetime('now'), datetime('now'));`,
+        [JSON.stringify(env)],
+      );
+      await activator.stageTool(createSampleToolManifest("generated_tool_override", "1.0.0"));
 
       const res = await activator.activate({
         workspaceId: "ws_test_02",

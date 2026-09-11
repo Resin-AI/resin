@@ -35,6 +35,16 @@ describe("DeploymentReconciler", () => {
     store.close();
   });
 
+  /** Seeds a workspace row with a valid, permissive capability envelope. */
+  function seedWorkspace(workspaceId: string): void {
+    const env = createSampleCapabilityEnvelope(workspaceId);
+    store.conn.run(
+      `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '{}', datetime('now'), datetime('now'));`,
+      [workspaceId, `/workspaces/${workspaceId}`, workspaceId, JSON.stringify(env)],
+    );
+  }
+
   describe("Crash Recovery & In-Flight State Cleanup", () => {
     it("cleans up incomplete in-flight activating state on daemon restart", async () => {
       const timestamp = new Date().toISOString();
@@ -88,11 +98,8 @@ describe("DeploymentReconciler", () => {
     it("suspends disabled tools even if desired state specifies them as active", async () => {
       const manifest = createSampleToolManifest("user-disabled", "1.0.0");
       await activator.stageTool(manifest);
-      await activator.activate({
-        workspaceId: "ws-ov",
-        toolId: "user-disabled",
-        version: "1.0.0",
-      });
+      seedWorkspace("ws-ov");
+      await activator.activate({ workspaceId: "ws-ov", toolId: "user-disabled", version: "1.0.0" });
 
       // User override disables the tool
       const result = await reconciler.reconcile({
@@ -122,6 +129,7 @@ describe("DeploymentReconciler", () => {
       await activator.stageTool(v2);
 
       // Initially activate v2
+      seedWorkspace("ws-pin");
       await activator.activate({ workspaceId: "ws-pin", toolId: "pinned-tool", version: "2.0.0" });
 
       // Reconcile with user pin to 1.0.0 while cloud desires 2.0.0
@@ -167,6 +175,7 @@ describe("DeploymentReconciler", () => {
         },
       });
       await activator.stageTool(manifest);
+      seedWorkspace("ws-tight");
       await activator.activate({ workspaceId: "ws-tight", toolId: "net-active", version: "1.0.0" });
 
       // Tightened envelope disallows outbound network
@@ -211,6 +220,7 @@ describe("DeploymentReconciler", () => {
         client: downloadClient,
       });
 
+      seedWorkspace("ws-cloud");
       const result = await cloudReconciler.reconcile({
         workspaceId: "ws-cloud",
         desiredTools: {
@@ -225,11 +235,8 @@ describe("DeploymentReconciler", () => {
     it("skips tools that are already active at the desired version", async () => {
       const manifest = createSampleToolManifest("synced-tool", "1.0.0");
       await activator.stageTool(manifest);
-      await activator.activate({
-        workspaceId: "ws-sync",
-        toolId: "synced-tool",
-        version: "1.0.0",
-      });
+      seedWorkspace("ws-sync");
+      await activator.activate({ workspaceId: "ws-sync", toolId: "synced-tool", version: "1.0.0" });
 
       const result = await reconciler.reconcile({
         workspaceId: "ws-sync",

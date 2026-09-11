@@ -13,6 +13,7 @@ import {
   type InstallationRecord,
   type SafetyGateRefusal,
   type ToolManifest,
+  ToolManifestSchema,
   type ToolVersion,
   canonicalJson,
   hashCanonicalContent,
@@ -20,7 +21,7 @@ import {
 } from "@resin/contracts";
 import { SecretRedactor } from "@resin/crypto";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
-import { pruneCatalogSnapshots } from "@resin/db";
+import { CATALOG_SNAPSHOT_NEXT_REV_KEY, pruneCatalogSnapshots } from "@resin/db";
 import type { JsonObject } from "../normalization/redaction.js";
 import type { AuditTrailManager } from "../observability/audit-trail.js";
 import {
@@ -553,27 +554,77 @@ export class DeploymentActivator {
           envelope = CapabilityEnvelopeSchema.parse(
             JSON.parse(wsEnvelopeRow.capability_envelope_json),
           );
-        } catch {
-          // Ignored
+        } catch (parseErr) {
+          // Fail closed: a malformed or missing envelope must not silently skip the
+          // capability gate, or a corrupt row would permit unrestricted activation.
+          throw new EnvelopeViolationError(
+            `Workspace capability envelope is missing or invalid: ${
+              parseErr instanceof Error ? parseErr.message : String(parseErr)
+            }`,
+            { toolId: params.toolId, version: params.version },
+          );
         }
       }
 
-      let manifestToVerify: ToolManifest | undefined = params.manifest;
-      if (!manifestToVerify) {
-        const tvRow = this.conn.get<{ manifest_json: string }>(
-          "SELECT manifest_json FROM tool_versions WHERE tool_id = ? AND version = ?;",
-          [params.toolId, params.version],
-        );
-        if (tvRow?.manifest_json) {
-          try {
-            manifestToVerify = JSON.parse(tvRow.manifest_json);
-          } catch {
-            // Ignored
+      const isBypass = isSafetyGateBypassTool(params.toolId);
+      let manifestToVerify: ToolManifest | undefined;
+      if (!isBypass) {
+        // Non-bypass tools require the stored (tool_id, version) manifest. A missing
+        // or malformed row must fail closed — otherwise the capability gate below is
+        // skipped and the tool activates unchecked. Retrieval and JSON parsing live
+        // inside the converting try so a SyntaxError cannot escape to the suppressing
+        // outer catch.
+        let rawManifest: unknown;
+        try {
+          const tvRow = this.conn.get<{ manifest_json: string }>(
+            "SELECT manifest_json FROM tool_versions WHERE tool_id = ? AND version = ?;",
+            [params.toolId, params.version],
+          );
+          if (!tvRow?.manifest_json) {
+            throw new EnvelopeViolationError(
+              `No manifest found for ${params.toolId}@${params.version}; cannot verify capabilities`,
+              { toolId: params.toolId, version: params.version },
+            );
+          }
+          rawManifest = JSON.parse(tvRow.manifest_json);
+          manifestToVerify = ToolManifestSchema.parse(rawManifest);
+        } catch (parseErr) {
+          if (parseErr instanceof EnvelopeViolationError) throw parseErr;
+          throw new EnvelopeViolationError(
+            `Manifest for ${params.toolId}@${params.version} is invalid: ${
+              parseErr instanceof Error ? parseErr.message : String(parseErr)
+            }`,
+            { toolId: params.toolId, version: params.version },
+          );
+        }
+        if (manifestToVerify.id !== params.toolId || manifestToVerify.version !== params.version) {
+          throw new EnvelopeViolationError(
+            `Manifest identity mismatch: expected ${params.toolId}@${params.version}, got ${manifestToVerify.id}@${manifestToVerify.version}`,
+            { toolId: params.toolId, version: params.version },
+          );
+        }
+        // A caller-supplied manifest must be identical to the stored one; otherwise a
+        // caller could underdeclare capabilities for an already-staged tool and have
+        // the weaker document policy-checked while the stored version activates.
+        if (params.manifest !== undefined) {
+          const storedDigest = crypto
+            .createHash("sha256")
+            .update(canonicalJson(manifestToVerify))
+            .digest("hex");
+          const callerDigest = crypto
+            .createHash("sha256")
+            .update(canonicalJson(ToolManifestSchema.parse(params.manifest)))
+            .digest("hex");
+          if (storedDigest !== callerDigest) {
+            throw new EnvelopeViolationError(
+              `Caller-supplied manifest for ${params.toolId}@${params.version} does not match the staged manifest`,
+              { toolId: params.toolId, version: params.version },
+            );
           }
         }
       }
 
-      if (envelope && manifestToVerify && !isSafetyGateBypassTool(params.toolId)) {
+      if (envelope && manifestToVerify && !isBypass) {
         const precheck = await this.preactivationChecker.checkPreactivation({
           manifest: manifestToVerify,
           workspaceId: params.workspaceId,
@@ -713,7 +764,7 @@ export class DeploymentActivator {
     let previousActiveVersion: string | undefined;
     await this.conn.transaction(async () => {
       // 1. Ensure workspace exists
-      let wsRow = this.conn.get<{
+      const wsRow = this.conn.get<{
         workspace_id: string;
         active_tools_json: string;
         capability_envelope_json: string;
@@ -723,24 +774,12 @@ export class DeploymentActivator {
       );
 
       if (!wsRow) {
-        this.conn.run(
-          `INSERT INTO workspaces (
-            workspace_id, root_path, name, config_json, capability_envelope_json,
-            active_tools_json, created_at, updated_at
-          ) VALUES (?, ?, ?, '{}', '{}', '{}', ?, ?);`,
-          [
-            params.workspaceId,
-            `/workspaces/${params.workspaceId}`,
-            params.workspaceId,
-            timestamp,
-            timestamp,
-          ],
+        // No workspace row means no capability envelope to gate against. Refuse rather
+        // than persist an invalid '{}' envelope that would fail closed on the next read.
+        throw new EnvelopeViolationError(
+          `Workspace ${params.workspaceId} has no capability envelope; cannot activate`,
+          { toolId: params.toolId, version: params.version },
         );
-        wsRow = {
-          workspace_id: params.workspaceId,
-          active_tools_json: "{}",
-          capability_envelope_json: "{}",
-        };
       }
 
       const activeTools: Record<string, string> = JSON.parse(wsRow.active_tools_json || "{}");
@@ -872,20 +911,47 @@ export class DeploymentActivator {
       }
 
       // Determine next revision number
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      // Allocate from a durable per-workspace high-water mark stored on the workspaces
+      // row, not the surviving snapshot rows. catalog_snapshots is retention-pruned and
+      // shared with non-revision registry snapshots, so the highest surviving _revN row
+      // is not a reliable allocator — and a fresh counter would collide with existing
+      // revisions. Seed from the max existing _revN so pre-counter rows are honored.
+      const counterRow = this.conn.get<{ config_json: string }>(
+        "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
         [params.workspaceId],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) {
-          nextRev = Number.parseInt(match[1], 10) + 1;
-        }
+      let stored = 0;
+      try {
+        const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
+      } catch {
+        stored = 0;
       }
+      const maxExisting = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [
+          `snap_${params.workspaceId}_rev`.length + 1,
+          params.workspaceId,
+          `snap_${params.workspaceId}_rev`.length,
+          `snap_${params.workspaceId}_rev`,
+        ],
+      );
+      const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
+      const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
+      this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
+        JSON.stringify(cfg),
+        params.workspaceId,
+      ]);
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1117,20 +1183,47 @@ export class DeploymentActivator {
         };
       }
 
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      // Allocate from a durable per-workspace high-water mark stored on the workspaces
+      // row, not the surviving snapshot rows. catalog_snapshots is retention-pruned and
+      // shared with non-revision registry snapshots, so the highest surviving _revN row
+      // is not a reliable allocator — and a fresh counter would collide with existing
+      // revisions. Seed from the max existing _revN so pre-counter rows are honored.
+      const counterRow = this.conn.get<{ config_json: string }>(
+        "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
         [params.workspaceId],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) {
-          nextRev = Number.parseInt(match[1], 10) + 1;
-        }
+      let stored = 0;
+      try {
+        const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
+      } catch {
+        stored = 0;
       }
+      const maxExisting = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [
+          `snap_${params.workspaceId}_rev`.length + 1,
+          params.workspaceId,
+          `snap_${params.workspaceId}_rev`.length,
+          `snap_${params.workspaceId}_rev`,
+        ],
+      );
+      const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
+      const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
+      this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
+        JSON.stringify(cfg),
+        params.workspaceId,
+      ]);
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1234,18 +1327,47 @@ export class DeploymentActivator {
           status: "active",
         };
       }
-      const latestSnap = this.conn.get<{
-        snapshot_id: string;
-      }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
+      // Allocate the revision from the maximum existing _revN for this workspace, not
+      // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
+      // restore) can give a newer snapshot an earlier timestamp, which would make a
+      // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
+      // Allocate from a durable per-workspace high-water mark stored on the workspaces
+      // row, not the surviving snapshot rows. catalog_snapshots is retention-pruned and
+      // shared with non-revision registry snapshots, so the highest surviving _revN row
+      // is not a reliable allocator — and a fresh counter would collide with existing
+      // revisions. Seed from the max existing _revN so pre-counter rows are honored.
+      const counterRow = this.conn.get<{ config_json: string }>(
+        "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
         [params.workspaceId],
       );
-
-      let nextRev = 1;
-      if (latestSnap) {
-        const match = latestSnap.snapshot_id.match(/_rev(\d+)$/);
-        if (match) nextRev = Number.parseInt(match[1], 10) + 1;
+      let stored = 0;
+      try {
+        const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
+      } catch {
+        stored = 0;
       }
+      const maxExisting = this.conn.get<{ max_rev: number | null }>(
+        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
+         FROM catalog_snapshots
+         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
+        [
+          `snap_${params.workspaceId}_rev`.length + 1,
+          params.workspaceId,
+          `snap_${params.workspaceId}_rev`.length,
+          `snap_${params.workspaceId}_rev`,
+        ],
+      );
+      const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
+      const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
+      this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
+        JSON.stringify(cfg),
+        params.workspaceId,
+      ]);
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({

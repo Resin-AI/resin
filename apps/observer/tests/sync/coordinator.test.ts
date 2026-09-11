@@ -44,6 +44,14 @@ describe("DeploymentSyncCoordinator", () => {
       reconciler,
       defaultWorkspaceId: "ws-coord",
     });
+
+    // Seed the default workspace with a valid, permissive capability envelope.
+    const env = createSampleCapabilityEnvelope("ws-coord");
+    store.conn.run(
+      `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
+       VALUES ('ws-coord', '/workspaces/ws-coord', 'ws-coord', ?, '{}', datetime('now'), datetime('now'));`,
+      [JSON.stringify(env)],
+    );
   });
 
   afterEach(() => {
@@ -82,8 +90,7 @@ describe("DeploymentSyncCoordinator", () => {
     // Save workspace envelope
     const envelope = createSampleCapabilityEnvelope("ws-coord");
     store.conn.run(
-      `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
-       VALUES ('ws-coord', '/workspaces/ws-coord', 'ws-coord', ?, '{}', datetime('now'), datetime('now'));`,
+      `UPDATE workspaces SET capability_envelope_json = ? WHERE workspace_id = 'ws-coord';`,
       [JSON.stringify(envelope)],
     );
 
@@ -379,6 +386,12 @@ describe("DeploymentSyncCoordinator", () => {
     // 1. Tool is active locally
     const manifest = createSampleToolManifest("offline-tool", "1.0.0");
     await activator.stageTool(manifest);
+    const offEnv = createSampleCapabilityEnvelope("ws-offline");
+    store.conn.run(
+      `INSERT INTO workspaces (workspace_id, root_path, name, capability_envelope_json, active_tools_json, created_at, updated_at)
+       VALUES ('ws-offline', '/workspaces/ws-offline', 'ws-offline', ?, '{}', datetime('now'), datetime('now'));`,
+      [JSON.stringify(offEnv)],
+    );
     await activator.activate({
       workspaceId: "ws-offline",
       toolId: "offline-tool",

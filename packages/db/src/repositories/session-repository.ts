@@ -53,6 +53,18 @@ export interface RawRecordRef {
 }
 
 /**
+ * Reserved config_json key holding the catalog-snapshot revision high-water mark.
+ * Internal to the observer activator; preserved across saveWorkspace upserts and
+ * stripped from WorkspaceRecord.config on reads so callers cannot see or set it.
+ */
+export const CATALOG_SNAPSHOT_NEXT_REV_KEY = "catalogSnapshotNextRev";
+
+function stripInternalConfigKeys(config: Record<string, unknown>): Record<string, unknown> {
+  const { [CATALOG_SNAPSHOT_NEXT_REV_KEY]: _omitted, ...rest } = config;
+  return rest;
+}
+
+/**
  * Repository managing workspaces, sessions, source cursors, raw record pointers,
  * and normalized session events.
  */
@@ -65,8 +77,34 @@ export class SessionRepository {
 
   async saveWorkspace(workspace: WorkspaceRecord): Promise<void> {
     const validated = WorkspaceRecordSchema.parse(workspace);
-    this.conn.run(
-      `INSERT INTO workspaces (
+    // Read existing config and upsert atomically so a concurrent activation cannot
+    // lose the counter between the SELECT and the write. The reserved key is stripped
+    // from caller input unconditionally and only a positive safe-integer stored value
+    // is restored, so callers can neither seed nor overwrite it.
+    await this.conn.transaction((conn) => {
+      const existing = conn.get<{ config_json: string }>(
+        "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
+        [validated.workspaceId],
+      );
+      let preservedNextRev: number | undefined;
+      if (existing) {
+        try {
+          const cfg = JSON.parse(existing.config_json) as Record<string, unknown>;
+          const v = cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY];
+          if (typeof v === "number" && Number.isSafeInteger(v) && v > 0) {
+            preservedNextRev = v;
+          }
+        } catch {
+          preservedNextRev = undefined;
+        }
+      }
+      const mergedConfig: Record<string, unknown> = { ...validated.config };
+      delete mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY];
+      if (preservedNextRev !== undefined) {
+        mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY] = preservedNextRev;
+      }
+      conn.run(
+        `INSERT INTO workspaces (
         workspace_id, root_path, name, config_json, capability_envelope_json, active_tools_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(workspace_id) DO UPDATE SET
@@ -76,17 +114,18 @@ export class SessionRepository {
         capability_envelope_json = excluded.capability_envelope_json,
         active_tools_json = excluded.active_tools_json,
         updated_at = excluded.updated_at;`,
-      [
-        validated.workspaceId,
-        validated.rootPath,
-        validated.name,
-        canonicalJson(validated.config),
-        canonicalJson(validated.capabilityEnvelope),
-        canonicalJson(validated.activeTools),
-        validated.createdAt,
-        validated.updatedAt ?? null,
-      ],
-    );
+        [
+          validated.workspaceId,
+          validated.rootPath,
+          validated.name,
+          canonicalJson(mergedConfig),
+          canonicalJson(validated.capabilityEnvelope),
+          canonicalJson(validated.activeTools),
+          validated.createdAt,
+          validated.updatedAt ?? null,
+        ],
+      );
+    });
   }
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceRecord | null> {
@@ -109,7 +148,7 @@ export class SessionRepository {
       workspaceId: row.workspace_id,
       rootPath: row.root_path,
       name: row.name,
-      config: JSON.parse(row.config_json),
+      config: stripInternalConfigKeys(JSON.parse(row.config_json)),
       capabilityEnvelope: JSON.parse(row.capability_envelope_json),
       activeTools: JSON.parse(row.active_tools_json),
       createdAt: row.created_at,
@@ -134,7 +173,7 @@ export class SessionRepository {
         workspaceId: row.workspace_id,
         rootPath: row.root_path,
         name: row.name,
-        config: JSON.parse(row.config_json),
+        config: stripInternalConfigKeys(JSON.parse(row.config_json)),
         capabilityEnvelope: JSON.parse(row.capability_envelope_json),
         activeTools: JSON.parse(row.active_tools_json),
         createdAt: row.created_at,

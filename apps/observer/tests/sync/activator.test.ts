@@ -1,5 +1,5 @@
 import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeploymentActivator } from "../../src/sync/activator.js";
 import type { CatalogChangeEvent } from "../../src/sync/types.js";
 import { createSampleToolManifest } from "./fixtures.js";
@@ -16,6 +16,28 @@ describe("DeploymentActivator", () => {
   afterEach(() => {
     store.close();
   });
+
+  /** Seeds a workspace row with a valid, permissive capability envelope. */
+  async function seedWorkspace(workspaceId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await store.sessions.saveWorkspace({
+      workspaceId,
+      rootPath: `/workspaces/${workspaceId}`,
+      name: workspaceId,
+      config: {},
+      capabilityEnvelope: {
+        envelopeId: `env-${workspaceId}`,
+        workspaceId,
+        version: "1.0.0",
+        fs: { allowWorkspaceRoot: true, allowTemp: true },
+        net: { allowOutbound: true },
+        command: { allowShellExecution: true },
+        createdAt: now,
+      },
+      activeTools: {},
+      createdAt: now,
+    });
+  }
 
   it("stages tool manifest and tool version in SQLite", async () => {
     const manifest = createSampleToolManifest("formatter", "1.0.0");
@@ -49,6 +71,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("linter", "1.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-test");
     const result = await activator.activate({
       workspaceId: "ws-test",
       toolId: "linter",
@@ -88,6 +111,7 @@ describe("DeploymentActivator", () => {
     const manifest = createSampleToolManifest("canary-tool", "2.0.0");
     await activator.stageTool(manifest);
 
+    await seedWorkspace("ws-canary");
     const result = await activator.activate({
       workspaceId: "ws-canary",
       toolId: "canary-tool",
@@ -113,6 +137,7 @@ describe("DeploymentActivator", () => {
     // Initial activation
     const v1 = createSampleToolManifest("resilient-tool", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-atomic");
     await activator.activate({
       workspaceId: "ws-atomic",
       toolId: "resilient-tool",
@@ -179,6 +204,7 @@ describe("DeploymentActivator", () => {
     // Deploy v1
     const v1 = createSampleToolManifest("calc", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-rb");
     await activator.activate({ workspaceId: "ws-rb", toolId: "calc", version: "1.0.0" });
 
     // Deploy v2
@@ -215,6 +241,7 @@ describe("DeploymentActivator", () => {
   it("rolls back first-installed tool to uninstalled state", async () => {
     const v1 = createSampleToolManifest("standalone", "1.0.0");
     await activator.stageTool(v1);
+    await seedWorkspace("ws-first");
     await activator.activate({ workspaceId: "ws-first", toolId: "standalone", version: "1.0.0" });
 
     const rbResult = await activator.rollback({
@@ -238,6 +265,7 @@ describe("DeploymentActivator", () => {
   it("handles suspend, resume, and retire lifecycle transitions cleanly", async () => {
     const manifest = createSampleToolManifest("lifecycle-tool", "1.0.0");
     await activator.stageTool(manifest);
+    await seedWorkspace("ws-life");
     await activator.activate({
       workspaceId: "ws-life",
       toolId: "lifecycle-tool",
@@ -295,6 +323,7 @@ describe("DeploymentActivator", () => {
     // catalog_snapshots row directly (bypassing ToolRepository), so without pruning this
     // table would grow one row per transition forever.
     for (let i = 0; i < 12; i += 1) {
+      await seedWorkspace("ws-bound");
       await activator.activate({
         workspaceId: "ws-bound",
         toolId: "bounded-tool",
@@ -310,5 +339,248 @@ describe("DeploymentActivator", () => {
       ["ws-bound"],
     );
     expect(row?.count).toBeLessThanOrEqual(5);
+  });
+
+  it("allocates a fresh snapshot revision even when the wall clock moves backward", async () => {
+    const manifest = createSampleToolManifest("clock-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    const manifest2 = createSampleToolManifest("clock-tool", "2.0.0");
+    await activator.stageTool(manifest2);
+
+    const realNow = Date.now();
+    try {
+      // Fill the retention bound (5 rows) at the real, current time.
+      for (let i = 0; i < 5; i += 1) {
+        await seedWorkspace("ws-clock");
+        const r = await activator.activate({
+          workspaceId: "ws-clock",
+          toolId: "clock-tool",
+          version: i % 2 === 0 ? "1.0.0" : "2.0.0",
+        });
+        expect(r.success).toBe(true);
+      }
+
+      // Step the clock back an hour. The next revisions carry earlier timestamps than
+      // every retained row, so a timestamp-ordered pruner would delete them on insert
+      // and a timestamp-ordered allocator would reuse their revision.
+      vi.setSystemTime(realNow - 3_600_000);
+      const rev6 = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "1.0.0",
+      });
+      expect(rev6.success).toBe(true);
+      const rev7 = await activator.activate({
+        workspaceId: "ws-clock",
+        toolId: "clock-tool",
+        version: "2.0.0",
+      });
+      expect(rev7.success).toBe(true);
+
+      const ids = store.conn
+        .all<{ snapshot_id: string }>(
+          "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY rowid;",
+          ["ws-clock"],
+        )
+        .map((r) => r.snapshot_id);
+      // Still bounded at 5, and the two regressed-clock revisions must have persisted.
+      expect(ids.length).toBe(5);
+      const revs = ids.map((id) => Number(id.match(/_rev(\d+)$/)?.[1] ?? 0));
+      expect(revs).toContain(6);
+      expect(revs).toContain(7);
+      expect(new Set(ids).size).toBe(ids.length);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the revision high-water mark when non-revision snapshots evict _rev rows", async () => {
+    const manifest = createSampleToolManifest("counter-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    // One activation allocates rev1 via the durable counter.
+    await seedWorkspace("ws-counter");
+    const first = await activator.activate({
+      workspaceId: "ws-counter",
+      toolId: "counter-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true);
+
+    // The registry writes non-_rev catalog_snapshots through the same table and prunes
+    // by insertion order. Enough of them evicts every _revN row under the shared
+    // retention bound, which would reset a row-derived allocator back to 1.
+    const { pruneCatalogSnapshots } = await import("@resin/db");
+    for (let i = 0; i < 6; i += 1) {
+      store.conn.run(
+        "INSERT INTO catalog_snapshots (snapshot_id, workspace_id, timestamp, tools_json, digest) VALUES (?, ?, ?, ?, ?);",
+        [`snap_ws-counter_registry_${i}`, "ws-counter", new Date().toISOString(), "{}", "d"],
+      );
+      pruneCatalogSnapshots(store.conn, "ws-counter");
+    }
+    const remaining = store.conn.all<{ snapshot_id: string }>(
+      "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? AND snapshot_id LIKE 'snap_ws-counter_rev%';",
+      ["ws-counter"],
+    );
+    expect(remaining.length).toBe(0); // all _rev rows evicted
+
+    // The next activation must still allocate rev2, not restart at rev1.
+    const second = await activator.activate({
+      workspaceId: "ws-counter",
+      toolId: "counter-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    expect(second.snapshot.snapshotId).toBe("snap_ws-counter_rev2");
+  });
+
+  it("preserves the revision high-water mark across a workspace config save", async () => {
+    const manifest = createSampleToolManifest("cfg-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    await seedWorkspace("ws-cfg");
+    const first = await activator.activate({
+      workspaceId: "ws-cfg",
+      toolId: "cfg-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true); // rev1
+
+    // A normal workspace save overwrites config_json; the internal counter must survive.
+    // The activator created the row with an empty envelope, so build a valid record.
+    const now = new Date().toISOString();
+    // Permissive envelope so the second activate still passes the capability check.
+    await store.sessions.saveWorkspace({
+      workspaceId: "ws-cfg",
+      rootPath: "/workspaces/ws-cfg",
+      name: "ws-cfg",
+      config: { userSetting: "changed" },
+      capabilityEnvelope: {
+        envelopeId: "env-cfg",
+        workspaceId: "ws-cfg",
+        version: "1.0.0",
+        fs: { allowWorkspaceRoot: true, allowTemp: true },
+        net: { allowOutbound: true },
+        command: { allowShellExecution: true },
+        createdAt: now,
+      },
+      activeTools: { "cfg-tool": "1.0.0" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // The reserved key must not leak into the public config on read.
+    const reread = await store.sessions.getWorkspace("ws-cfg");
+    expect(reread?.config?.catalogSnapshotNextRev).toBeUndefined();
+
+    // Evict all _rev rows so a row-derived allocator would reset to 1.
+    const { pruneCatalogSnapshots } = await import("@resin/db");
+    for (let i = 0; i < 6; i += 1) {
+      store.conn.run(
+        "INSERT INTO catalog_snapshots (snapshot_id, workspace_id, timestamp, tools_json, digest) VALUES (?, ?, ?, ?, ?);",
+        [`snap_ws-cfg_registry_${i}`, "ws-cfg", new Date().toISOString(), "{}", "d"],
+      );
+      pruneCatalogSnapshots(store.conn, "ws-cfg");
+    }
+
+    const second = await activator.activate({
+      workspaceId: "ws-cfg",
+      toolId: "cfg-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    expect(second.snapshot.snapshotId).toBe("snap_ws-cfg_rev2");
+  });
+
+  it("does not let a workspace config save seed or replace the revision counter", async () => {
+    const manifest = createSampleToolManifest("seed-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    await seedWorkspace("ws-seed");
+    const first = await activator.activate({
+      workspaceId: "ws-seed",
+      toolId: "seed-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true); // rev1
+
+    const now = new Date().toISOString();
+    const permissive = {
+      envelopeId: "env-seed",
+      workspaceId: "ws-seed",
+      version: "1.0.0",
+      fs: { allowWorkspaceRoot: true, allowTemp: true },
+      net: { allowOutbound: true },
+      command: { allowShellExecution: true },
+      createdAt: now,
+    };
+
+    // A caller tries to seed the reserved key to a huge value via config.
+    await store.sessions.saveWorkspace({
+      workspaceId: "ws-seed",
+      rootPath: "/workspaces/ws-seed",
+      name: "ws-seed",
+      config: { catalogSnapshotNextRev: 9999 },
+      capabilityEnvelope: permissive,
+      activeTools: { "seed-tool": "1.0.0" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const second = await activator.activate({
+      workspaceId: "ws-seed",
+      toolId: "seed-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    // Caller-supplied 9999 must be ignored; the counter continues from the real mark.
+    expect(second.snapshot.snapshotId).toBe("snap_ws-seed_rev2");
+  });
+
+  it("rejects activation when the staged manifest_json is malformed", async () => {
+    const manifest = createSampleToolManifest("corrupt-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    await seedWorkspace("ws-corrupt");
+
+    // Corrupt the stored manifest JSON.
+    store.conn.run(
+      "UPDATE tool_versions SET manifest_json = ? WHERE tool_id = ? AND version = ?;",
+      ["{not valid json", "corrupt-tool", "1.0.0"],
+    );
+
+    await expect(
+      activator.activate({ workspaceId: "ws-corrupt", toolId: "corrupt-tool", version: "1.0.0" }),
+    ).rejects.toThrow(/invalid|cannot verify/i);
+
+    // No deployment or activation state was written.
+    const dep = store.conn.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM deployment_records WHERE workspace_id = 'ws-corrupt';",
+    );
+    expect(dep?.c ?? 0).toBe(0);
+  });
+
+  it("rejects a caller manifest that underdeclares capabilities vs the staged manifest", async () => {
+    const manifest = createSampleToolManifest("mismatch-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    await seedWorkspace("ws-mismatch");
+
+    // Same id/version but weaker capabilities — must not authorize the stored manifest.
+    const weaker = createSampleToolManifest("mismatch-tool", "1.0.0", {
+      capabilities: { fs: { readPaths: [], writePaths: [] } },
+    });
+
+    await expect(
+      activator.activate({
+        workspaceId: "ws-mismatch",
+        toolId: "mismatch-tool",
+        version: "1.0.0",
+        manifest: weaker,
+      }),
+    ).rejects.toThrow(/does not match|mismatch/i);
+
+    const dep = store.conn.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM deployment_records WHERE workspace_id = 'ws-mismatch';",
+    );
+    expect(dep?.c ?? 0).toBe(0);
   });
 });
