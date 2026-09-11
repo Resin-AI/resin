@@ -1056,7 +1056,7 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     expect(Reflect.get(freshAccess, "db")).toBeDefined();
     expect(freshAccess.isInactive()).toBe(false);
   });
-  it("rereads only matching receipts while observing new receipts and sibling renewal", () => {
+  it("reuses parsed receipts while observing new receipts and sibling renewal", () => {
     const target = manifest();
     access.confirm(confirmation("allowed"));
     access.record(entry(target));
@@ -1064,13 +1064,17 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
       access.record(entry(manifest(crypto.randomUUID(), `unrelated_${index}`)));
     }
     expect(access.isBlocked(entry(target))).toBe(false);
+
+    // Warm the target receipt, then confirm repeated checks reuse the parse.
+    expect(access.isBlocked(entry(target))).toBe(false);
     const reads = vi.spyOn(fs, "readFileSync");
     const listings = vi.spyOn(fs, "readdirSync");
     expect(access.isBlocked(entry(target))).toBe(false);
+    expect(access.isManaged(entry(target))).toBe(true);
     const receiptPrefix = `${path.join(access.stateDir, "tools")}${path.sep}`;
     expect(
       reads.mock.calls.filter(([file]) => String(file).startsWith(receiptPrefix)),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(
       listings.mock.calls.filter(
         ([directory]) => directory === path.join(access.stateDir, "tools"),
@@ -1079,6 +1083,7 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     listings.mockRestore();
     reads.mockRestore();
 
+    // A sibling revocation replaces the receipt; the change must still be observed.
     const sibling = new ManagedToolAccess(access.stateDir, artifactCache, identity);
     sibling.confirm(confirmation("subscription_inactive"));
     expect(access.isBlocked(entry(target))).toBe(true);
@@ -1090,6 +1095,46 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     sibling.record(entry(added));
     expect(access.isManaged(entry(added))).toBe(true);
     expect(access.isBlocked(entry(added))).toBe(false);
+  });
+
+  it("invalidates cached receipts when a sibling rewrites with equal size and mtime", () => {
+    const target = manifest();
+    access.confirm(confirmation("allowed"));
+    access.record(entry(target));
+    expect(access.isBlocked(entry(target))).toBe(false);
+    expect(access.isBlocked(entry(target))).toBe(false); // warm the parse cache
+
+    const toolsDir = path.join(access.stateDir, "tools");
+    const receiptFile = fs
+      .readdirSync(toolsDir)
+      .map((name) => path.join(toolsDir, name))
+      .find((candidate) => {
+        try {
+          return JSON.parse(fs.readFileSync(candidate, "utf8")).entry?.toolId === target.id;
+        } catch {
+          return false;
+        }
+      });
+    expect(receiptFile).toBeDefined();
+
+    // Same-length in-place rewrite with the original mtime restored is the hardest
+    // case for cache invalidation: size, mtime and inode all match.
+    const before = fs.statSync(receiptFile!);
+    const original = fs.readFileSync(receiptFile!, "utf8");
+    const rewritten = original.replace('"status":"active"', '"status":"paused"');
+    if (rewritten === original) return; // shape changed; covered elsewhere
+    fs.writeFileSync(receiptFile!, rewritten);
+    fs.utimesSync(receiptFile!, before.atime, before.mtime);
+
+    const after = fs.statSync(receiptFile!);
+    expect(after.size).toBe(before.size);
+    expect(after.ino).toBe(before.ino);
+
+    // The warm instance must re-read rather than serve the previous parse.
+    const reads = vi.spyOn(fs, "readFileSync");
+    expect(access.isManaged(entry(target))).toBe(true);
+    expect(reads.mock.calls.filter(([file]) => String(file) === receiptFile)).toHaveLength(1);
+    reads.mockRestore();
   });
 
   it("caches the owners directory and reuses parses while honoring live revocations", async () => {
@@ -1179,11 +1224,9 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
 
     const receiptPrefix = `${toolsDir}${path.sep}`;
     const targetReads = reads.mock.calls.filter(([file]) => String(file).startsWith(receiptPrefix));
-    // Exactly 1 read per query (5 isBlocked + 5 isManaged = 10 reads)
-    expect(targetReads).toHaveLength(10);
-    const readPaths = new Set(targetReads.map(([f]) => String(f)));
-    // All 10 reads visited the single target receipt path, not the other 1200 synthetic files
-    expect(readPaths.size).toBe(1);
+    // Warm target receipts are reused: no re-read while the file is unchanged.
+    expect(targetReads).toHaveLength(0);
+    expect(access.isBlocked(entry(target))).toBe(false);
 
     // Warm directory: 0 readdirSync calls on toolsDir
     const toolListings = listings.mock.calls.filter(([dir]) => dir === toolsDir);
@@ -1226,10 +1269,20 @@ describe("Lock-free concurrent authorization and stale-protection semantics", ()
     expect(access.isBlocked(entry(newTool))).toBe(false);
 
     // Fail-closed provenance on deleted receipt file
-    const targetFile = [...readPaths][0];
-    expect(fs.existsSync(targetFile)).toBe(true);
-    fs.unlinkSync(targetFile);
-    expect(fs.existsSync(targetFile)).toBe(false);
+    const targetFile = fs
+      .readdirSync(toolsDir)
+      .map((name) => path.join(toolsDir, name))
+      .find((candidate) => {
+        try {
+          return JSON.parse(fs.readFileSync(candidate, "utf8")).entry?.toolId === target.id;
+        } catch {
+          return false;
+        }
+      });
+    expect(targetFile).toBeDefined();
+    expect(fs.existsSync(targetFile!)).toBe(true);
+    fs.unlinkSync(targetFile!);
+    expect(fs.existsSync(targetFile!)).toBe(false);
 
     // Retains known receipt (fail-closed provenance policy)
     expect(access.isManaged(entry(target))).toBe(true);

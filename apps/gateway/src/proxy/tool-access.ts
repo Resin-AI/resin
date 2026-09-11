@@ -74,6 +74,7 @@ export class ManagedToolAccess {
   private ownerDirectoryRevision?: string;
   private ownerNames: string[] = [];
   private readonly ownerFileCache = new Map<string, { revision: string; owner: Owner }>();
+  private readonly receiptFileCache = new Map<string, { revision: string; entry: ManagedEntry }>();
   private readonly ownersDir: string;
   private readonly entriesDir: string;
   private db?: DatabaseSync;
@@ -368,10 +369,7 @@ export class ManagedToolAccess {
       }
       // Newly discovered receipt: read it now so we can index its toolId
       try {
-        const file = path.join(this.entriesDir, name);
-        const content = fs.readFileSync(file, "utf8");
-        const entry = ManagedEntrySchema.parse(JSON.parse(content));
-        this.addKnownEntry(name, entry);
+        this.readReceiptFile(name);
       } catch {
         // Unreadable or malformed newly discovered record: track for retry without broad scan
         this.unresolvedReceiptNames.add(name);
@@ -382,11 +380,8 @@ export class ManagedToolAccess {
   private retryUnresolved(): void {
     if (this.unresolvedReceiptNames.size === 0) return;
     for (const name of this.unresolvedReceiptNames) {
-      const file = path.join(this.entriesDir, name);
       try {
-        const content = fs.readFileSync(file, "utf8");
-        const entry = ManagedEntrySchema.parse(JSON.parse(content));
-        this.addKnownEntry(name, entry);
+        this.readReceiptFile(name);
       } catch {
         // Retain in unresolvedReceiptNames until successful parse or directory listing proves absence
       }
@@ -425,7 +420,9 @@ export class ManagedToolAccess {
     let revision: string;
     try {
       const stat = fs.statSync(file, { bigint: true });
-      revision = `${stat.mtimeNs}:${stat.size}`;
+      // Include identity and both timestamps: an atomic rename changes inode and
+      // ctime, an in-place write changes mtime, and size catches equal-timestamp rewrites.
+      revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
     } catch {
       this.ownerFileCache.delete(name);
       return undefined;
@@ -442,6 +439,39 @@ export class ManagedToolAccess {
     }
   }
 
+  /**
+   * Read and validate one receipt file, reusing the parsed value until the file
+   * itself changes.
+   *
+   * The safety requirement is that an in-place activation change is observed, not
+   * that the bytes are re-parsed. A file's own revision detects every replacement
+   * and content change, so renewal and revocation are still seen immediately,
+   * while profile-guided profiling showed Zod re-validation plus readFileUtf8 and
+   * their garbage collection were the gateway's largest CPU consumers.
+   */
+  private readReceiptFile(name: string): ManagedEntry | undefined {
+    const file = path.join(this.entriesDir, name);
+    let revision: string;
+    try {
+      const stat = fs.statSync(file, { bigint: true });
+      // Include identity and both timestamps: an atomic rename changes inode and
+      // ctime, an in-place write changes mtime, and size catches equal-timestamp rewrites.
+      revision = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+    } catch {
+      this.receiptFileCache.delete(name);
+      return undefined;
+    }
+    const cached = this.receiptFileCache.get(name);
+    if (cached && cached.revision === revision) {
+      this.addKnownEntry(name, cached.entry);
+      return cached.entry;
+    }
+    const entry = ManagedEntrySchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+    this.receiptFileCache.set(name, { revision, entry });
+    this.addKnownEntry(name, entry);
+    return entry;
+  }
+
   private entries(tool?: ManagedToolTuple): ManagedEntry[] {
     this.syncDiscovery();
     this.retryUnresolved();
@@ -453,13 +483,14 @@ export class ManagedToolAccess {
       }
       const result: ManagedEntry[] = [];
       for (const name of filenames) {
-        // Refresh matching receipt contents on EVERY lookup
         try {
-          const file = path.join(this.entriesDir, name);
-          const content = fs.readFileSync(file, "utf8");
-          const entry = ManagedEntrySchema.parse(JSON.parse(content));
-          this.addKnownEntry(name, entry);
-          result.push(entry);
+          const entry = this.readReceiptFile(name);
+          if (entry) {
+            result.push(entry);
+          } else {
+            const fallback = this.knownEntries.get(name);
+            if (fallback) result.push(fallback);
+          }
         } catch {
           // Keep known receipts when files gone/unreadable as current failclosed provenance policy
           const fallback = this.knownEntries.get(name);
@@ -476,10 +507,7 @@ export class ManagedToolAccess {
       for (const name of this.receiptNames) {
         if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
         try {
-          const file = path.join(this.entriesDir, name);
-          const content = fs.readFileSync(file, "utf8");
-          const entry = ManagedEntrySchema.parse(JSON.parse(content));
-          this.addKnownEntry(name, entry);
+          this.readReceiptFile(name);
         } catch {
           /* Keep known receipts when files gone/unreadable */
         }
@@ -506,8 +534,11 @@ export class ManagedToolAccess {
       fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600, flag: "wx" });
       fs.renameSync(temp, file);
       // A rename can preserve mtime granularity; never serve the previous parse.
-      if (path.dirname(file) === this.ownersDir) {
+      const directory = path.dirname(file);
+      if (directory === this.ownersDir) {
         this.ownerFileCache.delete(path.basename(file));
+      } else if (directory === this.entriesDir) {
+        this.receiptFileCache.delete(path.basename(file));
       }
     } finally {
       fs.rmSync(temp, { force: true });
