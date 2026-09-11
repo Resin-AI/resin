@@ -20,6 +20,7 @@ import {
 } from "@resin/contracts";
 import { SecretRedactor } from "@resin/crypto";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
+import { pruneCatalogSnapshots } from "@resin/db";
 import type { JsonObject } from "../normalization/redaction.js";
 import type { AuditTrailManager } from "../observability/audit-trail.js";
 import {
@@ -874,7 +875,7 @@ export class DeploymentActivator {
       const latestSnap = this.conn.get<{
         snapshot_id: string;
       }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, snapshot_id DESC LIMIT 1;",
+        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
         [params.workspaceId],
       );
 
@@ -907,6 +908,7 @@ export class DeploymentActivator {
         ) VALUES (?, ?, ?, ?, ?);`,
         [snapshotId, params.workspaceId, timestamp, canonicalJson(toolSummaries), snapshotDigest],
       );
+      pruneCatalogSnapshots(this.conn, params.workspaceId);
     });
 
     if (!snapshotResult || !deploymentIdResult) {
@@ -1118,7 +1120,7 @@ export class DeploymentActivator {
       const latestSnap = this.conn.get<{
         snapshot_id: string;
       }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, snapshot_id DESC LIMIT 1;",
+        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
         [params.workspaceId],
       );
 
@@ -1151,6 +1153,7 @@ export class DeploymentActivator {
         ) VALUES (?, ?, ?, ?, ?);`,
         [snapshotId, params.workspaceId, timestamp, canonicalJson(toolSummaries), snapshotDigest],
       );
+      pruneCatalogSnapshots(this.conn, params.workspaceId);
     });
 
     if (!snapshotResult) {
@@ -1234,7 +1237,7 @@ export class DeploymentActivator {
       const latestSnap = this.conn.get<{
         snapshot_id: string;
       }>(
-        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, snapshot_id DESC LIMIT 1;",
+        "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT 1;",
         [params.workspaceId],
       );
 
@@ -1263,6 +1266,7 @@ export class DeploymentActivator {
         "INSERT INTO catalog_snapshots (snapshot_id, workspace_id, timestamp, tools_json, digest) VALUES (?, ?, ?, ?, ?);",
         [snapshotId, params.workspaceId, timestamp, canonicalJson(toolSummaries), snapshotDigest],
       );
+      pruneCatalogSnapshots(this.conn, params.workspaceId);
     });
 
     if (!snapshotResult) {
