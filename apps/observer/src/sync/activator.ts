@@ -20,7 +20,7 @@ import {
 } from "@resin/contracts";
 import { SecretRedactor } from "@resin/crypto";
 import type { LocalDatabaseConnection, ToolRepository } from "@resin/db";
-import { pruneCatalogSnapshots } from "@resin/db";
+import { CATALOG_SNAPSHOT_NEXT_REV_KEY, pruneCatalogSnapshots } from "@resin/db";
 import type { JsonObject } from "../normalization/redaction.js";
 import type { AuditTrailManager } from "../observability/audit-trail.js";
 import {
@@ -888,7 +888,10 @@ export class DeploymentActivator {
       let stored = 0;
       try {
         const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-        stored = typeof cfg.catalogSnapshotNextRev === "number" ? cfg.catalogSnapshotNextRev : 0;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
       } catch {
         stored = 0;
       }
@@ -905,7 +908,7 @@ export class DeploymentActivator {
       );
       const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
       const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-      cfg.catalogSnapshotNextRev = nextRev + 1;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
       this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
         JSON.stringify(cfg),
         params.workspaceId,
@@ -1157,7 +1160,10 @@ export class DeploymentActivator {
       let stored = 0;
       try {
         const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-        stored = typeof cfg.catalogSnapshotNextRev === "number" ? cfg.catalogSnapshotNextRev : 0;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
       } catch {
         stored = 0;
       }
@@ -1174,7 +1180,7 @@ export class DeploymentActivator {
       );
       const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
       const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-      cfg.catalogSnapshotNextRev = nextRev + 1;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
       this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
         JSON.stringify(cfg),
         params.workspaceId,
@@ -1298,7 +1304,10 @@ export class DeploymentActivator {
       let stored = 0;
       try {
         const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-        stored = typeof cfg.catalogSnapshotNextRev === "number" ? cfg.catalogSnapshotNextRev : 0;
+        stored =
+          typeof cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] === "number"
+            ? cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY]
+            : 0;
       } catch {
         stored = 0;
       }
@@ -1315,7 +1324,7 @@ export class DeploymentActivator {
       );
       const nextRev = Math.max(stored, (maxExisting?.max_rev ?? 0) + 1);
       const cfg = JSON.parse(counterRow?.config_json ?? "{}") as Record<string, unknown>;
-      cfg.catalogSnapshotNextRev = nextRev + 1;
+      cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY] = nextRev + 1;
       this.conn.run("UPDATE workspaces SET config_json = ? WHERE workspace_id = ?;", [
         JSON.stringify(cfg),
         params.workspaceId,

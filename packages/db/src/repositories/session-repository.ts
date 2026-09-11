@@ -53,6 +53,18 @@ export interface RawRecordRef {
 }
 
 /**
+ * Reserved config_json key holding the catalog-snapshot revision high-water mark.
+ * Internal to the observer activator; preserved across saveWorkspace upserts and
+ * stripped from WorkspaceRecord.config on reads so callers cannot see or set it.
+ */
+export const CATALOG_SNAPSHOT_NEXT_REV_KEY = "catalogSnapshotNextRev";
+
+function stripInternalConfigKeys(config: Record<string, unknown>): Record<string, unknown> {
+  const { [CATALOG_SNAPSHOT_NEXT_REV_KEY]: _omitted, ...rest } = config;
+  return rest;
+}
+
+/**
  * Repository managing workspaces, sessions, source cursors, raw record pointers,
  * and normalized session events.
  */
@@ -65,6 +77,25 @@ export class SessionRepository {
 
   async saveWorkspace(workspace: WorkspaceRecord): Promise<void> {
     const validated = WorkspaceRecordSchema.parse(workspace);
+    // Preserve the internal revision high-water mark across config upserts. The
+    // activator stores it in config_json; a normal workspace save must not erase it.
+    const existing = this.conn.get<{ config_json: string }>(
+      "SELECT config_json FROM workspaces WHERE workspace_id = ?;",
+      [validated.workspaceId],
+    );
+    let preservedNextRev: unknown;
+    if (existing) {
+      try {
+        const cfg = JSON.parse(existing.config_json) as Record<string, unknown>;
+        preservedNextRev = cfg[CATALOG_SNAPSHOT_NEXT_REV_KEY];
+      } catch {
+        preservedNextRev = undefined;
+      }
+    }
+    const mergedConfig: Record<string, unknown> = { ...validated.config };
+    if (typeof preservedNextRev === "number") {
+      mergedConfig[CATALOG_SNAPSHOT_NEXT_REV_KEY] = preservedNextRev;
+    }
     this.conn.run(
       `INSERT INTO workspaces (
         workspace_id, root_path, name, config_json, capability_envelope_json, active_tools_json, created_at, updated_at
@@ -80,7 +111,7 @@ export class SessionRepository {
         validated.workspaceId,
         validated.rootPath,
         validated.name,
-        canonicalJson(validated.config),
+        canonicalJson(mergedConfig),
         canonicalJson(validated.capabilityEnvelope),
         canonicalJson(validated.activeTools),
         validated.createdAt,
@@ -109,7 +140,7 @@ export class SessionRepository {
       workspaceId: row.workspace_id,
       rootPath: row.root_path,
       name: row.name,
-      config: JSON.parse(row.config_json),
+      config: stripInternalConfigKeys(JSON.parse(row.config_json)),
       capabilityEnvelope: JSON.parse(row.capability_envelope_json),
       activeTools: JSON.parse(row.active_tools_json),
       createdAt: row.created_at,
@@ -134,7 +165,7 @@ export class SessionRepository {
         workspaceId: row.workspace_id,
         rootPath: row.root_path,
         name: row.name,
-        config: JSON.parse(row.config_json),
+        config: stripInternalConfigKeys(JSON.parse(row.config_json)),
         capabilityEnvelope: JSON.parse(row.capability_envelope_json),
         activeTools: JSON.parse(row.active_tools_json),
         createdAt: row.created_at,

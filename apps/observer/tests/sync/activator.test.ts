@@ -402,4 +402,61 @@ describe("DeploymentActivator", () => {
     expect(second.success).toBe(true);
     expect(second.snapshot.snapshotId).toBe("snap_ws-counter_rev2");
   });
+
+  it("preserves the revision high-water mark across a workspace config save", async () => {
+    const manifest = createSampleToolManifest("cfg-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    const first = await activator.activate({
+      workspaceId: "ws-cfg",
+      toolId: "cfg-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true); // rev1
+
+    // A normal workspace save overwrites config_json; the internal counter must survive.
+    // The activator created the row with an empty envelope, so build a valid record.
+    const now = new Date().toISOString();
+    // Permissive envelope so the second activate still passes the capability check.
+    await store.sessions.saveWorkspace({
+      workspaceId: "ws-cfg",
+      rootPath: "/workspaces/ws-cfg",
+      name: "ws-cfg",
+      config: { userSetting: "changed" },
+      capabilityEnvelope: {
+        envelopeId: "env-cfg",
+        workspaceId: "ws-cfg",
+        version: "1.0.0",
+        fs: { allowWorkspaceRoot: true, allowTemp: true },
+        net: { allowOutbound: true },
+        command: { allowShellExecution: true },
+        createdAt: now,
+      },
+      activeTools: { "cfg-tool": "1.0.0" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // The reserved key must not leak into the public config on read.
+    const reread = await store.sessions.getWorkspace("ws-cfg");
+    expect(reread?.config?.catalogSnapshotNextRev).toBeUndefined();
+
+    // Evict all _rev rows so a row-derived allocator would reset to 1.
+    const { pruneCatalogSnapshots } = await import("@resin/db");
+    for (let i = 0; i < 6; i += 1) {
+      store.conn.run(
+        "INSERT INTO catalog_snapshots (snapshot_id, workspace_id, timestamp, tools_json, digest) VALUES (?, ?, ?, ?, ?);",
+        [`snap_ws-cfg_registry_${i}`, "ws-cfg", new Date().toISOString(), "{}", "d"],
+      );
+      pruneCatalogSnapshots(store.conn, "ws-cfg");
+    }
+
+    const second = await activator.activate({
+      workspaceId: "ws-cfg",
+      toolId: "cfg-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    expect(second.snapshot.snapshotId).toBe("snap_ws-cfg_rev2");
+  });
 });
