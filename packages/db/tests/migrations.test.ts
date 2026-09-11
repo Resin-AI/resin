@@ -87,7 +87,7 @@ describe("MigrationRunner", () => {
     conn.close();
   });
 
-  it("runs full integrity check twice when new migrations are applied", async () => {
+  it("runs the full integrity check twice when new migrations are applied", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
     const integrityCheckSpy = vi.spyOn(conn, "integrityCheck");
@@ -95,13 +95,14 @@ describe("MigrationRunner", () => {
     const runner = new MigrationRunner(conn);
     const result = await runner.migrate();
 
+    // Real migrations keep the full structural verification.
     expect(integrityCheckSpy).toHaveBeenCalledTimes(2);
     expect(result.appliedVersions).toEqual([1, 2, 3]);
     expect(result.integrityOk).toBe(true);
     conn.close();
   });
 
-  it("runs full integrity check once on an already-current database and returns integrityOk true with empty appliedVersions", async () => {
+  it("skips the database scan on an already-current database and returns integrityOk true", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
 
@@ -111,7 +112,10 @@ describe("MigrationRunner", () => {
     const integrityCheckSpy = vi.spyOn(conn, "integrityCheck");
     const result = await runner.migrate();
 
-    expect(integrityCheckSpy).toHaveBeenCalledTimes(1);
+    // A large state file must not be re-scanned when nothing is pending; doing so
+    // previously exceeded the daemon's activation probation window and rolled back
+    // otherwise-valid upgrades.
+    expect(integrityCheckSpy).toHaveBeenCalledTimes(0);
     expect(result.appliedVersions).toEqual([]);
     expect(result.integrityOk).toBe(true);
     expect(result.initialVersion).toBe(3);
@@ -119,29 +123,21 @@ describe("MigrationRunner", () => {
     conn.close();
   });
 
-  it("rejects failed pre-migration integrity check on no-op migration", async () => {
+  it("skips the pre-migration scan entirely on a no-op migration", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
 
     const runner = new MigrationRunner(conn);
     await runner.migrate();
 
-    vi.spyOn(conn, "integrityCheck").mockReturnValue({
-      ok: false,
-      details: ["malformed database schema"],
-    });
+    // Even a failing check result must not be consulted when nothing is pending.
+    const integrityCheckSpy = vi
+      .spyOn(conn, "integrityCheck")
+      .mockReturnValue({ ok: false, details: ["malformed database schema"] });
 
-    let thrownError: unknown;
-    try {
-      await runner.migrate();
-    } catch (error) {
-      thrownError = error;
-    }
-
-    expect(thrownError).toBeInstanceOf(MigrationIntegrityError);
-    expect((thrownError as Error).message).toMatch(
-      /Pre-migration integrity check failed: malformed database schema/,
-    );
+    const result = await runner.migrate();
+    expect(integrityCheckSpy).toHaveBeenCalledTimes(0);
+    expect(result.appliedVersions).toEqual([]);
     conn.close();
   });
 

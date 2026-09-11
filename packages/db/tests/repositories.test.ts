@@ -730,4 +730,65 @@ describe("Repositories End-to-End Round-Trip & Operations", () => {
 
     store.close();
   });
+
+  it("bounds catalog snapshot history per workspace as snapshots are written", async () => {
+    const store = await createInMemoryStateStore();
+    const workspaceId = "ws_01j7db4n000000000000000002";
+
+    const makeSnapshot = (index: number): CatalogSnapshot => ({
+      snapshotId: `snp_bound_${String(index).padStart(4, "0")}`,
+      workspaceId,
+      timestamp: new Date(Date.UTC(2026, 7, 17, 12, 0, index)).toISOString(),
+      tools: {},
+      digest: "0".repeat(64),
+    });
+
+    // A daemon that syncs its catalog repeatedly must not grow this table without
+    // bound; unbounded growth previously produced multi-gigabyte state files.
+    for (let index = 0; index < 40; index++) {
+      await store.tools.saveCatalogSnapshot(makeSnapshot(index));
+    }
+
+    const rows = store
+      .getConnection()
+      .all<{ count: number }>("SELECT COUNT(*) AS count FROM catalog_snapshots;");
+    expect(rows[0]?.count).toBe(5);
+
+    // The newest snapshots are the ones retained.
+    const newest = await store.tools.getLatestCatalogSnapshot(workspaceId);
+    expect(newest?.snapshotId).toBe("snp_bound_0039");
+
+    store.close();
+  });
+
+  it("bounds catalog snapshots independently per workspace", async () => {
+    const store = await createInMemoryStateStore();
+
+    const makeSnapshot = (name: string, workspaceId: string): CatalogSnapshot => ({
+      snapshotId: `snp_${name}`,
+      workspaceId,
+      timestamp: "2026-08-17T12:00:00.000Z",
+      tools: {},
+      digest: "1".repeat(64),
+    });
+
+    for (let index = 0; index < 12; index++) {
+      await store.tools.saveCatalogSnapshot(makeSnapshot(`a${index}`, "ws_alpha"));
+    }
+    for (let index = 0; index < 7; index++) {
+      await store.tools.saveCatalogSnapshot(makeSnapshot(`b${index}`, "ws_beta"));
+    }
+
+    const perWorkspace = store
+      .getConnection()
+      .all<{ workspace_id: string; count: number }>(
+        "SELECT workspace_id, COUNT(*) AS count FROM catalog_snapshots GROUP BY workspace_id ORDER BY workspace_id;",
+      );
+    expect(perWorkspace).toEqual([
+      { workspace_id: "ws_alpha", count: 5 },
+      { workspace_id: "ws_beta", count: 5 },
+    ]);
+
+    store.close();
+  });
 });
