@@ -125,6 +125,23 @@ afterEach(() => {
   for (const target of cleanupPaths.splice(0)) fs.rmSync(target, { recursive: true, force: true });
 });
 
+/**
+ * Strips Node.js runtime warnings (ExperimentalWarning, DeprecationWarning) that the
+ * runtime emits to stderr independently of the CLI's own output. The packed CLI imports
+ * node:sqlite, which is experimental on some Node versions and prints a warning the test
+ * must not treat as a product error.
+ */
+function stripNodeRuntimeWarnings(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter(
+      (line) =>
+        !/\(node:\d+\)\s+\[?\w*Warning\]?/i.test(line) && !/^\s*\(Use `node --trace/.test(line),
+    )
+    .join("\n")
+    .trim();
+}
+
 describe("packed CLI production bootstrap", () => {
   it("runs the npm-packed CLI entrypoint through a signed channel and HTTP fixture", async () => {
     const rootDir = process.cwd();
@@ -361,7 +378,7 @@ describe("packed CLI production bootstrap", () => {
         maxBuffer: 20 * 1024 * 1024,
       },
     );
-    expect(dryRunResult.stderr).toBe("");
+    expect(stripNodeRuntimeWarnings(dryRunResult.stderr)).toBe("");
     expect(dryRunResult.stdout).toContain('"success": true');
 
     const driverPath = path.join(runDir, "invoke-packed-cli.mjs");
@@ -405,7 +422,7 @@ describe("packed CLI production bootstrap", () => {
     }
 
     try {
-      expect(stderr).toBe("");
+      expect(stripNodeRuntimeWarnings(stderr)).toBe("");
       expect(stdout).toContain('"success": true');
       expect(fs.existsSync(path.join(home, ".resin", "versions", "v1.0.0"))).toBe(true);
       expect(fs.existsSync(path.join(home, ".resin", "versions", "v1.0.0", "bin", "resin"))).toBe(

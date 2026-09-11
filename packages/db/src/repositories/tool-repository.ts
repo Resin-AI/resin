@@ -14,7 +14,43 @@ import {
   hashCanonicalContent,
   normalizeSha256,
 } from "@resin/contracts";
-import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
+import type { LocalDatabaseConnection, SQLBindValue, SQLParams } from "../connection.js";
+
+/**
+ * Catalog snapshots retained per workspace.
+ *
+ * Matches the retention engine default so a state file stays bounded even when
+ * periodic compaction has not run yet.
+ */
+export const CATALOG_SNAPSHOT_KEEP_COUNT = 5;
+
+/**
+ * Deletes catalog snapshots beyond the per-workspace retention bound.
+ *
+ * Shared by ToolRepository.saveCatalogSnapshot and by writers that insert
+ * catalog_snapshots rows directly (the observer activator writes inside its own
+ * transaction and cannot go through the repository). Call this after every
+ * insert so the table stays bounded regardless of which path wrote the row.
+ */
+export function pruneCatalogSnapshots(
+  conn: { run(sql: string, params?: SQLParams): unknown },
+  workspaceId: string,
+  keepCount: number = CATALOG_SNAPSHOT_KEEP_COUNT,
+): void {
+  conn.run(
+    `DELETE FROM catalog_snapshots
+     WHERE workspace_id = ?
+       AND snapshot_id NOT IN (
+         SELECT snapshot_id FROM (
+           SELECT snapshot_id,
+                  ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY timestamp DESC, rowid DESC) AS rn
+           FROM catalog_snapshots
+           WHERE workspace_id = ?
+         ) WHERE rn <= ?
+       );`,
+    [workspaceId, workspaceId, keepCount],
+  );
+}
 
 /**
  * Harness plugin installation record.
@@ -375,6 +411,10 @@ export class ToolRepository {
         validated.digest,
       ],
     );
+    // Bound per-workspace history as we write. Every catalog sync appended a full
+    // snapshot and nothing pruned them, so a daemon could accumulate millions of
+    // rows (tens of gigabytes) and then fail its own startup integrity scan.
+    pruneCatalogSnapshots(this.conn, validated.workspaceId);
   }
 
   async getCatalogSnapshot(snapshotId: string): Promise<CatalogSnapshot | null> {

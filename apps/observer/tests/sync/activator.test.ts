@@ -284,4 +284,31 @@ describe("DeploymentActivator", () => {
     );
     expect(depRow?.state).toBe("retired");
   });
+
+  it("bounds catalog_snapshots across repeated activate/rollback/suspend cycles", async () => {
+    const manifest = createSampleToolManifest("bounded-tool", "1.0.0");
+    await activator.stageTool(manifest);
+    const manifest2 = createSampleToolManifest("bounded-tool", "2.0.0");
+    await activator.stageTool(manifest2);
+
+    // Drive many snapshot-writing transitions. Each activate/rollback/suspend inserts a
+    // catalog_snapshots row directly (bypassing ToolRepository), so without pruning this
+    // table would grow one row per transition forever.
+    for (let i = 0; i < 12; i += 1) {
+      await activator.activate({
+        workspaceId: "ws-bound",
+        toolId: "bounded-tool",
+        version: i % 2 === 0 ? "1.0.0" : "2.0.0",
+      });
+      await activator.suspend({ workspaceId: "ws-bound", toolId: "bounded-tool" });
+      await activator.resume({ workspaceId: "ws-bound", toolId: "bounded-tool" });
+    }
+    await activator.rollback({ workspaceId: "ws-bound", toolId: "bounded-tool", reason: "test" });
+
+    const row = store.conn.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM catalog_snapshots WHERE workspace_id = ?;",
+      ["ws-bound"],
+    );
+    expect(row?.count).toBeLessThanOrEqual(5);
+  });
 });
