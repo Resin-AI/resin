@@ -103,6 +103,11 @@ export const STATE_STORE_TABLES = [
   "audit_records",
   "local_outbox",
   "local_inbox",
+  "session_signatures",
+  "workflow_clusters",
+  "cluster_episodes",
+  "opportunity_hash_cache",
+  "pattern_outbox",
   "_local_migrations",
 ] as const;
 

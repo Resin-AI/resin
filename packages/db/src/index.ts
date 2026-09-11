@@ -12,6 +12,7 @@ export * from "./repositories/tool-repository.js";
 export * from "./repositories/capability-repository.js";
 export * from "./repositories/sync-repository.js";
 export * from "./repositories/audit-repository.js";
+export * from "./repositories/opportunity-local-repository.js";
 
 // Retention & Compaction Engine
 export * from "./retention.js";

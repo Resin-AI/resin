@@ -7,6 +7,7 @@ import {
 import { type MigrationResult, MigrationRunner } from "./migrations.js";
 import { AuditRepository } from "./repositories/audit-repository.js";
 import { CapabilityRepository } from "./repositories/capability-repository.js";
+import { OpportunityLocalRepository } from "./repositories/opportunity-local-repository.js";
 import { SessionRepository } from "./repositories/session-repository.js";
 import { SyncRepository } from "./repositories/sync-repository.js";
 import { ToolRepository } from "./repositories/tool-repository.js";
@@ -23,6 +24,7 @@ export class LocalStateStore {
   readonly capabilities: CapabilityRepository;
   readonly sync: SyncRepository;
   readonly audit: AuditRepository;
+  readonly opportunities: OpportunityLocalRepository;
   readonly retention: RetentionEngine;
   readonly migrations: MigrationRunner;
 
@@ -33,6 +35,7 @@ export class LocalStateStore {
     this.capabilities = new CapabilityRepository(conn);
     this.sync = new SyncRepository(conn);
     this.audit = new AuditRepository(conn);
+    this.opportunities = new OpportunityLocalRepository(conn);
     this.retention = new RetentionEngine(conn);
     this.migrations = new MigrationRunner(conn);
   }
