@@ -363,4 +363,43 @@ describe("DeploymentActivator", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps the revision high-water mark when non-revision snapshots evict _rev rows", async () => {
+    const manifest = createSampleToolManifest("counter-tool", "1.0.0");
+    await activator.stageTool(manifest);
+
+    // One activation allocates rev1 via the durable counter.
+    const first = await activator.activate({
+      workspaceId: "ws-counter",
+      toolId: "counter-tool",
+      version: "1.0.0",
+    });
+    expect(first.success).toBe(true);
+
+    // The registry writes non-_rev catalog_snapshots through the same table and prunes
+    // by insertion order. Enough of them evicts every _revN row under the shared
+    // retention bound, which would reset a row-derived allocator back to 1.
+    const { pruneCatalogSnapshots } = await import("@resin/db");
+    for (let i = 0; i < 6; i += 1) {
+      store.conn.run(
+        "INSERT INTO catalog_snapshots (snapshot_id, workspace_id, timestamp, tools_json, digest) VALUES (?, ?, ?, ?, ?);",
+        [`snap_ws-counter_registry_${i}`, "ws-counter", new Date().toISOString(), "{}", "d"],
+      );
+      pruneCatalogSnapshots(store.conn, "ws-counter");
+    }
+    const remaining = store.conn.all<{ snapshot_id: string }>(
+      "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? AND snapshot_id LIKE 'snap_ws-counter_rev%';",
+      ["ws-counter"],
+    );
+    expect(remaining.length).toBe(0); // all _rev rows evicted
+
+    // The next activation must still allocate rev2, not restart at rev1.
+    const second = await activator.activate({
+      workspaceId: "ws-counter",
+      toolId: "counter-tool",
+      version: "1.0.0",
+    });
+    expect(second.success).toBe(true);
+    expect(second.snapshot.snapshotId).toBe("snap_ws-counter_rev2");
+  });
 });

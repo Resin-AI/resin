@@ -876,14 +876,24 @@ export class DeploymentActivator {
       // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
       // restore) can give a newer snapshot an earlier timestamp, which would make a
       // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
-      const revPrefix = `snap_${params.workspaceId}_rev`;
-      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
-        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
-         FROM catalog_snapshots
-         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
-        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
+      // Allocate from a durable per-workspace counter, not the surviving snapshot rows.
+      // catalog_snapshots is retention-pruned and shared with non-revision registry
+      // snapshots, so the highest surviving _revN row is not a reliable allocator.
+      this.conn.run(
+        `INSERT INTO catalog_snapshot_counters (workspace_id, next_revision)
+         VALUES (?, 1)
+         ON CONFLICT(workspace_id) DO NOTHING;`,
+        [params.workspaceId],
       );
-      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
+      const counterRow = this.conn.get<{ next_revision: number }>(
+        "SELECT next_revision FROM catalog_snapshot_counters WHERE workspace_id = ?;",
+        [params.workspaceId],
+      );
+      const nextRev = counterRow?.next_revision ?? 1;
+      this.conn.run(
+        "UPDATE catalog_snapshot_counters SET next_revision = ? WHERE workspace_id = ?;",
+        [nextRev + 1, params.workspaceId],
+      );
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1119,14 +1129,24 @@ export class DeploymentActivator {
       // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
       // restore) can give a newer snapshot an earlier timestamp, which would make a
       // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
-      const revPrefix = `snap_${params.workspaceId}_rev`;
-      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
-        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
-         FROM catalog_snapshots
-         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
-        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
+      // Allocate from a durable per-workspace counter, not the surviving snapshot rows.
+      // catalog_snapshots is retention-pruned and shared with non-revision registry
+      // snapshots, so the highest surviving _revN row is not a reliable allocator.
+      this.conn.run(
+        `INSERT INTO catalog_snapshot_counters (workspace_id, next_revision)
+         VALUES (?, 1)
+         ON CONFLICT(workspace_id) DO NOTHING;`,
+        [params.workspaceId],
       );
-      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
+      const counterRow = this.conn.get<{ next_revision: number }>(
+        "SELECT next_revision FROM catalog_snapshot_counters WHERE workspace_id = ?;",
+        [params.workspaceId],
+      );
+      const nextRev = counterRow?.next_revision ?? 1;
+      this.conn.run(
+        "UPDATE catalog_snapshot_counters SET next_revision = ? WHERE workspace_id = ?;",
+        [nextRev + 1, params.workspaceId],
+      );
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
@@ -1234,14 +1254,24 @@ export class DeploymentActivator {
       // the latest-by-timestamp row. A backward wall-clock step (resume, NTP, VM
       // restore) can give a newer snapshot an earlier timestamp, which would make a
       // timestamp-ordered lookup pick a lower rev and collide on snapshot_id.
-      const revPrefix = `snap_${params.workspaceId}_rev`;
-      const maxRevRow = this.conn.get<{ max_rev: number | null }>(
-        `SELECT MAX(CAST(substr(snapshot_id, ?) AS INTEGER)) AS max_rev
-         FROM catalog_snapshots
-         WHERE workspace_id = ? AND substr(snapshot_id, 1, ?) = ?;`,
-        [revPrefix.length + 1, params.workspaceId, revPrefix.length, revPrefix],
+      // Allocate from a durable per-workspace counter, not the surviving snapshot rows.
+      // catalog_snapshots is retention-pruned and shared with non-revision registry
+      // snapshots, so the highest surviving _revN row is not a reliable allocator.
+      this.conn.run(
+        `INSERT INTO catalog_snapshot_counters (workspace_id, next_revision)
+         VALUES (?, 1)
+         ON CONFLICT(workspace_id) DO NOTHING;`,
+        [params.workspaceId],
       );
-      const nextRev = (maxRevRow?.max_rev ?? 0) + 1;
+      const counterRow = this.conn.get<{ next_revision: number }>(
+        "SELECT next_revision FROM catalog_snapshot_counters WHERE workspace_id = ?;",
+        [params.workspaceId],
+      );
+      const nextRev = counterRow?.next_revision ?? 1;
+      this.conn.run(
+        "UPDATE catalog_snapshot_counters SET next_revision = ? WHERE workspace_id = ?;",
+        [nextRev + 1, params.workspaceId],
+      );
       revisionResult = nextRev;
 
       const snapshotDigest = hashCanonicalContent({
