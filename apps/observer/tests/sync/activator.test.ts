@@ -342,6 +342,18 @@ describe("DeploymentActivator", () => {
       });
       expect(third.success).toBe(true);
 
+      // Drive past the retention bound while the clock is still regressed. Each new
+      // revision must be kept (not pruned as "oldest by timestamp") and must not be
+      // re-allocated, or the returned snapshot would silently not persist.
+      for (let i = 0; i < 6; i += 1) {
+        const r = await activator.activate({
+          workspaceId: "ws-clock",
+          toolId: "clock-tool",
+          version: i % 2 === 0 ? "1.0.0" : "2.0.0",
+        });
+        expect(r.success).toBe(true);
+      }
+
       const ids = store.conn
         .all<{ snapshot_id: string }>(
           "SELECT snapshot_id FROM catalog_snapshots WHERE workspace_id = ? ORDER BY rowid;",
@@ -349,7 +361,9 @@ describe("DeploymentActivator", () => {
         )
         .map((r) => r.snapshot_id);
       expect(new Set(ids).size).toBe(ids.length);
-      expect(ids.length).toBeGreaterThanOrEqual(3);
+      // Retention keeps the newest-by-insertion revisions; the highest rev must survive.
+      const revs = ids.map((id) => Number(id.match(/_rev(\d+)$/)?.[1] ?? 0));
+      expect(Math.max(...revs)).toBeGreaterThanOrEqual(8);
     } finally {
       Date.now = realNow;
     }

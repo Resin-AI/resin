@@ -27,6 +27,11 @@ export const CATALOG_SNAPSHOT_KEEP_COUNT = 5;
 /**
  * Deletes catalog snapshots beyond the per-workspace retention bound.
  *
+ * Retains by insertion order (rowid), not wall-clock timestamp. Snapshot
+ * revisions are allocated monotonically, and a backward clock step can give a
+ * newer revision an earlier timestamp — pruning by timestamp would then delete
+ * the newest row and let the allocator reuse its revision forever.
+ *
  * Shared by ToolRepository.saveCatalogSnapshot and by writers that insert
  * catalog_snapshots rows directly (the observer activator writes inside its own
  * transaction and cannot go through the repository). Call this after every
@@ -43,7 +48,7 @@ export function pruneCatalogSnapshots(
        AND snapshot_id NOT IN (
          SELECT snapshot_id FROM (
            SELECT snapshot_id,
-                  ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY timestamp DESC, rowid DESC) AS rn
+                  ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY rowid DESC) AS rn
            FROM catalog_snapshots
            WHERE workspace_id = ?
          ) WHERE rn <= ?
