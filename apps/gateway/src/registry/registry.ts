@@ -1591,6 +1591,45 @@ export class ToolRegistry {
    * Atomically activates a tool version in a workspace or session,
    * building a new snapshot revision and notifying listeners.
    */
+  /**
+   * Returns true when the tool is already registered and marked active for this
+   * workspace at the given version. Used by sync to skip a redundant
+   * registerToolSync + activateToolVersion (which rebuilds the whole catalog).
+   */
+  isToolActiveForWorkspace(
+    toolId: string,
+    version: string,
+    workspaceId: string,
+    expected?: { manifestDigest?: string; artifactDigest?: string; envelopeDigest?: string },
+  ): boolean {
+    const registered = this.registeredTools.get(toolId)?.get(version);
+    if (!registered) return false;
+    // A same-version entry whose digests changed is a different implementation and
+    // must NOT be treated as already active — re-register and re-activate it.
+    if (expected) {
+      // A present expected digest requires exact equality; a missing registered digest
+      // is a mismatch (the registered tool was never pinned to that content).
+      if (
+        expected.manifestDigest !== undefined &&
+        registered.manifestDigest !== expected.manifestDigest
+      )
+        return false;
+      if (
+        expected.artifactDigest !== undefined &&
+        registered.artifactDigest !== expected.artifactDigest
+      )
+        return false;
+      if (
+        expected.envelopeDigest !== undefined &&
+        registered.envelopeDigest !== expected.envelopeDigest
+      )
+        return false;
+    }
+    const wsMap = this.workspaceActiveTools.get(workspaceId);
+    if (!wsMap) return false;
+    return wsMap.get(toolId) === version || wsMap.get(registered.name) === version;
+  }
+
   async activateToolVersion(
     toolId: string,
     version: string,

@@ -906,7 +906,18 @@ export class CloudCatalogSyncCoordinator {
           }
         }
 
-        if (this.registry) {
+        // Fast path: already registered and active at the locked version — skip the
+        // redundant registerToolSync + activateToolVersion, which would rebuild the
+        // whole catalog per tool (O(n²) over a large unchanged lock).
+        const alreadyActive =
+          this.workspaceId &&
+          this.registry?.isToolActiveForWorkspace?.(entry.toolId, entry.version, this.workspaceId, {
+            manifestDigest: entry.manifestDigest,
+            artifactDigest: entry.artifactDigest,
+            envelopeDigest: entry.envelopeDigest,
+          });
+
+        if (this.registry && !alreadyActive) {
           const registryTool: RegistryTool = {
             toolId: entry.toolId,
             name: entry.name,
