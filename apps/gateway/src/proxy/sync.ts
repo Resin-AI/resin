@@ -508,7 +508,10 @@ export class CloudCatalogSyncCoordinator {
           continue;
         }
 
-        let result: ReconcileResult;
+        // Receipt renewal and lockfile reconciliation are independent concerns: the
+        // confirmation only authorizes recording activation proof, it does not require
+        // touching the lockfile. Record first when proof is present, then decide whether
+        // the lockfile actually needs work.
         if (this.activeConfirmation) {
           this.options.managedToolAccess?.record(
             candidateEntry,
@@ -518,14 +521,32 @@ export class CloudCatalogSyncCoordinator {
             this.activeConfirmation,
           );
         }
-        try {
-          result = this.lockManager.reconcileQualified(candidateEntry);
-        } catch (reconcileError: unknown) {
-          this.options.onToolSyncError?.(
-            manifest.name,
-            reconcileError instanceof Error ? reconcileError : new Error(String(reconcileError)),
-          );
-          continue;
+
+        let result: ReconcileResult;
+        // Exact-match fast path: the candidate already matches the committed entry, so
+        // reconcileQualified() can only return "unchanged". Resolve it against the lock
+        // this loop already holds instead of re-reading and re-cloning the whole lockfile
+        // (and acquiring its mutex) once per manifest.
+        const committed = currentLock.tools[candidateEntry.name];
+        const isExactlyCommitted =
+          committed !== undefined &&
+          committed.version === candidateEntry.version &&
+          committed.manifestDigest === candidateEntry.manifestDigest &&
+          committed.artifactDigest === candidateEntry.artifactDigest &&
+          committed.envelopeDigest === candidateEntry.envelopeDigest;
+
+        if (isExactlyCommitted) {
+          result = { outcome: "unchanged", lock: currentLock };
+        } else {
+          try {
+            result = this.lockManager.reconcileQualified(candidateEntry);
+          } catch (reconcileError: unknown) {
+            this.options.onToolSyncError?.(
+              manifest.name,
+              reconcileError instanceof Error ? reconcileError : new Error(String(reconcileError)),
+            );
+            continue;
+          }
         }
         if (result.outcome === "added") {
           currentLock = result.lock;

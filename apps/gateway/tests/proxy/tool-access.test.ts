@@ -141,6 +141,55 @@ function coordinator(
   });
 }
 
+describe("Reconciling an unchanged catalog", () => {
+  it("does not re-read or re-clone the lockfile per manifest once confirmed", async () => {
+    const lockPath = path.join(root, "resin.lock");
+    const projectId = "11111111-2222-4333-8444-555555555555";
+    const lockManager = new ProjectLockManager({ lockPath, projectId });
+    const tools = Array.from({ length: 40 }, (_, index) =>
+      manifest(crypto.randomUUID(), `locked_${index}`),
+    );
+    for (const tool of tools) {
+      lockManager.reconcileQualified(entry(tool));
+      cacheTool(tool);
+      register(tool);
+    }
+
+    const client = new CloudCatalogClient({
+      identityProvider: async () => identity,
+      workspaceId: identity.workspaceId,
+      deviceId: identity.deviceId,
+      fetchFn: async () => Response.json(confirmation("allowed")),
+      snapshotFetcher: async () => snapshot(tools),
+    });
+    const sync = new CloudCatalogSyncCoordinator({
+      client,
+      cache: new CloudCatalogCache(),
+      router: new CloudInvocationRouter(),
+      registry,
+      artifactCache,
+      managedToolAccess: access,
+      workspaceId: identity.workspaceId,
+      lockManager,
+    });
+
+    // First sync may legitimately reconcile (the lock exists, but adopt/record can differ).
+    await sync.sync();
+
+    // Second sync with an unchanged catalog must not re-enter reconcileQualified at all:
+    // the committed lock is already in hand and every candidate matches exactly.
+    const reconcile = vi.spyOn(ProjectLockManager.prototype, "reconcileQualified");
+    const readLock = vi.spyOn(ProjectLockManager.prototype, "readLock");
+    await sync.sync();
+
+    expect(reconcile).toHaveBeenCalledTimes(0);
+    // Exactly one lock read for the whole walk, not one per manifest.
+    expect(readLock.mock.calls.length).toBeLessThanOrEqual(2);
+    reconcile.mockRestore();
+    readLock.mockRestore();
+  });
+});
+
 describe("Positive tool-access confirmation", () => {
   it.each([
     [

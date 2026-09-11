@@ -921,6 +921,16 @@ export class ManagedToolAccess {
   /** Pre-upgrade catalog manifests carry explicit cloud account ownership; local locks do not. */
   adopt(registry: ToolRegistry | undefined, lockManager?: ProjectLockManager): void {
     if (!this.identity || !registry) return;
+    // Resolve the committed lockfile once. Looking each tool up individually re-read
+    // and re-cloned the whole lock, making adoption quadratic in the tool count.
+    const lock = lockManager?.readLock();
+    const byName = lock?.tools ?? {};
+    const byToolId = new Map<string, V1LockedToolEntry>();
+    if (lock) {
+      for (const entry of Object.values(lock.tools)) {
+        if (!byToolId.has(entry.toolId)) byToolId.set(entry.toolId, entry);
+      }
+    }
     for (const tool of registry.getAllRegisteredTools()) {
       const meta = tool.manifest.metadata;
       if (
@@ -929,7 +939,7 @@ export class ManagedToolAccess {
         (meta.source !== "registry" && meta.source !== "cloud")
       )
         continue;
-      const locked = lockManager?.getLockedTool(tool.toolId);
+      const locked = byName[tool.name] ?? byToolId.get(tool.toolId);
       const parsed = V1LockedToolEntrySchema.safeParse({
         toolId: tool.toolId,
         name: tool.name,
