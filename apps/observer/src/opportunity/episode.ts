@@ -5,12 +5,7 @@ import {
   type NormalizedToolResultEvent,
   hashCanonicalContent,
 } from "@resin/contracts";
-import type {
-  Episode,
-  EpisodeMetrics,
-  OpportunityDataValue,
-  SegmenterOptions,
-} from "./types.js";
+import type { Episode, EpisodeMetrics, OpportunityDataValue, SegmenterOptions } from "./types.js";
 
 const DEFAULT_IDLE_GAP_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_MIN_EVENTS = 1;

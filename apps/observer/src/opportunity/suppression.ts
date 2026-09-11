@@ -343,9 +343,7 @@ interface UnobservableCheckResult {
  * Deterministic event ordering, mirroring the cloud workflow-contract extraction so that
  * operation ids computed here address the same operations as a derived workflow contract.
  */
-function sortEventsDeterministically(
-  events: NormalizedSessionEvent[],
-): NormalizedSessionEvent[] {
+function sortEventsDeterministically(events: NormalizedSessionEvent[]): NormalizedSessionEvent[] {
   return [...events].sort((a, b) => {
     const aSeq = a.causalRef?.causalSequence ?? 0;
     const bSeq = b.causalRef?.causalSequence ?? 0;
@@ -398,7 +396,9 @@ function buildRepresentativeOperations(cluster: WorkflowCluster): OperationRef[]
 function readStringArray(value: unknown): string[] {
   if (typeof value === "string") return value.trim() ? [value] : [];
   if (Array.isArray(value)) {
-    return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    return value.filter(
+      (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
+    );
   }
   return [];
 }
@@ -474,15 +474,7 @@ function eventPathEvidence(event: NormalizedSessionEvent): string[] {
     if (hasParameterShapeEnvelope(event.parameters)) return paths;
     const params = event.parameters as Record<string, unknown> | undefined;
     if (!params || typeof params !== "object") return paths;
-    for (const key of [
-      "path",
-      "filePath",
-      "file",
-      "paths",
-      "targetPaths",
-      "files",
-      "filePaths",
-    ]) {
+    for (const key of ["path", "filePath", "file", "paths", "targetPaths", "files", "filePaths"]) {
       paths.push(...readStringArray(params[key]));
     }
   }
@@ -752,7 +744,10 @@ export class SuppressionEngine {
       const sig = cluster.representativeSignature;
       for (const op of sig.operations ?? []) {
         if (op.startsWith("tool:")) {
-          const raw = op.replace(/^tool:/, "").toLowerCase().trim();
+          const raw = op
+            .replace(/^tool:/, "")
+            .toLowerCase()
+            .trim();
           if (isSafeToolOperationName(raw)) {
             toolOperationCount++;
           }

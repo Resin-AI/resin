@@ -284,7 +284,11 @@ export class OpportunityLocalRepository {
   // Cluster Episodes
   // ---------------------------------------------------------------------------
 
-  async linkClusterEpisode(clusterId: string, episodeId: string, sessionId?: string): Promise<void> {
+  async linkClusterEpisode(
+    clusterId: string,
+    episodeId: string,
+    sessionId?: string,
+  ): Promise<void> {
     this.conn.run(
       `INSERT INTO cluster_episodes (cluster_id, episode_id, session_id)
       VALUES (?, ?, ?)

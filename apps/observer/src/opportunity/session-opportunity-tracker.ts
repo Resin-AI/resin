@@ -222,10 +222,7 @@ export class SessionOpportunityTracker {
       MAX_PENDING_EVENT_CAPACITY,
       Math.max(MIN_PENDING_EVENT_CAPACITY, this.maxEpisodesPerSession * EVENTS_PER_EPISODE_BUDGET),
     );
-    this.seenEventCapacity = Math.max(
-      MIN_SEEN_EVENT_CAPACITY,
-      this.pendingEventCapacity * 4,
-    );
+    this.seenEventCapacity = Math.max(MIN_SEEN_EVENT_CAPACITY, this.pendingEventCapacity * 4);
     this.hashCacheLookbackMs = toPositiveInt(
       options.hashCacheLookbackMs,
       DEFAULT_HASH_CACHE_LOOKBACK_MS,
@@ -481,7 +478,9 @@ export class SessionOpportunityTracker {
       return;
     }
     // Per-session overflow: drop this session's oldest retained episode.
-    const index = window.episodes.findIndex((candidate) => candidate.sessionId === episode.sessionId);
+    const index = window.episodes.findIndex(
+      (candidate) => candidate.sessionId === episode.sessionId,
+    );
     if (index >= 0) {
       this.dropEpisodeAt(window, index);
     }
@@ -677,10 +676,7 @@ export class SessionOpportunityTracker {
     this.emitPatternProven(pattern);
   }
 
-  private async recordDispatchedHash(
-    structuralHash: string,
-    engineVersion: string,
-  ): Promise<void> {
+  private async recordDispatchedHash(structuralHash: string, engineVersion: string): Promise<void> {
     const nowMs = this.now();
     const existing = await this.opportunities.getHashCacheEntry(structuralHash);
     await this.opportunities.upsertHashCacheEntry({
