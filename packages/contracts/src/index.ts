@@ -27,6 +27,9 @@ export * from "./deployments.js";
 // Workspace, Device, Invocation & Telemetry Records
 export * from "./records.js";
 
+// Local Opportunity Detection, Clustering & Pattern Dispatch
+export * from "./opportunity.js";
+
 // Production Safety Gate & Attestations
 export * from "./safety-gate.js";
 

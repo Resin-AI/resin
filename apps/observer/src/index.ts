@@ -56,6 +56,14 @@ export * from "./analytics/index.js";
 
 // Trajectory Capture Daemon Module & Attribution
 export * from "./trajectory-capture-module.js";
+
+// Local Opportunity Detection Engine & Continuous Session Tracker
+export {
+  SessionOpportunityTracker,
+  type SessionOpportunityTrackerDiagnostics,
+  type SessionOpportunityTrackerOptions,
+} from "./opportunity/session-opportunity-tracker.js";
+export * from "./opportunity-module.js";
 // Backward Compatibility Observer Service
 export interface ObserverService {
   recordEvent(message: ProtocolMessage): void;

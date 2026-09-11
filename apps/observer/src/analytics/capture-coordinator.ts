@@ -76,6 +76,28 @@ export interface PrivacyCutoffRecordsResult {
 }
 
 /**
+ * Terminal/attribution context accompanying a local session event notification.
+ */
+export interface SessionEventSinkContext {
+  /** True when the harness session reached a terminal status or emitted a terminal event. */
+  isTerminal: boolean;
+  /** True for trajectory-attributed sessions; false for generic observation sessions. */
+  isAttributed: boolean;
+}
+
+/**
+ * Local-only sink for metadata-projected normalized events.
+ *
+ * Receives the same metadata-projected form that is eligible for cloud observation batches.
+ * Implementations MUST be side-effect-safe: a throwing sink never fails capture.
+ */
+export type SessionEventSink = (
+  session: HarnessSession,
+  events: NormalizedSessionEvent[],
+  context: SessionEventSinkContext,
+) => void | Promise<void>;
+
+/**
  * Options for configuring TrajectoryCaptureCoordinator.
  */
 export interface TrajectoryCaptureCoordinatorOptions {
@@ -115,6 +137,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * Optional local telemetry aggregator for recording batch metrics.
    */
   telemetry?: TelemetryAggregator;
+  /**
+   * Optional local-only sink for metadata-projected normalized events. Invoked once per
+   * processed batch (and once per terminal transition) so local consumers such as the
+   * opportunity tracker observe the same event stream as cloud observation batches.
+   */
+  onSessionEvents?: SessionEventSink;
 }
 
 interface GenericCoalescingBuffer {
@@ -158,6 +186,7 @@ export class TrajectoryCaptureCoordinator {
   private readonly coalesceDwellMs: number;
   private readonly maxBatchSize: number;
   private readonly telemetry?: TelemetryAggregator;
+  private onSessionEvents?: SessionEventSink;
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -189,6 +218,7 @@ export class TrajectoryCaptureCoordinator {
       this.coalesceDwellMs = 2000;
       this.maxBatchSize = 100;
       this.telemetry = undefined;
+      this.onSessionEvents = undefined;
     } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
@@ -204,6 +234,7 @@ export class TrajectoryCaptureCoordinator {
           : 2000;
       this.maxBatchSize = Math.max(1, pipelineOrOptions.maxBatchSize ?? 100);
       this.telemetry = pipelineOrOptions.telemetry;
+      this.onSessionEvents = pipelineOrOptions.onSessionEvents;
     }
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
@@ -465,6 +496,7 @@ export class TrajectoryCaptureCoordinator {
       // 3. Process records through NormalizationPipeline
       if (emitter) {
         // ATTRIBUTED SESSION PATH
+        const ingestedEvents: NormalizedSessionEvent[] = [];
         if (telemetryRecords.length > 0) {
           const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
           const pipelineContext: PipelineProcessContext = {
@@ -491,6 +523,7 @@ export class TrajectoryCaptureCoordinator {
             if (res.event) {
               try {
                 emitter.ingest(res.event);
+                ingestedEvents.push(res.event);
               } catch (err) {
                 if (err instanceof TrajectoryAlreadyFinalizedError) {
                   break;
@@ -511,6 +544,9 @@ export class TrajectoryCaptureCoordinator {
             emitter.finalize({ status: "timeout" });
           }
         }
+
+        // Local consumers observe the same normalized events regardless of cloud submission outcome.
+        await this.notifySessionEvents(session, ingestedEvents, emitter.isFinalized(), true);
 
         // If finalized, submit trajectory to Cloud
         if (emitter.isFinalized()) {
@@ -782,6 +818,35 @@ export class TrajectoryCaptureCoordinator {
     });
   };
 
+  /**
+   * Attaches or detaches the local-only normalized event sink.
+   *
+   * Local consumers must never break capture, so sink failures are logged and swallowed.
+   */
+  public setSessionEventSink(sink?: SessionEventSink): void {
+    this.onSessionEvents = sink;
+  }
+
+  private async notifySessionEvents(
+    session: HarnessSession,
+    events: readonly NormalizedSessionEvent[],
+    isTerminal: boolean,
+    isAttributed: boolean,
+  ): Promise<void> {
+    if (!this.onSessionEvents || events.length === 0) {
+      return;
+    }
+    try {
+      const projected = events.map((event) => projectEventToMetadataOnly(event));
+      await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
+    } catch (err) {
+      // Local consumers must never break capture or cloud submission.
+      this.logger?.warn(`Local session event sink failed for session ${session.sessionId}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private isTurnBoundary(
     session: HarnessSession,
     records: RawHarnessRecord[],
@@ -895,6 +960,8 @@ export class TrajectoryCaptureCoordinator {
     }
 
     const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    // Local consumers observe the same normalized events regardless of cloud submission outcome.
+    await this.notifySessionEvents(buffer.session, validEvents, buffer.isTerminal, false);
     const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
     const batchDigest = createHash("sha256")
       .update(projectedEvents.map((event) => event.eventId).join("\0"))

@@ -16,6 +16,8 @@ export {
   type TrajectoryAttributionResolverObject,
   type TrajectoryAttributionResolver,
   type TrajectoryCaptureCoordinatorOptions,
+  type SessionEventSink,
+  type SessionEventSinkContext,
   TrajectoryCaptureCoordinator,
 } from "./capture-coordinator.js";
 

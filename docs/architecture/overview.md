@@ -121,6 +121,7 @@ The Observer passively monitors tool executions, transcript interactions, and pe
 - Records raw execution traces into local SQLite ([ADR 0005](../adr/0005-privacy-data-boundaries.md)). Raw session transcripts remain strictly local.
 - Runs a multi-stage local redaction pipeline to scrub credentials, private paths, and PII.
 - Generates sanitized observation summaries for the evolution engine.
+- Continuously tracks each session's workflow episodes locally, running the deterministic opportunity engine over metadata-projected events to attest recurring patterns. Proven patterns are queued in a local outbox, deduplicated by structural hash, and dispatched only when projected savings exceed the configured synthesis cost; the evolution kill switch halts detection.
 
 ### 3. Capability Broker (`@resin/runtime`)
 The Capability Broker enforces the pre-authorized **Capability Envelope** ([ADR 0007](../adr/0007-capability-envelope-and-security.md)):

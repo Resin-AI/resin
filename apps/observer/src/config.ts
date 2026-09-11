@@ -3,6 +3,23 @@ import path from "node:path";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./normalization/redaction.js";
 
+export const OpportunityTrackingConfigSchema = z
+  .object({
+    /** Enables continuous per-session local opportunity detection. */
+    enabled: z.boolean().default(true),
+    /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
+    synthesisCostUsd: z.number().nonnegative().default(0.05),
+    /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
+    minDispatchConfidence: z.number().min(0).max(1).default(0.5),
+    /** Rolling per-session episode window bound. */
+    maxEpisodesPerSession: z.number().int().positive().default(64),
+    /** Pattern outbox upload cadence and hash-cache reconciliation interval, in milliseconds. */
+    uploadIntervalMs: z.number().int().positive().default(300_000),
+  })
+  .strict();
+
+export type OpportunityTrackingConfig = z.infer<typeof OpportunityTrackingConfigSchema>;
+
 export const DaemonConfigSchema = z.object({
   version: z.string().default("0.1.0"),
   logLevel: z.enum(["debug", "info", "warn", "error", "silent"]).default("info"),
@@ -19,6 +36,7 @@ export const DaemonConfigSchema = z.object({
   workerExecutionTimeoutMs: z.number().int().positive().default(30000),
   moduleConfigs: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
   captureUserSessionsOnly: z.boolean().default(true),
+  opportunityTracking: OpportunityTrackingConfigSchema.default({}),
   custom: z.record(z.string(), z.unknown()).default({}),
 });
 
@@ -531,6 +549,14 @@ export function validateConfigUpdate(
     ...currentConfig,
     ...update,
   };
+  // Structured blocks merge field-wise so a partial runtime update never resets sibling
+  // thresholds to their schema defaults.
+  if (update.opportunityTracking !== undefined) {
+    candidate.opportunityTracking = {
+      ...currentConfig.opportunityTracking,
+      ...update.opportunityTracking,
+    };
+  }
 
   const parsed = DaemonConfigSchema.safeParse(candidate);
   if (!parsed.success) {

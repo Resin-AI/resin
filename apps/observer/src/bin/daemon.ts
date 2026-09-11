@@ -44,6 +44,7 @@ import {
   type ModuleStatusReport,
 } from "../supervisor.js";
 import { SourceCursorManager } from "../tailing/cursor-manager.js";
+import { OpportunityTrackingModule } from "../opportunity-module.js";
 import {
   type RemoteTelemetryConsentSnapshot,
   TrajectoryCaptureRuntimeModule,
@@ -489,6 +490,55 @@ export class RecoveryAwareDaemonSupervisor extends DaemonSupervisor {
   }
 }
 
+export interface CaptureDependentRegistrationOptions {
+  supervisor: DaemonSupervisor;
+  /** Module to register and start once its capture dependency is registered. */
+  module: DaemonModule;
+  /** ID of the capture module this registration depends on. */
+  captureModuleId: string;
+  /** When false the hook is inert. */
+  enabled: boolean;
+  logger?: Logger;
+}
+
+/**
+ * Builds a trajectory-capture registration hook for a dependent daemon module.
+ *
+ * Capture registers only when it is effectively enabled, so a dependent module cannot be
+ * registered unconditionally: its declared dependency would be missing at startup and would break
+ * topological ordering. The hook registers the dependent module the moment capture registers, and
+ * starts it when capture starts after daemon startup (a runtime telemetry change). Repeat
+ * invocations are idempotent.
+ */
+export function createCaptureDependentRegistration(
+  options: CaptureDependentRegistrationOptions,
+): (context?: ModuleContext) => Promise<void> {
+  return async (context?: ModuleContext): Promise<void> => {
+    const { supervisor, module: dependent, captureModuleId, enabled } = options;
+    if (!enabled) {
+      return;
+    }
+    if (!supervisor.getModule(captureModuleId)) {
+      return;
+    }
+    const registered = supervisor.getModule<DaemonModule>(dependent.id);
+    if (registered && registered !== dependent) {
+      throw new Error(`Unexpected module registered as '${dependent.id}'`);
+    }
+    if (!registered) {
+      supervisor.registerModule(dependent);
+      options.logger?.info(`Registered daemon module '${dependent.id}'`);
+    }
+    if (
+      context &&
+      supervisor.currentState === "ready" &&
+      dependent.getState() === "uninitialized"
+    ) {
+      await dependent.start(context);
+    }
+  };
+}
+
 export interface TelemetryCaptureControllerOptions {
   supervisor: DaemonSupervisor;
   captureModule: TrajectoryCaptureRuntimeModule;
@@ -497,6 +547,12 @@ export interface TelemetryCaptureControllerOptions {
   failClosed?: boolean;
   getCloudConsentEnabled?: () => boolean | null | undefined;
   refreshCloudConsentEnabled?: () => Promise<boolean | null | undefined>;
+  /**
+   * Registers and starts modules that consume trajectory capture output. Invoked once capture is
+   * registered at startup, and again with a module context when capture starts after daemon
+   * startup, so dependent consumers follow its dynamic lifecycle.
+   */
+  onCaptureRegistered?: (context?: ModuleContext) => Promise<void> | void;
 }
 
 export function resolveDeviceTelemetryEnabled<T>(value: T, failClosed = false): boolean {
@@ -519,6 +575,7 @@ export class TelemetryCaptureController {
   private readonly logger: Logger;
   private readonly getCloudConsentEnabled?: () => boolean | null | undefined;
   private readonly refreshCloudConsentEnabled?: () => Promise<boolean | null | undefined>;
+  private readonly onCaptureRegistered?: (context?: ModuleContext) => Promise<void> | void;
   private cloudConsentEnabled: boolean | null = null;
   private deviceEnabled: boolean;
   private failClosed: boolean;
@@ -530,6 +587,7 @@ export class TelemetryCaptureController {
     this.getCloudConsentEnabled = options.getCloudConsentEnabled;
     this.refreshCloudConsentEnabled = options.refreshCloudConsentEnabled;
     this.failClosed = options.failClosed === true;
+    this.onCaptureRegistered = options.onCaptureRegistered;
     this.deviceEnabled = resolveDeviceTelemetryEnabled(options.deviceEnabled, this.failClosed);
     const shouldCapture = this.getStatus().effectiveEnabled;
     if (shouldCapture && !this.captureModule.setTelemetryEnabled(true)) {
@@ -571,6 +629,23 @@ export class TelemetryCaptureController {
     }
   }
 
+  /**
+   * Registers and optionally starts modules that depend on trajectory capture. Capture
+   * registration must never fail because a dependent consumer failed to attach.
+   */
+  private async attachCaptureDependents(context?: ModuleContext): Promise<void> {
+    if (!this.onCaptureRegistered) {
+      return;
+    }
+    try {
+      await this.onCaptureRegistered(context);
+    } catch (error) {
+      this.logger.error("Failed to attach capture-dependent modules", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   prepareForStartup(): void {
     const shouldCapture = this.getStatus().effectiveEnabled;
     if (shouldCapture && !this.captureModule.setTelemetryEnabled(true)) {
@@ -587,6 +662,7 @@ export class TelemetryCaptureController {
     }
     if (!existingModule) {
       this.supervisor.registerModule(this.captureModule);
+      void this.attachCaptureDependents();
     }
   }
 
@@ -628,6 +704,7 @@ export class TelemetryCaptureController {
     }
     if (!existingModule) {
       this.supervisor.registerModule(this.captureModule);
+      void this.attachCaptureDependents();
     }
 
     if (this.supervisor.currentState === "ready") {
@@ -640,6 +717,7 @@ export class TelemetryCaptureController {
       try {
         await this.captureModule.start(context);
         this.trackDynamicModuleState();
+        await this.attachCaptureDependents(context);
       } catch (error) {
         this.failClosed = true;
         this.deviceEnabled = false;
@@ -1067,6 +1145,7 @@ async function runForeground(options: {
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),
   });
+  const deviceCredentials = await credentialStore.load();
   const cloudRuntimeModule = new CloudRuntimeModule({
     credentialStore,
     auditRepository: stateStore.audit,
@@ -1094,6 +1173,26 @@ async function runForeground(options: {
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
     captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
+  const opportunityTrackingConfig = config.opportunityTracking;
+  const opportunityModule = new OpportunityTrackingModule({
+    store: stateStore,
+    logger,
+    enabled: opportunityTrackingConfig.enabled,
+    synthesisCostUsd: opportunityTrackingConfig.synthesisCostUsd,
+    minDispatchConfidence: opportunityTrackingConfig.minDispatchConfidence,
+    maxEpisodesPerSession: opportunityTrackingConfig.maxEpisodesPerSession,
+    uploadIntervalMs: opportunityTrackingConfig.uploadIntervalMs,
+    accountId: deviceCredentials.credentials?.claims.accountId,
+    onPatternProven: (pattern) => {
+      logger.info("pattern:proven", {
+        patternId: pattern.patternId,
+        structuralHash: pattern.signature.structuralHash,
+        workspaceId: pattern.workspaceId,
+        triggerType: pattern.localVerdicts.trigger.triggerType,
+      });
+    },
+  });
+
   const telemetryController = new TelemetryCaptureController({
     supervisor,
     captureModule: trajectoryCaptureModule,
@@ -1103,9 +1202,22 @@ async function runForeground(options: {
     getCloudConsentEnabled: () => cloudConsent?.metadataTelemetryEnabled ?? null,
     refreshCloudConsentEnabled: async () =>
       (await refreshCloudConsent())?.metadataTelemetryEnabled ?? null,
+    // Opportunity tracking depends on the capture module, which registers only when capture is
+    // effectively enabled — at startup or later via a runtime telemetry change.
+    onCaptureRegistered: createCaptureDependentRegistration({
+      supervisor,
+      module: opportunityModule,
+      captureModuleId: trajectoryCaptureModule.id,
+      enabled: opportunityTrackingConfig.enabled,
+      logger,
+    }),
   });
   telemetryController.prepareForStartup();
   supervisor.setTelemetryStatusProvider(() => telemetryController.getStatus());
+
+  if (!opportunityTrackingConfig.enabled) {
+    logger.info("Local opportunity tracking is disabled by configuration");
+  }
 
   const reloadConfig = createTelemetryReloadHandler({
     supervisor,
@@ -1133,15 +1245,14 @@ async function runForeground(options: {
     logger,
   });
 
-  const controlCredentials = await credentialStore.load();
-  if (controlCredentials.credentials) {
+  if (deviceCredentials.credentials) {
     const controlPlaneClient = new ControlPlaneClient({
       identityProvider: (identityOptions) => credentialStore.getRequestIdentity(identityOptions),
     });
     supervisor.registerModule(
       new ControlPlaneRuntimeModule({
         client: controlPlaneClient,
-        deviceId: controlCredentials.credentials.deviceId,
+        deviceId: deviceCredentials.credentials.deviceId,
         applyAdapter: new FileControlPlaneApplyAdapter({
           reloadConfig: async () => {
             const result = await reloadConfig();
