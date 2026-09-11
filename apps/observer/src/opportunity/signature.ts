@@ -154,9 +154,18 @@ export function tokenizeCommandLine(cmd: string): string[] {
 }
 
 /**
+ * Matches a shell redirection token: `>`, `>>`, `<`, `2>`, `2>&1`, `>&2`, `&>`,
+ * `>/path`, `2>/dev/null`, etc. Redirections alter output routing, not workflow
+ * intent, so they are excluded from both the command profile and the argument
+ * profile to keep otherwise-identical commands on one signature.
+ */
+const SHELL_REDIRECTION = /^(?:\d*>>?|\d*<|&>|>&|\d*>&\d+).*$/;
+
+/**
  * Normalizes an observed command into a stable, non-shell command profile.
  * Paths are reduced to semantic aliases while executable, subcommand, and flags remain exact.
  */
+
 export function normalizeCommandProfile(rawCommand: string): string {
   const normalized = rawCommand
     .replace(/[\r\n\0]/g, " ")
@@ -164,25 +173,153 @@ export function normalizeCommandProfile(rawCommand: string): string {
     .replace(/\s+/g, " ");
   if (!normalized) return "";
 
-  return normalized
-    .split(" ")
-    .slice(0, 32)
-    .map((part, index) => {
-      if (index === 0) {
-        const portable = part.replace(/\\/g, "/");
-        return portable.slice(portable.lastIndexOf("/") + 1).toLowerCase();
-      }
-      if (part.startsWith("-")) return part;
-      if (
-        part.includes("/") ||
-        /\.(?:ts|tsx|js|jsx|json|md|yaml|yml|rs|toml|py|sh|sql|proto|graphql)$/i.test(part)
-      ) {
-        return normalizePathAlias(part);
-      }
-      return part;
-    })
-    .join(" ");
+  return (
+    normalized
+      .split(" ")
+      .slice(0, 32)
+      // Drop shell redirections (2>&1, >file, >>log, <in, 2>/dev/null, &>) — they
+      // alter output routing, not the workflow's intent, and would otherwise split
+      // otherwise-identical commands into distinct signatures.
+      .filter((part) => !SHELL_REDIRECTION.test(part))
+      .map((part, index) => {
+        if (index === 0) {
+          const portable = part.replace(/\\/g, "/");
+          return portable.slice(portable.lastIndexOf("/") + 1).toLowerCase();
+        }
+        if (part.startsWith("-")) return part;
+        if (
+          part.includes("/") ||
+          /\.(?:ts|tsx|js|jsx|json|md|yaml|yml|rs|toml|py|sh|sql|proto|graphql)$/i.test(part)
+        ) {
+          return normalizePathAlias(part);
+        }
+        return part;
+      })
+      .join(" ")
+  );
 }
+
+/**
+ * Command executables that carry no workflow signal: pure output, inspection,
+ * diagnostics, and shell plumbing. These are the ops an agent interleaves between
+ * the real work (echo separators, ls/cat/head/tail viewers, grep/sed/awk filters,
+ * pgrep/pkill/stat/test diagnostics, and shell control-flow keywords). They are
+ * excluded from the signature's structural arrays so run-to-run agent noise does
+ * not fragment clustering — the signature reflects the workflow, not the agent's
+ * incidental command stream.
+ */
+const LOW_SIGNAL_COMMANDS: Readonly<Record<string, true>> = Object.fromEntries(
+  [
+    // pure output / formatting
+    "echo",
+    "printf",
+    "yes",
+    // inspection / viewers
+    "cat",
+    "ls",
+    "dir",
+    "pwd",
+    "head",
+    "tail",
+    "wc",
+    "less",
+    "more",
+    "tree",
+    // text filters / readers
+    "grep",
+    "egrep",
+    "fgrep",
+    "sed",
+    "awk",
+    "cut",
+    "tr",
+    "sort",
+    "uniq",
+    "comm",
+    "diff",
+    "jq",
+    "tee",
+    // diagnostics / process inspection
+    "pgrep",
+    "pkill",
+    "ps",
+    "stat",
+    "file",
+    "which",
+    "whereis",
+    "type",
+    "printenv",
+    "uname",
+    "hostname",
+    "whoami",
+    "id",
+    "date",
+    "uptime",
+    "df",
+    "du",
+    "free",
+    "nproc",
+    "arch",
+    // shell plumbing / control flow
+    "cd",
+    "test",
+    "[",
+    "[[",
+    "true",
+    "false",
+    "set",
+    "export",
+    "unset",
+    "read",
+    "wait",
+    "sleep",
+    "clear",
+    "history",
+    "jobs",
+    "bg",
+    "fg",
+    "kill",
+    "trap",
+    "shift",
+    "for",
+    "while",
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "do",
+    "done",
+    "case",
+    "esac",
+    "function",
+    "return",
+    "exit",
+    "break",
+    "continue",
+    "in",
+    "select",
+    "until",
+    // tokenization artifacts (NOT real shell interpreters — `bash -c …`/`sh deploy.sh`
+    // wrap real work and must stay in the signature)
+    "_str",
+    "_arg",
+    "_path",
+    "_cmd",
+  ].map((name) => [name, true]),
+);
+
+/**
+ * Non-shell tool names that carry no workflow signal: pure reads and listings.
+ * A read/glob/grep tool call pads a workflow that also performs real work; it is
+ * excluded from the signature so the read does not fragment clustering.
+ */
+const LOW_SIGNAL_TOOLS: Readonly<Record<string, true>> = Object.fromEntries(
+  ["read", "glob", "grep", "list", "ls", "find", "search", "view", "cat", "stat"].map((name) => [
+    name,
+    true,
+  ]),
+);
 
 /**
  * Splits a composite shell command string into individual simple commands.
@@ -383,10 +520,10 @@ export function classifyToolOrCommand(name: string, commandText?: string): ToolC
 
   return "general";
 }
-
 /**
- * Computes an argument descriptor and hash.
- * Discards volatile values (timestamps, file contents) while preserving argument structure and flags.
+ * Extracts a deterministic argument profile from tool parameters or command args.
+ * Shell redirection tokens are dropped so output-routing differences do not split
+ * otherwise-identical commands into distinct signatures.
  */
 function extractArgumentProfile(
   args: OpportunityDataValue | Record<string, OpportunityDataValue> | unknown[] | null | undefined,
@@ -400,14 +537,17 @@ function extractArgumentProfile(
     return getValueTypeName(args);
   }
   if (Array.isArray(args)) {
-    const elementTypes = args.slice(0, 5).map((item) => {
-      if (Object.prototype.toString.call(item) === "[object String]") {
-        const str = String(item);
-        if (str.startsWith("-")) return str; // Preserve flags like -v, --cached
-        return normalizePathAlias(str);
-      }
-      return getValueTypeName(item);
-    });
+    const elementTypes = args
+      .filter((item) => !(typeof item === "string" && SHELL_REDIRECTION.test(item)))
+      .slice(0, 5)
+      .map((item) => {
+        if (Object.prototype.toString.call(item) === "[object String]") {
+          const str = String(item);
+          if (str.startsWith("-")) return str; // Preserve flags like -v, --cached
+          return normalizePathAlias(str);
+        }
+        return getValueTypeName(item);
+      });
     return `[${elementTypes.join(",")}]`;
   }
 
@@ -499,13 +639,16 @@ export class SignatureExtractor {
               const segArgs = tokens.slice(1);
               const segNormCmd = normalizeToolName(extractExecutableName(segExecutable));
               const commandProfile = normalizeCommandProfile(segment);
-              if (commandProfile) commandPatterns.push(commandProfile);
+              const lowSignal = isShellTool
+                ? LOW_SIGNAL_COMMANDS[segNormCmd] === true
+                : LOW_SIGNAL_TOOLS[normName] === true;
+              if (commandProfile && !lowSignal) commandPatterns.push(commandProfile);
 
               const cls = classifyToolOrCommand(segExecutable, segment);
-              toolClasses.push(cls);
+              if (!lowSignal) toolClasses.push(cls);
 
               const op = isShellTool ? `command:${segNormCmd}` : `tool:${normName}`;
-              operationSequence.push(op);
+              if (!lowSignal) operationSequence.push(op);
 
               const rawParams = toolEvt.parameters as
                 | Record<string, OpportunityDataValue>
@@ -513,7 +656,7 @@ export class SignatureExtractor {
               const segArgProfile = extractArgumentProfile(
                 segArgs.length > 0 ? segArgs : rawParams,
               );
-              argumentSchemaHashes.push(segArgProfile);
+              if (!lowSignal) argumentSchemaHashes.push(segArgProfile);
 
               for (const t of segArgs) {
                 if (t.includes("/") || /\.(ts|tsx|js|jsx|json|md|yaml|yml|rs|toml|py)$/i.test(t)) {
@@ -544,6 +687,7 @@ export class SignatureExtractor {
                 args: segArgs,
                 rawCommand: segment,
                 analysisOnly: true,
+                lowSignal,
               };
               if (!isShellTool) {
                 semOp.action = resolvedAction;
@@ -551,14 +695,18 @@ export class SignatureExtractor {
               semanticOperations.push(semOp);
             }
           } else {
+            const lowSignal = isShellTool
+              ? LOW_SIGNAL_COMMANDS[normName] === true
+              : LOW_SIGNAL_TOOLS[normName] === true;
             const op = `tool:${normName}`;
-            operationSequence.push(op);
+            if (!lowSignal) operationSequence.push(op);
             const cls = classifyToolOrCommand(toolEvt.toolName, commandText);
-            toolClasses.push(cls);
+            if (!lowSignal) toolClasses.push(cls);
             const rawParams = toolEvt.parameters as
               | Record<string, OpportunityDataValue>
               | undefined;
             const argHash = extractArgumentProfile(rawParams);
+            if (!lowSignal) argumentSchemaHashes.push(argHash);
 
             const rawEvtId =
               ("eventId" in toolEvt ? toolEvt.eventId : undefined) ??
@@ -579,6 +727,7 @@ export class SignatureExtractor {
               argumentSchemaHash: argHash,
               rawEventId: rawEvtId,
               rawProfileId: "prof_0",
+              lowSignal,
               rawCommand: commandText,
               analysisOnly: true,
             };
@@ -588,11 +737,14 @@ export class SignatureExtractor {
             semanticOperations.push(semOp);
           }
         } else {
+          const lowSignal = isShellTool
+            ? LOW_SIGNAL_COMMANDS[normName] === true
+            : LOW_SIGNAL_TOOLS[normName] === true;
           const op = `tool:${normName}`;
-          operationSequence.push(op);
+          if (!lowSignal) operationSequence.push(op);
 
           const cls = classifyToolOrCommand(toolEvt.toolName);
-          toolClasses.push(cls);
+          if (!lowSignal) toolClasses.push(cls);
 
           const rawParams = toolEvt.parameters as Record<string, OpportunityDataValue> | undefined;
           const isEnvelope = hasParameterShapeEnvelope(rawParams);
@@ -602,7 +754,7 @@ export class SignatureExtractor {
             : isEnvelope
               ? "nil"
               : extractArgumentProfile(rawParams);
-          argumentSchemaHashes.push(argHash);
+          if (!lowSignal) argumentSchemaHashes.push(argHash);
 
           let pathFound: string | undefined = undefined;
           if (
@@ -641,6 +793,7 @@ export class SignatureExtractor {
             rawProfileId: "prof_0",
             executable: toolEvt.toolName,
             paths: pathFound ? [pathFound] : [],
+            lowSignal,
             analysisOnly: true,
           };
           if (parsedShape) {
@@ -662,17 +815,18 @@ export class SignatureExtractor {
             const segExecutable = tokens[0] || cmdEvt.command.split(" ")[0] || "cmd";
             const segArgs = tokens.slice(1);
             const normCmd = normalizeToolName(extractExecutableName(segExecutable));
+            const lowSignal = LOW_SIGNAL_COMMANDS[normCmd] === true;
             const op = `command:${normCmd}`;
-            operationSequence.push(op);
+            if (!lowSignal) operationSequence.push(op);
 
             const cls = classifyToolOrCommand(segExecutable, segment);
-            toolClasses.push(cls);
+            if (!lowSignal) toolClasses.push(cls);
 
             const commandProfile = normalizeCommandProfile(segment);
-            if (commandProfile) commandPatterns.push(commandProfile);
+            if (commandProfile && !lowSignal) commandPatterns.push(commandProfile);
 
             const segArgProfile = extractArgumentProfile(segArgs);
-            argumentSchemaHashes.push(segArgProfile);
+            if (!lowSignal) argumentSchemaHashes.push(segArgProfile);
 
             for (const t of segArgs) {
               if (t.includes("/") || /\.(ts|tsx|js|jsx|json|md|yaml|yml|rs|toml|py)$/i.test(t)) {
@@ -702,6 +856,7 @@ export class SignatureExtractor {
               executable: segExecutable,
               args: segArgs,
               rawCommand: segment,
+              lowSignal,
               analysisOnly: true,
             });
           }
@@ -716,17 +871,18 @@ export class SignatureExtractor {
               const segExecutable = tokens[0] || cmdEvt.command || "cmd";
               const segArgs = tokens.slice(1);
               const normCmd = normalizeToolName(extractExecutableName(segExecutable));
+              const lowSignal = LOW_SIGNAL_COMMANDS[normCmd] === true;
               const op = `command:${normCmd}`;
-              operationSequence.push(op);
+              if (!lowSignal) operationSequence.push(op);
 
               const cls = classifyToolOrCommand(segExecutable, segment);
-              toolClasses.push(cls);
+              if (!lowSignal) toolClasses.push(cls);
 
               const commandProfile = normalizeCommandProfile(segment);
-              if (commandProfile) commandPatterns.push(commandProfile);
+              if (commandProfile && !lowSignal) commandPatterns.push(commandProfile);
 
               const segArgProfile = extractArgumentProfile(segArgs);
-              argumentSchemaHashes.push(segArgProfile);
+              if (!lowSignal) argumentSchemaHashes.push(segArgProfile);
 
               for (const t of segArgs) {
                 if (t.includes("/") || /\.(ts|tsx|js|jsx|json|md|yaml|yml|rs|toml|py)$/i.test(t)) {
@@ -756,6 +912,7 @@ export class SignatureExtractor {
                 executable: segExecutable,
                 args: segArgs,
                 rawCommand: segment,
+                lowSignal,
                 analysisOnly: true,
               });
             }
@@ -767,18 +924,19 @@ export class SignatureExtractor {
               Array.isArray(cmdEvt.args) && cmdEvt.args.length > 0 ? cmdEvt.args : tokenArgs;
             const cmdName = tokenExecutable;
             const normCmd = normalizeToolName(extractExecutableName(cmdName));
+            const lowSignal = LOW_SIGNAL_COMMANDS[normCmd] === true;
             const op = `command:${normCmd}`;
-            operationSequence.push(op);
+            if (!lowSignal) operationSequence.push(op);
             const cls = classifyToolOrCommand(cmdName, cmdEvt.command);
-            toolClasses.push(cls);
+            if (!lowSignal) toolClasses.push(cls);
             const commandProfile = normalizeCommandProfile(
               recordedArgs && recordedArgs.length > 0
                 ? `${cmdName} ${recordedArgs.join(" ")}`
                 : cmdEvt.command,
             );
-            if (commandProfile) commandPatterns.push(commandProfile);
+            if (commandProfile && !lowSignal) commandPatterns.push(commandProfile);
             const argHash = extractArgumentProfile(recordedArgs);
-            argumentSchemaHashes.push(argHash);
+            if (!lowSignal) argumentSchemaHashes.push(argHash);
 
             if (recordedArgs) {
               for (const a of recordedArgs) {
@@ -810,6 +968,7 @@ export class SignatureExtractor {
               executable: cmdName,
               args: recordedArgs ?? [],
               rawCommand: cmdEvt.command,
+              lowSignal,
               analysisOnly: true,
             });
           }
@@ -853,6 +1012,7 @@ export class SignatureExtractor {
           rawProfileId: "prof_0",
           executable: "edit",
           paths: [normPath],
+          lowSignal: false,
           analysisOnly: true,
         });
       }

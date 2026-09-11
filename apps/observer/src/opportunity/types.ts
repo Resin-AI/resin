@@ -90,6 +90,13 @@ export interface SemanticOperation {
   subOperations?: SemanticOperation[];
   /** Analysis-only marker ensuring this structure cannot be used to grant execution authority. */
   analysisOnly?: true;
+  /**
+   * True when the operation carries no workflow signal (pure output, inspection,
+   * diagnostics, or shell plumbing). Low-signal ops are retained on the semantic
+   * record for analysis but excluded from the signature's structural arrays so
+   * incidental agent noise does not fragment clustering.
+   */
+  lowSignal?: boolean;
   durationMs?: number;
   estimatedDurationMs?: number;
   tokens?: number;
