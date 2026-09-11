@@ -651,16 +651,29 @@ export class CloudCatalogSyncCoordinator {
 
     const entries = Object.entries(lock.tools);
 
-    for (const [toolName, entry] of entries) {
-      if (
-        this.options.managedToolAccess?.isInactive() ||
-        this.options.managedToolAccess?.isBlocked(entry)
-      )
-        continue;
-      if (entry.status === "disabled") {
-        continue;
+    // Pre-filter blocked/inactive entries under a single owner snapshot. The snapshot
+    // is opened and released synchronously here — it must NOT span the async download
+    // loop below, or a revocation landing mid-await would be masked. This collapses
+    // the per-tool readOwners() statx calls into one directory read.
+    const eligible: Array<[string, (typeof entries)[number][1]]> = [];
+    const releaseOwners = this.options.managedToolAccess?.beginOwnerSnapshot?.();
+    try {
+      for (const [toolName, entry] of entries) {
+        if (
+          this.options.managedToolAccess?.isInactive() ||
+          this.options.managedToolAccess?.isBlocked(entry)
+        )
+          continue;
+        if (entry.status === "disabled") {
+          continue;
+        }
+        eligible.push([toolName, entry]);
       }
+    } finally {
+      releaseOwners?.();
+    }
 
+    for (const [toolName, entry] of eligible) {
       try {
         if (this.artifactCache) {
           let isArtifactCached = this.artifactCache.isArtifactCached(entry.artifactDigest);
@@ -893,7 +906,18 @@ export class CloudCatalogSyncCoordinator {
           }
         }
 
-        if (this.registry) {
+        // Fast path: already registered and active at the locked version — skip the
+        // redundant registerToolSync + activateToolVersion, which would rebuild the
+        // whole catalog per tool (O(n²) over a large unchanged lock).
+        const alreadyActive =
+          this.workspaceId &&
+          this.registry?.isToolActiveForWorkspace?.(entry.toolId, entry.version, this.workspaceId, {
+            manifestDigest: entry.manifestDigest,
+            artifactDigest: entry.artifactDigest,
+            envelopeDigest: entry.envelopeDigest,
+          });
+
+        if (this.registry && !alreadyActive) {
           const registryTool: RegistryTool = {
             toolId: entry.toolId,
             name: entry.name,

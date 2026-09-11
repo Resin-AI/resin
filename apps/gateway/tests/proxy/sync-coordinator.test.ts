@@ -319,6 +319,126 @@ describe("CloudCatalogSyncCoordinator", () => {
     expect(downloadCount).toBe(1);
   });
 
+  it("does not rebuild the catalog per tool on a large unchanged lock", async () => {
+    const lockPath = path.join(tempDir, "resin.lock");
+    const cacheDir = path.join(tempDir, "artifacts-many");
+    const lockManager = new ProjectLockManager({ lockPath, projectId: PROJECT_A });
+    const artifactCache = new ArtifactCache({ cacheDir });
+
+    // Seed 60 locked tools, each already downloaded.
+    const N = 60;
+    const digests: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const toolId = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+      const manifest = makeTool(toolId, `tool_${i}`, "1.0.0");
+      const { archive } = encodeDeterministicTar([
+        { path: "manifest.json", content: JSON.stringify(manifest) },
+        { path: "src/index.js", content: "x" },
+      ]);
+      const artifactDigest = crypto.createHash("sha256").update(archive).digest("hex");
+      digests.push(artifactDigest);
+      lockManager.reconcileQualified({
+        toolId,
+        name: `tool_${i}`,
+        version: "1.0.0",
+        manifestDigest: manifest.digest,
+        artifactDigest,
+        status: "active",
+      });
+      // Pre-populate the artifact cache so no download is needed.
+      const staging = await artifactCache.createStagingDirectory(artifactDigest);
+      await fs.promises.mkdir(path.join(staging, "src"), { recursive: true });
+      await fs.promises.writeFile(path.join(staging, "manifest.json"), JSON.stringify(manifest));
+      await fs.promises.writeFile(path.join(staging, "src/index.js"), "x");
+      await artifactCache.commitStagingDirectory(staging, artifactDigest, { verify: false });
+    }
+
+    const mockService = new MockCloudMcpService();
+    const cache = new CloudCatalogCache();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const registry = new ToolRegistry();
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router: new CloudInvocationRouter({ catalogCache: cache }),
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+      transferClient: { downloadArtifact: async () => ({ bytes: Buffer.alloc(0) }) },
+      artifactCache,
+    });
+
+    // First reconcile registers + activates everything.
+    await syncCoordinator.reconcileLockedTools();
+
+    // Spy on resolveCatalog; a second unchanged reconcile must not rebuild per tool.
+    const resolveSpy = vi.spyOn(registry, "resolveCatalog");
+    const res2 = await syncCoordinator.reconcileLockedTools();
+    expect(res2.failed).toEqual([]);
+    // With the already-active fast path, unchanged tools skip activateToolVersion, so
+    // resolveCatalog is not called once per tool. Allow a small constant bound.
+    expect(resolveSpy.mock.calls.length).toBeLessThanOrEqual(5);
+  });
+
+  it("re-activates a same-version tool whose artifact digest changed", async () => {
+    const lockPath = path.join(tempDir, "resin.lock");
+    const cacheDir = path.join(tempDir, "artifacts-digest");
+    const lockManager = new ProjectLockManager({ lockPath, projectId: PROJECT_A });
+    const artifactCache = new ArtifactCache({ cacheDir });
+
+    const manifest = makeTool(TOOL_CALC, "calc_tool", "1.0.0");
+    const { archive: a1 } = encodeDeterministicTar([
+      { path: "manifest.json", content: JSON.stringify(manifest) },
+      { path: "src/index.js", content: "v1" },
+    ]);
+    const d1 = crypto.createHash("sha256").update(a1).digest("hex");
+
+    lockManager.reconcileQualified({
+      toolId: TOOL_CALC,
+      name: "calc_tool",
+      version: "1.0.0",
+      manifestDigest: manifest.digest,
+      artifactDigest: d1,
+      status: "active",
+    });
+
+    const mockService = new MockCloudMcpService();
+    const cache = new CloudCatalogCache();
+    const client = new CloudCatalogClient({
+      workspaceId: "ws-1",
+      deviceId: "dev-1",
+      baseUrl: "https://cloud.mock",
+      fetchFn: mockService.createFetchHandler(),
+    });
+    const registry = new ToolRegistry();
+    const syncCoordinator = new CloudCatalogSyncCoordinator({
+      client,
+      cache,
+      router: new CloudInvocationRouter({ catalogCache: cache }),
+      registry,
+      workspaceId: "ws-1",
+      lockManager,
+      transferClient: { downloadArtifact: async () => ({ bytes: a1 }) },
+      artifactCache,
+    });
+    await syncCoordinator.reconcileLockedTools();
+    expect(registry.isToolActiveForWorkspace(TOOL_CALC, "1.0.0", "ws-1")).toBe(true);
+
+    // Same version, different artifact digest -> must NOT be treated as active.
+    const d2 = crypto.createHash("sha256").update("different-bytes").digest("hex");
+    expect(
+      registry.isToolActiveForWorkspace(TOOL_CALC, "1.0.0", "ws-1", { artifactDigest: d2 }),
+    ).toBe(false);
+    expect(
+      registry.isToolActiveForWorkspace(TOOL_CALC, "1.0.0", "ws-1", { artifactDigest: d1 }),
+    ).toBe(true);
+  });
+
   it("activates a gzip-compressed bundle whose entrypoint is src/index.ts", async () => {
     const lockPath = path.join(tempDir, "resin.lock");
     const cacheDir = path.join(tempDir, "artifacts-gz");
