@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
+import { describe, expect, it, vi } from "vitest";
 import {
   CloudObservationClient,
   NormalizationPipeline,
@@ -22,15 +22,34 @@ function rec(sessionId: string, seq: number, isoTs: string): RawHarnessRecord {
 }
 function lifecycle(sessionId: string, seq: number, isoTs: string): RawHarnessRecord {
   return {
-    recordId: `rec_life_${seq}`, sessionId, harnessId: "open-code", sequenceNumber: seq,
-    timestamp: isoTs, recordType: "transcript_line",
-    rawPayload: { type: "session_lifecycle", lifecycleType: "end", exitReason: "completed", timestamp: isoTs },
-    cursor: { offset: seq * 100, line: seq, sequence: seq, timestamp: isoTs }, metadata: {},
+    recordId: `rec_life_${seq}`,
+    sessionId,
+    harnessId: "open-code",
+    sequenceNumber: seq,
+    timestamp: isoTs,
+    recordType: "transcript_line",
+    rawPayload: {
+      type: "session_lifecycle",
+      lifecycleType: "end",
+      exitReason: "completed",
+      timestamp: isoTs,
+    },
+    cursor: { offset: seq * 100, line: seq, sequence: seq, timestamp: isoTs },
+    metadata: {},
   };
 }
 function session(sessionId: string) {
   const t = new Date().toISOString();
-  return { sessionId, workspaceId: "ws", harnessId: "open-code", transcriptPath: `/t/${sessionId}.jsonl`, status: "active" as const, createdAt: t, updatedAt: t, metadata: undefined };
+  return {
+    sessionId,
+    workspaceId: "ws",
+    harnessId: "open-code",
+    transcriptPath: `/t/${sessionId}.jsonl`,
+    status: "active" as const,
+    createdAt: t,
+    updatedAt: t,
+    metadata: undefined,
+  };
 }
 function mockClient(capture: { obs: any[] }) {
   const c = Object.create(CloudObservationClient.prototype) as CloudObservationClient;
@@ -38,7 +57,13 @@ function mockClient(capture: { obs: any[] }) {
     sendTrajectoryObservationBatch: vi.fn(),
     sendObservationBatch: vi.fn(async (input: { observations: any[] }) => {
       capture.obs.push(...input.observations);
-      return { batchId: "b", status: "accepted", acceptedCount: input.observations.length, rejectedCount: 0, errors: [] };
+      return {
+        batchId: "b",
+        status: "accepted",
+        acceptedCount: input.observations.length,
+        rejectedCount: 0,
+        errors: [],
+      };
     }),
   });
 }
@@ -60,7 +85,11 @@ describe("out-of-order timestamp sort", () => {
       rec(s.sessionId, 3, new Date(base + 10000).toISOString()),
       lifecycle(s.sessionId, 4, new Date(base + 40000).toISOString()),
     ];
-    await coordinator.handleRecords(s as any, records, vi.fn(async () => {}));
+    await coordinator.handleRecords(
+      s as any,
+      records,
+      vi.fn(async () => {}),
+    );
     expect(capture.obs.length).toBeGreaterThan(1);
     const ts = capture.obs.map((o) => Date.parse(o.timestamp));
     for (let i = 1; i < ts.length; i++) {
