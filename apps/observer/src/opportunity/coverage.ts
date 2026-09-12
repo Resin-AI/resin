@@ -1,36 +1,6 @@
 import type { CoverageResult, CoverageStatus, ToolManifest } from "@resin/contracts";
 import type { WorkflowCluster } from "./types.js";
 
-/**
- * Calculates string similarity using Dice coefficient on bigrams.
- */
-function computeStringSimilarity(a: string, b: string): number {
-  if (a === b) return 1.0;
-  if (!a || !b) return 0.0;
-  const strA = a.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const strB = b.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (strA === strB) return 1.0;
-  if (strA.length < 2 || strB.length < 2) return 0.0;
-
-  const bigramsA = new Map<string, number>();
-  for (let i = 0; i < strA.length - 1; i++) {
-    const bigram = strA.slice(i, i + 2);
-    bigramsA.set(bigram, (bigramsA.get(bigram) || 0) + 1);
-  }
-
-  let intersection = 0;
-  for (let i = 0; i < strB.length - 1; i++) {
-    const bigram = strB.slice(i, i + 2);
-    const count = bigramsA.get(bigram) || 0;
-    if (count > 0) {
-      bigramsA.set(bigram, count - 1);
-      intersection++;
-    }
-  }
-
-  return (2.0 * intersection) / (strA.length - 1 + strB.length - 1);
-}
-
 interface ClusterToolComparison {
   similarity: number;
   overlapRatio: number;
@@ -56,8 +26,6 @@ export class CoverageEngine {
     }
 
     const ops = cluster.representativeSignature.operations;
-    const toolClasses = cluster.representativeSignature.toolClasses;
-    const commandPatterns = cluster.representativeSignature.commandPatterns;
 
     let bestMatch: {
       tool: ToolManifest;
@@ -67,7 +35,7 @@ export class CoverageEngine {
     } | null = null;
 
     for (const tool of existingTools) {
-      const match = this.compareClusterToTool(cluster, tool, ops, toolClasses, commandPatterns);
+      const match = this.compareClusterToTool(tool, ops);
       if (!bestMatch || match.similarity > bestMatch.similarity) {
         bestMatch = {
           tool,
@@ -122,30 +90,20 @@ export class CoverageEngine {
   /**
    * Compares a cluster with a single ToolManifest.
    */
-  private compareClusterToTool(
-    cluster: WorkflowCluster,
-    tool: ToolManifest,
-    ops: string[],
-    toolClasses: string[],
-    commandPatterns: string[],
-  ): ClusterToolComparison {
+  private compareClusterToTool(tool: ToolManifest, ops: string[]): ClusterToolComparison {
     const toolNameNorm = tool.name.toLowerCase().replace(/[^a-z0-9]/g, "_");
     const toolIdNorm = tool.id.toLowerCase().replace(/[^a-z0-9]/g, "_");
 
-    // 1. Check operation coverage (what fraction of operations in the workflow match the tool)
+    // Only an observed call to this tool proves identity. A command basename,
+    // file path, similar name or capability ceiling is not execution evidence.
     let matchingOpsCount = 0;
     for (const op of ops) {
-      const cleanOp = op.replace(/^tool:|^command:|^edit:/, "").toLowerCase();
-      if (
-        cleanOp.includes(toolNameNorm) ||
-        toolNameNorm.includes(cleanOp) ||
-        cleanOp.includes(toolIdNorm)
-      ) {
-        matchingOpsCount++;
-      } else {
-        const sim = computeStringSimilarity(cleanOp, toolNameNorm);
-        if (sim >= 0.75) matchingOpsCount++;
-      }
+      if (!op.startsWith("tool:")) continue;
+      const identity = op
+        .slice("tool:".length)
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "_");
+      if (identity === toolNameNorm || identity === toolIdNorm) matchingOpsCount++;
     }
     const opCoverage = ops.length > 0 ? matchingOpsCount / ops.length : 0;
 
