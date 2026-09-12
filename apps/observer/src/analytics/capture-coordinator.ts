@@ -960,6 +960,12 @@ export class TrajectoryCaptureCoordinator {
     }
 
     const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    // Cloud ingestion rejects batches whose consecutive event timestamps regress by
+    // more than 1000ms (CURSOR_ORDERING_ERROR). Transcript records can arrive out of
+    // order, and records missing a timestamp fall back to a wall-clock stamp, so sort
+    // the wire payload by event time. Local consumers keep ingestion order via
+    // validEvents; only the uploaded batch is reordered.
+    projectedEvents.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
     // Local consumers observe the same normalized events regardless of cloud submission outcome.
     await this.notifySessionEvents(buffer.session, validEvents, buffer.isTerminal, false);
     const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
