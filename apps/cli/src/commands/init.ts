@@ -181,7 +181,7 @@ Options:
   --auto-repair             Enable automatic harness repair for startup/hourly checks.
   --no-auto-repair          Persistently disable automatic repair while retaining detection.
   -v, --verbose              Enable verbose diagnostic logging and full authorization plan display.
-  -q, --quiet                Suppress non-error standard output.
+  -q, --quiet                Suppress non-error output except required authorization details.
   --rollback-install         Roll back the previous installation using the saved journal.
   -h, --help                 Show this help message.
 

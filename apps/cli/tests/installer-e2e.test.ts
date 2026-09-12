@@ -103,6 +103,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("executes full end-to-end init workflow with autoApprove", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const logs: string[] = [];
+    const promptFn = vi.fn().mockResolvedValue(false);
 
     const home = "/home/developer";
     const workspace = "/home/developer/code/my-app";
@@ -110,16 +111,20 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     const installer = new ResinInstaller({
       fsBridge: bridge,
       logger: (msg) => logs.push(msg),
+      promptFn,
+      verbosity: "default",
     });
 
     const summary = await installer.run({
       customHome: home,
       workspace,
-      nonInteractive: true,
+      nonInteractive: false,
       autoApprove: true,
     });
 
     expect(summary.success).toBe(true);
+    expect(promptFn).not.toHaveBeenCalled();
+    expect(logs.join("\n")).not.toContain("CAPABILITY ENVELOPE");
     expect(summary.dryRun).toBe(false);
     expect(summary.journal.status).toBe("completed");
     expect(summary.journal.steps.every((s) => s.status === "completed")).toBe(true);
@@ -172,29 +177,48 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(await bridge.readFile(`${home}/.codex/config.toml`)).toBeNull();
     expect(await bridge.readFile(`${home}/.omp/agent/mcp.json`)).toBeNull();
   });
-  it("prompts for authorization and succeeds when approved via injected promptFn", async () => {
-    const bridge = new InMemoryConfigFsBridge();
-    const home = "/home/developer";
-    const workspace = "/home/developer/code/my-app";
-    const promptFn = vi.fn().mockResolvedValue(true);
+  it.each(["default", "quiet", "verbose"] as const)(
+    "displays capabilities and privacy before requesting consent in %s mode",
+    async (verbosity) => {
+      const bridge = new InMemoryConfigFsBridge();
+      const home = "/home/developer";
+      const workspace = "/home/developer/code/my-app";
+      const logs: string[] = [];
+      const promptFn = vi.fn(async () => {
+        const displayed = logs.join("\n");
+        expect(displayed).toContain(workspace);
+        expect(displayed).toMatch(/Filesystem Read\/Write:\s+Workspace root allowed/);
+        expect(displayed).toMatch(/Filesystem Deny Paths:.*\*\*\/\.env\*/);
+        expect(displayed).toMatch(/Network Outbound:\s+DENIED.*127\.0\.0\.1/);
+        expect(displayed).toMatch(/Allowed Commands:\s+git, node, pnpm, deno/);
+        expect(displayed).toMatch(/Secret Access:\s+NONE/);
+        expect(displayed).toMatch(/Resource Limits:\s+CPU: 100%, Mem: 512MB, Timeout: 30000ms/);
+        expect(displayed).toMatch(/Redaction Strategy:\s+MASK/);
+        expect(displayed).toMatch(/Local-Only Mode:\s+ENABLED/);
+        expect(displayed).toMatch(/Cloud Sync:\s+DISABLED/);
+        expect(displayed).toMatch(/Telemetry:\s+ENABLED/);
+        return true;
+      });
 
-    const installer = new ResinInstaller({
-      fsBridge: bridge,
-      logger: () => {},
-      promptFn,
-    });
+      const installer = new ResinInstaller({
+        fsBridge: bridge,
+        logger: (msg) => logs.push(msg),
+        promptFn,
+        verbosity,
+      });
 
-    const summary = await installer.run({
-      customHome: home,
-      workspace,
-      nonInteractive: false,
-    });
+      const summary = await installer.run({
+        customHome: home,
+        workspace,
+        nonInteractive: false,
+      });
 
-    expect(summary.success).toBe(true);
-    expect(promptFn).toHaveBeenCalledTimes(1);
-    expect(summary.authPlan.granted).toBe(true);
-    expect(summary.authPlan.grantedBy).toBe("interactive_user");
-  });
+      expect(summary.success).toBe(true);
+      expect(promptFn).toHaveBeenCalledTimes(1);
+      expect(summary.authPlan.granted).toBe(true);
+      expect(summary.authPlan.grantedBy).toBe("interactive_user");
+    },
+  );
 
   it("aborts installation when user denies authorization in promptFn", async () => {
     const bridge = new InMemoryConfigFsBridge();
