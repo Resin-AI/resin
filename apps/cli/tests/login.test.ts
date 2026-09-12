@@ -202,25 +202,32 @@ describe("login device flow & browser launch", () => {
     expect(saved.claims.accountId).toBe("acc_live_01");
   });
 
-  it("falls back cleanly to printed URL and code when browser open fails or throws", async () => {
-    const customFetch = successfulDeviceFetch();
-    const openBrowser = vi.fn().mockRejectedValue(new Error("No GUI available"));
+  it.each(["fails", "throws"])(
+    "falls back cleanly to printed URL and code when browser open %s",
+    async (failure) => {
+      const customFetch = successfulDeviceFetch();
+      const openBrowser =
+        failure === "throws"
+          ? vi.fn().mockRejectedValue(new Error("No GUI available"))
+          : vi.fn().mockResolvedValue(false);
 
-    const result = await captureOutput(() =>
-      loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        // SAFETY: Mock fetch function implementing fetch interface for testing.
-        customFetch: customFetch as typeof fetch,
-        openBrowser,
-      }),
-    );
+      const result = await captureOutput(() =>
+        loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
+          // SAFETY: Mock fetch function implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+        }),
+      );
 
-    expect(result.exitCode).toBe(0);
-    expect(openBrowser).toHaveBeenCalledTimes(1);
-    expect(result.stdout).toContain("A browser could not be opened automatically.");
-    expect(result.stdout).toContain("2. Enter code:   ABCD-9876");
-    expect(result.stdout).toContain("Authenticated successfully.");
-    expect(result.stdout).not.toContain(ACCESS_TOKEN);
-  });
+      expect(result.exitCode).toBe(0);
+      expect(openBrowser).toHaveBeenCalledTimes(1);
+      expect(result.stdout).toContain("A browser could not be opened automatically.");
+      expect(result.stdout).toContain(`1. Navigate to: ${VERIFICATION_URI_COMPLETE}`);
+      expect(result.stdout).toContain("2. Enter code:   ABCD-9876");
+      expect(result.stdout).toContain("Authenticated successfully.");
+      expect(result.stdout).not.toContain(ACCESS_TOKEN);
+    },
+  );
 
   it("supports machine-readable json mode with verification payload and does not launch browser", async () => {
     const customFetch = successfulDeviceFetch();

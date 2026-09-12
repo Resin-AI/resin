@@ -7,6 +7,7 @@ import type {
   InstallationPairingSummary,
   InstallerPairingMutation,
 } from "../installer/installer.js";
+import { isWslEnvironment } from "../platform/platform.js";
 import {
   DEFAULT_CLOUD_URL,
   DeviceAuthClient,
@@ -20,43 +21,75 @@ export { validateCloudUrl, isReusableCredentialRecord } from "../service/auth-bo
 
 export type BrowserLauncher = (url: string) => Promise<boolean> | boolean;
 
+function runBrowserLauncher(command: string, args: string[]): Promise<boolean> {
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  try {
+    const child = spawn(command, args, {
+      stdio: "ignore",
+      shell: false,
+      windowsHide: true,
+    });
+    const timeout = setTimeout(() => {
+      resolve(false);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Dispatch remains best-effort even if the launcher cannot be killed.
+      }
+    }, 10_000);
+    const done = (success: boolean) => {
+      clearTimeout(timeout);
+      resolve(success);
+    };
+    child.once("error", () => done(false));
+    // Starting a process is not evidence that the OS accepted the URL.
+    child.once("close", (code, signal) => done(code === 0 && signal === null));
+  } catch {
+    resolve(false);
+  }
+  return promise;
+}
+
 export async function defaultOpenBrowser(url: string): Promise<boolean> {
   try {
-    const platform = process.platform;
-    let command: string;
-    let args: string[];
+    const target = new URL(url);
+    if (target.protocol !== "http:" && target.protocol !== "https:") return false;
 
-    if (platform === "darwin") {
-      command = "open";
-      args = [url];
-    } else if (platform === "win32") {
-      command = "cmd.exe";
-      args = ["/c", "start", '""', url];
-    } else {
-      command = "xdg-open";
-      args = [url];
+    const platform = process.platform;
+    const isWsl = platform === "linux" && isWslEnvironment();
+    if (platform === "win32" || isWsl) {
+      // Keep the URL out of PowerShell syntax (and away from cmd.exe's
+      // metacharacter expansion). Only base64 data enters this fixed script.
+      const encodedUrl = Buffer.from(url, "utf8").toString("base64");
+      const script = `$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedUrl}')); try { Start-Process -FilePath $url -ErrorAction Stop; exit 0 } catch { exit 1 }`;
+      const args = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        Buffer.from(script, "utf16le").toString("base64"),
+      ];
+      const commands = ["powershell.exe"];
+      if (isWsl) {
+        // WSL can disable appending the Windows PATH without disabling interop.
+        commands.push("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+      } else if (process.env.SystemRoot) {
+        commands.push(
+          path.win32.join(
+            process.env.SystemRoot,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+          ),
+        );
+      }
+      for (const command of commands) {
+        if (await runBrowserLauncher(command, args)) return true;
+      }
+      if (!isWsl) return false;
     }
 
-    return await new Promise<boolean>((resolve) => {
-      let settled = false;
-      const done = (result: boolean) => {
-        if (!settled) {
-          settled = true;
-          resolve(result);
-        }
-      };
-
-      const proc = spawn(command, args, {
-        stdio: "ignore",
-        detached: true,
-      });
-
-      proc.once("error", () => done(false));
-      proc.once("spawn", () => {
-        proc.unref();
-        done(true);
-      });
-    });
+    return await runBrowserLauncher(platform === "darwin" ? "open" : "xdg-open", [url]);
   } catch {
     return false;
   }

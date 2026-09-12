@@ -37,7 +37,6 @@ import {
   type AuthorizationPromptFn,
   createAuthorizationPlan,
   formatAuthPlanForDisplay,
-  formatCompactAuthPlan,
   validateAuthorization,
 } from "./auth-plan.js";
 import {
@@ -541,18 +540,16 @@ export class ResinInstaller {
         fsBridge: this.fsBridge,
       });
 
-      if (!options.json) {
-        if (this.verbosity === "verbose") {
-          this.logger(`\n${formatAuthPlanForDisplay(authPlan)}\n`);
-        } else if (
-          !options.autoApprove &&
-          !options.dryRun &&
-          !options.capabilitiesFile &&
-          !options.nonInteractive &&
-          this.verbosity !== "quiet"
-        ) {
-          this.logger(`\n${formatCompactAuthPlan(authPlan)}\n`);
-        }
+      if (
+        !options.json &&
+        (this.verbosity === "verbose" ||
+          (!options.autoApprove &&
+            !options.dryRun &&
+            !options.capabilitiesFile &&
+            !options.nonInteractive))
+      ) {
+        // Consent details are required even when quiet mode suppresses progress output.
+        this.logger(`\n${formatAuthPlanForDisplay(authPlan)}\n`);
       }
 
       const promptFn = options.promptFn ?? options.authPromptFn ?? this.promptFn;

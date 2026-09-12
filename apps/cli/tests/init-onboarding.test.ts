@@ -318,39 +318,6 @@ describe("init onboarding & pairing workflow", () => {
     expect(openBrowser).toHaveBeenCalledTimes(1);
   });
 
-  it("displays compact authorization summary in default mode during interactive approval", async () => {
-    const bridge = new InMemoryConfigFsBridge();
-    const customFetch = successfulDeviceFetch();
-    const openBrowser = vi.fn().mockResolvedValue(true);
-    let capturedStdoutAtPrompt = "";
-
-    const result = await captureOutput(async (getStdout) => {
-      const promptFn = vi.fn().mockImplementation(async (question: string) => {
-        capturedStdoutAtPrompt = getStdout();
-        return true;
-      });
-
-      const exitCode = await initCommandForTest(
-        ["--home", home, "--workspace", workspace, "--cloud-url", "https://api.resin.sh"],
-        {
-          customFsBridge: bridge,
-          customFetch: customFetch as typeof fetch,
-          openBrowser,
-          promptFn,
-        },
-      );
-      return exitCode;
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(capturedStdoutAtPrompt).toContain("Resin Authorization");
-    expect(capturedStdoutAtPrompt).toContain(`Workspace: ${workspace}`);
-    expect(capturedStdoutAtPrompt).not.toContain(
-      "================================================================================",
-    );
-    expect(result.stdout).toContain("Resin initialization complete.");
-  });
-
   it("default auto-approved init omits diagnostic progress", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const customFetch = successfulDeviceFetch();
@@ -431,8 +398,6 @@ describe("init onboarding & pairing workflow", () => {
 
     expect(result.exitCode).toBe(1);
     expect(promptFn).toHaveBeenCalledTimes(1);
-    expect(result.stdout).toContain("Resin Authorization");
-    expect(result.stdout).not.toContain("RESIN AUTHORIZATION PLAN");
     expect(result.stderr).toContain("Authorization declined by user. Installation aborted.");
     expect(customFetch).not.toHaveBeenCalled();
     expect(openBrowser).not.toHaveBeenCalled();
