@@ -34,6 +34,7 @@ import {
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
 
 export interface LocalArtifactEntry {
@@ -739,15 +740,18 @@ export class LocalArtifactExecutor {
         development: true,
       });
 
-    const brokerHandler = brokerManager.createRequestHandler({
-      invocationId,
-      grant,
-      workspaceRoot,
-      sessionId: context.sessionId,
-      workspaceId: context.workspaceId,
-      toolId: manifest.id,
-      toolVersion: manifest.version,
-    });
+    const commandFailures = new CommandFailureDiagnostics(workspaceRoot);
+    const brokerHandler = commandFailures.wrap(
+      brokerManager.createRequestHandler({
+        invocationId,
+        grant,
+        workspaceRoot,
+        sessionId: context.sessionId,
+        workspaceId: context.workspaceId,
+        toolId: manifest.id,
+        toolVersion: manifest.version,
+      }),
+    );
 
     // 7. Validate artifact imports
     // Fail closed before spawning Deno if the artifact's entry (src/index.ts and any relative imports
@@ -841,47 +845,54 @@ export class LocalArtifactExecutor {
       if (result.status === "success") {
         const text =
           typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
-        return {
-          content: [
-            {
-              type: "text",
-              text,
-            },
-          ],
+        const failed = commandFailures.isReportedFailure(result.output);
+        const response: CallToolResult = {
+          ...(failed ? { isError: true } : {}),
+          content: [{ type: "text", text }],
         };
+        return failed ? commandFailures.append(response, maxOutputSizeBytes) : response;
       }
 
       if (params.signal?.aborted) {
-        return {
+        return commandFailures.append(
+          {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Tool invocation was aborted by the caller before it completed (${result.error?.message ?? result.status}); the tool's manifest allows ${manifestTimeoutMs}ms.`,
+              },
+            ],
+          },
+          maxOutputSizeBytes,
+        );
+      }
+
+      return commandFailures.append(
+        {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Tool invocation was aborted by the caller before it completed (${result.error?.message ?? result.status}); the tool's manifest allows ${manifestTimeoutMs}ms.`,
+              text: result.error?.message ?? `Tool execution failed with status: ${result.status}`,
             },
           ],
-        };
-      }
-
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: result.error?.message ?? `Tool execution failed with status: ${result.status}`,
-          },
-        ],
-      };
+        },
+        maxOutputSizeBytes,
+      );
     } catch (err) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`,
-          },
-        ],
-      };
+      return commandFailures.append(
+        {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+        },
+        maxOutputSizeBytes,
+      );
     } finally {
       params.signal?.removeEventListener("abort", onAbort);
       brokerManager.cleanupInvocation(invocationId);

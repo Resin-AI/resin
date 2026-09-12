@@ -5,6 +5,7 @@ import path from "node:path";
 import { type ToolManifest, canonicalJson } from "@resin/contracts";
 import {
   ArtifactCache,
+  CapabilityBrokerManager,
   type GeneratedKeyPair,
   InMemoryKeyStore,
   type KeyStore,
@@ -1212,6 +1213,104 @@ export default defineTool(async (context: ToolContext<{ name: string }>) => {
     const parsedOutput = JSON.parse(result.content[0]?.text ?? "{}");
     expect(parsedOutput).toEqual({ greeting: "Hello, Resin!" });
   });
+
+  it.skipIf(!hasDeno).each(["failed", "handled", "throw"] as const)(
+    "reports real command diagnostics for %s outcomes without changing artifact output",
+    async (mode) => {
+      const toolId = "command-diagnostic-fixture";
+      const brokerManager = new CapabilityBrokerManager({
+        requireGrant: true,
+        allowUnverifiedBoundaries: true,
+        development: true,
+      });
+      brokerManager.secret.getRedactor().registerSecret("synthetic-command-secret");
+      fs.writeFileSync(
+        path.join(workspaceDir, "diagnostic-command.cjs"),
+        'process.stderr.write("command failed at " + process.cwd() + ": synthetic-command-secret"); process.exitCode = 7;',
+      );
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        {
+          id: toolId,
+          name: "command_diagnostic_fixture",
+          version: "1.0.0",
+          description: "Synthetic command failure regression",
+          parameters: { type: "object", properties: { mode: { type: "string" } } },
+          capabilities: {
+            command: {
+              allowShellExecution: false,
+              allowedCommands: ["node diagnostic-command.cjs"],
+            },
+          },
+          runtime: {
+            runtime: "deno",
+            entrypoint: "src/index.ts",
+            memoryLimitMb: 128,
+            timeoutMs: 5000,
+            cpuLimitPercent: 100,
+            maxOutputSizeBytes: 4096,
+          },
+          limits: { maxOutputBytes: 4096, timeoutMs: 5000 },
+        },
+        `
+import { defineTool } from "@resin/runtime";
+export default defineTool(async (context) => {
+  if (context.input.mode === "no-command") return { success: false };
+  const result = await context.broker.cmd.exec("node", ["diagnostic-command.cjs"]);
+  if (context.input.mode === "throw") throw new Error("intentional worker failure");
+  return {
+    success: context.input.mode === "handled" || result.exitCode === 0,
+    summary: "Completed workflow",
+    stdout: result.stdout,
+  };
+});`,
+      );
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        allowDevKeys: true,
+        brokerManager,
+      });
+      const entry = {
+        toolId,
+        name: "command_diagnostic_fixture",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest,
+      };
+      const context = resolveWorkspaceContext({ cwd: workspaceDir });
+      const result = await executor.execute({ entry, manifest, context, parameters: { mode } });
+      expect(result.isError === true).toBe(mode !== "handled");
+      expect(result.content).toHaveLength(mode === "handled" ? 1 : 2);
+      if (mode === "throw") {
+        expect(result.content[0]?.text).toContain("intentional worker failure");
+      } else {
+        expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
+          success: mode === "handled",
+          summary: "Completed workflow",
+          stdout: "",
+        });
+      }
+      if (mode !== "handled") {
+        const diagnostics = JSON.parse(result.content[1]?.text ?? "{}");
+        expect(diagnostics.commandFailures[0]).toMatchObject({
+          step: 1,
+          exitCode: 7,
+          truncated: false,
+        });
+        expect(diagnostics.commandFailures[0].stderr).toContain("command failed at <WORKSPACE>:");
+        expect(JSON.stringify(result)).not.toContain("synthetic-command-secret");
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(4096);
+      }
+      const next = await executor.execute({
+        entry,
+        manifest,
+        context,
+        parameters: { mode: "no-command" },
+      });
+      expect(next.isError).toBeFalsy();
+      expect(next.content).toHaveLength(1);
+    },
+  );
 
   it("fails closed when bundle imports unsupported bare specifier zod", async () => {
     const toolId = "test-zod-forbidden-tool-007";
