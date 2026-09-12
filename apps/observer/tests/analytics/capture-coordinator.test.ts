@@ -490,7 +490,12 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(ackCalled).toBe(true);
       expect(mockObservationClient.sendTrajectoryObservationBatch).not.toHaveBeenCalled();
       expect(submittedObservations.length).toBe(3);
-      expect(submittedObservations[2]).toMatchObject({
+      // The uploaded batch is sorted by event timestamp before submission, so the
+      // lifecycle event is located by type rather than by a fixed index.
+      const lifecycleEvent = submittedObservations.find(
+        (obs) => (obs as { type?: string }).type === "session_lifecycle",
+      );
+      expect(lifecycleEvent).toMatchObject({
         type: "session_lifecycle",
         lifecycleType: "end",
         exitReason: "completed",
