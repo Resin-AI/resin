@@ -54,12 +54,12 @@ jobs:
           echo "::error::DRILL: intentional monitor failure to exercise the incident notification route; no metadata was changed."
           exit 1
       - name: Checkout pinned public verifier
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Verify public signatures and six-hour renewal headroom
@@ -110,16 +110,16 @@ jobs:
             exit 1
           fi
       - name: Checkout approved public renewal implementation
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Assume approved channel renewal role
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.RESIN_CHANNEL_RENEWAL_ROLE_ARN }}
           aws-region: us-east-1
@@ -173,7 +173,7 @@ jobs:
             exit 1
           fi
       - name: Assume notification-only role
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.RESIN_CHANNEL_NOTIFICATION_ROLE_ARN }}
           aws-region: us-east-1
@@ -266,7 +266,7 @@ jobs:
           sys.exit(0 if receipt["submissionStatus"] == "submitted" else 1)
       - name: Upload notification submission receipt
         if: ${{ always() && steps.submission.outcome != 'skipped' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: channel-notification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/channel-notification-receipt.json
