@@ -2,8 +2,13 @@ import {
   type EpisodeSignature,
   type NormalizedCommandExecEvent,
   type NormalizedFileEditEvent,
+  type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
+  RESIN_COMPUTATION_EVIDENCE_KEY,
+  type ResinComputationEvidenceV1,
   hashCanonicalContent,
+  isSubstantiveComputationEvidence,
+  readComputationEvidence,
 } from "@resin/contracts";
 import {
   extractShapeArgumentProfile,
@@ -17,7 +22,7 @@ export { extractShapeArgumentProfile, hasParameterShapeEnvelope, parseParameterS
 export type { SemanticOperation };
 
 /** Literal engine revision of the structural signature extractor. */
-export const SIGNATURE_ENGINE_VERSION = "1.0.0";
+export const SIGNATURE_ENGINE_VERSION = "1.1.0";
 
 function getValueTypeName(val: unknown): string {
   if (val === null) return "null";
@@ -580,6 +585,223 @@ function extractArgumentProfile(
   return hashCanonicalContent(profile);
 }
 
+interface ComputationSignatureCarrier {
+  evidence: ResinComputationEvidenceV1;
+  carrierEventId: string;
+  insertionEventId: string;
+  eventIds: string[];
+  argumentProfile: string;
+}
+
+function eventIdOf(evt: NormalizedSessionEvent): string {
+  return evt.eventId;
+}
+
+function evidenceFromEvent(evt: NormalizedSessionEvent): ResinComputationEvidenceV1 | undefined {
+  return readComputationEvidence(evt.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]);
+}
+
+function uniqueSorted(values: Iterable<string | undefined>): string[] {
+  return Array.from(
+    new Set(Array.from(values).filter((value): value is string => Boolean(value))),
+  ).sort((a, b) => a.localeCompare(b));
+}
+
+function computationInvocationKey(evidence: ResinComputationEvidenceV1): string {
+  const { observation } = evidence;
+  return hashCanonicalContent({
+    callEventId: observation.callEventId,
+    callId: observation.callId ?? null,
+    resultEventId: observation.resultEventId ?? null,
+    programDigest: evidence.programDigest,
+  });
+}
+
+function extractComputationArgumentProfile(evidence: ResinComputationEvidenceV1): string {
+  const slotProfile = evidence.program.slots.map((slot) => ({
+    id: slot.id,
+    kind: slot.kind,
+    role: slot.role,
+  }));
+
+  return hashCanonicalContent({
+    programDigest: evidence.programDigest,
+    slots: slotProfile,
+  });
+}
+
+function carrierBelongsToSuccessfulEvent(
+  evt: NormalizedSessionEvent,
+  evidence: ResinComputationEvidenceV1,
+): boolean {
+  const { observation } = evidence;
+  if (
+    observation.kind !== "invocation" ||
+    observation.status !== "success" ||
+    observation.resultEventId === undefined
+  ) {
+    return false;
+  }
+  if (observation.callEventId === observation.resultEventId) {
+    return evt.type === "command_exec" && evt.eventId === observation.resultEventId;
+  }
+  return (
+    evt.type === "tool_result" &&
+    evt.eventId === observation.resultEventId &&
+    observation.callId !== undefined &&
+    evt.callId === observation.callId &&
+    evt.isError === false
+  );
+}
+
+interface ComputationCarrierPosition {
+  eventIndex: number;
+  causalSequence: number;
+}
+
+interface ComputationSupersession {
+  programDigest: string;
+  position: ComputationCarrierPosition;
+}
+
+function isLaterPosition(
+  correction: ComputationCarrierPosition,
+  carrier: ComputationCarrierPosition,
+): boolean {
+  return (
+    correction.causalSequence > carrier.causalSequence ||
+    (correction.causalSequence === carrier.causalSequence &&
+      correction.eventIndex > carrier.eventIndex)
+  );
+}
+
+function isSupersededComputation(
+  evidence: ResinComputationEvidenceV1,
+  position: ComputationCarrierPosition,
+  supersessions: readonly ComputationSupersession[],
+): boolean {
+  return supersessions.some((supersession) => {
+    if (!isLaterPosition(supersession.position, position)) {
+      return false;
+    }
+    return (
+      supersession.programDigest === evidence.programDigest ||
+      evidence.dependencies.some(
+        (dependency) => dependency.programDigest === supersession.programDigest,
+      )
+    );
+  });
+}
+
+function computationEvidenceEventIds(evidence: ResinComputationEvidenceV1): string[] {
+  return uniqueSorted([
+    evidence.observation.callEventId,
+    evidence.observation.resultEventId,
+    evidence.origin.sourceEventId,
+    ...evidence.dependencies.map((dependency) => dependency.sourceEventId),
+  ]);
+}
+
+function indexSuccessfulComputationCarriers(events: readonly NormalizedSessionEvent[]): {
+  carriersByInsertionEventId: Map<string, ComputationSignatureCarrier[]>;
+  skippedEvidenceEventIds: Set<string>;
+} {
+  const presentEventIds = new Set(events.map(eventIdOf));
+  const skippedEvidenceEventIds = new Set<string>();
+  const supersessions: ComputationSupersession[] = [];
+  const successfulCarriers: Array<{
+    evt: NormalizedSessionEvent;
+    evidence: ResinComputationEvidenceV1;
+    evidenceIds: string[];
+    insertionEventId: string;
+    position: ComputationCarrierPosition;
+  }> = [];
+
+  for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
+    const evt = events[eventIndex]!;
+    const evidence = evidenceFromEvent(evt);
+    if (evidence === undefined) {
+      continue;
+    }
+    skippedEvidenceEventIds.add(evt.eventId);
+
+    if (
+      !isSubstantiveComputationEvidence(evidence) ||
+      !carrierBelongsToSuccessfulEvent(evt, evidence)
+    ) {
+      continue;
+    }
+
+    const resultEventId = evidence.observation.resultEventId;
+    if (resultEventId === undefined) {
+      continue;
+    }
+    const position = {
+      eventIndex,
+      causalSequence: evt.causalRef.causalSequence,
+    };
+    skippedEvidenceEventIds.add(evidence.observation.callEventId);
+    skippedEvidenceEventIds.add(resultEventId);
+    for (const correction of evidence.corrections) {
+      supersessions.push({
+        programDigest: correction.supersededProgramDigest,
+        position,
+      });
+    }
+
+    const insertionEventId = presentEventIds.has(evidence.observation.callEventId)
+      ? evidence.observation.callEventId
+      : presentEventIds.has(resultEventId)
+        ? resultEventId
+        : evt.eventId;
+    successfulCarriers.push({
+      evt,
+      evidence,
+      evidenceIds: computationEvidenceEventIds(evidence),
+      insertionEventId,
+      position,
+    });
+  }
+
+  const byInvocation = new Map<string, ComputationSignatureCarrier>();
+  for (const carrierSource of successfulCarriers) {
+    if (isSupersededComputation(carrierSource.evidence, carrierSource.position, supersessions)) {
+      continue;
+    }
+    const key = computationInvocationKey(carrierSource.evidence);
+    const existing = byInvocation.get(key);
+    const carrier: ComputationSignatureCarrier = {
+      evidence: carrierSource.evidence,
+      carrierEventId: carrierSource.evt.eventId,
+      insertionEventId: carrierSource.insertionEventId,
+      eventIds: carrierSource.evidenceIds,
+      argumentProfile: extractComputationArgumentProfile(carrierSource.evidence),
+    };
+    if (
+      existing === undefined ||
+      carrierSource.evidenceIds.length > existing.eventIds.length ||
+      carrierSource.evt.eventId.localeCompare(existing.carrierEventId) < 0
+    ) {
+      byInvocation.set(key, carrier);
+    }
+  }
+
+  const carriersByInsertionEventId = new Map<string, ComputationSignatureCarrier[]>();
+  for (const carrier of byInvocation.values()) {
+    const carriers = carriersByInsertionEventId.get(carrier.insertionEventId) ?? [];
+    carriers.push(carrier);
+    carriersByInsertionEventId.set(carrier.insertionEventId, carriers);
+  }
+  for (const carriers of carriersByInsertionEventId.values()) {
+    carriers.sort((a, b) => {
+      const byDigest = a.evidence.programDigest.localeCompare(b.evidence.programDigest);
+      return byDigest !== 0 ? byDigest : a.carrierEventId.localeCompare(b.carrierEventId);
+    });
+  }
+
+  return { carriersByInsertionEventId, skippedEvidenceEventIds };
+}
+
 /**
  * Deterministic structural feature extractor for Workflow Episodes.
  */
@@ -594,8 +816,49 @@ export class SignatureExtractor {
     const normalizedPaths: Set<string> = new Set();
     const argumentSchemaHashes: string[] = [];
     const semanticOperations: SemanticOperation[] = [];
+    const { carriersByInsertionEventId, skippedEvidenceEventIds } =
+      indexSuccessfulComputationCarriers(episode.events);
 
     for (const evt of episode.events) {
+      const computationCarriers = carriersByInsertionEventId.get(evt.eventId);
+      if (computationCarriers !== undefined) {
+        for (const carrier of computationCarriers) {
+          const evidence = carrier.evidence;
+          const op = `compute:${evidence.programDigest}`;
+          operationSequence.push(op);
+          toolClasses.push("data_transform");
+          argumentSchemaHashes.push(carrier.argumentProfile);
+          semanticOperations.push({
+            id: `op_${semanticOperations.length}`,
+            order: semanticOperations.length,
+            operation: op,
+            name: "computation",
+            toolClass: "data_transform",
+            service: "compute",
+            action: "transform",
+            inputs: {
+              language: evidence.program.language,
+              slotCount: evidence.program.slots.length,
+              dependencyCount: evidence.dependencies.length,
+            },
+            evidenceEventIds: carrier.eventIds,
+            operationClass: "data_transform",
+            intent: "materialized_computation",
+            argumentSchemaHash: carrier.argumentProfile,
+            eventIds: carrier.eventIds,
+            rawEventId: evidence.observation.callEventId,
+            profileIds: [`compute:${evidence.programDigest}`],
+            rawProfileId: `compute:${evidence.programDigest}`,
+            sequenceIndex: semanticOperations.length,
+            analysisOnly: true,
+            lowSignal: false,
+            computationEvidence: evidence,
+          });
+        }
+      }
+      if (skippedEvidenceEventIds.has(evt.eventId)) {
+        continue;
+      }
       if (evt.type === "tool_call") {
         const toolEvt = evt as NormalizedToolCallEvent;
         const normName = normalizeToolName(toolEvt.toolName);

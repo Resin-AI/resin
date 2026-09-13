@@ -798,6 +798,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         error: err instanceof Error ? err.message : String(err),
       });
       throw err;
+    } finally {
+      this.captureCoordinator.clearComputationEvidence();
     }
   }
 

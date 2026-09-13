@@ -54,6 +54,9 @@ export * from "./cloud-job-client.js";
 // Outer Trajectory Observation & Attribution Analytics
 export * from "./analytics/index.js";
 
+// Native Computation Source Analysis, Canonical Program Building & Evidence Capture
+export * from "./analytics/computation/index.js";
+
 // Trajectory Capture Daemon Module & Attribution
 export * from "./trajectory-capture-module.js";
 

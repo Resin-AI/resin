@@ -21,7 +21,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_SIMILARITY_THRESHOLD = 0.8;
-export const CLUSTER_ENGINE_VERSION = "1.0.0";
+export const CLUSTER_ENGINE_VERSION = "1.1.0";
 
 /**
  * Computes Jaccard similarity between two arrays of strings.
@@ -97,10 +97,36 @@ function isSubsequenceContained(subSeq: string[], largerSeq: string[]): boolean 
   return false;
 }
 
+function computeDigests(signature: EpisodeSignature): string[] {
+  return signature.operations
+    .filter((operation) => operation.startsWith("compute:"))
+    .map((operation) => operation.slice("compute:".length));
+}
+
+function hasSubstantiveComputation(signature: EpisodeSignature): boolean {
+  return (
+    (signature.semanticOperations as SemanticOperation[] | undefined)?.some(
+      (operation) =>
+        operation.operation?.startsWith("compute:") &&
+        operation.toolClass === "data_transform" &&
+        operation.lowSignal !== true,
+    ) === true
+  );
+}
+
 /**
  * Computes composite structural similarity score between two EpisodeSignatures.
  */
 export function computeSignatureSimilarity(sigA: EpisodeSignature, sigB: EpisodeSignature): number {
+  const computeA = computeDigests(sigA);
+  const computeB = computeDigests(sigB);
+  if (computeA.length > 0 || computeB.length > 0) {
+    const bDigests = new Set(computeB);
+    const hasSharedDigest = computeA.some((digest) => bDigests.has(digest));
+    if (!hasSharedDigest) {
+      return 0;
+    }
+  }
   // Exact structural hash match
   if (sigA.structuralHash === sigB.structuralHash) {
     return 1.0;
@@ -248,6 +274,60 @@ function buildSubEpisode(
   };
 }
 
+function buildComputationSingletonSignature(
+  source: EpisodeSignature,
+  operation: SemanticOperation,
+): EpisodeSignature | undefined {
+  const computeOperation = operation.operation;
+  const argumentSchemaHash = operation.argumentSchemaHash;
+  if (
+    computeOperation === undefined ||
+    !computeOperation.startsWith("compute:") ||
+    argumentSchemaHash === undefined
+  ) {
+    return undefined;
+  }
+
+  const structuralDescriptor = {
+    ops: [computeOperation],
+    classes: ["data_transform"],
+    commands: [],
+    args: [argumentSchemaHash],
+  };
+  const structuralHash = hashCanonicalContent(structuralDescriptor);
+  return {
+    ...source,
+    signatureId: `sig_${structuralHash.slice(0, 16)}`,
+    structuralHash,
+    operations: [computeOperation],
+    toolClasses: ["data_transform"],
+    commandPatterns: [],
+    normalizedPaths: [],
+    argumentSchemaHashes: [argumentSchemaHash],
+    semanticOperations: [operation],
+    stepCount: 1,
+  };
+}
+
+function buildComputationSingletonEpisode(
+  parent: Episode,
+  operation: SemanticOperation,
+  fallbackIndex: number,
+): Episode {
+  const operationEventIds = new Set(operation.eventIds ?? operation.evidenceEventIds ?? []);
+  const events = parent.events.filter((event) => operationEventIds.has(event.eventId));
+  const subEvents = events.length > 0 ? events : parent.events;
+  const subEpisode = buildSubEpisode(parent, subEvents, fallbackIndex, fallbackIndex);
+  return {
+    ...subEpisode,
+    id: `${parent.id}_compute_${fallbackIndex}_${(operation.operation ?? "compute").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24)}`,
+    metrics: {
+      ...subEpisode.metrics,
+      stepCount: 1,
+    },
+  };
+}
+
 interface CandidateItem {
   episode: Episode;
   signature: EpisodeSignature;
@@ -331,6 +411,34 @@ export class StructuralClusterer {
           sliceStart: 0,
           sliceEnd: m > 0 ? m - 1 : 0,
         });
+
+        const semanticOperations =
+          (fullSig.semanticOperations as SemanticOperation[] | undefined) ?? [];
+        for (let operationIndex = 0; operationIndex < semanticOperations.length; operationIndex++) {
+          const operation = semanticOperations[operationIndex];
+          if (
+            operation.operation?.startsWith("compute:") !== true ||
+            operation.toolClass !== "data_transform" ||
+            operation.lowSignal === true
+          ) {
+            continue;
+          }
+          const singletonSig = buildComputationSingletonSignature(fullSig, operation);
+          if (singletonSig === undefined) {
+            continue;
+          }
+          candidates.push({
+            episode: buildComputationSingletonEpisode(ep, operation, operationIndex),
+            signature: singletonSig,
+            parentEpisodeId: ep.id,
+            parentSessionId: ep.sessionId,
+            parentScenarioId: epScenarioId,
+            stepCount: 1,
+            isFullEpisode: false,
+            sliceStart: operationIndex,
+            sliceEnd: operationIndex,
+          });
+        }
 
         // 2. Contiguous sub-slices of length 2 to (m - 1)
         if (m >= 3) {
@@ -418,6 +526,7 @@ export class StructuralClusterer {
         stepCount: number;
         operationSequence: string[];
         hasFullEpisode: boolean;
+        hasSubstantiveComputation: boolean;
       }
 
       const evaluatedClusters: EvaluatedCluster[] = candidateClusters.map((cc) => {
@@ -429,6 +538,9 @@ export class StructuralClusterer {
             .filter((s): s is string => Boolean(s && s.trim().length > 0)),
         );
         const hasFullEpisode = cc.items.some((i) => i.isFullEpisode);
+        const containsSubstantiveComputation = hasSubstantiveComputation(
+          cc.representativeSignature,
+        );
         return {
           cluster: cc,
           parentEpisodeIds,
@@ -438,6 +550,7 @@ export class StructuralClusterer {
           stepCount: cc.representativeSignature.operations.length,
           operationSequence: cc.representativeSignature.operations,
           hasFullEpisode,
+          hasSubstantiveComputation: containsSubstantiveComputation,
         };
       });
 
@@ -478,10 +591,11 @@ export class StructuralClusterer {
         }
       }
 
-      // For single-occurrence full episodes: if not covered by any recurring cluster, retain as standalone cluster
+      // For single-occurrence full episodes and verified computation singleton subworkflows: if not
+      // covered by any recurring cluster, retain as standalone cluster.
       const acceptedSingle: EvaluatedCluster[] = [];
       const singleOccurrences = evaluatedClusters.filter(
-        (ec) => ec.distinctOccurrences === 1 && ec.hasFullEpisode,
+        (ec) => ec.distinctOccurrences === 1 && (ec.hasFullEpisode || ec.hasSubstantiveComputation),
       );
 
       for (const single of singleOccurrences) {

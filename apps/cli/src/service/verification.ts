@@ -14,7 +14,7 @@ export const SYSTEM_META_TOOL_NAMES = [
 ] as const;
 import { SecretManager } from "@resin/crypto";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { IpcClient, type PathResolutionOptions, resolvePaths } from "@resin/observer";
+import { IpcClient, type PathResolutionOptions, resolvePaths } from "@resin/observer/client";
 import { areClaimsExpired } from "@resin/protocol";
 import { DeviceAuthClient } from "./auth-bootstrap.js";
 import {

@@ -27,6 +27,13 @@ describe("build-install-helper", () => {
     expect(fs.readFileSync(result.outputPath).equals(result.bytes)).toBe(true);
   });
 
+  it("keeps native computation parsers outside the standalone installer bundle", async () => {
+    const result = await buildInstallHelper({ rootDir, write: false });
+    expect(result.code).not.toContain("node_modules/typescript/");
+    expect(result.code).not.toContain("node_modules/@lezer/python/");
+    expect(result.bytes.length).toBeLessThan(2 * 1024 * 1024);
+  });
+
   it("check mode rejects a stale helper without overwriting it", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-helper-check-"));
     const outputPath = path.join(tmpDir, "helper.mjs");

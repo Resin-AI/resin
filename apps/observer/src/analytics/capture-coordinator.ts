@@ -15,6 +15,7 @@ import {
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
+import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { projectEventToMetadataOnly } from "./metadata-projection.js";
 import {
   TrajectoryAlreadyFinalizedError,
@@ -143,6 +144,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * opportunity tracker observe the same event stream as cloud observation batches.
    */
   onSessionEvents?: SessionEventSink;
+  /**
+   * Bounded observed-source evidence recorder. Defaults to a new recorder so every coordinator
+   * instance produces computation evidence without any new user-facing flag. Sessions are cleared
+   * on teardown.
+   */
+  computationEvidenceRecorder?: ComputationEvidenceRecorder;
 }
 
 interface GenericCoalescingBuffer {
@@ -187,6 +194,7 @@ export class TrajectoryCaptureCoordinator {
   private readonly maxBatchSize: number;
   private readonly telemetry?: TelemetryAggregator;
   private onSessionEvents?: SessionEventSink;
+  private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -219,6 +227,7 @@ export class TrajectoryCaptureCoordinator {
       this.maxBatchSize = 100;
       this.telemetry = undefined;
       this.onSessionEvents = undefined;
+      this.computationEvidenceRecorder = new ComputationEvidenceRecorder();
     } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
@@ -235,6 +244,8 @@ export class TrajectoryCaptureCoordinator {
       this.maxBatchSize = Math.max(1, pipelineOrOptions.maxBatchSize ?? 100);
       this.telemetry = pipelineOrOptions.telemetry;
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
+      this.computationEvidenceRecorder =
+        pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
     }
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
@@ -329,6 +340,9 @@ export class TrajectoryCaptureCoordinator {
     }
     this.minimumRecordTimestampMs = normalizedCutoff;
     this.telemetryGeneration += 1;
+    // Observed source state predates the new boundary: drop it so a helper or file body observed
+    // before revocation can never be revived into later evidence.
+    this.clearComputationEvidence();
     for (const buf of this.genericCoalescingBuffers.values()) {
       if (buf.timer) clearTimeout(buf.timer);
       this.acknowledgeBufferedAcks(buf.acks);
@@ -352,6 +366,9 @@ export class TrajectoryCaptureCoordinator {
     this.telemetryEnabled = nextEnabled;
     this.telemetryGeneration += 1;
     if (!nextEnabled) {
+      // Consent withdrawal is terminal for already-observed source state: nothing observed before
+      // revocation may be revived into evidence if telemetry is later re-enabled.
+      this.clearComputationEvidence();
       for (const buf of this.genericCoalescingBuffers.values()) {
         if (buf.timer) clearTimeout(buf.timer);
         this.acknowledgeBufferedAcks(buf.acks);
@@ -522,8 +539,11 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.event) {
               try {
-                emitter.ingest(res.event);
-                ingestedEvents.push(res.event);
+                // Bounded source evidence is produced after normalized ids/dedup and before both
+                // the local sink and cloud projection, so the two surfaces carry identical carriers.
+                const observed = this.computationEvidenceRecorder.observe(res.event);
+                emitter.ingest(observed);
+                ingestedEvents.push(observed);
               } catch (err) {
                 if (err instanceof TrajectoryAlreadyFinalizedError) {
                   break;
@@ -716,7 +736,9 @@ export class TrajectoryCaptureCoordinator {
                 latestTail = { eventId: ev.eventId, causalSequence: seq };
               }
               if (!res.isDuplicate) {
-                validEvents.push(ev);
+                // Same post-dedup hook as the attributed path: local sink and cloud batch project
+                // the identical carrier-bearing event.
+                validEvents.push(this.computationEvidenceRecorder.observe(ev));
               }
             }
           }
@@ -1182,6 +1204,26 @@ export class TrajectoryCaptureCoordinator {
   public async waitForIdle(): Promise<void> {
     await Promise.all(Array.from(this.sessionLocks.values()));
     await this.flushAllGenericBuffers();
+  }
+
+  /**
+   * Clears bounded observed-source evidence without detaching local session event subscribers.
+   *
+   * Restartable capture stops and telemetry-boundary changes must discard retained source state
+   * while preserving in-process consumers that are expected to survive a stop/start cycle.
+   */
+  public clearComputationEvidence(): void {
+    this.computationEvidenceRecorder.clear();
+  }
+
+  /**
+   * Releases bounded observed-source state and the local sink. Terminal disposal keeps the
+   * historical teardown behavior: retained source is cleared and session-event subscribers are
+   * detached.
+   */
+  public dispose(): void {
+    this.clearComputationEvidence();
+    this.onSessionEvents = undefined;
   }
 
   /**

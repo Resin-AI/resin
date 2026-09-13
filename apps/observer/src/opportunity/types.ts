@@ -2,6 +2,7 @@ import type {
   EpisodeSignature,
   NormalizedSessionEvent,
   OpportunityHashOutcome,
+  ResinComputationEvidenceV1,
 } from "@resin/contracts";
 
 /**
@@ -31,6 +32,7 @@ export type ToolClass =
   | "shell_exec"
   | "subagent"
   | "browser"
+  | "data_transform"
   | "network"
   | "general";
 
@@ -70,6 +72,7 @@ export interface SemanticOperation {
   inputs?: Record<string, OpportunityDataValue>;
   evidenceEventIds?: string[];
   parameterShape?: Record<string, unknown>;
+  computationEvidence?: ResinComputationEvidenceV1;
   operationClass?: SemanticOperationClass | string;
   intent?: string;
   commandProfile?: string;
@@ -266,7 +269,8 @@ export type RightSizingDecision =
   | "cheap_single_operation"
   | "valid_full_workflow"
   | "valid_subworkflow"
-  | "valid_expensive_single_operation";
+  | "valid_expensive_single_operation"
+  | "valid_computation";
 
 export interface RightSizingResult {
   isRightSized: boolean;

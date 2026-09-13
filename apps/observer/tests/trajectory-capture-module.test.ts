@@ -404,6 +404,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
   describe("Lifecycle & Health Checks", () => {
     it("manages start and stop lifecycle cleanly", async () => {
       const module = new TrajectoryCaptureRuntimeModule();
+      const clearEvidenceSpy = vi.spyOn(module.getCaptureCoordinator(), "clearComputationEvidence");
       expect(module.getState()).toBe("uninitialized");
 
       const context = createMockModuleContext();
@@ -421,6 +422,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
       await module.stop(context);
       expect(module.getState()).toBe("stopped");
+      expect(clearEvidenceSpy).toHaveBeenCalledTimes(1);
 
       const stoppedHealth = await module.healthCheck();
       expect(stoppedHealth.status).toBe("offline");
@@ -428,6 +430,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
     it("is idempotent on redundant start and stop calls", async () => {
       const module = new TrajectoryCaptureRuntimeModule();
+      const clearEvidenceSpy = vi.spyOn(module.getCaptureCoordinator(), "clearComputationEvidence");
       const context = createMockModuleContext();
 
       await module.start(context);
@@ -437,7 +440,19 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       await module.stop(context);
       await module.stop(context);
       expect(module.getState()).toBe("stopped");
+      expect(clearEvidenceSpy).toHaveBeenCalledTimes(1);
     }, 20000);
+
+    it("discards retained computation source even when shutdown fails", async () => {
+      const observer = new ObserverCoordinator();
+      const module = new TrajectoryCaptureRuntimeModule({ observerCoordinator: observer });
+      const clearEvidenceSpy = vi.spyOn(module.getCaptureCoordinator(), "clearComputationEvidence");
+      vi.spyOn(observer, "stop").mockRejectedValueOnce(new Error("synthetic stop failure"));
+
+      await expect(module.stop()).rejects.toThrow("synthetic stop failure");
+      expect(module.getState()).toBe("failed");
+      expect(clearEvidenceSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("Cloud Dependency & Observation Client Resolution", () => {

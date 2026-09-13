@@ -17,10 +17,12 @@ import {
   type NormalizedToolDiscoveryEvent,
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
+  RESIN_COMPUTATION_EVIDENCE_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
   estimatePayloadTokens,
   nowIso,
+  readComputationEvidence,
 } from "@resin/contracts";
 import {
   normalizeCommandProfile,
@@ -690,6 +692,19 @@ export function projectEventToMetadataOnly(
   const metadata: Record<string, unknown> = { scenarioId };
   if (sessionKind !== undefined) {
     metadata.sessionKind = sessionKind;
+  }
+
+  // Computation evidence is a strict, self-contained, already-privacy-projected carrier. It is
+  // re-read (canonical bytes, pinned limits, digest re-verification, cross-reference walk) and then
+  // copied through by value: idempotent under repeated projection, and no raw source, identifier,
+  // literal value or local state can ride along because the reader rejects anything else.
+  const computationEvidence = readComputationEvidence(
+    event.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+  );
+  if (computationEvidence !== undefined) {
+    metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = JSON.parse(
+      JSON.stringify(computationEvidence),
+    ) as Record<string, unknown>;
   }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;
