@@ -1,3 +1,4 @@
+import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import {
   COMPUTATION_IR_VERSION,
   type NormalizedCommandExecEvent,
@@ -135,6 +136,106 @@ function evidenceOf(event: NormalizedSessionEvent): unknown {
 function readOf(event: NormalizedSessionEvent) {
   return readComputationEvidence(evidenceOf(event));
 }
+
+describe("deferred native eval arguments", () => {
+  it.each(["missing", "wrong-id", "error", "overlap-known", "overlap-late", "reset"])(
+    "does not revive cached helpers after %s late arguments",
+    (mode) => {
+      const recorder = createComputationEvidenceRecorder();
+      const sessionId = `deferred-${mode}`;
+      const helper = "def transform(values):\n    return sorted([value * 2 for value in values])";
+      const use = "print(transform([3, 1]))";
+      const observe = (event: NormalizedSessionEvent) => {
+        const observed = recorder.observe(event);
+        expect(observed.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
+        return observed;
+      };
+      const call = (callId: string, sequence: number, code?: string) =>
+        toolCall({
+          sessionId,
+          callId,
+          toolName: "eval",
+          sequence,
+          parameters: code === undefined ? {} : { language: "py", code },
+        });
+      const result = (callId: string, sequence: number) =>
+        toolResult({ sessionId, callId, toolName: "eval", sequence });
+      const invoke = (callId: string, sequence: number, code: string) => {
+        observe(call(callId, sequence, code));
+        return observe(result(callId, sequence + 1));
+      };
+      invoke("setup", 1, helper);
+      expect(isSubstantiveComputationEvidence(evidenceOf(invoke("baseline", 3, use)))).toBe(true);
+      observe(call("late", 5));
+      const late = result("late", 8);
+      late.metadata = {
+        [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: {
+          callId: mode === "wrong-id" ? "unrelated" : "late",
+          toolName: "eval",
+          parameters: {
+            language: "py",
+            code: mode === "reset" ? "" : helper,
+            ...(mode === "reset" ? { reset: true } : {}),
+          },
+        },
+      };
+      if (mode === "missing") late.metadata = {};
+      if (mode === "error") late.isError = true;
+      if (mode === "overlap-known") {
+        expect(isSubstantiveComputationEvidence(evidenceOf(invoke("overlap", 6, use)))).toBe(false);
+      }
+      if (mode === "overlap-late") observe(call("overlap", 6));
+      observe(late);
+      if (mode !== "missing") {
+        expect(late.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeDefined();
+      }
+      if (mode === "overlap-late") {
+        const overlapping = result("overlap", 9);
+        overlapping.metadata = {
+          [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: {
+            callId: "overlap",
+            toolName: "eval",
+            parameters: { language: "py", code: use },
+          },
+        };
+        expect(isSubstantiveComputationEvidence(evidenceOf(observe(overlapping)))).toBe(false);
+      }
+      expect(isSubstantiveComputationEvidence(evidenceOf(invoke("after", 20, use)))).toBe(false);
+    },
+  );
+
+  it("preserves JavaScript helpers across a deferred Python reset-only call", () => {
+    const recorder = createComputationEvidenceRecorder();
+    const sessionId = "deferred-cross-language-reset";
+    const call = (callId: string, sequence: number, parameters: Record<string, unknown>) =>
+      toolCall({ sessionId, callId, sequence, toolName: "eval", parameters });
+    const result = (callId: string, sequence: number) =>
+      toolResult({ sessionId, callId, sequence, toolName: "eval" });
+    recorder.observe(
+      call("define-js", 1, {
+        language: "js",
+        code: "function transform(values) { return values.map(value => value * 2); }",
+      }),
+    );
+    recorder.observe(result("define-js", 2));
+    recorder.observe(call("reset-python", 3, {}));
+    const reset = result("reset-python", 4);
+    reset.metadata = {
+      [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: {
+        callId: "reset-python",
+        toolName: "eval",
+        parameters: { language: "py", code: "", reset: true },
+      },
+    };
+    expect(recorder.observe(reset).metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
+    recorder.observe(
+      call("use-js", 5, { language: "js", code: "console.log(transform([3, 1]));" }),
+    );
+    expect(
+      isSubstantiveComputationEvidence(evidenceOf(recorder.observe(result("use-js", 6)))),
+    ).toBe(true);
+  });
+});
 
 // ============================================================================
 // Shared fixture sources (no hand-written algorithm text)

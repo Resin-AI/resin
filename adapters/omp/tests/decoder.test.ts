@@ -22,7 +22,7 @@ import {
   RESIN_PARAMETER_SHAPE_KEY,
   projectToolParameters,
 } from "../../../apps/observer/src/analytics/metadata-projection.js";
-import { OmpRecordDecoder } from "../src/decoder.js";
+import { OmpRecordDecoder, RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "../src/decoder.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "../fixtures");
 
@@ -1574,6 +1574,75 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       rawPayload: JSON.stringify(payload),
       metadata: {},
     });
+
+    it.each([
+      ["python", "py", "print(1)", false, true],
+      ["javascript", "js", "console.log(1)", false, true],
+      ["reset", "py", "", true, true],
+      ["unknown", "lua", "print(1)", false, false],
+      ["oversize", "py", "x".repeat(65_537), false, false],
+      ["utf8-oversize", "py", "é".repeat(32_769), false, false],
+    ] as const)(
+      "recovers only observed bounded late arguments (%s), with session scoping and one-shot consumption",
+      (label, language, code, reset, eligible) => {
+        const sessionId = `session-native-late-${label}`;
+        const rawCallId = "call-native|same";
+        decoder.decode(
+          makeRecord(sessionId, 1, {
+            type: "custom",
+            customType: "tool_execution_start",
+            data: { toolCallId: rawCallId, toolName: "eval" },
+          }),
+        );
+        decoder.decode(
+          makeRecord(sessionId, 2, {
+            type: "message",
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: rawCallId,
+                  name: "eval",
+                  arguments: { language, code, reset },
+                },
+              ],
+            },
+          }),
+        );
+        const payload = {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: rawCallId,
+            toolName: "eval",
+            content: [{ type: "text", text: "native output" }],
+            isError: false,
+          },
+        };
+        const foreign = decoder.decode(
+          makeRecord(`${sessionId}-other`, 3, payload),
+        ) as IntermediateToolResultEvent;
+        expect(foreign.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
+        const record = makeRecord(sessionId, 3, payload);
+        record.metadata = { [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: { forged: true } };
+        const observed = decoder.decode(record) as IntermediateToolResultEvent;
+        expect(observed.result).toBe("native output");
+        expect(observed.isError).toBe(false);
+        expect(record.metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toEqual({ forged: true });
+        if (eligible) {
+          expect(observed.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toEqual({
+            callId: "call-native_same",
+            toolName: "eval",
+            parameters: { language, code, ...(reset ? { reset: true } : {}) },
+          });
+        } else {
+          expect(observed.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
+        }
+        const replay = decoder.decode(record) as IntermediateToolResultEvent;
+        expect(replay.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
+      },
+    );
 
     it("recovers nested records parameters from assistant toolCall block when start has no args and projects to safe shape", () => {
       const sessionId = "session-param-rec-1";

@@ -277,6 +277,154 @@ describe("Computation capture integration (native fixtures through the real pipe
     }
   });
 
+  it.each([false, true])(
+    "captures marker-first native eval across batches without leaking source or changing results (attributed=%s)",
+    async (attributed) => {
+      const environment = createCaptureEnvironment({ attributed });
+      const session = sessionFor(`session-marker-first-${attributed}`);
+      const normalized: NormalizedSessionEvent[] = [];
+      const processRecord = environment.pipeline.processRecord.bind(environment.pipeline);
+      vi.spyOn(environment.pipeline, "processRecord").mockImplementation(async (...args) => {
+        const outcomes = await processRecord(...args);
+        for (const outcome of outcomes) {
+          if (outcome.status === "success") normalized.push(outcome.event);
+        }
+        return outcomes;
+      });
+      const cells = [
+        { code: "import json\nfrom pathlib import Path", output: "(no output)" },
+        {
+          code: [
+            'values = json.loads(Path("values.json").read_text())',
+            'doubled = [item["amount"] * 2 for item in values]',
+            'print(json.dumps({"values": sorted(doubled)}))',
+            "# OMP_ORDER_SOURCE_ONLY_SENTINEL",
+          ].join("\n"),
+          output: '{"values":[4,8]}',
+        },
+      ];
+      let sequence = 0;
+      let finalResultRecord: RawHarnessRecord | undefined;
+      for (const [index, cell] of cells.entries()) {
+        const callId = `call-marker-first-${index}|fc-public-${index}`;
+        const payloads = [
+          {
+            type: "custom",
+            customType: "tool_execution_start",
+            data: { toolCallId: callId, toolName: "eval" },
+          },
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              provider: "openai",
+              model: "gpt-4o",
+              usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0 },
+              content: [
+                {
+                  type: "toolCall",
+                  id: callId,
+                  name: "eval",
+                  arguments: { language: "py", code: cell.code, reset: false },
+                },
+              ],
+            },
+          },
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolCallId: callId,
+              toolName: "eval",
+              content: [{ type: "text", text: cell.output }],
+              isError: false,
+              details: { durationMs: 3 },
+            },
+          },
+        ];
+        for (const payload of payloads) {
+          sequence += 1;
+          const timestamp = `2026-09-13T12:00:0${sequence}.000Z`;
+          const record: RawHarnessRecord = {
+            recordId: `rec-marker-first-${attributed}-${sequence}`,
+            sessionId: session.sessionId,
+            harnessId: "omp",
+            sequenceNumber: sequence,
+            timestamp,
+            recordType: "transcript_line",
+            rawPayload: JSON.stringify(payload),
+            cursor: { offset: sequence * 100, line: sequence, sequence, timestamp },
+            metadata: {},
+          };
+          await environment.coordinator.handleRecords(session, [record], async () => {});
+          finalResultRecord = record;
+        }
+      }
+      await environment.coordinator.handleRecords(
+        { ...session, status: "completed" },
+        [],
+        async () => {},
+      );
+      await environment.coordinator.waitForIdle();
+
+      const result = normalized.find(
+        (event) =>
+          event.type === "tool_result" && event.callId === "call-marker-first-1_fc-public-1",
+      );
+      expect(result?.type).toBe("tool_result");
+      if (result?.type !== "tool_result") throw new Error("missing native result");
+      expect(result.result).toBe(cells[1]!.output);
+      expect(result.executionDurationMs).toBe(3);
+      expect(result.metadata?.__resinLocalOmpNativeCallV1).toMatchObject({
+        callId: result.callId,
+        toolName: "eval",
+        parameters: { language: "py", code: cells[1]!.code },
+      });
+      const baseline = new NormalizationPipeline();
+      baseline.registerDecoder(new OmpRecordDecoder());
+      const baselineOutcomes = await baseline.processRecord(finalResultRecord!);
+      expect(baselineOutcomes[0]?.status).toBe("success");
+      const baselineOutcome = baselineOutcomes[0]!;
+      if (baselineOutcome.status !== "success") throw new Error("missing baseline result");
+      expect(result.metadata?.resinTokenEstimateV1).toEqual(
+        baselineOutcome.event.metadata?.resinTokenEstimateV1,
+      );
+
+      for (const events of [
+        environment.localEvents,
+        ...(attributed ? [] : [environment.cloud.batches as NormalizedSessionEvent[]]),
+      ]) {
+        const captured = events.find(
+          (event) =>
+            event.type === "tool_result" && event.callId === "call-marker-first-1_fc-public-1",
+        );
+        const evidence = readComputationEvidence(
+          captured?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+        );
+        expect(isSubstantiveComputationEvidence(evidence)).toBe(true);
+        expect(evidence?.observation.resultEventId).toBe(captured?.eventId);
+        expect(evidence?.program.complete).toBe(true);
+        expect(JSON.stringify(events)).not.toContain("__resinLocalOmpNativeCallV1");
+        expect(JSON.stringify(events)).not.toContain("OMP_ORDER_SOURCE_ONLY_SENTINEL");
+        expect(JSON.stringify(events)).not.toContain(cells[1]!.code);
+      }
+      if (attributed) {
+        // Attributed runs upload calibration metrics, not session-event rows.
+        expect(environment.cloud.submitted).toHaveLength(1);
+        expect(environment.cloud.batches).toHaveLength(0);
+        expect(JSON.stringify(environment.cloud.submitted)).not.toContain(
+          "__resinLocalOmpNativeCallV1",
+        );
+        expect(JSON.stringify(environment.cloud.submitted)).not.toContain(
+          "OMP_ORDER_SOURCE_ONLY_SENTINEL",
+        );
+      }
+      expect(JSON.stringify(projectEventToMetadataOnly(result))).not.toContain(
+        "__resinLocalOmpNativeCallV1",
+      );
+    },
+  );
+
   it("produces only causally justified evidence for every fixture family", async () => {
     for (const family of families) {
       for (const variant of family.variants) {
