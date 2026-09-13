@@ -2468,16 +2468,23 @@ class PythonFrameAnalyzer {
         (child) => child.name === "for" || child.name === "async",
       );
       if (clauseIndex > 0) {
-        const element = this.emitExpression(first, scope);
-        positional.push(
-          this.node(
-            "comprehension",
-            [element, ...this.emitComprehensionClauses(entry, clauseIndex, scope)],
-            {
-              compKind: "generator",
-            },
-          ),
-        );
+        const shadow = new Map<string, DraftSymbol>();
+        this.shadowFrames.push(shadow);
+        try {
+          this.predeclareComprehensionTargets(entry, clauseIndex, scope, shadow);
+          const element = this.emitExpression(first, scope);
+          positional.push(
+            this.node(
+              "comprehension",
+              [element, ...this.emitComprehensionClauses(entry, clauseIndex, scope, shadow)],
+              {
+                compKind: "generator",
+              },
+            ),
+          );
+        } finally {
+          this.shadowFrames.pop();
+        }
         continue;
       }
       positional.push(this.emitExpression(first, scope));
@@ -2892,6 +2899,7 @@ class PythonFrameAnalyzer {
     const shadow = new Map<string, DraftSymbol>();
     this.shadowFrames.push(shadow);
     try {
+      this.predeclareComprehensionTargets(children, clauseStart, scope, shadow);
       let element: DraftNode;
       if (compKind === "dict") {
         const key = children[0];
@@ -2900,7 +2908,7 @@ class PythonFrameAnalyzer {
         if (key === undefined || value === undefined) {
           return this.unsupported("unsupported_construct");
         }
-        element = this.emitPair(key, value, scope);
+        element = this.emitDictComprehensionElement(key, value, scope);
       } else {
         const elementNode = children[0];
         if (elementNode === undefined) {
@@ -2918,6 +2926,74 @@ class PythonFrameAnalyzer {
     }
   }
 
+  private emitDictComprehensionElement(key: PyNode, value: PyNode, scope: PyScope): DraftNode {
+    if (key.name === "String" && this.staticStringText(key) !== undefined) {
+      return this.emitPair(key, value, scope);
+    }
+    // Dict comprehensions carry a computed entry as `[key, value]`, keeping evaluation dataflow
+    // without pretending the dynamic key is a structural object field.
+    return this.node("tuple", [this.emitExpression(key, scope), this.emitExpression(value, scope)]);
+  }
+
+  private predeclareComprehensionTargets(
+    children: readonly PyNode[],
+    startIndex: number,
+    scope: PyScope,
+    shadow: Map<string, DraftSymbol>,
+  ): void {
+    let index = startIndex;
+    while (index < children.length) {
+      const child = children[index];
+      if (child.name === "async") {
+        index += 1;
+        continue;
+      }
+      if (child.name !== "for") {
+        index += 1;
+        continue;
+      }
+      index += 1;
+      while (
+        index < children.length &&
+        children[index].name !== "in" &&
+        children[index].name !== "for" &&
+        children[index].name !== "if"
+      ) {
+        const target = children[index];
+        if (
+          PY_STRUCTURAL_TOKENS[target.name] !== true &&
+          target.name !== "*" &&
+          target.name !== "async"
+        ) {
+          this.predeclareComprehensionTarget(target, scope, shadow);
+        }
+        index += 1;
+      }
+    }
+  }
+
+  private predeclareComprehensionTarget(
+    target: PyNode,
+    scope: PyScope,
+    shadow: Map<string, DraftSymbol>,
+  ): void {
+    if (target.name === "TupleExpression" || target.name === "ArrayExpression") {
+      for (const element of pyContentChildren(target)) {
+        this.predeclareComprehensionTarget(element, scope, shadow);
+      }
+      return;
+    }
+    if (target.name !== "VariableName") {
+      return;
+    }
+    const name = this.text(target);
+    if (shadow.has(name)) {
+      return;
+    }
+    const symbol = this.symbol(`shadow:${name}:${target.from}`, "local", scope.key);
+    shadow.set(name, symbol);
+  }
+
   private emitComprehensionClauses(
     children: readonly PyNode[],
     startIndex: number,
@@ -2925,6 +3001,7 @@ class PythonFrameAnalyzer {
     shadow?: Map<string, DraftSymbol>,
   ): DraftNode[] {
     const nodes: DraftNode[] = [];
+    let firstIterable = true;
     let index = startIndex;
     while (index < children.length) {
       const child = children[index];
@@ -2957,6 +3034,15 @@ class PythonFrameAnalyzer {
         index += 1;
         const iterable = children[index];
         index += 1;
+        const iterableNode =
+          iterable === undefined
+            ? this.unsupported("unsupported_construct")
+            : firstIterable
+              ? this.withCurrentComprehensionShadowHidden(shadow, () =>
+                  this.emitExpression(iterable, scope),
+                )
+              : this.emitExpression(iterable, scope);
+        firstIterable = false;
         const target =
           targets.length === 1
             ? this.emitComprehensionTarget(targets[0], scope, shadow)
@@ -2964,14 +3050,7 @@ class PythonFrameAnalyzer {
                 "tuple",
                 targets.map((item) => this.emitComprehensionTarget(item, scope, shadow)),
               );
-        nodes.push(
-          this.node("for_clause", [
-            target,
-            iterable === undefined
-              ? this.unsupported("unsupported_construct")
-              : this.emitExpression(iterable, scope),
-          ]),
-        );
+        nodes.push(this.node("for_clause", [target, iterableNode]));
         continue;
       }
       if (child.name === "if") {
@@ -2990,6 +3069,24 @@ class PythonFrameAnalyzer {
       index += 1;
     }
     return nodes;
+  }
+
+  private withCurrentComprehensionShadowHidden<T>(
+    shadow: Map<string, DraftSymbol> | undefined,
+    emit: () => T,
+  ): T {
+    if (shadow === undefined || shadow.size === 0) {
+      return emit();
+    }
+    const saved = new Map(shadow);
+    shadow.clear();
+    try {
+      return emit();
+    } finally {
+      for (const [name, symbol] of saved) {
+        shadow.set(name, symbol);
+      }
+    }
   }
 
   /**

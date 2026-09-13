@@ -7704,6 +7704,7 @@ var init_computation_evidence = __esm({
       "unsupported_reflection"
     ];
     COMPUTATION_APIS = [
+      "clock.iso_format",
       "clock.monotonic",
       "clock.now",
       "clock.parse",
@@ -7807,6 +7808,7 @@ var init_computation_evidence = __esm({
       "type.is_instance"
     ];
     COMPUTATION_TRANSFORM_APIS = [
+      "clock.iso_format",
       "clock.parse",
       "collection.all",
       "collection.any",

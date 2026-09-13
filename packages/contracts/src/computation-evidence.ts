@@ -452,6 +452,7 @@ export type ComputationUnsupportedReason = (typeof COMPUTATION_UNSUPPORTED_REASO
  * Sorted alphabetically for review; the sort order carries no semantics.
  */
 export const COMPUTATION_APIS = [
+  "clock.iso_format",
   "clock.monotonic",
   "clock.now",
   "clock.parse",
@@ -561,6 +562,7 @@ export type ComputationApi = (typeof COMPUTATION_APIS)[number];
  * reads/writes and `json.parse` are intentionally absent: wrapping one of those is not a computation.
  */
 export const COMPUTATION_TRANSFORM_APIS = [
+  "clock.iso_format",
   "clock.parse",
   "collection.all",
   "collection.any",
@@ -884,7 +886,8 @@ export const COMPUTATION_NODE_CHILD_SEMANTICS: Record<ComputationNodeKind, strin
   break: "no children",
   continue: "no children",
   expression: "[expression] — statement-position grouping",
-  comprehension: "[element, for_clause..., if_clause...] — clause order preserved",
+  comprehension:
+    "[element, for_clause..., if_clause...] — clause order preserved; dict entries use a pair for static fields or a tuple [key, value] for computed keys",
   for_clause: "[target, iterable]",
   if_clause: "[test]",
   slice:

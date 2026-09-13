@@ -2536,12 +2536,99 @@ class JavaScriptFrameAnalyzer {
     return this.node("call", args, fields);
   }
 
+  private emitBunFileRead(
+    callee: ts.PropertyAccessExpression,
+    args: readonly DraftNode[],
+    scope: JsScope,
+    optional: boolean,
+  ): DraftNode | undefined {
+    const method = callee.name.text;
+    if (method !== "text" && method !== "json") {
+      return undefined;
+    }
+    if (optional || args.length !== 0 || callee.questionDotToken !== undefined) {
+      return undefined;
+    }
+    const fileCall = callee.expression;
+    if (!ts.isCallExpression(fileCall) || fileCall.questionDotToken !== undefined) {
+      return undefined;
+    }
+    const fileCallee = fileCall.expression;
+    if (
+      !ts.isPropertyAccessExpression(fileCallee) ||
+      fileCallee.questionDotToken !== undefined ||
+      fileCallee.name.text !== "file" ||
+      !ts.isIdentifier(fileCallee.expression) ||
+      fileCallee.expression.text !== "Bun" ||
+      this.resolveBoundName("Bun", scope) !== undefined ||
+      this.importBindings.has("Bun") ||
+      this.isOpaqueName("Bun", scope)
+    ) {
+      return undefined;
+    }
+    const fileArgs = fileCall.arguments;
+    if (fileArgs.length !== 1 || ts.isSpreadElement(fileArgs[0])) {
+      return undefined;
+    }
+    const read = this.node("call", [this.emitExpression(fileArgs[0], scope)], {
+      api: "fs.read_text",
+    });
+    return method === "text" ? read : this.node("call", [read], { api: "json.parse" });
+  }
+
+  private emitObjectHasOwnPropertyCall(
+    callee: ts.PropertyAccessExpression,
+    args: readonly DraftNode[],
+    scope: JsScope,
+    optional: boolean,
+  ): DraftNode | undefined {
+    if (
+      optional ||
+      callee.questionDotToken !== undefined ||
+      callee.name.text !== "call" ||
+      args.length !== 2 ||
+      args.some((arg) => arg.kind === "spread")
+    ) {
+      return undefined;
+    }
+    const hasOwn = callee.expression;
+    if (
+      !ts.isPropertyAccessExpression(hasOwn) ||
+      hasOwn.questionDotToken !== undefined ||
+      hasOwn.name.text !== "hasOwnProperty"
+    ) {
+      return undefined;
+    }
+    const prototype = hasOwn.expression;
+    if (
+      !ts.isPropertyAccessExpression(prototype) ||
+      prototype.questionDotToken !== undefined ||
+      prototype.name.text !== "prototype" ||
+      !ts.isIdentifier(prototype.expression) ||
+      prototype.expression.text !== "Object" ||
+      this.resolveBoundName("Object", scope) !== undefined ||
+      this.importBindings.has("Object") ||
+      this.isOpaqueName("Object", scope)
+    ) {
+      return undefined;
+    }
+    return this.node("call", args, { api: "object.has_own" });
+  }
+
   private emitMemberCallee(
     callee: ts.PropertyAccessExpression,
     args: readonly DraftNode[],
     scope: JsScope,
     optional: boolean,
   ): DraftNode {
+    const bunFileRead = this.emitBunFileRead(callee, args, scope, optional);
+    if (bunFileRead !== undefined) {
+      return bunFileRead;
+    }
+    const hasOwnPropertyCall = this.emitObjectHasOwnPropertyCall(callee, args, scope, optional);
+    if (hasOwnPropertyCall !== undefined) {
+      return hasOwnPropertyCall;
+    }
     const base = callee.expression;
     const member = callee.name.text;
     // A local binding always wins over a same-named global namespace or module alias.
