@@ -17,6 +17,26 @@ export interface ComponentArtifact {
 
 /** Intentionally self-contained: this function is also embedded in sandboxed tool source. */
 export function assertComponentValue(schema: Record<string, unknown>, value: unknown): void {
+  function normalizedType(rule: Record<string, unknown>, path: string): string {
+    if (typeof rule.type === "string") return rule.type;
+    if (!Array.isArray(rule.type)) throw new Error(`Unsupported component schema type at ${path}`);
+    if (rule.type.length !== 2) throw new Error(`Unsupported component schema type at ${path}`);
+    const [first, second] = rule.type;
+    if (typeof first !== "string" || typeof second !== "string" || first === second)
+      throw new Error(`Unsupported component schema type at ${path}`);
+    const concrete = first === "null" ? second : second === "null" ? first : undefined;
+    switch (concrete) {
+      case "object":
+      case "array":
+      case "string":
+      case "number":
+      case "integer":
+      case "boolean":
+        return concrete;
+      default:
+        throw new Error(`Unsupported component schema type at ${path}`);
+    }
+  }
   function check(rule: Record<string, unknown>, item: unknown, path: string): void {
     const supported = [
       "type",
@@ -42,7 +62,9 @@ export function assertComponentValue(schema: Record<string, unknown>, value: unk
       !rule.enum.some((allowed) => JSON.stringify(allowed) === JSON.stringify(item))
     )
       throw new Error(`Component enum mismatch at ${path}`);
-    switch (rule.type) {
+    const type = normalizedType(rule, path);
+    if (Array.isArray(rule.type) && item === null) return;
+    switch (type) {
       case "object": {
         if (!item || typeof item !== "object" || Array.isArray(item))
           throw new Error(`Expected object at ${path}`);
@@ -86,7 +108,7 @@ export function assertComponentValue(schema: Record<string, unknown>, value: unk
         if (
           typeof item !== "number" ||
           !Number.isFinite(item) ||
-          (rule.type === "integer" && !Number.isInteger(item)) ||
+          (type === "integer" && !Number.isInteger(item)) ||
           (typeof rule.minimum === "number" && item < rule.minimum) ||
           (typeof rule.maximum === "number" && item > rule.maximum)
         )
@@ -178,6 +200,34 @@ export function validateCompositionBindings(
     if (schema.type !== "object") throw new Error("Component interfaces must be objects");
     return (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
   }
+  function typeSet(schema: Record<string, unknown>, path: string): Record<string, true> {
+    if (typeof schema.type === "string") return { [schema.type]: true };
+    if (!Array.isArray(schema.type))
+      throw new Error(`Unsupported component schema type at ${path}`);
+    if (schema.type.length !== 2) throw new Error(`Unsupported component schema type at ${path}`);
+    const [first, second] = schema.type;
+    if (typeof first !== "string" || typeof second !== "string" || first === second)
+      throw new Error(`Unsupported component schema type at ${path}`);
+    const concrete = first === "null" ? second : second === "null" ? first : undefined;
+    switch (concrete) {
+      case "object":
+      case "array":
+      case "string":
+      case "number":
+      case "integer":
+      case "boolean":
+        return { null: true, [concrete]: true };
+      default:
+        throw new Error(`Unsupported component schema type at ${path}`);
+    }
+  }
+  function isTypeSubset(source: Record<string, unknown>, target: Record<string, unknown>): boolean {
+    const sourceTypes = typeSet(source, "source");
+    const targetTypes = typeSet(target, "target");
+    for (const sourceType of Object.keys(sourceTypes))
+      if (!Object.hasOwn(targetTypes, sourceType)) return false;
+    return true;
+  }
   function resolve(
     binding: ComponentComposition["outputs"][string],
   ): Record<string, unknown> | undefined {
@@ -203,7 +253,7 @@ export function validateCompositionBindings(
     for (const [name, binding] of Object.entries(bindings)) {
       if (!Object.hasOwn(fields, name)) throw new Error(`Unknown component input: ${name}`);
       if (binding.from === "literal") assertComponentValue(fields[name], binding.value);
-      else if (resolve(binding)?.type !== fields[name].type)
+      else if (!isTypeSubset(resolve(binding) as Record<string, unknown>, fields[name]))
         throw new Error(`Component binding type mismatch: ${name}`);
     }
   }

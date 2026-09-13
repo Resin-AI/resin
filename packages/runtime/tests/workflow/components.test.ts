@@ -13,6 +13,7 @@ import {
   assertComponentValue,
   compileComponentComposition,
   executeComponentComposition,
+  validateCompositionBindings,
 } from "../../src/workflow/components.js";
 
 const object = {
@@ -173,6 +174,172 @@ describe("immutable component compositions", () => {
     );
     expect(() => assertComponentValue({ type: "number" }, Number.NaN)).toThrow();
     expect(() => assertComponentValue({ type: "string" }, "x".repeat(1048577))).toThrow("size");
+  });
+  it("accepts only bounded nullable type arrays for direct and nested records", () => {
+    const nullableNumber = { type: ["number", "null"], minimum: 0, maximum: 2 };
+    assertComponentValue(nullableNumber, null);
+    assertComponentValue(nullableNumber, 1);
+    expect(() => assertComponentValue(nullableNumber, -1)).toThrow("number");
+    expect(() => assertComponentValue(nullableNumber, "1")).toThrow("number");
+    expect(() => assertComponentValue({ type: ["integer", "null"] }, 1.5)).toThrow("number");
+
+    const nested = {
+      type: "object",
+      properties: {
+        record: {
+          type: "object",
+          properties: { value: { type: ["string", "null"], maxLength: 3 } },
+          required: ["value"],
+          additionalProperties: false,
+        },
+      },
+      required: ["record"],
+      additionalProperties: false,
+    };
+    assertComponentValue(nested, { record: { value: null } });
+    assertComponentValue(nested, { record: { value: "ok" } });
+    expect(() => assertComponentValue(nested, { record: { value: "toolong" } })).toThrow("string");
+  });
+  it("preserves enum constraints on nullable nulls and rejects malformed type arrays", () => {
+    expect(() => assertComponentValue({ type: ["string", "null"], enum: ["ready"] }, null)).toThrow(
+      "enum",
+    );
+    assertComponentValue({ type: ["string", "null"], enum: ["ready", null] }, null);
+    assertComponentValue({ type: ["string", "null"], enum: ["ready", null] }, "ready");
+    expect(() =>
+      assertComponentValue({ type: ["string", "null"], enum: ["ready", null] }, "nope"),
+    ).toThrow("enum");
+
+    for (const type of [
+      ["null"],
+      ["string"],
+      ["null", "null"],
+      ["string", "number"],
+      ["string", "null", "number"],
+      ["null", "never"],
+      ["null", 1],
+    ]) {
+      expect(() => assertComponentValue({ type }, null)).toThrow("Unsupported");
+    }
+  });
+  it("checks nullable binding compatibility before any component side effects", () => {
+    const nullableOutput = {
+      ...object,
+      properties: { value: { type: ["number", "null"] } },
+    };
+    const producer = { ...contract, name: "number.maybe", outputSchema: nullableOutput };
+    const consumer = { ...contract, name: "number.require" };
+    const staticGraph = ComponentCompositionSchema.parse({
+      schemaVersion: "1.0.0",
+      inputSchema: object,
+      outputSchema: object,
+      steps: [
+        {
+          id: "producer",
+          component: reference,
+          inputs: { value: { from: "input", path: ["value"] } },
+        },
+        {
+          id: "consumer",
+          component: reference,
+          inputs: { value: { from: "step", step: "producer", path: ["value"] } },
+        },
+      ],
+      outputs: { value: { from: "step", step: "consumer", path: ["value"] } },
+    });
+    const invoke = vi.fn();
+    expect(() => validateCompositionBindings(staticGraph, [producer, consumer])).toThrow(
+      "type mismatch",
+    );
+    expect(invoke).not.toHaveBeenCalled();
+
+    const nullableInput = { ...contract, name: "number.acceptMaybe", inputSchema: nullableOutput };
+    expect(() => validateCompositionBindings(staticGraph, [contract, nullableInput])).not.toThrow();
+
+    const nullableObject = {
+      type: "object",
+      properties: {
+        maybe: {
+          type: ["object", "null"],
+          properties: { value: { type: "number" } },
+          required: ["value"],
+          additionalProperties: false,
+        },
+      },
+      required: ["maybe"],
+      additionalProperties: false,
+    };
+    const traversal = ComponentCompositionSchema.parse({
+      ...composition,
+      inputSchema: nullableObject,
+      steps: [
+        {
+          id: "first",
+          component: reference,
+          inputs: { value: { from: "input", path: ["maybe", "value"] } },
+        },
+      ],
+      outputs: { value: { from: "step", step: "first", path: ["value"] } },
+    });
+    expect(() => validateCompositionBindings(traversal, [contract])).toThrow("objects");
+  });
+  it("executes compiled nullable outputs and literal nullable bindings", async () => {
+    const nullableObject = {
+      ...object,
+      properties: { value: { type: ["number", "null"] } },
+    };
+    const nullableContract = ComponentContractSchema.parse({
+      ...contract,
+      name: "number.echoNullable",
+      inputSchema: nullableObject,
+      outputSchema: nullableObject,
+      tests: [{ name: "echoes null", input: { value: null }, expectedOutput: { value: null } }],
+    });
+    const nullableSource =
+      'import { defineTool, type ToolContext } from "@resin/runtime"; export default defineTool(async (context: ToolContext<{value: number | null}>) => ({ value: context.input.value }));';
+    const nullableReference = {
+      contractDigest: componentContractDigest(nullableContract),
+      sourceDigest: createHash("sha256").update(nullableSource).digest("hex"),
+    };
+    const graph = ComponentCompositionSchema.parse({
+      schemaVersion: "1.0.0",
+      inputSchema: nullableObject,
+      outputSchema: nullableObject,
+      steps: [
+        {
+          id: "echo",
+          component: nullableReference,
+          inputs: { value: { from: "input", path: ["value"] } },
+        },
+      ],
+      outputs: { value: { from: "step", step: "echo", path: ["value"] } },
+    });
+    const compiled = compileComponentComposition(graph, [
+      { contract: nullableContract, source: nullableSource },
+    ]);
+    expect(await executeCompiled(compiled, { value: null })).toEqual({ value: null });
+    expect(await executeCompiled(compiled, { value: 2 })).toEqual({ value: 2 });
+
+    const literalGraph = ComponentCompositionSchema.parse({
+      ...graph,
+      inputSchema: { ...object, required: [] },
+      steps: [
+        {
+          id: "echo",
+          component: nullableReference,
+          inputs: { value: { from: "literal", value: null } },
+        },
+      ],
+      outputs: { value: { from: "literal", value: null } },
+    });
+    expect(
+      await executeCompiled(
+        compileComponentComposition(literalGraph, [
+          { contract: nullableContract, source: nullableSource },
+        ]),
+        {},
+      ),
+    ).toEqual({ value: null });
   });
   it("does not execute source or resolve arbitrary imports at compile time", () => {
     const malicious =
