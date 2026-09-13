@@ -116,6 +116,9 @@ const PYTHON_FILE_HANDLE_APIS: Readonly<Record<string, PythonApiName>> = {
  * so a private module path cannot leak through the program.
  */
 const PYTHON_MODULE_APIS: Readonly<Record<string, Readonly<Record<string, PythonApiName>>>> = {
+  pathlib: {
+    Path: "construct.path",
+  },
   builtins: PYTHON_BUILTIN_APIS,
   collections: {
     OrderedDict: "construct.map",

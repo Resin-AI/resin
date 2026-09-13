@@ -89,6 +89,7 @@ export const JAVASCRIPT_STATIC_CALL_APIS: Readonly<Record<string, ComputationApi
   "Math.round": "number.round",
   "Number.isFinite": "number.is_finite",
   "Number.isInteger": "number.is_integer",
+  "Number.isNaN": "number.is_nan",
   "Number.parseFloat": "number.parse",
   "Number.parseInt": "number.parse",
   "Object.entries": "collection.entries",
