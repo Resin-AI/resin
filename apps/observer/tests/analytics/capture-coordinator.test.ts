@@ -704,64 +704,89 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
     });
 
-    it("generic completed session without terminal record: synthesizes exactly one metadata-only terminal lifecycle event and sequences it after existing events", async () => {
-      const pipeline = new NormalizationPipeline();
-      const submittedObservations: NormalizedSessionEvent[] = [];
-      const mockObservationClient = {
-        sendTrajectoryObservationBatch: vi.fn(),
-        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
-          submittedObservations.push(...input.observations);
-          return {
-            batchId: "batch_synth_1",
-            acceptedCount: input.observations.length,
-            rejectedCount: 0,
-          };
-        }),
-      } as unknown as CloudObservationClient;
+    it.each(["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:02.000Z", "2026-01-01T00:00:03.000Z"])(
+      "generic completed session without terminal record: synthesizes exactly one metadata-only terminal lifecycle event after existing causal events (updatedAt %s)",
+      async (terminalTimestamp) => {
+        const pipeline = new NormalizationPipeline();
+        const submittedObservations: NormalizedSessionEvent[] = [];
+        const localObservations: NormalizedSessionEvent[] = [];
+        const mockObservationClient = {
+          sendTrajectoryObservationBatch: vi.fn(),
+          sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+            submittedObservations.push(...input.observations);
+            return {
+              batchId: "batch_synth_1",
+              acceptedCount: input.observations.length,
+              rejectedCount: 0,
+            };
+          }),
+        } as unknown as CloudObservationClient;
 
-      const session = createMockHarnessSession("sess_generic_synth_1", "completed");
-      const coordinator = new TrajectoryCaptureCoordinator({
-        pipeline,
-        observationClient: mockObservationClient,
-        attributionResolver: async () => null,
-      });
+        const session = createMockHarnessSession("sess_generic_synth_1", "completed");
+        session.createdAt = "2026-01-01T00:00:00.000Z";
+        session.updatedAt = terminalTimestamp;
+        const coordinator = new TrajectoryCaptureCoordinator({
+          pipeline,
+          observationClient: mockObservationClient,
+          attributionResolver: async () => null,
+          onSessionEvents: (_session, events) => {
+            localObservations.push(...events);
+          },
+        });
 
-      const promptRec = createPromptRecord(session.sessionId, 1);
-      const compRec = createCompletionRecord(session.sessionId, 2);
+        const promptRec = createPromptRecord(session.sessionId, 1);
+        const compRec = createCompletionRecord(session.sessionId, 2);
+        promptRec.timestamp = "2026-01-01T00:00:01.000Z";
+        promptRec.cursor.timestamp = promptRec.timestamp;
+        compRec.timestamp = "2026-01-01T00:00:02.000Z";
+        compRec.cursor.timestamp = compRec.timestamp;
 
-      const ack1 = vi.fn(async () => {});
-      await coordinator.handleRecords(session, [promptRec, compRec], ack1);
+        const ack1 = vi.fn(async () => {});
+        await coordinator.handleRecords(session, [promptRec, compRec], ack1);
 
-      expect(ack1).toHaveBeenCalledTimes(1);
-      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
-      expect(submittedObservations.length).toBe(3);
+        expect(ack1).toHaveBeenCalledTimes(1);
+        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+        expect(submittedObservations.length).toBe(3);
+        expect(submittedObservations.map((event) => event.timestamp)).toEqual(
+          [promptRec.timestamp, compRec.timestamp, terminalTimestamp].sort(),
+        );
+        // Wire order follows timestamps, while the local sink and causal references
+        // retain ingestion order even when session metadata predates its records.
+        const causalObservations = [...submittedObservations].sort(
+          (a, b) => a.causalRef.causalSequence - b.causalRef.causalSequence,
+        );
+        expect(localObservations.map((event) => event.eventId)).toEqual(
+          causalObservations.map((event) => event.eventId),
+        );
 
-      expect(submittedObservations[0].type).toBe("message");
-      expect(submittedObservations[0].causalRef.causalSequence).toBe(1);
+        expect(causalObservations[0].type).toBe("message");
+        expect(causalObservations[0].causalRef.causalSequence).toBe(1);
 
-      expect(submittedObservations[1].type).toBe("message");
-      expect(submittedObservations[1].causalRef.causalSequence).toBe(2);
+        expect(causalObservations[1].type).toBe("message");
+        expect(causalObservations[1].causalRef.causalSequence).toBe(2);
 
-      const syntheticTerminalEvent = submittedObservations[2];
-      expect(syntheticTerminalEvent.type).toBe("session_lifecycle");
-      if (syntheticTerminalEvent.type === "session_lifecycle") {
-        expect(syntheticTerminalEvent.lifecycleType).toBe("end");
-        expect(syntheticTerminalEvent.exitReason).toBe("completed");
-      }
-      expect(syntheticTerminalEvent.causalRef.causalSequence).toBe(3);
-      expect(syntheticTerminalEvent.causalRef.parentId).toBe(submittedObservations[1].eventId);
-      expect(syntheticTerminalEvent.redaction.isRedacted).toBe(true);
-      expect(syntheticTerminalEvent.redaction.redactionStrategy).toBe("drop");
-      expect(syntheticTerminalEvent.sessionId).toBe(session.sessionId);
+        const syntheticTerminalEvent = causalObservations[2];
+        expect(syntheticTerminalEvent.type).toBe("session_lifecycle");
+        if (syntheticTerminalEvent.type === "session_lifecycle") {
+          expect(syntheticTerminalEvent.lifecycleType).toBe("end");
+          expect(syntheticTerminalEvent.exitReason).toBe("completed");
+        }
+        expect(syntheticTerminalEvent.causalRef.causalSequence).toBe(3);
+        expect(syntheticTerminalEvent.causalRef.parentId).toBe(causalObservations[1].eventId);
+        expect(syntheticTerminalEvent.timestamp).toBe(terminalTimestamp);
+        expect(syntheticTerminalEvent.redaction.isRedacted).toBe(true);
+        expect(syntheticTerminalEvent.redaction.redactionStrategy).toBe("drop");
+        expect(syntheticTerminalEvent.sessionId).toBe(session.sessionId);
 
-      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+        expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
 
-      // Idempotency / repeat guard: subsequent handleRecords call does not re-emit
-      const ack2 = vi.fn(async () => {});
-      await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 3)], ack2);
-      expect(ack2).toHaveBeenCalledTimes(1);
-      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
-    });
+        // Idempotency / repeat guard: subsequent handleRecords call does not re-emit
+        const ack2 = vi.fn(async () => {});
+        await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 3)], ack2);
+        expect(ack2).toHaveBeenCalledTimes(1);
+        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it("generic completed session with explicit terminal end record: does NOT synthesize duplicate terminal lifecycle event", async () => {
       const pipeline = new NormalizationPipeline();
