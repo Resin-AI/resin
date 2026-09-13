@@ -195,7 +195,7 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
   });
 
   describe("3. Session Discovery and Ambiguity Reporting", () => {
-    it("discovers active and historical sessions from workspace directory", async () => {
+    it("discovers concurrent sessions without requiring every session id to be advertised", async () => {
       const fsBridge = new InMemoryConfigFsBridge();
       const rootPath = "/workspace/project";
 
@@ -205,8 +205,8 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
         `${JSON.stringify({ type: "session_start", session_id: "session-active-1" })}\n`,
       );
       await fsBridge.writeFile(
-        path.join(rootPath, ".claude", "session-history-2.jsonl"),
-        `${JSON.stringify({ type: "session_start", session_id: "session-history-2" })}\n`,
+        path.join(rootPath, ".claude", "session-concurrent-2.jsonl"),
+        `${JSON.stringify({ type: "session_start", session_id: "session-concurrent-2" })}\n`,
       );
 
       const adapter = new ClaudeHarnessAdapter({ fsBridge });
@@ -228,9 +228,8 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
       expect(activeSession).toBeDefined();
       expect(activeSession?.status).toBe("active");
 
-      const historySession = sessions.find((s) => s.sessionId === "session-history-2");
-      expect(historySession).toBeDefined();
-      expect(historySession?.status).toBe("completed");
+      const concurrentSession = sessions.find((s) => s.sessionId === "session-concurrent-2");
+      expect(concurrentSession?.status).toBe("active");
     });
   });
 

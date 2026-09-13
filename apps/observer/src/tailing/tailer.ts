@@ -638,9 +638,14 @@ export class TranscriptTailer extends EventEmitter {
 
     const pumpPromise = (async () => {
       try {
-        if (context.queue.size < context.queue.highWatermark && !this.isClosed) {
+        const availableCapacity = context.queue.capacity - context.queue.pendingCount;
+        if (
+          availableCapacity > 0 &&
+          context.queue.size < context.queue.highWatermark &&
+          !this.isClosed
+        ) {
           const records = await context.source.readNext(
-            context.options.maxBatchSize ?? this.defaultBatchSize,
+            Math.min(context.options.maxBatchSize ?? this.defaultBatchSize, availableCapacity),
           );
           if (records.length > 0 && !this.isClosed) {
             await this.handleIncomingRecords(context, records);
