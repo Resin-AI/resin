@@ -11585,8 +11585,6 @@ init_zod();
 var OpportunityTrackingConfigSchema = external_exports.object({
   /** Enables continuous per-session local opportunity detection. */
   enabled: external_exports.boolean().default(true),
-  /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
-  synthesisCostUsd: external_exports.number().nonnegative().default(0.05),
   /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
   minDispatchConfidence: external_exports.number().min(0).max(1).default(0.5),
   /** Rolling per-session episode window bound. */

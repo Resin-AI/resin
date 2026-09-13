@@ -16,7 +16,6 @@ import { OpportunityTrackingModule } from "../../src/opportunity-module.js";
 
 const WORKSPACE_ID = "ws_opportunity_module";
 const ACCOUNT_ID = "acct_opportunity_module";
-const SYNTHESIS_COST_USD = 0.12;
 
 const STEPS = ["tsc --noEmit", "vitest run", "biome check", "oxlint", "tsx scripts/build.ts"];
 
@@ -113,10 +112,7 @@ describe("OpportunityTrackingModule", () => {
       pipeline: new NormalizationPipeline({}),
     });
     const sinkSpy = vi.spyOn(coordinator, "setSessionEventSink");
-    const module = new OpportunityTrackingModule({
-      store,
-      synthesisCostUsd: SYNTHESIS_COST_USD,
-    });
+    const module = new OpportunityTrackingModule({ store });
     const context = {
       config: { opportunityTracking: {} } as never,
       paths: {} as never,

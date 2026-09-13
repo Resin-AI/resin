@@ -335,7 +335,7 @@ describe("public computation pipeline from native fixture records", () => {
     }
   }, 30_000);
 
-  it("keeps obsolete join V1 below the conservative computation authoring threshold while corrected V2 is admitted", async () => {
+  it("admits both obsolete join V1 and corrected V2 as strict substantive computation", async () => {
     const join = families.find((family) => family.familyId === "record-join-lineage")!;
     const variant = join.variants[0]!;
     const events = await captureVariant(variant);
@@ -345,12 +345,13 @@ describe("public computation pipeline from native fixture records", () => {
       const [oldEvidence] = substantiveByCallId(events, dataset.superseded!.invocationCallId);
       const [newEvidence] = substantiveByCallId(events, dataset.invocationCallId);
       expect(oldEvidence?.programDigest).not.toBe(newEvidence?.programDigest);
-      expect(evaluateRightSizing(1, 1, { computationEvidence: oldEvidence }).decision).toBe(
-        "cheap_single_operation",
-      );
-      expect(evaluateRightSizing(1, 1, { computationEvidence: newEvidence }).decision).toBe(
-        "valid_computation",
-      );
+      // Both are strictly validated substantive captures. Their advisory estimates differ, but
+      // neither is refused on estimated value.
+      const oldSizing = evaluateRightSizing(1, 1, { computationEvidence: oldEvidence });
+      const newSizing = evaluateRightSizing(1, 1, { computationEvidence: newEvidence });
+      expect(oldSizing.decision).toBe("valid_computation");
+      expect(newSizing.decision).toBe("valid_computation");
+      expect(oldSizing.description).toContain("advisory authoring benefit");
     }
   });
 
@@ -372,10 +373,20 @@ describe("public computation pipeline from native fixture records", () => {
     });
 
     expect(proven.length).toBeGreaterThan(0);
-    const payload = ProvenPatternDtoSchema.parse(proven[0]);
-    expect(payload.signature.toolClasses).toContain("data_transform");
-    expect(payload.localVerdicts.suppression).toMatchObject({ suppressed: false, reason: "none" });
-    expect(payload.localVerdicts.estimatedSavedWork.estimatedTokensSaved).toBeGreaterThan(0);
+    const payloads = proven.map((pattern) => ProvenPatternDtoSchema.parse(pattern));
+    // Every dispatched candidate is suppression-free; none is filtered on estimated value.
+    for (const payload of payloads) {
+      expect(payload.localVerdicts.suppression).toMatchObject({
+        suppressed: false,
+        reason: "none",
+      });
+    }
+    const computationCandidate = payloads.find(
+      (payload) =>
+        payload.signature.toolClasses.includes("data_transform") &&
+        payload.localVerdicts.estimatedSavedWork.estimatedTokensSaved > 0,
+    );
+    expect(computationCandidate).toBeDefined();
     expect(await store.opportunities.listPendingPatterns()).toHaveLength(proven.length);
   });
 });

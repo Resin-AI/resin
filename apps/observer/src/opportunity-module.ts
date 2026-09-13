@@ -44,8 +44,6 @@ export interface OpportunityTrackingModuleOptions {
   logger?: Logger;
   /** Injectable clock in epoch milliseconds. */
   now?: () => number;
-  /** Cost of synthesizing one tool, in USD. Dispatch requires savings to beat it. */
-  synthesisCostUsd?: number;
   /** Minimum evidence-maturity confidence required to dispatch a proven pattern. */
   minDispatchConfidence?: number;
   /** Rolling per-session episode window bound. */
@@ -92,7 +90,6 @@ export class OpportunityTrackingModule implements DaemonModule {
   private readonly killSwitches: KillSwitchManager;
   private readonly enabled: boolean;
   private readonly uploadIntervalMs?: number;
-  private readonly synthesisCostUsd?: number;
   private readonly minDispatchConfidence?: number;
   private readonly maxEpisodesPerSession?: number;
   private readonly accountId?: string;
@@ -115,7 +112,6 @@ export class OpportunityTrackingModule implements DaemonModule {
         ? Math.floor(options.uploadIntervalMs)
         : undefined;
     this.onPatternProvenFn = options.onPatternProven;
-    this.synthesisCostUsd = options.synthesisCostUsd;
     this.minDispatchConfidence = options.minDispatchConfidence;
     this.maxEpisodesPerSession = options.maxEpisodesPerSession;
     this.accountId = options.accountId;
@@ -188,7 +184,6 @@ export class OpportunityTrackingModule implements DaemonModule {
         killSwitches: this.killSwitches,
         logger: this.logger,
         now: this.now,
-        synthesisCostUsd: this.synthesisCostUsd,
         minDispatchConfidence: this.minDispatchConfidence,
         maxEpisodesPerSession: this.maxEpisodesPerSession,
         accountId: this.accountId,

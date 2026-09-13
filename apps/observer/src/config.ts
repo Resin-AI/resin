@@ -7,8 +7,6 @@ export const OpportunityTrackingConfigSchema = z
   .object({
     /** Enables continuous per-session local opportunity detection. */
     enabled: z.boolean().default(true),
-    /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
-    synthesisCostUsd: z.number().nonnegative().default(0.05),
     /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
     minDispatchConfidence: z.number().min(0).max(1).default(0.5),
     /** Rolling per-session episode window bound. */

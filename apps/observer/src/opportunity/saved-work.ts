@@ -34,7 +34,6 @@ const AUTHORING_NEGLIGIBLE_APIS: Readonly<Record<string, true>> = {
 const COMPUTATION_FIXED_OVERHEAD_UNITS = 256;
 const COMPUTATION_SLOT_OVERHEAD_UNITS = 8;
 const COMPUTATION_DEFINITION_OVERHEAD_UNITS = 4;
-const MIN_CREDIBLE_SUBSTANTIVE_NODES = 3;
 
 type ComputationEvidenceInput =
   | ResinComputationEvidenceV1
@@ -163,16 +162,6 @@ function collectClusterComputationEvidence(cluster: WorkflowCluster): ResinCompu
     if (evidence !== undefined) candidates.push(evidence);
   }
   return candidates;
-}
-
-/** Advisory unpriced work evidence, not a conversion to dollars or measured savings. */
-export function hasCredibleComputationAuthoringBenefit(cluster: WorkflowCluster): boolean {
-  const summary = summarizeComputationValue(collectClusterComputationEvidence(cluster));
-  return (
-    summary !== undefined &&
-    summary.substantiveNodeCount >= MIN_CREDIBLE_SUBSTANTIVE_NODES &&
-    summary.netAuthoringUnits > 0
-  );
 }
 
 /**
@@ -380,28 +369,17 @@ export function evaluateRightSizing(
   // Case 1 & 2: Single operation
   if (steps === 1) {
     if (computationSummary !== undefined) {
-      if (
-        computationSummary.substantiveNodeCount >= MIN_CREDIBLE_SUBSTANTIVE_NODES &&
-        computationSummary.netAuthoringUnits > 0
-      ) {
-        return {
-          isRightSized: true,
-          decision: "valid_computation" as RightSizingResult["decision"],
-          description: `Evidence-backed computation accepted (advisory authoring benefit: ${computationSummary.netAuthoringUnits} bounded units after discovery/invocation/schema/config overhead; ${computationSummary.substantiveNodeCount} substantive semantic nodes across ${computationSummary.uniqueProgramCount} unique program digest(s); priced usage unknown/incomplete).`,
-          subworkflowStepCount: steps,
-          scenarioStepCount: totalScenarioSteps,
-          coverageRatio,
-          isExpensiveSingleOp,
-        };
-      }
+      // Strictly validated substantive computation evidence decides admission on its own. The
+      // advisory authoring estimate is reported for ranking and is never an admission threshold,
+      // so a small or negative net estimate still qualifies.
       return {
-        isRightSized: false,
-        decision: "cheap_single_operation",
-        description: `Single-operation computation has no positive advisory authoring benefit after discovery/invocation/schema/config overhead (${computationSummary.netAuthoringUnits} bounded units); caller input/output cost remains native I/O and priced usage is unknown/incomplete.`,
+        isRightSized: true,
+        decision: "valid_computation" as RightSizingResult["decision"],
+        description: `Evidence-backed computation accepted (advisory authoring benefit: ${computationSummary.netAuthoringUnits} bounded units after discovery/invocation/schema/config overhead; ${computationSummary.substantiveNodeCount} substantive semantic nodes across ${computationSummary.uniqueProgramCount} unique program digest(s); priced usage unknown/incomplete).`,
         subworkflowStepCount: steps,
         scenarioStepCount: totalScenarioSteps,
         coverageRatio,
-        isExpensiveSingleOp: false,
+        isExpensiveSingleOp,
       };
     }
     if (!isExpensiveSingleOp) {

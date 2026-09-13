@@ -243,7 +243,34 @@ describe("computation value right-sizing", () => {
     );
   });
 
-  it("does not rescue obsolete negative-benefit computation evidence with huge native I/O", () => {
+  it("admits a small or negative advisory authoring estimate while bare wrappers stay rejected", () => {
+    const { evidence } = fixtureEvidence();
+
+    // Force a net-negative bounded estimate by shrinking the source cap below the fixed overhead.
+    const tinySource = reseal({
+      ...evidence,
+      metrics: { ...evidence.metrics, sourceBytes: 64 },
+    });
+    expect(readComputationEvidence(tinySource)).toBeDefined();
+    expect(isSubstantiveComputationEvidence(tinySource)).toBe(true);
+
+    const negative = evaluateRightSizing(1, 1, { computationEvidence: tinySource });
+    expect(negative).toMatchObject({
+      isRightSized: true,
+      decision: "valid_computation",
+    });
+    expect(negative.description).toContain("authoring benefit: -");
+
+    // The same admission path rejects a trivial single step and an empty subworkflow outright.
+    expect(evaluateRightSizing(1, 1).decision).toBe("cheap_single_operation");
+    expect(evaluateRightSizing(1, 1, { avgTokens: 1_000 }).decision).toBe("cheap_single_operation");
+    expect(evaluateRightSizing(0, 1)).toMatchObject({
+      isRightSized: false,
+      decision: "negligible",
+    });
+  });
+
+  it("admits obsolete join V1 evidence while never inflating its estimate with native I/O", () => {
     const evidence = obsoleteFixtureEvidence();
 
     const rightSizing = evaluateRightSizing(1, 1, {
@@ -255,9 +282,11 @@ describe("computation value right-sizing", () => {
       1,
     );
 
+    // V1 is a strictly validated substantive capture, so its advisory authoring estimate does not
+    // block admission; the estimate itself is still never inflated by huge native I/O.
     expect(rightSizing).toMatchObject({
-      isRightSized: false,
-      decision: "cheap_single_operation",
+      isRightSized: true,
+      decision: "valid_computation",
     });
     expect(savedWork.estimatedTokensSaved).toBe(0);
     expect(savedWork.savedTokens).toBe(0);
