@@ -2191,7 +2191,11 @@ class JavaScriptFrameAnalyzer {
     const base = node.expression;
     const name = node.name.text;
     // A local binding always wins over a same-named global namespace or module alias.
-    if (ts.isIdentifier(base) && this.resolveBoundName(base.text, scope) === undefined) {
+    if (
+      ts.isIdentifier(base) &&
+      this.resolveBoundName(base.text, scope) === undefined &&
+      !this.isOpaqueName(base.text, scope)
+    ) {
       if (base.text === "process" && name === "argv") {
         return this.literal("free:process.argv", "array", "free_variable");
       }
@@ -2632,16 +2636,22 @@ class JavaScriptFrameAnalyzer {
     const base = callee.expression;
     const member = callee.name.text;
     // A local binding always wins over a same-named global namespace or module alias.
-    if (ts.isIdentifier(base) && this.resolveBoundName(base.text, scope) === undefined) {
+    if (
+      ts.isIdentifier(base) &&
+      this.resolveBoundName(base.text, scope) === undefined &&
+      !this.isOpaqueName(base.text, scope)
+    ) {
       const imported = this.importBindings.get(base.text);
-      if (imported !== undefined && imported.kind === "module") {
-        const api = builtinModuleMemberApi(imported.module, member);
-        if (api !== undefined) {
-          return this.node("call", args, this.callFields({ api }, optional));
-        }
-        const helper = this.materializeModuleMember(imported.module, member);
-        if (helper !== undefined) {
-          return this.definitionCall(helper, args, this.callFields({ symbol: helper }, optional));
+      if (imported !== undefined) {
+        if (imported.kind === "module") {
+          const api = builtinModuleMemberApi(imported.module, member);
+          if (api !== undefined) {
+            return this.node("call", args, this.callFields({ api }, optional));
+          }
+          const helper = this.materializeModuleMember(imported.module, member);
+          if (helper !== undefined) {
+            return this.definitionCall(helper, args, this.callFields({ symbol: helper }, optional));
+          }
         }
         return this.unsupported("unsupported_api", args);
       }

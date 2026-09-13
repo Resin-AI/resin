@@ -308,6 +308,8 @@ class PythonFrameAnalyzer {
   private readonly definitionStack: PendingDefinition[] = [];
   private readonly authoredReads = new Set<DraftSymbol>();
   private readonly fileHandles = new Set<DraftSymbol>();
+  private readonly pathValues = new Set<DraftSymbol>();
+  private ambiguousPathDepth = 0;
   private readonly localDefinitions: PyDefinitionReport[] = [];
   private readonly localImports: { names: string[]; source: string }[] = [];
   private readonly referencedNames: string[] = [];
@@ -709,7 +711,12 @@ class PythonFrameAnalyzer {
       into.add(this.text(node));
       return into;
     }
-    if (node.name === "TupleExpression" || node.name === "ArrayExpression") {
+    if (
+      node.name === "TupleExpression" ||
+      node.name === "ArrayExpression" ||
+      node.name === "ParenthesizedExpression" ||
+      node.name === "SetExpression"
+    ) {
       for (const child of pyContentChildren(node)) {
         this.namesInTarget(child, into);
       }
@@ -731,14 +738,24 @@ class PythonFrameAnalyzer {
     const targets: PyNode[] = [];
     let start = 0;
     for (const index of equalsIndices) {
-      for (const child of children.slice(start, index)) {
-        if (child.name !== "TypeDef" && child.name !== ":") {
-          targets.push(child);
-        }
-      }
+      targets.push(...this.assignmentTargetElements(children.slice(start, index)));
       start = index + 1;
     }
     return targets;
+  }
+
+  private assignmentTargetElements(segment: readonly PyNode[]): PyNode[] {
+    return segment.filter(
+      (child) =>
+        child.name !== "TypeDef" &&
+        child.name !== ":" &&
+        child.name !== "," &&
+        child.name !== "Comment",
+    );
+  }
+
+  private segmentHasTopLevelComma(segment: readonly PyNode[]): boolean {
+    return segment.some((child) => child.name === ",");
   }
 
   // --------------------------------------------------------------------------
@@ -1087,14 +1104,50 @@ class PythonFrameAnalyzer {
         case "ImportStatement":
           this.recordImport(statement);
           return null;
-        case "IfStatement":
-          return this.emitIf(statement, scope);
-        case "WhileStatement":
-          return this.emitWhile(statement, scope);
-        case "ForStatement":
-          return this.emitFor(statement, scope);
-        case "TryStatement":
-          return this.emitTry(statement, scope);
+        case "IfStatement": {
+          const targets = this.assignmentTargetsInTree(statement);
+          this.invalidatePathTargets(targets, scope);
+          this.ambiguousPathDepth += 1;
+          try {
+            return this.emitIf(statement, scope);
+          } finally {
+            this.ambiguousPathDepth -= 1;
+            this.invalidatePathTargets(targets, scope);
+          }
+        }
+        case "WhileStatement": {
+          const targets = this.assignmentTargetsInTree(statement);
+          this.invalidatePathTargets(targets, scope);
+          this.ambiguousPathDepth += 1;
+          try {
+            return this.emitWhile(statement, scope);
+          } finally {
+            this.ambiguousPathDepth -= 1;
+            this.invalidatePathTargets(targets, scope);
+          }
+        }
+        case "ForStatement": {
+          const targets = this.assignmentTargetsInTree(statement);
+          this.invalidatePathTargets(targets, scope);
+          this.ambiguousPathDepth += 1;
+          try {
+            return this.emitFor(statement, scope);
+          } finally {
+            this.ambiguousPathDepth -= 1;
+            this.invalidatePathTargets(targets, scope);
+          }
+        }
+        case "TryStatement": {
+          const targets = this.assignmentTargetsInTree(statement);
+          this.invalidatePathTargets(targets, scope);
+          this.ambiguousPathDepth += 1;
+          try {
+            return this.emitTry(statement, scope);
+          } finally {
+            this.ambiguousPathDepth -= 1;
+            this.invalidatePathTargets(targets, scope);
+          }
+        }
         case "WithStatement":
           return this.emitWith(statement, scope);
         case "AssertStatement": {
@@ -1312,10 +1365,13 @@ class PythonFrameAnalyzer {
     const value = this.emitExpressionList(children.slice(start), scope);
     let current = value;
     for (let index = segments.length - 1; index >= 0; index -= 1) {
-      const targets = segments[index].filter(
-        (child) => child.name !== "TypeDef" && child.name !== ":" && child.name !== "*",
+      const segment = segments[index];
+      current = this.emitAssignmentToTargets(
+        this.assignmentTargetElements(segment),
+        current,
+        scope,
+        this.segmentHasTopLevelComma(segment),
       );
-      current = this.emitAssignmentToTargets(targets, current, scope);
     }
     return current;
   }
@@ -1324,20 +1380,23 @@ class PythonFrameAnalyzer {
     targets: readonly PyNode[],
     value: DraftNode,
     scope: PyScope,
+    forceTupleTarget = false,
   ): DraftNode {
     if (targets.length === 0) {
       return value;
     }
-    if (targets.length === 1 && targets[0].name === "VariableName") {
+    if (!forceTupleTarget && targets.length === 1 && targets[0].name === "VariableName") {
       const name = this.text(targets[0]);
       const existing = this.lookupLocal(name, scope);
       if (existing !== undefined) {
+        this.updatePathBinding(existing, value);
         return this.node("assign", [this.identifier(existing), value], { operator: "set" });
       }
       const symbol = this.createLocal(name, scope);
+      this.updatePathBinding(symbol, value);
       return this.node("declare", [value], { declKind: "local", symbol });
     }
-    if (targets.length === 1 && !this.isDestructuringPattern(targets[0])) {
+    if (!forceTupleTarget && targets.length === 1 && !this.isDestructuringPattern(targets[0])) {
       // A store into a place (`row["kind"] = ...`, `record.owner = ...`) keeps the place expression
       // and its reads; only a binding pattern is a destructuring target.
       return this.node("assign", [this.emitExpression(targets[0], scope), value], {
@@ -1345,12 +1404,13 @@ class PythonFrameAnalyzer {
       });
     }
     const target =
-      targets.length === 1
+      !forceTupleTarget && targets.length === 1
         ? this.emitDestructuringTarget(targets[0], scope)
         : this.node(
             "tuple",
             targets.map((item) => this.emitDestructuringTarget(item, scope)),
           );
+    this.invalidateDestructuringPathBindings(targets, scope);
     return this.node("assign", [target, value], { operator: "set" });
   }
 
@@ -1371,17 +1431,24 @@ class PythonFrameAnalyzer {
       const symbol = scope.locals.get(name) ?? this.createLocal(name, scope);
       return this.node("declare", [], { declKind: "local", symbol });
     }
+    if (target.name === "ParenthesizedExpression") {
+      const children = pyContentChildren(target);
+      if (children.length === 1 && !pyChildren(target).some((child) => child.name === ",")) {
+        return this.emitDestructuringTarget(children[0], scope);
+      }
+      return this.node(
+        "tuple",
+        children.map((element) => this.emitDestructuringTarget(element, scope)),
+      );
+    }
     if (
       target.name === "TupleExpression" ||
       target.name === "ArrayExpression" ||
-      target.name === "ParenthesizedExpression" ||
       target.name === "SetExpression"
     ) {
       return this.node(
         "tuple",
-        pyContentChildren(target)
-          .filter((child) => child.name !== "*")
-          .map((element) => this.emitDestructuringTarget(element, scope)),
+        pyContentChildren(target).map((element) => this.emitDestructuringTarget(element, scope)),
       );
     }
     return this.unsupported("unsupported_construct");
@@ -1406,6 +1473,7 @@ class PythonFrameAnalyzer {
               this.createLocal(this.text(target), scope),
           )
         : this.emitExpression(target, scope);
+    this.invalidateDestructuringPathBindings([target], scope);
     return this.node("assign", [targetDraft, value], { operator });
   }
 
@@ -1492,16 +1560,61 @@ class PythonFrameAnalyzer {
   }
 
   private emitExpressionList(values: readonly PyNode[], scope: PyScope): DraftNode {
-    if (values.length === 0) {
+    const groups = this.expressionListGroups(values);
+    if (groups.length === 0) {
       return pyConstant("null");
     }
-    if (values.length === 1) {
-      return this.emitExpression(values[0], scope);
+    if (groups.length === 1 && !groups[0].trailingComma && groups[0].nodes.length === 1) {
+      return this.emitExpression(groups[0].nodes[0], scope);
+    }
+    if (groups.length === 1 && groups[0].nodes.length > 1) {
+      return this.node(
+        "tuple",
+        groups[0].nodes.map((value) => this.emitExpression(value, scope)),
+      );
     }
     return this.node(
       "tuple",
-      values.map((value) => this.emitExpression(value, scope)),
+      groups.map((group) => this.emitExpressionListGroup(group.nodes, scope)),
     );
+  }
+
+  private emitExpressionListGroup(nodes: readonly PyNode[], scope: PyScope): DraftNode {
+    if (nodes.length !== 1) {
+      return this.unsupported("unsupported_construct");
+    }
+    return this.emitExpression(nodes[0], scope);
+  }
+
+  private expressionListGroups(
+    values: readonly PyNode[],
+  ): { nodes: PyNode[]; trailingComma: boolean }[] {
+    const groups: { nodes: PyNode[]; trailingComma: boolean }[] = [];
+    let group: PyNode[] = [];
+    let sawComma = false;
+    for (const child of values) {
+      if (child.name === "Comment") {
+        continue;
+      }
+      if (child.name === ",") {
+        if (group.length > 0) {
+          groups.push({ nodes: group, trailingComma: true });
+        }
+        group = [];
+        sawComma = true;
+        continue;
+      }
+      if (PY_STRUCTURAL_TOKENS[child.name] === true) {
+        continue;
+      }
+      group.push(child);
+    }
+    if (group.length > 0) {
+      groups.push({ nodes: group, trailingComma: false });
+    } else if (groups.length > 0 && sawComma) {
+      groups[groups.length - 1].trailingComma = true;
+    }
+    return groups;
   }
 
   private emitIf(statement: PyNode, scope: PyScope): DraftNode {
@@ -1723,6 +1836,7 @@ class PythonFrameAnalyzer {
   private bindWithTarget(target: PyNode, resource: DraftNode, scope: PyScope): DraftNode {
     const name = this.text(target);
     const symbol = this.lookupLocal(name, scope) ?? this.createLocal(name, scope);
+    this.pathValues.delete(symbol);
     if (resource.kind === "call" && resource.fields?.api === "fs.open_read") {
       this.fileHandles.add(symbol);
     }
@@ -1897,13 +2011,11 @@ class PythonFrameAnalyzer {
           }
           const name = this.text(target);
           const symbol = this.lookupLocal(name, scope) ?? this.createLocal(name, scope);
-          return this.node(
-            "assign",
-            [this.identifier(symbol), this.emitExpression(valueNode, scope)],
-            {
-              operator: "set",
-            },
-          );
+          const value = this.emitExpression(valueNode, scope);
+          this.updatePathBinding(symbol, value);
+          return this.node("assign", [this.identifier(symbol), value], {
+            operator: "set",
+          });
         }
         case "ArrayComprehensionExpression":
           return this.emitComprehension(node, scope, "list");
@@ -2366,7 +2478,10 @@ class PythonFrameAnalyzer {
     if (resolution.api !== undefined) {
       const keywordFields = args.keywordArgs.length > 0 ? { keywordArgs: args.keywordArgs } : {};
       if (resolution.construct) {
-        return this.node("new", args.positional, { api: resolution.api, ...keywordFields });
+        return this.node("new", this.pathConstructorArguments(resolution.api, args.positional), {
+          api: resolution.api,
+          ...keywordFields,
+        });
       }
       if (resolution.receiver !== undefined) {
         return this.node("call", args.positional, {
@@ -2535,6 +2650,9 @@ class PythonFrameAnalyzer {
       if (imported.kind === "module") {
         return { reason: "unsupported_api" };
       }
+      if (imported.module === "pathlib" && imported.member === "Path") {
+        return { api: "construct.path", construct: true };
+      }
       const api = pythonModuleApi(imported.module, imported.member ?? name);
       if (api !== undefined) {
         return { api };
@@ -2578,11 +2696,11 @@ class PythonFrameAnalyzer {
       return { reason: "unsupported_construct" };
     }
     const member = this.text(property);
-    const modulePath = this.dottedModuleName(base);
+    const modulePath = this.dottedModuleName(base, scope);
     if (modulePath !== undefined) {
       const direct = pythonModuleApi(modulePath, member);
       if (direct !== undefined) {
-        return { api: direct };
+        return { api: direct, construct: direct === "construct.path" };
       }
       if (modulePath === "builtins") {
         const constructionApi = pythonConstructorApi(member);
@@ -2611,6 +2729,9 @@ class PythonFrameAnalyzer {
     if (handleApi !== undefined) {
       return { api: handleApi, receiver: this.emitExpression(base, scope) };
     }
+    if (member === "read_text" && this.isPathReceiver(base, scope)) {
+      return { api: "fs.read_text", receiver: this.emitExpression(base, scope) };
+    }
     const method = pythonMethodApi(member);
     if (method !== undefined) {
       return { api: method, receiver: this.emitExpression(base, scope) };
@@ -2622,9 +2743,13 @@ class PythonFrameAnalyzer {
   }
 
   /** The dotted module path of an expression made only of module aliases, or `undefined`. */
-  private dottedModuleName(node: PyNode): string | undefined {
+  private dottedModuleName(node: PyNode, scope: PyScope): string | undefined {
     if (node.name === "VariableName") {
-      const alias = this.importBindings.get(this.text(node));
+      const name = this.text(node);
+      if (this.resolveBoundName(name, scope) !== undefined) {
+        return undefined;
+      }
+      const alias = this.importBindings.get(name);
       if (alias === undefined || alias.kind !== "module") {
         return undefined;
       }
@@ -2637,7 +2762,7 @@ class PythonFrameAnalyzer {
       if (base === undefined || property === undefined) {
         return undefined;
       }
-      const prefix = this.dottedModuleName(base);
+      const prefix = this.dottedModuleName(base, scope);
       return prefix === undefined ? undefined : `${prefix}.${this.text(property)}`;
     }
     return undefined;
@@ -2756,6 +2881,122 @@ class PythonFrameAnalyzer {
     (target.fields as Record<string, unknown>).symbol = symbol;
     scope.locals.set(name, symbol);
     return symbol;
+  }
+
+  private pathConstructorArguments(api: PythonApiName, args: readonly DraftNode[]): DraftNode[] {
+    if (api !== "construct.path") {
+      return [...args];
+    }
+    return args.map((arg) => this.asPathSlot(arg));
+  }
+
+  private asPathSlot(node: DraftNode): DraftNode {
+    const slot = node.fields?.slot as { key?: unknown; kind?: unknown; role?: unknown } | undefined;
+    if (node.kind !== "literal" || slot?.kind !== "string" || slot.role !== "literal") {
+      return node;
+    }
+    return this.literal(`path:${String(slot.key)}`, "string", "path");
+  }
+
+  private isPathReceiver(node: PyNode, scope: PyScope): boolean {
+    if (node.name === "CallExpression") {
+      const callee = pyChildren(node)[0];
+      const resolved = callee === undefined ? undefined : this.resolveCallee(callee, scope);
+      return resolved?.api === "construct.path" && resolved.construct === true;
+    }
+    if (node.name === "ParenthesizedExpression") {
+      const inner = pyContentChildren(node)[0];
+      return inner !== undefined && this.isPathReceiver(inner, scope);
+    }
+    if (node.name !== "VariableName") {
+      return false;
+    }
+    const symbol = this.lookupLocal(this.text(node), scope);
+    return symbol !== undefined && this.pathValues.has(symbol);
+  }
+
+  private updatePathBinding(symbol: DraftSymbol, value: DraftNode): void {
+    if (this.ambiguousPathDepth === 0 && this.isPathDraft(value)) {
+      this.pathValues.add(symbol);
+      return;
+    }
+    this.pathValues.delete(symbol);
+  }
+
+  private isPathDraft(node: DraftNode): boolean {
+    if (node.kind === "new" && node.fields?.api === "construct.path") {
+      return true;
+    }
+    const symbol = node.fields?.symbol as DraftSymbol | undefined;
+    return node.kind === "identifier" && symbol !== undefined && this.pathValues.has(symbol);
+  }
+
+  private invalidateDestructuringPathBindings(targets: readonly PyNode[], scope: PyScope): void {
+    for (const target of targets) {
+      for (const name of this.namesInTarget(target)) {
+        const symbol = this.lookupLocal(name, scope);
+        if (symbol !== undefined) {
+          this.pathValues.delete(symbol);
+        }
+      }
+    }
+  }
+
+  private invalidatePathTargets(targets: readonly PyNode[], scope: PyScope): void {
+    for (const target of targets) {
+      for (const name of this.namesInTarget(target)) {
+        const symbol = this.lookupLocal(name, scope);
+        if (symbol !== undefined) {
+          this.pathValues.delete(symbol);
+        }
+      }
+    }
+  }
+
+  private assignmentTargetsInTree(node: PyNode): PyNode[] {
+    const targets: PyNode[] = [];
+    const visit = (current: PyNode): void => {
+      if (current.name === "FunctionDefinition" || current.name === "LambdaExpression") {
+        return;
+      }
+      if (current.name === "AssignStatement") {
+        targets.push(...this.assignmentTargetsOf(current));
+      }
+      if (current.name === "UpdateStatement") {
+        const children = pyChildren(current);
+        const operatorIndex = children.findIndex((child) => child.name === "UpdateOp");
+        targets.push(...children.slice(0, operatorIndex < 0 ? 0 : operatorIndex));
+      }
+      if (current.name === "ForStatement") {
+        const children = pyChildren(current);
+        const inIndex = children.findIndex((child) => child.name === "in");
+        for (const child of children.slice(0, inIndex < 0 ? 0 : inIndex)) {
+          if (child.name !== "for" && child.name !== "async" && child.name !== ",") {
+            targets.push(child);
+          }
+        }
+      }
+      if (current.name === "WithStatement" || current.name === "TryStatement") {
+        const children = pyChildren(current);
+        for (let index = 0; index < children.length; index += 1) {
+          const target = children[index + 1];
+          if (children[index].name === "as" && target?.name === "VariableName") {
+            targets.push(target);
+          }
+        }
+      }
+      if (current.name === "NamedExpression") {
+        const target = pyContentChildren(current)[0];
+        if (target !== undefined) {
+          targets.push(target);
+        }
+      }
+      for (const child of pyChildren(current)) {
+        visit(child);
+      }
+    };
+    visit(node);
+    return targets;
   }
 
   /**

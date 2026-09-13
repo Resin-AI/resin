@@ -231,6 +231,52 @@ describe("ComputationEvidenceRecorder", () => {
     expect(isSubstantiveComputationEvidence(success)).toBe(true);
   });
 
+  it("carries successful setup imports into a later Path-read and implicit-tuple cell", () => {
+    const recorder = createComputationEvidenceRecorder();
+    const sessionId = "sess_path_import";
+    const observeCell = (callId: string, code: string, sequence: number) => {
+      recorder.observe(
+        toolCall({
+          sessionId,
+          callId,
+          toolName: "eval",
+          parameters: { language: "py", code },
+          sequence,
+        }),
+      );
+      return recorder.observe(
+        toolResult({ sessionId, callId, toolName: "eval", sequence: sequence + 1 }),
+      );
+    };
+
+    observeCell("setup", "import json\nfrom pathlib import Path", 1);
+    const result = observeCell(
+      "analyze",
+      [
+        "path = Path('synthetic-records.json')",
+        "rows = json.loads(path.read_text())",
+        "values, enabled = [], []",
+        "for row in rows:",
+        "    values.append(row['value'])",
+        "    if row['enabled']:",
+        "        enabled.append(row['value'])",
+        "print(json.dumps({'total': sum(values), 'enabledTotal': sum(enabled)}))",
+      ].join("\n"),
+      3,
+    );
+    const evidence = readOf(result);
+    expect(evidence?.observation.status).toBe("success");
+    expect(evidence?.program.complete).toBe(true);
+    expect(evidence?.program.unsupportedReasons).toEqual([]);
+    expect(evidence?.program.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "new", api: "construct.path" }),
+        expect.objectContaining({ kind: "call", api: "fs.read_text" }),
+      ]),
+    );
+    expect(isSubstantiveComputationEvidence(evidence)).toBe(true);
+  });
+
   it("never mutates an event object it already returned", () => {
     const variant = variantOf("record-join-lineage", "corrected-helper");
     const recorder = createComputationEvidenceRecorder();
