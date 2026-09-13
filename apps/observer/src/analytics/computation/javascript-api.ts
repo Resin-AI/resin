@@ -51,6 +51,7 @@ export const JAVASCRIPT_INSTANCE_CALL_APIS: Readonly<Record<string, ComputationA
   substring: "string.slice",
   substr: "string.slice",
   toFixed: "number.to_fixed",
+  toISOString: "clock.iso_format",
   toLowerCase: "string.lower",
   toString: "core.to_string" as ComputationApi,
   toUpperCase: "string.upper",
