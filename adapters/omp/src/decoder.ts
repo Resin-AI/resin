@@ -30,6 +30,31 @@ import type {
 export const OMP_PROVIDER = "omp";
 export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
+/** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
+export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
+
+function boundedNativeArguments(
+  args: OmpTranscriptPayload | undefined,
+): OmpTranscriptPayload | undefined {
+  if (
+    args === undefined ||
+    typeof args.language !== "string" ||
+    !["py", "python", "js", "javascript", "ts", "typescript"].includes(
+      args.language.trim().toLowerCase(),
+    ) ||
+    typeof args.code !== "string" ||
+    Buffer.byteLength(args.code, "utf8") > 65_536 ||
+    (args.code.length === 0 && args.reset !== true)
+  ) {
+    return undefined;
+  }
+  return {
+    language: args.language,
+    code: args.code,
+    ...(args.reset === true ? { reset: true } : {}),
+  };
+}
+
 /** Recover target metadata from native edit syntax before content is redacted. */
 function editTargetPaths(parameters: DecoderMetadataRecord): string[] {
   const input = asString(parameters.input) ?? asString(parameters.patch);
@@ -892,7 +917,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     };
     // SAFETY: Record metadata is an arbitrary JSON dictionary normalized into an OmpTranscriptValue object.
     const rawMeta = record.metadata as OmpTranscriptValue;
-    const metadata = asObject(rawMeta) ?? {};
+    const metadata = { ...(asObject(rawMeta) ?? {}) };
+    // Only the decoder's own argument cache may create this private handoff.
+    delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
 
     const rawRole = asString(obj.role)?.toLowerCase();
     const rawType = String(
@@ -1655,14 +1682,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   ): IntermediateToolResultEvent {
     const toolResultObj = asObject(obj.toolResult) ?? asObject(obj.tool_result) ?? obj;
 
-    const callId = normalizeCallId(
+    const rawCallId =
       asString(toolResultObj.callId) ??
-        asString(toolResultObj.call_id) ??
-        asString(toolResultObj.toolCallId) ??
-        asString(toolResultObj.tool_call_id) ??
-        asString(toolResultObj.id),
-      `call_${causalRef.causalSequence}`,
-    );
+      asString(toolResultObj.call_id) ??
+      asString(toolResultObj.toolCallId) ??
+      asString(toolResultObj.tool_call_id) ??
+      asString(toolResultObj.id);
+    const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
+    // OMP may append the argument-less start marker before the assistant record. At result time,
+    // consume those genuinely observed late arguments by RAW id (which can contain a pipe suffix).
+    const lateArgs = rawCallId
+      ? this.getAndClearToolCallArguments(sessionId, rawCallId)
+      : undefined;
+    const lateName = rawCallId ? this.getAndClearToolCallName(sessionId, rawCallId) : undefined;
 
     let toolName = String(
       asString(toolResultObj.toolName) ??
@@ -1673,7 +1705,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     );
 
     if (!toolName || toolName === "unknown_tool") {
-      const correlated = this.getAndClearToolCallName(sessionId, callId);
+      const correlated = lateName ?? this.getAndClearToolCallName(sessionId, callId);
       if (correlated) {
         toolName = correlated;
       } else {
@@ -1722,13 +1754,26 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       0;
 
     const providerUsage = this.extractProviderUsage(obj, metadata);
+    const nativeArguments =
+      toolName === "eval" && lateName === "eval" ? boundedNativeArguments(lateArgs) : undefined;
+    const eventMetadata =
+      nativeArguments === undefined
+        ? metadata
+        : {
+            ...metadata,
+            [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: {
+              callId,
+              toolName,
+              parameters: nativeArguments,
+            },
+          };
 
     const evt: IntermediateToolResultEvent = {
       sessionId,
       timestamp,
       schemaVersion: "1.0.0",
       causalRef,
-      metadata,
+      metadata: eventMetadata,
       type: "tool_result",
       toolName,
       callId,

@@ -1,3 +1,4 @@
+import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent, NormalizedToolCallEvent } from "@resin/contracts";
 import {
   COMPUTATION_EVAL_TOOL_NAMES,
@@ -696,6 +697,26 @@ export function extractComputationSourceFrames(
       const related = options.relatedCall;
       if (related === undefined) {
         return [];
+      }
+      if (
+        related.toolName === "eval" &&
+        event.toolName === "eval" &&
+        related.callId === event.callId
+      ) {
+        const raw = event.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+        const handoff = raw as Record<string, unknown>;
+        const parameters = handoff.parameters;
+        if (
+          handoff.callId !== event.callId ||
+          handoff.toolName !== event.toolName ||
+          typeof parameters !== "object" ||
+          parameters === null ||
+          Array.isArray(parameters)
+        ) {
+          return [];
+        }
+        return framesFromEvalCall(event, parameters as Record<string, unknown>);
       }
       return has(READ_TOOLS, normalizeToolName(related.toolName))
         ? framesFromReadResult(event, related)

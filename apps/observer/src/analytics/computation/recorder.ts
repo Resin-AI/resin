@@ -1,3 +1,4 @@
+import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import {
   COMPUTATION_IR_LIMITS,
   type ComputationCorrectionV1,
@@ -33,6 +34,17 @@ import type {
   LocalComputationImport,
   LocalComputationModule,
 } from "./types.js";
+
+function withoutLocalNativeArguments(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (
+    !Object.prototype.hasOwnProperty.call(event.metadata ?? {}, RESIN_LOCAL_OMP_NATIVE_CALL_KEY)
+  ) {
+    return event;
+  }
+  const metadata = { ...event.metadata };
+  delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
+  return { ...event, metadata } as NormalizedSessionEvent;
+}
 
 /**
  * Session source recorder: turns observed native tool traffic into bounded, privacy-safe computation
@@ -115,6 +127,8 @@ interface PendingCall {
   order: number;
   /** Minimal read framing only; never retain the original tool arguments or result. */
   readPath?: string;
+  /** Retain a known kernel identity even when its body cannot produce a prepared frame. */
+  language?: ComputationLanguage;
   prepared?: PreparedFrame;
   /** Retained frame source bytes this pending call contributes to the session budget. */
   retainedBytes: number;
@@ -202,9 +216,11 @@ export class ComputationEvidenceRecorder {
       const replayKey = `${event.sessionId}\u0000${event.eventId}`;
       const replayed = this.replayed.get(replayKey);
       if (replayed !== undefined) {
-        return replayed.event.deref() === event ? (replayed.observed.deref() ?? event) : event;
+        return withoutLocalNativeArguments(
+          replayed.event.deref() === event ? (replayed.observed.deref() ?? event) : event,
+        );
       }
-      const observed = this.observeEvent(event);
+      const observed = withoutLocalNativeArguments(this.observeEvent(event));
       if (this.replayIds.size >= MAX_REPLAY_EVENTS) {
         const oldest = this.replayIds.values().next().value;
         if (oldest !== undefined) {
@@ -220,7 +236,7 @@ export class ComputationEvidenceRecorder {
       });
       return observed;
     } catch {
-      return event;
+      return withoutLocalNativeArguments(event);
     }
   }
 
@@ -345,6 +361,14 @@ export class ComputationEvidenceRecorder {
     for (const [callId, pending] of session.pending) {
       const earlier = pending.prepared;
       if (
+        earlier === undefined &&
+        pending.toolName === "eval" &&
+        frame.executionScope === "persistent"
+      ) {
+        this.abandonPending(session, callId, pending);
+        continue;
+      }
+      if (
         earlier !== undefined &&
         ((frame.executionScope === "persistent" &&
           earlier.executionScope === "persistent" &&
@@ -370,6 +394,7 @@ export class ComputationEvidenceRecorder {
       toolName: event.toolName,
       callSequence: event.causalRef.causalSequence,
       order: this.nextOrder++,
+      ...(frame.executionScope === "persistent" ? { language: frame.language } : {}),
       // The frame source is retained while the call is unresolved; released on settlement.
       retainedBytes: 0,
     };
@@ -413,17 +438,21 @@ export class ComputationEvidenceRecorder {
 
     let prepared = pending.prepared;
     if (prepared === undefined) {
-      const relatedCall: NormalizedToolCallEvent | undefined =
-        pending.readPath === undefined
-          ? undefined
-          : {
-              ...event,
-              type: "tool_call",
-              eventId: pending.callEventId,
-              parameters: { path: pending.readPath },
-            };
+      const relatedCall: NormalizedToolCallEvent = {
+        ...event,
+        type: "tool_call",
+        eventId: pending.callEventId,
+        parameters: pending.readPath === undefined ? {} : { path: pending.readPath },
+      };
       const frame = this.framesFor(event, session, relatedCall)[0];
-      if (frame === undefined || this.applyFrameControl(session, frame)) {
+      if (frame === undefined) {
+        this.abandonPending(session, event.callId, pending);
+        return event;
+      }
+      if (frame.executionScope === "persistent") {
+        pending.language = frame.language;
+      }
+      if (this.applyFrameControl(session, frame)) {
         // No bounded representation: settle the pairing so a late result cannot revive it.
         this.settlePending(session, event.callId, pending, true);
         return event;
@@ -432,6 +461,13 @@ export class ComputationEvidenceRecorder {
     }
     this.settlePending(session, event.callId, pending, true);
     if (prepared === undefined || session.pairingDisabled) {
+      if (pending.prepared === undefined && pending.toolName === "eval") {
+        if (pending.language !== undefined) {
+          this.resetKernel(session, pending.language);
+        } else {
+          this.resetUnknownNativeKernels(session);
+        }
+      }
       return event;
     }
 
@@ -576,14 +612,31 @@ export class ComputationEvidenceRecorder {
   }
 
   /**
-   * Retains a call whose body will only appear in its result. Only a call carrying a path-like
-   * parameter can become a read frame, so unrelated calls never occupy the pending budget.
+   * Retains a read-path call or an identity-only native eval marker whose observed arguments arrive
+   * later. No raw arguments or results are retained by this pending entry.
    */
   private retainResultBodyCandidate(
     session: RecordedSession,
     event: NormalizedToolCallEvent,
   ): void {
     const parameters = (event.parameters ?? {}) as Readonly<Record<string, unknown>>;
+    if (event.toolName === "eval") {
+      for (const [callId, pending] of [...session.pending]) {
+        if (pending.toolName === "eval" || pending.prepared?.executionScope === "persistent") {
+          this.abandonPending(session, callId, pending);
+          this.resetUnknownNativeKernels(session);
+        }
+      }
+      this.addPending(session, event.callId, {
+        callId: event.callId,
+        callEventId: event.eventId,
+        toolName: event.toolName,
+        callSequence: event.causalRef.causalSequence,
+        order: this.nextOrder++,
+        retainedBytes: 0,
+      });
+      return;
+    }
     const path =
       parameters.path ?? parameters.filePath ?? parameters.file_path ?? parameters.target;
     if (typeof path !== "string" || path.length === 0 || byteLength(path) > 4096) {
@@ -598,6 +651,12 @@ export class ComputationEvidenceRecorder {
       readPath: path,
       retainedBytes: byteLength(path),
     });
+  }
+
+  private resetUnknownNativeKernels(session: RecordedSession): void {
+    for (const language of [...session.kernels.keys()]) {
+      this.resetKernel(session, language);
+    }
   }
 
   private addPending(session: RecordedSession, key: string, pending: PendingCall): boolean {
@@ -672,6 +731,13 @@ export class ComputationEvidenceRecorder {
       this.invalidateTouched(session, pending.prepared);
     } else if (pending.readPath !== undefined) {
       this.invalidateFile(session, pending.readPath);
+    } else if (pending.toolName === "eval") {
+      if (pending.language !== undefined) {
+        this.resetKernel(session, pending.language);
+      } else {
+        // Only an unattributable body may have changed either persistent kernel.
+        this.resetUnknownNativeKernels(session);
+      }
     }
     this.settlePending(session, callId, pending, true);
   }
