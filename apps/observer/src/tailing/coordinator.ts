@@ -353,6 +353,13 @@ export class ObserverCoordinator extends EventEmitter {
       }
     }
 
+    // Pull-only sources need ongoing reads as well as discovery. Pump every
+    // attached session, including idle ones with unread backlog, without waiting
+    // for downstream delivery. The tailer guards capacity and concurrent pumps.
+    for (const sessionId of this.tailer.getActiveSessions()) {
+      void this.tailer.pumpSession(sessionId);
+    }
+
     this.pollCyclesCompleted++;
     this.lastPollSummary = summary;
     this.emit("poll:completed", summary);

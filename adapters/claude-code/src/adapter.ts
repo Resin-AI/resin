@@ -115,10 +115,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
         const normalized = path.normalize(filePath);
         for (const dir of targetDirs) {
           const normalizedDir = path.normalize(dir);
-          const dirWithSep = normalizedDir.endsWith(path.sep)
-            ? normalizedDir
-            : `${normalizedDir}${path.sep}`;
-          if (normalized.startsWith(dirWithSep) && normalized.endsWith(".jsonl")) {
+          if (path.dirname(normalized) === normalizedDir && normalized.endsWith(".jsonl")) {
             const fileName = path.basename(normalized);
             const sessionId = path.basename(normalized, ".jsonl");
             if (!seenSessionIds.has(sessionId)) {
@@ -128,7 +125,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
                 workspaceId: workspace.workspaceId,
                 harnessId: this.id,
                 transcriptPath: normalized,
-                status: sessionId === workspace.activeSessionId ? "active" : "completed",
+                status: "active",
                 createdAt: nowIso(),
                 updatedAt: nowIso(),
                 metadata: { transcriptFile: fileName },
@@ -148,16 +145,21 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
           for (const entry of entries) {
             if (entry.isFile() && entry.name.endsWith(".jsonl")) {
               const sessionId = path.basename(entry.name, ".jsonl");
+              const transcriptPath = path.join(dir, entry.name);
+              const stat = await fs.stat(transcriptPath);
+              const isRecent = Date.now() - stat.mtimeMs < 5 * 60 * 1000;
               if (!seenSessionIds.has(sessionId)) {
                 seenSessionIds.add(sessionId);
                 sessions.push({
                   sessionId,
                   workspaceId: workspace.workspaceId,
                   harnessId: this.id,
-                  transcriptPath: path.join(dir, entry.name),
-                  status: sessionId === workspace.activeSessionId ? "active" : "completed",
-                  createdAt: nowIso(),
-                  updatedAt: nowIso(),
+                  transcriptPath,
+                  // Recent writes enable initial attachment; quiet historical files stay idle.
+                  // Inactivity is not completion: attached Claude sessions can resume later.
+                  status: isRecent ? "active" : "idle",
+                  createdAt: stat.birthtime.toISOString(),
+                  updatedAt: stat.mtime.toISOString(),
                   metadata: { transcriptFile: entry.name },
                 });
               }
@@ -174,7 +176,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
 
   async resolveActiveSession(workspace: HarnessWorkspace): Promise<HarnessSession | null> {
     const sessions = await this.listSessions(workspace);
-    return sessions.length > 0 ? sessions[0] : null;
+    return sessions.find((session) => session.status === "active") ?? null;
   }
 
   async openEventSource(

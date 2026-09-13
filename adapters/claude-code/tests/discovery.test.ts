@@ -152,13 +152,13 @@ describe("Claude Code Discovery & Installation Probing", () => {
     expect(current?.harnessId).toBe("claude-code");
   });
 
-  it("detects workspaces from ~/.claude/projects project directories and decodes paths", async () => {
+  it("detects workspaces from exact project metadata rather than decoding directory names", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
     const homeDir = "/home/testuser";
     await fsBridge.mkdirp(`${homeDir}/.claude/projects/-home-user-Projects-demo`);
     await fsBridge.writeFile(
       `${homeDir}/.claude/projects/-home-user-Projects-demo/session.jsonl`,
-      '{"type":"session_start","sessionId":"session-001"}\n',
+      '{"type":"user","sessionId":"session","cwd":"/home/user/Projects/demo"}\n',
     );
 
     const workspaces = await detectClaudeWorkspaces(homeDir, fsBridge);
@@ -169,5 +169,104 @@ describe("Claude Code Discovery & Installation Probing", () => {
     expect(demoWs?.name).toBe("demo");
     expect(demoWs?.harnessId).toBe("claude-code");
     expect(demoWs?.metadata?.discoveredFrom).toBe("projectsDir");
+  });
+
+  it("preserves Windows drive paths and hyphens from the session index", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const projectDir = "/home/testuser/.claude/projects/C--Users-test-user-demo-app";
+    await fsBridge.writeFile(
+      `${projectDir}/sessions-index.json`,
+      JSON.stringify({ version: 1, originalPath: "C:\\Users\\test-user\\demo-app", entries: [] }),
+    );
+
+    const workspaces = await detectClaudeWorkspaces("/home/testuser", fsBridge);
+
+    expect(workspaces.map((workspace) => [workspace.rootPath, workspace.configPath])).toEqual([
+      ["C:\\Users\\test-user\\demo-app", "C:\\Users\\test-user\\demo-app\\.claude.json"],
+    ]);
+  });
+
+  it.each([
+    ["missing metadata", '{"type":"user","sessionId":"session"}\n'],
+    ["relative cwd", '{"type":"user","sessionId":"session","cwd":"workspace/demo-app"}\n'],
+    ["different project", '{"type":"user","sessionId":"session","cwd":"/workspace/other"}\n'],
+    ["different session", '{"type":"user","sessionId":"other","cwd":"/workspace/demo-app"}\n'],
+    [
+      "sidechain cwd",
+      '{"type":"user","sessionId":"session","cwd":"/workspace/demo-app","isSidechain":true}\n',
+    ],
+    [
+      "nested tool cwd",
+      '{"type":"user","sessionId":"session","message":{"cwd":"/workspace/demo-app"}}\n',
+    ],
+    [
+      "ambiguous matching roots",
+      '{"type":"user","sessionId":"session","cwd":"/workspace/demo-app"}\n' +
+        '{"type":"assistant","sessionId":"session","cwd":"/workspace/demo/app"}\n',
+    ],
+  ])("does not invent a root from %s", async (_label, content) => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    await fsBridge.writeFile(
+      "/home/testuser/.claude/projects/-workspace-demo-app/session.jsonl",
+      content,
+    );
+
+    expect(await detectClaudeWorkspaces("/home/testuser", fsBridge)).toEqual([]);
+  });
+
+  it("ignores subagent transcripts when resolving the project root", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const projectDir = "/home/testuser/.claude/projects/-workspace-demo-app";
+    await fsBridge.writeFile(
+      `${projectDir}/session/subagents/agent.jsonl`,
+      '{"type":"user","sessionId":"agent","cwd":"/workspace/demo-app"}\n',
+    );
+
+    expect(await detectClaudeWorkspaces("/home/testuser", fsBridge)).toEqual([]);
+  });
+
+  it("rejects conflicting index and transcript roots that share a lossy encoding", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const projectDir = "/home/testuser/.claude/projects/-workspace-demo-app";
+    await fsBridge.writeFile(
+      `${projectDir}/sessions-index.json`,
+      JSON.stringify({ originalPath: "/workspace/demo-app", entries: [] }),
+    );
+    await fsBridge.writeFile(
+      `${projectDir}/session.jsonl`,
+      '{"type":"user","sessionId":"session","cwd":"/workspace/demo/app"}\n',
+    );
+
+    expect(await detectClaudeWorkspaces("/home/testuser", fsBridge)).toEqual([]);
+  });
+
+  it("uses exact index entry paths when the transcript metadata is not yet complete", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const projectDir = "/home/testuser/.claude/projects/-workspace-demo-app";
+    await fsBridge.writeFile(
+      `${projectDir}/sessions-index.json`,
+      JSON.stringify({ entries: [{ projectPath: "/workspace/demo-app" }] }),
+    );
+    await fsBridge.writeFile(`${projectDir}/session.jsonl`, '{"type":"user"');
+
+    const workspaces = await detectClaudeWorkspaces("/home/testuser", fsBridge);
+
+    expect(workspaces.map((workspace) => workspace.rootPath)).toEqual(["/workspace/demo-app"]);
+  });
+
+  it("keeps project session discovery when the workspace also has a cwd marker", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const cwd = process.cwd();
+    const projectDir = `/home/testuser/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, "-")}`;
+    await fsBridge.writeFile(`${cwd}/.claude.json`, "{}");
+    await fsBridge.writeFile(
+      `${projectDir}/sessions-index.json`,
+      JSON.stringify({ originalPath: cwd, entries: [] }),
+    );
+
+    const workspaces = await detectClaudeWorkspaces("/home/testuser", fsBridge);
+
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0].metadata?.projectDir).toBe(projectDir);
   });
 });

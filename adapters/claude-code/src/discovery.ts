@@ -5,12 +5,17 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { nowIso } from "@resin/contracts";
 import type { ProbeInstallationOptions } from "@resin/harness-contracts";
-import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import {
+  type ConfigFsBridge,
+  InMemoryConfigFsBridge,
+  defaultFsBridge,
+} from "@resin/harness-contracts";
 import type {
   HarnessInstallation,
   HarnessWorkspace,
   InstallationStatus,
 } from "@resin/harness-contracts";
+import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 
@@ -296,15 +301,111 @@ export async function probeClaudeInstallation(
   };
 }
 
-/**
- * Decodes an encoded project directory name (e.g. "-home-user-Projects-demo")
- * into a filesystem root path ("/home/user/Projects/demo").
- */
-export function decodeClaudeProjectPath(dirName: string): string {
-  if (!dirName) return "/";
-  // Replace all '-' with '/' to decode the directory path
-  const decoded = dirName.replace(/-/g, "/");
-  return decoded.startsWith("/") ? decoded : `/${decoded}`;
+const PROJECT_METADATA_BYTES = 64 * 1024;
+const projectIndexSchema = z.object({
+  originalPath: z.string().optional(),
+  entries: z.array(z.object({ projectPath: z.string().optional() })).optional(),
+});
+const transcriptMetadataSchema = z.object({
+  type: z.enum(["user", "assistant", "system", "session_start"]),
+  sessionId: z.string(),
+  cwd: z.string(),
+  isSidechain: z.boolean().optional(),
+});
+
+function projectPathApi(rootPath: string): typeof path {
+  return /^[a-zA-Z]:[\\/]/.test(rootPath) || rootPath.startsWith("\\\\") ? path.win32 : path.posix;
+}
+
+async function readProjectMetadata(
+  filePath: string,
+  fsBridge: ConfigFsBridge,
+): Promise<string | null> {
+  if (fsBridge instanceof InMemoryConfigFsBridge) {
+    const content = await fsBridge.readFile(filePath);
+    return content === null ? null : content.slice(0, PROJECT_METADATA_BYTES);
+  }
+  try {
+    const stat = await fs.lstat(filePath);
+    if (!stat.isFile()) return null;
+    const file = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(PROJECT_METADATA_BYTES);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      return buffer.toString("utf8", 0, bytesRead);
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function resolveClaudeProjectRoot(
+  projectDir: string,
+  fsBridge: ConfigFsBridge,
+  dump: Record<string, string> | null,
+): Promise<string | null> {
+  const encodedName = path.basename(projectDir);
+  const roots = new Set<string>();
+  const addRoot = (candidate: string | undefined) => {
+    if (!candidate || /[\0\r\n]/.test(candidate)) return;
+    const pathApi = projectPathApi(candidate);
+    if (!pathApi.isAbsolute(candidate)) return;
+    // Claude's encoding is lossy. Verify metadata belongs to this directory,
+    // but never attempt to reverse the encoding into a filesystem path.
+    if (candidate.replace(/[^a-zA-Z0-9]/g, "-") !== encodedName) return;
+    const normalized = pathApi.normalize(candidate);
+    if (normalized !== candidate) return;
+    roots.add(candidate);
+  };
+
+  const index = await readProjectMetadata(path.join(projectDir, "sessions-index.json"), fsBridge);
+  if (index) {
+    try {
+      const parsed = projectIndexSchema.safeParse(JSON.parse(index));
+      if (parsed.success) {
+        addRoot(parsed.data.originalPath);
+        for (const entry of parsed.data.entries ?? []) addRoot(entry.projectPath);
+      }
+    } catch {
+      // A missing, partial, or corrupt index can be recovered from transcript metadata.
+    }
+  }
+
+  let transcriptPaths: string[] = [];
+  if (dump) {
+    transcriptPaths = Object.keys(dump).filter(
+      (filePath) => path.dirname(filePath) === projectDir && filePath.endsWith(".jsonl"),
+    );
+  } else {
+    try {
+      const entries = await fs.readdir(projectDir, { withFileTypes: true });
+      transcriptPaths = entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+        .map((entry) => path.join(projectDir, entry.name));
+    } catch {
+      // An unreadable project without exact metadata cannot be discovered safely.
+    }
+  }
+  for (const transcriptPath of transcriptPaths) {
+    const content = await readProjectMetadata(transcriptPath, fsBridge);
+    if (!content) continue;
+    const sessionId = path.basename(transcriptPath, ".jsonl");
+    for (const line of content.slice(0, content.lastIndexOf("\n") + 1).split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = transcriptMetadataSchema.safeParse(JSON.parse(line));
+        if (parsed.success && parsed.data.sessionId === sessionId && !parsed.data.isSidechain) {
+          addRoot(parsed.data.cwd);
+        }
+      } catch {
+        // Transcript records can be partially written or non-JSON.
+      }
+    }
+    if (roots.size > 1) return null;
+  }
+  return roots.size === 1 ? (roots.values().next().value ?? null) : null;
 }
 
 /**
@@ -375,7 +476,7 @@ export async function detectClaudeWorkspaces(
       const normalized = path.normalize(filePath);
       for (const projectsDir of projectsDirs) {
         const normalizedProjectsDir = path.normalize(projectsDir);
-        if (normalized.startsWith(normalizedProjectsDir)) {
+        if (normalized.startsWith(`${normalizedProjectsDir}${path.sep}`)) {
           const rel = path.relative(normalizedProjectsDir, normalized);
           const parts = rel.split(path.sep).filter(Boolean);
           if (parts.length >= 1) {
@@ -405,22 +506,31 @@ export async function detectClaudeWorkspaces(
   // 3. Process each discovered project directory
   for (const projectDirPath of discoveredProjectDirs) {
     const projectDirName = path.basename(projectDirPath);
-    const decodedRoot = decodeClaudeProjectPath(projectDirName);
-    const normalizedRoot = path.normalize(decodedRoot);
+    const normalizedRoot = await resolveClaudeProjectRoot(projectDirPath, fsBridge, dump);
+    if (!normalizedRoot) continue;
+    const rootPathApi = projectPathApi(normalizedRoot);
 
     if (seenRootPaths.has(normalizedRoot)) {
+      const existing = workspaces.find((workspace) => workspace.rootPath === normalizedRoot);
+      if (existing) {
+        existing.metadata = {
+          ...existing.metadata,
+          projectDir: projectDirPath,
+          encodedProjectName: projectDirName,
+        };
+      }
       continue;
     }
     seenRootPaths.add(normalizedRoot);
 
-    const baseName = path.basename(normalizedRoot) || projectDirName;
+    const baseName = rootPathApi.basename(normalizedRoot) || projectDirName;
     workspaces.push({
       workspaceId: `claude-ws-${projectDirName}`,
       name: baseName,
       rootPath: normalizedRoot,
       harnessId: "claude-code",
-      configPath: path.join(normalizedRoot, ".claude.json"),
-      mcpConfigPath: path.join(normalizedRoot, ".claude.json"),
+      configPath: rootPathApi.join(normalizedRoot, ".claude.json"),
+      mcpConfigPath: rootPathApi.join(normalizedRoot, ".claude.json"),
       metadata: {
         discoveredFrom: "projectsDir",
         projectDir: projectDirPath,

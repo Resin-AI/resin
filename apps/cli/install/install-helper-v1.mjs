@@ -8837,13 +8837,25 @@ var init_config_planner = __esm({
 // adapters/claude-code/dist/discovery.js
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-var execFileAsync;
+var execFileAsync, PROJECT_METADATA_BYTES, projectIndexSchema, transcriptMetadataSchema;
 var init_discovery = __esm({
   "adapters/claude-code/dist/discovery.js"() {
     "use strict";
     init_dist();
     init_dist2();
+    init_zod();
     execFileAsync = promisify(execFile);
+    PROJECT_METADATA_BYTES = 64 * 1024;
+    projectIndexSchema = external_exports.object({
+      originalPath: external_exports.string().optional(),
+      entries: external_exports.array(external_exports.object({ projectPath: external_exports.string().optional() })).optional()
+    });
+    transcriptMetadataSchema = external_exports.object({
+      type: external_exports.enum(["user", "assistant", "system", "session_start"]),
+      sessionId: external_exports.string(),
+      cwd: external_exports.string(),
+      isSidechain: external_exports.boolean().optional()
+    });
   }
 });
 
