@@ -25,7 +25,11 @@ import type { KillSwitchManager } from "../observability/kill-switches.js";
 import { StructuralClusterer } from "./clustering.js";
 import { CoverageEngine } from "./coverage.js";
 import { EpisodeSegmenter } from "./episode.js";
-import { deriveEstimatedSavedWork, deriveScenarioProvenance } from "./saved-work.js";
+import {
+  deriveEstimatedSavedWork,
+  deriveScenarioProvenance,
+  hasCredibleComputationAuthoringBenefit,
+} from "./saved-work.js";
 import { SignatureExtractor } from "./signature.js";
 import { SuppressionEngine } from "./suppression.js";
 import { TriggerEvaluator } from "./triggers.js";
@@ -51,7 +55,7 @@ export interface SessionOpportunityTrackerOptions {
   logger?: Logger;
   /** Injectable clock in epoch milliseconds. */
   now?: () => number;
-  /** Cost of synthesizing one tool, in USD. Dispatch requires projected savings to beat it. */
+  /** Cost threshold for candidates with priced savings; unpriced computation uses bounded authoring evidence. */
   synthesisCostUsd?: number;
   /** Minimum evidence-maturity confidence (0..1) required to dispatch. */
   minDispatchConfidence?: number;
@@ -578,8 +582,17 @@ export class SessionOpportunityTracker {
       if (confidence < this.minDispatchConfidence) {
         continue;
       }
-      // Dynamic dispatch predicate: only pay for synthesis when discounted savings clear it.
-      if (this.expectedSavingsUsd(estimatedSavedWork) * confidence <= this.synthesisCostUsd) {
+      // Priced candidates must clear the existing cost floor. A complete computation can instead
+      // demonstrate conservative authoring work without inventing a dollar conversion. Cloud still
+      // applies its normal admission, synthesis-budget and quota gates.
+      const unpricedComputationBenefit =
+        estimatedSavedWork.estimatedCostSavedUsd === undefined &&
+        estimatedSavedWork.savedCostUsd === undefined &&
+        hasCredibleComputationAuthoringBenefit(cluster);
+      if (
+        !unpricedComputationBenefit &&
+        this.expectedSavingsUsd(estimatedSavedWork) * confidence <= this.synthesisCostUsd
+      ) {
         continue;
       }
 

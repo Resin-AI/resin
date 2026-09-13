@@ -9,7 +9,7 @@ import {
   DaemonConfigSchema,
   type DaemonPaths,
   resolvePaths,
-} from "@resin/observer";
+} from "@resin/observer/client";
 
 export const resolveDaemonPaths = resolvePaths;
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";

@@ -10,7 +10,7 @@ import {
   type CloudRequestIdentity,
   type PersistCloudCredentialsInput,
   type StoredCloudCredentials,
-} from "@resin/observer";
+} from "@resin/observer/client";
 import {
   type AuthClaims,
   type AuthScope,

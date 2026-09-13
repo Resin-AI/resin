@@ -6762,6 +6762,1602 @@ var init_v1 = __esm({
   }
 });
 
+// packages/contracts/dist/computation-evidence.js
+function normalizeFieldKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+function fieldKeySegments(key) {
+  return key.split(/[^A-Za-z0-9]+/).flatMap((part) => part.split(/(?=[A-Z])/)).map((part) => part.toLowerCase()).filter((part) => part.length > 0);
+}
+function isSafeComputationFieldKey(key) {
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(key)) {
+    return false;
+  }
+  const normalized = normalizeFieldKey(key);
+  if (normalized.length === 0 || Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_KEY_LOOKUP, normalized)) {
+    return false;
+  }
+  return fieldKeySegments(key).every((segment) => !Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_SEGMENTS, segment) && !Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_PREFIX_SEGMENTS, segment));
+}
+function childrenOf(min, max) {
+  return NodeIdList.min(min).max(max);
+}
+function nodeOf(kind, children, fields) {
+  return external_exports.object({
+    id: ComputationNodeIdSchema,
+    kind: external_exports.literal(kind),
+    children,
+    ...fields
+  }).strict();
+}
+function checkProgramStructure(program) {
+  const issues = [];
+  const report = (path10, code, detail) => issues.push({ path: path10, message: `${code}: ${detail}` });
+  if (program.nodes.length > COMPUTATION_IR_LIMITS.nodes) {
+    report(["nodes"], COMPUTATION_VALIDATION_CODES.LIMIT_NODES, "node limit exceeded");
+  }
+  if (program.symbols.length > COMPUTATION_IR_LIMITS.symbols) {
+    report(["symbols"], COMPUTATION_VALIDATION_CODES.LIMIT_SYMBOLS, "symbol limit exceeded");
+  }
+  if (program.slots.length > COMPUTATION_IR_LIMITS.slots) {
+    report(["slots"], COMPUTATION_VALIDATION_CODES.LIMIT_SLOTS, "slot limit exceeded");
+  }
+  if (program.definitions.length > COMPUTATION_IR_LIMITS.definitions) {
+    report(["definitions"], COMPUTATION_VALIDATION_CODES.LIMIT_DEFINITIONS, "definition limit exceeded");
+  }
+  const nodeById = /* @__PURE__ */ new Map();
+  program.nodes.forEach((node, index) => {
+    if (node.id !== `n${index}`) {
+      report(["nodes", index, "id"], COMPUTATION_VALIDATION_CODES.NODE_ORDER, `nodes must be in canonical pre-order with positional ids; expected 'n${index}'`);
+    }
+    nodeById.set(node.id, { index, value: node });
+  });
+  const symbolById = /* @__PURE__ */ new Map();
+  program.symbols.forEach((symbol, index) => {
+    if (symbol.id !== `sym${index}`) {
+      report(["symbols", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `symbols must be positional anonymous ids; expected 'sym${index}'`);
+    }
+    symbolById.set(symbol.id, symbol);
+  });
+  const slotById = /* @__PURE__ */ new Map();
+  program.slots.forEach((slot, index) => {
+    if (slot.id !== `slot${index}`) {
+      report(["slots", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `slots must be positional anonymous ids; expected 'slot${index}'`);
+    }
+    slotById.set(slot.id, slot);
+  });
+  const definitionIndexById = /* @__PURE__ */ new Map();
+  const definitionBySymbol = /* @__PURE__ */ new Map();
+  const definitionBodyIds = /* @__PURE__ */ new Set();
+  program.definitions.forEach((definition, index) => {
+    if (definition.id !== `def${index}`) {
+      report(["definitions", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `definitions must be positional anonymous ids; expected 'def${index}'`);
+    }
+    if (definition.scope !== `scope${index + 1}`) {
+      report(["definitions", index, "scope"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `definition scope must be 'scope${index + 1}'`);
+    }
+    if (definitionBySymbol.has(definition.nameSymbol)) {
+      report(["definitions", index, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, "each definition symbol may carry at most one definition record");
+    }
+    definitionIndexById.set(definition.id, index);
+    definitionBySymbol.set(definition.nameSymbol, definition);
+    definitionBodyIds.add(definition.body);
+  });
+  const nestedScopeByNode = /* @__PURE__ */ new Map();
+  for (const node of program.nodes) {
+    if ((node.kind === "function" || node.kind === "lambda") && !definitionBodyIds.has(node.id)) {
+      nestedScopeByNode.set(node.id, `scope${program.definitions.length + nestedScopeByNode.size + 1}`);
+    }
+  }
+  const definitionScopes = new Set(program.definitions.map((definition) => definition.scope));
+  const knownScopes = /* @__PURE__ */ new Set([
+    "scope0",
+    ...definitionScopes,
+    ...nestedScopeByNode.values()
+  ]);
+  const referenceNode = (path10, id) => {
+    if (!nodeById.has(id)) {
+      report(path10, COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown node reference '${id}'`);
+      return false;
+    }
+    return true;
+  };
+  const usedSymbols = /* @__PURE__ */ new Set();
+  const usedSlots = /* @__PURE__ */ new Set();
+  const declarationSites = /* @__PURE__ */ new Map();
+  const readSites = [];
+  const enclosingScope = /* @__PURE__ */ new Map();
+  const bindingTargetKinds = {
+    assign: true,
+    for: true,
+    for_clause: true,
+    with: true
+  };
+  program.nodes.forEach((node, index) => {
+    const nodePath = ["nodes", index];
+    const record = node;
+    if (node.kind === "literal" && node.constant === void 0 === (node.slot === void 0)) {
+      report([...nodePath, "constant"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a literal node must carry exactly one of a finite constant or an anonymous slot");
+    }
+    if (node.kind === "member" || node.kind === "pair") {
+      if (node.field === void 0 === (node.fieldSlot === void 0)) {
+        report([...nodePath, "field"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "exactly one of 'field' or 'fieldSlot' is required");
+      }
+    }
+    if (node.kind === "compare" || node.kind === "boolean") {
+      if (node.operators.length !== node.children.length - 1) {
+        report([...nodePath, "operators"], COMPUTATION_VALIDATION_CODES.CHILD_ARITY, `expected ${node.children.length - 1} operator(s) for ${node.children.length} operand(s)`);
+      }
+    }
+    if (node.kind === "slice") {
+      const boundCount = node.children.length - 1;
+      if (boundCount > 0 && node.slicePart === void 0) {
+        report([...nodePath, "slicePart"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a slice with bounds must declare 'slicePart'");
+      }
+      if (node.slicePart !== void 0) {
+        const remainingRoles = COMPUTATION_SLICE_PARTS.length - COMPUTATION_SLICE_PARTS.indexOf(node.slicePart);
+        if (boundCount < 1 || boundCount > remainingRoles) {
+          report([...nodePath, "children"], COMPUTATION_VALIDATION_CODES.CHILD_ARITY, `slicePart '${node.slicePart}' allows 1..${remainingRoles} bound(s) after the target, received ${boundCount}`);
+        }
+      }
+    }
+    if (node.kind === "call") {
+      if (node.api === void 0 === (node.symbol === void 0)) {
+        report([...nodePath, "api"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a call must select exactly one of a finite canonical 'api' or a resolved definition 'symbol'");
+      }
+      if (node.symbol !== void 0) {
+        const callee = symbolById.get(node.symbol);
+        if (callee === void 0 || callee.kind !== "definition" || !definitionBySymbol.has(node.symbol)) {
+          report([...nodePath, "symbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `call target '${node.symbol}' must be a materialized definition symbol (aliases resolve in the parser)`);
+        }
+      }
+    }
+    if (node.kind === "new") {
+      if (!Object.prototype.hasOwnProperty.call(CONSTRUCT_APIS, node.api)) {
+        report([...nodePath, "api"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, `'new' must construct a 'construct.*' API, received '${node.api}'`);
+      }
+    }
+    if ((node.kind === "call" || node.kind === "new") && node.keywordArgs !== void 0) {
+      const seenNames = /* @__PURE__ */ new Set();
+      node.keywordArgs.forEach((arg, argIndex) => {
+        if (seenNames.has(arg.name)) {
+          report([...nodePath, "keywordArgs", argIndex, "name"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, `duplicate keyword argument name '${arg.name}'`);
+        }
+        seenNames.add(arg.name);
+      });
+    }
+    if (node.kind === "function" || node.kind === "lambda") {
+      const isDefinitionBody = definitionBodyIds.has(node.id);
+      const ownerIndex = Number(node.scope.slice("scope".length)) - 1;
+      const claimedDefinition = Number.isInteger(ownerIndex) && ownerIndex >= 0 ? program.definitions[ownerIndex] : void 0;
+      if (isDefinitionBody) {
+        const owner = program.definitions.find((definition) => definition.body === node.id);
+        if (owner === void 0 || owner.scope !== node.scope) {
+          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition body '${node.id}' must claim its definition scope '${owner?.scope ?? "unknown"}'`);
+        } else if (owner.nameSymbol !== node.symbol) {
+          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `definition body '${node.id}' must declare the definition symbol '${owner.nameSymbol}'`);
+        }
+      } else {
+        const expectedScope = nestedScopeByNode.get(node.id);
+        if (node.scope !== expectedScope) {
+          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `nested function scope must be '${expectedScope ?? "a definition scope"}'`);
+        }
+        if (claimedDefinition !== void 0) {
+          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `nested function '${node.id}' must not claim definition scope '${node.scope}'`);
+        }
+      }
+    }
+    const isDeclarationKind = Object.prototype.hasOwnProperty.call(SYMBOL_FIELD_BINDING_NODE_KINDS, node.kind);
+    if (isDeclarationKind && typeof record.symbol === "string") {
+      const sites = declarationSites.get(record.symbol) ?? [];
+      sites.push(node.id);
+      declarationSites.set(record.symbol, sites);
+    }
+    if (Object.prototype.hasOwnProperty.call(bindingTargetKinds, node.kind) && node.children.length > 0) {
+      const target = nodeById.get(node.children[0])?.value;
+      if (target !== void 0 && target.kind === "identifier") {
+        const sites = declarationSites.get(target.symbol) ?? [];
+        sites.push(target.id);
+        declarationSites.set(target.symbol, sites);
+      }
+    }
+    for (const [field, value] of Object.entries(record)) {
+      if (value === void 0) {
+        continue;
+      }
+      if (field === "symbol") {
+        if (typeof value === "string") {
+          if (!symbolById.has(value)) {
+            report([...nodePath, field], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown symbol reference '${value}'`);
+          } else if (!(declarationSites.get(value) ?? []).includes(node.id)) {
+            usedSymbols.add(value);
+            readSites.push({ nodeId: node.id, symbolId: value });
+          }
+        }
+        continue;
+      }
+      if (field === "slot" || field === "fieldSlot") {
+        if (typeof value === "string") {
+          if (slotById.has(value)) {
+            usedSlots.add(value);
+          } else {
+            report([...nodePath, field], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown slot reference '${value}'`);
+          }
+        }
+      }
+      if (field === "scope" && typeof value === "string" && !knownScopes.has(value)) {
+        report([...nodePath, field], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `unknown scope '${value}'`);
+      }
+    }
+    node.children.forEach((child, childIndex) => referenceNode([...nodePath, "children", childIndex], child));
+    for (const field of COMPUTATION_NODE_FIELDS[node.kind].nodeFields) {
+      const value = record[field];
+      if (typeof value === "string") {
+        referenceNode([...nodePath, field], value);
+      }
+    }
+    if ((node.kind === "call" || node.kind === "new") && node.keywordArgs !== void 0) {
+      node.keywordArgs.forEach((arg, argIndex) => {
+        referenceNode([...nodePath, "keywordArgs", argIndex, "value"], arg.value);
+      });
+    }
+  });
+  const scopeParent = /* @__PURE__ */ new Map();
+  const parentOf = /* @__PURE__ */ new Map();
+  const assignScope = (id, scope) => {
+    enclosingScope.set(id, scope);
+    const node = nodeById.get(id)?.value;
+    if (node === void 0) {
+      return;
+    }
+    const childScope = node.kind === "function" || node.kind === "lambda" ? node.scope : scope;
+    if (childScope !== scope && !scopeParent.has(childScope)) {
+      scopeParent.set(childScope, scope);
+    }
+    for (const ref of computationChildRefs(node)) {
+      const existingParent = parentOf.get(ref);
+      if (existingParent !== void 0) {
+        if (existingParent !== id) {
+          report(["nodes", nodeById.get(ref)?.index ?? 0, "id"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `node '${ref}' is referenced from more than one parent; the canonical form is a tree`);
+        }
+        continue;
+      }
+      parentOf.set(ref, id);
+      assignScope(ref, childScope);
+    }
+  };
+  for (const root of program.roots) {
+    assignScope(root, "scope0");
+  }
+  const scopeChain = (scope) => {
+    const chain = [scope];
+    let current = scope;
+    while (current !== "scope0") {
+      const parent = scopeParent.get(current);
+      if (parent === void 0 || chain.includes(parent)) {
+        break;
+      }
+      chain.push(parent);
+      current = parent;
+    }
+    return chain;
+  };
+  const BINDING_DECLARATION_KINDS = {
+    // A local is bound either by its own `declare`/`catch` node or by being the binding TARGET of an
+    // `assign`/`for`/`for_clause`/`with`, which is always an `identifier` node (`children[0]`).
+    // A nested function/lambda introduces its binding in the enclosing scope, so `function`/`lambda`
+    // are legitimate binding sites for a local.
+    local: ["identifier", "declare", "catch", "function", "lambda"],
+    parameter: ["parameter"],
+    definition: ["function", "lambda"],
+    import: ["import"],
+    external: []
+  };
+  program.symbols.forEach((symbol, index) => {
+    const symbolPath = ["symbols", index];
+    const sites = declarationSites.get(symbol.id) ?? [];
+    const allowedKinds = BINDING_DECLARATION_KINDS[symbol.kind] ?? [];
+    for (const siteId of sites) {
+      const site = nodeById.get(siteId);
+      if (site === void 0) {
+        report(symbolPath, COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown symbol binding '${siteId}'`);
+        continue;
+      }
+      if (allowedKinds.length > 0 && !allowedKinds.includes(site.value.kind)) {
+        report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `symbol '${symbol.id}' of kind '${symbol.kind}' cannot be bound by a '${site.value.kind}' node`);
+      }
+      const siteScope = enclosingScope.get(siteId);
+      if (siteScope !== void 0 && siteScope !== symbol.scope) {
+        report([...symbolPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `symbol '${symbol.id}' is declared in '${siteScope}' but claims scope '${symbol.scope}'`);
+      }
+    }
+    if (symbol.node !== void 0) {
+      if (!nodeById.has(symbol.node)) {
+        report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown declaration node '${symbol.node}'`);
+      } else if (!sites.includes(symbol.node)) {
+        report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `declaration node '${symbol.node}' does not bind symbol '${symbol.id}'`);
+      }
+    } else if (sites.length > 0) {
+      report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `symbol '${symbol.id}' is bound at ${sites[0]} but declares no declaration node`);
+    }
+    if (symbol.kind === "external" && sites.length > 0) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `external symbol '${symbol.id}' must not be bound in the captured program`);
+    }
+    if (symbol.kind === "parameter" && sites.length === 0) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `parameter symbol '${symbol.id}' has no 'parameter' declaration node`);
+    }
+    if (symbol.kind === "local" && sites.length === 0) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, usedSymbols.has(symbol.id) ? `symbol '${symbol.id}' is read but never declared; undeclared captures are unsupported hidden state` : `symbol '${symbol.id}' is neither declared nor used`);
+    }
+    if (symbol.kind === "external" && !usedSymbols.has(symbol.id)) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.ORPHAN_SYMBOL, `external symbol '${symbol.id}' is never used`);
+    }
+    if (symbol.kind === "definition" && !definitionBySymbol.has(symbol.id)) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition symbol '${symbol.id}' has no definition record`);
+    }
+    if (symbol.kind !== "definition" && definitionBySymbol.has(symbol.id)) {
+      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `symbol '${symbol.id}' carries a definition record but is not of kind 'definition'`);
+    }
+    if (symbol.kind === "local" || symbol.kind === "parameter") {
+      if (!knownScopes.has(symbol.scope)) {
+        report([...symbolPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `unknown scope '${symbol.scope}'`);
+      }
+      for (const { nodeId, symbolId } of readSites) {
+        if (symbolId !== symbol.id) {
+          continue;
+        }
+        const useScope = enclosingScope.get(nodeId);
+        if (useScope === void 0) {
+          continue;
+        }
+        if (!scopeChain(useScope).includes(symbol.scope)) {
+          report(["nodes", nodeById.get(nodeId)?.index ?? 0, "symbol"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `symbol '${symbol.id}' is read outside its scope '${symbol.scope}'`);
+        }
+      }
+    }
+  });
+  program.slots.forEach((slot, index) => {
+    if (!usedSlots.has(slot.id)) {
+      report(["slots", index, "id"], COMPUTATION_VALIDATION_CODES.ORPHAN_SLOT, `slot '${slot.id}' is never used`);
+    }
+  });
+  program.definitions.forEach((definition, index) => {
+    const definitionPath = ["definitions", index];
+    const nameSymbol = symbolById.get(definition.nameSymbol);
+    if (nameSymbol === void 0) {
+      report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown definition symbol '${definition.nameSymbol}'`);
+    } else {
+      if (nameSymbol.kind !== "definition") {
+        report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition '${definition.id}' must reference a symbol of kind 'definition'`);
+      }
+      if (!scopeChain(definition.scope).includes(nameSymbol.scope)) {
+        report([...definitionPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition '${definition.id}' name must be visible from its body scope '${definition.scope}'`);
+      }
+    }
+    const bodyNode = nodeById.get(definition.body);
+    if (bodyNode === void 0) {
+      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown body node '${definition.body}'`);
+    } else if (bodyNode.value.kind !== "function" && bodyNode.value.kind !== "lambda") {
+      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition body '${definition.body}' must be a function or lambda node`);
+    } else if (bodyNode.value.symbol !== definition.nameSymbol) {
+      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `definition body '${definition.body}' must declare symbol '${definition.nameSymbol}'`);
+    }
+    if (!definition.complete && definition.unsupportedReasons.length === 0) {
+      report([...definitionPath, "unsupportedReasons"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "an incomplete definition must name at least one unsupported reason");
+    }
+    definition.parameters.forEach((parameter, parameterIndex) => {
+      const parameterSymbol = symbolById.get(parameter);
+      if (parameterSymbol === void 0) {
+        report([...definitionPath, "parameters", parameterIndex], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown parameter symbol '${parameter}'`);
+        return;
+      }
+      if (parameterSymbol.kind !== "parameter" || parameterSymbol.scope !== definition.scope) {
+        report([...definitionPath, "parameters", parameterIndex], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `parameter '${parameter}' must be a 'parameter' symbol in scope '${definition.scope}'`);
+      }
+    });
+    definition.dependencies.forEach((dependency, dependencyIndex) => {
+      const dependencySymbol = symbolById.get(dependency);
+      if (dependencySymbol === void 0) {
+        report([...definitionPath, "dependencies", dependencyIndex], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown dependency symbol '${dependency}'`);
+        return;
+      }
+      if (dependencySymbol.kind !== "definition" || !definitionBySymbol.has(dependency)) {
+        report([...definitionPath, "dependencies", dependencyIndex], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `dependency '${dependency}' is not a resolved definition symbol`);
+      }
+    });
+  });
+  const directDefinitionUses = /* @__PURE__ */ new Map();
+  for (const { nodeId, symbolId } of readSites) {
+    if (symbolById.get(symbolId)?.kind !== "definition") {
+      continue;
+    }
+    const readScope = enclosingScope.get(nodeId);
+    if (readScope === void 0) {
+      continue;
+    }
+    const owningScope = scopeChain(readScope).find((scope) => definitionScopes.has(scope));
+    if (owningScope === void 0) {
+      continue;
+    }
+    const uses = directDefinitionUses.get(owningScope) ?? /* @__PURE__ */ new Set();
+    uses.add(symbolId);
+    directDefinitionUses.set(owningScope, uses);
+  }
+  const resolvedDefinitionScopes = /* @__PURE__ */ new Set();
+  program.definitions.forEach((definition, index) => {
+    const definitionPath = ["definitions", index];
+    const nameSymbol = symbolById.get(definition.nameSymbol);
+    if (nameSymbol !== void 0 && (nameSymbol.kind !== "definition" || !definitionBySymbol.has(definition.nameSymbol))) {
+      report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition '${definition.id}' must name a resolvable 'definition' symbol`);
+    }
+    const expected = directDefinitionUses.get(definition.scope) ?? /* @__PURE__ */ new Set();
+    const declared = new Set(definition.dependencies);
+    for (const dependency of expected) {
+      if (!declared.has(dependency)) {
+        report([...definitionPath, "dependencies"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `definition '${definition.id}' must list the definition symbol '${dependency}' it reads`);
+      }
+    }
+    for (const dependency of definition.dependencies) {
+      if (!expected.has(dependency)) {
+        report([...definitionPath, "dependencies"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `definition '${definition.id}' lists '${dependency}' but its own scope never reads it`);
+      }
+    }
+    const reachedSymbols = /* @__PURE__ */ new Set();
+    const pendingSymbols = [...definition.dependencies];
+    let reachesItself = false;
+    while (pendingSymbols.length > 0 && !reachesItself) {
+      const symbolId = pendingSymbols.pop();
+      if (symbolId === definition.nameSymbol) {
+        reachesItself = true;
+        break;
+      }
+      if (reachedSymbols.has(symbolId)) {
+        continue;
+      }
+      reachedSymbols.add(symbolId);
+      pendingSymbols.push(...definitionBySymbol.get(symbolId)?.dependencies ?? []);
+    }
+    if (definition.recursive !== reachesItself) {
+      report([...definitionPath, "recursive"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, "'recursive' must equal whether the definition reaches itself through its materialized dependencies");
+    }
+    resolvedDefinitionScopes.add(definition.scope);
+  });
+  const visitedDefinitionSymbols = /* @__PURE__ */ new Set();
+  const pendingDefinitionSymbols = [...usedSymbols].filter((symbolId) => symbolById.get(symbolId)?.kind === "definition");
+  while (pendingDefinitionSymbols.length > 0) {
+    const symbolId = pendingDefinitionSymbols.pop();
+    if (visitedDefinitionSymbols.has(symbolId)) {
+      continue;
+    }
+    visitedDefinitionSymbols.add(symbolId);
+    const definition = definitionBySymbol.get(symbolId);
+    if (definition === void 0) {
+      const symbolIndex = program.symbols.findIndex((symbol) => symbol.id === symbolId);
+      report(["symbols", symbolIndex, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `used definition symbol '${symbolId}' has no materialized definition record`);
+      continue;
+    }
+    if (!resolvedDefinitionScopes.has(definition.scope)) {
+      report(["definitions", definitionIndexById.get(definition.id) ?? 0, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition '${definition.id}' scope '${definition.scope}' is not a definition scope`);
+    }
+    pendingDefinitionSymbols.push(...definition.dependencies);
+  }
+  program.roots.forEach((root, index) => referenceNode(["roots", index], root));
+  const nodeState = /* @__PURE__ */ new Map();
+  const walk = (id, stackDepth) => {
+    const entry = nodeById.get(id);
+    if (entry === void 0) {
+      return;
+    }
+    if (stackDepth > COMPUTATION_IR_LIMITS.nesting) {
+      report(["nodes", entry.index, "children"], COMPUTATION_VALIDATION_CODES.NESTING_LIMIT, "AST nesting depth limit exceeded");
+      return;
+    }
+    const current = nodeState.get(id);
+    if (current === "visiting") {
+      report(["nodes", entry.index, "children"], COMPUTATION_VALIDATION_CODES.NODE_CYCLE, `AST child cycle detected at '${id}'`);
+      return;
+    }
+    if (current === "done") {
+      return;
+    }
+    nodeState.set(id, "visiting");
+    for (const ref of computationChildRefs(entry.value)) {
+      walk(ref, stackDepth + 1);
+    }
+    nodeState.set(id, "done");
+  };
+  for (const root of program.roots)
+    walk(root, 1);
+  program.nodes.forEach((node, index) => {
+    if (!enclosingScope.has(node.id)) {
+      report(["nodes", index, "id"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `node '${node.id}' is not reachable from any ordered root`);
+    }
+  });
+  program.outputs.forEach((output, index) => {
+    const outputPath = ["outputs", index];
+    const entry = nodeById.get(output.node);
+    if (entry === void 0) {
+      report([...outputPath, "node"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown output node '${output.node}'`);
+      return;
+    }
+    if (entry.value.kind !== "return" && entry.value.kind !== "yield" && entry.value.kind !== "expression") {
+      report([...outputPath, "node"], COMPUTATION_VALIDATION_CODES.OUTPUT_INVALID, `output node '${output.node}' must be a return, yield or expression node`);
+    }
+    if (output.definitionId !== void 0 && !definitionIndexById.has(output.definitionId)) {
+      report([...outputPath, "definitionId"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown definition '${output.definitionId}'`);
+    }
+  });
+  const unsupportedNodes = program.nodes.filter((node) => node.kind === "unsupported");
+  if (unsupportedNodes.length > 0 && program.complete) {
+    report(["complete"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "a program containing an 'unsupported' node cannot claim to be complete");
+  }
+  if (!program.complete && program.unsupportedReasons.length === 0) {
+    report(["unsupportedReasons"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "an incomplete program must name at least one unsupported reason");
+  }
+  return issues;
+}
+function checkEnvelopeStructure(envelope) {
+  const issues = [];
+  const report = (path10, code, detail) => issues.push({ path: path10, message: `${code}: ${detail}` });
+  if (envelope.dependencies.length > COMPUTATION_IR_LIMITS.dependencies) {
+    report(["dependencies"], COMPUTATION_VALIDATION_CODES.LIMIT_DEPENDENCIES, "dependency limit exceeded");
+  }
+  if (envelope.corrections.length > COMPUTATION_IR_LIMITS.dependencies) {
+    report(["corrections"], COMPUTATION_VALIDATION_CODES.LIMIT_DEPENDENCIES, "correction limit exceeded");
+  }
+  const definitionIds = new Set(envelope.program.definitions.map((definition) => definition.id));
+  const seenDependencies = /* @__PURE__ */ new Set();
+  envelope.dependencies.forEach((dependency, index) => {
+    if (!definitionIds.has(dependency.definitionId)) {
+      report(["dependencies", index, "definitionId"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `dependency '${dependency.definitionId}' is not materialized in the program closure`);
+    }
+    if (seenDependencies.has(dependency.definitionId)) {
+      report(["dependencies", index, "definitionId"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `duplicate dependency '${dependency.definitionId}'`);
+    }
+    seenDependencies.add(dependency.definitionId);
+  });
+  const seenCorrections = /* @__PURE__ */ new Set();
+  envelope.corrections.forEach((correction, index) => {
+    const key = `${correction.supersedesDefinitionId}:${correction.supersededProgramDigest}`;
+    if (seenCorrections.has(key)) {
+      report(["corrections", index], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, "duplicate correction entry");
+    }
+    seenCorrections.add(key);
+  });
+  for (const [metricField, collectionField] of METRIC_COUNT_FIELDS) {
+    const declared = envelope.metrics[metricField];
+    const actual = envelope.program[collectionField].length;
+    if (declared !== actual) {
+      report(["metrics", metricField], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `metric '${metricField}' must equal the program ${collectionField} length (${actual})`);
+    }
+  }
+  return issues;
+}
+function orderedKeywordArgs(node) {
+  if (node.kind !== "call" && node.kind !== "new") {
+    return [];
+  }
+  return node.keywordArgs ?? [];
+}
+function computationChildRefs(node) {
+  const refs = [...node.children];
+  for (const field of COMPUTATION_NODE_FIELDS[node.kind].nodeFields) {
+    const value = node[field];
+    if (typeof value === "string") {
+      refs.push(value);
+    }
+  }
+  for (const arg of orderedKeywordArgs(node)) {
+    refs.push(arg.value);
+  }
+  return refs;
+}
+function projectProgramForDigest(program) {
+  const symbolById = /* @__PURE__ */ new Map();
+  const symbolOrdinal = /* @__PURE__ */ new Map();
+  program.symbols.forEach((symbol, index) => {
+    symbolById.set(symbol.id, symbol);
+    symbolOrdinal.set(symbol.id, index);
+  });
+  const slotById = /* @__PURE__ */ new Map();
+  const slotOrdinal = /* @__PURE__ */ new Map();
+  program.slots.forEach((slot, index) => {
+    slotById.set(slot.id, slot);
+    slotOrdinal.set(slot.id, index);
+  });
+  const definitionBySymbol = /* @__PURE__ */ new Map();
+  const definitionOrdinal = /* @__PURE__ */ new Map();
+  program.definitions.forEach((definition, index) => {
+    definitionBySymbol.set(definition.nameSymbol, definition);
+    definitionOrdinal.set(definition.id, index);
+  });
+  const kindByNode = /* @__PURE__ */ new Map();
+  for (const node of program.nodes)
+    kindByNode.set(node.id, node.kind);
+  const ordinalOfSymbol = (symbolId) => symbolOrdinal.get(symbolId) ?? null;
+  const ordinalOfSlot = (slotId) => slotOrdinal.get(slotId) ?? null;
+  const ordinalOfScope = (scopeId) => scopeId === "scope0" ? 0 : Number(scopeId.slice("scope".length));
+  const symbolProjection = (symbolId) => {
+    const symbol = symbolById.get(symbolId);
+    if (symbol === void 0) {
+      return { ordinal: null, unresolved: true };
+    }
+    return {
+      ordinal: ordinalOfSymbol(symbolId),
+      kind: symbol.kind,
+      scope: ordinalOfScope(symbol.scope),
+      resolved: definitionBySymbol.has(symbolId)
+    };
+  };
+  const slotProjection = (slotId) => {
+    const slot = slotById.get(slotId);
+    return { ordinal: ordinalOfSlot(slotId), kind: slot?.kind ?? null, role: slot?.role ?? null };
+  };
+  const projectNode = (node) => {
+    const abstracted = /* @__PURE__ */ new Set([
+      "id",
+      "definitionId",
+      "symbol",
+      "slot",
+      "fieldSlot",
+      "children",
+      "receiver",
+      "keywordArgs"
+    ]);
+    for (const field of DIGEST_ABSTRACTED_FIELDS[node.kind] ?? []) {
+      abstracted.add(field);
+    }
+    const projection = { kind: node.kind };
+    for (const [field, value] of Object.entries(node)) {
+      if (abstracted.has(field)) {
+        continue;
+      }
+      projection[field] = value;
+    }
+    projection.children = [...node.children];
+    if ("receiver" in node) {
+      projection.receiver = node.receiver ?? null;
+    }
+    if ("keywordArgs" in node) {
+      const args = orderedKeywordArgs(node);
+      projection.keywordArgs = args.length === 0 ? null : args.map((arg) => ({ name: arg.name, value: arg.value }));
+    }
+    if ("symbol" in node && typeof node.symbol === "string") {
+      projection.symbol = symbolProjection(node.symbol);
+    }
+    if ("fieldSlot" in node && typeof node.fieldSlot === "string") {
+      projection.fieldSlot = slotProjection(node.fieldSlot);
+    }
+    if ("slot" in node && typeof node.slot === "string") {
+      projection.slot = slotProjection(node.slot);
+    }
+    return projection;
+  };
+  const definitions = program.definitions.map((definition) => ({
+    symbol: ordinalOfSymbol(definition.nameSymbol),
+    kind: definition.kind,
+    parameters: definition.parameters.map((parameter) => ordinalOfSymbol(parameter)),
+    dependencies: definition.dependencies.map((dependency) => ordinalOfSymbol(dependency)).sort((left, right) => (left ?? -1) - (right ?? -1)),
+    body: definition.body,
+    recursive: definition.recursive,
+    complete: definition.complete,
+    unsupportedReasons: [...definition.unsupportedReasons]
+  }));
+  return {
+    version: program.version,
+    language: program.language,
+    rootKinds: program.roots.map((root) => kindByNode.get(root) ?? null),
+    nodes: program.nodes.map(projectNode),
+    definitions,
+    slots: program.slots.map((slot) => ({ kind: slot.kind, role: slot.role })),
+    outputs: program.outputs.map((output) => ({
+      node: output.node,
+      shape: output.shape,
+      definition: output.definitionId === void 0 ? null : definitionOrdinal.get(output.definitionId) ?? null
+    })),
+    complete: program.complete,
+    unsupportedReasons: [...program.unsupportedReasons]
+  };
+}
+function computeComputationProgramDigest(program) {
+  if (typeof program !== "object" || program === null) {
+    throw new TypeError("program must be an object");
+  }
+  return hashCanonicalContent(projectProgramForDigest(program));
+}
+function computeComputationEvidenceDigest(body) {
+  if (typeof body !== "object" || body === null) {
+    throw new TypeError("evidence body must be an object");
+  }
+  return hashCanonicalContent(body);
+}
+var COMPUTATION_IR_VERSION, COMPUTATION_IR_LIMITS, HARD_LIMIT_FACTOR, COMPUTATION_VALIDATION_CODES, COMPUTATION_LANGUAGES, COMPUTATION_TRANSFORM_NODE_KINDS, SYMBOL_FIELD_BINDING_NODE_KINDS, TRANSFORM_NODE_KINDS, COMPUTATION_BINARY_OPERATORS, COMPUTATION_UNARY_OPERATORS, COMPUTATION_COMPARE_OPERATORS, COMPUTATION_BOOLEAN_OPERATORS, COMPUTATION_ASSIGN_OPERATORS, COMPUTATION_CONSTANTS, COMPUTATION_DECLARE_KINDS, COMPUTATION_PARAMETER_KINDS, COMPUTATION_DEFINITION_KINDS, COMPUTATION_COMPREHENSION_KINDS, COMPUTATION_SPREAD_KINDS, COMPUTATION_TEMPLATE_KINDS, COMPUTATION_WITH_KINDS, COMPUTATION_SLICE_PARTS, COMPUTATION_SYMBOL_KINDS, COMPUTATION_SLOT_KINDS, COMPUTATION_SLOT_ROLES, COMPUTATION_ORIGIN_KINDS, COMPUTATION_OBSERVATION_KINDS, COMPUTATION_OBSERVATION_STATUSES, COMPUTATION_OUTPUT_SHAPES, COMPUTATION_UNSUPPORTED_REASONS, COMPUTATION_APIS, COMPUTATION_TRANSFORM_APIS, TRANSFORM_APIS, COMPUTATION_CONSTRUCT_APIS, CONSTRUCT_APIS, COMPUTATION_UNSAFE_FIELD_KEYS, UNSAFE_FIELD_KEY_LOOKUP, UNSAFE_FIELD_SEGMENTS, UNSAFE_FIELD_PREFIX_SEGMENTS, ComputationNodeIdSchema, ComputationSymbolIdSchema, ComputationSlotIdSchema, ComputationDefinitionIdSchema, ComputationScopeIdSchema, ComputationDigestSchema, ComputationFieldKeySchema, ComputationPathPatternSchema, DIGEST_ABSTRACTED_FIELDS, COMPUTATION_NODE_FIELDS, NodeIdList, KeywordArgNameSchema, KeywordArgSchema, UNBOUNDED, KeywordArgsSchema, ComputationProgramNodeSchema, ComputationBlockNodeSchema, ComputationFunctionNodeSchema, ComputationParametersNodeSchema, ComputationParameterNodeSchema, ComputationReturnNodeSchema, ComputationAssignNodeSchema, ComputationDeclareNodeSchema, ComputationIdentifierNodeSchema, ComputationLiteralNodeSchema, ComputationMemberNodeSchema, ComputationIndexNodeSchema, ComputationCallNodeSchema, ComputationNewNodeSchema, ComputationArrayNodeSchema, ComputationTupleNodeSchema, ComputationObjectNodeSchema, ComputationPairNodeSchema, ComputationLambdaNodeSchema, ComputationBinaryNodeSchema, ComputationUnaryNodeSchema, ComputationCompareNodeSchema, ComputationBooleanNodeSchema, ComputationConditionalNodeSchema, ComputationIfNodeSchema, ComputationForNodeSchema, ComputationWhileNodeSchema, ComputationTryNodeSchema, ComputationCatchNodeSchema, ComputationFinallyNodeSchema, ComputationThrowNodeSchema, ComputationAssertNodeSchema, ComputationImportNodeSchema, ComputationAwaitNodeSchema, ComputationBreakNodeSchema, ComputationContinueNodeSchema, ComputationExpressionNodeSchema, ComputationComprehensionNodeSchema, ComputationForClauseNodeSchema, ComputationIfClauseNodeSchema, ComputationSliceNodeSchema, ComputationSpreadNodeSchema, ComputationTemplateNodeSchema, ComputationWithNodeSchema, ComputationYieldNodeSchema, ComputationUnsupportedNodeSchema, ComputationNodeSchema, ComputationSymbolSchema, ComputationSlotSchema, ComputationDefinitionSchema, ComputationOutputSchema, ProgramBodyShape, ComputationProgramV1Schema, ComputationOriginSchema, ComputationObservationSchema, ComputationDependencySchema, ComputationCorrectionSchema, ComputationMetricsSchema, EnvelopeBodyShape, METRIC_COUNT_FIELDS, ResinComputationEvidenceV1Schema;
+var init_computation_evidence = __esm({
+  "packages/contracts/dist/computation-evidence.js"() {
+    "use strict";
+    init_zod();
+    init_canonical();
+    init_common();
+    COMPUTATION_IR_VERSION = "1.0.0";
+    COMPUTATION_IR_LIMITS = {
+      /** Maximum canonical serialized size of a program, and of a full evidence envelope. */
+      serializedBytes: 65536,
+      nodes: 512,
+      symbols: 256,
+      slots: 64,
+      definitions: 32,
+      /** Also bounds envelope `dependencies` and `corrections` entries. */
+      dependencies: 64,
+      /** Maximum AST child-edge depth from a root. def/use recursion is not depth-limited here. */
+      nesting: 64,
+      /** Bounds only the ESTIMATED authoring-size metrics; never model usage or savings. */
+      sourceLines: 1e5,
+      sourceBytes: 4194304
+    };
+    HARD_LIMIT_FACTOR = 4;
+    COMPUTATION_VALIDATION_CODES = {
+      CANONICAL_ID: "CANONICAL_ID",
+      CHILD_ARITY: "CHILD_ARITY",
+      CROSS_REF: "CROSS_REF",
+      NODE_CYCLE: "NODE_CYCLE",
+      NODE_ORDER: "NODE_ORDER",
+      NESTING_LIMIT: "NESTING_LIMIT",
+      LIMIT_NODES: "LIMIT_NODES",
+      LIMIT_SYMBOLS: "LIMIT_SYMBOLS",
+      LIMIT_SLOTS: "LIMIT_SLOTS",
+      LIMIT_DEFINITIONS: "LIMIT_DEFINITIONS",
+      LIMIT_DEPENDENCIES: "LIMIT_DEPENDENCIES",
+      LIMIT_SERIALIZED_BYTES: "LIMIT_SERIALIZED_BYTES",
+      FIELD_FORM: "FIELD_FORM",
+      SYMBOL_SCOPE: "SYMBOL_SCOPE",
+      SYMBOL_DECLARATION: "SYMBOL_DECLARATION",
+      ORPHAN_SYMBOL: "ORPHAN_SYMBOL",
+      ORPHAN_SLOT: "ORPHAN_SLOT",
+      DEFINITION_CLOSURE: "DEFINITION_CLOSURE",
+      CAPTURE_MISMATCH: "CAPTURE_MISMATCH",
+      DEPENDENCY_MISMATCH: "DEPENDENCY_MISMATCH",
+      OUTPUT_INVALID: "OUTPUT_INVALID",
+      UNSUPPORTED_CONSISTENCY: "UNSUPPORTED_CONSISTENCY",
+      SERIALIZATION: "SERIALIZATION"
+    };
+    COMPUTATION_LANGUAGES = ["python", "javascript", "typescript"];
+    COMPUTATION_TRANSFORM_NODE_KINDS = [
+      "assert",
+      "binary",
+      "boolean",
+      "compare",
+      "comprehension",
+      "conditional",
+      "for",
+      "if",
+      "slice",
+      "template",
+      "try",
+      "unary",
+      "while"
+    ];
+    SYMBOL_FIELD_BINDING_NODE_KINDS = {
+      catch: true,
+      declare: true,
+      function: true,
+      import: true,
+      lambda: true,
+      parameter: true
+    };
+    TRANSFORM_NODE_KINDS = Object.fromEntries(COMPUTATION_TRANSFORM_NODE_KINDS.map((kind) => [kind, true]));
+    COMPUTATION_BINARY_OPERATORS = [
+      "add",
+      "and",
+      "bit_and",
+      "bit_or",
+      "bit_xor",
+      "coalesce",
+      "concat",
+      "div",
+      "floor_div",
+      "matmul",
+      "mod",
+      "mul",
+      "or",
+      "pow",
+      "shift_left",
+      "shift_right",
+      "sub"
+    ];
+    COMPUTATION_UNARY_OPERATORS = ["bit_not", "negate", "not", "positive"];
+    COMPUTATION_COMPARE_OPERATORS = [
+      "eq",
+      "ge",
+      "gt",
+      "in",
+      "is",
+      "is_not",
+      "le",
+      "lt",
+      "ne",
+      "not_in"
+    ];
+    COMPUTATION_BOOLEAN_OPERATORS = ["and", "coalesce", "or"];
+    COMPUTATION_ASSIGN_OPERATORS = [
+      "add",
+      "and",
+      "bit_and",
+      "bit_or",
+      "bit_xor",
+      "coalesce",
+      "div",
+      "floor_div",
+      "mod",
+      "mul",
+      "or",
+      "pow",
+      "set",
+      "shift_left",
+      "shift_right",
+      "sub"
+    ];
+    COMPUTATION_CONSTANTS = [
+      "empty_string",
+      "false",
+      "intrinsic_undefined",
+      "null",
+      "one",
+      "python_type_bool",
+      "python_type_dict",
+      "python_type_float",
+      "python_type_int",
+      "python_type_list",
+      "python_type_object",
+      "python_type_set",
+      "python_type_str",
+      "python_type_tuple",
+      "true",
+      "type_name_bigint",
+      "type_name_boolean",
+      "type_name_function",
+      "type_name_number",
+      "type_name_object",
+      "type_name_string",
+      "type_name_symbol",
+      "type_name_undefined",
+      "zero"
+    ];
+    COMPUTATION_DECLARE_KINDS = ["const", "global", "let", "local", "var"];
+    COMPUTATION_PARAMETER_KINDS = [
+      "destructured",
+      "keyword_only",
+      "positional",
+      "rest_keyword",
+      "rest_positional"
+    ];
+    COMPUTATION_DEFINITION_KINDS = [
+      "async_function",
+      "function",
+      "generator_function",
+      "method"
+    ];
+    COMPUTATION_COMPREHENSION_KINDS = ["dict", "generator", "list", "set"];
+    COMPUTATION_SPREAD_KINDS = ["iterable", "mapping"];
+    COMPUTATION_TEMPLATE_KINDS = ["format", "fstring", "template_literal"];
+    COMPUTATION_WITH_KINDS = ["async_with", "using", "with"];
+    COMPUTATION_SLICE_PARTS = ["lower", "upper", "step"];
+    COMPUTATION_SYMBOL_KINDS = [
+      "definition",
+      "external",
+      "import",
+      "local",
+      "parameter"
+    ];
+    COMPUTATION_SLOT_KINDS = [
+      "array",
+      "boolean",
+      "bytes",
+      "function",
+      "null",
+      "number",
+      "object",
+      "string",
+      "unknown"
+    ];
+    COMPUTATION_SLOT_ROLES = [
+      "dynamic",
+      "field_key",
+      "free_variable",
+      "literal",
+      "path"
+    ];
+    COMPUTATION_ORIGIN_KINDS = [
+      "authored_file",
+      "heredoc",
+      "inline",
+      "referenced_file"
+    ];
+    COMPUTATION_OBSERVATION_KINDS = ["definition", "invocation"];
+    COMPUTATION_OBSERVATION_STATUSES = ["error", "pending", "success"];
+    COMPUTATION_OUTPUT_SHAPES = [
+      "array",
+      "boolean",
+      "null",
+      "number",
+      "object",
+      "string",
+      "tuple",
+      "unknown"
+    ];
+    COMPUTATION_UNSUPPORTED_REASONS = [
+      "incomplete_parse",
+      "limit_definition",
+      "limit_depth",
+      "limit_dependencies",
+      "limit_nodes",
+      "limit_serialized_bytes",
+      "limit_slots",
+      "limit_symbols",
+      "unsupported_api",
+      "unsupported_construct",
+      "unsupported_dynamic_key",
+      "unsupported_external_input",
+      "unsupported_hidden_state",
+      "unsupported_language",
+      "unsupported_mutable_capture",
+      "unsupported_operator",
+      "unsupported_reflection"
+    ];
+    COMPUTATION_APIS = [
+      "clock.monotonic",
+      "clock.now",
+      "clock.parse",
+      "collection.all",
+      "collection.any",
+      "collection.append",
+      "collection.count",
+      "collection.delete",
+      "collection.dict_setdefault",
+      "collection.entries",
+      "collection.extend",
+      "collection.filter",
+      "collection.find",
+      "collection.get",
+      "collection.group_by",
+      "collection.has",
+      "collection.includes",
+      "collection.items",
+      "collection.iterator",
+      "collection.join",
+      "collection.keys",
+      "collection.map",
+      "collection.map_set",
+      "collection.max",
+      "collection.min",
+      "collection.next",
+      "collection.pop",
+      "collection.range",
+      "collection.reduce",
+      "collection.reverse",
+      "collection.set_add",
+      "collection.slice",
+      "collection.sort",
+      "collection.sum",
+      "collection.values",
+      "collection.zip",
+      "construct.array",
+      "construct.date",
+      "construct.error",
+      "construct.map",
+      "construct.object",
+      "construct.set",
+      "core.hash",
+      "core.len",
+      "core.print",
+      "core.to_string",
+      "core.type_of",
+      "csv.parse_records",
+      "fs.close",
+      "fs.exists",
+      "fs.open_read",
+      "fs.read_json",
+      "fs.read_line",
+      "fs.read_lines",
+      "fs.read_text",
+      "fs.write_text",
+      "identity",
+      "json.parse",
+      "json.serialize",
+      "number.abs",
+      "number.ceil",
+      "number.float",
+      "number.floor",
+      "number.format",
+      "number.int",
+      "number.is_finite",
+      "number.is_integer",
+      "number.max",
+      "number.min",
+      "number.parse",
+      "number.round",
+      "number.to_fixed",
+      "object.has_own",
+      "path.basename",
+      "path.dirname",
+      "path.extname",
+      "path.join",
+      "path.normalize",
+      "string.endswith",
+      "string.find",
+      "string.format",
+      "string.isalpha",
+      "string.join",
+      "string.lower",
+      "string.lstrip",
+      "string.replace",
+      "string.rsplit",
+      "string.rstrip",
+      "string.slice",
+      "string.split",
+      "string.startswith",
+      "string.strip",
+      "string.upper",
+      "text.regex_compile",
+      "text.regex_findall",
+      "text.regex_match",
+      "text.regex_replace",
+      "text.regex_search",
+      "text.regex_test",
+      "type.is_array",
+      "type.is_instance"
+    ];
+    COMPUTATION_TRANSFORM_APIS = [
+      "clock.parse",
+      "collection.all",
+      "collection.any",
+      "collection.count",
+      "collection.delete",
+      "collection.dict_setdefault",
+      "collection.filter",
+      "collection.find",
+      "collection.group_by",
+      "collection.join",
+      "collection.map",
+      "collection.max",
+      "collection.min",
+      "collection.pop",
+      "collection.reduce",
+      "collection.reverse",
+      "collection.set_add",
+      "collection.slice",
+      "collection.sort",
+      "collection.sum",
+      "collection.zip",
+      "core.hash",
+      "core.to_string",
+      "json.serialize",
+      "number.abs",
+      "number.ceil",
+      "number.float",
+      "number.floor",
+      "number.int",
+      "number.max",
+      "number.min",
+      "number.parse",
+      "number.round",
+      "number.to_fixed",
+      "path.basename",
+      "path.dirname",
+      "path.extname",
+      "path.join",
+      "path.normalize",
+      "string.format",
+      "string.join",
+      "string.lower",
+      "string.lstrip",
+      "string.replace",
+      "string.rsplit",
+      "string.rstrip",
+      "string.slice",
+      "string.split",
+      "string.strip",
+      "string.upper",
+      "text.regex_findall",
+      "text.regex_match",
+      "text.regex_replace",
+      "text.regex_search"
+    ];
+    TRANSFORM_APIS = Object.fromEntries(COMPUTATION_TRANSFORM_APIS.map((api) => [api, true]));
+    COMPUTATION_CONSTRUCT_APIS = COMPUTATION_APIS.filter((api) => api.startsWith("construct."));
+    CONSTRUCT_APIS = Object.fromEntries(COMPUTATION_CONSTRUCT_APIS.map((api) => [api, true]));
+    COMPUTATION_UNSAFE_FIELD_KEYS = [
+      "accesstoken",
+      "apikey",
+      "authorization",
+      "authtoken",
+      "bearer",
+      "childprocess",
+      "completion",
+      "completions",
+      "constructor",
+      "cookie",
+      "cookies",
+      "credentials",
+      "execsync",
+      "generatorhistory",
+      "modelmessage",
+      "modelmessages",
+      "oauthtoken",
+      "password",
+      "passwd",
+      "privatekey",
+      "prompt",
+      "prompts",
+      "proto",
+      "prototype",
+      "rawcompletion",
+      "rawprompt",
+      "rawsource",
+      "rawtranscript",
+      "refreshtoken",
+      "secret",
+      "secrets",
+      "sessiontoken",
+      "source",
+      "spawnsync",
+      "systemprompt",
+      "token",
+      "tojson",
+      "toolinvocationhistory",
+      "transcript",
+      "transcripts"
+    ];
+    UNSAFE_FIELD_KEY_LOOKUP = Object.fromEntries(COMPUTATION_UNSAFE_FIELD_KEYS.map((key) => [key, true]));
+    UNSAFE_FIELD_SEGMENTS = {
+      api: true,
+      auth: true,
+      authorization: true,
+      bearer: true,
+      cookie: true,
+      cookies: true,
+      credential: true,
+      credentials: true,
+      key: true,
+      oauth: true,
+      passwd: true,
+      password: true,
+      private: true,
+      proto: true,
+      secret: true,
+      secrets: true,
+      session: true,
+      ssn: true,
+      token: true
+    };
+    UNSAFE_FIELD_PREFIX_SEGMENTS = {
+      akia: true,
+      aws: true,
+      ghp: true,
+      ghr: true,
+      ghs: true,
+      gho: true,
+      pk: true,
+      sk: true,
+      xoxa: true,
+      xoxb: true,
+      xoxp: true,
+      xoxr: true,
+      xoxs: true
+    };
+    ComputationNodeIdSchema = external_exports.string().regex(/^n(?:0|[1-9][0-9]{0,3})$/, "Node id must be a canonical anonymous 'n<index>' id");
+    ComputationSymbolIdSchema = external_exports.string().regex(/^sym(?:0|[1-9][0-9]{0,3})$/, "Symbol id must be a canonical anonymous 'sym<index>' id");
+    ComputationSlotIdSchema = external_exports.string().regex(/^slot(?:0|[1-9][0-9]{0,3})$/, "Slot id must be a canonical anonymous 'slot<index>' id");
+    ComputationDefinitionIdSchema = external_exports.string().regex(/^def(?:0|[1-9][0-9]{0,3})$/, "Definition id must be a canonical anonymous 'def<index>' id");
+    ComputationScopeIdSchema = external_exports.string().regex(/^scope(?:0|[1-9][0-9]{0,3})$/, "Scope id must be 'scope0' (module) or a definition scope 'scope<index>'");
+    ComputationDigestSchema = external_exports.string().regex(/^[a-f0-9]{64}$/, "Digest must be 64 lowercase hex characters");
+    ComputationFieldKeySchema = external_exports.string().min(1).max(64).regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/, "Field key must be a bounded safe structural identifier").refine(isSafeComputationFieldKey, "Secret-like, prototype or raw-evidence field keys must be captured as a field slot instead");
+    ComputationPathPatternSchema = external_exports.string().min(1).max(128).regex(/^[A-Za-z0-9_][A-Za-z0-9_./*-]*$/, "Path pattern must be a normalized relative pattern (no leading '/', '~', '.', drive letter or backslash)").refine((pattern) => !pattern.split("/").includes(".."), "Path pattern must not traverse parent directories");
+    DIGEST_ABSTRACTED_FIELDS = {
+      import: ["modulePath"]
+    };
+    COMPUTATION_NODE_FIELDS = {
+      program: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      block: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      function: {
+        required: ["symbol", "scope"],
+        optional: ["defKind", "async", "generator"],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      parameters: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      parameter: { required: ["symbol"], optional: ["paramKind"], nodeFields: [], keywordArgs: false },
+      return: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      assign: { required: [], optional: ["operator"], nodeFields: [], keywordArgs: false },
+      declare: {
+        required: ["symbol", "declKind"],
+        optional: [],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      identifier: { required: ["symbol"], optional: [], nodeFields: [], keywordArgs: false },
+      literal: {
+        required: [],
+        optional: ["constant", "slot"],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      member: {
+        required: [],
+        optional: ["field", "fieldSlot"],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      index: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      call: {
+        required: [],
+        optional: ["api", "symbol", "optional"],
+        nodeFields: ["receiver"],
+        keywordArgs: true
+      },
+      new: { required: ["api"], optional: [], nodeFields: [], keywordArgs: true },
+      array: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      tuple: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      object: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      pair: {
+        required: [],
+        optional: ["field", "fieldSlot"],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      lambda: {
+        required: ["symbol", "scope"],
+        optional: ["async"],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      binary: { required: ["operator"], optional: [], nodeFields: [], keywordArgs: false },
+      unary: { required: ["operator"], optional: [], nodeFields: [], keywordArgs: false },
+      compare: { required: ["operators"], optional: [], nodeFields: [], keywordArgs: false },
+      boolean: { required: ["operators"], optional: [], nodeFields: [], keywordArgs: false },
+      conditional: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      if: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      for: { required: [], optional: ["async"], nodeFields: [], keywordArgs: false },
+      while: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      try: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      catch: { required: [], optional: ["symbol"], nodeFields: [], keywordArgs: false },
+      finally: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      throw: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      assert: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      import: {
+        required: ["modulePath", "symbol"],
+        optional: [],
+        nodeFields: [],
+        keywordArgs: false
+      },
+      await: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      break: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      continue: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      expression: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      comprehension: { required: ["compKind"], optional: [], nodeFields: [], keywordArgs: false },
+      for_clause: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      if_clause: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      slice: { required: [], optional: ["slicePart"], nodeFields: [], keywordArgs: false },
+      spread: { required: ["spreadKind"], optional: [], nodeFields: [], keywordArgs: false },
+      template: { required: ["templateKind"], optional: [], nodeFields: [], keywordArgs: false },
+      with: { required: ["withKind"], optional: [], nodeFields: [], keywordArgs: false },
+      yield: { required: [], optional: [], nodeFields: [], keywordArgs: false },
+      unsupported: {
+        required: ["unsupportedReason"],
+        optional: [],
+        nodeFields: [],
+        keywordArgs: false
+      }
+    };
+    NodeIdList = external_exports.array(ComputationNodeIdSchema);
+    KeywordArgNameSchema = external_exports.union([external_exports.literal("key"), ComputationFieldKeySchema]);
+    KeywordArgSchema = external_exports.object({ name: KeywordArgNameSchema, value: ComputationNodeIdSchema }).strict();
+    UNBOUNDED = COMPUTATION_IR_LIMITS.nodes;
+    KeywordArgsSchema = external_exports.array(KeywordArgSchema).max(COMPUTATION_IR_LIMITS.nodes);
+    ComputationProgramNodeSchema = nodeOf("program", childrenOf(0, UNBOUNDED), {});
+    ComputationBlockNodeSchema = nodeOf("block", childrenOf(0, UNBOUNDED), {});
+    ComputationFunctionNodeSchema = nodeOf("function", childrenOf(2, 2), {
+      symbol: ComputationSymbolIdSchema,
+      scope: ComputationScopeIdSchema,
+      async: external_exports.boolean().optional(),
+      defKind: external_exports.enum(COMPUTATION_DEFINITION_KINDS).optional(),
+      generator: external_exports.boolean().optional()
+    });
+    ComputationParametersNodeSchema = nodeOf("parameters", childrenOf(0, UNBOUNDED), {});
+    ComputationParameterNodeSchema = nodeOf("parameter", childrenOf(0, 1), {
+      symbol: ComputationSymbolIdSchema,
+      paramKind: external_exports.enum(COMPUTATION_PARAMETER_KINDS).optional()
+    });
+    ComputationReturnNodeSchema = nodeOf("return", childrenOf(0, 1), {});
+    ComputationAssignNodeSchema = nodeOf("assign", childrenOf(2, 2), {
+      operator: external_exports.enum(COMPUTATION_ASSIGN_OPERATORS).optional()
+    });
+    ComputationDeclareNodeSchema = nodeOf("declare", childrenOf(0, 1), {
+      symbol: ComputationSymbolIdSchema,
+      declKind: external_exports.enum(COMPUTATION_DECLARE_KINDS)
+    });
+    ComputationIdentifierNodeSchema = nodeOf("identifier", childrenOf(0, 0), {
+      symbol: ComputationSymbolIdSchema
+    });
+    ComputationLiteralNodeSchema = nodeOf("literal", childrenOf(0, 0), {
+      constant: external_exports.enum(COMPUTATION_CONSTANTS).optional(),
+      slot: ComputationSlotIdSchema.optional()
+    });
+    ComputationMemberNodeSchema = nodeOf("member", childrenOf(1, 1), {
+      field: ComputationFieldKeySchema.optional(),
+      fieldSlot: ComputationSlotIdSchema.optional()
+    });
+    ComputationIndexNodeSchema = nodeOf("index", childrenOf(2, UNBOUNDED), {});
+    ComputationCallNodeSchema = nodeOf("call", childrenOf(0, UNBOUNDED), {
+      api: external_exports.enum(COMPUTATION_APIS).optional(),
+      symbol: ComputationSymbolIdSchema.optional(),
+      receiver: ComputationNodeIdSchema.optional(),
+      optional: external_exports.boolean().optional(),
+      keywordArgs: KeywordArgsSchema.optional()
+    });
+    ComputationNewNodeSchema = nodeOf("new", childrenOf(0, UNBOUNDED), {
+      api: external_exports.enum(COMPUTATION_APIS),
+      keywordArgs: KeywordArgsSchema.optional()
+    });
+    ComputationArrayNodeSchema = nodeOf("array", childrenOf(0, UNBOUNDED), {});
+    ComputationTupleNodeSchema = nodeOf("tuple", childrenOf(0, UNBOUNDED), {});
+    ComputationObjectNodeSchema = nodeOf("object", childrenOf(0, UNBOUNDED), {});
+    ComputationPairNodeSchema = nodeOf("pair", childrenOf(1, 1), {
+      field: ComputationFieldKeySchema.optional(),
+      fieldSlot: ComputationSlotIdSchema.optional()
+    });
+    ComputationLambdaNodeSchema = nodeOf("lambda", childrenOf(2, 2), {
+      symbol: ComputationSymbolIdSchema,
+      scope: ComputationScopeIdSchema,
+      async: external_exports.boolean().optional()
+    });
+    ComputationBinaryNodeSchema = nodeOf("binary", childrenOf(2, 2), {
+      operator: external_exports.enum(COMPUTATION_BINARY_OPERATORS)
+    });
+    ComputationUnaryNodeSchema = nodeOf("unary", childrenOf(1, 1), {
+      operator: external_exports.enum(COMPUTATION_UNARY_OPERATORS)
+    });
+    ComputationCompareNodeSchema = nodeOf("compare", childrenOf(2, UNBOUNDED), {
+      operators: external_exports.array(external_exports.enum(COMPUTATION_COMPARE_OPERATORS)).min(1).max(COMPUTATION_IR_LIMITS.nodes)
+    });
+    ComputationBooleanNodeSchema = nodeOf("boolean", childrenOf(2, UNBOUNDED), {
+      operators: external_exports.array(external_exports.enum(COMPUTATION_BOOLEAN_OPERATORS)).min(1).max(COMPUTATION_IR_LIMITS.nodes)
+    });
+    ComputationConditionalNodeSchema = nodeOf("conditional", childrenOf(3, 3), {});
+    ComputationIfNodeSchema = nodeOf("if", childrenOf(2, 3), {});
+    ComputationForNodeSchema = nodeOf("for", childrenOf(3, 3), {
+      async: external_exports.boolean().optional()
+    });
+    ComputationWhileNodeSchema = nodeOf("while", childrenOf(2, 2), {});
+    ComputationTryNodeSchema = nodeOf("try", childrenOf(1, UNBOUNDED), {});
+    ComputationCatchNodeSchema = nodeOf("catch", childrenOf(1, 1), {
+      symbol: ComputationSymbolIdSchema.optional()
+    });
+    ComputationFinallyNodeSchema = nodeOf("finally", childrenOf(1, 1), {});
+    ComputationThrowNodeSchema = nodeOf("throw", childrenOf(1, 1), {});
+    ComputationAssertNodeSchema = nodeOf("assert", childrenOf(1, 2), {});
+    ComputationImportNodeSchema = nodeOf("import", childrenOf(0, 0), {
+      modulePath: ComputationPathPatternSchema,
+      symbol: ComputationSymbolIdSchema
+    });
+    ComputationAwaitNodeSchema = nodeOf("await", childrenOf(1, 1), {});
+    ComputationBreakNodeSchema = nodeOf("break", childrenOf(0, 0), {});
+    ComputationContinueNodeSchema = nodeOf("continue", childrenOf(0, 0), {});
+    ComputationExpressionNodeSchema = nodeOf("expression", childrenOf(1, 1), {});
+    ComputationComprehensionNodeSchema = nodeOf("comprehension", childrenOf(2, UNBOUNDED), {
+      compKind: external_exports.enum(COMPUTATION_COMPREHENSION_KINDS)
+    });
+    ComputationForClauseNodeSchema = nodeOf("for_clause", childrenOf(2, 2), {});
+    ComputationIfClauseNodeSchema = nodeOf("if_clause", childrenOf(1, 1), {});
+    ComputationSliceNodeSchema = nodeOf("slice", childrenOf(1, 4), {
+      slicePart: external_exports.enum(COMPUTATION_SLICE_PARTS).optional()
+    });
+    ComputationSpreadNodeSchema = nodeOf("spread", childrenOf(1, 1), {
+      spreadKind: external_exports.enum(COMPUTATION_SPREAD_KINDS)
+    });
+    ComputationTemplateNodeSchema = nodeOf("template", childrenOf(0, UNBOUNDED), {
+      templateKind: external_exports.enum(COMPUTATION_TEMPLATE_KINDS)
+    });
+    ComputationWithNodeSchema = nodeOf("with", childrenOf(2, 2), {
+      withKind: external_exports.enum(COMPUTATION_WITH_KINDS)
+    });
+    ComputationYieldNodeSchema = nodeOf("yield", childrenOf(0, 1), {});
+    ComputationUnsupportedNodeSchema = nodeOf("unsupported", childrenOf(0, UNBOUNDED), {
+      unsupportedReason: external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)
+    });
+    ComputationNodeSchema = external_exports.discriminatedUnion("kind", [
+      ComputationProgramNodeSchema,
+      ComputationBlockNodeSchema,
+      ComputationFunctionNodeSchema,
+      ComputationParametersNodeSchema,
+      ComputationParameterNodeSchema,
+      ComputationReturnNodeSchema,
+      ComputationAssignNodeSchema,
+      ComputationDeclareNodeSchema,
+      ComputationIdentifierNodeSchema,
+      ComputationLiteralNodeSchema,
+      ComputationMemberNodeSchema,
+      ComputationIndexNodeSchema,
+      ComputationCallNodeSchema,
+      ComputationNewNodeSchema,
+      ComputationArrayNodeSchema,
+      ComputationTupleNodeSchema,
+      ComputationObjectNodeSchema,
+      ComputationPairNodeSchema,
+      ComputationLambdaNodeSchema,
+      ComputationBinaryNodeSchema,
+      ComputationUnaryNodeSchema,
+      ComputationCompareNodeSchema,
+      ComputationBooleanNodeSchema,
+      ComputationConditionalNodeSchema,
+      ComputationIfNodeSchema,
+      ComputationForNodeSchema,
+      ComputationWhileNodeSchema,
+      ComputationTryNodeSchema,
+      ComputationCatchNodeSchema,
+      ComputationFinallyNodeSchema,
+      ComputationThrowNodeSchema,
+      ComputationAssertNodeSchema,
+      ComputationImportNodeSchema,
+      ComputationAwaitNodeSchema,
+      ComputationBreakNodeSchema,
+      ComputationContinueNodeSchema,
+      ComputationExpressionNodeSchema,
+      ComputationComprehensionNodeSchema,
+      ComputationForClauseNodeSchema,
+      ComputationIfClauseNodeSchema,
+      ComputationSliceNodeSchema,
+      ComputationSpreadNodeSchema,
+      ComputationTemplateNodeSchema,
+      ComputationWithNodeSchema,
+      ComputationYieldNodeSchema,
+      ComputationUnsupportedNodeSchema
+    ]);
+    ComputationSymbolSchema = external_exports.object({
+      id: ComputationSymbolIdSchema,
+      kind: external_exports.enum(COMPUTATION_SYMBOL_KINDS),
+      scope: ComputationScopeIdSchema,
+      /** Definition node id that introduces the symbol (declaration site). */
+      node: ComputationNodeIdSchema.optional()
+    }).strict();
+    ComputationSlotSchema = external_exports.object({
+      id: ComputationSlotIdSchema,
+      kind: external_exports.enum(COMPUTATION_SLOT_KINDS),
+      role: external_exports.enum(COMPUTATION_SLOT_ROLES)
+    }).strict();
+    ComputationDefinitionSchema = external_exports.object({
+      id: ComputationDefinitionIdSchema,
+      kind: external_exports.enum(COMPUTATION_DEFINITION_KINDS),
+      nameSymbol: ComputationSymbolIdSchema,
+      parameters: external_exports.array(ComputationSymbolIdSchema).max(COMPUTATION_IR_LIMITS.symbols),
+      body: ComputationNodeIdSchema,
+      dependencies: external_exports.array(ComputationSymbolIdSchema).max(COMPUTATION_IR_LIMITS.definitions),
+      /** True when the definition reaches itself through `dependencies` (possibly mutually). */
+      recursive: external_exports.boolean(),
+      scope: ComputationScopeIdSchema,
+      complete: external_exports.boolean(),
+      unsupportedReasons: external_exports.array(external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)).max(8)
+    }).strict();
+    ComputationOutputSchema = external_exports.object({
+      /** `return` or `yield` node id, or an `expression` node for an emitted value. */
+      node: ComputationNodeIdSchema,
+      shape: external_exports.enum(COMPUTATION_OUTPUT_SHAPES),
+      definitionId: ComputationDefinitionIdSchema.optional()
+    }).strict();
+    ProgramBodyShape = {
+      version: external_exports.literal(COMPUTATION_IR_VERSION),
+      language: external_exports.enum(COMPUTATION_LANGUAGES),
+      nodes: external_exports.array(ComputationNodeSchema).max(COMPUTATION_IR_LIMITS.nodes * HARD_LIMIT_FACTOR),
+      symbols: external_exports.array(ComputationSymbolSchema).max(COMPUTATION_IR_LIMITS.symbols * HARD_LIMIT_FACTOR),
+      slots: external_exports.array(ComputationSlotSchema).max(COMPUTATION_IR_LIMITS.slots * HARD_LIMIT_FACTOR),
+      definitions: external_exports.array(ComputationDefinitionSchema).max(COMPUTATION_IR_LIMITS.definitions * HARD_LIMIT_FACTOR),
+      /** Ordered root node ids; the order is the program's top-level execution order. */
+      roots: external_exports.array(ComputationNodeIdSchema).min(1).max(COMPUTATION_IR_LIMITS.nodes * HARD_LIMIT_FACTOR),
+      outputs: external_exports.array(ComputationOutputSchema).max(COMPUTATION_IR_LIMITS.definitions + 1),
+      /** False whenever any part of the authored computation could not be represented. */
+      complete: external_exports.boolean(),
+      unsupportedReasons: external_exports.array(external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)).max(16)
+    };
+    ComputationProgramV1Schema = external_exports.object(ProgramBodyShape).strict().superRefine((program, ctx) => {
+      let issues;
+      try {
+        issues = checkProgramStructure(program);
+      } catch {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [],
+          message: `${COMPUTATION_VALIDATION_CODES.CROSS_REF}: program structure could not be walked`
+        });
+        return;
+      }
+      for (const issue of issues) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [...issue.path], message: issue.message });
+      }
+    });
+    ComputationOriginSchema = external_exports.object({
+      kind: external_exports.enum(COMPUTATION_ORIGIN_KINDS),
+      /** Source event that carried the body; provenance only, excluded from the program digest. */
+      sourceEventId: IdentifierSchema,
+      /** Normalized relative path pattern; never raw file contents or an absolute private path. */
+      pathPattern: ComputationPathPatternSchema.optional()
+    }).strict();
+    ComputationObservationSchema = external_exports.object({
+      kind: external_exports.enum(COMPUTATION_OBSERVATION_KINDS),
+      status: external_exports.enum(COMPUTATION_OBSERVATION_STATUSES),
+      callEventId: IdentifierSchema,
+      callId: IdentifierSchema.optional(),
+      resultEventId: IdentifierSchema.optional()
+    }).strict();
+    ComputationDependencySchema = external_exports.object({
+      definitionId: ComputationDefinitionIdSchema,
+      programDigest: ComputationDigestSchema,
+      sourceEventId: IdentifierSchema
+    }).strict();
+    ComputationCorrectionSchema = external_exports.object({
+      supersedesDefinitionId: ComputationDefinitionIdSchema,
+      supersededProgramDigest: ComputationDigestSchema
+    }).strict();
+    ComputationMetricsSchema = external_exports.object({
+      sourceLines: external_exports.number().int().nonnegative().max(COMPUTATION_IR_LIMITS.sourceLines),
+      sourceBytes: external_exports.number().int().nonnegative().max(COMPUTATION_IR_LIMITS.sourceBytes),
+      nodeCount: external_exports.number().int().nonnegative(),
+      symbolCount: external_exports.number().int().nonnegative(),
+      slotCount: external_exports.number().int().nonnegative(),
+      definitionCount: external_exports.number().int().nonnegative()
+    }).strict();
+    EnvelopeBodyShape = {
+      version: external_exports.literal(COMPUTATION_IR_VERSION),
+      evidenceId: ComputationDigestSchema,
+      program: ComputationProgramV1Schema,
+      programDigest: ComputationDigestSchema,
+      origin: ComputationOriginSchema,
+      observation: ComputationObservationSchema,
+      dependencies: external_exports.array(ComputationDependencySchema).max(COMPUTATION_IR_LIMITS.dependencies * HARD_LIMIT_FACTOR),
+      corrections: external_exports.array(ComputationCorrectionSchema).max(COMPUTATION_IR_LIMITS.dependencies * HARD_LIMIT_FACTOR),
+      metrics: ComputationMetricsSchema,
+      /** Structural marker: this contract is evidence for analysis only and grants no authority. */
+      analysisOnly: external_exports.literal(true)
+    };
+    METRIC_COUNT_FIELDS = [
+      ["nodeCount", "nodes"],
+      ["symbolCount", "symbols"],
+      ["slotCount", "slots"],
+      ["definitionCount", "definitions"]
+    ];
+    ResinComputationEvidenceV1Schema = external_exports.object(EnvelopeBodyShape).strict().superRefine((envelope, ctx) => {
+      try {
+        const { evidenceId, ...body } = envelope;
+        if (envelope.programDigest !== computeComputationProgramDigest(envelope.program)) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            path: ["programDigest"],
+            message: `${COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH}: programDigest does not match the program body`
+          });
+        }
+        if (evidenceId !== computeComputationEvidenceDigest(body)) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            path: ["evidenceId"],
+            message: `${COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH}: evidenceId does not match the bounded evidence body`
+          });
+        }
+        for (const issue of checkEnvelopeStructure(envelope)) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            path: [...issue.path],
+            message: issue.message
+          });
+        }
+      } catch {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [],
+          message: `${COMPUTATION_VALIDATION_CODES.SERIALIZATION}: evidence body could not be canonicalized`
+        });
+      }
+    });
+  }
+});
+
 // packages/contracts/dist/index.js
 var init_dist = __esm({
   "packages/contracts/dist/index.js"() {
@@ -6780,6 +8376,7 @@ var init_dist = __esm({
     init_safety_gate();
     init_qualification();
     init_v1();
+    init_computation_evidence();
   }
 });
 
@@ -9967,6 +11564,53 @@ function resolvePaths(options = {}) {
   };
 }
 
+// apps/observer/dist/config.js
+init_zod();
+var OpportunityTrackingConfigSchema = external_exports.object({
+  /** Enables continuous per-session local opportunity detection. */
+  enabled: external_exports.boolean().default(true),
+  /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
+  synthesisCostUsd: external_exports.number().nonnegative().default(0.05),
+  /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
+  minDispatchConfidence: external_exports.number().min(0).max(1).default(0.5),
+  /** Rolling per-session episode window bound. */
+  maxEpisodesPerSession: external_exports.number().int().positive().default(64),
+  /** Pattern outbox upload cadence and hash-cache reconciliation interval, in milliseconds. */
+  uploadIntervalMs: external_exports.number().int().positive().default(3e5)
+}).strict();
+var DaemonConfigSchema = external_exports.object({
+  version: external_exports.string().default("0.1.0"),
+  logLevel: external_exports.enum(["debug", "info", "warn", "error", "silent"]).default("info"),
+  host: external_exports.string().default("127.0.0.1"),
+  port: external_exports.number().int().min(1).max(65535).default(9400),
+  socketPath: external_exports.string().optional(),
+  cloudUrl: external_exports.string().url().default("https://api.resin.sh"),
+  telemetryEnabled: external_exports.boolean().default(true),
+  storageDir: external_exports.string().optional(),
+  heartbeatIntervalMs: external_exports.number().int().positive().default(3e3),
+  lockStaleThresholdMs: external_exports.number().int().positive().default(15e3),
+  shutdownTimeoutMs: external_exports.number().int().positive().default(1e4),
+  maxWorkerMemoryMb: external_exports.number().int().positive().default(512),
+  workerExecutionTimeoutMs: external_exports.number().int().positive().default(3e4),
+  moduleConfigs: external_exports.record(external_exports.string(), external_exports.record(external_exports.string(), external_exports.unknown())).default({}),
+  captureUserSessionsOnly: external_exports.boolean().default(true),
+  opportunityTracking: OpportunityTrackingConfigSchema.default({}),
+  custom: external_exports.record(external_exports.string(), external_exports.unknown()).default({})
+});
+var ConfigRecoveryWarningSchema = external_exports.object({
+  category: external_exports.literal("MALFORMED_CONFIG"),
+  detectedAt: external_exports.number().int().nonnegative(),
+  configPath: external_exports.string().min(1).max(8192),
+  backupPath: external_exports.string().min(1).max(8192),
+  remediation: external_exports.string().min(1).max(4096),
+  message: external_exports.string().min(1).max(16384)
+}).strict();
+var PersistedConfigRecoveryWarningSchema = external_exports.object({
+  version: external_exports.literal(1),
+  warning: ConfigRecoveryWarningSchema.nullable()
+}).strict();
+var MAX_CONFIG_RECOVERY_WARNING_BYTES = 64 * 1024;
+
 // packages/protocol/dist/errors.js
 init_dist();
 init_zod();
@@ -10947,31 +12591,21 @@ var ControlPlaneFieldDescriptorSchema = external_exports.object({
 }).strict();
 var ControlPlaneInventoryResponseSchema = external_exports.object({ fields: external_exports.array(ControlPlaneFieldDescriptorSchema) }).strict();
 
-// apps/observer/dist/notifications.js
+// apps/observer/dist/cloud-credentials.js
 init_zod();
-var ACTIONABLE_NOTIFICATION_COOLDOWN_MS = 4 * 60 * 60 * 1e3;
-var OBSERVER_NOTIFICATION_IDS = {
-  authSessionExpired: "auth.session-expired",
-  harnessIntegrationFailed: "harness.integration-failed",
-  daemonBackgroundFailed: "daemon.background-failed",
-  networkSyncDegraded: "network.sync-degraded"
-};
-var OBSERVER_MANAGED_NOTIFICATION_IDS = Object.freeze(Object.values(OBSERVER_NOTIFICATION_IDS));
-var MAX_NOTIFICATION_INBOX_BYTES = 512 * 1024;
-var MAX_HARNESS_HEALTH_BYTES = 512 * 1024;
-var HarnessHealthStateSchema = external_exports.object({
-  format: external_exports.literal("resin-harness-health/v1"),
-  success: external_exports.boolean(),
-  hasDrift: external_exports.boolean(),
-  settingsDiagnostic: external_exports.string().min(1).optional(),
-  harnesses: external_exports.array(external_exports.object({
-    installed: external_exports.boolean(),
-    condition: external_exports.enum(["healthy", "missing", "drifted", "corrupt", "not_installed"])
-  }).passthrough()).max(32),
-  lastFailure: external_exports.object({
-    code: external_exports.literal("check_failed")
-  }).passthrough().optional()
-}).passthrough();
+var StoredCloudCredentialsSchema = external_exports.object({
+  cloudUrl: external_exports.string().url("cloudUrl must be a valid URL"),
+  accessToken: external_exports.string().min(1, "accessToken cannot be empty"),
+  refreshToken: external_exports.string().min(1, "refreshToken cannot be empty").optional(),
+  claims: AuthClaimsSchema,
+  deviceId: external_exports.string().min(1, "deviceId cannot be empty"),
+  workspaceId: external_exports.string().min(1, "workspaceId cannot be empty"),
+  storedAt: external_exports.string().min(1, "storedAt cannot be empty")
+});
+
+// apps/observer/dist/ipc/client.js
+import crypto2 from "node:crypto";
+import net from "node:net";
 
 // apps/observer/dist/ipc/framing.js
 var MAX_FRAME_SIZE = 16 * 1024 * 1024;
@@ -11026,56 +12660,6 @@ var FrameDecoder = class {
   }
 };
 
-// apps/observer/dist/lock.js
-var MAX_IPC_PROBE_RESPONSE_BYTES = 64 * 1024;
-
-// apps/observer/dist/config.js
-init_zod();
-var OpportunityTrackingConfigSchema = external_exports.object({
-  /** Enables continuous per-session local opportunity detection. */
-  enabled: external_exports.boolean().default(true),
-  /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
-  synthesisCostUsd: external_exports.number().nonnegative().default(0.05),
-  /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
-  minDispatchConfidence: external_exports.number().min(0).max(1).default(0.5),
-  /** Rolling per-session episode window bound. */
-  maxEpisodesPerSession: external_exports.number().int().positive().default(64),
-  /** Pattern outbox upload cadence and hash-cache reconciliation interval, in milliseconds. */
-  uploadIntervalMs: external_exports.number().int().positive().default(3e5)
-}).strict();
-var DaemonConfigSchema = external_exports.object({
-  version: external_exports.string().default("0.1.0"),
-  logLevel: external_exports.enum(["debug", "info", "warn", "error", "silent"]).default("info"),
-  host: external_exports.string().default("127.0.0.1"),
-  port: external_exports.number().int().min(1).max(65535).default(9400),
-  socketPath: external_exports.string().optional(),
-  cloudUrl: external_exports.string().url().default("https://api.resin.sh"),
-  telemetryEnabled: external_exports.boolean().default(true),
-  storageDir: external_exports.string().optional(),
-  heartbeatIntervalMs: external_exports.number().int().positive().default(3e3),
-  lockStaleThresholdMs: external_exports.number().int().positive().default(15e3),
-  shutdownTimeoutMs: external_exports.number().int().positive().default(1e4),
-  maxWorkerMemoryMb: external_exports.number().int().positive().default(512),
-  workerExecutionTimeoutMs: external_exports.number().int().positive().default(3e4),
-  moduleConfigs: external_exports.record(external_exports.string(), external_exports.record(external_exports.string(), external_exports.unknown())).default({}),
-  captureUserSessionsOnly: external_exports.boolean().default(true),
-  opportunityTracking: OpportunityTrackingConfigSchema.default({}),
-  custom: external_exports.record(external_exports.string(), external_exports.unknown()).default({})
-});
-var ConfigRecoveryWarningSchema = external_exports.object({
-  category: external_exports.literal("MALFORMED_CONFIG"),
-  detectedAt: external_exports.number().int().nonnegative(),
-  configPath: external_exports.string().min(1).max(8192),
-  backupPath: external_exports.string().min(1).max(8192),
-  remediation: external_exports.string().min(1).max(4096),
-  message: external_exports.string().min(1).max(16384)
-}).strict();
-var PersistedConfigRecoveryWarningSchema = external_exports.object({
-  version: external_exports.literal(1),
-  warning: ConfigRecoveryWarningSchema.nullable()
-}).strict();
-var MAX_CONFIG_RECOVERY_WARNING_BYTES = 64 * 1024;
-
 // apps/observer/dist/ipc/protocol.js
 var IPC_ERROR_CODES = {
   UNAUTHORIZED: "UNAUTHORIZED",
@@ -11088,8 +12672,6 @@ var IPC_ERROR_CODES = {
 };
 
 // apps/observer/dist/ipc/client.js
-import crypto2 from "node:crypto";
-import net from "node:net";
 var IpcClient = class {
   socketPath;
   transport = null;
@@ -11291,1132 +12873,6 @@ var IpcClient = class {
     }
   }
 };
-
-// apps/observer/dist/worker-supervisor.js
-init_dist();
-var DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
-
-// apps/observer/dist/tailing/deduplicator.js
-init_dist();
-
-// apps/observer/dist/tailing/cursor-manager.js
-init_dist2();
-
-// apps/observer/dist/tailing/queue.js
-init_dist2();
-
-// apps/observer/dist/tailing/tailer.js
-init_dist2();
-
-// apps/observer/dist/auth-recovery.js
-init_zod();
-var JsonValueSchema = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.array(JsonValueSchema),
-  external_exports.record(JsonValueSchema)
-]));
-var JsonObjectSchema = external_exports.record(JsonValueSchema);
-var AUTH_ERROR_BODY_LIMIT_BYTES = 16 * 1024;
-
-// apps/observer/dist/normalization/decoder.js
-init_dist();
-init_dist2();
-
-// apps/observer/dist/normalization/deduplicator.js
-init_dist();
-
-// apps/observer/dist/normalization/pipeline.js
-init_dist();
-
-// apps/observer/dist/normalization/re-normalizer.js
-init_dist();
-
-// apps/observer/dist/observability/audit-trail.js
-init_dist();
-
-// apps/observer/dist/sync/types.js
-init_dist();
-init_zod();
-var DeploymentCommandTypeSchema = external_exports.enum([
-  "deploy",
-  "activate",
-  "canary",
-  "rollback",
-  "suspend",
-  "resume",
-  "retire"
-]);
-var DeploymentCommandMessageSchema = external_exports.object({
-  commandId: IdentifierSchema,
-  commandType: DeploymentCommandTypeSchema,
-  deploymentId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  version: SchemaVersionSchema,
-  workspaceId: IdentifierSchema.optional(),
-  projectId: IdentifierSchema.optional(),
-  targetDigest: Sha256DigestSchema.optional(),
-  canaryWeight: external_exports.number().int().min(0).max(100).optional(),
-  rollbackToVersion: SchemaVersionSchema.optional(),
-  rollbackToSnapshotId: IdentifierSchema.optional(),
-  reason: external_exports.string().optional(),
-  timestamp: ISOTimestampSchema,
-  bundleUrl: external_exports.string().optional(),
-  artifactUri: external_exports.string().optional(),
-  manifest: ToolManifestSchema.optional(),
-  signature: external_exports.record(external_exports.unknown()).optional(),
-  lockedEntry: V1LockedToolEntrySchema.optional(),
-  certificate: V1ActivationCertificateSchema.optional(),
-  trustVerification: external_exports.record(external_exports.unknown()).optional(),
-  metadata: external_exports.record(external_exports.unknown()).default({})
-});
-var LocalDeploymentStateSchema = external_exports.enum([
-  "staged",
-  "activating",
-  "active",
-  "canary",
-  "suspended",
-  "rolling_back",
-  "rolled_back",
-  "retired",
-  "rejected",
-  "broken",
-  "failed"
-]);
-var DeploymentSyncStatusReportSchema = external_exports.object({
-  reportId: IdentifierSchema,
-  commandId: IdentifierSchema.optional(),
-  deploymentId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  version: SchemaVersionSchema,
-  workspaceId: IdentifierSchema,
-  status: LocalDeploymentStateSchema,
-  previousStatus: LocalDeploymentStateSchema.optional(),
-  activeTrafficPercentage: external_exports.number().min(0).max(100).default(0),
-  appliedAt: ISOTimestampSchema,
-  errorMessage: external_exports.string().optional(),
-  errorCode: external_exports.string().optional(),
-  details: external_exports.record(external_exports.unknown()).default({}),
-  catalogRevision: external_exports.number().int().nonnegative().optional(),
-  catalogDigest: Sha256DigestSchema.optional()
-});
-var ToolOverrideRecordSchema = external_exports.object({
-  overrideId: IdentifierSchema.optional(),
-  toolId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  action: external_exports.enum(["disable", "pin", "allow", "custom"]),
-  pinnedVersion: SchemaVersionSchema.optional(),
-  isEnabled: external_exports.boolean().default(true),
-  createdAt: ISOTimestampSchema.optional(),
-  metadata: external_exports.record(external_exports.unknown()).default({})
-});
-var SyncReconciliationActionTypeSchema = external_exports.enum([
-  "activated",
-  "suspended",
-  "resumed",
-  "rolled_back",
-  "downloaded",
-  "staged",
-  "rejected",
-  "skipped",
-  "uninstalled",
-  "retired"
-]);
-var SyncReconciliationActionSchema = external_exports.object({
-  toolId: IdentifierSchema,
-  deploymentId: IdentifierSchema.optional(),
-  version: SchemaVersionSchema.optional(),
-  action: SyncReconciliationActionTypeSchema,
-  reason: external_exports.string(),
-  status: external_exports.enum(["success", "failure", "skipped"]),
-  error: external_exports.string().optional()
-});
-var SyncReconciliationResultSchema = external_exports.object({
-  workspaceId: IdentifierSchema,
-  reconciledAt: ISOTimestampSchema,
-  actions: external_exports.array(SyncReconciliationActionSchema).default([]),
-  activeTools: external_exports.record(SchemaVersionSchema).default({}),
-  suspendedTools: external_exports.array(IdentifierSchema).default([]),
-  rolledBackTools: external_exports.array(IdentifierSchema).default([]),
-  pendingActionsCount: external_exports.number().int().nonnegative().default(0),
-  appliedActionsCount: external_exports.number().int().nonnegative().default(0),
-  errorCount: external_exports.number().int().nonnegative().default(0),
-  errors: external_exports.array(external_exports.object({
-    toolId: IdentifierSchema.optional(),
-    error: external_exports.string()
-  })).default([])
-});
-var PROHIBITED_RAW_DATA_KEYS = Object.freeze([
-  "rawTranscript",
-  "transcript",
-  "transcripts",
-  "rawSession",
-  "rawSessions",
-  "rawRecords",
-  "rawRecordRefs",
-  "rawRecord",
-  "rawPrompt",
-  "unredactedPrompt",
-  "unredacted_prompt",
-  "sourceCode",
-  "source_code",
-  "sourceFiles",
-  "source_files",
-  "fileContent",
-  "file_content",
-  "fileDiff",
-  "file_diff",
-  "rawInput",
-  "rawOutput",
-  "raw_input",
-  "raw_output",
-  "secret",
-  "secrets",
-  "apiKey",
-  "api_key",
-  "bearerToken",
-  "bearer_token",
-  "privateKey",
-  "private_key",
-  "sessionRepository",
-  "localDatabase",
-  "dbConnection",
-  "sqliteConnection",
-  "rawPayload",
-  "raw_payload",
-  "systemPrompt",
-  "system_prompt",
-  "userPrompt",
-  "user_prompt",
-  "conversationHistory"
-]);
-var SENSITIVE_PATTERN_REGEXES = Object.freeze([
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/i,
-  /\b(?:sk|ghp|gho|ghu|ghs|xox[baprs]|secp|xkeysib)[-_][a-zA-Z0-9_-]{16,}\b/i,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/,
-  /\bpassword\s*[:=]\s*["']?[^\s"']{6,}/i
-]);
-
-// apps/observer/dist/sync/client.js
-init_dist();
-
-// apps/observer/dist/sync/preactivation.js
-init_dist();
-
-// apps/observer/dist/sync/activator.js
-init_dist();
-
-// packages/db/dist/connection.js
-import { DatabaseSync } from "node:sqlite";
-
-// packages/db/dist/migrations.js
-init_dist();
-var INITIAL_SCHEMA_SQL = `
--- 1. Workspaces
-CREATE TABLE IF NOT EXISTS workspaces (
-  workspace_id TEXT PRIMARY KEY,
-  root_path TEXT NOT NULL,
-  name TEXT NOT NULL,
-  config_json TEXT NOT NULL DEFAULT '{}',
-  capability_envelope_json TEXT NOT NULL,
-  active_tools_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_workspaces_root_path ON workspaces(root_path);
-
--- 2. Sessions
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id TEXT PRIMARY KEY,
-  workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE SET NULL,
-  harness_id TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active',
-  started_at TEXT NOT NULL,
-  ended_at TEXT,
-  metadata_json TEXT NOT NULL DEFAULT '{}',
-  source_identity_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id ON sessions(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_harness_id ON sessions(harness_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
-CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
-
--- 3. Source Cursors
-CREATE TABLE IF NOT EXISTS source_cursors (
-  cursor_id TEXT PRIMARY KEY,
-  device_id TEXT NOT NULL,
-  workspace_id TEXT,
-  entity_type TEXT NOT NULL,
-  last_synced_sequence INTEGER NOT NULL DEFAULT 0,
-  last_synced_timestamp TEXT NOT NULL,
-  sync_token TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_source_cursors_device_entity ON source_cursors(device_id, entity_type);
-CREATE INDEX IF NOT EXISTS idx_source_cursors_workspace ON source_cursors(workspace_id);
-
--- 4. Raw Record Refs
-CREATE TABLE IF NOT EXISTS raw_record_refs (
-  record_id TEXT PRIMARY KEY,
-  session_id TEXT REFERENCES sessions(session_id) ON DELETE CASCADE,
-  source_id TEXT NOT NULL,
-  payload_hash TEXT NOT NULL,
-  storage_path TEXT,
-  byte_size INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  metadata_json TEXT NOT NULL DEFAULT '{}'
-);
-CREATE INDEX IF NOT EXISTS idx_raw_record_refs_session_id ON raw_record_refs(session_id);
-CREATE INDEX IF NOT EXISTS idx_raw_record_refs_source_id ON raw_record_refs(source_id);
-CREATE INDEX IF NOT EXISTS idx_raw_record_refs_payload_hash ON raw_record_refs(payload_hash);
-
--- 5. Normalized Events
-CREATE TABLE IF NOT EXISTS normalized_events (
-  event_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL,
-  type TEXT NOT NULL,
-  timestamp TEXT NOT NULL,
-  causal_parent_id TEXT,
-  payload_json TEXT NOT NULL,
-  redaction_meta_json TEXT,
-  digest TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_events_session_sequence ON normalized_events(session_id, sequence);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_session_time ON normalized_events(session_id, timestamp);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_type ON normalized_events(type);
-CREATE INDEX IF NOT EXISTS idx_normalized_events_digest ON normalized_events(digest);
-
--- 6. Upload Batches
-CREATE TABLE IF NOT EXISTS upload_batches (
-  batch_id TEXT PRIMARY KEY,
-  workspace_id TEXT,
-  event_count INTEGER NOT NULL DEFAULT 0,
-  byte_size INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TEXT NOT NULL,
-  uploaded_at TEXT,
-  retry_count INTEGER NOT NULL DEFAULT 0,
-  checksum TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_upload_batches_status ON upload_batches(status);
-CREATE INDEX IF NOT EXISTS idx_upload_batches_created_at ON upload_batches(created_at);
-CREATE INDEX IF NOT EXISTS idx_upload_batches_workspace ON upload_batches(workspace_id);
-
--- 7. Upload Acknowledgements
-CREATE TABLE IF NOT EXISTS upload_acknowledgements (
-  ack_id TEXT PRIMARY KEY,
-  batch_id TEXT NOT NULL REFERENCES upload_batches(batch_id) ON DELETE CASCADE,
-  server_timestamp TEXT NOT NULL,
-  processed_count INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'accepted',
-  received_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_upload_acknowledgements_batch_id ON upload_acknowledgements(batch_id);
-
--- 8. Dead Letters
-CREATE TABLE IF NOT EXISTS dead_letters (
-  dead_letter_id TEXT PRIMARY KEY,
-  original_event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  error_reason TEXT NOT NULL,
-  failed_at TEXT NOT NULL,
-  retry_count INTEGER NOT NULL DEFAULT 0,
-  next_retry_at TEXT,
-  status TEXT NOT NULL DEFAULT 'pending'
-);
-CREATE INDEX IF NOT EXISTS idx_dead_letters_status ON dead_letters(status);
-CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at);
-
--- 9. Tool Manifests
-CREATE TABLE IF NOT EXISTS tool_manifests (
-  tool_id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  version TEXT NOT NULL,
-  description TEXT NOT NULL,
-  scope TEXT NOT NULL DEFAULT 'workspace',
-  parameters_json TEXT NOT NULL DEFAULT '{}',
-  output_schema_json TEXT,
-  runtime_json TEXT NOT NULL DEFAULT '{}',
-  capabilities_json TEXT NOT NULL DEFAULT '{}',
-  limits_json TEXT NOT NULL DEFAULT '{}',
-  digest TEXT NOT NULL,
-  metadata_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tool_manifests_name ON tool_manifests(name);
-CREATE INDEX IF NOT EXISTS idx_tool_manifests_version ON tool_manifests(version);
-CREATE INDEX IF NOT EXISTS idx_tool_manifests_digest ON tool_manifests(digest);
-CREATE INDEX IF NOT EXISTS idx_tool_manifests_scope ON tool_manifests(scope);
-
--- 10. Tool Versions
-CREATE TABLE IF NOT EXISTS tool_versions (
-  tool_id TEXT NOT NULL REFERENCES tool_manifests(tool_id) ON DELETE CASCADE,
-  version TEXT NOT NULL,
-  manifest_digest TEXT NOT NULL,
-  artifact_digest TEXT NOT NULL,
-  manifest_json TEXT NOT NULL,
-  artifact_json TEXT NOT NULL,
-  provenance_json TEXT NOT NULL,
-  signature_json TEXT,
-  status TEXT NOT NULL DEFAULT 'draft',
-  created_at TEXT NOT NULL,
-  created_by TEXT NOT NULL,
-  PRIMARY KEY (tool_id, version)
-);
-CREATE INDEX IF NOT EXISTS idx_tool_versions_manifest_digest ON tool_versions(manifest_digest);
-CREATE INDEX IF NOT EXISTS idx_tool_versions_artifact_digest ON tool_versions(artifact_digest);
-CREATE INDEX IF NOT EXISTS idx_tool_versions_status ON tool_versions(status);
-
--- 11. Catalog Snapshots
-CREATE TABLE IF NOT EXISTS catalog_snapshots (
-  snapshot_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  timestamp TEXT NOT NULL,
-  tools_json TEXT NOT NULL DEFAULT '{}',
-  digest TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_catalog_snapshots_workspace_time ON catalog_snapshots(workspace_id, timestamp);
-CREATE INDEX IF NOT EXISTS idx_catalog_snapshots_digest ON catalog_snapshots(digest);
-
--- 12. Capability Envelopes
-CREATE TABLE IF NOT EXISTS capability_envelopes (
-  envelope_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  version TEXT NOT NULL,
-  fs_json TEXT NOT NULL DEFAULT '{}',
-  net_json TEXT NOT NULL DEFAULT '{}',
-  command_json TEXT NOT NULL DEFAULT '{}',
-  secrets_json TEXT NOT NULL DEFAULT '{}',
-  limits_json TEXT NOT NULL DEFAULT '{}',
-  is_frozen INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_capability_envelopes_workspace ON capability_envelopes(workspace_id);
-
--- 13. Capability Grants
-CREATE TABLE IF NOT EXISTS capability_grants (
-  grant_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  tool_id TEXT NOT NULL,
-  granted_at TEXT NOT NULL,
-  expires_at TEXT,
-  grant_type TEXT NOT NULL,
-  capabilities_json TEXT NOT NULL DEFAULT '{}',
-  actor_json TEXT NOT NULL,
-  reason TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_capability_grants_workspace_tool ON capability_grants(workspace_id, tool_id);
-CREATE INDEX IF NOT EXISTS idx_capability_grants_granted_at ON capability_grants(granted_at);
-
--- 14. Deployment Records
-CREATE TABLE IF NOT EXISTS deployment_records (
-  deployment_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  tool_id TEXT NOT NULL,
-  tool_version TEXT NOT NULL,
-  state TEXT NOT NULL,
-  canary_config_json TEXT,
-  history_json TEXT NOT NULL DEFAULT '[]',
-  active_traffic_percentage REAL NOT NULL DEFAULT 0.0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_deployment_records_workspace_tool ON deployment_records(workspace_id, tool_id, tool_version);
-CREATE INDEX IF NOT EXISTS idx_deployment_records_state ON deployment_records(state);
-
--- 15. Installations
-CREATE TABLE IF NOT EXISTS installations (
-  installation_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  tool_id TEXT NOT NULL,
-  tool_version TEXT NOT NULL,
-  deployment_id TEXT NOT NULL,
-  installed_at TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'active',
-  config_overrides_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_installations_workspace_tool ON installations(workspace_id, tool_id);
-CREATE INDEX IF NOT EXISTS idx_installations_deployment_id ON installations(deployment_id);
-CREATE INDEX IF NOT EXISTS idx_installations_state ON installations(state);
-
--- 16. Harness Installations
-CREATE TABLE IF NOT EXISTS harness_installations (
-  harness_id TEXT NOT NULL,
-  plugin_id TEXT NOT NULL,
-  version TEXT NOT NULL,
-  installed_at TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'active',
-  metadata_json TEXT NOT NULL DEFAULT '{}',
-  PRIMARY KEY (harness_id, plugin_id)
-);
-CREATE INDEX IF NOT EXISTS idx_harness_installations_state ON harness_installations(state);
-
--- 17. Invocation Records
-CREATE TABLE IF NOT EXISTS invocation_records (
-  invocation_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-  workspace_id TEXT NOT NULL,
-  tool_id TEXT NOT NULL,
-  tool_version TEXT NOT NULL,
-  started_at TEXT NOT NULL,
-  completed_at TEXT NOT NULL,
-  duration_ms REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'success',
-  input_digest TEXT NOT NULL,
-  output_digest TEXT,
-  error_details_json TEXT,
-  resource_usage_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_invocation_records_session ON invocation_records(session_id);
-CREATE INDEX IF NOT EXISTS idx_invocation_records_tool ON invocation_records(tool_id);
-CREATE INDEX IF NOT EXISTS idx_invocation_records_status ON invocation_records(status);
-CREATE INDEX IF NOT EXISTS idx_invocation_records_started_at ON invocation_records(started_at);
-
--- 18. Audit Records
-CREATE TABLE IF NOT EXISTS audit_records (
-  audit_id TEXT PRIMARY KEY,
-  timestamp TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  actor_json TEXT NOT NULL,
-  workspace_id TEXT,
-  resource_type TEXT NOT NULL,
-  resource_id TEXT NOT NULL,
-  action TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'success',
-  details_json TEXT NOT NULL DEFAULT '{}',
-  client_ip TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_records_event_type ON audit_records(event_type);
-CREATE INDEX IF NOT EXISTS idx_audit_records_timestamp ON audit_records(timestamp);
-CREATE INDEX IF NOT EXISTS idx_audit_records_workspace ON audit_records(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_audit_records_resource ON audit_records(resource_type, resource_id);
-
--- 19. Local Outbox
-CREATE TABLE IF NOT EXISTS local_outbox (
-  outbox_id TEXT PRIMARY KEY,
-  topic TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  retry_count INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  created_at TEXT NOT NULL,
-  next_retry_at TEXT,
-  sent_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_local_outbox_status ON local_outbox(status);
-CREATE INDEX IF NOT EXISTS idx_local_outbox_next_retry ON local_outbox(next_retry_at);
-CREATE INDEX IF NOT EXISTS idx_local_outbox_created_at ON local_outbox(created_at);
-
--- 20. Local Inbox
-CREATE TABLE IF NOT EXISTS local_inbox (
-  inbox_id TEXT PRIMARY KEY,
-  source TEXT NOT NULL,
-  message_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  received_at TEXT NOT NULL,
-  processed_at TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_local_inbox_source_msg ON local_inbox(source, message_id);
-CREATE INDEX IF NOT EXISTS idx_local_inbox_status ON local_inbox(status);
-CREATE INDEX IF NOT EXISTS idx_local_inbox_received_at ON local_inbox(received_at);
-`;
-var MIGRATION_002_SQL = `
-ALTER TABLE invocation_records ADD COLUMN uploaded_at TEXT;
-CREATE INDEX IF NOT EXISTS idx_invocation_records_uploaded_at ON invocation_records(uploaded_at);
-`;
-var MIGRATION_003_SQL = `
-ALTER TABLE invocation_records ADD COLUMN usage_estimate_json TEXT;
-`;
-var MIGRATION_004_SQL = `
--- 1. Session Signatures
-CREATE TABLE IF NOT EXISTS session_signatures (
-  signature_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  structural_hash TEXT NOT NULL,
-  episode_id TEXT,
-  payload_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_session_signatures_session_id ON session_signatures(session_id);
-CREATE INDEX IF NOT EXISTS idx_session_signatures_structural_hash ON session_signatures(structural_hash);
-CREATE INDEX IF NOT EXISTS idx_session_signatures_episode_id ON session_signatures(episode_id);
-
--- 2. Workflow Clusters
-CREATE TABLE IF NOT EXISTS workflow_clusters (
-  cluster_id TEXT PRIMARY KEY,
-  workspace_id TEXT,
-  structural_hash TEXT NOT NULL,
-  first_seen_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
-  occurrence_count INTEGER NOT NULL DEFAULT 0,
-  evidence_event_ids_json TEXT NOT NULL DEFAULT '[]',
-  metrics_json TEXT NOT NULL DEFAULT '{}',
-  engine_version TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_clusters_structural_hash ON workflow_clusters(structural_hash);
-CREATE INDEX IF NOT EXISTS idx_workflow_clusters_workspace_id ON workflow_clusters(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_clusters_last_seen_at ON workflow_clusters(last_seen_at);
-
--- 3. Cluster Episodes
-CREATE TABLE IF NOT EXISTS cluster_episodes (
-  cluster_id TEXT NOT NULL,
-  episode_id TEXT NOT NULL,
-  session_id TEXT,
-  PRIMARY KEY (cluster_id, episode_id)
-);
-CREATE INDEX IF NOT EXISTS idx_cluster_episodes_session_id ON cluster_episodes(session_id);
-CREATE INDEX IF NOT EXISTS idx_cluster_episodes_episode_id ON cluster_episodes(episode_id);
-
--- 4. Opportunity Hash Cache
-CREATE TABLE IF NOT EXISTS opportunity_hash_cache (
-  structural_hash TEXT PRIMARY KEY,
-  outcome TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  source_revision TEXT,
-  synced_at TEXT,
-  expires_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_opportunity_hash_cache_last_seen_at ON opportunity_hash_cache(last_seen_at);
-CREATE INDEX IF NOT EXISTS idx_opportunity_hash_cache_expires_at ON opportunity_hash_cache(expires_at);
-
--- 5. Pattern Outbox
-CREATE TABLE IF NOT EXISTS pattern_outbox (
-  pattern_id TEXT PRIMARY KEY,
-  idempotency_key TEXT NOT NULL UNIQUE,
-  workspace_id TEXT,
-  payload_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  uploaded_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_pattern_outbox_workspace_id ON pattern_outbox(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_pattern_outbox_created_at ON pattern_outbox(created_at);
-CREATE INDEX IF NOT EXISTS idx_pattern_outbox_uploaded_at ON pattern_outbox(uploaded_at);
-`;
-var BUILT_IN_MIGRATIONS = [
-  {
-    version: 1,
-    name: "001_initial_local_schema",
-    sql: INITIAL_SCHEMA_SQL,
-    checksum: hashCanonicalContent(INITIAL_SCHEMA_SQL)
-  },
-  {
-    version: 2,
-    name: "002_add_invocation_records_uploaded_at",
-    sql: MIGRATION_002_SQL,
-    checksum: hashCanonicalContent(MIGRATION_002_SQL)
-  },
-  {
-    version: 3,
-    name: "003_add_invocation_records_usage_estimate",
-    sql: MIGRATION_003_SQL,
-    checksum: hashCanonicalContent(MIGRATION_003_SQL)
-  },
-  {
-    version: 4,
-    name: "004_add_local_opportunity_tables",
-    sql: MIGRATION_004_SQL,
-    checksum: hashCanonicalContent(MIGRATION_004_SQL)
-  }
-];
-
-// packages/db/dist/repositories/session-repository.js
-init_dist();
-
-// packages/db/dist/repositories/tool-repository.js
-init_dist();
-
-// packages/db/dist/repositories/capability-repository.js
-init_dist();
-
-// packages/db/dist/repositories/sync-repository.js
-init_dist();
-
-// packages/db/dist/repositories/audit-repository.js
-init_dist();
-
-// packages/db/dist/repositories/opportunity-local-repository.js
-init_dist();
-
-// apps/observer/dist/sync/coordinator.js
-init_dist();
-init_zod();
-var JsonValueSchema2 = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.array(JsonValueSchema2),
-  external_exports.record(JsonValueSchema2)
-]));
-var JsonObjectSchema2 = external_exports.record(JsonValueSchema2);
-var TrustVerificationResultSchema = external_exports.object({
-  trusted: external_exports.boolean(),
-  certificate: V1ActivationCertificateSchema.optional(),
-  revocationMetadata: V1RevocationMetadataSchema.optional(),
-  reason: external_exports.string().optional(),
-  errorCode: external_exports.string().optional()
-});
-
-// apps/observer/dist/cloud-credentials.js
-init_zod();
-var StoredCloudCredentialsSchema = external_exports.object({
-  cloudUrl: external_exports.string().url("cloudUrl must be a valid URL"),
-  accessToken: external_exports.string().min(1, "accessToken cannot be empty"),
-  refreshToken: external_exports.string().min(1, "refreshToken cannot be empty").optional(),
-  claims: AuthClaimsSchema,
-  deviceId: external_exports.string().min(1, "deviceId cannot be empty"),
-  workspaceId: external_exports.string().min(1, "workspaceId cannot be empty"),
-  storedAt: external_exports.string().min(1, "storedAt cannot be empty")
-});
-
-// apps/observer/dist/cloud-runtime.js
-init_dist();
-init_zod();
-
-// apps/observer/dist/cloud-job-client.js
-init_zod();
-var ProtocolErrorDetailValueSchema = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.record(ProtocolErrorDetailValueSchema),
-  external_exports.array(ProtocolErrorDetailValueSchema)
-]));
-var ProtocolErrorDetailRecordSchema = external_exports.record(ProtocolErrorDetailValueSchema);
-
-// apps/observer/dist/cloud-runtime.js
-var ProtocolErrorDetailValueSchema2 = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.record(ProtocolErrorDetailValueSchema2),
-  external_exports.array(ProtocolErrorDetailValueSchema2)
-]));
-var ProtocolErrorDetailRecordSchema2 = external_exports.record(ProtocolErrorDetailValueSchema2);
-var ProviderUsageAvailabilitySchema2 = external_exports.enum(["complete", "partial", "unavailable"]);
-var TrajectoryUsageSchema = external_exports.object({
-  availability: ProviderUsageAvailabilitySchema2,
-  inputTokens: external_exports.number().int().nonnegative().nullish(),
-  outputTokens: external_exports.number().int().nonnegative().nullish(),
-  reasoningTokens: external_exports.number().int().nonnegative().nullish(),
-  cachedInputTokens: external_exports.number().int().nonnegative().nullish(),
-  totalTokens: external_exports.number().int().nonnegative().nullish(),
-  costMicroUsd: external_exports.number().int().nonnegative().nullish(),
-  durationMs: external_exports.number().int().nonnegative().nullish()
-}).strict().superRefine((val, ctx) => {
-  if (val.availability === "complete") {
-    if (val.totalTokens === void 0 || val.totalTokens === null) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: "Complete provider usage requires totalTokens to be present",
-        path: ["totalTokens"]
-      });
-    }
-  }
-});
-var TrajectoryRoleSchema = external_exports.enum(["baseline", "candidate"]);
-var TrajectoryStatusSchema = external_exports.enum(["success", "failure", "timeout", "error"]);
-var TrajectoryObservationSchema = external_exports.object({
-  observationId: IdentifierSchema,
-  accountId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  ownerUserId: IdentifierSchema,
-  projectId: IdentifierSchema,
-  candidateId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: external_exports.string().min(1),
-  workloadId: external_exports.string().min(1),
-  trajectoryId: external_exports.string().min(1),
-  parentTrajectoryId: external_exports.string().min(1).nullish(),
-  provider: external_exports.string().min(1),
-  model: external_exports.string().min(1),
-  runtimeVersion: external_exports.string().min(1),
-  role: TrajectoryRoleSchema,
-  status: TrajectoryStatusSchema,
-  isEquivalent: external_exports.boolean(),
-  catalogExposureTokens: external_exports.number().int().nonnegative().default(0),
-  usage: TrajectoryUsageSchema,
-  canonicalPayload: external_exports.record(external_exports.unknown()).optional(),
-  metadata: external_exports.record(external_exports.unknown()).optional(),
-  observedAt: ISOTimestampSchema,
-  digest: Sha256DigestSchema,
-  createdAt: ISOTimestampSchema.optional()
-}).strict();
-var TrajectoryObservationBatchRequestSchema = external_exports.object({
-  observations: external_exports.array(TrajectoryObservationSchema).min(1).max(1e3)
-}).strict();
-var TrajectoryObservationBatchResponseSchema = external_exports.object({
-  received: external_exports.number().int().nonnegative(),
-  accepted: external_exports.number().int().nonnegative(),
-  rejected: external_exports.number().int().nonnegative(),
-  errors: external_exports.array(external_exports.object({
-    index: external_exports.number().int().nonnegative(),
-    reason: external_exports.string()
-  })).optional()
-}).strict();
-
-// apps/observer/dist/control-plane.js
-var MAX_CONTROL_PLANE_RESPONSE_BYTES = 512 * 1024;
-
-// apps/observer/dist/analytics/trajectory-emitter.js
-init_dist();
-init_zod();
-var JsonValueSchema3 = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.array(JsonValueSchema3),
-  external_exports.record(JsonValueSchema3)
-]));
-var JsonObjectSchema3 = external_exports.record(JsonValueSchema3);
-var TrajectoryAttributionContextSchema = external_exports.object({
-  observationId: IdentifierSchema.optional(),
-  accountId: IdentifierSchema,
-  workspaceId: IdentifierSchema,
-  ownerUserId: IdentifierSchema,
-  projectId: IdentifierSchema,
-  candidateId: IdentifierSchema,
-  toolId: IdentifierSchema,
-  toolVersion: external_exports.string().min(1),
-  workloadId: external_exports.string().min(1),
-  trajectoryId: external_exports.string().min(1),
-  parentTrajectoryId: external_exports.string().min(1).nullish(),
-  provider: external_exports.string().min(1).optional(),
-  model: external_exports.string().min(1).optional(),
-  accountingVersion: external_exports.string().min(1).optional(),
-  runtimeVersion: external_exports.string().min(1),
-  role: TrajectoryRoleSchema,
-  status: TrajectoryStatusSchema.optional().default("success"),
-  isEquivalent: external_exports.boolean().optional().default(false),
-  catalogExposureTokens: external_exports.number().int().nonnegative().optional().default(0),
-  observedAt: ISOTimestampSchema.optional(),
-  metadata: JsonObjectSchema3.optional()
-}).strict();
-
-// apps/observer/dist/analytics/capture-coordinator.js
-init_dist();
-init_zod();
-
-// apps/observer/dist/analytics/metadata-projection.js
-init_dist();
-import { homedir } from "node:os";
-var DEFAULT_HOME_DIR = homedir();
-
-// apps/observer/dist/analytics/capture-coordinator.js
-var JsonValueSchema4 = external_exports.lazy(() => external_exports.union([
-  external_exports.string(),
-  external_exports.number(),
-  external_exports.boolean(),
-  external_exports.null(),
-  external_exports.undefined(),
-  external_exports.array(JsonValueSchema4),
-  external_exports.record(JsonValueSchema4)
-]));
-var JsonObjectSchema4 = external_exports.record(JsonValueSchema4);
-
-// apps/observer/dist/trajectory-capture-module.js
-init_dist3();
-init_dist4();
-init_dist5();
-init_zod();
-var RemoteTelemetryConsentSnapshotSchema = external_exports.object({
-  metadataTelemetryEnabled: external_exports.boolean(),
-  updatedAt: external_exports.string().datetime({ offset: true })
-}).strict();
-var LegacyTelemetryPrivacyCheckpointSchema = external_exports.object({
-  version: external_exports.literal(1),
-  cutoffMs: external_exports.number().int().nonnegative(),
-  telemetryEnabled: external_exports.boolean()
-}).strict();
-var CurrentTelemetryPrivacyCheckpointSchema = external_exports.object({
-  version: external_exports.literal(2),
-  cutoffMs: external_exports.number().int().nonnegative(),
-  telemetryEnabled: external_exports.boolean(),
-  remoteConsent: RemoteTelemetryConsentSnapshotSchema.nullable(),
-  remoteConsentCutoffMs: external_exports.number().int().nonnegative(),
-  remoteHistoryAvailable: external_exports.boolean()
-}).strict();
-var TelemetryPrivacyCheckpointSchema = external_exports.discriminatedUnion("version", [
-  LegacyTelemetryPrivacyCheckpointSchema,
-  CurrentTelemetryPrivacyCheckpointSchema
-]);
-
-// apps/observer/dist/opportunity/session-opportunity-tracker.js
-init_dist();
-
-// apps/observer/dist/opportunity/clustering.js
-init_dist();
-
-// apps/observer/dist/opportunity/episode.js
-init_dist();
-var DEFAULT_IDLE_GAP_THRESHOLD_MS = 5 * 60 * 1e3;
-
-// apps/observer/dist/opportunity/signature.js
-init_dist();
-
-// apps/observer/dist/opportunity/parameter-shape.js
-init_dist();
-var RESIN_PARAMETER_SHAPE_KEY2 = "__resinParameterShapeV1";
-var BLOCKED_PROPERTIES = Object.fromEntries(["__proto__", "constructor", "prototype", RESIN_PARAMETER_SHAPE_KEY2].map((key) => [
-  key,
-  true
-]));
-
-// apps/observer/dist/opportunity/signature.js
-var LOW_SIGNAL_COMMANDS = Object.fromEntries([
-  // pure output / formatting
-  "echo",
-  "printf",
-  "yes",
-  // inspection / viewers
-  "cat",
-  "ls",
-  "dir",
-  "pwd",
-  "head",
-  "tail",
-  "wc",
-  "less",
-  "more",
-  "tree",
-  // text filters / readers
-  "grep",
-  "egrep",
-  "fgrep",
-  "sed",
-  "awk",
-  "cut",
-  "tr",
-  "sort",
-  "uniq",
-  "comm",
-  "diff",
-  "jq",
-  "tee",
-  // diagnostics / process inspection
-  "pgrep",
-  "pkill",
-  "ps",
-  "stat",
-  "file",
-  "which",
-  "whereis",
-  "type",
-  "printenv",
-  "uname",
-  "hostname",
-  "whoami",
-  "id",
-  "date",
-  "uptime",
-  "df",
-  "du",
-  "free",
-  "nproc",
-  "arch",
-  // shell plumbing / control flow
-  "cd",
-  "test",
-  "[",
-  "[[",
-  "true",
-  "false",
-  "set",
-  "export",
-  "unset",
-  "read",
-  "wait",
-  "sleep",
-  "clear",
-  "history",
-  "jobs",
-  "bg",
-  "fg",
-  "kill",
-  "trap",
-  "shift",
-  "for",
-  "while",
-  "if",
-  "then",
-  "else",
-  "elif",
-  "fi",
-  "do",
-  "done",
-  "case",
-  "esac",
-  "function",
-  "return",
-  "exit",
-  "break",
-  "continue",
-  "in",
-  "select",
-  "until",
-  // tokenization artifacts (NOT real shell interpreters — `bash -c …`/`sh deploy.sh`
-  // wrap real work and must stay in the signature)
-  "_str",
-  "_arg",
-  "_path",
-  "_cmd"
-].map((name) => [name, true]));
-var LOW_SIGNAL_TOOLS = Object.fromEntries(["read", "glob", "grep", "list", "ls", "find", "search", "view", "cat", "stat"].map((name) => [
-  name,
-  true
-]));
-
-// apps/observer/dist/opportunity/suppression.js
-var TRIVIAL_COMMANDS = Object.fromEntries(["echo", "pwd", "whoami", "hostname", "date", "true", "false", "clear"].map((name) => [
-  name,
-  true
-]));
-var RESERVED_TOOL_NAMES = Object.fromEntries([
-  "unknown",
-  "generic",
-  "custom",
-  "auto",
-  "auto_general",
-  "general",
-  "passthrough",
-  "unknown_passthrough",
-  "session_lifecycle",
-  "message",
-  "thinking",
-  "undefined",
-  "null",
-  "nan",
-  "none",
-  "__proto__",
-  "proto",
-  "prototype",
-  "constructor",
-  "search_tools",
-  "get_tool_schema",
-  "invoke_tool",
-  "manage_tools"
-].map((name) => [name, true]));
-var RESERVED_OR_BUILTIN_TOOL_NAMES = Object.fromEntries([
-  // Meta tools
-  "search_tools",
-  "get_tool_schema",
-  "invoke_tool",
-  "manage_tools",
-  // Shell / command tools
-  "bash",
-  "sh",
-  "exec",
-  "command_exec",
-  "shell",
-  "terminal",
-  "exec_command",
-  "cmd",
-  // File tools
-  "file_read",
-  "read",
-  "read_file",
-  "cat",
-  "head",
-  "tail",
-  "view",
-  "file_edit",
-  "edit",
-  "write",
-  "write_file",
-  "patch",
-  "replace",
-  "sed",
-  // Search tools
-  "grep",
-  "glob",
-  "find",
-  "search",
-  "rg",
-  "ripgrep",
-  "ag",
-  // System / runtime tools & keywords
-  "eval",
-  "computer",
-  "web_search",
-  "browser",
-  "system",
-  "admin",
-  "root",
-  "process",
-  "spawn",
-  "node",
-  "python",
-  // Generic placeholders
-  "unknown",
-  "generic",
-  "custom",
-  "auto",
-  "auto_general",
-  "general",
-  "passthrough",
-  "unknown_passthrough",
-  "undefined",
-  "null",
-  "nan",
-  "none",
-  "message",
-  "thinking",
-  "session_lifecycle",
-  // Prototype pollution & object properties
-  "__proto__",
-  "proto",
-  "prototype",
-  "constructor",
-  "object",
-  "function",
-  "tostring",
-  "valueof",
-  "hasownproperty",
-  "isprototypeof",
-  "propertyisenumerable",
-  "__definegetter__",
-  "__definesetter__",
-  "__lookupgetter__",
-  "__lookupsetter__"
-].map((name) => [name, true]));
-var COMMAND_PLACEHOLDER_CLASSES = {
-  $STR: "[^\\s]+",
-  $NUM: "-?\\d+(\\.\\d+)?",
-  $URL: "https?://[^\\s]+",
-  $GLOB: "[^\\s]+",
-  $PATH: "[^\\s-][^\\s]*",
-  $SRC_FILE: "[^\\s-][^\\s]*",
-  $TEST_FILE: "[^\\s-][^\\s]*",
-  $CONFIG_FILE: "[^\\s-][^\\s]*",
-  $DOC_FILE: "[^\\s-][^\\s]*",
-  $BUILD_DIR: "[^\\s-][^\\s]*",
-  $TMP_DIR: "[^\\s-][^\\s]*"
-};
-var PLACEHOLDER_PATTERN = new RegExp(Object.keys(COMMAND_PLACEHOLDER_CLASSES).sort((left, right) => right.length - left.length).map((placeholder) => placeholder.replace("$", "\\$")).join("|"), "g");
-
-// apps/observer/dist/opportunity/session-opportunity-tracker.js
-var DEFAULT_HASH_CACHE_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1e3;
-var DEFAULT_HASH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 
 // apps/cli/src/service/auth-bootstrap.ts
 var DEFAULT_DEVICE_AUTH_SCOPES = Object.freeze([
@@ -13952,16 +14408,16 @@ function getActiveVersion(resinHome) {
 import crypto4 from "node:crypto";
 var REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 var ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-function canonicalJson2(val) {
+function canonicalJson(val) {
   if (val === null || val === void 0 || Array.isArray(val) || Object.prototype.toString.call(val) !== "[object Object]") {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
-    return `[${val.map((item) => canonicalJson2(item)).join(",")}]`;
+    return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
   }
   const obj = val;
   const keys = Object.keys(obj).filter((key) => obj[key] !== void 0).sort();
-  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson2(obj[key])}`);
+  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(obj[key])}`);
   return `{${pairs.join(",")}}`;
 }
 function createPublicKeyFromInput(key) {
@@ -13988,7 +14444,7 @@ function createPublicKeyFromInput(key) {
 function verifyEd25519Signature(payload, signatureHex, publicKey) {
   try {
     const keyObject = createPublicKeyFromInput(publicKey);
-    const canonicalString = canonicalJson2(payload);
+    const canonicalString = canonicalJson(payload);
     const dataBuffer = Buffer.from(canonicalString, "utf8");
     const signatureBuffer = Buffer.from(signatureHex, "hex");
     return crypto4.verify(null, dataBuffer, keyObject, signatureBuffer);
@@ -14288,7 +14744,7 @@ function verifyManifest(manifestData, options = {}) {
     }
   }
   if (options.expectedDigest) {
-    const digestInput = options.rawManifestBytes ?? canonicalJson2(manifest);
+    const digestInput = options.rawManifestBytes ?? canonicalJson(manifest);
     const actualDigest = crypto4.createHash("sha256").update(digestInput).digest("hex");
     if (actualDigest !== options.expectedDigest) {
       errors.push(

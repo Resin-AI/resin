@@ -1,5 +1,13 @@
-import type { EstimatedSavedWork } from "@resin/contracts";
+import {
+  COMPUTATION_TRANSFORM_APIS,
+  COMPUTATION_TRANSFORM_NODE_KINDS,
+  type EstimatedSavedWork,
+  type ResinComputationEvidenceV1,
+  isSubstantiveComputationEvidence,
+  readComputationEvidence,
+} from "@resin/contracts";
 import { extractScenarioId } from "./episode.js";
+import { extractEpisodeSignature } from "./signature.js";
 import {
   DEFAULT_RIGHT_SIZING_OPTIONS,
   type RightSizingOptions,
@@ -9,6 +17,163 @@ import {
 } from "./types.js";
 
 export { DEFAULT_RIGHT_SIZING_OPTIONS };
+
+const SUBSTANTIVE_NODE_KINDS: Readonly<Record<string, true>> = Object.fromEntries(
+  COMPUTATION_TRANSFORM_NODE_KINDS.map((kind) => [kind, true] as const),
+);
+
+const SUBSTANTIVE_CALL_APIS: Readonly<Record<string, true>> = Object.fromEntries(
+  COMPUTATION_TRANSFORM_APIS.map((api) => [api, true] as const),
+);
+
+const AUTHORING_NEGLIGIBLE_APIS: Readonly<Record<string, true>> = {
+  "core.to_string": true,
+  "json.serialize": true,
+};
+
+const COMPUTATION_FIXED_OVERHEAD_UNITS = 256;
+const COMPUTATION_SLOT_OVERHEAD_UNITS = 8;
+const COMPUTATION_DEFINITION_OVERHEAD_UNITS = 4;
+const MIN_CREDIBLE_SUBSTANTIVE_NODES = 3;
+
+type ComputationEvidenceInput =
+  | ResinComputationEvidenceV1
+  | readonly ResinComputationEvidenceV1[]
+  | undefined;
+
+interface ComputationValueSummary {
+  evidenceCount: number;
+  uniqueProgramCount: number;
+  substantiveNodeCount: number;
+  authoringUnits: number;
+  overheadUnits: number;
+  netAuthoringUnits: number;
+}
+
+function normalizeComputationEvidence(
+  evidenceInput: ComputationEvidenceInput,
+): ResinComputationEvidenceV1[] {
+  if (evidenceInput === undefined) {
+    return [];
+  }
+  const candidates = Array.isArray(evidenceInput) ? evidenceInput : [evidenceInput];
+  const parsed: ResinComputationEvidenceV1[] = [];
+  const seenEvidenceIds = new Set<string>();
+  for (const candidate of candidates) {
+    const evidence = readComputationEvidence(candidate);
+    if (evidence === undefined || !isSubstantiveComputationEvidence(evidence)) {
+      continue;
+    }
+    if (seenEvidenceIds.has(evidence.evidenceId)) {
+      continue;
+    }
+    seenEvidenceIds.add(evidence.evidenceId);
+    parsed.push(evidence);
+  }
+
+  // Temporal correction selection belongs to the signature extractor. A historical digest set
+  // cannot distinguish a superseded invocation from a later deliberate restoration of its body.
+  return parsed;
+}
+
+function countSubstantiveAuthoringNodes(evidence: ResinComputationEvidenceV1): number {
+  let count = 0;
+  for (const node of evidence.program.nodes) {
+    if (SUBSTANTIVE_NODE_KINDS[node.kind] === true) {
+      count += 1;
+      continue;
+    }
+    if (
+      node.kind === "call" &&
+      typeof node.api === "string" &&
+      SUBSTANTIVE_CALL_APIS[node.api] === true &&
+      AUTHORING_NEGLIGIBLE_APIS[node.api] !== true
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function summarizeComputationValue(
+  evidenceInput: ComputationEvidenceInput,
+): ComputationValueSummary | undefined {
+  const evidence = normalizeComputationEvidence(evidenceInput);
+  if (evidence.length === 0) {
+    return undefined;
+  }
+
+  const bestByProgramDigest = new Map<string, ComputationValueSummary>();
+  for (const candidate of evidence) {
+    const substantiveNodeCount = countSubstantiveAuthoringNodes(candidate);
+    const sourceCap = Math.floor(candidate.metrics.sourceBytes / 4);
+    const authoringUnits = Math.min(substantiveNodeCount * 16, sourceCap);
+    const overheadUnits =
+      COMPUTATION_FIXED_OVERHEAD_UNITS +
+      candidate.program.slots.length * COMPUTATION_SLOT_OVERHEAD_UNITS +
+      candidate.program.definitions.length * COMPUTATION_DEFINITION_OVERHEAD_UNITS +
+      candidate.program.outputs.length;
+    const summary: ComputationValueSummary = {
+      evidenceCount: 1,
+      uniqueProgramCount: 1,
+      substantiveNodeCount,
+      authoringUnits,
+      overheadUnits,
+      netAuthoringUnits: authoringUnits - overheadUnits,
+    };
+    const previous = bestByProgramDigest.get(candidate.programDigest);
+    if (previous === undefined || summary.netAuthoringUnits > previous.netAuthoringUnits) {
+      bestByProgramDigest.set(candidate.programDigest, summary);
+    }
+  }
+
+  let best: ComputationValueSummary | undefined;
+  for (const summary of bestByProgramDigest.values()) {
+    if (best === undefined || summary.netAuthoringUnits > best.netAuthoringUnits) {
+      best = summary;
+    }
+  }
+  if (best === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...best,
+    evidenceCount: evidence.length,
+    uniqueProgramCount: bestByProgramDigest.size,
+  };
+}
+
+function collectClusterComputationEvidence(cluster: WorkflowCluster): ResinComputationEvidenceV1[] {
+  const operations =
+    cluster.representativeSignature.semanticOperations ??
+    cluster.episodes.flatMap(
+      (episode) => extractEpisodeSignature(episode).semanticOperations ?? [],
+    );
+  const candidates: ResinComputationEvidenceV1[] = [];
+  for (const operation of operations) {
+    if (
+      typeof operation !== "object" ||
+      operation === null ||
+      !("computationEvidence" in operation)
+    ) {
+      continue;
+    }
+    const evidence = readComputationEvidence(operation.computationEvidence);
+    if (evidence !== undefined) candidates.push(evidence);
+  }
+  return candidates;
+}
+
+/** Advisory unpriced work evidence, not a conversion to dollars or measured savings. */
+export function hasCredibleComputationAuthoringBenefit(cluster: WorkflowCluster): boolean {
+  const summary = summarizeComputationValue(collectClusterComputationEvidence(cluster));
+  return (
+    summary !== undefined &&
+    summary.substantiveNodeCount >= MIN_CREDIBLE_SUBSTANTIVE_NODES &&
+    summary.netAuthoringUnits > 0
+  );
+}
 
 /**
  * Derives deterministic scenario provenance across cluster episodes.
@@ -103,6 +268,23 @@ export function deriveEstimatedSavedWork(
       ? scenarioProvenance.length
       : (cluster.distinctScenarioCount ?? (cluster.scenarioIds?.length || 0));
   const stepCount = Math.max(1, operationCount);
+  const computationSummary = summarizeComputationValue(collectClusterComputationEvidence(cluster));
+  if (computationSummary !== undefined) {
+    const estimatedTokensSaved = Math.max(0, Math.round(computationSummary.netAuthoringUnits));
+    return {
+      estimatedDurationSavedMs: 0,
+      estimatedTokensSaved,
+      estimatedStepsSaved: 0,
+      savedDurationMs: 0,
+      savedTokens: estimatedTokensSaved,
+      savedToolCalls: 0,
+      confidence: Math.min(
+        0.9,
+        Number((0.55 + 0.05 * Math.min(computationSummary.uniqueProgramCount, 4)).toFixed(2)),
+      ),
+    };
+  }
+
   const avgDurationMs = cluster.metrics?.avgDurationMs ?? cluster.metrics?.totalDurationMs ?? 0;
   const avgTokens = cluster.metrics?.avgTokens ?? cluster.metrics?.totalTokens ?? 0;
   const totalCostUsd = cluster.metrics?.totalCostUsd;
@@ -156,6 +338,7 @@ export function evaluateRightSizing(
     maxDurationMs?: number;
     maxTokens?: number;
     maxCostUsd?: number | null;
+    computationEvidence?: ComputationEvidenceInput;
   } = {},
   options: RightSizingOptions = {},
 ): RightSizingResult {
@@ -192,13 +375,40 @@ export function evaluateRightSizing(
     tokens >= opts.expensiveSingleOpMinTokens ||
     (knownCost && cost !== null && cost >= opts.expensiveSingleOpMinCostUsd);
 
+  const computationSummary = summarizeComputationValue(metrics.computationEvidence);
+
   // Case 1 & 2: Single operation
   if (steps === 1) {
+    if (computationSummary !== undefined) {
+      if (
+        computationSummary.substantiveNodeCount >= MIN_CREDIBLE_SUBSTANTIVE_NODES &&
+        computationSummary.netAuthoringUnits > 0
+      ) {
+        return {
+          isRightSized: true,
+          decision: "valid_computation" as RightSizingResult["decision"],
+          description: `Evidence-backed computation accepted (advisory authoring benefit: ${computationSummary.netAuthoringUnits} bounded units after discovery/invocation/schema/config overhead; ${computationSummary.substantiveNodeCount} substantive semantic nodes across ${computationSummary.uniqueProgramCount} unique program digest(s); priced usage unknown/incomplete).`,
+          subworkflowStepCount: steps,
+          scenarioStepCount: totalScenarioSteps,
+          coverageRatio,
+          isExpensiveSingleOp,
+        };
+      }
+      return {
+        isRightSized: false,
+        decision: "cheap_single_operation",
+        description: `Single-operation computation has no positive advisory authoring benefit after discovery/invocation/schema/config overhead (${computationSummary.netAuthoringUnits} bounded units); caller input/output cost remains native I/O and priced usage is unknown/incomplete.`,
+        subworkflowStepCount: steps,
+        scenarioStepCount: totalScenarioSteps,
+        coverageRatio,
+        isExpensiveSingleOp: false,
+      };
+    }
     if (!isExpensiveSingleOp) {
       return {
         isRightSized: false,
         decision: "cheap_single_operation",
-        description: `Single-operation wrapper is negligible/cheap (${duration}ms < ${opts.expensiveSingleOpMinDurationMs}ms, ${tokens} tokens < ${opts.expensiveSingleOpMinTokens}, cost: ${costDescription}). Requires >= ${opts.minStepsForCheapOperation} steps or demonstrably expensive operation.`,
+        description: `Single-operation wrapper is negligible/cheap (${duration}ms < ${opts.expensiveSingleOpMinDurationMs}ms, ${tokens} tokens < ${opts.expensiveSingleOpMinTokens}, cost: ${costDescription}). Requires >= ${opts.minStepsForCheapOperation} steps, demonstrably expensive operation, or credible computation evidence.`,
         subworkflowStepCount: steps,
         scenarioStepCount: totalScenarioSteps,
         coverageRatio,

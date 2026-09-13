@@ -1,8 +1,12 @@
-import type {
-  CapabilityEnvelope,
-  NormalizedCommandExecEvent,
-  NormalizedSessionEvent,
-  SuppressionResult,
+import {
+  type CapabilityEnvelope,
+  type NormalizedCommandExecEvent,
+  type NormalizedSessionEvent,
+  RESIN_COMPUTATION_EVIDENCE_KEY,
+  type ResinComputationEvidenceV1,
+  type SuppressionResult,
+  isSubstantiveComputationEvidence,
+  readComputationEvidence,
 } from "@resin/contracts";
 import { isActionableStep } from "./episode.js";
 import { hasParameterShapeEnvelope } from "./parameter-shape.js";
@@ -15,6 +19,10 @@ import type {
 } from "./types.js";
 
 const DEFAULT_MIN_MEANINGFUL_STEPS = 2;
+
+type SemanticOperationWithComputationEvidence = {
+  computationEvidence?: unknown;
+};
 
 const DESTRUCTIVE_COMMAND_PATTERNS = [
   /\brm\s+-(rf|fr|r|f)\s+(\/|~|\*|\.\/|\.\.)/i,
@@ -482,6 +490,56 @@ function eventPathEvidence(event: NormalizedSessionEvent): string[] {
   return paths;
 }
 
+function readEventComputationEvidence(
+  event: NormalizedSessionEvent,
+): ResinComputationEvidenceV1 | undefined {
+  const evidence = readComputationEvidence(event.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]);
+  if (evidence === undefined || !isSubstantiveComputationEvidence(evidence)) {
+    return undefined;
+  }
+  return evidence;
+}
+
+function collectSubstantiveComputationEvidence(
+  cluster: WorkflowCluster,
+): ResinComputationEvidenceV1[] {
+  const evidenceById = new Map<string, ResinComputationEvidenceV1>();
+  for (const operation of cluster.representativeSignature.semanticOperations ?? []) {
+    const candidate = readComputationEvidence(
+      (operation as SemanticOperationWithComputationEvidence).computationEvidence,
+    );
+    if (candidate !== undefined && isSubstantiveComputationEvidence(candidate)) {
+      evidenceById.set(candidate.evidenceId, candidate);
+    }
+  }
+  for (const episode of cluster.episodes ?? []) {
+    for (const event of episode.events ?? []) {
+      const candidate = readEventComputationEvidence(event);
+      if (candidate !== undefined) {
+        evidenceById.set(candidate.evidenceId, candidate);
+      }
+    }
+  }
+
+  const supersededProgramDigests = new Set<string>();
+  for (const evidence of evidenceById.values()) {
+    for (const correction of evidence.corrections) {
+      supersededProgramDigests.add(correction.supersededProgramDigest);
+    }
+  }
+  if (supersededProgramDigests.size === 0) {
+    return [...evidenceById.values()];
+  }
+  return [...evidenceById.values()].filter((evidence) => {
+    if (supersededProgramDigests.has(evidence.programDigest)) {
+      return false;
+    }
+    return !evidence.dependencies.some((dependency) =>
+      supersededProgramDigests.has(dependency.programDigest),
+    );
+  });
+}
+
 /**
  * Workflow opportunity suppression engine.
  * Suppresses trivial, out-of-envelope, destructive, unobservable, or in-progress/published workflows.
@@ -654,8 +712,12 @@ export class SuppressionEngine {
       }
     }
 
-    // 5. Check Tool Operations (< 2 safe tool operations)
-    const toolOpsCheck = this.checkToolOperations(cluster);
+    // 5. Check Tool Operations (< 2 safe tool operations), while allowing one strict substantive
+    // computation carrier to represent one public compute operation. The carrier is validated
+    // through @resin/contracts; generic eval/tool names alone never reach this path.
+    const computationEvidence = collectSubstantiveComputationEvidence(cluster);
+    const hasCredibleComputation = computationEvidence.length > 0;
+    const toolOpsCheck = this.checkToolOperations(cluster, hasCredibleComputation);
     if (!toolOpsCheck.hasEnoughToolOperations) {
       return {
         suppressed: true,
@@ -665,8 +727,12 @@ export class SuppressionEngine {
       };
     }
 
-    // 6. Check Trivial Workflows (minimal execution time / tokens)
-    const trivialCheck = this.checkTrivialWorkflow(cluster);
+    // 6. Check Trivial Workflows (minimal execution time / tokens). A strict successful
+    // computation carrier is the substantive signal; cheap generic wrappers without evidence still
+    // fall through to normal trivial suppression.
+    const trivialCheck = hasCredibleComputation
+      ? { isTrivial: false, reason: "" }
+      : this.checkTrivialWorkflow(cluster);
     if (trivialCheck.isTrivial) {
       return {
         suppressed: true,
@@ -697,8 +763,13 @@ export class SuppressionEngine {
   /**
    * Computes the number of tool operations in a cluster.
    * Counts tool_call and tool_result events with safe, non-reserved tool names across episodes.
+   * A strict substantive computation carrier counts as one meaningful compute operation, not as a
+   * generic eval/tool wrapper.
    */
-  private checkToolOperations(cluster: WorkflowCluster): {
+  private checkToolOperations(
+    cluster: WorkflowCluster,
+    hasCredibleComputation: boolean,
+  ): {
     hasEnoughToolOperations: boolean;
     toolOperationCount: number;
     reason: string;
@@ -756,10 +827,17 @@ export class SuppressionEngine {
     }
 
     if (toolOperationCount < 2) {
+      if (hasCredibleComputation) {
+        return {
+          hasEnoughToolOperations: true,
+          toolOperationCount: Math.max(1, toolOperationCount),
+          reason: "",
+        };
+      }
       return {
         hasEnoughToolOperations: false,
         toolOperationCount,
-        reason: `Workflow contains ${toolOperationCount} tool operations (requires at least 2 safe tool operations).`,
+        reason: `Workflow contains ${toolOperationCount} tool operations (requires at least 2 safe tool operations or strict substantive computation evidence).`,
       };
     }
 
