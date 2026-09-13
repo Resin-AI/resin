@@ -65,7 +65,7 @@ export const RESIN_COMPUTATION_EVIDENCE_KEY = "resinComputationEvidenceV1" as co
  */
 export const COMPUTATION_IR_LIMITS = {
   /** Maximum canonical serialized size of a program, and of a full evidence envelope. */
-  serializedBytes: 32768,
+  serializedBytes: 65536,
   nodes: 512,
   symbols: 256,
   slots: 64,
@@ -298,17 +298,34 @@ export const COMPUTATION_ASSIGN_OPERATORS = [
 export type ComputationAssignOperator = (typeof COMPUTATION_ASSIGN_OPERATORS)[number];
 
 /**
- * Finite semantic constants. Booleans, `null`, the empty string and the arithmetic identities are
- * representable; any other literal payload (numbers other than 0/1, non-empty strings, bytes,
- * containers with values) is a `literal` node carrying a `slot` instead, so its value never leaves
- * the device while the ALGORITHM still distinguishes e.g. a 0 seed from a 1 seed.
+ * Finite semantic constants: arithmetic identities, booleans, null, empty string, intrinsic type
+ * references and contextual typeof type names. Arbitrary literal payloads remain anonymous slots;
+ * a language keyword used as ordinary data is not promoted to a semantic constant.
  */
 export const COMPUTATION_CONSTANTS = [
   "empty_string",
   "false",
+  "intrinsic_undefined",
   "null",
   "one",
+  "python_type_bool",
+  "python_type_dict",
+  "python_type_float",
+  "python_type_int",
+  "python_type_list",
+  "python_type_object",
+  "python_type_set",
+  "python_type_str",
+  "python_type_tuple",
   "true",
+  "type_name_bigint",
+  "type_name_boolean",
+  "type_name_function",
+  "type_name_number",
+  "type_name_object",
+  "type_name_string",
+  "type_name_symbol",
+  "type_name_undefined",
   "zero",
 ] as const;
 export type ComputationConstant = (typeof COMPUTATION_CONSTANTS)[number];
@@ -437,11 +454,13 @@ export type ComputationUnsupportedReason = (typeof COMPUTATION_UNSUPPORTED_REASO
 export const COMPUTATION_APIS = [
   "clock.monotonic",
   "clock.now",
+  "clock.parse",
   "collection.all",
   "collection.any",
   "collection.append",
   "collection.count",
   "collection.delete",
+  "collection.dict_setdefault",
   "collection.entries",
   "collection.extend",
   "collection.filter",
@@ -451,13 +470,16 @@ export const COMPUTATION_APIS = [
   "collection.has",
   "collection.includes",
   "collection.items",
+  "collection.iterator",
   "collection.join",
   "collection.keys",
   "collection.map",
   "collection.map_set",
   "collection.max",
   "collection.min",
+  "collection.next",
   "collection.pop",
+  "collection.range",
   "collection.reduce",
   "collection.reverse",
   "collection.set_add",
@@ -475,9 +497,15 @@ export const COMPUTATION_APIS = [
   "core.hash",
   "core.len",
   "core.print",
+  "core.to_string",
   "core.type_of",
+  "csv.parse_records",
+  "fs.close",
   "fs.exists",
+  "fs.open_read",
   "fs.read_json",
+  "fs.read_line",
+  "fs.read_lines",
   "fs.read_text",
   "fs.write_text",
   "identity",
@@ -490,10 +518,12 @@ export const COMPUTATION_APIS = [
   "number.format",
   "number.int",
   "number.is_finite",
+  "number.is_integer",
   "number.max",
   "number.min",
   "number.parse",
   "number.round",
+  "number.to_fixed",
   "object.has_own",
   "path.basename",
   "path.dirname",
@@ -503,18 +533,24 @@ export const COMPUTATION_APIS = [
   "string.endswith",
   "string.find",
   "string.format",
+  "string.isalpha",
   "string.join",
   "string.lower",
+  "string.lstrip",
   "string.replace",
+  "string.rsplit",
+  "string.rstrip",
   "string.slice",
   "string.split",
   "string.startswith",
   "string.strip",
   "string.upper",
+  "text.regex_compile",
   "text.regex_findall",
   "text.regex_match",
   "text.regex_replace",
   "text.regex_search",
+  "text.regex_test",
   "type.is_array",
   "type.is_instance",
 ] as const;
@@ -525,10 +561,12 @@ export type ComputationApi = (typeof COMPUTATION_APIS)[number];
  * reads/writes and `json.parse` are intentionally absent: wrapping one of those is not a computation.
  */
 export const COMPUTATION_TRANSFORM_APIS = [
+  "clock.parse",
   "collection.all",
   "collection.any",
   "collection.count",
   "collection.delete",
+  "collection.dict_setdefault",
   "collection.filter",
   "collection.find",
   "collection.group_by",
@@ -545,6 +583,7 @@ export const COMPUTATION_TRANSFORM_APIS = [
   "collection.sum",
   "collection.zip",
   "core.hash",
+  "core.to_string",
   "json.serialize",
   "number.abs",
   "number.ceil",
@@ -555,6 +594,7 @@ export const COMPUTATION_TRANSFORM_APIS = [
   "number.min",
   "number.parse",
   "number.round",
+  "number.to_fixed",
   "path.basename",
   "path.dirname",
   "path.extname",
@@ -563,7 +603,10 @@ export const COMPUTATION_TRANSFORM_APIS = [
   "string.format",
   "string.join",
   "string.lower",
+  "string.lstrip",
   "string.replace",
+  "string.rsplit",
+  "string.rstrip",
   "string.slice",
   "string.split",
   "string.strip",
@@ -856,7 +899,7 @@ export const COMPUTATION_NODE_CHILD_SEMANTICS: Record<ComputationNodeKind, strin
 /**
  * Fields abstracted away by the program digest. Everything else is retained verbatim, which keeps the
  * digest semantics-bearing: operators, ordered children, ordered keyword-argument names, control-flow
- * structure, finite constants (`zero`/`one`/`true`/`false`/`null`/`empty_string`), safe structural
+ * structure, finite constants (including intrinsic types and contextual typeof names), safe structural
  * field keys, and the slice/loop/with/comprehension/optional/async flags.
  *
  * Abstracted are a node's private `symbol` text (projected, see below), its slot payloads, and a data
@@ -2705,9 +2748,9 @@ const SUBSTANTIVE_MIN_NODES = 3;
  *
  * Substantive requires at least one genuine transform/control/dataflow operation — a
  * `COMPUTATION_TRANSFORM_NODE_KINDS` node or a `COMPUTATION_TRANSFORM_APIS` call — plus at least one
- * output record. A definition is NOT required, so a plain sequence of inline expressions qualifies,
- * while `print(...)`, a bare file read, `json.parse` wrapping, `len(x)` plumbing, an identity call or
- * a program made only of declarations never does, regardless of node count. A definition-only capture
+ * observable module-level output record; a helper's internal return alone is not emitted output.
+ * A definition is not required. Print-only code, bare file reads, JSON wrapping, length/identity
+ * plumbing and declaration-only programs do not qualify, regardless of size. A definition-only capture
  * is rejected by the observation-kind check. Nothing here keys off a model/tool/eval *name*, and
  * opportunity value ranking remains a later, stricter concern.
  *
@@ -2738,7 +2781,10 @@ export function isSubstantiveComputationEvidence(value: unknown): boolean {
   if (observation.resultEventId === undefined) {
     return false;
   }
-  if (program.nodes.length < SUBSTANTIVE_MIN_NODES || program.outputs.length === 0) {
+  if (
+    program.nodes.length < SUBSTANTIVE_MIN_NODES ||
+    !program.outputs.some((output) => output.definitionId === undefined)
+  ) {
     return false;
   }
   return program.nodes.some(

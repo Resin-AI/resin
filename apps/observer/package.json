@@ -38,6 +38,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@lezer/python": "1.1.19",
     "@resin/adapter-claude-code": "workspace:*",
     "@resin/adapter-codex": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
@@ -46,6 +47,10 @@
     "@resin/db": "workspace:*",
     "@resin/harness-contracts": "workspace:*",
     "@resin/protocol": "workspace:*",
+    "typescript": "5.9.3",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@resin/test-fixtures": "workspace:*"
   }
 }

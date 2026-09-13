@@ -357,6 +357,63 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(coordinator.getActiveSessionCount()).toBe(0);
     });
 
+    it("restartable evidence clearing preserves session event sinks while terminal dispose detaches them", async () => {
+      const pipeline = new NormalizationPipeline();
+      const mockObservationClient = createMockObservationClient({
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: unknown[] }) => ({
+          batchId: `batch_${input.observations.length}`,
+          status: "accepted",
+          acceptedCount: input.observations.length,
+          rejectedCount: 0,
+          errors: [],
+        })),
+      });
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+      const sink = vi.fn(async () => undefined);
+      coordinator.setSessionEventSink(sink);
+
+      const firstSession = createMockHarnessSession("sess_restart_sink_before", "active");
+      await coordinator.handleRecords(
+        firstSession,
+        [createPromptRecord(firstSession.sessionId, 1)],
+        vi.fn(async () => {}),
+      );
+      await coordinator.waitForIdle();
+      expect(sink).toHaveBeenCalledTimes(1);
+
+      coordinator.clearComputationEvidence();
+
+      const restartedSession = createMockHarnessSession("sess_restart_sink_after", "active");
+      await coordinator.handleRecords(
+        restartedSession,
+        [createPromptRecord(restartedSession.sessionId, 1)],
+        vi.fn(async () => {}),
+      );
+      await coordinator.waitForIdle();
+      expect(sink).toHaveBeenCalledTimes(2);
+      expect(sink).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: restartedSession.sessionId }),
+        expect.arrayContaining([expect.objectContaining({ type: "message" })]),
+        expect.objectContaining({ isAttributed: false }),
+      );
+
+      coordinator.dispose();
+
+      const disposedSession = createMockHarnessSession("sess_restart_sink_disposed", "active");
+      await coordinator.handleRecords(
+        disposedSession,
+        [createPromptRecord(disposedSession.sessionId, 1)],
+        vi.fn(async () => {}),
+      );
+      await coordinator.waitForIdle();
+      expect(sink).toHaveBeenCalledTimes(2);
+    });
+
     it("falls back to generic observation submission when resolver returns invalid attribution schema", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: unknown[] = [];

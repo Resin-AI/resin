@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPUTATION_APIS,
   COMPUTATION_CONSTANTS,
   COMPUTATION_CONSTRUCT_APIS,
   COMPUTATION_IR_LIMITS,
@@ -1135,6 +1136,11 @@ describe("computation evidence contracts", () => {
       expect(digests.get("zero")).not.toBe(digests.get("one"));
       expect(digests.get("true")).not.toBe(digests.get("false"));
       expect(new Set(digests.values()).size).toBe(COMPUTATION_CONSTANTS.length);
+      for (const value of COMPUTATION_CONSTANTS) {
+        expect(ComputationProgramV1Schema.safeParse(buildProgram(constant(value))).success).toBe(
+          true,
+        );
+      }
 
       const keyed = (amountSlot: string, dstSlot: string): ProgramSpec => ({
         slots: {
@@ -2008,7 +2014,7 @@ describe("computation evidence contracts", () => {
     });
 
     it("pins the serialized byte limit and rejects oversize evidence", () => {
-      expect(COMPUTATION_IR_LIMITS.serializedBytes).toBe(32768);
+      expect(COMPUTATION_IR_LIMITS.serializedBytes).toBe(65536);
       const evidence = buildEvidence(pipelineSpec());
       expect(serializeComputationProgram(evidence.program).length).toBeLessThan(
         COMPUTATION_IR_LIMITS.serializedBytes,
@@ -2593,6 +2599,114 @@ describe("computation evidence contracts", () => {
       expect(computeComputationProgramDigest(program)).toMatch(/^[a-f0-9]{64}$/);
       expect(program.nodes.length).toBe(1 + 1 + 48 * 3);
       expect(program.nodes.length).toBeLessThan(COMPUTATION_IR_LIMITS.nodes);
+    });
+  });
+
+  describe("approved finite api vocabulary additions", () => {
+    /**
+     * The exact names approved for the native-algorithm capture phase. Some exist because a real
+     * Python/JS construct needs a finite name (`str(x)`, `dict.setdefault`, `str.rsplit`, `clock.parse`,
+     * `re.compile`/`pattern.test`, an explicitly read-only file handle, `csv.parse_records`); each is a
+     * bounded canonical API, never an authority grant or a generic escape hatch.
+     */
+    const APPROVED_API_ADDITIONS = [
+      "clock.parse",
+      "collection.dict_setdefault",
+      "collection.iterator",
+      "collection.next",
+      "collection.range",
+      "core.to_string",
+      "csv.parse_records",
+      "fs.close",
+      "fs.open_read",
+      "fs.read_line",
+      "fs.read_lines",
+      "number.is_integer",
+      "number.to_fixed",
+      "string.isalpha",
+      "string.lstrip",
+      "string.rsplit",
+      "string.rstrip",
+      "text.regex_compile",
+      "text.regex_test",
+    ] as const;
+
+    /** Minimal valid program whose only operation is one call to `api`. */
+    const callSpec = (api: string): ProgramSpec => ({
+      roots: [
+        {
+          kind: "expression",
+          output: { shape: "unknown" },
+          children: [{ kind: "call", api, children: [{ kind: "identifier", symbol: "value" }] }],
+        },
+      ],
+    });
+
+    it("accepts each approved addition in a canonical minimal program", () => {
+      for (const api of APPROVED_API_ADDITIONS) {
+        expect(COMPUTATION_APIS).toContain(api);
+        expectCanonicalProgram(buildProgram(callSpec(api)));
+      }
+      // Every transform-classified name must exist in the canonical vocabulary: a name classified as
+      // a transform without being admissible would silently never count as computation.
+      for (const api of COMPUTATION_TRANSFORM_APIS) {
+        expect(COMPUTATION_APIS).toContain(api);
+      }
+      expect(COMPUTATION_CONSTRUCT_APIS.every((api) => COMPUTATION_APIS.includes(api))).toBe(true);
+    });
+
+    it("rejects unlisted api names shaped like the approved additions", () => {
+      for (const api of [
+        "collection.iter_next",
+        "csv.parse_rows",
+        "fs.open_append",
+        "fs.read_char",
+        "number.to_precision",
+        "string.capitalize",
+        "text.regex_exec",
+        "clock.format",
+      ]) {
+        const result = ComputationProgramV1Schema.safeParse(buildProgram(callSpec(api)));
+        expect(result.success).toBe(false);
+        // The rejected name is reported, so an unsupported call is never silently dropped.
+        expect(JSON.stringify(result.error?.issues ?? [])).toContain(api);
+      }
+    });
+
+    it("classifies the additions by their real operation, not by namespace", () => {
+      // Genuine value transforms count as computation evidence: string reshaping (split/strip family),
+      // numeric rounding, time parsing and dict-shaped retention.
+      for (const api of [
+        "clock.parse",
+        "collection.dict_setdefault",
+        "core.to_string",
+        "number.to_fixed",
+        "string.lstrip",
+        "string.rsplit",
+        "string.rstrip",
+      ]) {
+        expect(isSubstantiveComputationEvidence(buildEvidence(callSpec(api)))).toBe(true);
+      }
+      // Raw file I/O, iterator producers, regex CONSTRUCTION and boolean/record predicates are not
+      // transforms: a read-only handle, an iterator, a compiled pattern or a yes/no test is an input or
+      // a query (like `json.parse`, `fs.read_text`, `string.startswith` and `number.is_finite`), so
+      // wrapping one is never the computation itself.
+      for (const api of [
+        "collection.iterator",
+        "collection.next",
+        "collection.range",
+        "csv.parse_records",
+        "fs.close",
+        "fs.open_read",
+        "fs.read_line",
+        "fs.read_lines",
+        "number.is_integer",
+        "string.isalpha",
+        "text.regex_compile",
+        "text.regex_test",
+      ]) {
+        expect(isSubstantiveComputationEvidence(buildEvidence(callSpec(api)))).toBe(false);
+      }
     });
   });
 });
