@@ -39,6 +39,9 @@ export * from "./qualification.js";
 // V1 Canonical Contracts & Schemas
 export * from "./v1.js";
 
+// Computation Semantic Evidence (analysis-only) IR, digests and fail-closed reader
+export * from "./computation-evidence.js";
+
 // Legacy compatibility types and constants
 export interface ToolSpec {
   id: string;

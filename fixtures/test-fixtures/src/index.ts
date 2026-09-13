@@ -40,3 +40,6 @@ export * from "./doc-generator.js";
 
 // Consumer Test Suites
 export * from "./consumer-suites.js";
+
+// Synthetic Computation Capture Fixture Families
+export * from "./computation-families.js";
