@@ -17,6 +17,7 @@ import {
   type NormalizedToolDiscoveryEvent,
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
+  RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
@@ -24,6 +25,7 @@ import {
   nowIso,
   readComputationEvidence,
 } from "@resin/contracts";
+import { projectDeterministicCommandSequenceFromEvent } from "./deterministic-command-sequence.js";
 import {
   normalizeCommandProfile,
   normalizePathPattern,
@@ -705,6 +707,13 @@ export function projectEventToMetadataOnly(
     metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = JSON.parse(
       JSON.stringify(computationEvidence),
     ) as Record<string, unknown>;
+  }
+
+  // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
+  // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
+  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(event);
+  if (derivedCommandSequence !== null) {
+    metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;
