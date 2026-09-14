@@ -200,6 +200,84 @@ describe("immutable component compositions", () => {
     assertComponentValue(nested, { record: { value: "ok" } });
     expect(() => assertComponentValue(nested, { record: { value: "toolong" } })).toThrow("string");
   });
+  it.each(["direct", "compiled"] as const)(
+    "distinguishes nullable record-array type mismatches from string bounds (%s)",
+    async (mode) => {
+      const lines = [{ number: 1, text: "toy line content must not appear in diagnostics" }];
+      const envelope = (field: Record<string, unknown>) => ({
+        type: "object",
+        properties: { lines: field },
+        required: ["lines"],
+        additionalProperties: false,
+      });
+      const evaluate = async (field: Record<string, unknown>, value: unknown) => {
+        const schema = envelope(field);
+        if (mode === "direct") {
+          assertComponentValue(schema, { lines: value });
+          return { lines: value };
+        }
+        const unit = {
+          ...contract,
+          inputSchema: schema,
+          outputSchema: schema,
+          tests: [
+            { name: "preserves null", input: { lines: null }, expectedOutput: { lines: null } },
+          ],
+        };
+        const code =
+          'import { defineTool, type ToolContext } from "@resin/runtime"; export default defineTool((context: ToolContext<{lines: unknown}>) => ({lines: context.input.lines}));';
+        const graph = ComponentCompositionSchema.parse({
+          schemaVersion: "1.0.0",
+          inputSchema: schema,
+          outputSchema: schema,
+          steps: [
+            {
+              id: "echo",
+              component: {
+                contractDigest: componentContractDigest(unit),
+                sourceDigest: createHash("sha256").update(code).digest("hex"),
+              },
+              inputs: { lines: { from: "input", path: ["lines"] } },
+            },
+          ],
+          outputs: { lines: { from: "step", step: "echo", path: ["lines"] } },
+        });
+        return executeCompiled(
+          compileComponentComposition(graph, [{ contract: unit, source: code }]),
+          {
+            lines: value,
+          },
+        );
+      };
+      const nullableString = { type: ["string", "null"], maxLength: 8 };
+      await expect(evaluate(nullableString, lines)).rejects.toThrow(
+        /Expected string \| null at \$\.lines; received array/,
+      );
+      await expect(evaluate(nullableString, lines)).rejects.not.toThrow(lines[0].text);
+      await expect(evaluate(nullableString, "123456789")).rejects.toThrow(
+        "Component string bounds at $.lines",
+      );
+      await expect(evaluate(nullableString, null)).resolves.toEqual({ lines: null });
+      await expect(
+        evaluate(
+          {
+            type: ["array", "null"],
+            maxItems: 4,
+            items: {
+              type: "object",
+              properties: {
+                number: { type: "integer" },
+                text: { type: "string", maxLength: 100 },
+              },
+              required: ["number", "text"],
+              additionalProperties: false,
+            },
+          },
+          lines,
+        ),
+      ).resolves.toEqual({ lines });
+    },
+  );
   it("preserves enum constraints on nullable nulls and rejects malformed type arrays", () => {
     expect(() => assertComponentValue({ type: ["string", "null"], enum: ["ready"] }, null)).toThrow(
       "enum",

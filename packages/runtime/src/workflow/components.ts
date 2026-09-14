@@ -37,6 +37,10 @@ export function assertComponentValue(schema: Record<string, unknown>, value: unk
         throw new Error(`Unsupported component schema type at ${path}`);
     }
   }
+  function typeMismatch(type: string, nullable: boolean, item: unknown, path: string): Error {
+    const actual = item === null ? "null" : Array.isArray(item) ? "array" : typeof item;
+    return new Error(`Expected ${type}${nullable ? " | null" : ""} at ${path}; received ${actual}`);
+  }
   function check(rule: Record<string, unknown>, item: unknown, path: string): void {
     const supported = [
       "type",
@@ -95,8 +99,9 @@ export function assertComponentValue(schema: Record<string, unknown>, value: unk
           check(rule.items as Record<string, unknown>, item[index], `${path}[${index}]`);
         break;
       case "string":
+        if (typeof item !== "string")
+          throw typeMismatch(type, Array.isArray(rule.type), item, path);
         if (
-          typeof item !== "string" ||
           item.length > 1048576 ||
           (typeof rule.minLength === "number" && item.length < rule.minLength) ||
           (typeof rule.maxLength === "number" && item.length > rule.maxLength)
@@ -105,8 +110,9 @@ export function assertComponentValue(schema: Record<string, unknown>, value: unk
         break;
       case "number":
       case "integer":
+        if (typeof item !== "number")
+          throw typeMismatch(type, Array.isArray(rule.type), item, path);
         if (
-          typeof item !== "number" ||
           !Number.isFinite(item) ||
           (type === "integer" && !Number.isInteger(item)) ||
           (typeof rule.minimum === "number" && item < rule.minimum) ||
