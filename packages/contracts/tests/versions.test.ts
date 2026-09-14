@@ -48,6 +48,47 @@ describe("versions contracts", () => {
     });
   });
 
+  describe("compiler provenance", () => {
+    const compiler = {
+      synthesizedAt: validToolVersion.provenance.synthesizedAt,
+      deterministicBuildHash: validToolVersion.provenance.deterministicBuildHash,
+      authoring: {
+        kind: "compiler",
+        compilerId: "resin-command-sequence",
+        compilerVersion: "1",
+        inputDigest: validToolVersion.provenance.deterministicBuildHash,
+      },
+    };
+
+    it("accepts compiler-authored versions without a model or prompt", () => {
+      const provenance = ProvenanceMetadataSchema.parse(compiler);
+      expect(provenance.authoring?.kind).toBe("compiler");
+      expect(provenance).not.toHaveProperty("synthesizerModel");
+      expect(provenance).not.toHaveProperty("promptHash");
+      expect(ToolVersionSchema.safeParse({ ...validToolVersion, provenance }).success).toBe(true);
+    });
+
+    it("rejects fabricated model or prompt claims and incomplete compiler identity", () => {
+      expect(
+        ProvenanceMetadataSchema.safeParse({ ...compiler, synthesizerModel: "not-a-model" })
+          .success,
+      ).toBe(false);
+      expect(
+        ProvenanceMetadataSchema.safeParse({
+          ...compiler,
+          promptHash: compiler.deterministicBuildHash,
+        }).success,
+      ).toBe(false);
+      expect(
+        ProvenanceMetadataSchema.safeParse({ ...compiler, authoring: { kind: "compiler" } })
+          .success,
+      ).toBe(false);
+      expect(
+        ProvenanceMetadataSchema.safeParse({ ...compiler, authoring: undefined }).success,
+      ).toBe(false);
+    });
+  });
+
   describe("ProvenanceMetadataSchema & SignatureMetadataSchema", () => {
     it("parses provenance metadata", () => {
       const provenance = ProvenanceMetadataSchema.parse({

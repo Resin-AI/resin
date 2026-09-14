@@ -36,15 +36,33 @@ export type ToolArtifact = z.infer<typeof ToolArtifactSchema>;
 /**
  * Provenance metadata detailing how the tool version was synthesized.
  */
-export const ProvenanceMetadataSchema = z.object({
+const ProvenanceBaseSchema = z.object({
   sourceCandidateId: IdentifierSchema.optional(),
   synthesizedAt: ISOTimestampSchema,
-  synthesizerModel: z.string().min(1),
-  promptHash: Sha256DigestSchema.optional(),
   gitCommitSha: z.string().optional(),
   deterministicBuildHash: Sha256DigestSchema,
   environment: z.record(z.string()).default({}),
 });
+
+export const ProvenanceMetadataSchema = z.union([
+  ProvenanceBaseSchema.extend({
+    authoring: z.object({ kind: z.literal("model") }).optional(),
+    synthesizerModel: z.string().min(1),
+    promptHash: Sha256DigestSchema.optional(),
+  }),
+  ProvenanceBaseSchema.extend({
+    authoring: z
+      .object({
+        kind: z.literal("compiler"),
+        compilerId: z.string().min(1),
+        compilerVersion: z.string().min(1),
+        inputDigest: Sha256DigestSchema,
+      })
+      .strict(),
+    synthesizerModel: z.never().optional(),
+    promptHash: z.never().optional(),
+  }),
+]);
 
 export type ProvenanceMetadata = z.infer<typeof ProvenanceMetadataSchema>;
 

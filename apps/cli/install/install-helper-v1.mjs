@@ -4859,7 +4859,7 @@ var init_secrets = __esm({
 });
 
 // packages/contracts/dist/versions.js
-var BundleReferenceSchema, ToolArtifactSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
+var BundleReferenceSchema, ToolArtifactSchema, ProvenanceBaseSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
 var init_versions = __esm({
   "packages/contracts/dist/versions.js"() {
     "use strict";
@@ -4880,15 +4880,30 @@ var init_versions = __esm({
       sourceMap: external_exports.string().optional(),
       checksums: external_exports.record(external_exports.string()).default({})
     });
-    ProvenanceMetadataSchema = external_exports.object({
+    ProvenanceBaseSchema = external_exports.object({
       sourceCandidateId: IdentifierSchema.optional(),
       synthesizedAt: ISOTimestampSchema,
-      synthesizerModel: external_exports.string().min(1),
-      promptHash: Sha256DigestSchema.optional(),
       gitCommitSha: external_exports.string().optional(),
       deterministicBuildHash: Sha256DigestSchema,
       environment: external_exports.record(external_exports.string()).default({})
     });
+    ProvenanceMetadataSchema = external_exports.union([
+      ProvenanceBaseSchema.extend({
+        authoring: external_exports.object({ kind: external_exports.literal("model") }).optional(),
+        synthesizerModel: external_exports.string().min(1),
+        promptHash: Sha256DigestSchema.optional()
+      }),
+      ProvenanceBaseSchema.extend({
+        authoring: external_exports.object({
+          kind: external_exports.literal("compiler"),
+          compilerId: external_exports.string().min(1),
+          compilerVersion: external_exports.string().min(1),
+          inputDigest: Sha256DigestSchema
+        }).strict(),
+        synthesizerModel: external_exports.never().optional(),
+        promptHash: external_exports.never().optional()
+      })
+    ]);
     SignatureMetadataSchema = external_exports.object({
       signature: external_exports.string().min(1),
       keyId: external_exports.string().min(1),
