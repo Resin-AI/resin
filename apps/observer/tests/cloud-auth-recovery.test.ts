@@ -159,8 +159,11 @@ function makeCompletedSession(sessionId: string): HarnessSession {
   };
 }
 
-function makePromptRecord(sessionId: string, sequence = 1): RawHarnessRecord {
-  const timestamp = new Date().toISOString();
+function makePromptRecord(
+  sessionId: string,
+  sequence = 1,
+  timestamp = new Date().toISOString(),
+): RawHarnessRecord {
   return {
     recordId: `record_auth_recovery_${sequence}`,
     sessionId,
@@ -583,9 +586,14 @@ describe("cloud authentication recovery", () => {
       pipeline: normalizationPipeline,
       observationClient: runtime.getObservationClient(),
     });
-    const session = makeCompletedSession("session_auth_queue");
-    const firstRecord = makePromptRecord(session.sessionId, 1);
-    const secondRecord = makePromptRecord(session.sessionId, 2);
+    const session = {
+      ...makeCompletedSession("session_auth_queue"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    };
+    // Wire observations are timestamp-sorted, including the synthetic terminal event.
+    const firstRecord = makePromptRecord(session.sessionId, 1, "2026-01-01T00:00:01.000Z");
+    const secondRecord = makePromptRecord(session.sessionId, 2, "2026-01-01T00:00:02.000Z");
     const source = new FakeSessionEventSource(session.sessionId, [firstRecord]);
     const degraded = Promise.withResolvers<{ persisted: boolean }>();
     tailer.once("auth:degraded", (event: { persisted: boolean }) => degraded.resolve(event));
