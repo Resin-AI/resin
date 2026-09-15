@@ -148,6 +148,9 @@ describe("DeterministicCommandSequenceSchema", () => {
           ],
         },
       ],
+      parameterValueSha256: {
+        arg1: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
     };
     expect(isDeterministicCommandSequence(suiteLune)).toBe(true);
   });
@@ -353,6 +356,9 @@ describe("DeterministicCommandSequenceSchema", () => {
           argv: [{ literal: "run" }, { parameter: "arg3", role: "path" }],
         },
       ],
+      parameterValueSha256: {
+        arg2: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
     };
 
     expect(isDeterministicCommandSequence(compound)).toBe(true);
@@ -434,6 +440,49 @@ describe("DeterministicCommandSequenceSchema", () => {
     };
 
     expect(isDeterministicCommandSequence(arbitraryWorkflow)).toBe(true);
+  });
+
+  it("accepts evidence-derived commitments only for string parameters", () => {
+    const committed = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "custom-checker",
+          argv: [
+            { parameter: "arg0", role: "string" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+      ],
+      parameterValueSha256: {
+        arg0: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    };
+
+    expect(isDeterministicCommandSequence(committed)).toBe(true);
+    expect(
+      isDeterministicCommandSequence({
+        ...committed,
+        parameterValueSha256: {
+          arg1: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isDeterministicCommandSequence({
+        ...committed,
+        parameterValueSha256: { arg0: "not-a-sha256-digest" },
+      }),
+    ).toBe(false);
+    expect(
+      isDeterministicCommandSequence({
+        ...committed,
+        parameterValueSha256: undefined,
+      }),
+    ).toBe(false);
   });
 
   it("accepts privacy-safe parameters embedded in --flag=value argv tokens", () => {

@@ -8569,10 +8569,12 @@ var init_deterministic_command_sequence = __esm({
       schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
       kind: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
       control: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
-      steps: external_exports.array(DeterministicCommandStepSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps)
+      steps: external_exports.array(DeterministicCommandStepSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+      parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
     }).strict().superRefine((seq, ctx) => {
       let expectedParamIndex = 0;
       const seenParamNames = /* @__PURE__ */ new Set();
+      const stringParamNames = /* @__PURE__ */ new Set();
       for (let i = 0; i < seq.steps.length; i++) {
         const step = seq.steps[i];
         const expectedStepId = `step${i}`;
@@ -8596,6 +8598,9 @@ var init_deterministic_command_sequence = __esm({
             } else {
               seenParamNames.add(arg.parameter);
             }
+            if (arg.role === "string") {
+              stringParamNames.add(arg.parameter);
+            }
             if (arg.parameter !== expectedParamName) {
               ctx.addIssue({
                 code: external_exports.ZodIssueCode.custom,
@@ -8605,6 +8610,24 @@ var init_deterministic_command_sequence = __esm({
             }
             expectedParamIndex++;
           }
+        }
+      }
+      for (const parameter of stringParamNames) {
+        if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
+            path: ["parameterValueSha256", parameter]
+          });
+        }
+      }
+      for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
+        if (!stringParamNames.has(parameter)) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `Value commitment '${parameter}' must reference a string parameter`,
+            path: ["parameterValueSha256", parameter]
+          });
         }
       }
     });

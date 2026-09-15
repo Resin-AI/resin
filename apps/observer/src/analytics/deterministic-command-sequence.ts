@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DETERMINISTIC_COMMAND_SEQUENCE_CONTROL,
   DETERMINISTIC_COMMAND_SEQUENCE_KIND,
@@ -17,7 +18,6 @@ import {
 } from "@resin/contracts";
 import {
   COMMAND_PARAMETER_KEYS,
-  isShellToolName,
   normalizeCommandProfile,
   tokenizeShellLine,
 } from "./evidence-normalization.js";
@@ -52,23 +52,11 @@ const FORBIDDEN_CHARS: Record<string, true> = {
   "?": true,
 };
 
-const SHELL_COMMAND_WRAPPERS: Record<string, true> = {
-  bash: true,
-  sh: true,
-  zsh: true,
-  "/bin/bash": true,
-  "/bin/sh": true,
-  "/bin/zsh": true,
-  "/usr/bin/bash": true,
-  "/usr/bin/sh": true,
-  "/usr/bin/zsh": true,
-};
-
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Extracts a pre-redaction raw shell command string from a normalized session event.
- * Only unambiguous command_exec and known shell tool_call events yield a string.
+ * Only structurally unambiguous command-bearing events yield a string.
  */
 export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent): string | null {
   if (event.type === "command_exec") {
@@ -78,10 +66,9 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
 
     const rawArgs = Array.isArray(cmdEvent.args) ? cmdEvent.args : [];
 
-    // Shell wrapper invocations: bash -c "command" or bash -lc "command"
-    if (SHELL_COMMAND_WRAPPERS[rawCmd] === true) {
-      // Must have exactly two arguments: [-c flag, commandString].
-      // Any extra positional arguments or missing command is rejected.
+    // Treat an exact `-c`/login-command argv shape as a command wrapper without
+    // requiring the wrapper executable to appear in a fixed name catalog.
+    if (rawArgs.length > 0) {
       if (
         rawArgs.length === 2 &&
         (rawArgs[0] === "-c" || rawArgs[0] === "-lc" || rawArgs[0] === "-cl") &&
@@ -89,13 +76,8 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
       ) {
         return rawArgs[1].trim() || null;
       }
-      return null;
-    }
-
-    // If rawArgs is non-empty for a non-shell command, fail closed.
-    // Never reconstruct structured argv by string concatenation to prevent argv data
-    // (e.g. literal '&&' or quotes in an argument) from being interpreted as shell syntax.
-    if (rawArgs.length > 0) {
+      // Never reconstruct general structured argv by string concatenation:
+      // an argument containing `&&` must remain data, not become shell syntax.
       return null;
     }
 
@@ -105,9 +87,6 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
 
   if (event.type === "tool_call") {
     const toolEvent = event as NormalizedToolCallEvent;
-    if (!isShellToolName(toolEvent.toolName)) {
-      return null;
-    }
 
     const params = toolEvent.parameters;
     if (typeof params !== "object" || params === null || Array.isArray(params)) {
@@ -116,23 +95,17 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
 
     const record = params as Record<string, unknown>;
 
-    // Check if tool parameters provide a shell wrapper like command: "bash", args: ["-c", "..."]
-    const directCmd = record.command;
+    // Accept an exact command-wrapper argv shape for any command-bearing tool;
+    // the structural shape, not a fixed wrapper/tool-name list, controls extraction.
     const directArgs = record.args;
-    if (typeof directCmd === "string" && SHELL_COMMAND_WRAPPERS[directCmd.trim()] === true) {
+    if (Array.isArray(directArgs) && directArgs.length > 0) {
       if (
-        Array.isArray(directArgs) &&
         directArgs.length === 2 &&
         (directArgs[0] === "-c" || directArgs[0] === "-lc" || directArgs[0] === "-cl") &&
         typeof directArgs[1] === "string"
       ) {
         return directArgs[1].trim() || null;
       }
-      return null;
-    }
-
-    // If args is present and non-empty for non-shell-wrapper, reject (fail closed for structured argv / mixed ambiguity)
-    if (Array.isArray(directArgs) && directArgs.length > 0) {
       return null;
     }
 
@@ -177,6 +150,10 @@ function placeholderRole(token: string): "path" | "string" | "number" | null {
   if (token === "$NUM" || token === "-$NUM" || token === "+$NUM") return "number";
   if (STRING_PLACEHOLDERS[token] === true) return "string";
   return null;
+}
+
+function valueSha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 /**
@@ -375,33 +352,50 @@ export function projectDeterministicCommandSequence(
   }
 
   let paramIndex = 0;
+  const parameterValueSha256: Record<string, string> = {};
   const steps: DeterministicCommandStep[] = [];
   for (let stepIndex = 0; stepIndex < normalizedSteps.length; stepIndex++) {
     const tokens = normalizedSteps[stepIndex] as string[];
     const executable = stepTokensList[stepIndex]?.[0];
     if (!executable) return null;
     const argumentTokens = tokens.slice(1);
-    if (argumentTokens.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs) {
+    const rawArgumentTokens = stepTokensList[stepIndex]?.slice(1);
+    if (
+      !rawArgumentTokens ||
+      argumentTokens.length !== rawArgumentTokens.length ||
+      argumentTokens.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs
+    ) {
       return null;
     }
 
     const argv: DeterministicCommandArg[] = [];
-    for (const token of argumentTokens) {
+    for (let argumentIndex = 0; argumentIndex < argumentTokens.length; argumentIndex++) {
+      const token = argumentTokens[argumentIndex] as string;
+      const rawArgument = rawArgumentTokens[argumentIndex] as string;
       const role = placeholderRole(token);
       if (role !== null) {
-        argv.push({ parameter: `arg${paramIndex++}`, role });
+        const parameter = `arg${paramIndex++}`;
+        argv.push({ parameter, role });
+        if (role === "string") {
+          parameterValueSha256[parameter] = valueSha256(rawArgument);
+        }
         continue;
       }
 
       const prefixedParameter = token.match(PREFIXED_PARAMETER_PLACEHOLDER);
       if (prefixedParameter) {
+        const prefix = prefixedParameter[1] as string;
         const prefixedRole = placeholderRole(prefixedParameter[2] as string);
-        if (prefixedRole === null) return null;
+        if (prefixedRole === null || !rawArgument.startsWith(prefix)) return null;
+        const parameter = `arg${paramIndex++}`;
         argv.push({
-          prefix: prefixedParameter[1] as string,
-          parameter: `arg${paramIndex++}`,
+          prefix,
+          parameter,
           role: prefixedRole,
         });
+        if (prefixedRole === "string") {
+          parameterValueSha256[parameter] = valueSha256(rawArgument.slice(prefix.length));
+        }
         continue;
       }
 
@@ -421,6 +415,7 @@ export function projectDeterministicCommandSequence(
     kind: DETERMINISTIC_COMMAND_SEQUENCE_KIND,
     control: DETERMINISTIC_COMMAND_SEQUENCE_CONTROL,
     steps,
+    ...(Object.keys(parameterValueSha256).length > 0 ? { parameterValueSha256 } : {}),
   };
 
   const parseResult = DeterministicCommandSequenceSchema.safeParse(sequence);

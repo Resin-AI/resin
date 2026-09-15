@@ -318,6 +318,7 @@ export function isDescriptorSafePlainTree(value: unknown, seen = new Set<object>
  * - strictly sequential step IDs (step0, step1, ...)
  * - strictly sequential, unique parameter identifiers (arg0, arg1, ...)
  * - strict plain objects with no extra keys, prototype pollution, or hostiles
+ * - evidence-derived SHA-256 commitments for every private string parameter
  */
 const RawDeterministicCommandSequenceSchema = z
   .object({
@@ -328,11 +329,15 @@ const RawDeterministicCommandSequenceSchema = z
       .array(DeterministicCommandStepSchema)
       .min(1)
       .max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+    parameterValueSha256: z
+      .record(z.string().regex(/^arg[0-9]+$/), z.string().regex(/^[0-9a-f]{64}$/))
+      .optional(),
   })
   .strict()
   .superRefine((seq, ctx) => {
     let expectedParamIndex = 0;
     const seenParamNames = new Set<string>();
+    const stringParamNames = new Set<string>();
 
     for (let i = 0; i < seq.steps.length; i++) {
       const step = seq.steps[i];
@@ -361,6 +366,9 @@ const RawDeterministicCommandSequenceSchema = z
           } else {
             seenParamNames.add(arg.parameter);
           }
+          if (arg.role === "string") {
+            stringParamNames.add(arg.parameter);
+          }
 
           if (arg.parameter !== expectedParamName) {
             ctx.addIssue({
@@ -371,6 +379,26 @@ const RawDeterministicCommandSequenceSchema = z
           }
           expectedParamIndex++;
         }
+      }
+    }
+
+    for (const parameter of stringParamNames) {
+      if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
+          path: ["parameterValueSha256", parameter],
+        });
+      }
+    }
+
+    for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
+      if (!stringParamNames.has(parameter)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Value commitment '${parameter}' must reference a string parameter`,
+          path: ["parameterValueSha256", parameter],
+        });
       }
     }
   });

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DETERMINISTIC_COMMAND_SEQUENCE_LIMITS,
   type NormalizedCommandExecEvent,
@@ -38,58 +39,70 @@ function createBaseHeaders(seq = 1) {
 }
 
 describe("projectDeterministicCommandSequence", () => {
-  describe("supported standalone grammar", () => {
+  describe("generic standalone projection", () => {
     it("projects git status variations", () => {
       const bare = projectDeterministicCommandSequence("git status");
       expect(bare).not.toBeNull();
       expect(bare?.steps).toHaveLength(1);
       expect(bare?.steps[0]?.executable).toBe("git");
-      expect(bare?.steps[0]?.argv).toEqual([{ literal: "status" }]);
+      expect(bare?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "string" }]);
 
       const short = projectDeterministicCommandSequence("git status --short");
-      expect(short?.steps[0]?.argv).toEqual([{ literal: "status" }, { literal: "--short" }]);
+      expect(short?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
+        { literal: "--short" },
+      ]);
 
       const porcelain = projectDeterministicCommandSequence("git status --porcelain");
       expect(porcelain?.steps[0]?.argv).toEqual([
-        { literal: "status" },
+        { parameter: "arg0", role: "string" },
         { literal: "--porcelain" },
       ]);
     });
 
     it("projects git diff variations", () => {
       const bare = projectDeterministicCommandSequence("git diff");
-      expect(bare?.steps[0]?.argv).toEqual([{ literal: "diff" }]);
+      expect(bare?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "string" }]);
 
       const stat = projectDeterministicCommandSequence("git diff --stat");
-      expect(stat?.steps[0]?.argv).toEqual([{ literal: "diff" }, { literal: "--stat" }]);
+      expect(stat?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
+        { literal: "--stat" },
+      ]);
 
       const nameOnly = projectDeterministicCommandSequence("git diff --name-only");
-      expect(nameOnly?.steps[0]?.argv).toEqual([{ literal: "diff" }, { literal: "--name-only" }]);
+      expect(nameOnly?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
+        { literal: "--name-only" },
+      ]);
 
       const nameStatus = projectDeterministicCommandSequence("git diff --name-status");
       expect(nameStatus?.steps[0]?.argv).toEqual([
-        { literal: "diff" },
+        { parameter: "arg0", role: "string" },
         { literal: "--name-status" },
       ]);
     });
 
     it("projects git log variations preserving option order", () => {
       const oneline = projectDeterministicCommandSequence("git log --oneline");
-      expect(oneline?.steps[0]?.argv).toEqual([{ literal: "log" }, { literal: "--oneline" }]);
+      expect(oneline?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
+        { literal: "--oneline" },
+      ]);
 
       const onelineLimit = projectDeterministicCommandSequence("git log --oneline -n 10");
       expect(onelineLimit?.steps[0]?.argv).toEqual([
-        { literal: "log" },
+        { parameter: "arg0", role: "string" },
         { literal: "--oneline" },
         { literal: "-n" },
-        { parameter: "arg0", role: "number" },
+        { parameter: "arg1", role: "number" },
       ]);
 
       const limitOneline = projectDeterministicCommandSequence("git log -n 5 --oneline");
       expect(limitOneline?.steps[0]?.argv).toEqual([
-        { literal: "log" },
+        { parameter: "arg0", role: "string" },
         { literal: "-n" },
-        { parameter: "arg0", role: "number" },
+        { parameter: "arg1", role: "number" },
         { literal: "--oneline" },
       ]);
     });
@@ -97,18 +110,18 @@ describe("projectDeterministicCommandSequence", () => {
     it("projects lune run with path and optional suite", () => {
       const basic = projectDeterministicCommandSequence("lune run tests/test.luau");
       expect(basic?.steps[0]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg0", role: "path" },
+        { parameter: "arg0", role: "string" },
+        { parameter: "arg1", role: "path" },
       ]);
 
       const withSuite = projectDeterministicCommandSequence(
         "lune run tests/test.luau --suite unit",
       );
       expect(withSuite?.steps[0]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg0", role: "path" },
+        { parameter: "arg0", role: "string" },
+        { parameter: "arg1", role: "path" },
         { literal: "--suite" },
-        { parameter: "arg1", role: "string" },
+        { parameter: "arg2", role: "string" },
       ]);
     });
 
@@ -197,14 +210,14 @@ describe("projectDeterministicCommandSequence", () => {
       expect(compound?.steps).toHaveLength(2);
       expect(compound?.steps[0]?.id).toBe("step0");
       expect(compound?.steps[0]?.executable).toBe("git");
-      expect(compound?.steps[0]?.argv).toEqual([{ literal: "status" }]);
+      expect(compound?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "string" }]);
 
       expect(compound?.steps[1]?.id).toBe("step1");
       expect(compound?.steps[1]?.executable).toBe("git");
       expect(compound?.steps[1]?.argv).toEqual([
-        { literal: "log" },
+        { parameter: "arg1", role: "string" },
         { literal: "-n" },
-        { parameter: "arg0", role: "number" },
+        { parameter: "arg2", role: "number" },
         { literal: "--oneline" },
       ]);
     });
@@ -216,12 +229,12 @@ describe("projectDeterministicCommandSequence", () => {
       expect(compound).not.toBeNull();
       expect(compound?.steps).toHaveLength(2);
       expect(compound?.steps[0]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg0", role: "path" },
+        { parameter: "arg0", role: "string" },
+        { parameter: "arg1", role: "path" },
       ]);
       expect(compound?.steps[1]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg1", role: "path" },
+        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "path" },
       ]);
     });
 
@@ -232,14 +245,14 @@ describe("projectDeterministicCommandSequence", () => {
       expect(quoted).not.toBeNull();
       expect(quoted?.steps).toHaveLength(2);
       expect(quoted?.steps[0]?.argv).toEqual([
-        { literal: "status" },
         { parameter: "arg0", role: "string" },
+        { parameter: "arg1", role: "string" },
       ]);
       expect(quoted?.steps[1]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg1", role: "string" },
-        { literal: "--suite" },
         { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "string" },
+        { literal: "--suite" },
+        { parameter: "arg4", role: "string" },
       ]);
     });
 
@@ -261,8 +274,8 @@ describe("projectDeterministicCommandSequence", () => {
       expect(compound?.steps[1]?.id).toBe("step1");
       expect(compound?.steps[1]?.executable).toBe("lune");
       expect(compound?.steps[1]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg2", role: "path" },
+        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "path" },
       ]);
     });
 
@@ -283,8 +296,8 @@ describe("projectDeterministicCommandSequence", () => {
       expect(compound?.steps[1]?.id).toBe("step1");
       expect(compound?.steps[1]?.executable).toBe("lune");
       expect(compound?.steps[1]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg2", role: "path" },
+        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "path" },
       ]);
     });
 
@@ -306,8 +319,8 @@ describe("projectDeterministicCommandSequence", () => {
       expect(compound?.steps[1]?.id).toBe("step1");
       expect(compound?.steps[1]?.executable).toBe("lune");
       expect(compound?.steps[1]?.argv).toEqual([
-        { literal: "run" },
-        { parameter: "arg2", role: "path" },
+        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "path" },
       ]);
     });
   });
@@ -351,18 +364,26 @@ describe("projectDeterministicCommandSequence", () => {
       expect(seleneJson).not.toContain("vault");
       expect(seleneJson).not.toContain("keys");
     });
-    it("retains only Lune's structural run verb and redacts other positional words", () => {
+    it("redacts the first positional word as user-controlled data", () => {
       const sequence = projectDeterministicCommandSequence(
-        "lune customer-secret && lune run scripts/test.luau",
+        "lune run scripts/test.luau customer-secret",
       );
       const json = JSON.stringify(sequence);
 
-      expect(sequence?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "string" }]);
-      expect(sequence?.steps[1]?.argv).toEqual([
-        { literal: "run" },
+      expect(sequence?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
         { parameter: "arg1", role: "path" },
+        { parameter: "arg2", role: "string" },
       ]);
+      expect(sequence?.parameterValueSha256).toEqual({
+        arg0: createHash("sha256").update("run").digest("hex"),
+        arg2: createHash("sha256").update("customer-secret").digest("hex"),
+      });
+      expect(json).not.toContain("run");
       expect(json).not.toContain("customer-secret");
+      expect(
+        JSON.stringify(projectDeterministicCommandSequence("custom-tool alice")),
+      ).not.toContain("alice");
     });
   });
 
@@ -438,19 +459,19 @@ describe("projectDeterministicCommandSequence", () => {
         "custom-check",
       ]);
       expect(sequence?.steps[0]?.argv).toEqual([
-        { literal: "build" },
-        { parameter: "arg0", role: "path" },
-        { literal: "--output" },
+        { parameter: "arg0", role: "string" },
         { parameter: "arg1", role: "path" },
+        { literal: "--output" },
+        { parameter: "arg2", role: "path" },
       ]);
       expect(sequence?.steps[1]?.argv).toEqual([
-        { literal: "nextest" },
-        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "string" },
+        { parameter: "arg4", role: "string" },
         { literal: "--workspace" },
       ]);
       expect(sequence?.steps[2]?.argv).toEqual([
-        { parameter: "arg3", role: "string" },
-        { parameter: "arg4", role: "path" },
+        { parameter: "arg5", role: "string" },
+        { parameter: "arg6", role: "path" },
       ]);
 
       const json = JSON.stringify(sequence);
@@ -508,6 +529,39 @@ describe("projectDeterministicCommandSequence", () => {
         ).toBe(true);
       }
     });
+
+    it("projects previously unseen executables with generic flags and typed positional parameters", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "biome check src/app.ts --write && custom-tool run 10 && novel-cli",
+      );
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(3);
+
+      expect(sequence?.steps[0]).toEqual({
+        id: "step0",
+        executable: "biome",
+        argv: [
+          { parameter: "arg0", role: "string" },
+          { parameter: "arg1", role: "path" },
+          { literal: "--write" },
+        ],
+      });
+
+      expect(sequence?.steps[1]).toEqual({
+        id: "step1",
+        executable: "custom-tool",
+        argv: [
+          { parameter: "arg2", role: "string" },
+          { parameter: "arg3", role: "number" },
+        ],
+      });
+
+      expect(sequence?.steps[2]).toEqual({
+        id: "step2",
+        executable: "novel-cli",
+        argv: [],
+      });
+    });
   });
 });
 
@@ -524,11 +578,11 @@ describe("extractRawCommandStringFromEvent", () => {
     expect(extractRawCommandStringFromEvent(event)).toBe("git status && git diff");
   });
 
-  it("extracts from command_exec with bash -c wrapper", () => {
+  it("extracts an exact command-wrapper argv shape without an executable-name allowlist", () => {
     const event: NormalizedCommandExecEvent = {
       ...createBaseHeaders(1),
       type: "command_exec",
-      command: "bash",
+      command: "novel-wrapper",
       args: ["-c", "git status --short"],
       exitCode: 0,
       durationMs: 45,
@@ -550,7 +604,21 @@ describe("extractRawCommandStringFromEvent", () => {
     expect(extractRawCommandStringFromEvent(event)).toBe("git log --oneline -n 5");
   });
 
-  it("returns null for non-shell tool_call or non-command events", () => {
+  it("extracts command text from an unseen command-bearing tool without a tool-name allowlist", () => {
+    const event: NormalizedToolCallEvent = {
+      ...createBaseHeaders(1),
+      type: "tool_call",
+      callId: "call_unseen",
+      toolName: "acme_command_runner",
+      parameters: {
+        command: "custom-checker inspect src/main.ts",
+      },
+      isShadow: false,
+    };
+    expect(extractRawCommandStringFromEvent(event)).toBe("custom-checker inspect src/main.ts");
+  });
+
+  it("returns null for tool calls without a command parameter", () => {
     const toolEvent: NormalizedToolCallEvent = {
       ...createBaseHeaders(1),
       type: "tool_call",
