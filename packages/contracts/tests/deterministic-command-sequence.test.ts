@@ -152,6 +152,170 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(isDeterministicCommandSequence(suiteLune)).toBe(true);
   });
 
+  it("validates stylua --check with one or more path parameters", () => {
+    const singlePath: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [{ literal: "--check" }, { parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(singlePath)).toBe(true);
+
+    const multiPath: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [
+            { literal: "--check" },
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(multiPath)).toBe(true);
+    const parsed = parseDeterministicCommandSequence(multiPath);
+    expect(parsed.steps[0]?.executable).toBe("stylua");
+    expect(parsed.steps[0]?.argv).toHaveLength(3);
+  });
+
+  it("validates selene with one or more path parameters and optional --allow-warnings", () => {
+    const bareSingle: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [{ parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(bareSingle)).toBe(true);
+
+    const bareMulti: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(bareMulti)).toBe(true);
+
+    const warningsMulti: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [
+            { literal: "--allow-warnings" },
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(warningsMulti)).toBe(true);
+  });
+
+  it("validates PhysicsSnap compound workflows with stylua, selene, and lune", () => {
+    const styluaWorkflow: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [
+            { literal: "--check" },
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg2", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(styluaWorkflow)).toBe(true);
+    const digest1 = canonicalDeterministicCommandSequenceDigest(styluaWorkflow);
+    expect(digest1).toMatch(/^[a-f0-9]{64}$/);
+
+    const seleneWorkflow: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg2", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(seleneWorkflow)).toBe(true);
+    const digest2 = canonicalDeterministicCommandSequenceDigest(seleneWorkflow);
+    expect(digest2).toMatch(/^[a-f0-9]{64}$/);
+
+    const seleneWarningsWorkflow: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [
+            { literal: "--allow-warnings" },
+            { parameter: "arg0", role: "path" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg2", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(seleneWarningsWorkflow)).toBe(true);
+    const digest3 = canonicalDeterministicCommandSequenceDigest(seleneWarningsWorkflow);
+    expect(digest3).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it("validates compound sequence with positional sequential parameter names across steps", () => {
     const compound: DeterministicCommandSequence = {
       schemaVersion: 1,
@@ -286,6 +450,162 @@ describe("DeterministicCommandSequenceSchema", () => {
       ],
     };
     expect(isDeterministicCommandSequence(unknownGitSub)).toBe(false);
+  });
+
+  it("rejects invalid stylua step grammar", () => {
+    const missingCheck = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [{ parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(missingCheck)).toBe(false);
+
+    const missingPaths = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [{ literal: "--check" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(missingPaths)).toBe(false);
+
+    const extraFlag = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [
+            { literal: "--check" },
+            { literal: "--verbose" },
+            { parameter: "arg0", role: "path" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(extraFlag)).toBe(false);
+
+    const nonPathRole = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [{ literal: "--check" }, { parameter: "arg0", role: "string" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(nonPathRole)).toBe(false);
+
+    const flagInPathPosition = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "stylua",
+          argv: [
+            { literal: "--check" },
+            { parameter: "arg0", role: "path" },
+            { literal: "--verify" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(flagInPathPosition)).toBe(false);
+  });
+
+  it("rejects invalid selene step grammar", () => {
+    const unsupportedFlag = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [{ literal: "--quiet" }, { parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(unsupportedFlag)).toBe(false);
+
+    const missingPaths = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [{ literal: "--allow-warnings" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(missingPaths)).toBe(false);
+
+    const nonPathRole = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [{ parameter: "arg0", role: "number" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(nonPathRole)).toBe(false);
+
+    const flagAfterPath = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [{ parameter: "arg0", role: "path" }, { literal: "--allow-warnings" }],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(flagAfterPath)).toBe(false);
+
+    const duplicateFlag = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "selene",
+          argv: [
+            { literal: "--allow-warnings" },
+            { literal: "--allow-warnings" },
+            { parameter: "arg0", role: "path" },
+          ],
+        },
+      ],
+    };
+    expect(isDeterministicCommandSequence(duplicateFlag)).toBe(false);
   });
 
   it("rejects unknown properties on strict objects", () => {

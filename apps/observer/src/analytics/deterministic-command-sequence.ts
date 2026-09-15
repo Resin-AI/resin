@@ -145,6 +145,15 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
   return null;
 }
 
+function isSafeRelativePathToken(token: string): boolean {
+  if (token.length === 0) return false;
+  if (token.startsWith("-")) return false;
+  if (token.startsWith("/")) return false;
+  if (/^[a-zA-Z]:/.test(token)) return false;
+  if (token.includes("..")) return false;
+  return true;
+}
+
 /**
  * Projects a raw shell command string into a deterministic command sequence evidence structure.
  *
@@ -155,6 +164,8 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
  *     git diff (--stat, --name-only, --name-status)
  *     git log (--oneline, optional -n NUMBER in either order)
  *     lune run PATH (optional --suite STRING)
+ *     stylua --check PATH... (one or more safe relative paths)
+ *     selene [--allow-warnings] PATH... (one or more safe relative paths)
  * - Returns null on any malformed, hostile, unsupported, or ambiguous input (fail closed).
  */
 export function projectDeterministicCommandSequence(
@@ -293,13 +304,13 @@ export function projectDeterministicCommandSequence(
 
   for (let s = 0; s < stepTokensList.length; s++) {
     const tokens = stepTokensList[s] as string[];
-    if (tokens.length === 0 || tokens.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs) {
+    if (tokens.length === 0 || tokens.length - 1 > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs) {
       return null;
     }
 
     const stepId = `step${s}`;
     const exe = tokens[0];
-    if (exe !== "git" && exe !== "lune") {
+    if (exe !== "git" && exe !== "lune" && exe !== "stylua" && exe !== "selene") {
       return null;
     }
 
@@ -396,6 +407,43 @@ export function projectDeterministicCommandSequence(
       }
 
       steps.push({ id: stepId, executable: "lune", argv });
+    } else if (exe === "stylua") {
+      if (tokens.length < 3) return null;
+      if (tokens[1] !== "--check") return null;
+
+      argv.push({ literal: "--check" });
+
+      for (let t = 2; t < tokens.length; t++) {
+        const pathTok = tokens[t] as string;
+        if (!isSafeRelativePathToken(pathTok)) {
+          return null;
+        }
+        argv.push({ parameter: `arg${paramIndex++}`, role: "path" });
+      }
+
+      steps.push({ id: stepId, executable: "stylua", argv });
+    } else if (exe === "selene") {
+      if (tokens.length < 2) return null;
+
+      let pathStartIdx = 1;
+      if (tokens[1] === "--allow-warnings") {
+        argv.push({ literal: "--allow-warnings" });
+        pathStartIdx = 2;
+      }
+
+      if (pathStartIdx >= tokens.length) {
+        return null;
+      }
+
+      for (let t = pathStartIdx; t < tokens.length; t++) {
+        const pathTok = tokens[t] as string;
+        if (!isSafeRelativePathToken(pathTok)) {
+          return null;
+        }
+        argv.push({ parameter: `arg${paramIndex++}`, role: "path" });
+      }
+
+      steps.push({ id: stepId, executable: "selene", argv });
     }
   }
 

@@ -1,5 +1,6 @@
 import {
   type NormalizedCommandExecEvent,
+  DETERMINISTIC_COMMAND_SEQUENCE_LIMITS,
   type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
@@ -110,6 +111,83 @@ describe("projectDeterministicCommandSequence", () => {
         { parameter: "arg1", role: "string" },
       ]);
     });
+
+    it("projects stylua --check with one or more paths", () => {
+      const single = projectDeterministicCommandSequence("stylua --check src/module.luau");
+      expect(single).not.toBeNull();
+      expect(single?.steps).toHaveLength(1);
+      expect(single?.steps[0]?.executable).toBe("stylua");
+      expect(single?.steps[0]?.argv).toEqual([
+        { literal: "--check" },
+        { parameter: "arg0", role: "path" },
+      ]);
+
+      const multi = projectDeterministicCommandSequence(
+        "stylua --check src/first.luau src/second.luau",
+      );
+      expect(multi).not.toBeNull();
+      expect(multi?.steps[0]?.argv).toEqual([
+        { literal: "--check" },
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+    });
+
+    it("projects selene with one or more paths and optional --allow-warnings", () => {
+      const bareSingle = projectDeterministicCommandSequence("selene src/module.luau");
+      expect(bareSingle).not.toBeNull();
+      expect(bareSingle?.steps[0]?.executable).toBe("selene");
+      expect(bareSingle?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "path" }]);
+
+      const bareMulti = projectDeterministicCommandSequence(
+        "selene src/first.luau src/second.luau",
+      );
+      expect(bareMulti?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+
+      const withWarnings = projectDeterministicCommandSequence(
+        "selene --allow-warnings src/first.luau src/second.luau",
+      );
+      expect(withWarnings?.steps[0]?.argv).toEqual([
+        { literal: "--allow-warnings" },
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+    });
+
+    it("matches the schema argv boundary for variadic stylua and selene commands", () => {
+      const maxArgs = DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs;
+      const paths = Array.from({ length: maxArgs + 1 }, (_, index) => `src/file-${index}.luau`);
+
+      expect(
+        projectDeterministicCommandSequence(
+          `stylua --check ${paths.slice(0, maxArgs - 1).join(" ")}`,
+        ),
+      ).not.toBeNull();
+      expect(
+        projectDeterministicCommandSequence(`stylua --check ${paths.slice(0, maxArgs).join(" ")}`),
+      ).toBeNull();
+
+      expect(
+        projectDeterministicCommandSequence(`selene ${paths.slice(0, maxArgs).join(" ")}`),
+      ).not.toBeNull();
+      expect(
+        projectDeterministicCommandSequence(`selene ${paths.slice(0, maxArgs + 1).join(" ")}`),
+      ).toBeNull();
+
+      expect(
+        projectDeterministicCommandSequence(
+          `selene --allow-warnings ${paths.slice(0, maxArgs - 1).join(" ")}`,
+        ),
+      ).not.toBeNull();
+      expect(
+        projectDeterministicCommandSequence(
+          `selene --allow-warnings ${paths.slice(0, maxArgs).join(" ")}`,
+        ),
+      ).toBeNull();
+    });
   });
 
   describe("compound sequences", () => {
@@ -161,6 +239,74 @@ describe("projectDeterministicCommandSequence", () => {
         { parameter: "arg1", role: "string" },
       ]);
     });
+
+    it("projects PhysicsSnap workflow: stylua --check <two files> && lune run scripts/test-platformer-motor.luau", () => {
+      const compound = projectDeterministicCommandSequence(
+        "stylua --check src/motor.luau src/platformer.luau && lune run scripts/test-platformer-motor.luau",
+      );
+      expect(compound).not.toBeNull();
+      expect(compound?.steps).toHaveLength(2);
+
+      expect(compound?.steps[0]?.id).toBe("step0");
+      expect(compound?.steps[0]?.executable).toBe("stylua");
+      expect(compound?.steps[0]?.argv).toEqual([
+        { literal: "--check" },
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+
+      expect(compound?.steps[1]?.id).toBe("step1");
+      expect(compound?.steps[1]?.executable).toBe("lune");
+      expect(compound?.steps[1]?.argv).toEqual([
+        { literal: "run" },
+        { parameter: "arg2", role: "path" },
+      ]);
+    });
+
+    it("projects PhysicsSnap workflow: selene <two files> && lune run scripts/build.luau", () => {
+      const compound = projectDeterministicCommandSequence(
+        "selene src/motor.luau src/platformer.luau && lune run scripts/build.luau",
+      );
+      expect(compound).not.toBeNull();
+      expect(compound?.steps).toHaveLength(2);
+
+      expect(compound?.steps[0]?.id).toBe("step0");
+      expect(compound?.steps[0]?.executable).toBe("selene");
+      expect(compound?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+
+      expect(compound?.steps[1]?.id).toBe("step1");
+      expect(compound?.steps[1]?.executable).toBe("lune");
+      expect(compound?.steps[1]?.argv).toEqual([
+        { literal: "run" },
+        { parameter: "arg2", role: "path" },
+      ]);
+    });
+
+    it("projects selene with --allow-warnings and compound lune run", () => {
+      const compound = projectDeterministicCommandSequence(
+        "selene --allow-warnings src/motor.luau src/platformer.luau && lune run scripts/build.luau",
+      );
+      expect(compound).not.toBeNull();
+      expect(compound?.steps).toHaveLength(2);
+
+      expect(compound?.steps[0]?.id).toBe("step0");
+      expect(compound?.steps[0]?.executable).toBe("selene");
+      expect(compound?.steps[0]?.argv).toEqual([
+        { literal: "--allow-warnings" },
+        { parameter: "arg0", role: "path" },
+        { parameter: "arg1", role: "path" },
+      ]);
+
+      expect(compound?.steps[1]?.id).toBe("step1");
+      expect(compound?.steps[1]?.executable).toBe("lune");
+      expect(compound?.steps[1]?.argv).toEqual([
+        { literal: "run" },
+        { parameter: "arg2", role: "path" },
+      ]);
+    });
   });
 
   describe("privacy boundaries", () => {
@@ -182,6 +328,24 @@ describe("projectDeterministicCommandSequence", () => {
       expect(json).not.toContain("customer");
       expect(json).not.toContain("sensitive_data");
       expect(json).not.toContain("confidential_suite");
+    });
+
+    it("never retains stylua or selene private parameter values in the evidence", () => {
+      const styluaSeq = projectDeterministicCommandSequence(
+        "stylua --check internal/confidential/code.luau private/secret.luau",
+      );
+      const styluaJson = JSON.stringify(styluaSeq);
+      expect(styluaJson).not.toContain("internal");
+      expect(styluaJson).not.toContain("confidential");
+      expect(styluaJson).not.toContain("secret");
+
+      const seleneSeq = projectDeterministicCommandSequence(
+        "selene --allow-warnings sensitive/vault/keys.luau",
+      );
+      const seleneJson = JSON.stringify(seleneSeq);
+      expect(seleneJson).not.toContain("sensitive");
+      expect(seleneJson).not.toContain("vault");
+      expect(seleneJson).not.toContain("keys");
     });
   });
 
@@ -250,6 +414,75 @@ describe("projectDeterministicCommandSequence", () => {
       expect(projectDeterministicCommandSequence("git diff ''")).toBeNull();
       expect(projectDeterministicCommandSequence('git log --oneline ""')).toBeNull();
       expect(projectDeterministicCommandSequence('lune run "path.luau" --suite ""')).toBeNull();
+    });
+
+    it("rejects mutation-mode stylua and stylua without paths", () => {
+      // Missing --check (mutation mode)
+      expect(projectDeterministicCommandSequence("stylua src/motor.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("stylua src/motor.luau src/platformer.luau"),
+      ).toBeNull();
+      // --check without paths
+      expect(projectDeterministicCommandSequence("stylua --check")).toBeNull();
+      expect(projectDeterministicCommandSequence("stylua")).toBeNull();
+    });
+
+    it("rejects option injection in stylua and selene", () => {
+      // Option injection in stylua
+      expect(
+        projectDeterministicCommandSequence("stylua --check --output-format json src/motor.luau"),
+      ).toBeNull();
+      expect(projectDeterministicCommandSequence("stylua --check -v src/motor.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("stylua --check src/motor.luau --verify"),
+      ).toBeNull();
+
+      // Option injection in selene
+      expect(
+        projectDeterministicCommandSequence(
+          "selene --allow-warnings --display-style quiet src/motor.luau",
+        ),
+      ).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("selene src/motor.luau --allow-warnings"),
+      ).toBeNull();
+      expect(projectDeterministicCommandSequence("selene -v src/motor.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("selene --config selene.toml src/motor.luau"),
+      ).toBeNull();
+    });
+
+    it("rejects absolute paths and directory traversal in stylua and selene", () => {
+      // Absolute paths
+      expect(projectDeterministicCommandSequence("stylua --check /etc/passwd")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("stylua --check /root/test.luau src/motor.luau"),
+      ).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("stylua --check C:/Users/test/test.luau"),
+      ).toBeNull();
+      expect(projectDeterministicCommandSequence("selene /var/log/test.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("selene --allow-warnings /abs/path.luau"),
+      ).toBeNull();
+      expect(projectDeterministicCommandSequence("selene C:/Users/test/test.luau")).toBeNull();
+
+      // Directory traversal
+      expect(projectDeterministicCommandSequence("stylua --check ../motor.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("stylua --check src/../../secret.luau"),
+      ).toBeNull();
+      expect(projectDeterministicCommandSequence("selene ../foo.luau")).toBeNull();
+      expect(
+        projectDeterministicCommandSequence("selene --allow-warnings src/../bar.luau"),
+      ).toBeNull();
+    });
+
+    it("rejects unsupported selene flags and selene without paths", () => {
+      expect(projectDeterministicCommandSequence("selene --quiet src/foo.luau")).toBeNull();
+      expect(projectDeterministicCommandSequence("selene --color always src/foo.luau")).toBeNull();
+      expect(projectDeterministicCommandSequence("selene --allow-warnings")).toBeNull();
+      expect(projectDeterministicCommandSequence("selene")).toBeNull();
     });
   });
 });

@@ -75,7 +75,7 @@ export const DeterministicCommandArgSchema = z.union([
 export type DeterministicCommandArg = z.infer<typeof DeterministicCommandArgSchema>;
 
 /** Allowlisted executables for deterministic command execution. */
-export const DeterministicCommandExecutableSchema = z.enum(["git", "lune"]);
+export const DeterministicCommandExecutableSchema = z.enum(["git", "lune", "stylua", "selene"]);
 
 export type DeterministicCommandExecutable = z.infer<typeof DeterministicCommandExecutableSchema>;
 
@@ -365,6 +365,73 @@ function validateStepGrammar(
       message: `Unsupported arguments for lune run: must be 'run PATH' or 'run PATH --suite STRING'`,
       path: ["steps", stepIndex, "argv"],
     });
+  } else if (step.executable === "stylua") {
+    // stylua --check PATH... (one or more path parameters)
+    const firstArg = step.argv[0];
+    if (!("literal" in firstArg) || firstArg.literal !== "--check") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Step ${stepIndex} (stylua) first argument must be literal '--check'`,
+        path: ["steps", stepIndex, "argv", 0],
+      });
+      return;
+    }
+
+    if (step.argv.length < 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `stylua --check requires at least one path parameter argument`,
+        path: ["steps", stepIndex, "argv"],
+      });
+      return;
+    }
+
+    for (let i = 1; i < step.argv.length; i++) {
+      const arg = step.argv[i];
+      if (!("parameter" in arg) || arg.role !== "path") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stylua argument at index ${i} must be a parameter with role 'path'`,
+          path: ["steps", stepIndex, "argv", i],
+        });
+      }
+    }
+  } else if (step.executable === "selene") {
+    // selene [--allow-warnings] PATH... (one or more path parameters)
+    let pathStartIndex = 0;
+    const firstArg = step.argv[0];
+
+    if ("literal" in firstArg) {
+      if (firstArg.literal !== "--allow-warnings") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unsupported flag '${firstArg.literal}' for selene: only optional '--allow-warnings' is permitted`,
+          path: ["steps", stepIndex, "argv", 0],
+        });
+        return;
+      }
+      pathStartIndex = 1;
+    }
+
+    if (step.argv.length <= pathStartIndex) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `selene requires at least one path parameter argument`,
+        path: ["steps", stepIndex, "argv"],
+      });
+      return;
+    }
+
+    for (let i = pathStartIndex; i < step.argv.length; i++) {
+      const arg = step.argv[i];
+      if (!("parameter" in arg) || arg.role !== "path") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `selene argument at index ${i} must be a parameter with role 'path'`,
+          path: ["steps", stepIndex, "argv", i],
+        });
+      }
+    }
   }
 }
 
@@ -378,7 +445,7 @@ function validateStepGrammar(
  * - 1 to 8 steps
  * - strictly sequential step IDs (step0, step1, ...)
  * - strictly sequential, unique parameter identifiers (arg0, arg1, ...)
- * - exact CLI grammar per step (git status, git diff, git log, lune run)
+ * - exact CLI grammar per step (git status, git diff, git log, lune run, stylua --check, selene)
  * - strict plain objects with no extra keys, prototype pollution, or hostiles
  */
 const RawDeterministicCommandSequenceSchema = z
