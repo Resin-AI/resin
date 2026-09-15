@@ -9,6 +9,7 @@ import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
 import type { ReconcileOutcome } from "../project/lock-manager.js";
+import { LocalArtifactTrustConfigurationError } from "../proxy/local-artifact-trust.js";
 import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../proxy/runtime.js";
 import { ToolRegistry } from "../registry/registry.js";
 import type { ToolRegistryDatabaseOption } from "../registry/types.js";
@@ -369,7 +370,8 @@ export class McpStdioShim {
       if (registry && cloudRuntime.router) {
         router = createRegistryGatewayRouter(registry, cloudRuntime.router);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof LocalArtifactTrustConfigurationError) throw error;
       cloudRuntime = undefined;
     }
 

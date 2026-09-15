@@ -315,10 +315,11 @@ export class LocalArtifactExecutor {
     return true;
   }
 
-  private async verifyDeterministicArchiveRehash(
+  private async verifyArtifactDirectory(
     artifactDir: string,
     entry: LocalArtifactEntry,
     manifest: ToolManifest,
+    verifyArchiveDigest = true,
   ): Promise<{ verified: boolean; error?: string }> {
     if (!entry.artifactDigest) {
       return { verified: false, error: "Missing artifact digest" };
@@ -361,36 +362,6 @@ export class LocalArtifactExecutor {
           verified: false,
           error: "Bundle signature is required in production but signature.json is missing",
         };
-      }
-    }
-
-    if (hasSig) {
-      try {
-        const sigContent = fs.readFileSync(sigPath, "utf8");
-        const sigData = BundleSignatureDataSchema.parse(JSON.parse(sigContent));
-
-        if (entry.signatureIdentity?.keyId && sigData.keyId !== entry.signatureIdentity.keyId) {
-          return {
-            verified: false,
-            error: `Signature keyId mismatch: expected '${entry.signatureIdentity.keyId}', got '${sigData.keyId}'`,
-          };
-        }
-
-        const loader = this.getLoader();
-        const keyStore = this.keyStore ?? loader.keyStore;
-        if (keyStore) {
-          const sigResult = await verifyBundleSignature(sigData, keyStore, {
-            allowDevKeys: this.allowDevKeys,
-          });
-          if (!sigResult.valid) {
-            return {
-              verified: false,
-              error: `Signature verification failed: ${sigResult.error ?? sigResult.reason}`,
-            };
-          }
-        }
-      } catch (err) {
-        return { verified: false, error: `Signed bundle inspection failed: ${err}` };
       }
     }
 
@@ -483,6 +454,42 @@ export class LocalArtifactExecutor {
         error: "Artifact directory contains invalid files, symlinks, or exceeds bundle limits",
       };
     }
+    if (hasSig) {
+      try {
+        const sigContent = fs.readFileSync(sigPath, "utf8");
+        const sigData = BundleSignatureDataSchema.parse(JSON.parse(sigContent));
+
+        if (entry.signatureIdentity?.keyId && sigData.keyId !== entry.signatureIdentity.keyId) {
+          return {
+            verified: false,
+            error: `Signature keyId mismatch: expected '${entry.signatureIdentity.keyId}', got '${sigData.keyId}'`,
+          };
+        }
+
+        const loader = this.getLoader();
+        const keyStore = this.keyStore ?? loader.keyStore;
+        if (keyStore) {
+          const unsignedFiles = filesToArchive.filter(
+            (file) => file.path !== BUNDLE_FILE_SIGNATURE,
+          );
+          const { archive: unsignedArchive, fileDigests } = encodeDeterministicTar(unsignedFiles);
+          const sigResult = await verifyBundleSignature(sigData, keyStore, {
+            allowDevKeys: this.allowDevKeys,
+            expectedBundleDigest: createHash("sha256").update(unsignedArchive).digest("hex"),
+            expectedFileDigests: fileDigests,
+          });
+          if (!sigResult.valid) {
+            return {
+              verified: false,
+              error: `Signature verification failed: ${sigResult.error ?? sigResult.reason}`,
+            };
+          }
+        }
+      } catch (err) {
+        return { verified: false, error: `Signed bundle inspection failed: ${err}` };
+      }
+    }
+    if (!verifyArchiveDigest) return { verified: true };
 
     // 4. Reconstruct deterministic tar archive and verify against entry.artifactDigest
     try {
@@ -522,11 +529,8 @@ export class LocalArtifactExecutor {
       };
     }
 
-    // 1. Resolve and validate manifest
-    let manifest = params.manifest;
-    if (!manifest) {
-      manifest = this.cache.getArtifactManifest(entry.artifactDigest) ?? undefined;
-    }
+    // 1. Artifact bytes, never unsigned catalog metadata, govern execution.
+    let manifest = this.cache.getArtifactManifest(entry.artifactDigest) ?? undefined;
     if (!manifest) {
       const manifestPath = path.join(artifactDir, BUNDLE_FILE_MANIFEST);
       if (fs.existsSync(manifestPath)) {
@@ -559,13 +563,51 @@ export class LocalArtifactExecutor {
       };
     }
 
-    // 2. Fail closed on manifest digest mismatch unless verified via deterministic archive rehash
-    if (entry.manifestDigest && !matchesManifestDigest(manifest, entry.manifestDigest)) {
-      const rehashResult = await this.verifyDeterministicArchiveRehash(
-        artifactDir,
-        entry,
-        manifest,
+    let catalogDigestMatches = false;
+    if (params.manifest) {
+      const catalogManifest = ToolManifestSchema.safeParse(params.manifest);
+      // Catalog delivery may add provenance metadata or normalize its digest, but
+      // it cannot redefine the signed tool's identity, inputs, grants, or limits.
+      const executionFields = [
+        "id",
+        "name",
+        "version",
+        "parameters",
+        "runtime",
+        "capabilities",
+        "limits",
+      ] as const;
+      if (
+        !catalogManifest.success ||
+        executionFields.some(
+          (field) => canonicalJson(catalogManifest.data[field]) !== canonicalJson(manifest[field]),
+        )
+      ) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "Catalog execution manifest does not match the artifact manifest",
+            },
+          ],
+        };
+      }
+      catalogDigestMatches = Boolean(
+        entry.manifestDigest && matchesManifestDigest(catalogManifest.data, entry.manifestDigest),
       );
+    }
+
+    // 2. A catalog digest may cover different delivery metadata, but only after
+    // its execution fields match the artifact. Signature verification below still
+    // authenticates all artifact bytes; catalog metadata never replaces those bytes.
+    let artifactVerified = false;
+    if (
+      entry.manifestDigest &&
+      !catalogDigestMatches &&
+      !matchesManifestDigest(manifest, entry.manifestDigest)
+    ) {
+      const rehashResult = await this.verifyArtifactDirectory(artifactDir, entry, manifest);
       if (!rehashResult.verified) {
         const computed = computeManifestDigest(manifest);
         return {
@@ -578,6 +620,7 @@ export class LocalArtifactExecutor {
           ],
         };
       }
+      artifactVerified = true;
     }
 
     // 3. Extracted metadata integrity check
@@ -627,62 +670,22 @@ export class LocalArtifactExecutor {
       };
     }
 
-    // 5. Signature verification as required
-    const sigPath = path.join(artifactDir, BUNDLE_FILE_SIGNATURE);
-    const hasSig = fs.existsSync(sigPath);
-    const loader = this.getLoader();
-    const keyStore = this.keyStore ?? loader.keyStore;
-    const shouldRequireSig = this.requireSignature ?? Boolean(entry.signatureIdentity?.keyId);
-    if (shouldRequireSig && !hasSig) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Bundle signature is required in production but signature.json is missing",
-          },
-        ],
-      };
-    }
-
-    if (hasSig) {
-      try {
-        const sigContent = fs.readFileSync(sigPath, "utf8");
-        const sigData = BundleSignatureDataSchema.parse(JSON.parse(sigContent));
-        if (entry.signatureIdentity?.keyId && sigData.keyId !== entry.signatureIdentity.keyId) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Signature keyId '${sigData.keyId}' does not match expected keyId '${entry.signatureIdentity.keyId}'`,
-              },
-            ],
-          };
-        }
-        if (keyStore) {
-          const verifyResult = await verifyBundleSignature(sigData, keyStore, {
-            allowDevKeys: this.allowDevKeys,
-          });
-          if (!verifyResult.valid) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Bundle signature verification failed: ${verifyResult.error ?? verifyResult.reason}`,
-                },
-              ],
-            };
-          }
-        }
-      } catch (err) {
+    // 5. Bind every signed file and the unsigned archive digest to the trusted signature.
+    // A pin requires signatures even for catalog entries without signatureIdentity.
+    if (
+      !artifactVerified &&
+      (this.requireSignature ||
+        entry.signatureIdentity?.keyId ||
+        fs.existsSync(path.join(artifactDir, BUNDLE_FILE_SIGNATURE)))
+    ) {
+      const verification = await this.verifyArtifactDirectory(artifactDir, entry, manifest, false);
+      if (!verification.verified) {
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Bundle signature inspection failed: ${err instanceof Error ? err.message : String(err)}`,
+              text: `Bundle signature verification failed: ${verification.error}`,
             },
           ],
         };
