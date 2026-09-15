@@ -1,6 +1,6 @@
 import {
-  type NormalizedCommandExecEvent,
   DETERMINISTIC_COMMAND_SEQUENCE_LIMITS,
+  type NormalizedCommandExecEvent,
   type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
@@ -231,12 +231,15 @@ describe("projectDeterministicCommandSequence", () => {
       );
       expect(quoted).not.toBeNull();
       expect(quoted?.steps).toHaveLength(2);
-      expect(quoted?.steps[0]?.argv).toEqual([{ literal: "status" }, { literal: "--short" }]);
+      expect(quoted?.steps[0]?.argv).toEqual([
+        { literal: "status" },
+        { parameter: "arg0", role: "string" },
+      ]);
       expect(quoted?.steps[1]?.argv).toEqual([
         { literal: "run" },
-        { parameter: "arg0", role: "path" },
-        { literal: "--suite" },
         { parameter: "arg1", role: "string" },
+        { literal: "--suite" },
+        { parameter: "arg2", role: "string" },
       ]);
     });
 
@@ -344,62 +347,71 @@ describe("projectDeterministicCommandSequence", () => {
       );
       const seleneJson = JSON.stringify(seleneSeq);
       expect(seleneJson).not.toContain("sensitive");
+
       expect(seleneJson).not.toContain("vault");
       expect(seleneJson).not.toContain("keys");
     });
+    it("retains only Lune's structural run verb and redacts other positional words", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "lune customer-secret && lune run scripts/test.luau",
+      );
+      const json = JSON.stringify(sequence);
+
+      expect(sequence?.steps[0]?.argv).toEqual([{ parameter: "arg0", role: "string" }]);
+      expect(sequence?.steps[1]?.argv).toEqual([
+        { literal: "run" },
+        { parameter: "arg1", role: "path" },
+      ]);
+      expect(json).not.toContain("customer-secret");
+    });
   });
 
-  describe("rejections (fails closed)", () => {
+  describe("shell-free safety boundary", () => {
     it("rejects shell expansions and variables", () => {
       expect(projectDeterministicCommandSequence("git status && echo $SECRET")).toBeNull();
       expect(projectDeterministicCommandSequence("git log --oneline -n $NUM")).toBeNull();
       expect(projectDeterministicCommandSequence("git status `whoami`")).toBeNull();
     });
 
-    it("rejects redirection and pipes", () => {
+    it("rejects redirection, pipes, semicolons, and newlines", () => {
       expect(projectDeterministicCommandSequence("git status > file.txt")).toBeNull();
       expect(projectDeterministicCommandSequence("git status 2>&1")).toBeNull();
       expect(projectDeterministicCommandSequence("git status | cat")).toBeNull();
       expect(projectDeterministicCommandSequence("git status || git diff")).toBeNull();
-    });
-
-    it("rejects semicolons and newlines", () => {
       expect(projectDeterministicCommandSequence("git status ; git diff")).toBeNull();
       expect(projectDeterministicCommandSequence("git status\ngit diff")).toBeNull();
     });
 
-    it("rejects environment variable assignments", () => {
+    it("rejects environment assignments and malformed quotes", () => {
       expect(projectDeterministicCommandSequence("NODE_ENV=production git status")).toBeNull();
       expect(projectDeterministicCommandSequence("git status && FOO=1 git diff")).toBeNull();
-    });
-
-    it("rejects malformed or truncated quotes without heuristic repair", () => {
       expect(projectDeterministicCommandSequence('git status "unclosed')).toBeNull();
       expect(projectDeterministicCommandSequence("lune run 'unclosed")).toBeNull();
       expect(projectDeterministicCommandSequence("git st'at'us")).toBeNull();
     });
 
-    it("rejects non-whitelisted commands and flags", () => {
-      expect(projectDeterministicCommandSequence("git push origin main")).toBeNull();
-      expect(projectDeterministicCommandSequence("git commit -m 'test'")).toBeNull();
-      expect(projectDeterministicCommandSequence("git status -v")).toBeNull();
-      expect(projectDeterministicCommandSequence("git diff --cached")).toBeNull();
-      expect(projectDeterministicCommandSequence("curl https://api.example.com")).toBeNull();
-      expect(projectDeterministicCommandSequence("rm -rf /")).toBeNull();
+    it("rejects direct shells, nested launchers, and stateful builtins", () => {
+      for (const command of [
+        "bash -c whoami && pwd",
+        "env sh script.sh && pwd",
+        "sudo bash -c whoami && pwd",
+        "nice sh script.sh && pwd",
+        "timeout 10 sh script.sh && pwd",
+        "setsid sh script.sh && pwd",
+        "stdbuf -oL sh script.sh && pwd",
+        "busybox sh script.sh && pwd",
+        "awk length input.txt && pwd",
+        "sed -n 1p input.txt && pwd",
+        "time sh script.sh && pwd",
+        "nohup sh script.sh && pwd",
+        "exec sh script.sh && pwd",
+        "cd subdir && pwd",
+      ]) {
+        expect(projectDeterministicCommandSequence(command)).toBeNull();
+      }
     });
 
-    it("rejects directory traversal in lune paths", () => {
-      expect(projectDeterministicCommandSequence("lune run ../secret.luau")).toBeNull();
-      expect(projectDeterministicCommandSequence("lune run foo/../../bar.luau")).toBeNull();
-    });
-
-    it("rejects invalid numbers in git log limit", () => {
-      expect(projectDeterministicCommandSequence("git log --oneline -n 0")).toBeNull();
-      expect(projectDeterministicCommandSequence("git log --oneline -n -5")).toBeNull();
-      expect(projectDeterministicCommandSequence("git log --oneline -n abc")).toBeNull();
-    });
-
-    it("rejects trailing && and empty intermediate stages", () => {
+    it("rejects trailing, leading, or empty stages", () => {
       expect(projectDeterministicCommandSequence("git status &&")).toBeNull();
       expect(projectDeterministicCommandSequence("git status &&   ")).toBeNull();
       expect(projectDeterministicCommandSequence("git status && git diff &&")).toBeNull();
@@ -407,82 +419,94 @@ describe("projectDeterministicCommandSequence", () => {
       expect(projectDeterministicCommandSequence("&& git status")).toBeNull();
     });
 
-    it("preserves empty quoted tokens and rejects invalid grammar", () => {
+    it("rejects empty quoted argv values that cannot be replayed", () => {
       expect(projectDeterministicCommandSequence('lune run ""')).toBeNull();
       expect(projectDeterministicCommandSequence("lune run ''")).toBeNull();
       expect(projectDeterministicCommandSequence('git status ""')).toBeNull();
-      expect(projectDeterministicCommandSequence("git diff ''")).toBeNull();
-      expect(projectDeterministicCommandSequence('git log --oneline ""')).toBeNull();
-      expect(projectDeterministicCommandSequence('lune run "path.luau" --suite ""')).toBeNull();
+    });
+  });
+
+  describe("open command projection", () => {
+    it("projects arbitrary executables without an executable allowlist", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "rojo build default.project.json --output dist/game.rbxlx && cargo nextest run --workspace && custom-check verify src/game.ts",
+      );
+
+      expect(sequence?.steps.map((step) => step.executable)).toEqual([
+        "rojo",
+        "cargo",
+        "custom-check",
+      ]);
+      expect(sequence?.steps[0]?.argv).toEqual([
+        { literal: "build" },
+        { parameter: "arg0", role: "path" },
+        { literal: "--output" },
+        { parameter: "arg1", role: "path" },
+      ]);
+      expect(sequence?.steps[1]?.argv).toEqual([
+        { literal: "nextest" },
+        { parameter: "arg2", role: "string" },
+        { literal: "--workspace" },
+      ]);
+      expect(sequence?.steps[2]?.argv).toEqual([
+        { parameter: "arg3", role: "string" },
+        { parameter: "arg4", role: "path" },
+      ]);
+
+      const json = JSON.stringify(sequence);
+      expect(json).not.toContain("default.project.json");
+      expect(json).not.toContain("dist/game.rbxlx");
+      expect(json).not.toContain("src/game.ts");
     });
 
-    it("rejects mutation-mode stylua and stylua without paths", () => {
-      // Missing --check (mutation mode)
-      expect(projectDeterministicCommandSequence("stylua src/motor.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("stylua src/motor.luau src/platformer.luau"),
-      ).toBeNull();
-      // --check without paths
-      expect(projectDeterministicCommandSequence("stylua --check")).toBeNull();
-      expect(projectDeterministicCommandSequence("stylua")).toBeNull();
+    it("projects arbitrary subcommands, flags, numeric values, and no-argument commands", () => {
+      expect(projectDeterministicCommandSequence("git push origin main")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("git status -v")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("curl https://api.example.com")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("stylua src/motor.luau")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("selene --quiet src/foo.luau")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("git log --oneline -n -5")).not.toBeNull();
+      expect(projectDeterministicCommandSequence("selene && pwd")).not.toBeNull();
     });
 
-    it("rejects option injection in stylua and selene", () => {
-      // Option injection in stylua
-      expect(
-        projectDeterministicCommandSequence("stylua --check --output-format json src/motor.luau"),
-      ).toBeNull();
-      expect(projectDeterministicCommandSequence("stylua --check -v src/motor.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("stylua --check src/motor.luau --verify"),
-      ).toBeNull();
+    it("preserves exact bare executable identity and rejects qualified paths", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "MyTool.exe verify src/input.ts && check.py",
+      );
 
-      // Option injection in selene
-      expect(
-        projectDeterministicCommandSequence(
-          "selene --allow-warnings --display-style quiet src/motor.luau",
-        ),
-      ).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("selene src/motor.luau --allow-warnings"),
-      ).toBeNull();
-      expect(projectDeterministicCommandSequence("selene -v src/motor.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("selene --config selene.toml src/motor.luau"),
-      ).toBeNull();
+      expect(sequence?.steps.map((step) => step.executable)).toEqual(["MyTool.exe", "check.py"]);
+      expect(projectDeterministicCommandSequence("./gradlew test && pwd")).toBeNull();
     });
 
-    it("rejects absolute paths and directory traversal in stylua and selene", () => {
-      // Absolute paths
-      expect(projectDeterministicCommandSequence("stylua --check /etc/passwd")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("stylua --check /root/test.luau src/motor.luau"),
-      ).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("stylua --check C:/Users/test/test.luau"),
-      ).toBeNull();
-      expect(projectDeterministicCommandSequence("selene /var/log/test.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("selene --allow-warnings /abs/path.luau"),
-      ).toBeNull();
-      expect(projectDeterministicCommandSequence("selene C:/Users/test/test.luau")).toBeNull();
+    it("projects --flag=value as one argv token with an embedded typed parameter", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "pytest --junitxml=reports/results.xml && pwd",
+      );
 
-      // Directory traversal
-      expect(projectDeterministicCommandSequence("stylua --check ../motor.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("stylua --check src/../../secret.luau"),
-      ).toBeNull();
-      expect(projectDeterministicCommandSequence("selene ../foo.luau")).toBeNull();
-      expect(
-        projectDeterministicCommandSequence("selene --allow-warnings src/../bar.luau"),
-      ).toBeNull();
+      expect(sequence?.steps[0]?.argv).toEqual([
+        { prefix: "--junitxml=", parameter: "arg0", role: "path" },
+      ]);
+      expect(sequence?.steps[1]).toEqual({
+        id: "step1",
+        executable: "pwd",
+        argv: [],
+      });
+      expect(JSON.stringify(sequence)).not.toContain("reports/results.xml");
     });
 
-    it("rejects unsupported selene flags and selene without paths", () => {
-      expect(projectDeterministicCommandSequence("selene --quiet src/foo.luau")).toBeNull();
-      expect(projectDeterministicCommandSequence("selene --color always src/foo.luau")).toBeNull();
-      expect(projectDeterministicCommandSequence("selene --allow-warnings")).toBeNull();
-      expect(projectDeterministicCommandSequence("selene")).toBeNull();
+    it("redacts absolute and traversal-looking positional values as path parameters", () => {
+      for (const command of [
+        "lune run ../secret.luau",
+        "stylua --check /etc/passwd",
+        "selene src/../../secret.luau",
+      ]) {
+        const sequence = projectDeterministicCommandSequence(command);
+        expect(sequence).not.toBeNull();
+        expect(JSON.stringify(sequence)).not.toMatch(/secret|passwd|etc/);
+        expect(
+          sequence?.steps[0]?.argv.some((arg) => "parameter" in arg && arg.role === "path"),
+        ).toBe(true);
+      }
     });
   });
 });
@@ -649,7 +673,7 @@ describe("projectEventToMetadataOnly integration", () => {
         [RESIN_COMMAND_SEQUENCE_METADATA_KEY]: forgedSequence,
       },
       type: "command_exec",
-      command: "echo unsupported", // Fails deterministic sequence parsing
+      command: "echo $SECRET", // Shell expansion fails deterministic sequence parsing
       args: [],
       exitCode: 0,
       durationMs: 10,

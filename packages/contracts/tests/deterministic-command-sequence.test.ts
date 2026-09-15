@@ -404,208 +404,145 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(res.success).toBe(false);
   });
 
-  it("rejects git log without --oneline", () => {
-    const missingOneline = {
+  it("accepts arbitrary portable executables and command-specific argument shapes", () => {
+    const arbitraryWorkflow = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
       steps: [
         {
           id: "step0",
+          executable: "rojo",
+          argv: [
+            { literal: "build" },
+            { parameter: "arg0", role: "path" },
+            { literal: "--output" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+        {
+          id: "step1",
+          executable: "cargo-nextest",
+          argv: [{ literal: "run" }, { literal: "--workspace" }],
+        },
+        {
+          id: "step2",
           executable: "git",
-          argv: [{ literal: "log" }, { literal: "-n" }, { parameter: "arg0", role: "number" }],
+          argv: [{ literal: "rev-parse" }, { literal: "HEAD" }],
         },
       ],
     };
 
-    const res = safeParseDeterministicCommandSequence(missingOneline);
-    expect(res.success).toBe(false);
+    expect(isDeterministicCommandSequence(arbitraryWorkflow)).toBe(true);
   });
 
-  it("rejects unknown executables or subcommands", () => {
-    const unknownExe = {
+  it("accepts privacy-safe parameters embedded in --flag=value argv tokens", () => {
+    const sequence = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
       steps: [
         {
           id: "step0",
-          executable: "curl",
-          argv: [{ literal: "http://example.com" }],
+          executable: "pytest",
+          argv: [{ prefix: "--junitxml=", parameter: "arg0", role: "path" }],
         },
       ],
     };
-    expect(isDeterministicCommandSequence(unknownExe)).toBe(false);
 
-    const unknownGitSub = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "git",
-          argv: [{ literal: "commit" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(unknownGitSub)).toBe(false);
+    expect(isDeterministicCommandSequence(sequence)).toBe(true);
+    expect(parseDeterministicCommandSequence(sequence).steps[0]?.argv[0]).toEqual({
+      prefix: "--junitxml=",
+      parameter: "arg0",
+      role: "path",
+    });
   });
 
-  it("rejects invalid stylua step grammar", () => {
-    const missingCheck = {
+  it("accepts commands without arguments", () => {
+    const noArgCommands = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
       steps: [
-        {
-          id: "step0",
-          executable: "stylua",
-          argv: [{ parameter: "arg0", role: "path" }],
-        },
+        { id: "step0", executable: "pwd", argv: [] },
+        { id: "step1", executable: "make", argv: [] },
       ],
     };
-    expect(isDeterministicCommandSequence(missingCheck)).toBe(false);
 
-    const missingPaths = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "stylua",
-          argv: [{ literal: "--check" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(missingPaths)).toBe(false);
-
-    const extraFlag = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "stylua",
-          argv: [
-            { literal: "--check" },
-            { literal: "--verbose" },
-            { parameter: "arg0", role: "path" },
-          ],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(extraFlag)).toBe(false);
-
-    const nonPathRole = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "stylua",
-          argv: [{ literal: "--check" }, { parameter: "arg0", role: "string" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(nonPathRole)).toBe(false);
-
-    const flagInPathPosition = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "stylua",
-          argv: [
-            { literal: "--check" },
-            { parameter: "arg0", role: "path" },
-            { literal: "--verify" },
-          ],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(flagInPathPosition)).toBe(false);
+    expect(isDeterministicCommandSequence(noArgCommands)).toBe(true);
   });
 
-  it("rejects invalid selene step grammar", () => {
-    const unsupportedFlag = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "selene",
-          argv: [{ literal: "--quiet" }, { parameter: "arg0", role: "path" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(unsupportedFlag)).toBe(false);
+  it("rejects malformed executable names and shell-bearing literal arguments", () => {
+    for (const executable of ["../rojo", "/usr/bin/rojo", "rojo build", "-rojo"]) {
+      expect(
+        isDeterministicCommandSequence({
+          schemaVersion: 1,
+          kind: "command-sequence",
+          control: "and-then",
+          steps: [{ id: "step0", executable, argv: [] }],
+        }),
+      ).toBe(false);
+    }
 
-    const missingPaths = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "selene",
-          argv: [{ literal: "--allow-warnings" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(missingPaths)).toBe(false);
+    for (const literal of ["two words", "foo;bar", "$(whoami)", "a|b"]) {
+      expect(
+        isDeterministicCommandSequence({
+          schemaVersion: 1,
+          kind: "command-sequence",
+          control: "and-then",
+          steps: [{ id: "step0", executable: "custom-check", argv: [{ literal }] }],
+        }),
+      ).toBe(false);
+    }
 
-    const nonPathRole = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "selene",
-          argv: [{ parameter: "arg0", role: "number" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(nonPathRole)).toBe(false);
-
-    const flagAfterPath = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "selene",
-          argv: [{ parameter: "arg0", role: "path" }, { literal: "--allow-warnings" }],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(flagAfterPath)).toBe(false);
-
-    const duplicateFlag = {
-      schemaVersion: 1,
-      kind: "command-sequence",
-      control: "and-then",
-      steps: [
-        {
-          id: "step0",
-          executable: "selene",
-          argv: [
-            { literal: "--allow-warnings" },
-            { literal: "--allow-warnings" },
-            { parameter: "arg0", role: "path" },
+    for (const prefix of ["junitxml=", "--bad value=", "--unsafe;="]) {
+      expect(
+        isDeterministicCommandSequence({
+          schemaVersion: 1,
+          kind: "command-sequence",
+          control: "and-then",
+          steps: [
+            {
+              id: "step0",
+              executable: "pytest",
+              argv: [{ prefix, parameter: "arg0", role: "path" }],
+            },
           ],
-        },
-      ],
-    };
-    expect(isDeterministicCommandSequence(duplicateFlag)).toBe(false);
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects shells, identity-hiding launchers, and stateful builtins", () => {
+    for (const executable of [
+      "bash",
+      "PwSh.exe",
+      "env",
+      "sudo",
+      "nice",
+      "timeout",
+      "awk",
+      "gawk.exe",
+      "sed",
+      "setsid",
+      "stdbuf",
+      "busybox",
+      "xargs",
+      "chroot",
+      "cd",
+      "pushd",
+      "export",
+      "source",
+    ]) {
+      expect(
+        isDeterministicCommandSequence({
+          schemaVersion: 1,
+          kind: "command-sequence",
+          control: "and-then",
+          steps: [{ id: "step0", executable, argv: [] }],
+        }),
+      ).toBe(false);
+    }
   });
 
   it("rejects unknown properties on strict objects", () => {

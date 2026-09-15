@@ -8378,6 +8378,10 @@ var init_computation_evidence = __esm({
 });
 
 // packages/contracts/dist/deterministic-command-sequence.js
+function isUnsafeDeterministicCommandExecutable(executable) {
+  const normalized = executable.toLowerCase().replace(/\.exe$/i, "");
+  return UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES[normalized] === true;
+}
 function isForbiddenKey(key) {
   return key === "__proto__" || key === "constructor" || key === "prototype";
 }
@@ -8434,183 +8438,7 @@ function isDescriptorSafePlainTree(value, seen = /* @__PURE__ */ new Set()) {
   }
   return true;
 }
-function validateStepGrammar(step, stepIndex, ctx) {
-  if (step.executable === "git") {
-    const firstArg = step.argv[0];
-    if (!("literal" in firstArg)) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `Step ${stepIndex} (git) first argument must be a literal subcommand`,
-        path: ["steps", stepIndex, "argv", 0]
-      });
-      return;
-    }
-    const sub = firstArg.literal;
-    if (sub === "status") {
-      if (step.argv.length > 2) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `git status accepts at most one optional flag (--short or --porcelain)`,
-          path: ["steps", stepIndex, "argv"]
-        });
-        return;
-      }
-      if (step.argv.length === 2) {
-        const flagArg = step.argv[1];
-        if (!("literal" in flagArg) || flagArg.literal !== "--short" && flagArg.literal !== "--porcelain") {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `git status flag must be literal --short or --porcelain`,
-            path: ["steps", stepIndex, "argv", 1]
-          });
-        }
-      }
-    } else if (sub === "diff") {
-      if (step.argv.length > 2) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `git diff accepts at most one optional flag (--stat, --name-only, or --name-status)`,
-          path: ["steps", stepIndex, "argv"]
-        });
-        return;
-      }
-      if (step.argv.length === 2) {
-        const flagArg = step.argv[1];
-        if (!("literal" in flagArg) || flagArg.literal !== "--stat" && flagArg.literal !== "--name-only" && flagArg.literal !== "--name-status") {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `git diff flag must be literal --stat, --name-only, or --name-status`,
-            path: ["steps", stepIndex, "argv", 1]
-          });
-        }
-      }
-    } else if (sub === "log") {
-      let hasOneline = false;
-      let hasLimit = false;
-      let idx = 1;
-      while (idx < step.argv.length) {
-        const arg = step.argv[idx];
-        if ("literal" in arg && arg.literal === "--oneline") {
-          if (hasOneline) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Duplicate --oneline flag in git log`,
-              path: ["steps", stepIndex, "argv", idx]
-            });
-            return;
-          }
-          hasOneline = true;
-          idx++;
-        } else if ("literal" in arg && arg.literal === "-n") {
-          if (hasLimit) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Duplicate -n limit in git log`,
-              path: ["steps", stepIndex, "argv", idx]
-            });
-            return;
-          }
-          if (idx + 1 >= step.argv.length) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `-n requires a numeric parameter argument`,
-              path: ["steps", stepIndex, "argv", idx]
-            });
-            return;
-          }
-          const nextArg = step.argv[idx + 1];
-          if (!("parameter" in nextArg) || nextArg.role !== "number") {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `-n argument must be a parameter with role 'number'`,
-              path: ["steps", stepIndex, "argv", idx + 1]
-            });
-            return;
-          }
-          hasLimit = true;
-          idx += 2;
-        } else {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `Unsupported argument for git log: only --oneline and -n NUMBER are permitted`,
-            path: ["steps", stepIndex, "argv", idx]
-          });
-          return;
-        }
-      }
-      if (!hasOneline) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `git log requires --oneline flag`,
-          path: ["steps", stepIndex, "argv"]
-        });
-      }
-    } else {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `Unsupported git subcommand '${sub}': only status, diff, log are permitted`,
-        path: ["steps", stepIndex, "argv", 0]
-      });
-    }
-  } else if (step.executable === "lune") {
-    const firstArg = step.argv[0];
-    if (!("literal" in firstArg) || firstArg.literal !== "run") {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `Step ${stepIndex} (lune) first argument must be literal 'run'`,
-        path: ["steps", stepIndex, "argv", 0]
-      });
-      return;
-    }
-    if (step.argv.length < 2) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `lune run requires a path parameter argument`,
-        path: ["steps", stepIndex, "argv"]
-      });
-      return;
-    }
-    const pathArg = step.argv[1];
-    if (!("parameter" in pathArg) || pathArg.role !== "path") {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        message: `lune run second argument must be a parameter with role 'path'`,
-        path: ["steps", stepIndex, "argv", 1]
-      });
-      return;
-    }
-    if (step.argv.length === 2) {
-      return;
-    }
-    if (step.argv.length === 4) {
-      const suiteFlag = step.argv[2];
-      const suiteVal = step.argv[3];
-      if (!("literal" in suiteFlag) || suiteFlag.literal !== "--suite") {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `lune run third argument must be literal '--suite'`,
-          path: ["steps", stepIndex, "argv", 2]
-        });
-        return;
-      }
-      if (!("parameter" in suiteVal) || suiteVal.role !== "string") {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `lune run --suite value must be a parameter with role 'string'`,
-          path: ["steps", stepIndex, "argv", 3]
-        });
-        return;
-      }
-      return;
-    }
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: `Unsupported arguments for lune run: must be 'run PATH' or 'run PATH --suite STRING'`,
-      path: ["steps", stepIndex, "argv"]
-    });
-  }
-}
-var DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION, DETERMINISTIC_COMMAND_SEQUENCE_KIND, DETERMINISTIC_COMMAND_SEQUENCE_CONTROL, DETERMINISTIC_COMMAND_SEQUENCE_LIMITS, DeterministicCommandParameterRoleSchema, DeterministicCommandArgLiteralSchema, DeterministicCommandArgParameterSchema, DeterministicCommandArgSchema, DeterministicCommandExecutableSchema, DeterministicCommandStepSchema, RawDeterministicCommandSequenceSchema, DeterministicCommandSequenceSchema;
+var DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION, DETERMINISTIC_COMMAND_SEQUENCE_KIND, DETERMINISTIC_COMMAND_SEQUENCE_CONTROL, DETERMINISTIC_COMMAND_SEQUENCE_LIMITS, DeterministicCommandParameterRoleSchema, DeterministicCommandArgLiteralSchema, DeterministicCommandArgParameterSchema, DeterministicCommandArgPrefixedParameterSchema, DeterministicCommandArgSchema, UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES, DeterministicCommandExecutableSchema, DeterministicCommandStepSchema, RawDeterministicCommandSequenceSchema, DeterministicCommandSequenceSchema;
 var init_deterministic_command_sequence = __esm({
   "packages/contracts/dist/deterministic-command-sequence.js"() {
     "use strict";
@@ -8624,6 +8452,8 @@ var init_deterministic_command_sequence = __esm({
       maxSteps: 8,
       /** Maximum number of arguments in a single step. */
       maxArgs: 32,
+      /** Maximum length of an executable basename. */
+      maxExecutableLength: 128,
       /** Maximum length of a literal token. */
       maxLiteralLength: 128,
       /** Maximum length of a parameter identifier. */
@@ -8633,21 +8463,107 @@ var init_deterministic_command_sequence = __esm({
     };
     DeterministicCommandParameterRoleSchema = external_exports.enum(["path", "string", "number"]);
     DeterministicCommandArgLiteralSchema = external_exports.object({
-      literal: external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength)
+      literal: external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^[^\s\x00\r\n`$|;&<>(){}!'"\\]+$/, "Literal argument must be a shell-free argv token")
     }).strict();
     DeterministicCommandArgParameterSchema = external_exports.object({
       parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
       role: DeterministicCommandParameterRoleSchema
     }).strict();
+    DeterministicCommandArgPrefixedParameterSchema = external_exports.object({
+      prefix: external_exports.string().min(3).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^-{1,2}[A-Za-z][A-Za-z0-9_.-]*=$/, "Parameter prefix must be a shell-free --flag= token prefix"),
+      parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
+      role: DeterministicCommandParameterRoleSchema
+    }).strict();
     DeterministicCommandArgSchema = external_exports.union([
       DeterministicCommandArgLiteralSchema,
-      DeterministicCommandArgParameterSchema
+      DeterministicCommandArgParameterSchema,
+      DeterministicCommandArgPrefixedParameterSchema
     ]);
-    DeterministicCommandExecutableSchema = external_exports.enum(["git", "lune"]);
+    UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES = {
+      // Shells and command interpreters.
+      sh: true,
+      bash: true,
+      zsh: true,
+      csh: true,
+      tcsh: true,
+      ksh: true,
+      dash: true,
+      fish: true,
+      cmd: true,
+      "cmd.exe": true,
+      powershell: true,
+      "powershell.exe": true,
+      pwsh: true,
+      "pwsh.exe": true,
+      wscript: true,
+      cscript: true,
+      // Positional-program tools can execute caller-controlled code without a flag.
+      awk: true,
+      gawk: true,
+      mawk: true,
+      nawk: true,
+      sed: true,
+      gsed: true,
+      // Wrappers whose outer binary hides the executable identity checked by the broker.
+      sudo: true,
+      env: true,
+      time: true,
+      nohup: true,
+      exec: true,
+      nice: true,
+      ionice: true,
+      timeout: true,
+      setsid: true,
+      stdbuf: true,
+      busybox: true,
+      xargs: true,
+      chroot: true,
+      watch: true,
+      strace: true,
+      ltrace: true,
+      taskset: true,
+      numactl: true,
+      unshare: true,
+      nsenter: true,
+      // Stateful or shell-only builtins cannot preserve sequential subprocess semantics.
+      cd: true,
+      pushd: true,
+      popd: true,
+      export: true,
+      unset: true,
+      alias: true,
+      unalias: true,
+      set: true,
+      shift: true,
+      trap: true,
+      wait: true,
+      jobs: true,
+      fg: true,
+      bg: true,
+      disown: true,
+      hash: true,
+      type: true,
+      source: true,
+      builtin: true,
+      command: true,
+      eval: true,
+      umask: true,
+      ulimit: true,
+      readonly: true,
+      local: true,
+      declare: true,
+      typeset: true,
+      read: true,
+      exit: true,
+      return: true,
+      break: true,
+      continue: true
+    };
+    DeterministicCommandExecutableSchema = external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxExecutableLength).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/, "Executable must be a portable bare command name").refine((executable) => !isUnsafeDeterministicCommandExecutable(executable), "Shell interpreters, process-launching wrappers, and stateful builtins are not deterministic command executables");
     DeterministicCommandStepSchema = external_exports.object({
       id: external_exports.string().regex(/^step[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxStepIdLength),
       executable: DeterministicCommandExecutableSchema,
-      argv: external_exports.array(DeterministicCommandArgSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs)
+      argv: external_exports.array(DeterministicCommandArgSchema).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs)
     }).strict();
     RawDeterministicCommandSequenceSchema = external_exports.object({
       schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
@@ -8667,7 +8583,6 @@ var init_deterministic_command_sequence = __esm({
             path: ["steps", i, "id"]
           });
         }
-        validateStepGrammar(step, i, ctx);
         for (let j = 0; j < step.argv.length; j++) {
           const arg = step.argv[j];
           if ("parameter" in arg) {

@@ -205,6 +205,8 @@ describe("Command Identity Policy & Verification", () => {
     it("detects dangerous git command options", () => {
       expect(isDangerousOption("git", "--upload-pack=/tmp/evil")).toBe(true);
       expect(isDangerousOption("git", "-c core.fsmonitor=touch /tmp/pwned")).toBe(true);
+      expect(isDangerousOption("git", "Core.FSMONITOR")).toBe(true);
+      expect(isDangerousOption("GIT.EXE", "CORE.SSHCOMMAND")).toBe(true);
       expect(isDangerousOption("git", "-c protocol.ext.allow=always")).toBe(true);
       expect(isDangerousOption("git", "--exec=evil")).toBe(true);
 

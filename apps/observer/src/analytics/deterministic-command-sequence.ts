@@ -11,10 +11,16 @@ import {
   type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
   isDeterministicCommandSequence,
+  isUnsafeDeterministicCommandExecutable,
   parseDeterministicCommandSequence,
   safeParseDeterministicCommandSequence,
 } from "@resin/contracts";
-import { COMMAND_PARAMETER_KEYS, isShellToolName } from "./evidence-normalization.js";
+import {
+  COMMAND_PARAMETER_KEYS,
+  isShellToolName,
+  normalizeCommandProfile,
+  tokenizeShellLine,
+} from "./evidence-normalization.js";
 
 export {
   isDeterministicCommandSequence,
@@ -57,6 +63,8 @@ const SHELL_COMMAND_WRAPPERS: Record<string, true> = {
   "/usr/bin/sh": true,
   "/usr/bin/zsh": true,
 };
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Extracts a pre-redaction raw shell command string from a normalized session event.
@@ -145,28 +153,38 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
   return null;
 }
 
-function isSafeRelativePathToken(token: string): boolean {
-  if (token.length === 0) return false;
-  if (token.startsWith("-")) return false;
-  if (token.startsWith("/")) return false;
-  if (/^[a-zA-Z]:/.test(token)) return false;
-  if (token.includes("..")) return false;
-  return true;
+const PATH_PLACEHOLDERS: Record<string, true> = {
+  $PATH: true,
+  $SRC_FILE: true,
+  $TEST_FILE: true,
+  $CONFIG_FILE: true,
+  $DOC_FILE: true,
+  $BUILD_DIR: true,
+  $TMP_DIR: true,
+};
+
+const STRING_PLACEHOLDERS: Record<string, true> = {
+  $STR: true,
+  $URL: true,
+  $GLOB: true,
+};
+
+const PREFIXED_PARAMETER_PLACEHOLDER =
+  /^(-{1,2}[A-Za-z][A-Za-z0-9_.-]*=)(\$PATH|\$SRC_FILE|\$TEST_FILE|\$CONFIG_FILE|\$DOC_FILE|\$BUILD_DIR|\$TMP_DIR|\$STR|\$URL|\$GLOB|\$NUM|-\$NUM|\+\$NUM)$/;
+
+function placeholderRole(token: string): "path" | "string" | "number" | null {
+  if (PATH_PLACEHOLDERS[token] === true) return "path";
+  if (token === "$NUM" || token === "-$NUM" || token === "+$NUM") return "number";
+  if (STRING_PLACEHOLDERS[token] === true) return "string";
+  return null;
 }
 
 /**
- * Projects a raw shell command string into a deterministic command sequence evidence structure.
- *
- * Requirements:
- * - Only explicit '&&' sequencing is supported (rejects pipes, semicolons, redirections, expansions).
- * - Supported grammar:
- *     git status (--short, --porcelain)
- *     git diff (--stat, --name-only, --name-status)
- *     git log (--oneline, optional -n NUMBER in either order)
- *     lune run PATH (optional --suite STRING)
- *     stylua --check PATH... (one or more safe relative paths)
- *     selene [--allow-warnings] PATH... (one or more safe relative paths)
- * - Returns null on any malformed, hostile, unsupported, or ambiguous input (fail closed).
+ * Projects a raw shell command string into privacy-safe deterministic command
+ * evidence. Any portable executable is accepted; argument values are replaced
+ * by typed parameters through the shared command normalizer. Only explicit
+ * `&&` sequencing is supported, and the compiled runtime still invokes each
+ * executable directly without a shell.
  */
 export function projectDeterministicCommandSequence(
   command: string,
@@ -271,10 +289,8 @@ export function projectDeterministicCommandSequence(
       continue;
     }
 
-    // Assignments are rejected
-    if (char === "=") {
-      return null;
-    }
+    // Environment assignments are rejected after tokenization so ordinary
+    // shell-free `--flag=value` argv tokens remain representable.
 
     hasToken = true;
     expectingStep = false;
@@ -299,152 +315,105 @@ export function projectDeterministicCommandSequence(
   ) {
     return null;
   }
-  let paramIndex = 0;
-  const steps: DeterministicCommandStep[] = [];
+  if (stepTokensList.some((tokens) => tokens.some((token) => token.length === 0))) {
+    return null;
+  }
+  if (
+    stepTokensList.some((tokens) => {
+      const executable = tokens[0];
+      if (!executable || ENV_ASSIGNMENT.test(executable)) return true;
+      return isUnsafeDeterministicCommandExecutable(executable);
+    })
+  ) {
+    return null;
+  }
+  const normalizedProfile = normalizeCommandProfile(trimmed, {
+    maxTokens:
+      DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps *
+      (DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs + 2),
+    maxLength: 2048,
+  });
+  if (normalizedProfile.length === 0 || normalizedProfile.length >= 2048) {
+    return null;
+  }
 
-  for (let s = 0; s < stepTokensList.length; s++) {
-    const tokens = stepTokensList[s] as string[];
-    if (tokens.length === 0 || tokens.length - 1 > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs) {
+  const normalizedSteps: string[][] = [];
+  let normalizedStep: string[] = [];
+  for (const token of tokenizeShellLine(normalizedProfile)) {
+    if (!token.quoted && token.text === "&&") {
+      if (normalizedStep.length === 0) return null;
+      normalizedSteps.push(normalizedStep);
+      normalizedStep = [];
+      continue;
+    }
+    if (
+      !token.quoted &&
+      (token.text === "||" ||
+        token.text === "|" ||
+        token.text === ";" ||
+        token.text === ">" ||
+        token.text === ">>" ||
+        token.text === "<" ||
+        token.text === "2>" ||
+        token.text === "2>>" ||
+        token.text === "2>&1" ||
+        token.text === "&>" ||
+        token.text === "1>")
+    ) {
       return null;
     }
+    normalizedStep.push(token.text);
+  }
+  if (normalizedStep.length === 0) return null;
+  normalizedSteps.push(normalizedStep);
 
-    const stepId = `step${s}`;
-    const exe = tokens[0];
-    if (exe !== "git" && exe !== "lune" && exe !== "stylua" && exe !== "selene") {
+  if (
+    normalizedSteps.length !== stepTokensList.length ||
+    normalizedSteps.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps
+  ) {
+    return null;
+  }
+
+  let paramIndex = 0;
+  const steps: DeterministicCommandStep[] = [];
+  for (let stepIndex = 0; stepIndex < normalizedSteps.length; stepIndex++) {
+    const tokens = normalizedSteps[stepIndex] as string[];
+    const executable = stepTokensList[stepIndex]?.[0];
+    if (!executable) return null;
+    const argumentTokens = tokens.slice(1);
+    if (argumentTokens.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs) {
       return null;
     }
 
     const argv: DeterministicCommandArg[] = [];
-
-    if (exe === "git") {
-      if (tokens.length < 2) return null;
-      const sub = tokens[1];
-
-      if (sub === "status") {
-        argv.push({ literal: "status" });
-        if (tokens.length === 2) {
-          // git status
-        } else if (tokens.length === 3) {
-          const flag = tokens[2];
-          if (flag === "--short" || flag === "--porcelain") {
-            argv.push({ literal: flag });
-          } else {
-            return null;
-          }
-        } else {
-          return null;
-        }
-      } else if (sub === "diff") {
-        argv.push({ literal: "diff" });
-        if (tokens.length === 2) {
-          // git diff
-        } else if (tokens.length === 3) {
-          const flag = tokens[2];
-          if (flag === "--stat" || flag === "--name-only" || flag === "--name-status") {
-            argv.push({ literal: flag });
-          } else {
-            return null;
-          }
-        } else {
-          return null;
-        }
-      } else if (sub === "log") {
-        argv.push({ literal: "log" });
-        let hasOneline = false;
-        let hasLimit = false;
-
-        let t = 2;
-        while (t < tokens.length) {
-          const tok = tokens[t] as string;
-          if (tok === "--oneline") {
-            if (hasOneline) return null;
-            hasOneline = true;
-            argv.push({ literal: "--oneline" });
-            t++;
-          } else if (tok === "-n") {
-            if (hasLimit) return null;
-            t++;
-            if (t >= tokens.length) return null;
-            const numTok = tokens[t] as string;
-            if (!/^[1-9][0-9]*$/.test(numTok)) return null;
-            hasLimit = true;
-            argv.push({ literal: "-n" });
-            argv.push({ parameter: `arg${paramIndex++}`, role: "number" });
-            t++;
-          } else {
-            return null;
-          }
-        }
-
-        if (!hasOneline) return null;
-      } else {
-        return null;
+    for (const token of argumentTokens) {
+      const role = placeholderRole(token);
+      if (role !== null) {
+        argv.push({ parameter: `arg${paramIndex++}`, role });
+        continue;
       }
 
-      steps.push({ id: stepId, executable: "git", argv });
-    } else if (exe === "lune") {
-      if (tokens.length < 3) return null;
-      if (tokens[1] !== "run") return null;
-      argv.push({ literal: "run" });
-
-      const pathTok = tokens[2] as string;
-      if (pathTok.length === 0 || pathTok.startsWith("-") || pathTok.includes("..")) {
-        return null;
+      const prefixedParameter = token.match(PREFIXED_PARAMETER_PLACEHOLDER);
+      if (prefixedParameter) {
+        const prefixedRole = placeholderRole(prefixedParameter[2] as string);
+        if (prefixedRole === null) return null;
+        argv.push({
+          prefix: prefixedParameter[1] as string,
+          parameter: `arg${paramIndex++}`,
+          role: prefixedRole,
+        });
+        continue;
       }
 
-      argv.push({ parameter: `arg${paramIndex++}`, role: "path" });
-
-      if (tokens.length === 3) {
-        // lune run PATH
-      } else if (tokens.length === 5) {
-        if (tokens[3] !== "--suite") return null;
-        const suiteTok = tokens[4] as string;
-        if (suiteTok.length === 0 || suiteTok.startsWith("-")) return null;
-        argv.push({ literal: "--suite" });
-        argv.push({ parameter: `arg${paramIndex++}`, role: "string" });
-      } else {
-        return null;
-      }
-
-      steps.push({ id: stepId, executable: "lune", argv });
-    } else if (exe === "stylua") {
-      if (tokens.length < 3) return null;
-      if (tokens[1] !== "--check") return null;
-
-      argv.push({ literal: "--check" });
-
-      for (let t = 2; t < tokens.length; t++) {
-        const pathTok = tokens[t] as string;
-        if (!isSafeRelativePathToken(pathTok)) {
-          return null;
-        }
-        argv.push({ parameter: `arg${paramIndex++}`, role: "path" });
-      }
-
-      steps.push({ id: stepId, executable: "stylua", argv });
-    } else if (exe === "selene") {
-      if (tokens.length < 2) return null;
-
-      let pathStartIdx = 1;
-      if (tokens[1] === "--allow-warnings") {
-        argv.push({ literal: "--allow-warnings" });
-        pathStartIdx = 2;
-      }
-
-      if (pathStartIdx >= tokens.length) {
-        return null;
-      }
-
-      for (let t = pathStartIdx; t < tokens.length; t++) {
-        const pathTok = tokens[t] as string;
-        if (!isSafeRelativePathToken(pathTok)) {
-          return null;
-        }
-        argv.push({ parameter: `arg${paramIndex++}`, role: "path" });
-      }
-
-      steps.push({ id: stepId, executable: "selene", argv });
+      if (token.includes("$")) return null;
+      argv.push({ literal: token });
     }
+
+    steps.push({
+      id: `step${stepIndex}`,
+      executable,
+      argv,
+    });
   }
 
   const sequence: DeterministicCommandSequence = {
@@ -455,11 +424,7 @@ export function projectDeterministicCommandSequence(
   };
 
   const parseResult = DeterministicCommandSequenceSchema.safeParse(sequence);
-  if (!parseResult.success) {
-    return null;
-  }
-
-  return parseResult.data;
+  return parseResult.success ? parseResult.data : null;
 }
 
 /**

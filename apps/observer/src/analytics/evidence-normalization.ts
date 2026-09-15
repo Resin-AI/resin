@@ -166,6 +166,7 @@ export const SUBCOMMAND_SLOTS_BY_EXECUTABLE: Record<string, number> = {
   pnpx: 1,
   bunx: 1,
   deno: 1,
+  lune: 1,
   cargo: 1,
   rustup: 1,
   go: 1,
@@ -205,6 +206,10 @@ export const SUBCOMMAND_SLOTS_BY_EXECUTABLE: Record<string, number> = {
   resin: 2,
   rojo: 1,
   wally: 1,
+};
+
+const RETAINED_SUBCOMMANDS_BY_EXECUTABLE: Record<string, Record<string, true>> = {
+  lune: { run: true },
 };
 const SUBCOMMAND_WORD = /^[a-z][a-z-]{0,18}[0-9]?$/;
 const FLAG_TOKEN = /^-{1,2}[A-Za-z][\w-]*$/;
@@ -373,8 +378,10 @@ const WELL_KNOWN_PYTHON_MODULES: Record<string, true> = {
   timeit: true,
   doctest: true,
 };
-
-export function normalizeCommandProfile(rawCommand: unknown): string {
+export function normalizeCommandProfile(
+  rawCommand: unknown,
+  options: { maxTokens?: number; maxLength?: number } = {},
+): string {
   if (typeof rawCommand !== "string") return "";
   const cleaned = rawCommand.replace(/\0/g, " ").replace(/\r/g, "").trim();
   if (!cleaned) return "";
@@ -389,9 +396,9 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
   let seenFlag = false;
   let moduleFlagPending = false;
   let currentExecutable = "";
-
+  const maxTokens = options.maxTokens ?? MAX_PROFILE_TOKENS;
   const pushToken = (t: string): boolean => {
-    if (out.length >= MAX_PROFILE_TOKENS) return false;
+    if (out.length >= maxTokens) return false;
     out.push(t);
     return true;
   };
@@ -459,11 +466,13 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
       if (!pushToken(text.slice(0, 48))) break;
       continue;
     }
+    const retainedSubcommands = RETAINED_SUBCOMMANDS_BY_EXECUTABLE[currentExecutable];
     if (
       !seenFlag &&
       subcommandSlots < subcommandBudget &&
       SUBCOMMAND_WORD.test(text) &&
-      !looksLikePath(text)
+      !looksLikePath(text) &&
+      (retainedSubcommands === undefined || retainedSubcommands[text] === true)
     ) {
       subcommandSlots++;
       if (!pushToken(text)) break;
@@ -473,9 +482,9 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
     subcommandBudget = 0;
     if (!pushToken(placeholderFor(text))) break;
   }
-
   const profile = out.join(" ");
-  return profile.length > MAX_PROFILE_LENGTH ? profile.slice(0, MAX_PROFILE_LENGTH) : profile;
+  const maxLength = options.maxLength ?? MAX_PROFILE_LENGTH;
+  return profile.length > maxLength ? profile.slice(0, maxLength) : profile;
 }
 
 const IDENTIFIER_SEGMENT =
