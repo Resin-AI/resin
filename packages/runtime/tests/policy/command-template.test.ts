@@ -98,6 +98,13 @@ describe("Command Template Policy", () => {
     expect(matchCommandProfileArgs(["$STR"], ["trailing\n"])).toBe(false);
   });
 
+  it("allows spaces inside an embedded $STR without adding argv elements", () => {
+    expect(matchCommandProfileArgs(["--label=$STR"], ["--label=hello world"])).toBe(true);
+    expect(matchCommandProfileArgs(["--label=$STR"], ["--label="])).toBe(false);
+    expect(matchCommandProfileArgs(["--label=$STR"], ["--label=hello\nworld"])).toBe(false);
+    expect(matchCommandProfileArgs(["--label=$STR"], ["--other=hello world"])).toBe(false);
+  });
+
   it("authorizes command profile prefixes and placeholder values", () => {
     expect(commandProfileAuthorizes("node --test", "node --test $TEST_FILE")).toBe(true);
     expect(commandProfileAuthorizes("node", "node --test $TEST_FILE")).toBe(true);

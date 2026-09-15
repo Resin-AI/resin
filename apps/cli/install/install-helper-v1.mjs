@@ -4859,7 +4859,7 @@ var init_secrets = __esm({
 });
 
 // packages/contracts/dist/versions.js
-var BundleReferenceSchema, ToolArtifactSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
+var BundleReferenceSchema, ToolArtifactSchema, ProvenanceBaseSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
 var init_versions = __esm({
   "packages/contracts/dist/versions.js"() {
     "use strict";
@@ -4880,15 +4880,30 @@ var init_versions = __esm({
       sourceMap: external_exports.string().optional(),
       checksums: external_exports.record(external_exports.string()).default({})
     });
-    ProvenanceMetadataSchema = external_exports.object({
+    ProvenanceBaseSchema = external_exports.object({
       sourceCandidateId: IdentifierSchema.optional(),
       synthesizedAt: ISOTimestampSchema,
-      synthesizerModel: external_exports.string().min(1),
-      promptHash: Sha256DigestSchema.optional(),
       gitCommitSha: external_exports.string().optional(),
       deterministicBuildHash: Sha256DigestSchema,
       environment: external_exports.record(external_exports.string()).default({})
     });
+    ProvenanceMetadataSchema = external_exports.union([
+      ProvenanceBaseSchema.extend({
+        authoring: external_exports.object({ kind: external_exports.literal("model") }).optional(),
+        synthesizerModel: external_exports.string().min(1),
+        promptHash: Sha256DigestSchema.optional()
+      }),
+      ProvenanceBaseSchema.extend({
+        authoring: external_exports.object({
+          kind: external_exports.literal("compiler"),
+          compilerId: external_exports.string().min(1),
+          compilerVersion: external_exports.string().min(1),
+          inputDigest: Sha256DigestSchema
+        }).strict(),
+        synthesizerModel: external_exports.never().optional(),
+        promptHash: external_exports.never().optional()
+      })
+    ]);
     SignatureMetadataSchema = external_exports.object({
       signature: external_exports.string().min(1),
       keyId: external_exports.string().min(1),
@@ -8362,6 +8377,269 @@ var init_computation_evidence = __esm({
   }
 });
 
+// packages/contracts/dist/deterministic-command-sequence.js
+function isUnsafeDeterministicCommandExecutable(executable) {
+  const normalized = executable.toLowerCase().replace(/\.exe$/i, "");
+  return UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES[normalized] === true;
+}
+function isForbiddenKey(key) {
+  return key === "__proto__" || key === "constructor" || key === "prototype";
+}
+function isDescriptorSafePlainTree(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value !== "object") {
+    return true;
+  }
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+  const proto = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (proto !== Array.prototype) {
+      return false;
+    }
+    const propNames2 = Object.getOwnPropertyNames(value);
+    for (let i = 0; i < propNames2.length; i++) {
+      const key = propNames2[i];
+      if (key === "length")
+        continue;
+      if (isForbiddenKey(key))
+        return false;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc)
+        return false;
+      if (!("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
+        return false;
+      }
+      if (!isDescriptorSafePlainTree(desc.value, seen)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (proto !== null && proto !== Object.prototype) {
+    return false;
+  }
+  const propNames = Object.getOwnPropertyNames(value);
+  for (let i = 0; i < propNames.length; i++) {
+    const key = propNames[i];
+    if (isForbiddenKey(key)) {
+      return false;
+    }
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc)
+      return false;
+    if (!("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
+      return false;
+    }
+    if (!isDescriptorSafePlainTree(desc.value, seen)) {
+      return false;
+    }
+  }
+  return true;
+}
+var DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION, DETERMINISTIC_COMMAND_SEQUENCE_KIND, DETERMINISTIC_COMMAND_SEQUENCE_CONTROL, DETERMINISTIC_COMMAND_SEQUENCE_LIMITS, DeterministicCommandParameterRoleSchema, DeterministicCommandArgLiteralSchema, DeterministicCommandArgParameterSchema, DeterministicCommandArgPrefixedParameterSchema, DeterministicCommandArgSchema, UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES, DeterministicCommandExecutableSchema, DeterministicCommandStepSchema, RawDeterministicCommandSequenceSchema, DeterministicCommandSequenceSchema;
+var init_deterministic_command_sequence = __esm({
+  "packages/contracts/dist/deterministic-command-sequence.js"() {
+    "use strict";
+    init_zod();
+    init_canonical();
+    DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION = 1;
+    DETERMINISTIC_COMMAND_SEQUENCE_KIND = "command-sequence";
+    DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then";
+    DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
+      /** Maximum number of command steps in a single sequence. */
+      maxSteps: 8,
+      /** Maximum number of arguments in a single step. */
+      maxArgs: 32,
+      /** Maximum length of an executable basename. */
+      maxExecutableLength: 128,
+      /** Maximum length of a literal token. */
+      maxLiteralLength: 128,
+      /** Maximum length of a parameter identifier. */
+      maxParameterLength: 64,
+      /** Maximum length of a step identifier. */
+      maxStepIdLength: 32
+    };
+    DeterministicCommandParameterRoleSchema = external_exports.enum(["path", "string", "number"]);
+    DeterministicCommandArgLiteralSchema = external_exports.object({
+      literal: external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^[^\s\x00\r\n`$|;&<>(){}!'"\\]+$/, "Literal argument must be a shell-free argv token")
+    }).strict();
+    DeterministicCommandArgParameterSchema = external_exports.object({
+      parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
+      role: DeterministicCommandParameterRoleSchema
+    }).strict();
+    DeterministicCommandArgPrefixedParameterSchema = external_exports.object({
+      prefix: external_exports.string().min(3).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^-{1,2}[A-Za-z][A-Za-z0-9_.-]*=$/, "Parameter prefix must be a shell-free --flag= token prefix"),
+      parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
+      role: DeterministicCommandParameterRoleSchema
+    }).strict();
+    DeterministicCommandArgSchema = external_exports.union([
+      DeterministicCommandArgLiteralSchema,
+      DeterministicCommandArgParameterSchema,
+      DeterministicCommandArgPrefixedParameterSchema
+    ]);
+    UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES = {
+      // Shells and command interpreters.
+      sh: true,
+      bash: true,
+      zsh: true,
+      csh: true,
+      tcsh: true,
+      ksh: true,
+      dash: true,
+      fish: true,
+      cmd: true,
+      "cmd.exe": true,
+      powershell: true,
+      "powershell.exe": true,
+      pwsh: true,
+      "pwsh.exe": true,
+      wscript: true,
+      cscript: true,
+      // Positional-program tools can execute caller-controlled code without a flag.
+      awk: true,
+      gawk: true,
+      mawk: true,
+      nawk: true,
+      sed: true,
+      gsed: true,
+      // Wrappers whose outer binary hides the executable identity checked by the broker.
+      sudo: true,
+      env: true,
+      time: true,
+      nohup: true,
+      exec: true,
+      nice: true,
+      ionice: true,
+      timeout: true,
+      setsid: true,
+      stdbuf: true,
+      busybox: true,
+      xargs: true,
+      chroot: true,
+      watch: true,
+      strace: true,
+      ltrace: true,
+      taskset: true,
+      numactl: true,
+      unshare: true,
+      nsenter: true,
+      // Stateful or shell-only builtins cannot preserve sequential subprocess semantics.
+      cd: true,
+      pushd: true,
+      popd: true,
+      export: true,
+      unset: true,
+      alias: true,
+      unalias: true,
+      set: true,
+      shift: true,
+      trap: true,
+      wait: true,
+      jobs: true,
+      fg: true,
+      bg: true,
+      disown: true,
+      hash: true,
+      type: true,
+      source: true,
+      builtin: true,
+      command: true,
+      eval: true,
+      umask: true,
+      ulimit: true,
+      readonly: true,
+      local: true,
+      declare: true,
+      typeset: true,
+      read: true,
+      exit: true,
+      return: true,
+      break: true,
+      continue: true
+    };
+    DeterministicCommandExecutableSchema = external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxExecutableLength).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/, "Executable must be a portable bare command name").refine((executable) => !isUnsafeDeterministicCommandExecutable(executable), "Shell interpreters, process-launching wrappers, and stateful builtins are not deterministic command executables");
+    DeterministicCommandStepSchema = external_exports.object({
+      id: external_exports.string().regex(/^step[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxStepIdLength),
+      executable: DeterministicCommandExecutableSchema,
+      argv: external_exports.array(DeterministicCommandArgSchema).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs)
+    }).strict();
+    RawDeterministicCommandSequenceSchema = external_exports.object({
+      schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
+      kind: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
+      control: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
+      steps: external_exports.array(DeterministicCommandStepSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+      parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
+    }).strict().superRefine((seq, ctx) => {
+      let expectedParamIndex = 0;
+      const seenParamNames = /* @__PURE__ */ new Set();
+      const stringParamNames = /* @__PURE__ */ new Set();
+      for (let i = 0; i < seq.steps.length; i++) {
+        const step = seq.steps[i];
+        const expectedStepId = `step${i}`;
+        if (step.id !== expectedStepId) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `Step at index ${i} must have id '${expectedStepId}', got '${step.id}'`,
+            path: ["steps", i, "id"]
+          });
+        }
+        for (let j = 0; j < step.argv.length; j++) {
+          const arg = step.argv[j];
+          if ("parameter" in arg) {
+            const expectedParamName = `arg${expectedParamIndex}`;
+            if (seenParamNames.has(arg.parameter)) {
+              ctx.addIssue({
+                code: external_exports.ZodIssueCode.custom,
+                message: `Duplicate parameter identifier '${arg.parameter}' in sequence. Each input identifier must be positional and unique.`,
+                path: ["steps", i, "argv", j, "parameter"]
+              });
+            } else {
+              seenParamNames.add(arg.parameter);
+            }
+            if (arg.role === "string") {
+              stringParamNames.add(arg.parameter);
+            }
+            if (arg.parameter !== expectedParamName) {
+              ctx.addIssue({
+                code: external_exports.ZodIssueCode.custom,
+                message: `Positional parameter identifier mismatch at position ${expectedParamIndex}: expected '${expectedParamName}', got '${arg.parameter}'`,
+                path: ["steps", i, "argv", j, "parameter"]
+              });
+            }
+            expectedParamIndex++;
+          }
+        }
+      }
+      for (const parameter of stringParamNames) {
+        if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
+            path: ["parameterValueSha256", parameter]
+          });
+        }
+      }
+      for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
+        if (!stringParamNames.has(parameter)) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `Value commitment '${parameter}' must reference a string parameter`,
+            path: ["parameterValueSha256", parameter]
+          });
+        }
+      }
+    });
+    DeterministicCommandSequenceSchema = external_exports.preprocess((val) => {
+      if (!isDescriptorSafePlainTree(val)) {
+        return null;
+      }
+      return val;
+    }, RawDeterministicCommandSequenceSchema);
+  }
+});
+
 // packages/contracts/dist/index.js
 var init_dist = __esm({
   "packages/contracts/dist/index.js"() {
@@ -8381,6 +8659,7 @@ var init_dist = __esm({
     init_qualification();
     init_v1();
     init_computation_evidence();
+    init_deterministic_command_sequence();
   }
 });
 
@@ -11585,8 +11864,6 @@ init_zod();
 var OpportunityTrackingConfigSchema = external_exports.object({
   /** Enables continuous per-session local opportunity detection. */
   enabled: external_exports.boolean().default(true),
-  /** Cost of synthesizing one tool, in USD. Dispatched savings must beat it. */
-  synthesisCostUsd: external_exports.number().nonnegative().default(0.05),
   /** Minimum evidence-maturity confidence (0..1) required to dispatch a proven pattern. */
   minDispatchConfidence: external_exports.number().min(0).max(1).default(0.5),
   /** Rolling per-session episode window bound. */

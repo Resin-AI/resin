@@ -74,7 +74,7 @@ describe("edit target metadata", () => {
 
 describe("numeric command evidence", () => {
   it.each([
-    ["git log --oneline -123", "git log --oneline -$NUM"],
+    ["git log --oneline -123", "git $STR --oneline -$NUM"],
     ["calc --offset=-123 --limit=456", "calc --offset=-$NUM --limit=$NUM"],
     ["node --amount=+42", "node --amount=+$NUM"],
   ])("retains sign semantics without numeric values: %s", (command, expected) => {

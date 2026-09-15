@@ -42,13 +42,13 @@ function assertVocabulary(profile: string): void {
 }
 
 describe("normalizeCommandProfile", () => {
-  it("keeps executable, subcommands and flags; collapses values", () => {
-    expect(normalizeCommandProfile('git commit -m "fix auth bug"')).toBe("git commit -m $STR");
+  it("keeps executable names and flags while parameterizing every positional value", () => {
+    expect(normalizeCommandProfile('git commit -m "fix auth bug"')).toBe("git $STR -m $STR");
     expect(normalizeCommandProfile("pnpm test src/auth/login.test.ts")).toBe(
-      "pnpm test $TEST_FILE",
+      "pnpm $STR $TEST_FILE",
     );
-    expect(normalizeCommandProfile("git status --porcelain")).toBe("git status --porcelain");
-    expect(normalizeCommandProfile("npm run build")).toBe("npm run build");
+    expect(normalizeCommandProfile("git status --porcelain")).toBe("git $STR --porcelain");
+    expect(normalizeCommandProfile("npm run build")).toBe("npm $STR $STR");
     expect(normalizeCommandProfile("node scripts/migrate.js --dry-run")).toBe(
       "node $SRC_FILE --dry-run",
     );
@@ -57,7 +57,7 @@ describe("normalizeCommandProfile", () => {
   it("splits composite commands and keeps operators", () => {
     expect(
       normalizeCommandProfile("git add -A && git commit -m 'x' || echo failed | tee out.log"),
-    ).toBe("git add -A && git commit -m $STR || echo $STR | tee $PATH");
+    ).toBe("git $STR -A && git $STR -m $STR || echo $STR | tee $PATH");
     expect(normalizeCommandProfile("cd /tmp/x; ls -la")).toBe("cd $TMP_DIR ; ls -la");
   });
 
@@ -78,36 +78,34 @@ describe("normalizeCommandProfile", () => {
     );
   });
 
-  it("does not treat positional words after a flag as subcommands", () => {
-    expect(normalizeCommandProfile("git commit -m hunter2")).toBe("git commit -m $STR");
+  it("parameterizes positional words before and after flags", () => {
+    expect(normalizeCommandProfile("git commit -m hunter2")).toBe("git $STR -m $STR");
     expect(normalizeCommandProfile("echo -n secretword")).toBe("echo -n $STR");
   });
 
-  it("keeps well-known python -m modules and collapses project modules", () => {
+  it("normalizes interpreter -m arguments as generic parameters without an executable allowlist", () => {
     expect(normalizeCommandProfile("python3 -m unittest tests.test_stage_load -v")).toBe(
-      "python3 -m unittest $STR -v",
+      "python3 -m $STR $STR -v",
     );
     expect(normalizeCommandProfile("python -m pytest tests/ -q")).toBe(
-      "python -m pytest $TEST_FILE -q",
+      "python -m $STR $TEST_FILE -q",
     );
     expect(normalizeCommandProfile("python3 -m acme.internal_tool --run")).toBe(
       "python3 -m $STR --run",
     );
-    // Only the interpreter's -m names a module; git's -m is a message.
-    expect(normalizeCommandProfile("git commit -m unittest")).toBe("git commit -m $STR");
+    // Flags are structural for every executable; all positional values are parameters.
+    expect(normalizeCommandProfile("git commit -m unittest")).toBe("git $STR -m $STR");
     expect(normalizeCommandProfile("python3 -m unittest && python3 -m pytest")).toBe(
-      "python3 -m unittest && python3 -m pytest",
+      "python3 -m $STR && python3 -m $STR",
     );
   });
 
-  it("caps subcommand slots at two", () => {
-    expect(normalizeCommandProfile("aws s3 cp bucket target")).toBe("aws s3 cp $STR $STR");
+  it("parameterizes every positional slot without a command grammar", () => {
+    expect(normalizeCommandProfile("aws s3 cp bucket target")).toBe("aws $STR $STR $STR $STR");
   });
 
-  it("unwraps sudo/env style wrappers", () => {
-    expect(normalizeCommandProfile("sudo apt-get install -y jq")).toBe(
-      "sudo apt-get install -y $STR",
-    );
+  it("normalizes wrapper arguments with the same generic positional rule", () => {
+    expect(normalizeCommandProfile("sudo apt-get install -y jq")).toBe("sudo $STR $STR -y $STR");
   });
 
   it("drops heredoc bodies and comment lines", () => {
@@ -124,7 +122,7 @@ describe("normalizeCommandProfile", () => {
 
   it("treats multi-line scripts as sequenced commands", () => {
     expect(normalizeCommandProfile("git fetch\ngit rebase origin/main")).toBe(
-      "git fetch ; git rebase $PATH",
+      "git $STR ; git $STR $PATH",
     );
   });
 
@@ -170,6 +168,25 @@ describe("normalizeCommandProfile", () => {
         }
       }
     }
+  });
+
+  it("normalizes unseen executables with flags and typed positional parameters", () => {
+    expect(normalizeCommandProfile("biome check src/index.ts --write")).toBe(
+      "biome $STR $SRC_FILE --write",
+    );
+    expect(normalizeCommandProfile("ruff format --check src/")).toBe("ruff $STR --check $SRC_FILE");
+    expect(normalizeCommandProfile("deployctl deploy --project=demo --prod ./dist")).toBe(
+      "deployctl $STR --project=$STR --prod $BUILD_DIR",
+    );
+    expect(normalizeCommandProfile("my-custom-cli build src/main.rs --jobs 4")).toBe(
+      "my-custom-cli $STR $SRC_FILE --jobs $NUM",
+    );
+    expect(normalizeCommandProfile("custom-linter")).toBe("custom-linter");
+    expect(normalizeCommandProfile("file-checker src/utils.ts")).toBe("file-checker $SRC_FILE");
+    expect(normalizeCommandProfile('data-processor ingest "raw data" archive')).toBe(
+      "data-processor $STR $STR $STR",
+    );
+    expect(normalizeCommandProfile("custom-tool alice")).toBe("custom-tool $STR");
   });
 });
 
@@ -260,7 +277,7 @@ describe("projectEnrichedToolParameters", () => {
       { homeDir: "/home/alice" },
     );
     expect(res).toEqual({
-      parameters: { command: "pnpm test $TEST_FILE && git commit -m $STR", cwd: "…/repo" },
+      parameters: { command: "pnpm $STR $TEST_FILE && git $STR -m $STR", cwd: "…/repo" },
       maskedFields: ["command", "cwd"],
     });
   });
@@ -293,7 +310,14 @@ describe("projectEnrichedToolParameters", () => {
     expect(projectEnrichedToolParameters("bash", "command")).toBeNull();
   });
 
-  it("does not treat non-shell tools' command keys as shell commands", () => {
-    expect(projectEnrichedToolParameters("hub", { command: "rm -rf /" })).toBeNull();
+  it("projects command fields generically without a tool-name allowlist", () => {
+    expect(
+      projectEnrichedToolParameters("acme_command_runner", {
+        command: "custom-checker inspect src/main.ts",
+      }),
+    ).toEqual({
+      parameters: { command: "custom-checker $STR $SRC_FILE" },
+      maskedFields: ["command"],
+    });
   });
 });

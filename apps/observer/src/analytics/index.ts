@@ -47,3 +47,12 @@ export {
   type InvocationTelemetryUploaderOptions,
   InvocationTelemetryUploader,
 } from "./invocation-telemetry-uploader.js";
+
+export {
+  extractRawCommandStringFromEvent,
+  isDeterministicCommandSequence,
+  parseDeterministicCommandSequence,
+  projectDeterministicCommandSequence,
+  projectDeterministicCommandSequenceFromEvent,
+  safeParseDeterministicCommandSequence,
+} from "./deterministic-command-sequence.js";

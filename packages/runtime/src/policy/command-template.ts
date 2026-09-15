@@ -33,19 +33,31 @@ export function isTemplatedCommandProfile(profile: string): boolean {
   return tokenizeCommandProfile(profile).some((token) => isCommandPlaceholderToken(token));
 }
 
-export function compileCommandProfileArg(token: string): RegExp {
+function compileCommandProfileArgWithStringClass(token: string, stringClass: string): RegExp {
   let source = "";
   let cursor = 0;
 
   for (const match of token.matchAll(placeholderPattern)) {
     const placeholder = match[0];
     source += token.slice(cursor, match.index).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    source += `(?:${COMMAND_PLACEHOLDER_CLASSES[placeholder]})`;
+    source += `(?:${
+      placeholder === "$STR" ? stringClass : COMMAND_PLACEHOLDER_CLASSES[placeholder]
+    })`;
     cursor = (match.index ?? 0) + placeholder.length;
   }
 
   source += token.slice(cursor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${source}$`);
+}
+
+export function compileCommandProfileArg(token: string): RegExp {
+  return compileCommandProfileArgWithStringClass(token, COMMAND_PLACEHOLDER_CLASSES.$STR);
+}
+
+function compileCommandProfileArgv(token: string): RegExp {
+  // An argv element may contain spaces without introducing another argument.
+  // Control characters remain forbidden.
+  return compileCommandProfileArgWithStringClass(token, "[^\\x00\\r\\n]+");
 }
 
 export function matchCommandProfileArgs(profileArgs: string[], args: string[]): boolean {
@@ -62,7 +74,7 @@ export function matchCommandProfileArgs(profileArgs: string[], args: string[]): 
     if (!isCommandPlaceholderToken(profileArg)) {
       return profileArg === args[index];
     }
-    return compileCommandProfileArg(profileArg).test(args[index]);
+    return compileCommandProfileArgv(profileArg).test(args[index]);
   });
 }
 

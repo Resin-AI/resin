@@ -1077,18 +1077,19 @@ export function isDangerousOption(binaryNameOrPath: string, arg: string): boolea
     .toLowerCase()
     .replace(/\.exe$/i, "");
   const cleanArg = arg.trim();
+  const normalizedArg = cleanArg.toLowerCase();
 
   if (baseName === "git") {
     if (
-      cleanArg.startsWith("--upload-pack") ||
-      cleanArg.startsWith("--receive-pack") ||
-      cleanArg.startsWith("--exec=") ||
-      cleanArg === "--exec" ||
-      cleanArg.includes("core.fsmonitor") ||
-      cleanArg.includes("core.sshCommand") ||
-      cleanArg.includes("protocol.ext.allow") ||
-      cleanArg.includes("diff.external") ||
-      cleanArg.includes("sequence.editor")
+      normalizedArg.startsWith("--upload-pack") ||
+      normalizedArg.startsWith("--receive-pack") ||
+      normalizedArg.startsWith("--exec=") ||
+      normalizedArg === "--exec" ||
+      normalizedArg.includes("core.fsmonitor") ||
+      normalizedArg.includes("core.sshcommand") ||
+      normalizedArg.includes("protocol.ext.allow") ||
+      normalizedArg.includes("diff.external") ||
+      normalizedArg.includes("sequence.editor")
     ) {
       return true;
     }

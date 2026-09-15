@@ -42,6 +42,8 @@ export * from "./v1.js";
 // Computation Semantic Evidence (analysis-only) IR, digests and fail-closed reader
 export * from "./computation-evidence.js";
 
+// Deterministic Command Sequence Evidence Contract
+export * from "./deterministic-command-sequence.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {
   id: string;

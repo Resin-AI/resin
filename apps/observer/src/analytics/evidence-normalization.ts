@@ -2,19 +2,16 @@
  * Deterministic, value-free evidence normalization.
  *
  * The metadata-only projection historically dropped every command string and
- * parameter value, which left the cloud with only the *shape* of a session
- * (tool names, key names, exit codes). These helpers replace dropping with a
- * projection onto a finite, enumerable vocabulary so the cloud can recognise
- * *what kind* of work happened (which executables, which subcommands, which
- * flags, which file classes) without ever receiving user content.
+ * parameter value, which left the cloud with only the *shape* of a session.
+ * These helpers retain portable executable names and flags while replacing
+ * every positional value with a typed placeholder.
  *
  * Guarantees:
- * - Every output token is either (a) an executable basename, (b) a bare
- *   lowercase subcommand word in one of the first two positional slots,
- *   (c) a flag name, (d) a shell operator or redirection from a fixed set, or
- *   (e) a typed placeholder (`$PATH`, `$SRC_FILE`, `$STR`, ...).
- * - Quoted strings, environment assignments, URLs, numbers, globs, paths and
- *   any positional argument after a flag collapse to placeholders.
+ * - Every output token is either (a) a portable executable basename, (b) a
+ *   flag name, (c) a shell operator or redirection from a fixed syntax set, or
+ *   (d) a typed placeholder (`$PATH`, `$SRC_FILE`, `$STR`, ...).
+ * - Quoted strings, environment assignments, URLs, numbers, globs, paths, and
+ *   every positional argument collapse to placeholders.
  * - Path patterns keep only the last few segments, replace identifier-like
  *   segments with `*`, and never include the user's home directory.
  * - All outputs are length- and token-bounded.
@@ -27,7 +24,6 @@ export const MAX_PROFILE_TOKENS = 32;
 export const MAX_PROFILE_LENGTH = 256;
 export const MAX_PATH_PATTERN_LENGTH = 128;
 export const MAX_PATH_SEGMENTS = 4;
-export const MAX_SUBCOMMAND_SLOTS = 2;
 
 const SHELL_OPERATORS: Record<string, true> = { "&&": true, "||": true, "|": true, ";": true };
 const REDIRECTIONS: Record<string, true> = {
@@ -39,29 +35,6 @@ const REDIRECTIONS: Record<string, true> = {
   "2>&1": true,
   "&>": true,
   "1>": true,
-};
-
-const SHELL_WRAPPERS: Record<string, true> = {
-  sudo: true,
-  env: true,
-  time: true,
-  nohup: true,
-  exec: true,
-};
-
-export const SHELL_TOOL_NAMES: Record<string, true> = {
-  bash: true,
-  sh: true,
-  zsh: true,
-  shell: true,
-  exec: true,
-  exec_command: true,
-  execute_command: true,
-  run_command: true,
-  command_exec: true,
-  terminal: true,
-  run_terminal_cmd: true,
-  run_shell_command: true,
 };
 
 export const COMMAND_PARAMETER_KEYS: readonly string[] = [
@@ -150,63 +123,6 @@ const URL_TOKEN = /^(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s]+$/i;
 const GLOB_TOKEN = /[*?[\]{}]/;
 const NUMBER_TOKEN = /^[+-]?\d+(\.\d+)?$/;
 
-/**
- * Executables whose leading positional words are subcommands worth keeping,
- * with the number of slots retained. Anything not listed keeps no positional
- * words at all, so `echo <secret>` or `cat <file>` never carry values.
- */
-export const SUBCOMMAND_SLOTS_BY_EXECUTABLE: Record<string, number> = {
-  git: 1,
-  gh: 2,
-  npm: 2,
-  pnpm: 2,
-  yarn: 2,
-  bun: 2,
-  npx: 1,
-  pnpx: 1,
-  bunx: 1,
-  deno: 1,
-  cargo: 1,
-  rustup: 1,
-  go: 1,
-  docker: 2,
-  "docker-compose": 1,
-  podman: 2,
-  kubectl: 2,
-  helm: 1,
-  terraform: 1,
-  aws: 2,
-  gcloud: 2,
-  az: 2,
-  pip: 1,
-  pip3: 1,
-  uv: 2,
-  poetry: 1,
-  pipx: 1,
-  conda: 1,
-  make: 1,
-  just: 1,
-  vitest: 1,
-  turbo: 1,
-  nx: 1,
-  dotnet: 1,
-  mvn: 1,
-  gradle: 1,
-  swift: 1,
-  flutter: 1,
-  bundle: 1,
-  rails: 1,
-  mix: 1,
-  composer: 1,
-  systemctl: 1,
-  brew: 1,
-  apt: 1,
-  "apt-get": 1,
-  resin: 2,
-  rojo: 1,
-  wally: 1,
-};
-const SUBCOMMAND_WORD = /^[a-z][a-z-]{0,18}[0-9]?$/;
 const FLAG_TOKEN = /^-{1,2}[A-Za-z][\w-]*$/;
 const FLAG_WITH_VALUE = /^(-{1,2}[A-Za-z][\w-]*)=(.*)$/s;
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -342,39 +258,12 @@ function normalizeExecutable(token: string): string {
  * Produce a value-free command profile for a shell command line.
  *
  * Example: `git commit -m "fix auth" && pnpm test src/a.test.ts | tee out.log`
- *       -> `git commit -m $STR && pnpm test $TEST_FILE | tee $PATH`
+ *       -> `git $STR -m $STR && pnpm $STR $TEST_FILE | tee $PATH`
  */
-/**
- * Interpreters whose `-m <module>` argument names a tool, and the widely used
- * modules that are safe to keep literally. Any other module name is a project
- * identifier and stays `$STR`.
- */
-const MODULE_FLAG_INTERPRETERS: Record<string, true> = {
-  python: true,
-  python3: true,
-  py: true,
-};
-
-const WELL_KNOWN_PYTHON_MODULES: Record<string, true> = {
-  unittest: true,
-  pytest: true,
-  pip: true,
-  venv: true,
-  "http.server": true,
-  "json.tool": true,
-  black: true,
-  ruff: true,
-  mypy: true,
-  flake8: true,
-  coverage: true,
-  build: true,
-  twine: true,
-  pdb: true,
-  timeit: true,
-  doctest: true,
-};
-
-export function normalizeCommandProfile(rawCommand: unknown): string {
+export function normalizeCommandProfile(
+  rawCommand: unknown,
+  options: { maxTokens?: number; maxLength?: number } = {},
+): string {
   if (typeof rawCommand !== "string") return "";
   const cleaned = rawCommand.replace(/\0/g, " ").replace(/\r/g, "").trim();
   if (!cleaned) return "";
@@ -384,14 +273,9 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
 
   const out: string[] = [];
   let atCommandStart = true;
-  let subcommandSlots = 0;
-  let subcommandBudget = 0;
-  let seenFlag = false;
-  let moduleFlagPending = false;
-  let currentExecutable = "";
-
+  const maxTokens = options.maxTokens ?? MAX_PROFILE_TOKENS;
   const pushToken = (t: string): boolean => {
-    if (out.length >= MAX_PROFILE_TOKENS) return false;
+    if (out.length >= maxTokens) return false;
     out.push(t);
     return true;
   };
@@ -402,9 +286,6 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
     if (!quoted && SHELL_OPERATORS[text] === true) {
       if (!pushToken(text)) break;
       atCommandStart = true;
-      subcommandSlots = 0;
-      seenFlag = false;
-      moduleFlagPending = false;
       continue;
     }
     if (!quoted && REDIRECTIONS[text] === true) {
@@ -421,33 +302,15 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
       }
       const exe = quoted ? "$STR" : normalizeExecutable(text);
       if (!pushToken(exe)) break;
-      atCommandStart = SHELL_WRAPPERS[exe] === true;
-      subcommandSlots = 0;
-      subcommandBudget = SUBCOMMAND_SLOTS_BY_EXECUTABLE[exe] ?? 0;
-      seenFlag = false;
-      moduleFlagPending = false;
-      currentExecutable = exe;
+      atCommandStart = false;
       continue;
     }
     if (quoted) {
-      moduleFlagPending = false;
       if (!pushToken("$STR")) break;
       continue;
     }
-    if (moduleFlagPending) {
-      // `python3 -m unittest …`: a well-known module names the tool being run.
-      moduleFlagPending = false;
-      if (WELL_KNOWN_PYTHON_MODULES[text] === true) {
-        if (!pushToken(text)) break;
-        continue;
-      }
-    }
-    if (text === "-m" && MODULE_FLAG_INTERPRETERS[currentExecutable] === true) {
-      moduleFlagPending = true;
-    }
     const flagValue = text.match(FLAG_WITH_VALUE);
     if (flagValue) {
-      seenFlag = true;
       const value = flagValue[2] ?? "";
       if (!pushToken(`${flagValue[1]}=${value.length > 0 ? placeholderFor(value) : "$STR"}`)) {
         break;
@@ -455,27 +318,14 @@ export function normalizeCommandProfile(rawCommand: unknown): string {
       continue;
     }
     if (FLAG_TOKEN.test(text)) {
-      seenFlag = true;
       if (!pushToken(text.slice(0, 48))) break;
       continue;
     }
-    if (
-      !seenFlag &&
-      subcommandSlots < subcommandBudget &&
-      SUBCOMMAND_WORD.test(text) &&
-      !looksLikePath(text)
-    ) {
-      subcommandSlots++;
-      if (!pushToken(text)) break;
-      continue;
-    }
-    // Subcommands are contiguous leading words; the first value ends them.
-    subcommandBudget = 0;
     if (!pushToken(placeholderFor(text))) break;
   }
-
   const profile = out.join(" ");
-  return profile.length > MAX_PROFILE_LENGTH ? profile.slice(0, MAX_PROFILE_LENGTH) : profile;
+  const maxLength = options.maxLength ?? MAX_PROFILE_LENGTH;
+  return profile.length > maxLength ? profile.slice(0, maxLength) : profile;
 }
 
 const IDENTIFIER_SEGMENT =
@@ -529,10 +379,6 @@ export function extractAnchoredEditPath(payload: unknown): string | undefined {
   return m ? (m[1] as string) : undefined;
 }
 
-export function isShellToolName(toolName: string): boolean {
-  return SHELL_TOOL_NAMES[toolName.toLowerCase().replace(/[^a-z0-9_]/g, "_")] === true;
-}
-
 export interface EnrichedParameterProjection {
   /** Parameters safe to ship verbatim (already normalized). */
   parameters: Record<string, string | string[]>;
@@ -546,7 +392,7 @@ export interface EnrichedParameterProjection {
  * shape envelope).
  */
 export function projectEnrichedToolParameters(
-  toolName: string,
+  _toolName: string,
   rawParams: unknown,
   options: { homeDir?: string } = {},
 ): EnrichedParameterProjection | null {
@@ -557,23 +403,21 @@ export function projectEnrichedToolParameters(
   const out: Record<string, string | string[]> = {};
   const masked: string[] = [];
 
-  if (isShellToolName(toolName)) {
-    for (const key of COMMAND_PARAMETER_KEYS) {
-      const value = params[key];
-      if (typeof value === "string" && value.trim().length > 0) {
-        const profile = normalizeCommandProfile(value);
-        if (profile) {
-          out.command = profile;
-          masked.push(key);
-          break;
-        }
+  for (const key of COMMAND_PARAMETER_KEYS) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      const profile = normalizeCommandProfile(value);
+      if (profile) {
+        out.command = profile;
+        masked.push(key);
+        break;
       }
     }
-    const cwd = params.cwd;
-    if (typeof cwd === "string" && cwd.length > 0) {
-      out.cwd = normalizePathPattern(cwd, options.homeDir);
-      masked.push("cwd");
-    }
+  }
+  const cwd = params.cwd;
+  if (typeof cwd === "string" && cwd.length > 0) {
+    out.cwd = normalizePathPattern(cwd, options.homeDir);
+    masked.push("cwd");
   }
 
   for (const key of PATH_PARAMETER_KEYS) {

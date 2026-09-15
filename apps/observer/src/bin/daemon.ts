@@ -1178,7 +1178,6 @@ async function runForeground(options: {
     store: stateStore,
     logger,
     enabled: opportunityTrackingConfig.enabled,
-    synthesisCostUsd: opportunityTrackingConfig.synthesisCostUsd,
     minDispatchConfidence: opportunityTrackingConfig.minDispatchConfidence,
     maxEpisodesPerSession: opportunityTrackingConfig.maxEpisodesPerSession,
     uploadIntervalMs: opportunityTrackingConfig.uploadIntervalMs,

@@ -320,7 +320,7 @@ describe("projectEventToMetadataOnly", () => {
     );
     if (shell.type !== "tool_call") throw new Error("Expected tool_call");
     expect(shell.parameters).toEqual({
-      command: "git commit -m $STR && pnpm test $TEST_FILE",
+      command: "git $STR -m $STR && pnpm $STR $TEST_FILE",
       cwd: "…/repo",
     });
     expect(shell.redaction.redactionStrategy).toBe("mask");

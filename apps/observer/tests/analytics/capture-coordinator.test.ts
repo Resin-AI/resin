@@ -859,9 +859,12 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
       expect(submittedObservations.length).toBe(2);
 
-      const terminalEvent = submittedObservations[1];
-      expect(terminalEvent.type).toBe("session_lifecycle");
-      if (terminalEvent.type === "session_lifecycle") {
+      const terminalEvents = submittedObservations.filter(
+        (event) => event.type === "session_lifecycle",
+      );
+      expect(terminalEvents).toHaveLength(1);
+      const terminalEvent = terminalEvents[0];
+      if (terminalEvent?.type === "session_lifecycle") {
         expect(terminalEvent.lifecycleType).toBe("crash");
         expect(terminalEvent.exitReason).toBe("failed");
       }

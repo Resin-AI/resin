@@ -25,11 +25,7 @@ import type { KillSwitchManager } from "../observability/kill-switches.js";
 import { StructuralClusterer } from "./clustering.js";
 import { CoverageEngine } from "./coverage.js";
 import { EpisodeSegmenter } from "./episode.js";
-import {
-  deriveEstimatedSavedWork,
-  deriveScenarioProvenance,
-  hasCredibleComputationAuthoringBenefit,
-} from "./saved-work.js";
+import { deriveEstimatedSavedWork, deriveScenarioProvenance } from "./saved-work.js";
 import { SignatureExtractor } from "./signature.js";
 import { SuppressionEngine } from "./suppression.js";
 import { TriggerEvaluator } from "./triggers.js";
@@ -55,8 +51,6 @@ export interface SessionOpportunityTrackerOptions {
   logger?: Logger;
   /** Injectable clock in epoch milliseconds. */
   now?: () => number;
-  /** Cost threshold for candidates with priced savings; unpriced computation uses bounded authoring evidence. */
-  synthesisCostUsd?: number;
   /** Minimum evidence-maturity confidence (0..1) required to dispatch. */
   minDispatchConfidence?: number;
   /** Rolling per-session episode window bound. */
@@ -118,7 +112,6 @@ export interface SessionOpportunityTrackerDiagnostics {
   droppedEpisodes: number;
 }
 
-const DEFAULT_SYNTHESIS_COST_USD = 0.05;
 const DEFAULT_MIN_DISPATCH_CONFIDENCE = 0.5;
 const DEFAULT_MAX_EPISODES_PER_SESSION = 64;
 const WORKSPACE_EPISODE_FACTOR = 8;
@@ -148,10 +141,12 @@ function toPositiveInt(value: number | undefined, fallback: number): number {
  * opportunity engine over each session's rolling episode window:
  * segment -> sign -> cluster -> trigger -> suppress -> cover -> estimate saved work.
  *
- * A pattern is dispatched only when the projected per-pattern savings, discounted by evidence
- * maturity (`confidence = min(1, occurrences / 2)`), exceed the configured synthesis cost.
- * Proven patterns are enqueued into the local pattern outbox (idempotent on idempotency key)
- * and recorded in the local structural-hash cache so repeated sessions do not re-dispatch them.
+ * A pattern is dispatched when it clears the trigger, suppression, coverage and evidence-maturity
+ * (`confidence = min(1, occurrences / 2)`) `minDispatchConfidence` guards. Estimated saved work is
+ * derived and recorded for ranking, but it is advisory: zero, negative or unknown estimates never
+ * refuse a candidate on value. Proven patterns are enqueued into the local pattern outbox
+ * (idempotent on idempotency key) and recorded in the local structural-hash cache so repeated
+ * sessions do not re-dispatch them.
  */
 export class SessionOpportunityTracker {
   private readonly opportunities: OpportunityLocalRepository;
@@ -160,7 +155,6 @@ export class SessionOpportunityTracker {
   private readonly killSwitches?: KillSwitchManager;
   private readonly logger?: Logger;
   private readonly now: () => number;
-  private readonly synthesisCostUsd: number;
   private readonly minDispatchConfidence: number;
   private readonly maxEpisodesPerSession: number;
   private readonly maxEpisodesPerWorkspace: number;
@@ -209,7 +203,6 @@ export class SessionOpportunityTracker {
     this.killSwitches = options.killSwitches;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
-    this.synthesisCostUsd = options.synthesisCostUsd ?? DEFAULT_SYNTHESIS_COST_USD;
     this.minDispatchConfidence = options.minDispatchConfidence ?? DEFAULT_MIN_DISPATCH_CONFIDENCE;
     this.maxEpisodesPerSession = toPositiveInt(
       options.maxEpisodesPerSession,
@@ -582,19 +575,10 @@ export class SessionOpportunityTracker {
       if (confidence < this.minDispatchConfidence) {
         continue;
       }
-      // Priced candidates must clear the existing cost floor. A complete computation can instead
-      // demonstrate conservative authoring work without inventing a dollar conversion. Cloud still
-      // applies its normal admission, synthesis-budget and quota gates.
-      const unpricedComputationBenefit =
-        estimatedSavedWork.estimatedCostSavedUsd === undefined &&
-        estimatedSavedWork.savedCostUsd === undefined &&
-        hasCredibleComputationAuthoringBenefit(cluster);
-      if (
-        !unpricedComputationBenefit &&
-        this.expectedSavingsUsd(estimatedSavedWork) * confidence <= this.synthesisCostUsd
-      ) {
-        continue;
-      }
+      // Dispatch is decided by the trigger, suppression, coverage, confidence and idempotency
+      // guards above. Estimated saved work is advisory only: zero, negative and unknown estimates
+      // all dispatch, and no predicted-cost floor exists locally. Cloud still applies its own
+      // admission, synthesis-budget and quota gates.
 
       await this.dispatchPattern(
         cluster,
@@ -611,10 +595,6 @@ export class SessionOpportunityTracker {
     const occurrences =
       cluster.completedOccurrences > 0 ? cluster.completedOccurrences : cluster.episodeCount;
     return Math.min(1, occurrences / 2);
-  }
-
-  private expectedSavingsUsd(estimated: EstimatedSavedWork): number {
-    return estimated.estimatedCostSavedUsd ?? estimated.savedCostUsd ?? 0;
   }
 
   private async dispatchPattern(

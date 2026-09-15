@@ -13,17 +13,13 @@ const ACCOUNT_ID = "acct_opportunity_tracker";
 const EPISODE_COST_MICRO_USD = 200_000;
 
 /**
- * A single occurrence is worth 0.1788 USD of estimated savings discounted by its 0.5 evidence
- * confidence (0.0894 USD); the second occurrence doubles that to 0.1788 USD. This threshold sits
- * between the two so the dispatch predicate is only satisfied once the pattern recurs.
+ * Builds one deterministic 3-step workflow episode worth of events.
  */
-const DISCRIMINATING_SYNTHESIS_COST_USD = 0.12;
-
-/** Builds one deterministic 3-step workflow episode worth of events. */
 function buildWorkflowEvents(
   sessionId: string,
   sequenceOffset: number,
   timestampMs: number,
+  withPricedUsage = true,
 ): NormalizedSessionEvent[] {
   // Distinct commands per step: repeated identical actions would read as retries.
   const steps = [
@@ -60,7 +56,7 @@ function buildWorkflowEvents(
       },
       metadata: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
       // Usage is attributed once per episode, on the final step.
-      ...(index === steps.length - 1
+      ...(withPricedUsage && index === steps.length - 1
         ? {
             providerUsage: {
               provider: "openai",
@@ -126,10 +122,7 @@ describe("SessionOpportunityTracker", () => {
 
   beforeEach(async () => {
     store = await createInMemoryStateStore();
-    tracker = new SessionOpportunityTracker({
-      opportunities: store.opportunities,
-      synthesisCostUsd: DISCRIMINATING_SYNTHESIS_COST_USD,
-    });
+    tracker = new SessionOpportunityTracker({ opportunities: store.opportunities });
   });
 
   afterEach(() => {
@@ -142,9 +135,10 @@ describe("SessionOpportunityTracker", () => {
     target: SessionOpportunityTracker,
     sessionId: string,
     baseMs: number,
+    withPricedUsage = true,
   ): Promise<void> {
     const session = buildHarnessSession(sessionId);
-    const events = buildWorkflowEvents(sessionId, 1, baseMs);
+    const events = buildWorkflowEvents(sessionId, 1, baseMs, withPricedUsage);
     await target.handleSessionEvents(session, events, {
       isTerminal: false,
       isAttributed: true,
@@ -156,62 +150,78 @@ describe("SessionOpportunityTracker", () => {
     );
   }
 
-  it("withholds a single occurrence and enqueues a ProvenPatternDto once the pattern recurs", async () => {
+  it("dispatches on the first occurrence regardless of predicted cost savings", async () => {
     const baseMs = Date.parse("2026-01-05T10:00:00.000Z");
     await feedSession(tracker, "sess_opp_alpha", baseMs);
 
-    // One occurrence yields 0.0894 USD of discounted savings, below the 0.12 USD synthesis cost.
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(0);
-
-    await feedSession(tracker, "sess_opp_bravo", baseMs + 60_000);
-
+    // The trigger, not the derived dollar estimate, decides dispatch.
     const pending = await store.opportunities.listPendingPatterns();
     expect(pending).toHaveLength(1);
-    const payload = ProvenPatternDtoSchema.parse(pending[0].payload);
+    const payload = ProvenPatternDtoSchema.parse(pending[0]?.payload);
     // Episode attribution comes from the session, not from an event field.
     expect(payload.workspaceId).toBe(WORKSPACE_ID);
     expect(payload.localVerdicts.coverage.status).toBe("net_new");
     expect(payload.accountId).toBe(ACCOUNT_ID);
-    expect(payload.idempotencyKey).toBe(pending[0].idempotencyKey);
+    expect(payload.idempotencyKey).toBe(pending[0]?.idempotencyKey);
     expect(payload.localVerdicts.trigger.triggered).toBe(true);
-    // Recurrence across sessions, not single-episode exceptional waste, is what proves it.
     expect(payload.localVerdicts.trigger.triggerType).toBe("normal_frequency");
     expect(payload.localVerdicts.suppression.suppressed).toBe(false);
-    expect(payload.cluster.episodeCount).toBeGreaterThanOrEqual(2);
-    expect(payload.cluster.distinctSessionIds.length).toBeGreaterThanOrEqual(2);
-    // Two occurrences clear the threshold: 0.1788 USD discounted at confidence 1.0.
-    expect(payload.localVerdicts.estimatedSavedWork.estimatedCostSavedUsd ?? 0).toBeGreaterThan(
-      DISCRIMINATING_SYNTHESIS_COST_USD,
-    );
+    // Priced usage is present, so the advisory estimate is still derived and recorded.
+    expect(payload.localVerdicts.estimatedSavedWork.estimatedCostSavedUsd).toBeGreaterThan(0);
     expect(payload.localVerdicts.estimatedSavedWork.confidence).toBeLessThanOrEqual(1);
+    expect(tracker.getDiagnostics().patternsProven).toBe(1);
+
+    // The same structural pattern in a later session is deduplicated, not re-dispatched.
+    await feedSession(tracker, "sess_opp_bravo", baseMs + 60_000);
+    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
     expect(tracker.getDiagnostics().patternsProven).toBe(1);
   });
 
-  it("withholds dispatch while projected savings fail to beat synthesis cost", async () => {
-    const expensive = new SessionOpportunityTracker({
-      opportunities: store.opportunities,
-      synthesisCostUsd: 10_000,
-    });
-    await feedSession(expensive, "sess_opp_costly_a", Date.parse("2026-01-05T11:00:00.000Z"));
-    await feedSession(expensive, "sess_opp_costly_b", Date.parse("2026-01-05T11:01:00.000Z"));
+  it("keeps dispatching when the predicted savings estimate is unknown", async () => {
+    const unknownSavings = new SessionOpportunityTracker({ opportunities: store.opportunities });
+    const baseMs = Date.parse("2026-01-05T11:00:00.000Z");
+    await feedSession(unknownSavings, "sess_opp_zero_a", baseMs, false);
 
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(0);
-    expect(expensive.getDiagnostics().patternsProven).toBe(0);
-    expensive.reset();
+    const pending = await store.opportunities.listPendingPatterns();
+    expect(pending).toHaveLength(1);
+    const estimate = ProvenPatternDtoSchema.parse(pending[0]?.payload).localVerdicts
+      .estimatedSavedWork;
+    // Unknown cost stays unknown: it is never invented, and it never withholds dispatch.
+    expect(estimate.estimatedCostSavedUsd).toBeUndefined();
+    expect(estimate.savedCostUsd).toBeUndefined();
+
+    await feedSession(unknownSavings, "sess_opp_zero_b", baseMs + 60_000, false);
+    expect(unknownSavings.getDiagnostics().patternsProven).toBe(1);
+    unknownSavings.reset();
+  });
+
+  it("withholds a pattern whose evidence maturity is below the dispatch confidence floor", async () => {
+    const floored = new SessionOpportunityTracker({
+      opportunities: store.opportunities,
+      minDispatchConfidence: 1,
+    });
+    const baseMs = Date.parse("2026-01-05T11:30:00.000Z");
+    await feedSession(floored, "sess_opp_floor_a", baseMs);
+
+    // A single occurrence carries 0.5 evidence-maturity confidence; only a second one reaches 1.
+    expect(floored.getDiagnostics().patternsProven).toBe(0);
+    expect(floored.getDiagnostics().clustersEvaluated).toBeGreaterThan(0);
+
+    await feedSession(floored, "sess_opp_floor_b", baseMs + 60_000);
+
+    expect(floored.getDiagnostics().patternsProven).toBe(1);
+    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
+    floored.reset();
   });
 
   it("does not re-dispatch a pattern already recorded in the hash cache", async () => {
     const baseMs = Date.parse("2026-01-05T12:00:00.000Z");
     await feedSession(tracker, "sess_opp_cached_a", baseMs);
-    await feedSession(tracker, "sess_opp_cached_b", baseMs + 60_000);
     expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
     tracker.reset();
 
     // A fresh tracker has no in-memory dispatch memory: only the persisted hash cache can block.
-    const restarted = new SessionOpportunityTracker({
-      opportunities: store.opportunities,
-      synthesisCostUsd: DISCRIMINATING_SYNTHESIS_COST_USD,
-    });
+    const restarted = new SessionOpportunityTracker({ opportunities: store.opportunities });
     await feedSession(restarted, "sess_opp_cached_c", baseMs + 120_000);
     await feedSession(restarted, "sess_opp_cached_d", baseMs + 180_000);
 
@@ -230,7 +240,6 @@ describe("SessionOpportunityTracker", () => {
   it("skips detection while the evolution kill switch is paused", async () => {
     const gated = new SessionOpportunityTracker({
       opportunities: store.opportunities,
-      synthesisCostUsd: DISCRIMINATING_SYNTHESIS_COST_USD,
       killSwitches: {
         canEvolve: () => ({ allowed: false, reason: "paused" }),
       } as never,
@@ -247,7 +256,6 @@ describe("SessionOpportunityTracker", () => {
   it("bounds the workspace episode window", async () => {
     const bounded = new SessionOpportunityTracker({
       opportunities: store.opportunities,
-      synthesisCostUsd: DISCRIMINATING_SYNTHESIS_COST_USD,
       maxEpisodesPerSession: 1,
       maxEpisodesPerWorkspace: 2,
     });
