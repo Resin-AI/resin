@@ -203,6 +203,8 @@ export class TrajectoryCaptureCoordinator {
   private totalGenericBatchesUploaded = 0;
   private totalGenericObservationsUploaded = 0;
   private lastGenericBatchSize = 0;
+  private totalGenericBatchesAccepted = 0;
+  private totalGenericObservationsAccepted = 0;
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(
     pipeline: NormalizationPipeline,
@@ -999,10 +1001,14 @@ export class TrajectoryCaptureCoordinator {
     const batchId = `obs_${batchDigest}_${sessionKey}_${firstSeq}`.slice(0, 128);
 
     try {
-      await this.observationClient.sendObservationBatch({
+      const receipt = await this.observationClient.sendObservationBatch({
         batchId,
         observations: projectedEvents,
       });
+      if (receipt?.acceptedCount > 0) {
+        this.totalGenericBatchesAccepted++;
+        this.totalGenericObservationsAccepted += receipt.acceptedCount;
+      }
       await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
       this.sessionBackoffs.delete(sessionId);
       this.genericResourceForbiddenRetries.delete(sessionId);
@@ -1189,11 +1195,15 @@ export class TrajectoryCaptureCoordinator {
     totalBatchesUploaded: number;
     totalObservationsUploaded: number;
     lastBatchSize: number;
+    totalBatchesAccepted: number;
+    totalObservationsAccepted: number;
   } {
     return {
       totalBatchesUploaded: this.totalGenericBatchesUploaded,
       totalObservationsUploaded: this.totalGenericObservationsUploaded,
       lastBatchSize: this.lastGenericBatchSize,
+      totalBatchesAccepted: this.totalGenericBatchesAccepted,
+      totalObservationsAccepted: this.totalGenericObservationsAccepted,
     };
   }
 

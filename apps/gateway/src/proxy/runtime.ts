@@ -29,6 +29,7 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
+import { loadLocalArtifactTrust } from "./local-artifact-trust.js";
 import { LocalArtifactExecutor } from "./local-executor.js";
 import { CloudInvocationRouter } from "./router.js";
 import {
@@ -98,8 +99,10 @@ export interface ProductionProxyRuntime {
  * circuit breaker, CloudCatalogClient, CloudCatalogCache, CloudInvocationRouter,
  * and CloudCatalogSyncCoordinator with registry auto-registration.
  *
- * Missing/expired/offline/revoked credentials produce a safe local-only runtime state,
- * never throwing an uncaught exception.
+ * Missing/expired/offline/revoked credentials normally produce a safe local-only state.
+ * RESIN_LOCAL_ARTIFACT_TRUST_FILE explicitly pins one development signing key to the
+ * credential's exact loopback origin. Invalid local trust configuration fails closed,
+ * including when no valid credential origin is available.
  */
 export async function createProductionProxyRuntime(
   options: ProductionProxyRuntimeOptions = {},
@@ -130,10 +133,13 @@ export async function createProductionProxyRuntime(
     }
   }
   const paths = resolvePaths({ home: options.home, resinHome: options.resinHome });
+  const localKeyStore = loadLocalArtifactTrust(paths.homeDir, identity?.cloudUrl);
+  const allowDevKeys = localKeyStore !== undefined || (options.allowDevKeys ?? false);
   const artifactCache =
     options.artifactCache ??
     new ArtifactCache({
       cacheDir: path.join(paths.dataDir, "artifacts"),
+      keyStore: localKeyStore,
     });
   const managedToolAccess = new ManagedToolAccess(
     path.join(paths.stateDir, "managed-tool-access"),
@@ -174,7 +180,9 @@ export async function createProductionProxyRuntime(
       new LocalArtifactExecutor({
         cache: artifactCache,
         workspaceRoot: process.cwd(),
-        allowDevKeys: options.allowDevKeys ?? false,
+        keyStore: localKeyStore,
+        allowDevKeys,
+        requireSignature: localKeyStore ? true : undefined,
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
       });
@@ -214,7 +222,7 @@ export async function createProductionProxyRuntime(
       identity: options.identity,
       certificateProvider: options.certificateProvider,
       revocationProvider: options.revocationProvider,
-      allowDevKeys: options.allowDevKeys ?? false,
+      allowDevKeys,
       onToolQualified: options.onToolQualified,
       onToolSyncError: options.onToolSyncError,
       onOfflineDegraded: options.onOfflineDegraded,
@@ -385,7 +393,9 @@ export async function createProductionProxyRuntime(
     new LocalArtifactExecutor({
       cache: artifactCache,
       workspaceRoot: process.cwd(),
-      allowDevKeys: options.allowDevKeys ?? false,
+      keyStore: localKeyStore,
+      allowDevKeys,
+      requireSignature: localKeyStore ? true : undefined,
       resinHome: paths.homeDir,
     });
   localExecutor.setManagedToolAccess(managedToolAccess);

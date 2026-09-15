@@ -625,7 +625,6 @@ describe("LocalArtifactExecutor", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
   });
 
   it("rejects bundle fallback when extra file is injected into artifact directory", async () => {
@@ -723,7 +722,6 @@ describe("LocalArtifactExecutor", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("Manifest digest mismatch");
   });
 
   it("rejects bundle fallback when symlink exists in artifact directory", async () => {

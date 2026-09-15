@@ -522,46 +522,70 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       });
     });
 
-    it("processes and submits observation batch for ordinary sessions without attribution metadata", async () => {
-      const module = new TrajectoryCaptureRuntimeModule({
-        observationClient: mockClient,
-        now: () => 1,
-      });
+    it.each([false, true])(
+      "reports only acknowledged uploads for ordinary sessions (rejected=%s)",
+      async (rejected) => {
+        if (rejected) {
+          mockSendObservationBatch.mockRejectedValueOnce(
+            Object.assign(new Error("Rejected"), { status: 400 }),
+          );
+        }
+        const module = new TrajectoryCaptureRuntimeModule({
+          observationClient: mockClient,
+          now: () => 1,
+        });
 
-      const captureCoordinator = module.getCaptureCoordinator();
-      const ordinarySession: HarnessSession = {
-        sessionId: "sess-ordinary-1",
-        workspaceId: "ws-1",
-        harnessId: "claude-code",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        metadata: {
-          someOtherKey: "unrelated-value",
-        },
-      };
+        expect((await module.healthCheck()).details?.observationUpload).toEqual({
+          totalBatchesUploaded: 0,
+          totalObservationsUploaded: 0,
+          lastBatchSize: 0,
+          totalBatchesAccepted: 0,
+          totalObservationsAccepted: 0,
+        });
+        const captureCoordinator = module.getCaptureCoordinator();
+        const ordinarySession: HarnessSession = {
+          sessionId: "sess-ordinary-1",
+          workspaceId: "ws-1",
+          harnessId: "claude-code",
+          status: "active",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          metadata: {
+            someOtherKey: "unrelated-value",
+          },
+        };
 
-      const rawRecord: RawHarnessRecord = {
-        recordId: "rec-1",
-        harnessId: "claude-code",
-        sourcePath: "/tmp/claude.jsonl",
-        rawPayload: JSON.stringify({
-          type: "message",
-          role: "user",
-          content: "hello",
-        }),
-        timestamp: new Date().toISOString(),
-      };
+        const rawRecord: RawHarnessRecord = {
+          recordId: "rec-1",
+          harnessId: "claude-code",
+          sourcePath: "/tmp/claude.jsonl",
+          rawPayload: JSON.stringify({
+            type: "message",
+            role: "user",
+            content: "hello",
+          }),
+          timestamp: new Date().toISOString(),
+        };
 
-      const ack = vi.fn().mockResolvedValue(undefined);
-      await captureCoordinator.handleRecords(ordinarySession, [rawRecord], ack);
-      await captureCoordinator.waitForIdle();
+        const ack = vi.fn().mockResolvedValue(undefined);
+        await captureCoordinator.handleRecords(ordinarySession, [rawRecord], ack);
+        await captureCoordinator.waitForIdle();
 
-      expect(ack).toHaveBeenCalled();
-      expect(mockSubmit).not.toHaveBeenCalled();
-      expect(mockSendObservationBatch).toHaveBeenCalledTimes(1);
-      expect(captureCoordinator.isSessionUnattributed("sess-ordinary-1")).toBe(true);
-    });
+        expect(ack).toHaveBeenCalled();
+        expect(mockSubmit).not.toHaveBeenCalled();
+        expect(mockSendObservationBatch).toHaveBeenCalledTimes(1);
+        expect(captureCoordinator.isSessionUnattributed("sess-ordinary-1")).toBe(true);
+        const observationUpload = {
+          totalBatchesUploaded: 1,
+          totalObservationsUploaded: 1,
+          lastBatchSize: 1,
+          totalBatchesAccepted: rejected ? 0 : 1,
+          totalObservationsAccepted: rejected ? 0 : 1,
+        };
+        expect((await module.healthCheck()).details?.observationUpload).toEqual(observationUpload);
+        expect((await module.getDiagnostics()).observationUpload).toEqual(observationUpload);
+      },
+    );
 
     it("processes and submits observation batch for malformed attribution metadata without trajectory submission", async () => {
       const module = new TrajectoryCaptureRuntimeModule({

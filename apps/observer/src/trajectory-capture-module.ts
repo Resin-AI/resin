@@ -824,6 +824,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         activeSessions: this.captureCoordinator.getActiveSessionCount(),
         finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
         unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
+        observationUpload: this.captureCoordinator.getBatchMetrics(),
       },
       lastCheckTime: Date.now(),
     };
@@ -843,6 +844,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       activeSessions: this.captureCoordinator.getActiveSessionCount(),
       finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
       unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
+      observationUpload: this.captureCoordinator.getBatchMetrics(),
     };
   }
 
