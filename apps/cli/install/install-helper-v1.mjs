@@ -8448,10 +8448,14 @@ var init_deterministic_command_sequence = __esm({
     DETERMINISTIC_COMMAND_SEQUENCE_KIND = "command-sequence";
     DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then";
     DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
-      /** Maximum number of command steps in a single sequence. */
-      maxSteps: 8,
       /** Maximum number of arguments in a single step. */
       maxArgs: 32,
+      /**
+       * Maximum number of arguments across every step of one sequence. This is a size limit on the
+       * evidence (and therefore on compiled source and invocation cost), not a bound on how many
+       * commands a useful workflow may contain.
+       */
+      maxSequenceArgs: 256,
       /** Maximum length of an executable basename. */
       maxExecutableLength: 128,
       /** Maximum length of a literal token. */
@@ -8569,14 +8573,16 @@ var init_deterministic_command_sequence = __esm({
       schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
       kind: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
       control: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
-      steps: external_exports.array(DeterministicCommandStepSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+      steps: external_exports.array(DeterministicCommandStepSchema).min(1),
       parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
     }).strict().superRefine((seq, ctx) => {
       let expectedParamIndex = 0;
       const seenParamNames = /* @__PURE__ */ new Set();
       const stringParamNames = /* @__PURE__ */ new Set();
+      let totalArgs = 0;
       for (let i = 0; i < seq.steps.length; i++) {
         const step = seq.steps[i];
+        totalArgs += step.argv.length;
         const expectedStepId = `step${i}`;
         if (step.id !== expectedStepId) {
           ctx.addIssue({
@@ -8611,6 +8617,13 @@ var init_deterministic_command_sequence = __esm({
             expectedParamIndex++;
           }
         }
+      }
+      if (totalArgs > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: `Command sequence carries ${totalArgs} arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
+          path: ["steps"]
+        });
       }
       for (const parameter of stringParamNames) {
         if (!(parameter in (seq.parameterValueSha256 ?? {}))) {

@@ -286,13 +286,19 @@ export function projectDeterministicCommandSequence(
   flushStep();
 
   // If trailing && resulted in no following step, or no steps at all
-  if (
-    stepTokensList.length === 0 ||
-    stepTokensList.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps
-  ) {
+  if (stepTokensList.length === 0) {
     return null;
   }
   if (stepTokensList.some((tokens) => tokens.some((token) => token.length === 0))) {
+    return null;
+  }
+  // Length is bounded by the sequence argument budget and the raw command-length check above,
+  // never by a fixed command count: a longer workflow stays representable as long as it fits.
+  let totalArguments = 0;
+  for (const tokens of stepTokensList) {
+    totalArguments += Math.max(tokens.length - 1, 0);
+  }
+  if (totalArguments > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
     return null;
   }
   if (
@@ -305,9 +311,7 @@ export function projectDeterministicCommandSequence(
     return null;
   }
   const normalizedProfile = normalizeCommandProfile(trimmed, {
-    maxTokens:
-      DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps *
-      (DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs + 2),
+    maxTokens: stepTokensList.length + DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs,
     maxLength: 2048,
   });
   if (normalizedProfile.length === 0 || normalizedProfile.length >= 2048) {
@@ -344,10 +348,7 @@ export function projectDeterministicCommandSequence(
   if (normalizedStep.length === 0) return null;
   normalizedSteps.push(normalizedStep);
 
-  if (
-    normalizedSteps.length !== stepTokensList.length ||
-    normalizedSteps.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps
-  ) {
+  if (normalizedSteps.length !== stepTokensList.length) {
     return null;
   }
 

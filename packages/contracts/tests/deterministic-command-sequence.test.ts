@@ -611,18 +611,41 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(isDeterministicCommandSequence(extraKey)).toBe(false);
   });
 
-  it("rejects sequences exceeding step limits", () => {
-    const nineSteps = {
+  it("accepts workflows longer than the former eight-step ceiling", () => {
+    const twelveSteps = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
-      steps: Array.from({ length: 9 }, (_, i) => ({
+      steps: Array.from({ length: 12 }, (_, i) => ({
         id: `step${i}`,
         executable: "git",
         argv: [{ literal: "status" }],
       })),
     };
-    expect(isDeterministicCommandSequence(nineSteps)).toBe(false);
+    expect(isDeterministicCommandSequence(twelveSteps)).toBe(true);
+  });
+
+  it("rejects sequences whose total argument count exceeds the evidence budget", () => {
+    let parameterIndex = 0;
+    const steps = Array.from({ length: 60 }, (_, i) => ({
+      id: `step${i}`,
+      executable: "stylua",
+      argv: Array.from({ length: 5 }, () => ({
+        parameter: `arg${parameterIndex++}`,
+        role: "path",
+      })),
+    }));
+    const oversized = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps,
+    };
+    const result = safeParseDeterministicCommandSequence(oversized);
+    expect(result.success).toBe(false);
+    expect(
+      result.success ? "" : result.error.issues.map((issue) => issue.message).join("; "),
+    ).toContain("evidence budget");
   });
 
   it("rejects hostile accessors without invoking getters", () => {

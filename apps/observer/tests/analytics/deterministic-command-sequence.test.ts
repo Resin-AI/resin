@@ -530,6 +530,15 @@ describe("projectDeterministicCommandSequence", () => {
       }
     });
 
+    it("projects a workflow longer than the former eight-step ceiling without truncation", () => {
+      const steps = Array.from({ length: 10 }, (_, i) => `custom-tool run step${i}`);
+      const sequence = projectDeterministicCommandSequence(steps.join(" && "));
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(10);
+      expect(sequence?.steps[9]?.id).toBe("step9");
+      expect(sequence?.steps[9]?.executable).toBe("custom-tool");
+    });
+
     it("projects previously unseen executables with generic flags and typed positional parameters", () => {
       const sequence = projectDeterministicCommandSequence(
         "biome check src/app.ts --write && custom-tool run 10 && novel-cli",

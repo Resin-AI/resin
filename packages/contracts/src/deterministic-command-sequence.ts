@@ -15,12 +15,22 @@ export const DETERMINISTIC_COMMAND_SEQUENCE_KIND = "command-sequence" as const;
 /** Control flow model for deterministic command sequences. */
 export const DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then" as const;
 
-/** Hard limits for deterministic command sequences. */
+/**
+ * Hard limits for deterministic command sequences.
+ *
+ * Limits are size- and resource-based, never a command-count cap: a workflow may be as long as the
+ * user's work actually is. Evidence growth is bounded by the total argument budget, the per-token
+ * length limits, and the recorder's own command-length bound.
+ */
 export const DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
-  /** Maximum number of command steps in a single sequence. */
-  maxSteps: 8,
   /** Maximum number of arguments in a single step. */
   maxArgs: 32,
+  /**
+   * Maximum number of arguments across every step of one sequence. This is a size limit on the
+   * evidence (and therefore on compiled source and invocation cost), not a bound on how many
+   * commands a useful workflow may contain.
+   */
+  maxSequenceArgs: 256,
   /** Maximum length of an executable basename. */
   maxExecutableLength: 128,
   /** Maximum length of a literal token. */
@@ -313,7 +323,8 @@ export function isDescriptorSafePlainTree(value: unknown, seen = new Set<object>
  * - schemaVersion: 1
  * - kind: 'command-sequence'
  * - control: 'and-then'
- * - 1 to 8 shell-free command steps
+ * - 1 or more shell-free command steps, bounded by the sequence argument budget rather than a
+ *   fixed command count
  * - portable executable names without a command allowlist
  * - strictly sequential step IDs (step0, step1, ...)
  * - strictly sequential, unique parameter identifiers (arg0, arg1, ...)
@@ -325,10 +336,7 @@ const RawDeterministicCommandSequenceSchema = z
     schemaVersion: z.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
     kind: z.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
     control: z.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
-    steps: z
-      .array(DeterministicCommandStepSchema)
-      .min(1)
-      .max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+    steps: z.array(DeterministicCommandStepSchema).min(1),
     parameterValueSha256: z
       .record(z.string().regex(/^arg[0-9]+$/), z.string().regex(/^[0-9a-f]{64}$/))
       .optional(),
@@ -338,9 +346,11 @@ const RawDeterministicCommandSequenceSchema = z
     let expectedParamIndex = 0;
     const seenParamNames = new Set<string>();
     const stringParamNames = new Set<string>();
+    let totalArgs = 0;
 
     for (let i = 0; i < seq.steps.length; i++) {
       const step = seq.steps[i];
+      totalArgs += step.argv.length;
 
       // Validate step id ordering
       const expectedStepId = `step${i}`;
@@ -380,6 +390,14 @@ const RawDeterministicCommandSequenceSchema = z
           expectedParamIndex++;
         }
       }
+    }
+
+    if (totalArgs > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Command sequence carries ${totalArgs} arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
+        path: ["steps"],
+      });
     }
 
     for (const parameter of stringParamNames) {
