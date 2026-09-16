@@ -530,6 +530,15 @@ describe("projectDeterministicCommandSequence", () => {
       }
     });
 
+    it("projects a workflow longer than the former eight-step ceiling without truncation", () => {
+      const steps = Array.from({ length: 10 }, (_, i) => `custom-tool run step${i}`);
+      const sequence = projectDeterministicCommandSequence(steps.join(" && "));
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(10);
+      expect(sequence?.steps[9]?.id).toBe("step9");
+      expect(sequence?.steps[9]?.executable).toBe("custom-tool");
+    });
+
     it("projects previously unseen executables with generic flags and typed positional parameters", () => {
       const sequence = projectDeterministicCommandSequence(
         "biome check src/app.ts --write && custom-tool run 10 && novel-cli",
@@ -561,6 +570,126 @@ describe("projectDeterministicCommandSequence", () => {
         executable: "novel-cli",
         argv: [],
       });
+    });
+
+    it("projects an 8x32 argument chain (256 arguments) across 8 steps without truncation", () => {
+      const stepCount = 8;
+      const argsPerStep = 32;
+      const steps = Array.from(
+        { length: stepCount },
+        (_, stepIndex) =>
+          `tool${stepIndex} ${Array.from({ length: argsPerStep }, (_, argIndex) => `a${stepIndex}x${argIndex}`).join(" ")}`,
+      );
+      const fullCommand = steps.join(" && ");
+      expect(fullCommand.length).toBeLessThanOrEqual(2048);
+
+      const sequence = projectDeterministicCommandSequence(fullCommand);
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(stepCount);
+
+      let totalArgCount = 0;
+      for (let i = 0; i < stepCount; i++) {
+        const step = sequence?.steps[i];
+        expect(step?.id).toBe(`step${i}`);
+        expect(step?.executable).toBe(`tool${i}`);
+        expect(step?.argv).toHaveLength(argsPerStep);
+        totalArgCount += step?.argv.length ?? 0;
+      }
+      expect(totalArgCount).toBe(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs);
+      expect(isDeterministicCommandSequence(sequence)).toBe(true);
+    });
+
+    it("preserves identical raw path argument as shared parameter across steps in a real project command", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "stylua --check src/app.luau && selene src/app.luau",
+      );
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(2);
+
+      expect(sequence?.steps[0]).toEqual({
+        id: "step0",
+        executable: "stylua",
+        argv: [{ literal: "--check" }, { parameter: "arg0", role: "path" }],
+      });
+
+      expect(sequence?.steps[1]).toEqual({
+        id: "step1",
+        executable: "selene",
+        argv: [{ parameter: "arg0", role: "path" }],
+      });
+
+      const json = JSON.stringify(sequence);
+      expect(json).not.toContain("src/app.luau");
+      expect(isDeterministicCommandSequence(sequence)).toBe(true);
+    });
+
+    it("shares a path parameter across steps regardless of the prefix that carries it", () => {
+      const sharedPrefixSeq = projectDeterministicCommandSequence(
+        "novel-build --input=src/main.ts && novel-test --input=src/main.ts",
+      );
+      expect(sharedPrefixSeq).not.toBeNull();
+      expect(sharedPrefixSeq?.steps).toHaveLength(2);
+      expect(sharedPrefixSeq?.steps[0]?.argv[0]).toEqual({
+        prefix: "--input=",
+        parameter: "arg0",
+        role: "path",
+      });
+      expect(sharedPrefixSeq?.steps[1]?.argv[0]).toEqual({
+        prefix: "--input=",
+        parameter: "arg0",
+        role: "path",
+      });
+      expect(isDeterministicCommandSequence(sharedPrefixSeq)).toBe(true);
+
+      // The prefix is positional: the same input value stays one parameter while each occurrence
+      // keeps its own fixed prefix.
+      const differingPrefixSeq = projectDeterministicCommandSequence(
+        "novel-build --input=src/main.ts && novel-test --output=src/main.ts",
+      );
+      expect(differingPrefixSeq).not.toBeNull();
+      expect(differingPrefixSeq?.steps[0]?.argv[0]).toEqual({
+        prefix: "--input=",
+        parameter: "arg0",
+        role: "path",
+      });
+      expect(differingPrefixSeq?.steps[1]?.argv[0]).toEqual({
+        prefix: "--output=",
+        parameter: "arg0",
+        role: "path",
+      });
+      expect(isDeterministicCommandSequence(differingPrefixSeq)).toBe(true);
+
+      // A prefix-embedded value and a positional one still name the same input.
+      const mixedFormSeq = projectDeterministicCommandSequence(
+        "novel-build --input=src/main.ts && novel-test src/main.ts",
+      );
+      expect(mixedFormSeq?.steps[0]?.argv[0]).toEqual({
+        prefix: "--input=",
+        parameter: "arg0",
+        role: "path",
+      });
+      expect(mixedFormSeq?.steps[1]?.argv[0]).toEqual({ parameter: "arg0", role: "path" });
+      expect(isDeterministicCommandSequence(mixedFormSeq)).toBe(true);
+    });
+
+    it("does not merge string or number parameters even when raw values are identical", () => {
+      const sequence = projectDeterministicCommandSequence(
+        "custom-tool Alice 42 && other-tool Alice 42",
+      );
+      expect(sequence).not.toBeNull();
+      expect(sequence?.steps).toHaveLength(2);
+
+      expect(sequence?.steps[0]?.argv).toEqual([
+        { parameter: "arg0", role: "string" },
+        { parameter: "arg1", role: "number" },
+      ]);
+
+      expect(sequence?.steps[1]?.argv).toEqual([
+        { parameter: "arg2", role: "string" },
+        { parameter: "arg3", role: "number" },
+      ]);
+
+      expect(isDeterministicCommandSequence(sequence)).toBe(true);
     });
   });
 });
@@ -702,6 +831,60 @@ describe("extractRawCommandStringFromEvent", () => {
     };
     expect(extractRawCommandStringFromEvent(conflictingCall)).toBeNull();
   });
+
+  it("handles hostile accessor properties on command, args, and parameters without throwing", () => {
+    const hostileCmdEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      get command(): string {
+        throw new Error("hostile command getter");
+      },
+      args: [],
+      exitCode: 0,
+      durationMs: 10,
+    } as unknown as NormalizedCommandExecEvent;
+    expect(extractRawCommandStringFromEvent(hostileCmdEvent)).toBeNull();
+
+    const hostileArgsEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      command: "git status",
+      get args(): string[] {
+        throw new Error("hostile args getter");
+      },
+      exitCode: 0,
+      durationMs: 10,
+    } as unknown as NormalizedCommandExecEvent;
+    expect(extractRawCommandStringFromEvent(hostileArgsEvent)).toBeNull();
+
+    const hostileToolEvent = {
+      ...createBaseHeaders(1),
+      type: "tool_call",
+      callId: "call_hostile",
+      toolName: "bash",
+      parameters: {
+        get command(): string {
+          throw new Error("hostile parameters.command getter");
+        },
+      },
+      isShadow: false,
+    } as unknown as NormalizedToolCallEvent;
+    expect(extractRawCommandStringFromEvent(hostileToolEvent)).toBeNull();
+
+    const hostileArgvElementEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      command: "git",
+      args: Object.defineProperty(["-c"], "1", {
+        get() {
+          throw new Error("hostile args[1] getter");
+        },
+      }),
+      exitCode: 0,
+      durationMs: 10,
+    } as unknown as NormalizedCommandExecEvent;
+    expect(extractRawCommandStringFromEvent(hostileArgvElementEvent)).toBeNull();
+  });
 });
 
 describe("projectEventToMetadataOnly integration", () => {
@@ -719,6 +902,63 @@ describe("projectEventToMetadataOnly integration", () => {
     const seq = projected.metadata?.[RESIN_COMMAND_SEQUENCE_METADATA_KEY];
     expect(seq).toBeDefined();
     expect(isDeterministicCommandSequence(seq)).toBe(true);
+  });
+
+  it("projects a long zero-argument chain beyond the former step ceiling and fails closed past the command-length bound", () => {
+    const longChain = Array.from({ length: 200 }, () => "x").join(" && ");
+    const longChainEvent: NormalizedCommandExecEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      command: longChain,
+      args: [],
+      exitCode: 0,
+      durationMs: 10,
+    };
+    expect(projectDeterministicCommandSequence(longChain)?.steps).toHaveLength(200);
+    const longChainSequence =
+      projectEventToMetadataOnly(longChainEvent).metadata?.[RESIN_COMMAND_SEQUENCE_METADATA_KEY];
+    expect(longChainSequence).toBeDefined();
+    expect(isDeterministicCommandSequence(longChainSequence)).toBe(true);
+
+    const overLengthChain = Array.from({ length: 700 }, () => "x").join(" && ");
+    expect(overLengthChain.length).toBeGreaterThan(2048);
+    const overLengthEvent: NormalizedCommandExecEvent = {
+      ...createBaseHeaders(2),
+      type: "command_exec",
+      command: overLengthChain,
+      args: [],
+      exitCode: 0,
+      durationMs: 10,
+    };
+    expect(() => projectDeterministicCommandSequence(overLengthChain)).not.toThrow();
+    expect(projectDeterministicCommandSequence(overLengthChain)).toBeNull();
+    expect(
+      projectEventToMetadataOnly(overLengthEvent).metadata?.[RESIN_COMMAND_SEQUENCE_METADATA_KEY],
+    ).toBeUndefined();
+  });
+
+  it("carries a shared path parameter across steps as one identifier in projected metadata", () => {
+    const event: NormalizedCommandExecEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      command: "stylua --check src/app.luau && selene src/app.luau",
+      args: [],
+      exitCode: 0,
+      durationMs: 10,
+    };
+
+    const sequence = projectEventToMetadataOnly(event).metadata?.[
+      RESIN_COMMAND_SEQUENCE_METADATA_KEY
+    ] as DeterministicCommandSequence | undefined;
+
+    expect(sequence).toBeDefined();
+    expect(sequence?.steps).toHaveLength(2);
+    const firstStepParameter = sequence?.steps[0]?.argv[1];
+    const secondStepParameter = sequence?.steps[1]?.argv[0];
+    expect(firstStepParameter).toEqual({ parameter: "arg0", role: "path" });
+    expect(secondStepParameter).toEqual({ parameter: "arg0", role: "path" });
+    expect(isDeterministicCommandSequence(sequence)).toBe(true);
+    expect(JSON.stringify(sequence)).not.toContain("src/app.luau");
   });
 
   it("discards preexisting inbound metadata.resinCommandSequence", () => {

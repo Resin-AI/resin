@@ -8,9 +8,7 @@ import {
   type DeterministicCommandSequence,
   DeterministicCommandSequenceSchema,
   type DeterministicCommandStep,
-  type NormalizedCommandExecEvent,
   type NormalizedSessionEvent,
-  type NormalizedToolCallEvent,
   isDeterministicCommandSequence,
   isUnsafeDeterministicCommandExecutable,
   parseDeterministicCommandSequence,
@@ -54,27 +52,54 @@ const FORBIDDEN_CHARS: Record<string, true> = {
 
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+function safeOwnDataProperty(
+  record: unknown,
+  key: string,
+): { ok: true; value: unknown } | { ok: false } {
+  if (typeof record !== "object" || record === null) return { ok: true, value: undefined };
+  const desc = Object.getOwnPropertyDescriptor(record, key);
+  if (desc === undefined) return { ok: true, value: undefined };
+  if (!("value" in desc) || desc.get !== undefined || desc.set !== undefined) {
+    return { ok: false };
+  }
+  return { ok: true, value: desc.value };
+}
+
 /**
  * Extracts a pre-redaction raw shell command string from a normalized session event.
- * Only structurally unambiguous command-bearing events yield a string.
+ * Only structurally unambiguous command-bearing events yield a string. Uses descriptor-safe
+ * property access so hostile objects cannot invoke getters during ingestion, failing closed
+ * if any accessor property is encountered.
  */
 export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent): string | null {
-  if (event.type === "command_exec") {
-    const cmdEvent = event as NormalizedCommandExecEvent;
-    const rawCmd = typeof cmdEvent.command === "string" ? cmdEvent.command.trim() : "";
+  const eventTypeProp = safeOwnDataProperty(event, "type");
+  if (!eventTypeProp.ok) return null;
+  const eventType = eventTypeProp.value;
+
+  if (eventType === "command_exec") {
+    const rawCmdProp = safeOwnDataProperty(event, "command");
+    if (!rawCmdProp.ok) return null;
+    const rawCmd = typeof rawCmdProp.value === "string" ? rawCmdProp.value.trim() : "";
     if (rawCmd.length === 0) return null;
 
-    const rawArgs = Array.isArray(cmdEvent.args) ? cmdEvent.args : [];
+    const rawArgsProp = safeOwnDataProperty(event, "args");
+    if (!rawArgsProp.ok) return null;
+    const rawArgs = Array.isArray(rawArgsProp.value) ? rawArgsProp.value : [];
 
     // Treat an exact `-c`/login-command argv shape as a command wrapper without
     // requiring the wrapper executable to appear in a fixed name catalog.
     if (rawArgs.length > 0) {
+      const arg0Prop = safeOwnDataProperty(rawArgs, "0");
+      const arg1Prop = safeOwnDataProperty(rawArgs, "1");
+      if (!arg0Prop.ok || !arg1Prop.ok) return null;
+      const arg0 = arg0Prop.value;
+      const arg1 = arg1Prop.value;
       if (
         rawArgs.length === 2 &&
-        (rawArgs[0] === "-c" || rawArgs[0] === "-lc" || rawArgs[0] === "-cl") &&
-        typeof rawArgs[1] === "string"
+        (arg0 === "-c" || arg0 === "-lc" || arg0 === "-cl") &&
+        typeof arg1 === "string"
       ) {
-        return rawArgs[1].trim() || null;
+        return arg1.trim() || null;
       }
       // Never reconstruct general structured argv by string concatenation:
       // an argument containing `&&` must remain data, not become shell syntax.
@@ -85,33 +110,40 @@ export function extractRawCommandStringFromEvent(event: NormalizedSessionEvent):
     return rawCmd;
   }
 
-  if (event.type === "tool_call") {
-    const toolEvent = event as NormalizedToolCallEvent;
-
-    const params = toolEvent.parameters;
+  if (eventType === "tool_call") {
+    const paramsProp = safeOwnDataProperty(event, "parameters");
+    if (!paramsProp.ok) return null;
+    const params = paramsProp.value;
     if (typeof params !== "object" || params === null || Array.isArray(params)) {
       return null;
     }
 
-    const record = params as Record<string, unknown>;
-
     // Accept an exact command-wrapper argv shape for any command-bearing tool;
     // the structural shape, not a fixed wrapper/tool-name list, controls extraction.
-    const directArgs = record.args;
+    const directArgsProp = safeOwnDataProperty(params, "args");
+    if (!directArgsProp.ok) return null;
+    const directArgs = directArgsProp.value;
     if (Array.isArray(directArgs) && directArgs.length > 0) {
+      const arg0Prop = safeOwnDataProperty(directArgs, "0");
+      const arg1Prop = safeOwnDataProperty(directArgs, "1");
+      if (!arg0Prop.ok || !arg1Prop.ok) return null;
+      const arg0 = arg0Prop.value;
+      const arg1 = arg1Prop.value;
       if (
         directArgs.length === 2 &&
-        (directArgs[0] === "-c" || directArgs[0] === "-lc" || directArgs[0] === "-cl") &&
-        typeof directArgs[1] === "string"
+        (arg0 === "-c" || arg0 === "-lc" || arg0 === "-cl") &&
+        typeof arg1 === "string"
       ) {
-        return directArgs[1].trim() || null;
+        return arg1.trim() || null;
       }
       return null;
     }
 
     let foundCmd: string | null = null;
     for (const key of COMMAND_PARAMETER_KEYS) {
-      const val = record[key];
+      const valProp = safeOwnDataProperty(params, key);
+      if (!valProp.ok) return null;
+      const val = valProp.value;
       if (typeof val === "string" && val.trim().length > 0) {
         if (foundCmd !== null && foundCmd !== val.trim()) {
           // Multiple conflicting command parameters -> ambiguous, reject
@@ -286,13 +318,19 @@ export function projectDeterministicCommandSequence(
   flushStep();
 
   // If trailing && resulted in no following step, or no steps at all
-  if (
-    stepTokensList.length === 0 ||
-    stepTokensList.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps
-  ) {
+  if (stepTokensList.length === 0) {
     return null;
   }
   if (stepTokensList.some((tokens) => tokens.some((token) => token.length === 0))) {
+    return null;
+  }
+  // Length is bounded by the sequence argument budget and the raw command-length check above,
+  // never by a fixed command count: a longer workflow stays representable as long as it fits.
+  let totalArguments = 0;
+  for (const tokens of stepTokensList) {
+    totalArguments += Math.max(tokens.length - 1, 0);
+  }
+  if (totalArguments > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
     return null;
   }
   if (
@@ -305,9 +343,8 @@ export function projectDeterministicCommandSequence(
     return null;
   }
   const normalizedProfile = normalizeCommandProfile(trimmed, {
-    maxTokens:
-      DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps *
-      (DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs + 2),
+    // Budget accounts for every executable, every argument, and each inter-step `&&` separator.
+    maxTokens: totalArguments + 2 * stepTokensList.length - 1,
     maxLength: 2048,
   });
   if (normalizedProfile.length === 0 || normalizedProfile.length >= 2048) {
@@ -344,14 +381,27 @@ export function projectDeterministicCommandSequence(
   if (normalizedStep.length === 0) return null;
   normalizedSteps.push(normalizedStep);
 
-  if (
-    normalizedSteps.length !== stepTokensList.length ||
-    normalizedSteps.length > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps
-  ) {
+  if (normalizedSteps.length !== stepTokensList.length) {
     return null;
   }
 
   let paramIndex = 0;
+  const sharedPathParameters = new Map<string, string>();
+  const allocateParameter = (role: "path" | "string" | "number", rawValue: string): string => {
+    if (role !== "path") {
+      return `arg${paramIndex++}`;
+    }
+    // A shared identifier names one input value. The prefix that carries an occurrence is
+    // positional, so it stays out of the identity: `--input=x` and `--output=x` share one input.
+    const existing = sharedPathParameters.get(rawValue);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const name = `arg${paramIndex++}`;
+    sharedPathParameters.set(rawValue, name);
+    return name;
+  };
+
   const parameterValueSha256: Record<string, string> = {};
   const steps: DeterministicCommandStep[] = [];
   for (let stepIndex = 0; stepIndex < normalizedSteps.length; stepIndex++) {
@@ -374,7 +424,7 @@ export function projectDeterministicCommandSequence(
       const rawArgument = rawArgumentTokens[argumentIndex] as string;
       const role = placeholderRole(token);
       if (role !== null) {
-        const parameter = `arg${paramIndex++}`;
+        const parameter = allocateParameter(role, rawArgument);
         argv.push({ parameter, role });
         if (role === "string") {
           parameterValueSha256[parameter] = valueSha256(rawArgument);
@@ -387,7 +437,7 @@ export function projectDeterministicCommandSequence(
         const prefix = prefixedParameter[1] as string;
         const prefixedRole = placeholderRole(prefixedParameter[2] as string);
         if (prefixedRole === null || !rawArgument.startsWith(prefix)) return null;
-        const parameter = `arg${paramIndex++}`;
+        const parameter = allocateParameter(prefixedRole, rawArgument.slice(prefix.length));
         argv.push({
           prefix,
           parameter,

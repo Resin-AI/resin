@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  DETERMINISTIC_COMMAND_SEQUENCE_LIMITS,
   type DeterministicCommandSequence,
   DeterministicCommandSequenceSchema,
   canonicalDeterministicCommandSequenceDigest,
   isDeterministicCommandSequence,
   parseDeterministicCommandSequence,
   safeParseDeterministicCommandSequence,
+  tryCanonicalDeterministicCommandSequenceDigest,
 } from "../src/index.js";
 
 describe("DeterministicCommandSequenceSchema", () => {
@@ -366,8 +368,8 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("rejects duplicate or non-sequential parameter identifiers", () => {
-    const duplicateParams = {
+  it("accepts shared parameter identifiers across steps with identical role and prefix", () => {
+    const sharedParams = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
@@ -382,16 +384,157 @@ describe("DeterministicCommandSequenceSchema", () => {
           executable: "lune",
           argv: [
             { literal: "run" },
-            { parameter: "arg0", role: "path" }, // Reused arg0 instead of arg1
+            { parameter: "arg0", role: "path" }, // Reused arg0 with same role and prefix
           ],
         },
       ],
     };
 
-    const res = safeParseDeterministicCommandSequence(duplicateParams);
-    expect(res.success).toBe(false);
+    const res = safeParseDeterministicCommandSequence(sharedParams);
+    expect(res.success).toBe(true);
+    expect(isDeterministicCommandSequence(sharedParams)).toBe(true);
   });
 
+  it("rejects non-sequential first appearances of parameter identifiers", () => {
+    const nonSequential = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg1", role: "path" }], // Expected arg0
+        },
+      ],
+    };
+
+    const res = safeParseDeterministicCommandSequence(nonSequential);
+    expect(res.success).toBe(false);
+    expect(res.success ? "" : res.error.issues.map((issue) => issue.message).join("; ")).toContain(
+      "first appears at position 0: expected 'arg0'",
+    );
+  });
+
+  it("accepts parameter identifier reuse across differing prefixes with one role", () => {
+    const sharedAcrossPrefixes = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--input=", parameter: "arg0", role: "path" }],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--output=", parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+
+    const res = safeParseDeterministicCommandSequence(sharedAcrossPrefixes);
+    expect(res.success).toBe(true);
+    expect(isDeterministicCommandSequence(sharedAcrossPrefixes)).toBe(true);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(sharedAcrossPrefixes)).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+  });
+
+  it("canonicalizes shared-parameter linkage distinctly from an unlinked sequence", () => {
+    const linked: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--input=", parameter: "arg0", role: "path" }],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--output=", parameter: "arg0", role: "path" }],
+        },
+      ],
+    };
+    // Same evidence with object keys written in a different insertion order must canonicalize equal.
+    const linkedReordered: DeterministicCommandSequence = {
+      control: "and-then",
+      kind: "command-sequence",
+      schemaVersion: 1,
+      steps: [
+        {
+          executable: "lune",
+          id: "step0",
+          argv: [{ literal: "run" }, { role: "path", prefix: "--input=", parameter: "arg0" }],
+        },
+        {
+          executable: "lune",
+          id: "step1",
+          argv: [{ literal: "run" }, { role: "path", parameter: "arg0", prefix: "--output=" }],
+        },
+      ],
+    };
+    const unlinked: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--input=", parameter: "arg0", role: "path" }],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { prefix: "--output=", parameter: "arg1", role: "path" }],
+        },
+      ],
+    };
+
+    const linkedDigest = canonicalDeterministicCommandSequenceDigest(linked);
+    expect(linkedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(canonicalDeterministicCommandSequenceDigest(linkedReordered)).toBe(linkedDigest);
+    expect(canonicalDeterministicCommandSequenceDigest(unlinked)).not.toBe(linkedDigest);
+
+    expect(isDeterministicCommandSequence(linked)).toBe(true);
+    expect(isDeterministicCommandSequence(linkedReordered)).toBe(true);
+    expect(isDeterministicCommandSequence(unlinked)).toBe(true);
+  });
+
+  it("rejects parameter identifier reuse with conflicting role", () => {
+    const conflictingRole = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg0", role: "path" }],
+        },
+        {
+          id: "step1",
+          executable: "lune",
+          argv: [{ literal: "run" }, { parameter: "arg0", role: "string" }],
+        },
+      ],
+      parameterValueSha256: {
+        arg0: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    };
+
+    const resRole = safeParseDeterministicCommandSequence(conflictingRole);
+    expect(resRole.success).toBe(false);
+    expect(
+      resRole.success ? "" : resRole.error.issues.map((issue) => issue.message).join("; "),
+    ).toContain("conflicting role");
+  });
   it("rejects non-sequential step IDs", () => {
     const wrongStepId = {
       schemaVersion: 1,
@@ -611,18 +754,41 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(isDeterministicCommandSequence(extraKey)).toBe(false);
   });
 
-  it("rejects sequences exceeding step limits", () => {
-    const nineSteps = {
+  it("accepts workflows longer than the former eight-step ceiling", () => {
+    const twelveSteps = {
       schemaVersion: 1,
       kind: "command-sequence",
       control: "and-then",
-      steps: Array.from({ length: 9 }, (_, i) => ({
+      steps: Array.from({ length: 12 }, (_, i) => ({
         id: `step${i}`,
         executable: "git",
         argv: [{ literal: "status" }],
       })),
     };
-    expect(isDeterministicCommandSequence(nineSteps)).toBe(false);
+    expect(isDeterministicCommandSequence(twelveSteps)).toBe(true);
+  });
+
+  it("rejects sequences whose total argument count exceeds the evidence budget", () => {
+    let parameterIndex = 0;
+    const steps = Array.from({ length: 60 }, (_, i) => ({
+      id: `step${i}`,
+      executable: "stylua",
+      argv: Array.from({ length: 5 }, () => ({
+        parameter: `arg${parameterIndex++}`,
+        role: "path",
+      })),
+    }));
+    const oversized = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps,
+    };
+    const result = safeParseDeterministicCommandSequence(oversized);
+    expect(result.success).toBe(false);
+    expect(
+      result.success ? "" : result.error.issues.map((issue) => issue.message).join("; "),
+    ).toContain("evidence budget");
   });
 
   it("rejects hostile accessors without invoking getters", () => {
@@ -687,5 +853,180 @@ describe("DeterministicCommandSequenceSchema", () => {
     const customInstance = new CustomSequence();
     expect(isDeterministicCommandSequence(customInstance)).toBe(false);
     expect(safeParseDeterministicCommandSequence(customInstance).success).toBe(false);
+  });
+  it("validates and digests an 8x32 argument chain at the exact 256 argument budget", () => {
+    const maxArgsPerStep = DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs; // 32
+    const stepCount = 8;
+    // 8 steps x 32 args = exactly 256 arguments (maxSequenceArgs)
+    const chain8x32: DeterministicCommandSequence = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: Array.from({ length: stepCount }, (_, stepIndex) => ({
+        id: `step${stepIndex}`,
+        executable: `tool${stepIndex}`,
+        argv: Array.from({ length: maxArgsPerStep }, (_, argIndex) => ({
+          literal: `flag-${stepIndex}-${argIndex}`,
+        })),
+      })),
+    };
+
+    expect(isDeterministicCommandSequence(chain8x32)).toBe(true);
+    const parsed = parseDeterministicCommandSequence(chain8x32);
+    expect(parsed.steps).toHaveLength(8);
+    const totalArgs = parsed.steps.reduce((acc, step) => acc + step.argv.length, 0);
+    expect(totalArgs).toBe(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs);
+
+    const digest = canonicalDeterministicCommandSequenceDigest(chain8x32);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(chain8x32)).toBe(digest);
+  });
+
+  it("rejects a sequence exceeding the 256 argument budget by one argument", () => {
+    // 8 steps x 32 args = 256 args; plus 1 step x 1 arg = 257 args
+    const oversizedByOne = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        ...Array.from({ length: 8 }, (_, stepIndex) => ({
+          id: `step${stepIndex}`,
+          executable: `tool${stepIndex}`,
+          argv: Array.from({ length: 32 }, (_, argIndex) => ({
+            literal: `flag-${stepIndex}-${argIndex}`,
+          })),
+        })),
+        {
+          id: "step8",
+          executable: "tool8",
+          argv: [{ literal: "extra-arg" }],
+        },
+      ],
+    };
+
+    const result = safeParseDeterministicCommandSequence(oversizedByOne);
+    expect(result.success).toBe(false);
+    expect(
+      result.success ? "" : result.error.issues.map((issue) => issue.message).join("; "),
+    ).toContain(
+      `Command sequence carries 257 arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
+    );
+  });
+
+  it("fails explicitly without throw for 2500 zero-argument steps exceeding the structural node budget", () => {
+    const zeroArg2500 = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: Array.from({ length: 2500 }, (_, i) => ({
+        id: `step${i}`,
+        executable: "git",
+        argv: [],
+      })),
+    };
+
+    expect(isDeterministicCommandSequence(zeroArg2500)).toBe(false);
+    const res = safeParseDeterministicCommandSequence(zeroArg2500);
+    expect(res.success).toBe(false);
+    // Safe parse must fail explicitly without throwing
+    expect(res.error).toBeDefined();
+    // Fail-closed digest must return undefined without throwing
+    expect(tryCanonicalDeterministicCommandSequenceDigest(zeroArg2500)).toBeUndefined();
+    // parseDeterministicCommandSequence throws a ZodError, not an unhandled serializer Error
+    expect(() => parseDeterministicCommandSequence(zeroArg2500)).toThrow();
+  });
+
+  it("validates sequence near node budget boundary and rejects sequence exceeding it", () => {
+    // Each zero-arg step is 4 nodes; root is 5 nodes.
+    // 2498 steps: 2498 * 4 + 5 = 9997 nodes <= 10,000 maxEvidenceNodes
+    const boundaryValid = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: Array.from({ length: 2498 }, (_, i) => ({
+        id: `step${i}`,
+        executable: "git",
+        argv: [],
+      })),
+    };
+    expect(isDeterministicCommandSequence(boundaryValid)).toBe(true);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(boundaryValid)).toMatch(/^[a-f0-9]{64}$/);
+
+    // 2501 steps: 2501 * 4 + 5 = 10,009 nodes > 10,000 maxEvidenceNodes
+    const boundaryExceeded = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: Array.from({ length: 2501 }, (_, i) => ({
+        id: `step${i}`,
+        executable: "git",
+        argv: [],
+      })),
+    };
+    expect(isDeterministicCommandSequence(boundaryExceeded)).toBe(false);
+    expect(safeParseDeterministicCommandSequence(boundaryExceeded).success).toBe(false);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(boundaryExceeded)).toBeUndefined();
+  });
+
+  it("tryCanonicalDeterministicCommandSequenceDigest handles hostile getters and oversized payloads fail-closed", () => {
+    let getterInvoked = false;
+    const hostile = {
+      get schemaVersion() {
+        getterInvoked = true;
+        return 1;
+      },
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [{ id: "step0", executable: "git", argv: [] }],
+    };
+
+    expect(tryCanonicalDeterministicCommandSequenceDigest(hostile)).toBeUndefined();
+    expect(getterInvoked).toBe(false);
+
+    const malformed = { notASequence: true };
+    expect(tryCanonicalDeterministicCommandSequenceDigest(malformed)).toBeUndefined();
+    expect(tryCanonicalDeterministicCommandSequenceDigest(null)).toBeUndefined();
+    expect(tryCanonicalDeterministicCommandSequenceDigest(undefined)).toBeUndefined();
+    expect(tryCanonicalDeterministicCommandSequenceDigest("plain string")).toBeUndefined();
+  });
+
+  it("fails closed without throwing when introspection traps throw", () => {
+    const trapThrowing = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error("hostile prototype trap");
+        },
+        ownKeys() {
+          throw new Error("hostile ownKeys trap");
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error("hostile descriptor trap");
+        },
+      },
+    );
+
+    expect(isDeterministicCommandSequence(trapThrowing)).toBe(false);
+    expect(safeParseDeterministicCommandSequence(trapThrowing).success).toBe(false);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(trapThrowing)).toBeUndefined();
+    expect(() => parseDeterministicCommandSequence(trapThrowing)).toThrow();
+  });
+
+  it("rejects payloads nested beyond the pinned evidence depth without throwing", () => {
+    let deep: Record<string, unknown> = { leaf: "value" };
+    for (let i = 0; i < 200; i++) {
+      deep = { nested: deep };
+    }
+    const overDeep = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [{ id: "step0", executable: "git", argv: [deep] }],
+    };
+
+    expect(isDeterministicCommandSequence(overDeep)).toBe(false);
+    expect(safeParseDeterministicCommandSequence(overDeep).success).toBe(false);
+    expect(tryCanonicalDeterministicCommandSequenceDigest(overDeep)).toBeUndefined();
+    expect(() => parseDeterministicCommandSequence(overDeep)).toThrow();
   });
 });

@@ -8385,58 +8385,69 @@ function isUnsafeDeterministicCommandExecutable(executable) {
 function isForbiddenKey(key) {
   return key === "__proto__" || key === "constructor" || key === "prototype";
 }
-function isDescriptorSafePlainTree(value, seen = /* @__PURE__ */ new Set()) {
-  if (value === null || typeof value !== "object") {
-    return true;
-  }
-  if (seen.has(value)) {
-    return false;
-  }
-  seen.add(value);
-  const proto = Object.getPrototypeOf(value);
-  if (Array.isArray(value)) {
-    if (proto !== Array.prototype) {
+function isDescriptorSafePlainTree(value, options = {}) {
+  const maxDepth = options.maxDepth ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceDepth;
+  const maxNodes = options.maxNodes ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes;
+  let nodes = 0;
+  const seen = /* @__PURE__ */ new Set();
+  const walk = (current, depth) => {
+    nodes++;
+    if (nodes > maxNodes || depth > maxDepth) {
       return false;
     }
-    const propNames2 = Object.getOwnPropertyNames(value);
-    for (let i = 0; i < propNames2.length; i++) {
-      const key = propNames2[i];
-      if (key === "length")
-        continue;
-      if (isForbiddenKey(key))
-        return false;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc)
-        return false;
-      if (!("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
+    if (current === null || typeof current !== "object") {
+      return true;
+    }
+    if (seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    const proto = Object.getPrototypeOf(current);
+    if (Array.isArray(current)) {
+      if (proto !== Array.prototype) {
         return false;
       }
-      if (!isDescriptorSafePlainTree(desc.value, seen)) {
+      const propNames2 = Object.getOwnPropertyNames(current);
+      for (let i = 0; i < propNames2.length; i++) {
+        const key = propNames2[i];
+        if (key === "length")
+          continue;
+        if (isForbiddenKey(key))
+          return false;
+        const desc = Object.getOwnPropertyDescriptor(current, key);
+        if (!desc || !("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
+          return false;
+        }
+        if (!walk(desc.value, depth + 1)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (proto !== null && proto !== Object.prototype) {
+      return false;
+    }
+    const propNames = Object.getOwnPropertyNames(current);
+    for (let i = 0; i < propNames.length; i++) {
+      const key = propNames[i];
+      if (isForbiddenKey(key)) {
+        return false;
+      }
+      const desc = Object.getOwnPropertyDescriptor(current, key);
+      if (!desc || !("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
+        return false;
+      }
+      if (!walk(desc.value, depth + 1)) {
         return false;
       }
     }
     return true;
-  }
-  if (proto !== null && proto !== Object.prototype) {
+  };
+  try {
+    return walk(value, 0);
+  } catch {
     return false;
   }
-  const propNames = Object.getOwnPropertyNames(value);
-  for (let i = 0; i < propNames.length; i++) {
-    const key = propNames[i];
-    if (isForbiddenKey(key)) {
-      return false;
-    }
-    const desc = Object.getOwnPropertyDescriptor(value, key);
-    if (!desc)
-      return false;
-    if (!("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
-      return false;
-    }
-    if (!isDescriptorSafePlainTree(desc.value, seen)) {
-      return false;
-    }
-  }
-  return true;
 }
 var DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION, DETERMINISTIC_COMMAND_SEQUENCE_KIND, DETERMINISTIC_COMMAND_SEQUENCE_CONTROL, DETERMINISTIC_COMMAND_SEQUENCE_LIMITS, DeterministicCommandParameterRoleSchema, DeterministicCommandArgLiteralSchema, DeterministicCommandArgParameterSchema, DeterministicCommandArgPrefixedParameterSchema, DeterministicCommandArgSchema, UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES, DeterministicCommandExecutableSchema, DeterministicCommandStepSchema, RawDeterministicCommandSequenceSchema, DeterministicCommandSequenceSchema;
 var init_deterministic_command_sequence = __esm({
@@ -8448,10 +8459,14 @@ var init_deterministic_command_sequence = __esm({
     DETERMINISTIC_COMMAND_SEQUENCE_KIND = "command-sequence";
     DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then";
     DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
-      /** Maximum number of command steps in a single sequence. */
-      maxSteps: 8,
       /** Maximum number of arguments in a single step. */
       maxArgs: 32,
+      /**
+       * Maximum number of arguments across every step of one sequence. This is a size limit on the
+       * evidence (and therefore on compiled source and invocation cost), not a bound on how many
+       * commands a useful workflow may contain.
+       */
+      maxSequenceArgs: 256,
       /** Maximum length of an executable basename. */
       maxExecutableLength: 128,
       /** Maximum length of a literal token. */
@@ -8459,7 +8474,14 @@ var init_deterministic_command_sequence = __esm({
       /** Maximum length of a parameter identifier. */
       maxParameterLength: 64,
       /** Maximum length of a step identifier. */
-      maxStepIdLength: 32
+      maxStepIdLength: 32,
+      /**
+       * Structural bounds for untrusted evidence: maximum node count and nesting depth accepted while
+       * walking a payload descriptor-safely, pinned to the same numbers used for canonical
+       * serialization so every accepted sequence can always be digested without throwing.
+       */
+      maxEvidenceNodes: 1e4,
+      maxEvidenceDepth: 64
     };
     DeterministicCommandParameterRoleSchema = external_exports.enum(["path", "string", "number"]);
     DeterministicCommandArgLiteralSchema = external_exports.object({
@@ -8569,14 +8591,15 @@ var init_deterministic_command_sequence = __esm({
       schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
       kind: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
       control: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
-      steps: external_exports.array(DeterministicCommandStepSchema).min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSteps),
+      steps: external_exports.array(DeterministicCommandStepSchema).min(1),
       parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
     }).strict().superRefine((seq, ctx) => {
-      let expectedParamIndex = 0;
-      const seenParamNames = /* @__PURE__ */ new Set();
+      const seenParamNames = /* @__PURE__ */ new Map();
       const stringParamNames = /* @__PURE__ */ new Set();
+      let totalArgs = 0;
       for (let i = 0; i < seq.steps.length; i++) {
         const step = seq.steps[i];
+        totalArgs += step.argv.length;
         const expectedStepId = `step${i}`;
         if (step.id !== expectedStepId) {
           ctx.addIssue({
@@ -8588,29 +8611,58 @@ var init_deterministic_command_sequence = __esm({
         for (let j = 0; j < step.argv.length; j++) {
           const arg = step.argv[j];
           if ("parameter" in arg) {
-            const expectedParamName = `arg${expectedParamIndex}`;
-            if (seenParamNames.has(arg.parameter)) {
+            const existingRole = seenParamNames.get(arg.parameter);
+            if (existingRole === void 0) {
+              const expectedParamName = `arg${seenParamNames.size}`;
+              if (arg.parameter !== expectedParamName) {
+                ctx.addIssue({
+                  code: external_exports.ZodIssueCode.custom,
+                  message: `Parameter identifier '${arg.parameter}' first appears at position ${seenParamNames.size}: expected '${expectedParamName}'`,
+                  path: ["steps", i, "argv", j, "parameter"]
+                });
+              }
+              seenParamNames.set(arg.parameter, arg.role);
+            } else if (existingRole !== arg.role) {
               ctx.addIssue({
                 code: external_exports.ZodIssueCode.custom,
-                message: `Duplicate parameter identifier '${arg.parameter}' in sequence. Each input identifier must be positional and unique.`,
-                path: ["steps", i, "argv", j, "parameter"]
+                message: `Parameter '${arg.parameter}' is reused with conflicting role: expected '${existingRole}', got '${arg.role}'`,
+                path: ["steps", i, "argv", j]
               });
-            } else {
-              seenParamNames.add(arg.parameter);
             }
             if (arg.role === "string") {
               stringParamNames.add(arg.parameter);
             }
-            if (arg.parameter !== expectedParamName) {
-              ctx.addIssue({
-                code: external_exports.ZodIssueCode.custom,
-                message: `Positional parameter identifier mismatch at position ${expectedParamIndex}: expected '${expectedParamName}', got '${arg.parameter}'`,
-                path: ["steps", i, "argv", j, "parameter"]
-              });
-            }
-            expectedParamIndex++;
           }
         }
+      }
+      if (totalArgs > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: `Command sequence carries ${totalArgs} arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
+          path: ["steps"]
+        });
+      }
+      let totalNodes = 5 + (seq.parameterValueSha256 ? 1 + Object.keys(seq.parameterValueSha256).length : 0);
+      for (let i = 0; i < seq.steps.length; i++) {
+        const step = seq.steps[i];
+        totalNodes += 4;
+        for (let j = 0; j < step.argv.length; j++) {
+          const arg = step.argv[j];
+          if ("prefix" in arg) {
+            totalNodes += 4;
+          } else if ("parameter" in arg) {
+            totalNodes += 3;
+          } else {
+            totalNodes += 2;
+          }
+        }
+      }
+      if (totalNodes > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: `Command sequence carries ${totalNodes} structural nodes; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes}`,
+          path: ["steps"]
+        });
       }
       for (const parameter of stringParamNames) {
         if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
