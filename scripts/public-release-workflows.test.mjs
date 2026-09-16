@@ -858,7 +858,7 @@ describe("Public Release Workflows Contract", () => {
   });
 
   describe("Channel renewal authorization", () => {
-    it("keeps scheduled expiry monitoring read-only and channel writes manually approved", () => {
+    it("keeps monitoring read-only and scheduled renewal inside existing production custody", () => {
       const workflow = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"));
       expect(workflow).not.toBeNull();
       const { monitor, renew } = workflow.doc.jobs;
@@ -873,7 +873,10 @@ describe("Public Release Workflows Contract", () => {
       expect(renew.env?.RESIN_RELEASE_PRIVATE_KEY_PEM).toBeUndefined();
       const signer = renew.steps.find((step) => step.env?.RESIN_RELEASE_PRIVATE_KEY_PEM);
       expect(signer.run).toContain("renew-channel");
-      expect(signer.env.CONFIRM_RENEWAL).toBe("${{ inputs.confirmation }}");
+      expect(signer.env.CONFIRM_RENEWAL).toBe(
+        "${{ steps.renewal-authorization.outputs.confirmation }}",
+      );
+      expect(signer.env.OPERATION).toBe("${{ steps.renewal-authorization.outputs.operation }}");
       expect(signer.run).toContain('--confirmation "$CONFIRM_RENEWAL"');
       expect(monitor.permissions).toEqual({ contents: "read" });
       expect(monitor.environment).toBeUndefined();
@@ -881,6 +884,146 @@ describe("Public Release Workflows Contract", () => {
       expect(JSON.stringify(monitor)).toContain("check-channel-expiry");
       expect(JSON.stringify(monitor)).toContain("::error::");
       expect(JSON.stringify(monitor)).not.toContain("continue-on-error");
+    });
+
+    function authorizeRenewal(overrides = {}) {
+      const workflow = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"));
+      const guard = workflow.doc.jobs.renew.steps.find(
+        (step) => step.id === "renewal-authorization",
+      );
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "resin-renewal-auth-"));
+      const outputPath = path.join(directory, "outputs");
+      try {
+        const result = spawnSync("bash", ["-c", guard.run], {
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            GITHUB_OUTPUT: outputPath,
+            EVENT_NAME: "schedule",
+            EVENT_SCHEDULE: "47 */12 * * *",
+            WORKFLOW_REF: "refs/heads/main",
+            REF_PROTECTED: "true",
+            OPERATION: "",
+            CONFIRM_RENEWAL: "",
+            ...overrides,
+          },
+        });
+        return {
+          status: result.status,
+          outputs: fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "",
+        };
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    }
+
+    it("authorizes only the exact protected-main renewal schedule and never scheduled restore", () => {
+      expect(authorizeRenewal()).toEqual({
+        status: 0,
+        outputs: "operation=renew\nconfirmation=RENEW_CHANNEL_PRODUCTION\n",
+      });
+      for (const overrides of [
+        { EVENT_SCHEDULE: "17 */3 * * *" },
+        { EVENT_SCHEDULE: "" },
+        { EVENT_NAME: "push" },
+        { EVENT_NAME: "pull_request_target" },
+        { WORKFLOW_REF: "refs/heads/other" },
+        { WORKFLOW_REF: "refs/tags/v1.0.0" },
+        { REF_PROTECTED: "false" },
+        { OPERATION: "restore", CONFIRM_RENEWAL: "RESTORE_EXPIRED_CHANNEL_PRODUCTION" },
+      ]) {
+        expect(authorizeRenewal(overrides)).toEqual({ status: 1, outputs: "" });
+      }
+    });
+
+    it("retains separate explicit manual renew and restore confirmations", () => {
+      for (const [operation, confirmation] of [
+        ["renew", "RENEW_CHANNEL_PRODUCTION"],
+        ["restore", "RESTORE_EXPIRED_CHANNEL_PRODUCTION"],
+      ]) {
+        expect(
+          authorizeRenewal({
+            EVENT_NAME: "workflow_dispatch",
+            EVENT_SCHEDULE: "",
+            OPERATION: operation,
+            CONFIRM_RENEWAL: confirmation,
+          }),
+        ).toEqual({ status: 0, outputs: `operation=${operation}\nconfirmation=${confirmation}\n` });
+        expect(
+          authorizeRenewal({
+            EVENT_NAME: "workflow_dispatch",
+            EVENT_SCHEDULE: "",
+            OPERATION: operation,
+            CONFIRM_RENEWAL: "",
+          }),
+        ).toEqual({ status: 1, outputs: "" });
+      }
+      for (const operation of ["check", "notification-drill", "unexpected"]) {
+        expect(
+          authorizeRenewal({
+            EVENT_NAME: "workflow_dispatch",
+            OPERATION: operation,
+            CONFIRM_RENEWAL: "RENEW_CHANNEL_PRODUCTION",
+          }),
+        ).toEqual({ status: 1, outputs: "" });
+      }
+    });
+
+    it("keeps renewal independent, retains correlated receipts, and verifies freshness without signing credentials", () => {
+      const { renew } = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"))
+        .doc.jobs;
+      expect(renew.needs).toBeUndefined();
+      expect(renew.steps[0].id).toBe("renewal-authorization");
+      const signer = renew.steps.find((step) => step.env?.RESIN_RELEASE_PRIVATE_KEY_PEM);
+      expect(signer.run.match(/scripts\/publish-public-release\.mjs renew-channel/g)).toHaveLength(
+        1,
+      );
+      expect(signer.run).not.toMatch(/retry|while|workflow run|dispatches/);
+      const upload = renew.steps.find((step) => step.uses?.startsWith("actions/upload-artifact"));
+      expect(upload.with.name).toBe(
+        "channel-renewal-receipt-${{ github.run_id }}-${{ github.run_attempt }}",
+      );
+      expect(upload.with["if-no-files-found"]).toBe("error");
+      const readback = renew.steps.at(-1);
+      expect(readback.run).toContain("check-channel-expiry");
+      expect(readback.env).toBeUndefined();
+      expect(JSON.stringify(readback)).not.toMatch(/secrets\.|restore-expired|continue-on-error/);
+    });
+
+    it("executes renewal once without restore fallback and propagates publisher failures", () => {
+      const { renew } = loadWorkflow(path.join(ROOT_DIR, ".github/workflows/channel-renewal.yml"))
+        .doc.jobs;
+      const signer = renew.steps.find((step) => step.env?.RESIN_RELEASE_PRIVATE_KEY_PEM);
+      for (const exitCode of [0, 1]) {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), "resin-scheduled-renewal-"));
+        try {
+          const calls = path.join(directory, "calls");
+          fs.writeFileSync(
+            path.join(directory, "node"),
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$NODE_CALLS"\nprintf \'{"status":"verified"}\\n\'\nexit "$NODE_EXIT"\n',
+            { mode: 0o700 },
+          );
+          const result = spawnSync("bash", ["-c", signer.run], {
+            encoding: "utf8",
+            env: {
+              PATH: `${directory}:${process.env.PATH}`,
+              OPERATION: "renew",
+              CONFIRM_RENEWAL: "RENEW_CHANNEL_PRODUCTION",
+              RUNNER_TEMP: directory,
+              GITHUB_STEP_SUMMARY: path.join(directory, "summary"),
+              NODE_CALLS: calls,
+              NODE_EXIT: String(exitCode),
+            },
+          });
+          expect(result.status).toBe(exitCode);
+          expect(fs.readFileSync(calls, "utf8")).toBe(
+            "--experimental-strip-types scripts/publish-public-release.mjs renew-channel --confirmation RENEW_CHANNEL_PRODUCTION\n",
+          );
+          expect(fs.existsSync(path.join(directory, "summary"))).toBe(exitCode === 0);
+        } finally {
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      }
     });
   });
 
@@ -914,12 +1057,52 @@ describe("Public Release Workflows Contract", () => {
       }
       expect(
         predicate(monitor.if, {
-          github: { event_name: "schedule" },
+          github: { event_name: "schedule", event: { schedule: "17 */3 * * *" } },
           inputs: {},
         }),
       ).toBe(true);
       expect(predicate(renew.if, { inputs: { operation: "notification-drill" } })).toBe(false);
-      expect(workflow.doc.on.schedule).toEqual([{ cron: "17 */3 * * *" }]);
+      expect(workflow.doc.on.schedule).toEqual([
+        { cron: "17 */3 * * *" },
+        { cron: "47 */12 * * *" },
+      ]);
+    });
+
+    it("selects exactly one independent job for each known schedule and rejects unauthorized renewal refs", () => {
+      for (const schedule of ["17 */3 * * *", "47 */12 * * *", "0 * * * *", ""]) {
+        const context = {
+          github: {
+            event_name: "schedule",
+            event: { schedule },
+            ref: "refs/heads/main",
+            ref_protected: true,
+          },
+          inputs: {},
+        };
+        expect(predicate(monitor.if, context)).toBe(schedule === "17 */3 * * *");
+        expect(predicate(renew.if, context)).toBe(schedule === "47 */12 * * *");
+      }
+      for (const event of ["push", "pull_request", "workflow_dispatch", "schedule"]) {
+        for (const ref of ["refs/heads/main", "refs/heads/other"]) {
+          for (const protectedRef of [true, false]) {
+            expect(
+              predicate(renew.if, {
+                github: {
+                  event_name: event,
+                  event: { schedule: "47 */12 * * *" },
+                  ref,
+                  ref_protected: protectedRef,
+                },
+                inputs: { operation: "renew" },
+              }),
+            ).toBe(
+              (event === "schedule" || event === "workflow_dispatch") &&
+                ref === "refs/heads/main" &&
+                protectedRef,
+            );
+          }
+        }
+      }
     });
 
     it("requires confirmed protected-main drills and does not send on rejected diagnostic requests", () => {
