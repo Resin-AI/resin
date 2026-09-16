@@ -18,9 +18,10 @@ export const DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then" as const;
 /**
  * Hard limits for deterministic command sequences.
  *
- * Limits are size- and resource-based, never a command-count cap: a workflow may be as long as the
- * user's work actually is. Evidence growth is bounded by the total argument budget, the per-token
- * length limits, and the recorder's own command-length bound.
+ * Limits are size- and resource-based, never a fixed command-count cap: a workflow may be as long
+ * as the user's work actually is, as long as the whole sequence fits the resource budget.
+ * Evidence growth is bounded by the sequence argument budget, the per-token length limits, the
+ * recorder's own command-length bound, and the pinned canonical serializer bounds.
  */
 export const DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
   /** Maximum number of arguments in a single step. */
@@ -39,8 +40,14 @@ export const DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
   maxParameterLength: 64,
   /** Maximum length of a step identifier. */
   maxStepIdLength: 32,
+  /**
+   * Structural bounds for untrusted evidence: maximum node count and nesting depth accepted while
+   * walking a payload descriptor-safely, pinned to the same numbers used for canonical
+   * serialization so every accepted sequence can always be digested without throwing.
+   */
+  maxEvidenceNodes: 10_000,
+  maxEvidenceDepth: 64,
 } as const;
-
 /** Allowed parameter roles for command arguments. */
 export const DeterministicCommandParameterRoleSchema = z.enum(["path", "string", "number"]);
 
@@ -253,67 +260,91 @@ function isForbiddenKey(key: string): boolean {
   return key === "__proto__" || key === "constructor" || key === "prototype";
 }
 
+/** Options for {@link isDescriptorSafePlainTree}; defaults match the pinned evidence limits. */
+export interface DescriptorSafeTreeOptions {
+  maxDepth?: number;
+  maxNodes?: number;
+}
+
 /**
  * Validates that a value tree consists exclusively of descriptor-safe plain objects,
- * arrays, and primitives. Rejects accessors (getters/setters), forbidden prototype keys,
- * custom prototypes, and circular structures without invoking any getters.
+ * arrays, and primitives within pinned depth and node bounds. Rejects accessors (getters/setters),
+ * forbidden prototype keys, custom prototypes, and circular structures without invoking any
+ * getters.
  */
-export function isDescriptorSafePlainTree(value: unknown, seen = new Set<object>()): boolean {
-  if (value === null || typeof value !== "object") {
-    return true;
-  }
+export function isDescriptorSafePlainTree(
+  value: unknown,
+  options: DescriptorSafeTreeOptions = {},
+): boolean {
+  const maxDepth = options.maxDepth ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceDepth;
+  const maxNodes = options.maxNodes ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes;
+  let nodes = 0;
+  const seen = new Set<object>();
 
-  if (seen.has(value)) {
-    return false;
-  }
-  seen.add(value);
-
-  const proto = Object.getPrototypeOf(value);
-
-  if (Array.isArray(value)) {
-    if (proto !== Array.prototype) {
+  const walk = (current: unknown, depth: number): boolean => {
+    // Count every value, primitives included, exactly as canonical serialization does.
+    nodes++;
+    if (nodes > maxNodes || depth > maxDepth) {
       return false;
     }
-    const propNames = Object.getOwnPropertyNames(value);
+    if (current === null || typeof current !== "object") {
+      return true;
+    }
+    if (seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+
+    const proto = Object.getPrototypeOf(current);
+    if (Array.isArray(current)) {
+      if (proto !== Array.prototype) {
+        return false;
+      }
+      const propNames = Object.getOwnPropertyNames(current);
+      for (let i = 0; i < propNames.length; i++) {
+        const key = propNames[i] as string;
+        if (key === "length") continue;
+        if (isForbiddenKey(key)) return false;
+
+        const desc = Object.getOwnPropertyDescriptor(current, key);
+        if (!desc || !("value" in desc) || desc.get !== undefined || desc.set !== undefined) {
+          return false;
+        }
+        if (!walk(desc.value, depth + 1)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    if (proto !== null && proto !== Object.prototype) {
+      return false;
+    }
+
+    const propNames = Object.getOwnPropertyNames(current);
     for (let i = 0; i < propNames.length; i++) {
       const key = propNames[i] as string;
-      if (key === "length") continue;
-      if (isForbiddenKey(key)) return false;
-
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc) return false;
-      if (!("value" in desc) || desc.get !== undefined || desc.set !== undefined) {
+      if (isForbiddenKey(key)) {
         return false;
       }
-      if (!isDescriptorSafePlainTree(desc.value, seen)) {
+
+      const desc = Object.getOwnPropertyDescriptor(current, key);
+      if (!desc || !("value" in desc) || desc.get !== undefined || desc.set !== undefined) {
+        return false;
+      }
+      if (!walk(desc.value, depth + 1)) {
         return false;
       }
     }
-    return true;
-  }
 
-  if (proto !== null && proto !== Object.prototype) {
+    return true;
+  };
+
+  try {
+    return walk(value, 0);
+  } catch {
     return false;
   }
-
-  const propNames = Object.getOwnPropertyNames(value);
-  for (let i = 0; i < propNames.length; i++) {
-    const key = propNames[i] as string;
-    if (isForbiddenKey(key)) {
-      return false;
-    }
-
-    const desc = Object.getOwnPropertyDescriptor(value, key);
-    if (!desc) return false;
-    if (!("value" in desc) || desc.get !== undefined || desc.set !== undefined) {
-      return false;
-    }
-    if (!isDescriptorSafePlainTree(desc.value, seen)) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 /**
@@ -323,11 +354,12 @@ export function isDescriptorSafePlainTree(value: unknown, seen = new Set<object>
  * - schemaVersion: 1
  * - kind: 'command-sequence'
  * - control: 'and-then'
- * - 1 or more shell-free command steps, bounded by the sequence argument budget rather than a
- *   fixed command count
+ * - 1 or more shell-free command steps, bounded by the sequence budget rather than a fixed command count
  * - portable executable names without a command allowlist
  * - strictly sequential step IDs (step0, step1, ...)
- * - strictly sequential, unique parameter identifiers (arg0, arg1, ...)
+ * - strictly sequential parameter identifiers (arg0, arg1, ...) where a repeated identifier names one
+ *   input value shared by several steps and therefore keeps one role; the argv prefix carrying each
+ *   occurrence is positional and may differ
  * - strict plain objects with no extra keys, prototype pollution, or hostiles
  * - evidence-derived SHA-256 commitments for every private string parameter
  */
@@ -343,8 +375,7 @@ const RawDeterministicCommandSequenceSchema = z
   })
   .strict()
   .superRefine((seq, ctx) => {
-    let expectedParamIndex = 0;
-    const seenParamNames = new Set<string>();
+    const seenParamNames = new Map<string, DeterministicCommandParameterRole>();
     const stringParamNames = new Set<string>();
     let totalArgs = 0;
 
@@ -362,32 +393,34 @@ const RawDeterministicCommandSequenceSchema = z
         });
       }
 
-      // Validate parameter ordering and uniqueness across all steps
+      // Validate parameter ordering and consistent role reuse across all steps. A shared identifier
+      // names one input value; the argv prefix that carries it belongs to its position and may
+      // differ per occurrence.
       for (let j = 0; j < step.argv.length; j++) {
         const arg = step.argv[j];
         if ("parameter" in arg) {
-          const expectedParamName = `arg${expectedParamIndex}`;
-          if (seenParamNames.has(arg.parameter)) {
+          const existingRole = seenParamNames.get(arg.parameter);
+          if (existingRole === undefined) {
+            const expectedParamName = `arg${seenParamNames.size}`;
+            if (arg.parameter !== expectedParamName) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `Parameter identifier '${arg.parameter}' first appears at position ${seenParamNames.size}: expected '${expectedParamName}'`,
+                path: ["steps", i, "argv", j, "parameter"],
+              });
+            }
+            seenParamNames.set(arg.parameter, arg.role);
+          } else if (existingRole !== arg.role) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
-              message: `Duplicate parameter identifier '${arg.parameter}' in sequence. Each input identifier must be positional and unique.`,
-              path: ["steps", i, "argv", j, "parameter"],
+              message: `Parameter '${arg.parameter}' is reused with conflicting role: expected '${existingRole}', got '${arg.role}'`,
+              path: ["steps", i, "argv", j],
             });
-          } else {
-            seenParamNames.add(arg.parameter);
           }
+
           if (arg.role === "string") {
             stringParamNames.add(arg.parameter);
           }
-
-          if (arg.parameter !== expectedParamName) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: `Positional parameter identifier mismatch at position ${expectedParamIndex}: expected '${expectedParamName}', got '${arg.parameter}'`,
-              path: ["steps", i, "argv", j, "parameter"],
-            });
-          }
-          expectedParamIndex++;
         }
       }
     }
@@ -396,6 +429,32 @@ const RawDeterministicCommandSequenceSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `Command sequence carries ${totalArgs} arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
+        path: ["steps"],
+      });
+    }
+
+    // Structural work is bounded by matching the canonical serializer's node budget
+    let totalNodes =
+      5 + (seq.parameterValueSha256 ? 1 + Object.keys(seq.parameterValueSha256).length : 0);
+    for (let i = 0; i < seq.steps.length; i++) {
+      const step = seq.steps[i];
+      totalNodes += 4; // step object + id + executable + argv array
+      for (let j = 0; j < step.argv.length; j++) {
+        const arg = step.argv[j];
+        if ("prefix" in arg) {
+          totalNodes += 4; // arg object + prefix + parameter + role
+        } else if ("parameter" in arg) {
+          totalNodes += 3; // arg object + parameter + role
+        } else {
+          totalNodes += 2; // arg object + literal
+        }
+      }
+    }
+
+    if (totalNodes > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Command sequence carries ${totalNodes} structural nodes; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes}`,
         path: ["steps"],
       });
     }
@@ -484,14 +543,42 @@ export function safeParseDeterministicCommandSequence(
 
 /**
  * Computes a deterministic SHA-256 digest of a canonical command sequence.
+ *
+ * Pinned to the same structural bounds the validator enforces, so an accepted sequence always
+ * serializes.
  */
 export function canonicalDeterministicCommandSequenceDigest(
   sequence: DeterministicCommandSequence,
   options?: { prefix?: boolean },
 ): string {
-  const serialized = descriptorSafeCanonicalJsonStringify(sequence);
+  const serialized = descriptorSafeCanonicalJsonStringify(sequence, {
+    maxDepth: DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceDepth,
+    maxNodes: DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes,
+  });
   if (!serialized) {
     throw new Error("Failed to canonically serialize DeterministicCommandSequence");
   }
   return hashCanonicalContent(JSON.parse(serialized), options);
+}
+
+/**
+ * Fail-closed digest for untrusted command-sequence evidence.
+ *
+ * Validates the payload under the same descriptor-safe bounds and strict schema as
+ * {@link safeParseDeterministicCommandSequence} and returns `undefined` instead of throwing, so
+ * evidence ingestion can never be interrupted by a hostile, oversized, or malformed payload.
+ */
+export function tryCanonicalDeterministicCommandSequenceDigest(
+  value: unknown,
+  options?: { prefix?: boolean },
+): string | undefined {
+  const parsed = safeParseDeterministicCommandSequence(value);
+  if (!parsed.success) {
+    return undefined;
+  }
+  try {
+    return canonicalDeterministicCommandSequenceDigest(parsed.data, options);
+  } catch {
+    return undefined;
+  }
 }
