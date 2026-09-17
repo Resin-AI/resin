@@ -361,7 +361,9 @@ export function isDescriptorSafePlainTree(
  *   input value shared by several steps and therefore keeps one role; the argv prefix carrying each
  *   occurrence is positional and may differ
  * - strict plain objects with no extra keys, prototype pollution, or hostiles
- * - evidence-derived SHA-256 commitments for every private string parameter
+ * - evidence-derived SHA-256 commitments for private string parameters: a string parameter without a
+ *   commitment is a caller-supplied input, while a committed one is pinned to the private value the
+ *   evidence recorded, so the compiled tool can only ever replay that value
  */
 const RawDeterministicCommandSequenceSchema = z
   .object({
@@ -376,7 +378,6 @@ const RawDeterministicCommandSequenceSchema = z
   .strict()
   .superRefine((seq, ctx) => {
     const seenParamNames = new Map<string, DeterministicCommandParameterRole>();
-    const stringParamNames = new Set<string>();
     let totalArgs = 0;
 
     for (let i = 0; i < seq.steps.length; i++) {
@@ -417,10 +418,6 @@ const RawDeterministicCommandSequenceSchema = z
               path: ["steps", i, "argv", j],
             });
           }
-
-          if (arg.role === "string") {
-            stringParamNames.add(arg.parameter);
-          }
         }
       }
     }
@@ -459,18 +456,12 @@ const RawDeterministicCommandSequenceSchema = z
       });
     }
 
-    for (const parameter of stringParamNames) {
-      if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
-          path: ["parameterValueSha256", parameter],
-        });
-      }
-    }
+    // A string parameter may be free: the compiled tool then requires the caller to supply the value.
+    // Only a parameter whose recorded value is private carries a commitment, and admission refuses
+    // sequences that pin such values because they can never be reused for other inputs.
 
     for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
-      if (!stringParamNames.has(parameter)) {
+      if (seenParamNames.get(parameter) !== "string") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Value commitment '${parameter}' must reference a string parameter`,

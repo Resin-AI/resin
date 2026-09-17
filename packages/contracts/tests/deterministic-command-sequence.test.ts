@@ -585,7 +585,7 @@ describe("DeterministicCommandSequenceSchema", () => {
     expect(isDeterministicCommandSequence(arbitraryWorkflow)).toBe(true);
   });
 
-  it("accepts evidence-derived commitments only for string parameters", () => {
+  it("accepts evidence-derived commitments only for string parameters, and free string inputs", () => {
     const committed = {
       schemaVersion: 1,
       kind: "command-sequence",
@@ -620,10 +620,20 @@ describe("DeterministicCommandSequenceSchema", () => {
         parameterValueSha256: { arg0: "not-a-sha256-digest" },
       }),
     ).toBe(false);
+    // A string parameter without a commitment is a caller-supplied input: the compiled tool asks
+    // for the value instead of replaying the recorded one.
     expect(
       isDeterministicCommandSequence({
         ...committed,
         parameterValueSha256: undefined,
+      }),
+    ).toBe(true);
+    expect(
+      isDeterministicCommandSequence({
+        ...committed,
+        parameterValueSha256: {
+          arg1: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
       }),
     ).toBe(false);
   });

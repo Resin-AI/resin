@@ -8595,7 +8595,6 @@ var init_deterministic_command_sequence = __esm({
       parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
     }).strict().superRefine((seq, ctx) => {
       const seenParamNames = /* @__PURE__ */ new Map();
-      const stringParamNames = /* @__PURE__ */ new Set();
       let totalArgs = 0;
       for (let i = 0; i < seq.steps.length; i++) {
         const step = seq.steps[i];
@@ -8629,9 +8628,6 @@ var init_deterministic_command_sequence = __esm({
                 path: ["steps", i, "argv", j]
               });
             }
-            if (arg.role === "string") {
-              stringParamNames.add(arg.parameter);
-            }
           }
         }
       }
@@ -8664,17 +8660,8 @@ var init_deterministic_command_sequence = __esm({
           path: ["steps"]
         });
       }
-      for (const parameter of stringParamNames) {
-        if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
-            path: ["parameterValueSha256", parameter]
-          });
-        }
-      }
       for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
-        if (!stringParamNames.has(parameter)) {
+        if (seenParamNames.get(parameter) !== "string") {
           ctx.addIssue({
             code: external_exports.ZodIssueCode.custom,
             message: `Value commitment '${parameter}' must reference a string parameter`,
