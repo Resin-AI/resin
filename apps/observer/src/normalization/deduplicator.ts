@@ -42,6 +42,7 @@ interface CachedEventEntry {
   eventId: string;
   sessionId: string;
   sequence: number;
+  stepIndex: number;
   contentHash: string;
   timestamp: number;
 }
@@ -55,7 +56,7 @@ export class NormalizationDeduplicator {
 
   // Primary lookup: eventId -> CachedEventEntry
   private readonly eventIdCache = new Map<string, CachedEventEntry>();
-  // Secondary lookup: `${sessionId}:${sequence}` -> eventId
+  // Secondary lookup: [sessionId, source sequence, sibling step index] -> eventId
   private readonly sessionSequenceMap = new Map<string, string>();
 
   // Statistics
@@ -105,8 +106,9 @@ export class NormalizationDeduplicator {
     const eventId = event.eventId;
     const sessionId = event.sessionId;
     const sequence = event.causalRef?.causalSequence ?? 0;
+    const stepIndex = event.causalRef?.stepIndex ?? 0;
     const incomingHash = this.computeContentHash(event);
-    const sessionSeqKey = `${sessionId}:${sequence}`;
+    const sessionSeqKey = JSON.stringify([sessionId, sequence, stepIndex]);
 
     // 1. Check in-memory cache by eventId
     const cachedByEventId = this.eventIdCache.get(eventId);
@@ -129,7 +131,7 @@ export class NormalizationDeduplicator {
       };
     }
 
-    // 2. Check in-memory cache by session:sequence
+    // 2. Check in-memory cache by session:sequence:stepIndex
     const cachedEventIdForSeq = this.sessionSequenceMap.get(sessionSeqKey);
     if (cachedEventIdForSeq && cachedEventIdForSeq !== eventId) {
       const entry = this.eventIdCache.get(cachedEventIdForSeq);
@@ -139,7 +141,7 @@ export class NormalizationDeduplicator {
         eventId,
         existingHash: entry?.contentHash ?? cachedEventIdForSeq,
         incomingHash,
-        errorReason: `Integrity conflict: sequence collision in session ${sessionId} at sequence ${sequence}: existing event ${cachedEventIdForSeq} vs incoming ${eventId}`,
+        errorReason: `Integrity conflict: sequence collision in session ${sessionId} at sequence ${sequence}, step ${stepIndex}: existing event ${cachedEventIdForSeq} vs incoming ${eventId}`,
       };
     }
 
@@ -151,8 +153,8 @@ export class NormalizationDeduplicator {
           payload_json: string;
           sequence: number;
         }>(
-          "SELECT event_id, payload_json, sequence FROM normalized_events WHERE event_id = ? OR (session_id = ? AND sequence = ?);",
-          [eventId, sessionId, sequence],
+          "SELECT event_id, payload_json, sequence FROM normalized_events WHERE event_id = ? OR (session_id = ? AND sequence = ? AND (CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END) = ?);",
+          [eventId, sessionId, sequence, stepIndex],
         );
 
         if (existingRow) {
@@ -207,8 +209,9 @@ export class NormalizationDeduplicator {
     const eventId = event.eventId;
     const sessionId = event.sessionId;
     const sequence = event.causalRef?.causalSequence ?? 0;
+    const stepIndex = event.causalRef?.stepIndex ?? 0;
     const contentHash = precomputedHash ?? this.computeContentHash(event);
-    const sessionSeqKey = `${sessionId}:${sequence}`;
+    const sessionSeqKey = JSON.stringify([sessionId, sequence, stepIndex]);
 
     // Evict oldest entries if capacity reached
     if (this.eventIdCache.size >= this.maxCacheSize) {
@@ -216,7 +219,9 @@ export class NormalizationDeduplicator {
       if (oldestKey) {
         const oldEntry = this.eventIdCache.get(oldestKey);
         if (oldEntry) {
-          this.sessionSequenceMap.delete(`${oldEntry.sessionId}:${oldEntry.sequence}`);
+          this.sessionSequenceMap.delete(
+            JSON.stringify([oldEntry.sessionId, oldEntry.sequence, oldEntry.stepIndex]),
+          );
         }
         this.eventIdCache.delete(oldestKey);
       }
@@ -226,6 +231,7 @@ export class NormalizationDeduplicator {
       eventId,
       sessionId,
       sequence,
+      stepIndex,
       contentHash,
       timestamp: Date.now(),
     };

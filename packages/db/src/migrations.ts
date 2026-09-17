@@ -461,6 +461,45 @@ CREATE INDEX IF NOT EXISTS idx_pattern_outbox_uploaded_at ON pattern_outbox(uplo
 `;
 
 /**
+ * Migration 005: Widen normalized_events sequence uniqueness to causal fan-out
+ * siblings.
+ *
+ * Decoders may emit several events that share one source sequence (a message
+ * plus its tool-call siblings). The original unique index on
+ * (session_id, sequence) rejected those siblings, so the index is replaced by
+ * an expression index that additionally keys on the causal step. Rows written
+ * before fan-out existed carry no `causalRef.stepIndex`; they coalesce to step 0
+ * and therefore keep the exact uniqueness guarantee they had before, while
+ * siblings key on steps 1..N. No column or row is added or rewritten, so
+ * historical event ids and sequences are untouched.
+ *
+ * The DROP/CREATE pair runs inside the migration transaction, and the index name
+ * is preserved so existing query plans and diagnostics keep resolving it.
+ *
+ * Hazard: `json_extract` raises `malformed JSON` on non-JSON input. A bare
+ * expression index would therefore abort the whole migration if any historical
+ * `payload_json` is not well-formed JSON (corrupted or foreign state files).
+ * Every writer (SessionRepository.insertEvent, observer pipeline) stores
+ * canonicalJson output, but the index guards with `json_valid` anyway: malformed
+ * payloads fail closed to step 0, which preserves their original
+ * (session_id, sequence) uniqueness instead of crashing startup. Repository
+ * lookups reuse the exact same expression so the index stays usable.
+ */
+export const MIGRATION_005_SQL = `
+DROP INDEX IF EXISTS idx_normalized_events_session_sequence;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_events_session_sequence
+  ON normalized_events(
+    session_id,
+    sequence,
+    CASE
+      WHEN json_valid(payload_json)
+        THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0)
+      ELSE 0
+    END
+  );
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -487,6 +526,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "004_add_local_opportunity_tables",
     sql: MIGRATION_004_SQL,
     checksum: hashCanonicalContent(MIGRATION_004_SQL),
+  },
+  {
+    version: 5,
+    name: "005_normalized_events_causal_step_uniqueness",
+    sql: MIGRATION_005_SQL,
+    checksum: hashCanonicalContent(MIGRATION_005_SQL),
   },
 ];
 

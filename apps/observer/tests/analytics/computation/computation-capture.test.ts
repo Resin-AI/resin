@@ -34,8 +34,6 @@ import {
  * of those stages fails this suite rather than passing on a hand-built stand-in.
  */
 
-const decoder = new OmpRecordDecoder();
-
 // ============================================================================
 // Native fixture records -> raw harness records
 // ============================================================================
@@ -153,7 +151,7 @@ interface CaptureEnvironment {
 
 function createCaptureEnvironment(options?: { attributed?: boolean }): CaptureEnvironment {
   const pipeline = new NormalizationPipeline();
-  pipeline.registerDecoder(decoder);
+  pipeline.registerDecoder(new OmpRecordDecoder());
   const cloud = createFakeCloudClient();
   const localEvents: NormalizedSessionEvent[] = [];
   const attributed = options?.attributed ?? false;
@@ -257,6 +255,74 @@ function substantiveCarriers(
     isSubstantiveComputationEvidence(carrier.evidence),
   );
 }
+
+it("captures completed computation from nested OMP messages without explicit start markers", async () => {
+  const sessionId = "omp-embedded-only-capture";
+  const callId = "embedded-eval-call";
+  const code = "items = [2, 4, 6]\nprint(sum(items))";
+  const environment = createCaptureEnvironment();
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  const rows = [
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: callId, name: "eval", arguments: { language: "py", code } },
+        ],
+        stopReason: "toolUse",
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "toolResult",
+        toolCallId: callId,
+        toolName: "eval",
+        content: [{ type: "text", text: "12" }],
+        isError: false,
+      },
+    },
+  ];
+  const records: RawHarnessRecord[] = rows.map((row, index) => ({
+    recordId: `embedded-record-${index}`,
+    sessionId,
+    harnessId: "omp",
+    sequenceNumber: index + 1,
+    timestamp,
+    recordType: "transcript_line",
+    rawPayload: JSON.stringify(row),
+    cursor: { offset: index * 100, line: index + 1, sequence: index + 1, timestamp },
+    metadata: {},
+  }));
+  const session = sessionFor(sessionId);
+  for (const record of records) {
+    await environment.coordinator.handleRecords(session, [record], async () => {});
+  }
+  await environment.coordinator.handleRecords(
+    { ...session, status: "completed" },
+    [],
+    async () => {},
+  );
+  await environment.coordinator.waitForIdle();
+  const projected = environment.cloud.batches as NormalizedSessionEvent[];
+  const calls = projected.filter((event) => event.type === "tool_call");
+  const results = projected.filter((event) => event.type === "tool_result");
+  expect(calls).toHaveLength(1);
+  expect(results).toHaveLength(1);
+  expect(calls[0]?.type === "tool_call" && calls[0].callId).toBe(callId);
+  const evidence = readComputationEvidence(results[0]?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]);
+  expect(evidence?.observation).toMatchObject({
+    callId,
+    status: "success",
+    callEventId: calls[0]?.eventId,
+    resultEventId: results[0]?.eventId,
+  });
+  expect(evidence?.program.complete).toBe(true);
+  expect(isSubstantiveComputationEvidence(evidence)).toBe(true);
+  expect(JSON.stringify(projected)).not.toContain(code);
+  expect(JSON.stringify(projected)).not.toContain("__resinLocalOmpNativeCallV1");
+});
 
 // ============================================================================
 // Shared fixture families

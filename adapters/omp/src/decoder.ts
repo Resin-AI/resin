@@ -84,6 +84,8 @@ export interface CausalRefInput {
   causalSequence: number;
   parentId?: string | null;
   rootId?: string | null;
+  /** Disambiguates sibling events decoded from one source record; unset on the record's own event. */
+  stepIndex?: number;
 }
 
 export function asString(value: OmpTranscriptValue | undefined | null): string | undefined {
@@ -124,6 +126,114 @@ export function asArray(
   value: OmpTranscriptValue | undefined | null,
 ): OmpTranscriptValue[] | undefined {
   return Array.isArray(value) ? value : undefined;
+}
+
+const TOOL_CALL_BLOCK_TYPES: Record<string, true> = {
+  toolcall: true,
+  tool_call: true,
+  tooluse: true,
+  tool_use: true,
+  function: true,
+  function_call: true,
+};
+
+/** Source record that announced a session call: an assistant message or an execution record. */
+type CallAnnouncementOrigin = "assistant_message" | "execution_record";
+
+/** Assistant-embedded tool call request block, normalized without inventing identity or arguments. */
+interface EmbeddedAssistantToolCall {
+  rawCallId: string;
+  toolName?: string;
+  parameters?: OmpTranscriptPayload;
+  /**
+   * Ordinal among announce-valid blocks in this record, fixed before any deduplication, so retries
+   * and re-ingests reproduce identical step indices regardless of which siblings were already seen.
+   */
+  stepIndex?: number;
+}
+
+/** Parses explicit tool arguments; absent, malformed, and non-object values are never invented. */
+function parseToolArguments(
+  value: OmpTranscriptValue | undefined | null,
+): OmpTranscriptPayload | undefined {
+  const direct = asObject(value);
+  if (direct) return direct;
+  const text = asString(value);
+  if (text === undefined) return undefined;
+  try {
+    // SAFETY: JSON.parse returns an arbitrary JSON value before object normalization.
+    return asObject(JSON.parse(text) as OmpTranscriptValue);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Enumerates assistant-embedded tool call request blocks carried by content/parts/toolCalls arrays
+ * and the singular toolCall/tool_call envelope. Blocks without an explicit call id are dropped:
+ * a request identity is never invented for malformed or text-only content.
+ */
+function embeddedAssistantToolCalls(obj: OmpTranscriptPayload): EmbeddedAssistantToolCall[] {
+  const nestedMsg = asObject(obj.message);
+  const candidates: OmpTranscriptValue[] = [];
+  const containers: Array<OmpTranscriptValue | undefined> = [
+    obj.content,
+    obj.parts,
+    obj.toolCalls,
+    obj.tool_calls,
+    nestedMsg?.content,
+    nestedMsg?.parts,
+    nestedMsg?.toolCalls,
+    nestedMsg?.tool_calls,
+  ];
+  for (const container of containers) {
+    const arr = asArray(container);
+    if (arr) candidates.push(...arr);
+  }
+  for (const single of [obj.toolCall, obj.tool_call, nestedMsg?.toolCall, nestedMsg?.tool_call]) {
+    const block = asObject(single);
+    if (block) candidates.push(block);
+  }
+
+  const calls: EmbeddedAssistantToolCall[] = [];
+  let announceOrdinal = 0;
+  for (const candidate of candidates) {
+    const block = asObject(candidate);
+    if (!block) continue;
+
+    const rawCallId =
+      asString(block.id) ??
+      asString(block.callId) ??
+      asString(block.call_id) ??
+      asString(block.toolCallId) ??
+      asString(block.tool_call_id);
+    if (!rawCallId?.trim()) continue;
+
+    const rawName =
+      asString(block.name) ??
+      asString(block.toolName) ??
+      asString(block.tool_name) ??
+      asString(block.tool);
+    const toolName = rawName?.trim() && rawName !== "unknown_tool" ? rawName : undefined;
+    const rawArgs =
+      block.arguments ?? block.args ?? block.parameters ?? block.params ?? block.input;
+    const blockType = asString(block.type)?.toLowerCase();
+    const hasToolType = TOOL_CALL_BLOCK_TYPES[blockType ?? ""] === true;
+    if (!hasToolType && rawArgs === undefined && toolName === undefined) continue;
+
+    const parameters = parseToolArguments(rawArgs);
+    if (
+      toolName === undefined ||
+      parameters === undefined ||
+      (blockType !== undefined && !hasToolType)
+    ) {
+      calls.push({ rawCallId, toolName, parameters });
+      continue;
+    }
+    announceOrdinal++;
+    calls.push({ rawCallId, toolName, parameters, stepIndex: announceOrdinal });
+  }
+  return calls;
 }
 
 /**
@@ -717,6 +827,14 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
 
+  /**
+   * Session-scoped call identities already announced as tool_call events, keyed by raw call id and
+   * valued by the announcing record kind.
+   */
+  private readonly announcedToolCalls = new BoundedSessionCallMap<CallAnnouncementOrigin>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+
   private setToolCallName(sessionId: string, callId: string, toolName: string): void {
     if (!callId || !toolName || toolName === "unknown_tool") return;
     this.callToolNames.set(sessionId, callId, toolName);
@@ -745,117 +863,75 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private clearSessionToolCalls(sessionId: string): void {
     this.callToolNames.clearSession(sessionId);
     this.callToolArguments.clearSession(sessionId);
+    this.announcedToolCalls.clearSession(sessionId);
   }
 
-  private cacheAssistantToolCalls(obj: OmpTranscriptPayload, sessionId: string): void {
-    const candidateArrays: unknown[] = [obj.content, obj.parts, obj.toolCalls, obj.tool_calls];
-    const nestedMsg = asObject(obj.message);
-    if (nestedMsg) {
-      candidateArrays.push(
-        nestedMsg.content,
-        nestedMsg.parts,
-        nestedMsg.toolCalls,
-        nestedMsg.tool_calls,
-      );
-    }
-
-    for (const cand of candidateArrays) {
-      const arr = asArray(cand as OmpTranscriptValue);
-      if (!arr) continue;
-      for (const item of arr) {
-        const block = asObject(item);
-        if (!block) continue;
-
-        const rawType = asString(block.type)?.toLowerCase();
-        const hasToolType =
-          rawType === "toolcall" ||
-          rawType === "tool_call" ||
-          rawType === "tooluse" ||
-          rawType === "tool_use" ||
-          rawType === "function" ||
-          rawType === "function_call";
-
-        const rawCallId =
-          asString(block.id) ??
-          asString(block.callId) ??
-          asString(block.call_id) ??
-          asString(block.toolCallId) ??
-          asString(block.tool_call_id);
-
-        if (!rawCallId) continue;
-        const callId = rawCallId;
-        const rawArgs =
-          block.arguments ?? block.args ?? block.parameters ?? block.params ?? block.input;
-
-        const toolName =
-          asString(block.name) ??
-          asString(block.toolName) ??
-          asString(block.tool_name) ??
-          asString(block.tool);
-
-        if (hasToolType || rawArgs !== undefined || toolName !== undefined) {
-          if (toolName && toolName !== "unknown_tool") {
-            this.setToolCallName(sessionId, callId, toolName);
-          }
-
-          if (rawArgs !== undefined) {
-            let argsObj: OmpTranscriptPayload | undefined = asObject(rawArgs);
-            if (!argsObj && typeof rawArgs === "string") {
-              try {
-                argsObj = asObject(JSON.parse(rawArgs));
-              } catch {
-                // ignore JSON parse failure
-              }
-            }
-            if (argsObj !== undefined) {
-              this.setToolCallArguments(sessionId, callId, argsObj);
-            }
-          }
-        }
+  /**
+   * Caches assistant-embedded call identities and arguments so later execution records correlate
+   * without re-declaring them.
+   */
+  private cacheAssistantToolCalls(calls: EmbeddedAssistantToolCall[], sessionId: string): void {
+    for (const call of calls) {
+      if (call.toolName) {
+        this.setToolCallName(sessionId, call.rawCallId, call.toolName);
+      }
+      if (call.parameters !== undefined) {
+        this.setToolCallArguments(sessionId, call.rawCallId, call.parameters);
       }
     }
+  }
 
-    const singleToolCall =
-      asObject(obj.toolCall) ??
-      asObject(obj.tool_call) ??
-      (nestedMsg ? (asObject(nestedMsg.toolCall) ?? asObject(nestedMsg.tool_call)) : undefined);
-    if (singleToolCall) {
-      const rawCallId =
-        asString(singleToolCall.id) ??
-        asString(singleToolCall.callId) ??
-        asString(singleToolCall.call_id) ??
-        asString(singleToolCall.toolCallId) ??
-        asString(singleToolCall.tool_call_id);
-      if (rawCallId) {
-        const toolName =
-          asString(singleToolCall.name) ??
-          asString(singleToolCall.toolName) ??
-          asString(singleToolCall.tool_name) ??
-          asString(singleToolCall.tool);
-        if (toolName && toolName !== "unknown_tool") {
-          this.setToolCallName(sessionId, rawCallId, toolName);
-        }
-        const rawArgs =
-          singleToolCall.arguments ??
-          singleToolCall.args ??
-          singleToolCall.parameters ??
-          singleToolCall.params ??
-          singleToolCall.input;
-        if (rawArgs !== undefined) {
-          let argsObj: OmpTranscriptPayload | undefined = asObject(rawArgs);
-          if (!argsObj && typeof rawArgs === "string") {
-            try {
-              argsObj = asObject(JSON.parse(rawArgs));
-            } catch {
-              // ignore JSON parse failure
-            }
-          }
-          if (argsObj !== undefined) {
-            this.setToolCallArguments(sessionId, rawCallId, argsObj);
-          }
-        }
-      }
+  /** Recovers bounded edit target metadata before patch content is redacted. */
+  private withEditTargets(
+    toolName: string,
+    parameters: OmpTranscriptPayload,
+  ): OmpTranscriptPayload {
+    if (toolName !== "edit" && toolName !== "apply_patch") return parameters;
+    if (parameters.path || parameters.filePath || parameters.targetPaths) return parameters;
+    const targetPaths = editTargetPaths(parameters);
+    return targetPaths.length > 0 ? { ...parameters, targetPaths } : parameters;
+  }
+
+  /**
+   * Emits genuinely requested assistant-embedded tool calls exactly once per session-scoped call
+   * identity, whatever announced them first. Provider usage stays on the owning assistant message
+   * so accounting never doubles. Siblings keep the source record's sequence, timestamp, and parent,
+   * and carry the stepIndex of their validated source block — including siblings already announced
+   * earlier in the session.
+   */
+  private emitEmbeddedToolCalls(
+    calls: EmbeddedAssistantToolCall[],
+    sessionId: string,
+    timestamp: string,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+  ): IntermediateToolCallEvent[] {
+    const events: IntermediateToolCallEvent[] = [];
+    for (const call of calls) {
+      const toolName = call.toolName;
+      const parameters = call.parameters;
+      const stepIndex = call.stepIndex;
+      if (toolName === undefined || parameters === undefined || stepIndex === undefined) continue;
+      if (this.announcedToolCalls.get(sessionId, call.rawCallId) !== undefined) continue;
+      this.announcedToolCalls.set(sessionId, call.rawCallId, "assistant_message");
+
+      const callId = normalizeCallId(call.rawCallId, call.rawCallId);
+      // Results may only carry the sanitized identity, so keep the name resolvable under it too.
+      this.setToolCallName(sessionId, callId, toolName);
+      events.push({
+        sessionId,
+        timestamp,
+        schemaVersion: "1.0.0",
+        causalRef: { ...causalRef, stepIndex },
+        metadata: { ...metadata },
+        type: "tool_call",
+        toolName,
+        callId,
+        toolCallId: callId,
+        parameters: this.withEditTargets(toolName, parameters),
+      });
     }
+    return events;
   }
   canDecode(record: RawHarnessRecord): boolean {
     if (!record) return false;
@@ -1474,9 +1550,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateMessageEvent {
-    if (role === "assistant") {
-      this.cacheAssistantToolCalls(obj, sessionId);
+  ): IntermediateSessionEvent | IntermediateSessionEvent[] {
+    const embeddedCalls = role === "assistant" ? embeddedAssistantToolCalls(obj) : undefined;
+    if (embeddedCalls) {
+      this.cacheAssistantToolCalls(embeddedCalls, sessionId);
     }
 
     let content = "";
@@ -1529,7 +1606,18 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     if (providerUsage) {
       evt.providerUsage = providerUsage;
     }
-    return evt;
+
+    if (!embeddedCalls) {
+      return evt;
+    }
+    const emittedCalls = this.emitEmbeddedToolCalls(
+      embeddedCalls,
+      sessionId,
+      timestamp,
+      causalRef,
+      metadata,
+    );
+    return emittedCalls.length > 0 ? [evt, ...emittedCalls] : evt;
   }
 
   private normalizeReasoning(
@@ -1581,7 +1669,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateToolCallEvent {
+  ): IntermediateToolCallEvent | null {
     const toolCallObj =
       asObject(obj.toolCall) ??
       asObject(obj.tool_call) ??
@@ -1602,6 +1690,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asString(toolCallObj.id);
     const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
     const cacheCallId = rawCallId ?? callId;
+
+    // An assistant message already announced this exact request: the execution record must neither
+    // duplicate the call nor consume the cached arguments the matching result still needs. Repeated
+    // execution records for one call keep their own announcements.
+    if (this.announcedToolCalls.get(sessionId, cacheCallId) === "assistant_message") {
+      return null;
+    }
+    this.announcedToolCalls.set(sessionId, cacheCallId, "execution_record");
+
     const cachedName = cacheCallId
       ? this.getAndClearToolCallName(sessionId, cacheCallId)
       : undefined;
@@ -1640,15 +1737,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       }
       parameters = rawParamsObj ?? {};
     }
-    if (
-      (toolName === "edit" || toolName === "apply_patch") &&
-      !parameters.path &&
-      !parameters.filePath &&
-      !parameters.targetPaths
-    ) {
-      const targetPaths = editTargetPaths(parameters);
-      if (targetPaths.length > 0) parameters = { ...parameters, targetPaths };
-    }
+    parameters = this.withEditTargets(toolName, parameters);
 
     if (toolCallObj.intent !== undefined && metadata.intent === undefined) {
       metadata.intent = toolCallObj.intent;

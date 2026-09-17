@@ -10,6 +10,7 @@ import type {
   IntermediateFileEditEvent,
   IntermediateMessageEvent,
   IntermediateModelReasoningEvent,
+  IntermediateSessionEvent,
   IntermediateSessionLifecycleEvent,
   IntermediateSubagentLifecycleEvent,
   IntermediateToolCallEvent,
@@ -1085,7 +1086,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       };
     }
 
-    it("unwraps nested user and assistant messages without duplicating embedded tool calls", () => {
+    it("unwraps nested user and assistant messages and emits each embedded tool call once", () => {
       const user = decoder.decode(
         v18Record(1, {
           type: "message",
@@ -1104,22 +1105,52 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
               { type: "text", text: "Inspecting." },
               {
                 type: "toolCall",
-                id: "call-read",
+                id: "call-inspect-1",
                 name: "read",
                 arguments: { path: "input.csv" },
               },
             ],
           },
         }),
-      ) as IntermediateMessageEvent;
+      ) as IntermediateSessionEvent[];
+      // Re-decoding the same completed assistant message must not re-announce the request.
+      const replay = decoder.decode(
+        v18Record(2, {
+          type: "message",
+          message: {
+            role: "Assistant",
+            content: [
+              { type: "text", text: "Inspecting." },
+              {
+                type: "toolCall",
+                id: "call-inspect-1",
+                name: "read",
+                arguments: { path: "input.csv" },
+              },
+            ],
+          },
+        }),
+      );
 
       expect(user).toMatchObject({
         type: "message",
         role: "user",
         content: "Inspect the fixture.",
       });
-      expect(assistant).not.toBeInstanceOf(Array);
-      expect(assistant).toMatchObject({
+      expect(assistant.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect(assistant[0]).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: "Inspecting.\n",
+      });
+      expect(assistant[1]).toMatchObject({
+        type: "tool_call",
+        toolName: "read",
+        callId: "call-inspect-1",
+        parameters: { path: "input.csv" },
+      });
+      expect(Array.isArray(replay)).toBe(false);
+      expect(replay).toMatchObject({
         type: "message",
         role: "assistant",
         content: "Inspecting.\n",
@@ -1555,6 +1586,314 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     });
   });
 
+  describe("OMP assistant-embedded tool call emission", () => {
+    const decoder = new OmpRecordDecoder();
+
+    const makeRecord = (sessionId: string, seq: number, payload: unknown): RawHarnessRecord => ({
+      recordId: `rec-${sessionId}-${seq}`,
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: seq,
+      recordType: "transcript_line",
+      timestamp: `2026-09-03T09:00:${String(seq).padStart(2, "0")}.000Z`,
+      cursor: {
+        offset: seq * 100,
+        line: seq,
+        sequence: seq,
+        timestamp: `2026-09-03T09:00:${String(seq).padStart(2, "0")}.000Z`,
+      },
+      rawPayload: JSON.stringify(payload),
+      metadata: {},
+    });
+
+    it("announces every embedded request with matched results and single provider accounting", () => {
+      const sessionId = "session-embedded-multi-1";
+
+      const events = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Reading and running." },
+              {
+                type: "toolCall",
+                id: "call_embed_read",
+                name: "read",
+                arguments: { path: "input.csv" },
+              },
+              {
+                type: "toolCall",
+                id: "call_embed_bash",
+                name: "bash",
+                arguments: { command: "pnpm test" },
+              },
+            ],
+            model: "gemini-3.8-flash",
+            usage: { input: 120, output: 40, totalTokens: 160 },
+          },
+        }),
+      ) as IntermediateSessionEvent[];
+
+      expect(events.map((event) => event.type)).toEqual(["message", "tool_call", "tool_call"]);
+
+      const message = events[0] as IntermediateMessageEvent;
+      expect(message.type).toBe("message");
+      expect(message.providerUsage?.totalTokens).toBe(160);
+
+      const readCall = events[1] as IntermediateToolCallEvent;
+      const bashCall = events[2] as IntermediateToolCallEvent;
+      expect(readCall).toMatchObject({
+        type: "tool_call",
+        toolName: "read",
+        callId: "call_embed_read",
+        toolCallId: "call_embed_read",
+        parameters: { path: "input.csv" },
+      });
+      expect(bashCall).toMatchObject({
+        type: "tool_call",
+        toolName: "bash",
+        callId: "call_embed_bash",
+        toolCallId: "call_embed_bash",
+        parameters: { command: "pnpm test" },
+      });
+
+      // Requests come from the same source record but never restate its provider accounting
+      expect(readCall.causalRef?.causalSequence).toBe(message.causalRef?.causalSequence);
+      expect(message.causalRef?.stepIndex).toBeUndefined();
+      expect(readCall.causalRef?.stepIndex).toBe(1);
+      expect(bashCall.causalRef?.stepIndex).toBe(2);
+      expect(readCall.timestamp).toBe(message.timestamp);
+      expect(readCall.providerUsage).toBeUndefined();
+      expect(bashCall.providerUsage).toBeUndefined();
+
+      // Results correlate back to the announced requests without announcing calls again
+      const readResult = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call_embed_read",
+            content: [{ type: "text", text: "sku,quantity" }],
+            isError: false,
+          },
+        }),
+      ) as IntermediateToolResultEvent;
+      expect(readResult).toMatchObject({
+        type: "tool_result",
+        toolName: "read",
+        callId: "call_embed_read",
+        result: "sku,quantity",
+      });
+
+      const bashResult = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call_embed_bash",
+            content: [{ type: "text", text: "1 failed" }],
+            isError: true,
+          },
+        }),
+      ) as IntermediateToolResultEvent;
+      expect(bashResult.type).toBe("tool_result");
+      expect(bashResult.toolName).toBe("bash");
+      expect(bashResult.isError).toBe(true);
+    });
+
+    it("announces a singular toolCall envelope carried by a completed assistant message", () => {
+      const sessionId = "session-embedded-envelope-1";
+
+      const events = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: "Working.",
+            toolCall: { id: "call_envelope_1", name: "grep", arguments: { pattern: "TODO" } },
+          },
+        }),
+      ) as IntermediateSessionEvent[];
+
+      expect(events.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect(events[1]).toMatchObject({
+        type: "tool_call",
+        toolName: "grep",
+        callId: "call_envelope_1",
+        parameters: { pattern: "TODO" },
+      });
+    });
+
+    it("never announces requests from malformed, non-assistant, or streaming content", () => {
+      const sessionId = "session-malformed-1";
+
+      const malformed = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "text", text: "toolCall id: 'call_in_text', name: 'read'" },
+            { type: "text", id: "call_text_metadata", name: "read", arguments: { path: "x" } },
+            { type: "toolCall", name: "missing_id", arguments: { path: "x" } },
+            { type: "toolCall", id: "call_missing_name", arguments: { path: "x" } },
+            { type: "toolCall", id: "", name: "read", arguments: {} },
+            { type: "toolCall", id: "   ", name: "read", arguments: {} },
+            { type: "toolCall", id: "empty_name", name: "", arguments: {} },
+            { type: "toolCall", id: "blank_name", name: "   ", arguments: {} },
+            { type: "toolCall", id: "call_numeric_args", name: "numeric_tool", arguments: 42 },
+            { type: "toolCall", id: "call_bad_json", name: "bad_json_tool", arguments: "{nope" },
+            { type: "toolCall", id: "call_array_args", name: "array_tool", arguments: [1, 2] },
+          ],
+        }),
+      );
+      expect(Array.isArray(malformed)).toBe(false);
+      expect(malformed).toMatchObject({ type: "message", role: "assistant" });
+
+      const userMessage = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "text", text: "quoted request" },
+            { type: "toolCall", id: "call_user", name: "read", arguments: { path: "x" } },
+          ],
+        }),
+      );
+      expect(userMessage).toMatchObject({ type: "message", role: "user" });
+
+      const systemMessage = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "message",
+          role: "system",
+          content: [
+            { type: "toolCall", id: "call_system", name: "read", arguments: { path: "x" } },
+          ],
+        }),
+      );
+      expect(systemMessage).toMatchObject({ type: "message", role: "system" });
+
+      const toolResult = decoder.decode(
+        makeRecord(sessionId, 4, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call_system",
+            content: [
+              { type: "text", text: "no result" },
+              { type: "toolCall", id: "call_result", name: "read", arguments: { path: "x" } },
+            ],
+            isError: false,
+          },
+        }),
+      );
+      expect(toolResult).toMatchObject({ type: "tool_result" });
+
+      expect(
+        decoder.decode(
+          makeRecord(sessionId, 5, {
+            type: "message_update",
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: "call_streaming",
+                  name: "read",
+                  arguments: { path: "x" },
+                },
+              ],
+            },
+          }),
+        ),
+      ).toBeNull();
+      expect(
+        decoder.decode(
+          makeRecord(sessionId, 6, {
+            type: "message_start",
+            message: { role: "assistant" },
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it("keeps source block ordinals stable when a sibling was already announced", () => {
+      const blockA = {
+        type: "toolCall",
+        id: "call_ord_a",
+        name: "read",
+        arguments: { path: "a" },
+      };
+      const blockB = {
+        type: "toolCall",
+        id: "call_ord_b",
+        name: "read",
+        arguments: { path: "b" },
+      };
+
+      // Fresh session: both requests are announced with their source ordinals
+      const fresh = decoder.decode(
+        makeRecord("session-embedded-ordinal-fresh", 1, {
+          type: "message",
+          role: "assistant",
+          content: [blockA, blockB],
+        }),
+      ) as IntermediateSessionEvent[];
+      expect(fresh.map((event) => event.type)).toEqual(["message", "tool_call", "tool_call"]);
+      expect(fresh[1]?.causalRef?.stepIndex).toBe(1);
+      expect(fresh[2]?.causalRef?.stepIndex).toBe(2);
+
+      // Same record after the first request was announced earlier: the second request must keep
+      // ordinal 2 rather than collapsing to 1 because its sibling was filtered out
+      decoder.decode(
+        makeRecord("session-embedded-ordinal-seen", 1, {
+          type: "message",
+          role: "assistant",
+          content: [blockA],
+        }),
+      );
+      const retried = decoder.decode(
+        makeRecord("session-embedded-ordinal-seen", 2, {
+          type: "message",
+          role: "assistant",
+          content: [blockA, blockB],
+        }),
+      ) as IntermediateSessionEvent[];
+
+      expect(retried.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      const retriedB = retried[1] as IntermediateToolCallEvent;
+      expect(retriedB.callId).toBe("call_ord_b");
+      expect(retriedB.causalRef?.stepIndex).toBe(2);
+    });
+
+    it("recovers edit target paths on the announced request", () => {
+      const sessionId = "session-embedded-edit-1";
+
+      const events = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_edit_1",
+              name: "edit",
+              arguments: {
+                input:
+                  "*** Begin Patch\n*** Update File: src/auth.ts\n@@\n-const a = 1;\n+const a = 2;\n*** End Patch",
+              },
+            },
+          ],
+        }),
+      ) as IntermediateSessionEvent[];
+
+      expect(events.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      const editCall = events[1] as IntermediateToolCallEvent;
+      expect(editCall.toolName).toBe("edit");
+      expect(editCall.parameters?.targetPaths).toEqual(["src/auth.ts"]);
+    });
+  });
+
   describe("OMP tool parameter recovery for truncated execution markers", () => {
     const decoder = new OmpRecordDecoder();
 
@@ -1644,7 +1983,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       },
     );
 
-    it("recovers nested records parameters from assistant toolCall block when start has no args and projects to safe shape", () => {
+    it("emits nested records parameters from the assistant toolCall block when the start carries no args", () => {
       const sessionId = "session-param-rec-1";
 
       // Step 1: Assistant message with canonical toolCall content block containing nested records
@@ -1663,9 +2002,17 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         ],
       });
 
-      const assistantEvt = decoder.decode(assistantRecord) as IntermediateMessageEvent;
-      expect(assistantEvt.type).toBe("message");
-      expect(assistantEvt.role).toBe("assistant");
+      const assistantEvents = decoder.decode(assistantRecord) as IntermediateSessionEvent[];
+      expect(assistantEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect(assistantEvents[0]).toMatchObject({ type: "message", role: "assistant" });
+
+      const toolCallEvt = assistantEvents[1] as IntermediateToolCallEvent;
+      expect(toolCallEvt.type).toBe("tool_call");
+      expect(toolCallEvt.toolName).toBe("custom_sync_tool");
+      expect(toolCallEvt.callId).toBe("call_records_101");
+      expect(toolCallEvt.parameters).toEqual({
+        records: [{ status: "ready" }],
+      });
 
       // Step 2: Durable tool_execution_start marker arrives with data envelope and no args
       const startRecord = makeRecord(sessionId, 2, {
@@ -1677,13 +2024,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         },
       });
 
-      const toolCallEvt = decoder.decode(startRecord) as IntermediateToolCallEvent;
-      expect(toolCallEvt.type).toBe("tool_call");
-      expect(toolCallEvt.toolName).toBe("custom_sync_tool");
-      expect(toolCallEvt.callId).toBe("call_records_101");
-      expect(toolCallEvt.parameters).toEqual({
-        records: [{ status: "ready" }],
-      });
+      expect(decoder.decode(startRecord)).toBeNull();
 
       // Step 3: Verify existing metadata projector produces safe descriptor envelope
       const projected = projectToolParameters(toolCallEvt.parameters);
@@ -1723,12 +2064,21 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         },
       });
 
-      const msgEvt = decoder.decode(assistantRecord) as IntermediateMessageEvent;
+      const msgEvents = decoder.decode(assistantRecord) as IntermediateSessionEvent[];
+      expect(msgEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      const msgEvt = msgEvents[0] as IntermediateMessageEvent;
       expect(msgEvt.type).toBe("message");
       expect(msgEvt.role).toBe("assistant");
       expect(msgEvt.content).toBe("Deploying cluster configuration\n");
 
-      // Truncated tool_execution_start with only command/path
+      const toolCallEvt = msgEvents[1] as IntermediateToolCallEvent;
+      expect(toolCallEvt.type).toBe("tool_call");
+      expect(toolCallEvt.parameters).toEqual({
+        config: { env: "prod", replicas: 3 },
+        dryRun: false,
+      });
+
+      // Truncated tool_execution_start with only command/path must not replace the request
       const startRecord = makeRecord(sessionId, 2, {
         type: "tool_execution_start",
         toolName: "cluster_deploy",
@@ -1736,12 +2086,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         args: { command: "cluster_deploy" },
       });
 
-      const toolCallEvt = decoder.decode(startRecord) as IntermediateToolCallEvent;
-      expect(toolCallEvt.type).toBe("tool_call");
-      expect(toolCallEvt.parameters).toEqual({
-        config: { env: "prod", replicas: 3 },
-        dryRun: false,
-      });
+      expect(decoder.decode(startRecord)).toBeNull();
 
       const projected = projectToolParameters(toolCallEvt.parameters);
       expect(projected).toEqual({
@@ -1759,7 +2104,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       const sharedCallId = "call_shared_001";
 
       // Assistant message in session A
-      decoder.decode(
+      const msgA = decoder.decode(
         makeRecord(sessionA, 1, {
           type: "message",
           role: "assistant",
@@ -1772,10 +2117,10 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           ],
         }),
-      );
+      ) as IntermediateSessionEvent[];
 
       // Assistant message in session B with same call ID but different arguments
-      decoder.decode(
+      const msgB = decoder.decode(
         makeRecord(sessionB, 1, {
           type: "message",
           role: "assistant",
@@ -1788,36 +2133,69 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           ],
         }),
-      );
+      ) as IntermediateSessionEvent[];
 
-      // Execution start in session A recovers session A arguments
-      const startA = decoder.decode(
-        makeRecord(sessionA, 2, {
-          type: "tool_execution_start",
-          callId: sharedCallId,
-          toolName: "scoped_tool",
+      // The identical call ID is announced once per session, each with its own arguments
+      expect(msgA.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect(msgB.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect((msgA[1] as IntermediateToolCallEvent).parameters).toEqual({
+        sessionScope: "A",
+        tenant: "alpha",
+      });
+      expect((msgB[1] as IntermediateToolCallEvent).parameters).toEqual({
+        sessionScope: "B",
+        tenant: "beta",
+      });
+
+      // Execution starts for the identical call ID are deduplicated per session
+      expect(
+        decoder.decode(
+          makeRecord(sessionA, 2, {
+            type: "tool_execution_start",
+            callId: sharedCallId,
+            toolName: "scoped_tool",
+          }),
+        ),
+      ).toBeNull();
+      expect(
+        decoder.decode(
+          makeRecord(sessionB, 2, {
+            type: "tool_execution_start",
+            callId: sharedCallId,
+            toolName: "scoped_tool",
+          }),
+        ),
+      ).toBeNull();
+
+      // A third session reusing the same call ID is unaffected by either deduplication
+      const msgC = decoder.decode(
+        makeRecord("session-iso-C", 1, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: sharedCallId,
+              name: "scoped_tool",
+              arguments: { sessionScope: "C", tenant: "gamma" },
+            },
+          ],
         }),
-      ) as IntermediateToolCallEvent;
+      ) as IntermediateSessionEvent[];
 
-      expect(startA.parameters).toEqual({ sessionScope: "A", tenant: "alpha" });
-
-      // Execution start in session B recovers session B arguments
-      const startB = decoder.decode(
-        makeRecord(sessionB, 2, {
-          type: "tool_execution_start",
-          callId: sharedCallId,
-          toolName: "scoped_tool",
-        }),
-      ) as IntermediateToolCallEvent;
-
-      expect(startB.parameters).toEqual({ sessionScope: "B", tenant: "beta" });
+      expect(msgC.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect((msgC[1] as IntermediateToolCallEvent).parameters).toEqual({
+        sessionScope: "C",
+        tenant: "gamma",
+      });
     });
 
     it("bounds argument cache eviction under high volume and clears on session termination", () => {
       const boundDecoder = new OmpRecordDecoder();
       const sessionTerm = "session-term-cache";
 
-      // Populate 5005 tool call arguments in assistant messages across distinct call IDs
+      // Populate 5005 tool call arguments in assistant messages across distinct call IDs. The blocks
+      // omit a tool name, so they only cache arguments for later execution records to recover.
       for (let i = 1; i <= 5005; i++) {
         boundDecoder.decode(
           makeRecord("session-flood", i, {
@@ -1827,7 +2205,6 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
               {
                 type: "toolCall",
                 id: `flood_call_${i}`,
-                name: "flood_tool",
                 arguments: { index: i },
               },
             ],
@@ -1918,7 +2295,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       });
     });
 
-    it("ensures assistant message remains a single message event and start remains a single tool_call event without duplicates", () => {
+    it("emits an embedded request once and deduplicates the matching execution start", () => {
       const sessionId = "session-no-dups-1";
 
       const msgResult = decoder.decode(
@@ -1936,12 +2313,21 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         }),
       );
 
-      // Assistant message decodes to exactly ONE IntermediateMessageEvent (not an array, not a tool_call)
-      expect(Array.isArray(msgResult)).toBe(false);
-      const msgEvt = msgResult as IntermediateMessageEvent;
-      expect(msgEvt.type).toBe("message");
-      expect(msgEvt.role).toBe("assistant");
+      // The assistant message stays intact and the requested call is announced exactly once
+      expect(Array.isArray(msgResult)).toBe(true);
+      const msgEvents = msgResult as IntermediateSessionEvent[];
+      expect(msgEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect(msgEvents[0]).toMatchObject({ type: "message", role: "assistant" });
+      const toolCallEvt = msgEvents[1] as IntermediateToolCallEvent;
+      expect(toolCallEvt).toMatchObject({
+        type: "tool_call",
+        toolName: "do_task",
+        callId: "call_single_1",
+        toolCallId: "call_single_1",
+        parameters: { target: "repo" },
+      });
 
+      // The execution start for the same call resolves to nothing rather than a second call event
       const startResult = decoder.decode(
         makeRecord(sessionId, 2, {
           type: "tool_execution_start",
@@ -1949,15 +2335,105 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           toolName: "do_task",
         }),
       );
+      expect(startResult).toBeNull();
 
-      // Execution start decodes to exactly ONE IntermediateToolCallEvent
-      expect(Array.isArray(startResult)).toBe(false);
-      const toolCallEvt = startResult as IntermediateToolCallEvent;
-      expect(toolCallEvt.type).toBe("tool_call");
-      expect(toolCallEvt.parameters).toEqual({ target: "repo" });
+      const repeatedResult = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "tool_call",
+          callId: "call_single_1",
+          toolName: "do_task",
+          args: { target: "repo" },
+        }),
+      );
+      expect(repeatedResult).toBeNull();
     });
 
-    it("avoids retaining arguments past the matching start", () => {
+    it("deduplicates an embedded request that follows its own execution start", () => {
+      const sessionId = "session-start-first-1";
+
+      const startResult = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "tool_execution_start",
+          callId: "call_start_first",
+          toolName: "eval",
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(startResult).toMatchObject({
+        type: "tool_call",
+        toolName: "eval",
+        callId: "call_start_first",
+      });
+
+      // The later assistant message keeps its content but must not re-announce the same call
+      const msgResult = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Running the check." },
+              {
+                type: "toolCall",
+                id: "call_start_first",
+                name: "eval",
+                arguments: { language: "py", code: "print(1)" },
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(Array.isArray(msgResult)).toBe(false);
+      expect(msgResult).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: "Running the check.\n",
+      });
+    });
+
+    it("keeps execution-record announcements while suppressing the assistant message that follows", () => {
+      const sessionId = "session-announcement-scope-1";
+
+      // Repeated execution records for one call keep their own announcements
+      const firstStart = decoder.decode(
+        makeRecord(sessionId, 1, {
+          type: "tool_execution_start",
+          callId: "call_scope_1",
+          toolName: "read",
+          args: { path: "src/a.ts" },
+        }),
+      ) as IntermediateToolCallEvent;
+      const secondStart = decoder.decode(
+        makeRecord(sessionId, 2, {
+          type: "tool_execution_start",
+          callId: "call_scope_1",
+          toolName: "read",
+          args: { path: "src/a.ts" },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(firstStart.type).toBe("tool_call");
+      expect(secondStart.type).toBe("tool_call");
+
+      // The assistant message repeating the same request must not announce it a third time
+      const msgResult = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_scope_1",
+              name: "read",
+              arguments: { path: "src/a.ts" },
+            },
+          ],
+        }),
+      );
+      expect(Array.isArray(msgResult)).toBe(false);
+      expect(msgResult).toMatchObject({ type: "message", role: "assistant" });
+    });
+
+    it("keeps cached arguments past a deduplicated start for result correlation", () => {
       const sessionId = "session-no-retain-1";
 
       decoder.decode(
@@ -1968,33 +2444,68 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             {
               type: "toolCall",
               id: "call_once_1",
-              name: "one_time_tool",
-              arguments: { secretToken: "cached-val" },
+              name: "eval",
+              arguments: { language: "py", code: "print(2)", reset: false },
             },
           ],
         }),
       );
 
-      // First start consumes and clears the cached arguments
+      // The matching start is deduplicated instead of consuming the cached arguments
       const firstStart = decoder.decode(
         makeRecord(sessionId, 2, {
           type: "tool_execution_start",
           callId: "call_once_1",
-          toolName: "one_time_tool",
+          toolName: "eval",
+          args: { language: "py", code: "print(3)", reset: false },
         }),
-      ) as IntermediateToolCallEvent;
-      expect(firstStart.parameters).toEqual({ secretToken: "cached-val" });
+      );
+      expect(firstStart).toBeNull();
 
-      // Subsequent start for the same call ID does not retain the previous arguments
-      const secondStart = decoder.decode(
+      // The result still receives the request arguments the request itself declared, exactly once
+      const result = decoder.decode(
         makeRecord(sessionId, 3, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call_once_1",
+            toolName: "eval",
+            content: [{ type: "text", text: "2" }],
+            isError: false,
+          },
+        }),
+      ) as IntermediateToolResultEvent;
+      expect(result.toolName).toBe("eval");
+      expect(result.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toEqual({
+        callId: "call_once_1",
+        toolName: "eval",
+        parameters: { language: "py", code: "print(2)" },
+      });
+
+      // Subsequent starts for the same call stay deduplicated and do not resurrect the arguments
+      const secondStart = decoder.decode(
+        makeRecord(sessionId, 4, {
           type: "tool_execution_start",
           callId: "call_once_1",
-          toolName: "one_time_tool",
-          args: { fallback: true },
+          toolName: "eval",
+          args: { language: "py", code: "print(4)" },
         }),
-      ) as IntermediateToolCallEvent;
-      expect(secondStart.parameters).toEqual({ fallback: true });
+      );
+      expect(secondStart).toBeNull();
+
+      const replay = decoder.decode(
+        makeRecord(sessionId, 3, {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "call_once_1",
+            toolName: "eval",
+            content: [{ type: "text", text: "2" }],
+            isError: false,
+          },
+        }),
+      ) as IntermediateToolResultEvent;
+      expect(replay.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toBeUndefined();
     });
 
     it("consistently normalizes assistant tool call IDs containing pipe characters for cache insertion and lookup", () => {
@@ -2002,7 +2513,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       const rawPipeCallId = "call|tool|nested|999";
 
       // Assistant message with pipe-delimited raw call ID
-      decoder.decode(
+      const assistantEvents = decoder.decode(
         makeRecord(sessionId, 1, {
           type: "message",
           role: "assistant",
@@ -2015,9 +2526,23 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           ],
         }),
-      );
+      ) as IntermediateSessionEvent[];
 
-      // Execution start with the same pipe-delimited call ID
+      expect(assistantEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      const callEvt = assistantEvents[1] as IntermediateToolCallEvent;
+      expect(callEvt.type).toBe("tool_call");
+      expect(callEvt.callId).toBe("call_tool_nested_999");
+      expect(callEvt.toolCallId).toBe("call_tool_nested_999");
+      expect(callEvt.parameters).toEqual({ recordList: [{ key: "k1", count: 42 }] });
+
+      const projected = projectToolParameters(callEvt.parameters);
+      expect(projected).toEqual({
+        [RESIN_PARAMETER_SHAPE_KEY]: {
+          recordList: [{ key: "string", count: "number" }],
+        },
+      });
+
+      // Execution start with the same pipe-delimited call ID is deduplicated, not re-announced
       const startEvt = decoder.decode(
         makeRecord(sessionId, 2, {
           type: "custom",
@@ -2028,26 +2553,15 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             args: { truncated: true },
           },
         }),
-      ) as IntermediateToolCallEvent;
-
-      expect(startEvt.type).toBe("tool_call");
-      expect(startEvt.callId).toBe("call_tool_nested_999");
-      expect(startEvt.toolCallId).toBe("call_tool_nested_999");
-      expect(startEvt.parameters).toEqual({ recordList: [{ key: "k1", count: 42 }] });
-
-      const projected = projectToolParameters(startEvt.parameters);
-      expect(projected).toEqual({
-        [RESIN_PARAMETER_SHAPE_KEY]: {
-          recordList: [{ key: "string", count: "number" }],
-        },
-      });
+      );
+      expect(startEvt).toBeNull();
     });
 
     it("distinguishes absent argument field from explicit empty arguments object/string", () => {
       const sessionId = "session-absent-vs-empty";
 
-      // Case 1: Absent argument field in assistant message -> preserves marker fallback
-      decoder.decode(
+      // Case 1: Absent argument field in assistant message -> no call is announced, marker fallback stands
+      const absentEvents = decoder.decode(
         makeRecord(sessionId, 1, {
           type: "message",
           role: "assistant",
@@ -2060,6 +2574,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           ],
         }),
       );
+      expect(Array.isArray(absentEvents)).toBe(false);
 
       const absentStart = decoder.decode(
         makeRecord(sessionId, 2, {
@@ -2071,8 +2586,8 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       ) as IntermediateToolCallEvent;
       expect(absentStart.parameters).toEqual({ markerFallback: "kept" });
 
-      // Case 2: Explicit empty object -> authoritative explicit empty arguments override marker
-      decoder.decode(
+      // Case 2: Explicit empty object -> the request announces explicit empty arguments
+      const emptyObjEvents = decoder.decode(
         makeRecord(sessionId, 3, {
           type: "message",
           role: "assistant",
@@ -2085,7 +2600,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           ],
         }),
-      );
+      ) as IntermediateSessionEvent[];
+      expect(emptyObjEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect((emptyObjEvents[1] as IntermediateToolCallEvent).parameters).toEqual({});
 
       const emptyObjStart = decoder.decode(
         makeRecord(sessionId, 4, {
@@ -2094,11 +2611,11 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           toolName: "empty_tool",
           args: { markerFallback: "should_be_overridden" },
         }),
-      ) as IntermediateToolCallEvent;
-      expect(emptyObjStart.parameters).toEqual({});
+      );
+      expect(emptyObjStart).toBeNull();
 
-      // Case 3: Explicit empty JSON string -> authoritative explicit empty arguments override marker
-      decoder.decode(
+      // Case 3: Explicit empty JSON string -> parsed into the same explicit empty arguments
+      const emptyStrEvents = decoder.decode(
         makeRecord(sessionId, 5, {
           type: "message",
           role: "assistant",
@@ -2111,7 +2628,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           ],
         }),
-      );
+      ) as IntermediateSessionEvent[];
+      expect(emptyStrEvents.map((event) => event.type)).toEqual(["message", "tool_call"]);
+      expect((emptyStrEvents[1] as IntermediateToolCallEvent).parameters).toEqual({});
 
       const emptyStrStart = decoder.decode(
         makeRecord(sessionId, 6, {
@@ -2120,8 +2639,8 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           toolName: "empty_str_tool",
           args: { markerFallback: "should_be_overridden" },
         }),
-      ) as IntermediateToolCallEvent;
-      expect(emptyStrStart.parameters).toEqual({});
+      );
+      expect(emptyStrStart).toBeNull();
     });
 
     it("prevents colon-concatenation collisions and ensures collision-free session lifecycle cleanup", () => {
@@ -2162,7 +2681,6 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             {
               type: "toolCall",
               id: call2,
-              name: "tool_2",
               arguments: { target: "session-alpha-colon-beta" },
             },
           ],
@@ -2177,7 +2695,6 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             {
               type: "toolCall",
               id: call3,
-              name: "tool_3",
               arguments: { target: "session-alpha-beta-gamma" },
             },
           ],
@@ -2228,7 +2745,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     it("keeps authoritative arguments distinct when raw call IDs normalize identically", () => {
       const collisionDecoder = new OmpRecordDecoder();
       const sessionId = "session-normalized-id-collision";
-      collisionDecoder.decode(
+      const assistantEvents = collisionDecoder.decode(
         makeRecord(sessionId, 1, {
           type: "message",
           message: {
@@ -2249,25 +2766,40 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             ],
           },
         }),
-      );
+      ) as IntermediateSessionEvent[];
 
-      const pipeStart = collisionDecoder.decode(
-        makeRecord(sessionId, 2, {
-          type: "tool_execution_start",
-          callId: "call|x",
-          toolName: "pipe_tool",
-        }),
-      ) as IntermediateToolCallEvent;
-      const questionStart = collisionDecoder.decode(
-        makeRecord(sessionId, 3, {
-          type: "tool_execution_start",
-          callId: "call?x",
-          toolName: "question_tool",
-        }),
-      ) as IntermediateToolCallEvent;
+      // Both requests are announced even though their sanitized call IDs collide
+      expect(assistantEvents.map((event) => event.type)).toEqual([
+        "message",
+        "tool_call",
+        "tool_call",
+      ]);
+      const pipeCall = assistantEvents[1] as IntermediateToolCallEvent;
+      const questionCall = assistantEvents[2] as IntermediateToolCallEvent;
+      expect(pipeCall.callId).toBe("call_x");
+      expect(questionCall.callId).toBe("call_x");
+      expect(pipeCall.parameters).toEqual({ target: "pipe" });
+      expect(questionCall.parameters).toEqual({ target: "question" });
 
-      expect(pipeStart.parameters).toEqual({ target: "pipe" });
-      expect(questionStart.parameters).toEqual({ target: "question" });
+      // Raw identities, not sanitized ones, drive deduplication of the matching starts
+      expect(
+        collisionDecoder.decode(
+          makeRecord(sessionId, 2, {
+            type: "tool_execution_start",
+            callId: "call|x",
+            toolName: "pipe_tool",
+          }),
+        ),
+      ).toBeNull();
+      expect(
+        collisionDecoder.decode(
+          makeRecord(sessionId, 3, {
+            type: "tool_execution_start",
+            callId: "call?x",
+            toolName: "question_tool",
+          }),
+        ),
+      ).toBeNull();
     });
   });
 });

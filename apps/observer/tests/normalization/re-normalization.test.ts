@@ -1,3 +1,4 @@
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import { createInMemoryStateStore } from "@resin/db";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
@@ -11,6 +12,56 @@ import {
 describe("Re-Normalization & Versioned Revision Engine", () => {
   const sessionId = "01J5XYZ7890ABCDEFGHJKMNPQR";
   const timestamp = "2026-08-17T12:00:00.000Z";
+
+  it("matches historical fan-out siblings by sequence and step rather than overwriting them", async () => {
+    const store = await createInMemoryStateStore();
+    await store.sessions.saveSession({
+      sessionId,
+      harnessId: "omp",
+      status: "running",
+      startedAt: timestamp,
+    });
+    const pipeline = new NormalizationPipeline({
+      sessionRepository: store.sessions,
+      dbConnection: store.conn,
+    });
+    pipeline.registerDecoder(new OmpRecordDecoder());
+    const record: RawHarnessRecord = {
+      recordId: "fanout-source",
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: 1,
+      timestamp,
+      recordType: "transcript_line",
+      rawPayload: {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "first-call", name: "read", arguments: { path: "first.ts" } },
+            { type: "toolCall", id: "second-call", name: "read", arguments: { path: "second.ts" } },
+          ],
+        },
+      },
+      cursor: { offset: 0, line: 1, sequence: 1, timestamp },
+      metadata: {},
+    };
+    const initial = await pipeline.processRecord(record);
+    expect(initial).toHaveLength(3);
+    expect(initial.every((result) => result.status === "success")).toBe(true);
+    const preview = await new ReNormalizer({
+      sessionRepository: store.sessions,
+      dbConnection: store.conn,
+    }).preview([record], { sessionId, decoder: new OmpRecordDecoder() });
+    expect(preview.diffs).toHaveLength(3);
+    for (const diff of preview.diffs) {
+      expect(diff.originalEventId).toBe(diff.newEventId);
+      expect(diff.changedFields).not.toContain("new_event");
+      expect(diff.changedFields).not.toContain("type");
+    }
+    expect(await store.sessions.getEvents(sessionId)).toHaveLength(3);
+    store.close();
+  });
 
   it("creates new revisions without mutating historical evidence", async () => {
     const store = await createInMemoryStateStore();

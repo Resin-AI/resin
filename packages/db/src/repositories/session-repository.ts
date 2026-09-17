@@ -59,6 +59,37 @@ export interface RawRecordRef {
  */
 export const CATALOG_SNAPSHOT_NEXT_REV_KEY = "catalogSnapshotNextRev";
 
+/**
+ * SQL expression resolving an event's causal fan-out step.
+ *
+ * Decoders may emit several events sharing one source sequence (a message and
+ * its tool-call siblings); the step distinguishes them. Rows written before
+ * fan-out existed carry no `causalRef.stepIndex` and resolve to step 0. Guarding
+ * with json_valid mirrors the unique expression index installed by migration
+ * 005, so malformed payloads fail closed to step 0 instead of raising. Keep this
+ * expression identical to the index definition or lookups stop being
+ * index-served.
+ */
+const CAUSAL_STEP_INDEX_SQL =
+  "CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END";
+
+interface NormalizedEventRow {
+  event_id: string;
+  session_id: string;
+  sequence: number;
+  type: string;
+  timestamp: string;
+  causal_parent_id: string | null;
+  payload_json: string;
+  redaction_meta_json: string | null;
+  digest: string | null;
+  created_at: string;
+}
+
+function mapNormalizedEventRow(row: NormalizedEventRow): NormalizedSessionEvent {
+  return NormalizedSessionEventSchema.parse(JSON.parse(row.payload_json));
+}
+
 function stripInternalConfigKeys(config: Record<string, unknown>): Record<string, unknown> {
   const { [CATALOG_SNAPSHOT_NEXT_REV_KEY]: _omitted, ...rest } = config;
   return rest;
@@ -536,25 +567,12 @@ export class SessionRepository {
   }
 
   async getEventById(eventId: string): Promise<NormalizedSessionEvent | null> {
-    const row = this.conn.get<{
-      event_id: string;
-      session_id: string;
-      sequence: number;
-      type: string;
-      timestamp: string;
-      causal_parent_id: string | null;
-      payload_json: string;
-      redaction_meta_json: string | null;
-      digest: string | null;
-      created_at: string;
-    }>("SELECT * FROM normalized_events WHERE event_id = ?;", [eventId]);
+    const row = this.conn.get<NormalizedEventRow>(
+      "SELECT * FROM normalized_events WHERE event_id = ?;",
+      [eventId],
+    );
 
-    if (!row) {
-      return null;
-    }
-
-    const parsed = JSON.parse(row.payload_json);
-    return NormalizedSessionEventSchema.parse(parsed);
+    return row ? mapNormalizedEventRow(row) : null;
   }
 
   async getEvents(
@@ -569,29 +587,50 @@ export class SessionRepository {
       params.push(options.sinceSequence);
     }
 
-    let sql = `SELECT * FROM normalized_events WHERE ${conditions.join(" AND ")} ORDER BY sequence ASC`;
+    // Sibling fan-out events share a sequence, so the causal step is the
+    // tie-break that keeps playback order stable across reads.
+    let sql = `SELECT * FROM normalized_events WHERE ${conditions.join(" AND ")} ORDER BY sequence ASC, ${CAUSAL_STEP_INDEX_SQL} ASC`;
     if (options?.limit) {
       sql += " LIMIT ?";
       params.push(options.limit);
     }
 
-    const rows = this.conn.all<{
-      event_id: string;
-      session_id: string;
-      sequence: number;
-      type: string;
-      timestamp: string;
-      causal_parent_id: string | null;
-      payload_json: string;
-      redaction_meta_json: string | null;
-      digest: string | null;
-      created_at: string;
-    }>(sql, params);
+    const rows = this.conn.all<NormalizedEventRow>(sql, params);
 
-    return rows.map((r) => {
-      const parsed = JSON.parse(r.payload_json);
-      return NormalizedSessionEventSchema.parse(parsed);
-    });
+    return rows.map(mapNormalizedEventRow);
+  }
+
+  /**
+   * Finds the event stored for a session sequence.
+   *
+   * With `stepIndex` omitted the lookup keeps legacy single-row semantics: the
+   * lowest causal step wins, which is the implicit step 0 of pre-fan-out events,
+   * and a preexisting row that carries a higher step is still returned rather
+   * than reported missing. With `stepIndex` supplied the lookup is exact and
+   * returns the specific fan-out sibling.
+   */
+  async findEventBySessionAndSequence(
+    sessionId: string,
+    sequence: number,
+    stepIndex?: number,
+  ): Promise<NormalizedSessionEvent | null> {
+    const conditions = ["session_id = ?", "sequence = ?"];
+    const params: SQLBindValue[] = [sessionId, sequence];
+
+    if (stepIndex !== undefined) {
+      conditions.push(`${CAUSAL_STEP_INDEX_SQL} = ?`);
+      params.push(stepIndex);
+    }
+
+    const row = this.conn.get<NormalizedEventRow>(
+      `SELECT * FROM normalized_events
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY ${CAUSAL_STEP_INDEX_SQL} ASC
+       LIMIT 1;`,
+      params,
+    );
+
+    return row ? mapNormalizedEventRow(row) : null;
   }
 
   async getLatestEventSequence(sessionId: string): Promise<number> {

@@ -159,18 +159,21 @@ export class ReNormalizer {
     const diffs: ReNormalizationDiff[] = [];
 
     // Fetch existing historical events for this session to compute diffs if DB available
-    const existingEventsBySeq = new Map<number, NormalizedSessionEvent>();
+    const existingEventsByStep = new Map<string, NormalizedSessionEvent>();
     const dbConn = options.dbConnection ?? this.dbConnection;
     if (dbConn) {
       try {
         const rows = dbConn.all<{ sequence: number; payload_json: string }>(
-          "SELECT sequence, payload_json FROM normalized_events WHERE session_id = ? ORDER BY sequence ASC;",
+          "SELECT sequence, payload_json FROM normalized_events WHERE session_id = ? ORDER BY sequence ASC, CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END ASC;",
           [sessionId],
         );
         for (const row of rows) {
           try {
             const parsed = JSON.parse(row.payload_json);
-            existingEventsBySeq.set(row.sequence, parsed);
+            existingEventsByStep.set(
+              JSON.stringify([row.sequence, parsed.causalRef?.stepIndex ?? 0]),
+              parsed,
+            );
           } catch {
             // Ignore
           }
@@ -216,7 +219,9 @@ export class ReNormalizer {
 
           // Calculate diff against existing historical event
           const seq = eventWithRevision.causalRef.causalSequence;
-          const original = existingEventsBySeq.get(seq);
+          const original = existingEventsByStep.get(
+            JSON.stringify([seq, eventWithRevision.causalRef.stepIndex ?? 0]),
+          );
           const newDigest = createHash("sha256")
             .update(canonicalJson(eventWithRevision), "utf8")
             .digest("hex");

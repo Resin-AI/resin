@@ -35,8 +35,6 @@ import {
  * contract property read back from the produced carrier.
  */
 
-const decoder = new OmpRecordDecoder();
-
 /** Current wire envelope limit for one evidence payload. */
 const WIRE_EVIDENCE_BYTES_LIMIT = 65_536;
 
@@ -88,7 +86,7 @@ interface CaptureEnvironment {
 
 function createCaptureEnvironment(): CaptureEnvironment {
   const pipeline = new NormalizationPipeline();
-  pipeline.registerDecoder(decoder);
+  pipeline.registerDecoder(new OmpRecordDecoder());
   const localEvents: NormalizedSessionEvent[] = [];
   const cloudRows: NormalizedSessionEvent[] = [];
   // SAFETY: Fake implements the two submission methods the coordinator calls.
