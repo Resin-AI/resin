@@ -9,13 +9,13 @@
 
 import {
   type RecordedWorkflow,
+  type WorkflowJsonValue,
   type WorkflowValueTemplate,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import {
   type RecordedWorkflowExecution,
   type RuntimeAdapterRegistry,
-  type WorkflowJsonValue,
   executeRecordedWorkflow,
 } from "./recorded-workflow.js";
 
