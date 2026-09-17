@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@resin/contracts";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import type { LocalDatabaseConnection } from "@resin/db";
+import { CAUSAL_STEP_INDEX_SQL } from "@resin/db";
 
 /**
  * Deduplication check outcome.
@@ -153,7 +154,9 @@ export class NormalizationDeduplicator {
           payload_json: string;
           sequence: number;
         }>(
-          "SELECT event_id, payload_json, sequence FROM normalized_events WHERE event_id = ? OR (session_id = ? AND sequence = ? AND (CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END) = ?);",
+          `SELECT event_id, payload_json, sequence FROM normalized_events
+           WHERE event_id = ?
+             OR (session_id = ? AND sequence = ? AND (${CAUSAL_STEP_INDEX_SQL}) = ?);`,
           [eventId, sessionId, sequence, stepIndex],
         );
 

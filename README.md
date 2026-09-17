@@ -57,6 +57,8 @@ Search for tools that can inspect this repository's structure.
 4. The local MCP gateway makes active tools available to coding agents.
 5. Each tool runs within its declared capability limits.
 
+With metadata sharing enabled, workflow links identify shared files or issues using temporary labels—not paths, repository names, issue numbers, contents, or hashes of those values. Only completed, successful steps count as workflow evidence. These links never grant tool permissions.
+
 ## Coding agent compatibility
 
 Codex CLI uses four stable MCP tools: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Newly available tools are reached through these same routes, without restarting the session. Claude Code and Oh My Pi retain their native dynamic tool catalogs.

@@ -68,7 +68,22 @@ describe("Idempotency & Deduplication", () => {
     expect(
       await pipeline.processIntermediateEvent({ ...call, callId: "conflicting-call" }),
     ).toMatchObject({ status: "dead_letter" });
-    expect(await store.sessions.getEvents(sessionId)).toHaveLength(3);
+    // Playback order ties each sibling to its source sequence by causal step:
+    // the step-less legacy message resolves to step 0 and the recovered calls follow.
+    const persisted = await store.sessions.getEvents(sessionId);
+    expect(
+      persisted.map((event) => [
+        event.type,
+        event.causalRef.stepIndex ?? 0,
+        event.type === "tool_call" ? event.callId : null,
+      ]),
+    ).toEqual([
+      ["message", 0, null],
+      ["tool_call", 1, "embedded-call-one"],
+      ["tool_call", 2, "embedded-call-two"],
+    ]);
+    // Evidence keeps its original identity: the message is never renumbered by siblings.
+    expect(persisted[0]?.eventId).toBe(first.event.eventId);
   });
 
   it("is completely idempotent when re-processing identical raw records", async () => {

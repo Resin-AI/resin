@@ -8692,6 +8692,218 @@ var init_deterministic_command_sequence = __esm({
   }
 });
 
+// packages/contracts/dist/tool-link-evidence.js
+function checkCarrierStructure(carrier, ctx) {
+  const declared = [...carrier.reads, ...carrier.writes];
+  const fields = [
+    ["reads", carrier.reads],
+    ["writes", carrier.writes]
+  ];
+  for (const [field, refs] of fields) {
+    for (let index = 0; index < refs.length; index++) {
+      const entry = refs[index];
+      if (refs.findIndex((other) => other.ref === entry.ref) !== index) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [field, index, "ref"],
+          message: `${field} must be deduplicated by ref`
+        });
+        continue;
+      }
+      if (declared.some((other) => other.ref === entry.ref && other.kind !== entry.kind)) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [field, index, "kind"],
+          message: "One ref names exactly one resource kind within a carrier"
+        });
+      }
+    }
+  }
+  for (let index = 0; index < carrier.inputs.length; index++) {
+    const entry = carrier.inputs[index];
+    if (carrier.inputs.findIndex((other) => other.name === entry.name) !== index) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: ["inputs", index, "name"],
+        message: "inputs must be deduplicated by name"
+      });
+    }
+    if (!declared.some((resource) => resource.ref === entry.ref)) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: ["inputs", index, "ref"],
+        message: "An input role must reference a resource this carrier declares as read or written"
+      });
+    }
+  }
+  for (let index = 0; index < carrier.contentKinds.length; index++) {
+    const kind = carrier.contentKinds[index];
+    if (carrier.contentKinds.indexOf(kind) !== index) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: ["contentKinds", index],
+        message: "contentKinds must be deduplicated"
+      });
+    }
+  }
+  const readKinds = carrier.reads.map((entry) => entry.kind);
+  const writeKinds = carrier.writes.map((entry) => entry.kind);
+  const hasRead = carrier.reads.length > 0;
+  const hasWrite = carrier.writes.length > 0;
+  if (!hasRead && !hasWrite) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["reads"],
+      message: "A carrier states a declared data flow and needs at least one resource"
+    });
+  }
+  switch (carrier.operation) {
+    case "file.read":
+      if (hasWrite) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["writes"],
+          message: "file.read declares no written resource"
+        });
+      }
+      break;
+    case "file.write":
+      if (hasRead) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["reads"],
+          message: "file.write declares no read resource"
+        });
+      }
+      break;
+    case "file.transform":
+      if (!hasRead || !hasWrite) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["reads"],
+          message: "file.transform consumes a read resource and produces a written one"
+        });
+      }
+      break;
+    case "github.issue.read":
+      if (!readKinds.includes("github_issue")) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["reads"],
+          message: "github.issue.read reads at least one issue"
+        });
+      }
+      if (writeKinds.includes("github_issue")) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["writes"],
+          message: "github.issue.read never writes an issue"
+        });
+      }
+      break;
+    case "github.issue.update":
+      if (!writeKinds.includes("github_issue")) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["writes"],
+          message: "github.issue.update writes at least one issue"
+        });
+      }
+      if (readKinds.includes("github_issue")) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["reads"],
+          message: "github.issue.update never reads the issue it writes"
+        });
+      }
+      break;
+    case "command.exec":
+      break;
+  }
+}
+var TOOL_LINK_EVIDENCE_VERSION, TOOL_LINK_EVIDENCE_LIMITS, TOOL_LINK_OPERATIONS, TOOL_LINK_RESOURCE_KINDS, TOOL_LINK_INPUT_NAMES, TOOL_LINK_CONTENT_KINDS, TOOL_LINK_OBSERVATION_STATUSES, ToolLinkResourceRefIdSchema, ToolLinkResourceRefSchema, ToolLinkInputSchema, ToolLinkObservationSchema, ToolLinkReadsSchema, ToolLinkWritesSchema, ToolLinkInputsSchema, ToolLinkContentKindsSchema, ToolLinkEvidenceV1Schema;
+var init_tool_link_evidence = __esm({
+  "packages/contracts/dist/tool-link-evidence.js"() {
+    "use strict";
+    init_zod();
+    init_canonical();
+    init_common();
+    TOOL_LINK_EVIDENCE_VERSION = 1;
+    TOOL_LINK_EVIDENCE_LIMITS = {
+      /** Distinct resources declared as read by one invocation. */
+      reads: 4,
+      /** Distinct resources declared as written by one invocation. */
+      writes: 4,
+      /** Distinct semantic input roles named by one invocation. */
+      inputs: 6,
+      /** Distinct content-shape facts recorded for one invocation. */
+      contentKinds: 1,
+      /** Highest resource ordinal a ref may name; the per-scope namespace is `r0`…`r<maxRefIndex>`. */
+      maxRefIndex: 999,
+      /** Canonical serialized byte ceiling of one carrier; larger payloads are rejected unparsed. */
+      serializedBytes: 8192
+    };
+    TOOL_LINK_OPERATIONS = [
+      "github.issue.read",
+      "github.issue.update",
+      "file.read",
+      "file.write",
+      "file.transform",
+      "command.exec"
+    ];
+    TOOL_LINK_RESOURCE_KINDS = ["file", "github_issue", "value"];
+    TOOL_LINK_INPUT_NAMES = ["subject", "source", "target", "changes"];
+    TOOL_LINK_CONTENT_KINDS = ["markdown_checklist"];
+    TOOL_LINK_OBSERVATION_STATUSES = ["pending", "success", "failure"];
+    ToolLinkResourceRefIdSchema = external_exports.string().regex(new RegExp(`^r(?:0|[1-9][0-9]{0,${String(TOOL_LINK_EVIDENCE_LIMITS.maxRefIndex).length - 1}})$`), "Resource ref must be a bounded 'r<ordinal>' ordinal id").refine((ref) => Number.parseInt(ref.slice(1), 10) <= TOOL_LINK_EVIDENCE_LIMITS.maxRefIndex, "Resource ref exceeds the pinned ordinal namespace");
+    ToolLinkResourceRefSchema = external_exports.object({
+      kind: external_exports.enum(TOOL_LINK_RESOURCE_KINDS),
+      ref: ToolLinkResourceRefIdSchema
+    }).strict();
+    ToolLinkInputSchema = external_exports.object({
+      name: external_exports.enum(TOOL_LINK_INPUT_NAMES),
+      ref: ToolLinkResourceRefIdSchema
+    }).strict();
+    ToolLinkObservationSchema = external_exports.object({
+      callId: IdentifierSchema,
+      callEventId: IdentifierSchema,
+      resultEventId: IdentifierSchema.optional(),
+      status: external_exports.enum(TOOL_LINK_OBSERVATION_STATUSES)
+    }).strict().superRefine((observation, ctx) => {
+      if (observation.status === "pending" && observation.resultEventId !== void 0) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["resultEventId"],
+          message: "A pending observation is call-side only and cannot carry a result event id"
+        });
+      }
+      if (observation.status !== "pending" && observation.resultEventId === void 0) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["resultEventId"],
+          message: "A completed observation must name the result event that carried the outcome"
+        });
+      }
+    });
+    ToolLinkReadsSchema = external_exports.array(ToolLinkResourceRefSchema).max(TOOL_LINK_EVIDENCE_LIMITS.reads);
+    ToolLinkWritesSchema = external_exports.array(ToolLinkResourceRefSchema).max(TOOL_LINK_EVIDENCE_LIMITS.writes);
+    ToolLinkInputsSchema = external_exports.array(ToolLinkInputSchema).max(TOOL_LINK_EVIDENCE_LIMITS.inputs);
+    ToolLinkContentKindsSchema = external_exports.array(external_exports.enum(TOOL_LINK_CONTENT_KINDS)).max(TOOL_LINK_EVIDENCE_LIMITS.contentKinds);
+    ToolLinkEvidenceV1Schema = external_exports.object({
+      version: external_exports.literal(TOOL_LINK_EVIDENCE_VERSION),
+      scopeId: IdentifierSchema,
+      operation: external_exports.enum(TOOL_LINK_OPERATIONS),
+      reads: ToolLinkReadsSchema,
+      writes: ToolLinkWritesSchema,
+      inputs: ToolLinkInputsSchema,
+      contentKinds: ToolLinkContentKindsSchema,
+      observation: ToolLinkObservationSchema
+    }).strict().superRefine((carrier, ctx) => {
+      checkCarrierStructure(carrier, ctx);
+    });
+  }
+});
+
 // packages/contracts/dist/index.js
 var init_dist = __esm({
   "packages/contracts/dist/index.js"() {
@@ -8712,6 +8924,7 @@ var init_dist = __esm({
     init_v1();
     init_computation_evidence();
     init_deterministic_command_sequence();
+    init_tool_link_evidence();
   }
 });
 

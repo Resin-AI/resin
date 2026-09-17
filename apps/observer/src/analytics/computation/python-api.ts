@@ -331,3 +331,136 @@ export function parsePythonImportText(source: string): PythonImportBinding | und
   }
   return names.length === 0 ? undefined : { module: names[0], kind: "module", names, members };
 }
+
+/** The single-character escapes whose value Python defines exactly. */
+const PYTHON_SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  a: "\x07",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  v: "\v",
+};
+
+/** Prefixes whose literal is a plain or unicode TEXT value (raw ones skip escape processing). */
+const PYTHON_TEXT_PREFIXES: Readonly<Record<string, { raw: boolean }>> = {
+  "": { raw: false },
+  u: { raw: false },
+  r: { raw: true },
+  ru: { raw: true },
+  ur: { raw: true },
+};
+
+/** True when the delimiter occurs inside the body without being escaped by a backslash run. */
+function containsUnescapedDelimiter(body: string, delimiter: string): boolean {
+  if (delimiter.length === 0) {
+    return false;
+  }
+  for (let index = 0; index + delimiter.length <= body.length; index++) {
+    if (!body.startsWith(delimiter, index)) {
+      continue;
+    }
+    let backslashes = 0;
+    for (let back = index - 1; back >= 0 && body[back] === "\\"; back--) {
+      backslashes += 1;
+    }
+    if (backslashes % 2 === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function decodePythonEscapes(body: string): string | undefined {
+  if (!body.includes("\\")) {
+    return body;
+  }
+  let decoded = "";
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index]!;
+    if (char !== "\\") {
+      decoded += char;
+      continue;
+    }
+    const escaped = body[index + 1];
+    if (escaped === undefined) {
+      return undefined;
+    }
+    if (escaped === "\n") {
+      // A line continuation inside a literal contributes nothing.
+      index += 1;
+      continue;
+    }
+    const simple = PYTHON_SIMPLE_ESCAPES[escaped];
+    if (simple !== undefined) {
+      decoded += simple;
+      index += 1;
+      continue;
+    }
+    if (escaped === "x" || escaped === "u" || escaped === "U") {
+      const width = escaped === "x" ? 2 : escaped === "u" ? 4 : 8;
+      const digits = body.slice(index + 2, index + 2 + width);
+      if (digits.length !== width || !/^[0-9A-Fa-f]+$/.test(digits)) {
+        return undefined;
+      }
+      const codePoint = Number.parseInt(digits, 16);
+      if (codePoint > 0x10ffff) {
+        return undefined;
+      }
+      decoded += String.fromCodePoint(codePoint);
+      index += 1 + width;
+      continue;
+    }
+    if (/[0-7]/.test(escaped)) {
+      const octal = /^[0-7]{1,3}/.exec(body.slice(index + 1))?.[0];
+      if (octal === undefined) {
+        return undefined;
+      }
+      decoded += String.fromCodePoint(Number.parseInt(octal, 8));
+      index += octal.length;
+      continue;
+    }
+    // An escape this decoder does not fully define (`\N{...}`, an escaped space, an unknown letter)
+    // is refused: a caller must never reason about an approximated value.
+    return undefined;
+  }
+  return decoded;
+}
+
+/**
+ * Decode one Python string literal's VALUE with a closed escape set, without evaluating anything.
+ *
+ * The literal kind is decided by its prefix: a plain or `u` literal has its escapes decoded, a raw
+ * (`r`/`ur`/`ru`) literal keeps every backslash as written, and every other prefix (bytes,
+ * f-string, anything unknown) returns `undefined` because its value is not a static text value. An
+ * escape this decoder does not define exactly — `\N{...}`, an escaped space, an unknown letter, a
+ * truncated `\x`/`\u`/`\U` — also returns `undefined`, so no caller ever sees an approximated string.
+ */
+export function decodePythonStringLiteral(text: string): string | undefined {
+  const match = /^([A-Za-z]{0,2})("""|'''|"|')([\s\S]*)\2$/.exec(text);
+  if (match === null) {
+    return undefined;
+  }
+  const prefix = (match[1] ?? "").toLowerCase();
+  const body = match[3] ?? "";
+  if (containsUnescapedDelimiter(body, match[2] ?? "")) {
+    // The text is not one literal (`'a' 'b'` is implicit concatenation): refuse rather than
+    // decode a value the interpreter never produced.
+    return undefined;
+  }
+  const kind = PYTHON_TEXT_PREFIXES[prefix];
+  if (kind === undefined) {
+    return undefined;
+  }
+  if (!kind.raw) {
+    return decodePythonEscapes(body);
+  }
+  // A raw literal keeps its backslashes, but an odd trailing run would mean the closing quote was
+  // escaped and the literal does not end where it looks like it does.
+  const trailing = /\\+$/.exec(body)?.[0].length ?? 0;
+  return trailing % 2 === 1 ? undefined : body;
+}

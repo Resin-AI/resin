@@ -69,8 +69,11 @@ export const CATALOG_SNAPSHOT_NEXT_REV_KEY = "catalogSnapshotNextRev";
  * 005, so malformed payloads fail closed to step 0 instead of raising. Keep this
  * expression identical to the index definition or lookups stop being
  * index-served.
+ *
+ * Exported so observer readers (deduplication and re-normalization lookups)
+ * reuse the one authoritative expression instead of copying it and drifting.
  */
-const CAUSAL_STEP_INDEX_SQL =
+export const CAUSAL_STEP_INDEX_SQL =
   "CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END";
 
 interface NormalizedEventRow {

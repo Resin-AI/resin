@@ -49,6 +49,15 @@ describe("Re-Normalization & Versioned Revision Engine", () => {
     const initial = await pipeline.processRecord(record);
     expect(initial).toHaveLength(3);
     expect(initial.every((result) => result.status === "success")).toBe(true);
+    // Streamed order is source-message first, then its recovered call siblings by step.
+    const decoded = initial.flatMap((result) =>
+      result.status === "success" ? [result.event] : [],
+    );
+    expect(decoded.map((event) => [event.type, event.causalRef.stepIndex ?? 0])).toEqual([
+      ["message", 0],
+      ["tool_call", 1],
+      ["tool_call", 2],
+    ]);
     const preview = await new ReNormalizer({
       sessionRepository: store.sessions,
       dbConnection: store.conn,
@@ -59,7 +68,12 @@ describe("Re-Normalization & Versioned Revision Engine", () => {
       expect(diff.changedFields).not.toContain("new_event");
       expect(diff.changedFields).not.toContain("type");
     }
-    expect(await store.sessions.getEvents(sessionId)).toHaveLength(3);
+    const persisted = await store.sessions.getEvents(sessionId);
+    expect(persisted.map((event) => [event.type, event.causalRef.stepIndex ?? 0])).toEqual([
+      ["message", 0],
+      ["tool_call", 1],
+      ["tool_call", 2],
+    ]);
     store.close();
   });
 

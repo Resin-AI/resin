@@ -19,11 +19,13 @@ import {
   type NormalizedUnknownPassthroughEvent,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
+  RESIN_TOOL_LINK_EVIDENCE_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
   estimatePayloadTokens,
   nowIso,
   readComputationEvidence,
+  readToolLinkEvidence,
 } from "@resin/contracts";
 import { projectDeterministicCommandSequenceFromEvent } from "./deterministic-command-sequence.js";
 import {
@@ -707,6 +709,18 @@ export function projectEventToMetadataOnly(
     metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = JSON.parse(
       JSON.stringify(computationEvidence),
     ) as Record<string, unknown>;
+  }
+
+  // Declared data-flow evidence is a strict carrier of per-scope resource ordinals. It is re-read
+  // (canonical bytes, strict schema, structural carrier checks) and copied through by value, so
+  // repeated projection is idempotent and no raw path, repository, issue identifier or value can
+  // ride along: the reader rejects anything that is not the frozen carrier vocabulary.
+  const toolLinkEvidence = readToolLinkEvidence(event.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY]);
+  if (toolLinkEvidence !== undefined) {
+    metadata[RESIN_TOOL_LINK_EVIDENCE_KEY] = JSON.parse(JSON.stringify(toolLinkEvidence)) as Record<
+      string,
+      unknown
+    >;
   }
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec

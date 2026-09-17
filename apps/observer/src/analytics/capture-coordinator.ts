@@ -17,6 +17,7 @@ import type { TelemetryAggregator } from "../observability/telemetry-aggregator.
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { projectEventToMetadataOnly } from "./metadata-projection.js";
+import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
   type TrajectoryAttributionContextInput,
@@ -150,6 +151,13 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * on teardown.
    */
   computationEvidenceRecorder?: ComputationEvidenceRecorder;
+  /**
+   * Bounded declared data-flow recorder. Defaults to a new recorder so every coordinator instance
+   * produces tool link evidence without any new user-facing flag. It observes each post-dedup event
+   * BEFORE the computation recorder removes the local native-call handoff, because that handoff is
+   * the embedded copy of a persisted eval call's arguments.
+   */
+  toolLinkEvidenceRecorder?: ToolLinkEvidenceRecorder;
 }
 
 interface GenericCoalescingBuffer {
@@ -195,6 +203,7 @@ export class TrajectoryCaptureCoordinator {
   private readonly telemetry?: TelemetryAggregator;
   private onSessionEvents?: SessionEventSink;
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
+  private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -230,6 +239,7 @@ export class TrajectoryCaptureCoordinator {
       this.telemetry = undefined;
       this.onSessionEvents = undefined;
       this.computationEvidenceRecorder = new ComputationEvidenceRecorder();
+      this.toolLinkEvidenceRecorder = new ToolLinkEvidenceRecorder();
     } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
@@ -248,6 +258,8 @@ export class TrajectoryCaptureCoordinator {
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
       this.computationEvidenceRecorder =
         pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
+      this.toolLinkEvidenceRecorder =
+        pipelineOrOptions.toolLinkEvidenceRecorder ?? new ToolLinkEvidenceRecorder();
     }
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
@@ -345,6 +357,7 @@ export class TrajectoryCaptureCoordinator {
     // Observed source state predates the new boundary: drop it so a helper or file body observed
     // before revocation can never be revived into later evidence.
     this.clearComputationEvidence();
+    this.clearToolLinkEvidence();
     for (const buf of this.genericCoalescingBuffers.values()) {
       if (buf.timer) clearTimeout(buf.timer);
       this.acknowledgeBufferedAcks(buf.acks);
@@ -371,6 +384,7 @@ export class TrajectoryCaptureCoordinator {
       // Consent withdrawal is terminal for already-observed source state: nothing observed before
       // revocation may be revived into evidence if telemetry is later re-enabled.
       this.clearComputationEvidence();
+      this.clearToolLinkEvidence();
       for (const buf of this.genericCoalescingBuffers.values()) {
         if (buf.timer) clearTimeout(buf.timer);
         this.acknowledgeBufferedAcks(buf.acks);
@@ -543,7 +557,11 @@ export class TrajectoryCaptureCoordinator {
               try {
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
-                const observed = this.computationEvidenceRecorder.observe(res.event);
+                // Declared data flow runs first: the computation recorder consumes and then removes
+                // the local native-call handoff a persisted eval result may still carry.
+                const observed = this.computationEvidenceRecorder.observe(
+                  this.toolLinkEvidenceRecorder.observe(res.event),
+                );
                 emitter.ingest(observed);
                 ingestedEvents.push(observed);
               } catch (err) {
@@ -740,7 +758,11 @@ export class TrajectoryCaptureCoordinator {
               if (!res.isDuplicate) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
                 // the identical carrier-bearing event.
-                validEvents.push(this.computationEvidenceRecorder.observe(ev));
+                validEvents.push(
+                  this.computationEvidenceRecorder.observe(
+                    this.toolLinkEvidenceRecorder.observe(ev),
+                  ),
+                );
               }
             }
           }
@@ -1226,6 +1248,11 @@ export class TrajectoryCaptureCoordinator {
     this.computationEvidenceRecorder.clear();
   }
 
+  /** Clears bounded declared data-flow state (scopes, pending calls, ordinals) without detaching. */
+  public clearToolLinkEvidence(): void {
+    this.toolLinkEvidenceRecorder.clear();
+  }
+
   /**
    * Releases bounded observed-source state and the local sink. Terminal disposal keeps the
    * historical teardown behavior: retained source is cleared and session-event subscribers are
@@ -1233,6 +1260,7 @@ export class TrajectoryCaptureCoordinator {
    */
   public dispose(): void {
     this.clearComputationEvidence();
+    this.clearToolLinkEvidence();
     this.onSessionEvents = undefined;
   }
 

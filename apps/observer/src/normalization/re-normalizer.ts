@@ -7,6 +7,7 @@ import {
   nowIso,
 } from "@resin/contracts";
 import type { LocalDatabaseConnection, SessionRepository } from "@resin/db";
+import { CAUSAL_STEP_INDEX_SQL } from "@resin/db";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import {
   DecoderRegistry,
@@ -164,7 +165,9 @@ export class ReNormalizer {
     if (dbConn) {
       try {
         const rows = dbConn.all<{ sequence: number; payload_json: string }>(
-          "SELECT sequence, payload_json FROM normalized_events WHERE session_id = ? ORDER BY sequence ASC, CASE WHEN json_valid(payload_json) THEN COALESCE(json_extract(payload_json, '$.causalRef.stepIndex'), 0) ELSE 0 END ASC;",
+          `SELECT sequence, payload_json FROM normalized_events
+           WHERE session_id = ?
+           ORDER BY sequence ASC, ${CAUSAL_STEP_INDEX_SQL} ASC;`,
           [sessionId],
         );
         for (const row of rows) {
