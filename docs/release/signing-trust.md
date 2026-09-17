@@ -22,12 +22,20 @@ Release signing secrets and configuration are bound exclusively to the `producti
 
 - **No Mandatory Human Reviewers**: The `production` GitHub Environment enforces no mandatory human environment reviewers. Deployment and signing authorization rely on automated machine verification gates, protected branch refs, auditable `workflow_dispatch`, explicit promotion confirmation inputs, offline verification receipts, and cryptographic signatures.
 - **Protected Workflow Refs & Custody**: Removing human approval does not authorize bypassing automated gates, extracting signing secrets, or weakening signing configuration. Environment credentials remain restricted to authorized workflows on protected refs.
-- **Deployment Branch Protection & Promotion Gates**: The `production` environment permits protected workflow refs without mandatory human reviewer gates; it is not tag-only. Release publication still qualifies the exact release tag and commit, while channel renewal/restoration may run from a protected branch such as `main` with the operation's explicit confirmation and existing verification gates.
+- **Deployment Branch Protection & Promotion Gates**: The `production` environment permits protected workflow refs without mandatory human reviewer gates; it is not tag-only. Release publication still qualifies the exact release tag and commit. Channel renewal is standing-authorized only for the exact twelve-hour schedule in `channel-renewal.yml` on protected `main`; manual renewal and expired-source restoration require their operation's explicit confirmation. Every path retains the existing signature, manifest, revocation, conditional-write, and canonical-readback verification gates.
 - **Auditability & Machine Verification Receipts**:
   - Workflow strictly enforces exact 40-character commit SHA matching against protected release tags.
-  - Production promotion requires `confirm_promotion=PROMOTE_PRODUCTION`; channel operations retain their own explicit confirmation inputs.
+  - Production promotion requires `confirm_promotion=PROMOTE_PRODUCTION`; manual channel operations retain their own explicit confirmation inputs. The scheduled renewal path accepts only its exact schedule event and never selects restoration.
   - Automated cryptographic qualification gates must pass 100% of checks before signing keys are loaded into runner memory.
   - Immutable GitHub Actions audit logs track the executing operator's identity, dispatch parameters, and timestamp.
+
+### 1.3 Channel Freshness Maintenance
+
+The channel renewal schedule is `47 */12 * * *` (00:47 and 12:47 UTC). It uses the existing `production` signing custody and channel-only renewal role, serializes with releases, and preserves release selection and immutable artifacts. Channel validity remains at most 24 hours and is capped by referenced manifest expiry; renewal does not extend expired manifests.
+
+The independent credential-free monitor remains on `17 */3 * * *` and fails at six hours or less of remaining validity or on any verification failure. Either monitoring or renewal failure submits the existing incident notification. GitHub schedules can be delayed or disabled: the schedule is not a delivery guarantee, and failures still require operator attention.
+
+Expired metadata is never restored automatically. Investigate it and explicitly dispatch `operation=restore` with `confirmation=RESTORE_EXPIRED_CHANNEL_PRODUCTION` when restoration is authorized. Manual `operation=renew` continues to require `confirmation=RENEW_CHANNEL_PRODUCTION`.
 
 ---
 

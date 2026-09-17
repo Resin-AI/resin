@@ -19,6 +19,8 @@ on:
         type: string
   schedule:
     - cron: "17 */3 * * *"
+    # Standing authorization for renewal only; expired-source restoration stays manual.
+    - cron: "47 */12 * * *"
 
 permissions:
   contents: read
@@ -26,7 +28,9 @@ permissions:
 jobs:
   monitor:
     name: Check public channel expiry without credentials
-    if: ${{ github.event_name == 'schedule' || inputs.operation == 'check' || inputs.operation == 'notification-drill' }}
+    if: >-
+      ${{ (github.event_name == 'schedule' && github.event.schedule == '17 */3 * * *') ||
+          (github.event_name == 'workflow_dispatch' && (inputs.operation == 'check' || inputs.operation == 'notification-drill')) }}
     runs-on: resin-vm-linux-arm64
     timeout-minutes: 5
     permissions:
@@ -75,7 +79,10 @@ jobs:
 
   renew:
     name: Authorized channel-only metadata renewal
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.operation == 'renew' || inputs.operation == 'restore') }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && github.ref_protected == true &&
+          ((github.event_name == 'schedule' && github.event.schedule == '47 */12 * * *') ||
+           (github.event_name == 'workflow_dispatch' && (inputs.operation == 'renew' || inputs.operation == 'restore'))) }}
     runs-on: resin-vm-linux-arm64
     timeout-minutes: 15
     environment: production
@@ -86,29 +93,46 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Validate explicit authorization before assuming credentials
+      - name: Validate renewal authorization before assuming credentials
+        id: renewal-authorization
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          WORKFLOW_REF: ${{ github.ref }}
           OPERATION: ${{ inputs.operation }}
           CONFIRM_RENEWAL: ${{ inputs.confirmation }}
           REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
-          if [ "$REF_PROTECTED" != "true" ]; then
-            echo "::error::Renewal requires a protected workflow ref and production environment approval."
+          if [ "$WORKFLOW_REF" != "refs/heads/main" ] || [ "$REF_PROTECTED" != "true" ]; then
+            echo "::error::Renewal requires protected main and the production environment."
             exit 1
           fi
-          if [ "$OPERATION" = "renew" ]; then
-            expected="RENEW_CHANNEL_PRODUCTION"
-          elif [ "$OPERATION" = "restore" ]; then
-            expected="RESTORE_EXPIRED_CHANNEL_PRODUCTION"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            if [ "$EVENT_SCHEDULE" != "47 */12 * * *" ] || [ -n "$OPERATION" ] || [ -n "$CONFIRM_RENEWAL" ]; then
+              echo "::error::Only the authorized twelve-hour schedule may renew automatically."
+              exit 1
+            fi
+            OPERATION="renew"
+            CONFIRM_RENEWAL="RENEW_CHANNEL_PRODUCTION"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$OPERATION" = "renew" ]; then
+              expected="RENEW_CHANNEL_PRODUCTION"
+            elif [ "$OPERATION" = "restore" ]; then
+              expected="RESTORE_EXPIRED_CHANNEL_PRODUCTION"
+            else
+              exit 1
+            fi
+            if [ "$CONFIRM_RENEWAL" != "$expected" ]; then
+              echo "::error::Explicit channel renewal confirmation is missing or incorrect."
+              exit 1
+            fi
           else
+            echo "::error::Unsupported channel renewal event."
             exit 1
           fi
-          if [ "$CONFIRM_RENEWAL" != "$expected" ]; then
-            echo "::error::Explicit channel renewal confirmation is missing or incorrect."
-            exit 1
-          fi
+          printf 'operation=%s\nconfirmation=%s\n' "$OPERATION" "$CONFIRM_RENEWAL" >> "$GITHUB_OUTPUT"
       - name: Checkout approved public renewal implementation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -126,8 +150,8 @@ jobs:
       - name: Renew only signed channel freshness and verify canonical readback
         shell: bash
         env:
-          OPERATION: ${{ inputs.operation }}
-          CONFIRM_RENEWAL: ${{ inputs.confirmation }}
+          OPERATION: ${{ steps.renewal-authorization.outputs.operation }}
+          CONFIRM_RENEWAL: ${{ steps.renewal-authorization.outputs.confirmation }}
           RESIN_DISTRIBUTION_BUCKET: ${{ secrets.RESIN_DISTRIBUTION_BUCKET }}
           RESIN_DISTRIBUTION_ID: ${{ secrets.RESIN_DISTRIBUTION_ID }}
           RESIN_RELEASE_KEY_ID: ${{ vars.RESIN_RELEASE_KEY_ID }}
@@ -143,6 +167,16 @@ jobs:
             --confirmation "$CONFIRM_RENEWAL" "${args[@]}" \
             | tee "$RUNNER_TEMP/channel-renewal-receipt.json"
           cat "$RUNNER_TEMP/channel-renewal-receipt.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain exact-run renewal receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: channel-renewal-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/channel-renewal-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verify anonymous signed channel freshness after renewal
+        shell: bash
+        run: node --experimental-strip-types scripts/publish-public-release.mjs check-channel-expiry
 
   notify:
     name: Submit channel failure notification (SNS submission only)
