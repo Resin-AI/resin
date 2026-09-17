@@ -100,4 +100,28 @@ describe("recorded workflow validation", () => {
     // The same shape validates: compilability is representability, not recognition.
     expect(renamed.valid).toBe(true);
   });
+
+  it("requires a failure behavior and declared private references", () => {
+    const workflow = fourCallWorkflow();
+    const missingFailure = validateRecordedWorkflow({
+      ...workflow,
+      steps: workflow.steps.map((step) => {
+        const { failure: _dropped, ...rest } = step;
+        return rest;
+      }),
+    });
+    expect(missingFailure.valid).toBe(false);
+    expect(missingFailure.errors.join("\n")).toContain("failure must be 'abort' or 'continue'");
+
+    const undeclared = validateRecordedWorkflow({
+      ...workflow,
+      privateReferences: [],
+    });
+    expect(undeclared.valid).toBe(false);
+    expect(undeclared.errors.join("\n")).toContain("undeclared private reference");
+
+    const badPrivateList = validateRecordedWorkflow({ ...workflow, privateReferences: "secret" });
+    expect(badPrivateList.valid).toBe(false);
+    expect(badPrivateList.errors.join("\n")).toContain("privateReferences must be an array");
+  });
 });

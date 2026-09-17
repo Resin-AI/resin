@@ -128,6 +128,21 @@ export function validateRecordedWorkflow(value: unknown): {
     if (inputNames.has(input.name)) errors.push(`duplicate input: ${input.name}`);
     inputNames.add(input.name);
   }
+  const declaredPrivates = new Set<string>();
+  const privateReferences = (value as { privateReferences?: unknown }).privateReferences;
+  if (privateReferences !== undefined) {
+    if (!Array.isArray(privateReferences)) {
+      errors.push("privateReferences must be an array when present");
+    } else {
+      for (const reference of privateReferences) {
+        if (typeof reference !== "string" || reference.length === 0) {
+          errors.push("every private reference must be a non-empty string");
+          continue;
+        }
+        declaredPrivates.add(reference);
+      }
+    }
+  }
   const steps = Array.isArray(value.steps) ? value.steps : null;
   if (!steps || steps.length === 0) errors.push("steps must be a non-empty array");
   const stepIds = new Set<string>();
@@ -149,6 +164,10 @@ export function validateRecordedWorkflow(value: unknown): {
       callable.name.length === 0
     ) {
       errors.push(`step ${step.id} needs a callable with a runtime and a recorded name`);
+    }
+    const failure = (step as { failure?: unknown }).failure;
+    if (failure !== "abort" && failure !== "continue") {
+      errors.push(`step ${step.id} failure must be 'abort' or 'continue'`);
     }
     const permissions = (step as { permissions?: unknown }).permissions;
     if (permissions !== undefined && !isJsonValue(permissions)) {
@@ -215,11 +234,14 @@ export function validateRecordedWorkflow(value: unknown): {
       if (source.kind === "literal" && !isJsonValue(source.value)) {
         errors.push(`step ${step.id} argument ${argument.name} has a non-JSON literal`);
       }
-      if (
-        source.kind === "private" &&
-        (typeof source.reference !== "string" || source.reference.length === 0)
-      ) {
-        errors.push(`step ${step.id} argument ${argument.name} needs a private reference`);
+      if (source.kind === "private") {
+        if (typeof source.reference !== "string" || source.reference.length === 0) {
+          errors.push(`step ${step.id} argument ${argument.name} needs a private reference`);
+        } else if (!declaredPrivates.has(source.reference)) {
+          errors.push(
+            `step ${step.id} argument ${argument.name} reads undeclared private reference '${source.reference}'`,
+          );
+        }
       }
     }
   }
