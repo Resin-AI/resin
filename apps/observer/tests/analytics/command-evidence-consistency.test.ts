@@ -60,12 +60,17 @@ const decoder = {
   harnessId: "consistency_test",
   decoderVersion: "1.0.0",
   canDecode: () => true,
-  decode: (record: { rawPayload?: unknown; sequenceNumber?: number }) => {
+  decode: (record: {
+    rawPayload?: unknown;
+    sequenceNumber?: number;
+    sessionId?: string;
+  }) => {
     const payload = record.rawPayload as Record<string, unknown>;
+    const sessionId = record.sessionId ?? "sess_consistency";
     if (payload.type === "session_lifecycle") {
       return {
         type: "session_lifecycle" as const,
-        sessionId: "sess_consistency",
+        sessionId,
         timestamp: new Date(Date.UTC(2026, 8, 17, 0, 0, record.sequenceNumber ?? 1)).toISOString(),
         schemaVersion: "1.0.0" as const,
         causalRef: { causalSequence: record.sequenceNumber ?? 1 },
@@ -75,7 +80,7 @@ const decoder = {
     }
     return {
       type: "tool_call" as const,
-      sessionId: "sess_consistency",
+      sessionId,
       timestamp: new Date(Date.UTC(2026, 8, 17, 0, 0, record.sequenceNumber ?? 1)).toISOString(),
       schemaVersion: "1.0.0" as const,
       causalRef: { causalSequence: record.sequenceNumber ?? 1 },
@@ -175,6 +180,8 @@ describe("command evidence consistency across consumers", () => {
     const firstError = await handle(commandRecord(sessionId));
     expect(firstError).toBeInstanceOf(ResourceForbiddenError);
     expect(attempts).toHaveLength(1);
+    // The sanitized sequence is retained while the session is in flight, so a retry can reuse it.
+    expect(coordinator.getRetainedCommandSequenceCount()).toBeGreaterThan(0);
 
     // Retry: a later batch re-projects the same buffered events.
     await handle(lifecycleRecord(sessionId));
@@ -202,6 +209,12 @@ describe("command evidence consistency across consumers", () => {
     const serialized = JSON.stringify(shared.map((eventId) => local.get(eventId)));
     expect(serialized).not.toContain(SECRET);
     expect(serialized).not.toContain("REDACTED");
+
+    // Retaining it is bounded by the session: once the session ends, nothing is kept.
+    await handle(lifecycleRecord(sessionId));
+    await coordinator.waitForIdle();
+    expect(coordinator.isSessionFinalized(sessionId)).toBe(true);
+    expect(coordinator.getRetainedCommandSequenceCount()).toBe(0);
 
     coordinator.dispose();
   });

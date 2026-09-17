@@ -857,6 +857,7 @@ export class TrajectoryCaptureCoordinator {
             this.finalizedSessions.add(sessionId);
             this.activeGenericSessions.delete(sessionId);
             this.genericSessionTails.delete(sessionId);
+            this.forgetSessionCommandSequences(sessionId);
           }
           await ack();
           return;
@@ -1045,6 +1046,7 @@ export class TrajectoryCaptureCoordinator {
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
       for (const ack of acks) {
         await ack();
       }
@@ -1055,6 +1057,7 @@ export class TrajectoryCaptureCoordinator {
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
       for (const ack of acks) {
         await ack();
       }
@@ -1150,6 +1153,7 @@ export class TrajectoryCaptureCoordinator {
           this.finalizedSessions.add(sessionId);
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         for (const ack of acks) {
@@ -1201,6 +1205,7 @@ export class TrajectoryCaptureCoordinator {
           this.finalizedSessions.add(sessionId);
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         for (const ack of acks) {
@@ -1229,6 +1234,7 @@ export class TrajectoryCaptureCoordinator {
       this.finalizedSessions.add(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessionTails.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
     }
 
     for (const ack of acks) {
@@ -1329,6 +1335,14 @@ export class TrajectoryCaptureCoordinator {
    */
   public getActiveSessionCount(): number {
     return this.activeSessions.size + this.activeGenericSessions.size;
+  }
+
+  /**
+   * Returns the count of sanitized command sequences retained for the sessions currently in flight.
+   * Entries are dropped when their session ends, so a healthy coordinator returns to zero.
+   */
+  public getRetainedCommandSequenceCount(): number {
+    return this.commandSequences.size;
   }
 
   /**
