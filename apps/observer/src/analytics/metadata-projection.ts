@@ -27,6 +27,7 @@ import {
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
+import type { PreRedactionCommandCarrier } from "../normalization/pipeline.js";
 import { projectDeterministicCommandSequenceFromEvent } from "./deterministic-command-sequence.js";
 import {
   normalizeCommandProfile,
@@ -640,6 +641,14 @@ export interface MetadataProjectionOptions {
   enrichEvidence?: boolean;
   /** Home directory prefix to strip from path patterns (default: os.homedir()). */
   homeDir?: string;
+  /**
+   * Command-bearing fields captured before redaction. When present, the deterministic command
+   * sequence is derived from these instead of from the redacted event, so redaction masking an
+   * argument value cannot cost the command its evidence and cannot force a guess about the value's
+   * kind. The derived sequence carries typed parameters and, for string parameters, an
+   * evidence-derived value commitment — never a value.
+   */
+  preRedactionCommandCarrier?: PreRedactionCommandCarrier;
 }
 
 /**
@@ -661,6 +670,23 @@ export interface MetadataProjectionOptions {
  * Redaction metadata reflects which fields were dropped (`drop`) or
  * normalized (`mask`).
  */
+/**
+ * Builds the event view the sequence derivation reads: the redacted event with its command-bearing
+ * fields replaced by the pre-redaction ones when they were captured.
+ */
+function commandCarrierView(
+  event: NormalizedSessionEvent,
+  carrier: PreRedactionCommandCarrier,
+): NormalizedSessionEvent {
+  const view: Record<string, unknown> = { ...event, type: carrier.type };
+  if (carrier.toolName !== undefined) view.toolName = carrier.toolName;
+  for (const key of ["command", "args", "parameters"] as const) {
+    if (carrier[key] === undefined) delete view[key];
+    else view[key] = carrier[key];
+  }
+  return view as unknown as NormalizedSessionEvent;
+}
+
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
   options: MetadataProjectionOptions = {},
@@ -725,7 +751,11 @@ export function projectEventToMetadataOnly(
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
   // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
-  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(event);
+  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(
+    options.preRedactionCommandCarrier
+      ? commandCarrierView(event, options.preRedactionCommandCarrier)
+      : event,
+  );
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }

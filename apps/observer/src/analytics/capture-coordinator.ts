@@ -10,6 +10,7 @@ import {
   NormalizationPipeline,
   type PipelineProcessContext,
   type PipelineProcessResult,
+  type PreRedactionCommandCarrier,
   generateDeterministicEventId,
 } from "../normalization/pipeline.js";
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
@@ -177,6 +178,31 @@ interface GenericCoalescingBuffer {
  * attribution resolution, and privacy-safe cloud observation submission.
  */
 export class TrajectoryCaptureCoordinator {
+  /**
+   * Pre-redaction command-bearing fields, keyed by normalized event id, bridging the pipeline result
+   * that produced them and the projection that derives command evidence from them. Entries are
+   * deleted as soon as their event is projected, and the map is bounded so a stalled flush cannot
+   * grow it without limit.
+   */
+  private readonly preRedactionCarriers = new Map<string, PreRedactionCommandCarrier>();
+
+  private static readonly MAX_PRE_REDACTION_CARRIERS = 4096;
+
+  private rememberPreRedactionCarrier(result: PipelineProcessResult): void {
+    if (result.status !== "success" || !result.preRedactionCommandCarrier) return;
+    if (this.preRedactionCarriers.size >= TrajectoryCaptureCoordinator.MAX_PRE_REDACTION_CARRIERS) {
+      const oldest = this.preRedactionCarriers.keys().next().value;
+      if (oldest !== undefined) this.preRedactionCarriers.delete(oldest);
+    }
+    this.preRedactionCarriers.set(result.event.eventId, result.preRedactionCommandCarrier);
+  }
+
+  private takePreRedactionCarrier(eventId: string): PreRedactionCommandCarrier | undefined {
+    const carrier = this.preRedactionCarriers.get(eventId);
+    if (carrier !== undefined) this.preRedactionCarriers.delete(eventId);
+    return carrier;
+  }
+
   private readonly pipeline: NormalizationPipeline;
   private readonly observationClient: CloudObservationClient;
   private readonly attributionResolver?: TrajectoryAttributionResolver;
@@ -555,6 +581,7 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.event) {
               try {
+                this.rememberPreRedactionCarrier(res);
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
                 // Declared data flow runs first: the computation recorder consumes and then removes
@@ -744,6 +771,7 @@ export class TrajectoryCaptureCoordinator {
               continue;
             }
             if (res.status === "success" && res.event) {
+              this.rememberPreRedactionCarrier(res);
               const ev = res.event;
               if (
                 ev.type === "session_lifecycle" &&
@@ -883,7 +911,11 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
     try {
-      const projected = events.map((event) => projectEventToMetadataOnly(event));
+      const projected = events.map((event) =>
+        projectEventToMetadataOnly(event, {
+          preRedactionCommandCarrier: this.takePreRedactionCarrier(event.eventId),
+        }),
+      );
       await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
     } catch (err) {
       // Local consumers must never break capture or cloud submission.
@@ -1005,7 +1037,11 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
 
-    const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    const projectedEvents = validEvents.map((ev) =>
+      projectEventToMetadataOnly(ev, {
+        preRedactionCommandCarrier: this.takePreRedactionCarrier(ev.eventId),
+      }),
+    );
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by
     // more than 1000ms (CURSOR_ORDERING_ERROR). Transcript records can arrive out of
     // order, and records missing a timestamp fall back to a wall-clock stamp, so sort
