@@ -115,4 +115,38 @@ describe("workflow recipe recording", () => {
     ]);
     expect(recipe.workflow.steps[1]!.failure).toBe("continue");
   });
+
+  it("never emits a masked value nested inside a composite argument", () => {
+    const nested: RecordedCallObservation[] = [
+      {
+        callId: "call_nested_secret",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.call" },
+        arguments: { headers: { auth: "tok_live_123" }, body: { id: "row-7" } },
+        maskedValues: ["tok_live_123"],
+        result: { ok: true },
+      },
+      {
+        callId: "call_after",
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.follow" },
+        arguments: { ok: "true" },
+        result: { ok: true },
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_nested_secret", nested)!;
+
+    // The call carrying the nested private value is reported as unrepresentable, not recorded.
+    expect(recipe.skipped).toEqual([
+      {
+        callId: "call_nested_secret",
+        reason: "argument 'headers' contains a masked value the workflow cannot carry",
+      },
+    ]);
+    const carried = JSON.stringify(recipe.workflow);
+    expect(carried).not.toContain("tok_live_123");
+    expect(carried).not.toContain("headers");
+    // The representable call is still recorded.
+    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["call_after"]);
+  });
 });

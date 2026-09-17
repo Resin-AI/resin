@@ -55,6 +55,23 @@ interface Producer {
   value: WorkflowJsonValue;
 }
 
+/**
+ * True when a masked value appears anywhere inside a value, including nested objects and arrays.
+ * A masked value nested in a composite cannot be expressed as a whole-argument reference, so the
+ * call is reported as unrepresentable instead of being emitted with the value in it.
+ */
+function containsMaskedValue(value: WorkflowJsonValue, masked: ReadonlySet<string>): boolean {
+  if (masked.size === 0) return false;
+  const stack: WorkflowJsonValue[] = [value];
+  while (stack.length > 0) {
+    const current = stack.pop() as WorkflowJsonValue;
+    if (masked.has(JSON.stringify(current))) return true;
+    if (Array.isArray(current)) stack.push(...current);
+    else if (typeof current === "object" && current !== null) stack.push(...Object.values(current));
+  }
+  return false;
+}
+
 function leafEntries(
   value: WorkflowJsonValue,
   path: WorkflowValuePath = [],
@@ -97,14 +114,23 @@ export function recordWorkflowRecipe(
     }
     const stepId = `step${steps.length}`;
     const privateForCall = new Map<string, string>();
+    const maskedStrings = new Set<string>();
     for (const masked of observation.maskedValues ?? []) {
       const reference = `private:${observation.callId}:${privateForCall.size}`;
       privateForCall.set(JSON.stringify(masked), reference);
+      maskedStrings.add(JSON.stringify(masked));
     }
 
     const sources: Array<{ name: string; source: WorkflowValueSource }> = [];
+    let unrepresentable: string | undefined;
     for (const [name, value] of Object.entries(observation.arguments)) {
       const maskedReference = privateForCall.get(JSON.stringify(value));
+      if (!maskedReference && containsMaskedValue(value, maskedStrings)) {
+        // A private value inside a composite argument: the call cannot be represented without
+        // carrying it, so it is reported instead of recorded.
+        unrepresentable = `argument '${name}' contains a masked value the workflow cannot carry`;
+        break;
+      }
       if (maskedReference) {
         privateValues.set(maskedReference, value);
         sources.push({ name, source: { kind: "private", reference: maskedReference } });
@@ -127,6 +153,10 @@ export function recordWorkflowRecipe(
       }
     }
 
+    if (unrepresentable) {
+      skipped.push({ callId: observation.callId, reason: unrepresentable });
+      continue;
+    }
     if (observation.result !== undefined) {
       for (const leaf of leafEntries(observation.result)) {
         const key = JSON.stringify(leaf.value);
