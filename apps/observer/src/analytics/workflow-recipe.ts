@@ -102,6 +102,9 @@ export function recordWorkflowRecipe(
       (right.causalSequence ?? Number.MAX_SAFE_INTEGER),
   );
   const privateValues = new Map<string, WorkflowJsonValue>();
+  // Masked values are tracked for the whole session: a value masked in one call must not reappear
+  // as a literal in another call's arguments.
+  const maskedInSession = new Set<string>();
   const skipped: Array<{ callId: string; reason: string }> = [];
   const steps: WorkflowStep[] = [];
   // Producers indexed by the exact value they returned, built only from calls already recorded.
@@ -114,12 +117,12 @@ export function recordWorkflowRecipe(
     }
     const stepId = `step${steps.length}`;
     const privateForCall = new Map<string, string>();
-    const maskedStrings = new Set<string>();
     for (const masked of observation.maskedValues ?? []) {
       const reference = `private:${observation.callId}:${privateForCall.size}`;
       privateForCall.set(JSON.stringify(masked), reference);
-      maskedStrings.add(JSON.stringify(masked));
+      maskedInSession.add(JSON.stringify(masked));
     }
+    const maskedStrings = maskedInSession;
 
     const sources: Array<{ name: string; source: WorkflowValueSource }> = [];
     let unrepresentable: string | undefined;

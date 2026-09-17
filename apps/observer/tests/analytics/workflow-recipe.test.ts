@@ -149,4 +149,27 @@ describe("workflow recipe recording", () => {
     // The representable call is still recorded.
     expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["call_after"]);
   });
+
+  it("does not let a value masked in one call reappear as a literal in another", () => {
+    const crossCall: RecordedCallObservation[] = [
+      {
+        callId: "call_masks",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.login" },
+        arguments: { user: "dev" },
+        maskedValues: ["tok_from_login"],
+        result: { token: "tok_from_login" },
+      },
+      {
+        callId: "call_reuses",
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.echo" },
+        arguments: { headers: { auth: "tok_from_login" } },
+        result: { ok: true },
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_cross_call", crossCall)!;
+    expect(recipe.skipped.map((entry) => entry.callId)).toEqual(["call_reuses"]);
+    expect(JSON.stringify(recipe.workflow)).not.toContain("tok_from_login");
+  });
 });
