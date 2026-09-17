@@ -1,175 +1,161 @@
+import type { RecordedWorkflow } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
   type RecordedCallObservation,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
 
-/**
- * A session of four calls that exist nowhere in the repository, passing fresh values between them:
- * fetch -> transform -> write -> upload.
- */
+function leaf(value: RecordedWorkflow["steps"][number]["arguments"][number]["source"]) {
+  if (value.kind !== "template") throw new Error(`expected a template, got ${value.kind}`);
+  return value.template;
+}
+
+/** Four calls that exist nowhere in the repository, with the origins the record establishes. */
 function session(): RecordedCallObservation[] {
   return [
     {
       callId: "call_fetch",
       causalSequence: 1,
       callable: { runtime: "unfamiliar-protocol", name: "vendor.fetch", connection: "srv_9" },
-      arguments: { source: "alpha", mode: "full" },
-      result: { body: { rows: [{ id: "row-7", size: 12 }] } },
+      arguments: { source: "alpha", page: 2 },
+      argumentOrigins: {
+        source: { type: "input", name: "source" },
+        page: { type: "literal", value: 2 },
+      },
+      argumentTypes: { source: "string", page: "number" },
+      result: { body: { rows: [{ id: "row-7" }] } },
+      observed: "succeeded",
+      recordedFailureControl: "abort",
     },
     {
       callId: "call_transform",
       causalSequence: 2,
       callable: { runtime: "unfamiliar-program", name: "local-transform" },
-      arguments: { id: "row-7", mode: "full" },
-      result: { stdout: "ROW-7", exitCode: 0 },
+      arguments: { request: { id: "row-7", options: { mode: "full" } } },
+      argumentOrigins: {
+        request: {
+          type: "object",
+          entries: {
+            id: { type: "result", stepId: "step0", path: ["body", "rows", 0, "id"] },
+            options: { type: "object", entries: { mode: { type: "literal", value: "full" } } },
+          },
+        },
+      },
+      result: { stdout: "ROW-7" },
+      observed: "succeeded",
     },
     {
       callId: "call_write",
       causalSequence: 3,
       callable: { runtime: "unfamiliar-program", name: "local-write" },
       arguments: { content: "ROW-7", directory: "/tmp/out" },
+      argumentOrigins: {
+        content: { type: "result", stepId: "step1", path: ["stdout"] },
+        directory: { type: "input", name: "target" },
+      },
+      argumentTypes: { directory: "string" },
       result: { path: "/tmp/out/report.txt" },
+      observed: "succeeded",
     },
     {
       callId: "call_upload",
       causalSequence: 4,
       callable: { runtime: "unfamiliar-protocol", name: "vendor.upload", connection: "srv_9" },
-      arguments: { file: "/tmp/out/report.txt", token: "ghp_secret_value" },
-      maskedValues: ["ghp_secret_value"],
+      arguments: {
+        envelope: { file: "/tmp/out/report.txt", auth: "Bearer ghp_secret_value" },
+        note: "plain",
+      },
+      argumentOrigins: {
+        envelope: {
+          type: "object",
+          entries: {
+            file: { type: "result", stepId: "step2", path: ["path"] },
+            auth: { type: "literal", value: "Bearer ghp_secret_value" },
+          },
+        },
+        note: { type: "literal", value: "plain" },
+      },
+      isPrivateValue: (value) => value.includes("ghp_secret_value"),
       result: { uploaded: true },
+      observed: "succeeded",
     },
   ];
 }
 
 describe("workflow recipe recording", () => {
-  it("binds a value to the single earlier call that produced it, by nested path", () => {
+  it("keeps recorded origins, nested leaves included, and declares typed inputs", () => {
     const recipe = recordWorkflowRecipe("wf_unfamiliar", session())!;
-    const [fetch, transform, write, upload] = recipe.workflow.steps;
+    const [fetch, transform, write] = recipe.workflow.steps;
 
-    expect(fetch!.callable).toMatchObject({ runtime: "unfamiliar-protocol", name: "vendor.fetch" });
-    // A value only one call produced is that call's result, addressed by path.
-    expect(transform!.arguments[0]).toEqual({
-      name: "id",
-      source: { kind: "result", stepId: "step0", path: ["body", "rows", 0, "id"] },
+    expect(leaf(fetch!.arguments[0]!.source)).toEqual({ type: "input", name: "source" });
+    expect(leaf(fetch!.arguments[1]!.source)).toEqual({ type: "literal", value: 2 });
+
+    // A recursively constructed argument keeps each leaf's own origin.
+    expect(leaf(transform!.arguments[0]!.source)).toEqual({
+      type: "object",
+      entries: {
+        id: { type: "result", stepId: "step0", path: ["body", "rows", 0, "id"] },
+        options: { type: "object", entries: { mode: { type: "literal", value: "full" } } },
+      },
     });
     expect(transform!.dependsOn).toEqual(["step0"]);
-    // `mode` was a constant in every call and no call produced it: it stays a constant.
-    expect(transform!.arguments[1]).toEqual({
-      name: "mode",
-      source: { kind: "literal", value: "full" },
-    });
-    expect(write!.arguments[0]?.source).toEqual({
-      kind: "result",
+    expect(leaf(write!.arguments[0]!.source)).toEqual({
+      type: "result",
       stepId: "step1",
       path: ["stdout"],
     });
-    expect(upload!.arguments[0]?.source).toEqual({
-      kind: "result",
-      stepId: "step2",
-      path: ["path"],
-    });
+
+    // Inputs are captured, with the types the record shows rather than "string" for everything.
+    expect(recipe.workflow.inputs).toEqual([
+      { name: "source", type: "string" },
+      { name: "target", type: "string" },
+    ]);
   });
 
-  it("keeps a masked value private: a local reference, never a literal in the workflow", () => {
+  it("keeps a secret inside a larger string or a nested object as a private leaf", () => {
     const recipe = recordWorkflowRecipe("wf_unfamiliar", session())!;
     const upload = recipe.workflow.steps[3]!;
-    expect(upload.arguments[1]?.source).toEqual({
-      kind: "private",
-      reference: "private:call_upload:0",
+    const envelope = leaf(upload.arguments[0]!.source);
+    expect(envelope).toMatchObject({
+      type: "object",
+      entries: { file: { type: "result", stepId: "step2", path: ["path"] } },
     });
-    expect(recipe.privateValues.get("private:call_upload:0")).toBe("ghp_secret_value");
-    // The workflow itself carries no private value.
+    const auth = (envelope as { entries: Record<string, { type: string; reference?: string }> })
+      .entries.auth!;
+    expect(auth.type).toBe("private");
+    expect(recipe.privateValues.get(auth.reference!)).toBe("Bearer ghp_secret_value");
+    // The call is recorded, not discarded, and no private text reaches the workflow.
+    expect(recipe.skipped).toEqual([]);
     expect(JSON.stringify(recipe.workflow)).not.toContain("ghp_secret_value");
-    expect(recipe.workflow.privateReferences).toEqual(["private:call_upload:0"]);
   });
 
-  it("does not bind when several steps produced the same value", () => {
-    const ambiguous: RecordedCallObservation[] = [
-      {
-        callId: "call_earlier",
-        causalSequence: 0,
-        callable: { runtime: "unfamiliar-protocol", name: "vendor.list" },
-        arguments: {},
-        result: { ids: ["row-7"] },
-      },
-      ...session(),
-    ];
-    const recipe = recordWorkflowRecipe("wf_ambiguous", ambiguous)!;
-    // Two steps produced "row-7", so the transform's argument stays the constant it was recorded as.
-    const transform = recipe.workflow.steps.find((step) => step.callId === "call_transform")!;
-    expect(transform.arguments[0]?.source).toEqual({ kind: "literal", value: "row-7" });
+  it("preserves an argument whose origin the record does not establish as unresolved", () => {
+    const unknownOrigin = session();
+    unknownOrigin[1]!.argumentOrigins = {};
+    const recipe = recordWorkflowRecipe("wf_unknown", unknownOrigin)!;
+    const transform = recipe.workflow.steps[1]!;
+    // Not a guessed dependency, and not a frozen value either.
+    expect(leaf(transform.arguments[0]!.source)).toMatchObject({ type: "object" });
+    expect(JSON.stringify(leaf(transform.arguments[0]!.source))).toContain("unresolved");
     expect(transform.dependsOn).toEqual([]);
   });
 
-  it("counts one execution once and preserves a recorded failure as failure behavior", () => {
-    const withFailure = session();
-    withFailure[1]!.failed = true;
-    // A redelivery of the same execution must not become a second step.
-    const recipe = recordWorkflowRecipe("wf_redelivery", [...withFailure, { ...withFailure[2]! }])!;
-    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual([
-      "call_fetch",
-      "call_transform",
-      "call_write",
-      "call_upload",
-    ]);
-    expect(recipe.workflow.steps[1]!.failure).toBe("continue");
-  });
+  it("separates recorded control flow from the observed outcome", () => {
+    const failed = session();
+    failed[1]!.observed = "failed";
+    const recipe = recordWorkflowRecipe("wf_failure", failed)!;
+    const transform = recipe.workflow.steps[1]!;
+    expect(transform.observed).toEqual({ outcome: "failed" });
+    // The record did not say how failure was handled, so the choice is labelled as policy.
+    expect(transform.failurePolicy).toEqual({ onError: "abort", policy: "default" });
 
-  it("never emits a masked value nested inside a composite argument", () => {
-    const nested: RecordedCallObservation[] = [
-      {
-        callId: "call_nested_secret",
-        causalSequence: 1,
-        callable: { runtime: "unfamiliar-protocol", name: "vendor.call" },
-        arguments: { headers: { auth: "tok_live_123" }, body: { id: "row-7" } },
-        maskedValues: ["tok_live_123"],
-        result: { ok: true },
-      },
-      {
-        callId: "call_after",
-        causalSequence: 2,
-        callable: { runtime: "unfamiliar-protocol", name: "vendor.follow" },
-        arguments: { ok: "true" },
-        result: { ok: true },
-      },
-    ];
-    const recipe = recordWorkflowRecipe("wf_nested_secret", nested)!;
-
-    // The call carrying the nested private value is reported as unrepresentable, not recorded.
-    expect(recipe.skipped).toEqual([
-      {
-        callId: "call_nested_secret",
-        reason: "argument 'headers' contains a masked value the workflow cannot carry",
-      },
-    ]);
-    const carried = JSON.stringify(recipe.workflow);
-    expect(carried).not.toContain("tok_live_123");
-    expect(carried).not.toContain("headers");
-    // The representable call is still recorded.
-    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["call_after"]);
-  });
-
-  it("does not let a value masked in one call reappear as a literal in another", () => {
-    const crossCall: RecordedCallObservation[] = [
-      {
-        callId: "call_masks",
-        causalSequence: 1,
-        callable: { runtime: "unfamiliar-protocol", name: "vendor.login" },
-        arguments: { user: "dev" },
-        maskedValues: ["tok_from_login"],
-        result: { token: "tok_from_login" },
-      },
-      {
-        callId: "call_reuses",
-        causalSequence: 2,
-        callable: { runtime: "unfamiliar-protocol", name: "vendor.echo" },
-        arguments: { headers: { auth: "tok_from_login" } },
-        result: { ok: true },
-      },
-    ];
-    const recipe = recordWorkflowRecipe("wf_cross_call", crossCall)!;
-    expect(recipe.skipped.map((entry) => entry.callId)).toEqual(["call_reuses"]);
-    expect(JSON.stringify(recipe.workflow)).not.toContain("tok_from_login");
+    const recorded = session();
+    recorded[1]!.observed = "failed";
+    recorded[1]!.recordedFailureControl = "continue";
+    const recordedRecipe = recordWorkflowRecipe("wf_failure_recorded", recorded)!;
+    expect(recordedRecipe.workflow.steps[1]!.failurePolicy).toEqual({
+      onError: "continue",
+      policy: "recorded",
+    });
   });
 });
