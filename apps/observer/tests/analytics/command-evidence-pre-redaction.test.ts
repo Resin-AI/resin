@@ -197,4 +197,52 @@ describe("command evidence derived before redaction", () => {
     expect(sequence).toBeDefined();
     expect(sequence?.steps[0]?.executable).not.toBe("git");
   });
+
+  it("derives the workspace-relative directory from the recorded session workspace", async () => {
+    const pipeline = newPipeline();
+    const { event, preRedactionCommandCarrier } = await runPipeline(pipeline, "pnpm run check:all");
+
+    const withWorkspace = projectEventToMetadataOnly(event, {
+      preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+      workspaceDirectory: "/home/dev/projects/tool-evolver",
+    });
+    // OMP records no per-command directory: the recorded session workspace is the directory the
+    // command ran in, and the evidence carries its workspace-relative form, never the host path.
+    expect((withWorkspace.metadata as Record<string, unknown>).cwd).toBe(".");
+    expect(JSON.stringify(withWorkspace)).not.toContain("/home/dev/projects/tool-evolver");
+
+    const withoutWorkspace = projectEventToMetadataOnly(event, {
+      preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+    });
+    // A genuinely unknown directory stays unknown.
+    expect((withoutWorkspace.metadata as Record<string, unknown>).cwd).toBeUndefined();
+  });
+
+  it("keeps a recorded directory override and refuses one outside the workspace", async () => {
+    const pipeline = newPipeline();
+    const { event, preRedactionCommandCarrier } = await runPipeline(pipeline, "pnpm run check:all");
+    const relative = {
+      ...event,
+      cwd: "packages/core",
+    } as typeof event;
+    const projectedRelative = projectEventToMetadataOnly(relative, {
+      preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+      workspaceDirectory: "/home/dev/projects/tool-evolver",
+    });
+    expect((projectedRelative.metadata as Record<string, unknown>).cwd).toBe("packages/core");
+
+    const absolute = { ...event, cwd: "/home/dev/projects/tool-evolver/apps/cli" } as typeof event;
+    const projectedAbsolute = projectEventToMetadataOnly(absolute, {
+      preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+      workspaceDirectory: "/home/dev/projects/tool-evolver",
+    });
+    expect((projectedAbsolute.metadata as Record<string, unknown>).cwd).toBe("apps/cli");
+
+    const outside = { ...event, cwd: "/tmp/elsewhere" } as typeof event;
+    const projectedOutside = projectEventToMetadataOnly(outside, {
+      preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+      workspaceDirectory: "/home/dev/projects/tool-evolver",
+    });
+    expect((projectedOutside.metadata as Record<string, unknown>).cwd).toBeUndefined();
+  });
 });

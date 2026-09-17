@@ -179,6 +179,17 @@ interface GenericCoalescingBuffer {
  * Coordinates raw record ingestion through normalization, per-session trajectory aggregation,
  * attribution resolution, and privacy-safe cloud observation submission.
  */
+/**
+ * The directory the recorded session ran in, as the harness recorded it. Both the live capture path
+ * and the historical import path hand the same session object to the coordinator, so command
+ * evidence derives its workspace-relative directory from the same place and leaves it unknown when
+ * the harness recorded none.
+ */
+function sessionDirectory(session: unknown): string | undefined {
+  const recorded = (session as { cwd?: unknown } | undefined)?.cwd;
+  return typeof recorded === "string" && recorded.trim().length > 0 ? recorded.trim() : undefined;
+}
+
 export class TrajectoryCaptureCoordinator {
   /**
    * Sanitized command evidence, derived once per event from the pre-redaction fields the pipeline
@@ -939,6 +950,7 @@ export class TrajectoryCaptureCoordinator {
       const projected = events.map((event) =>
         projectEventToMetadataOnly(event, {
           derivedCommandSequence: this.commandSequenceFor(event.sessionId, event.eventId),
+          workspaceDirectory: sessionDirectory(session),
         }),
       );
       await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
@@ -1067,6 +1079,7 @@ export class TrajectoryCaptureCoordinator {
     const projectedEvents = validEvents.map((ev) =>
       projectEventToMetadataOnly(ev, {
         derivedCommandSequence: this.commandSequenceFor(ev.sessionId, ev.eventId),
+        workspaceDirectory: sessionDirectory(buffer.session),
       }),
     );
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by

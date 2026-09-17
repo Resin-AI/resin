@@ -655,6 +655,13 @@ export interface MetadataProjectionOptions {
    * carries identical command evidence instead of depending on which consumer ran first.
    */
   derivedCommandSequence?: unknown;
+  /**
+   * The directory the recorded session ran in, as the harness recorded it. OMP records no
+   * per-command directory, so a command without one of its own ran in the session workspace: the
+   * shared projection derives the workspace-relative directory from this and leaves it unknown when
+   * the harness recorded none. An explicit recorded override is preserved.
+   */
+  workspaceDirectory?: string;
 }
 
 /**
@@ -716,6 +723,36 @@ export function deriveCommandSequenceFromCarrier(carrier: PreRedactionCommandCar
     carrier,
   );
   return projectDeterministicCommandSequenceFromEvent(event);
+}
+
+/**
+ * Workspace-relative form of the directory a command ran in.
+ *
+ * - a recorded relative directory is the override and is kept as recorded;
+ * - a recorded absolute directory inside the session workspace becomes its relative part;
+ * - a command with no directory of its own runs in the session workspace (".");
+ * - anything else (absolute but outside the workspace, or no recorded workspace) is unknown.
+ */
+function workspaceRelativeDirectory(
+  recorded: unknown,
+  workspaceDirectory: unknown,
+): string | undefined {
+  const directory =
+    typeof recorded === "string" && recorded.trim().length > 0 ? recorded.trim() : undefined;
+  const workspace =
+    typeof workspaceDirectory === "string" && workspaceDirectory.trim().length > 0
+      ? workspaceDirectory.trim().replace(/\/+$/, "")
+      : undefined;
+  const workspaceDefault = (): string | undefined => {
+    if (workspace === undefined) return undefined;
+    return workspace.startsWith("/") ? "." : workspace;
+  };
+  if (directory === undefined) return workspaceDefault();
+  if (!directory.startsWith("/")) return directory;
+  if (workspace === undefined) return undefined;
+  if (directory === workspace) return ".";
+  if (directory.startsWith(`${workspace}/`)) return directory.slice(workspace.length + 1);
+  return undefined;
 }
 
 export function projectEventToMetadataOnly(
@@ -792,6 +829,17 @@ export function projectEventToMetadataOnly(
     null;
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
+    // Command evidence carries the directory it ran in, workspace-relative, for the admission
+    // decision that replays it. Absolute host paths never enter the evidence, and a directory that
+    // cannot be established stays unknown.
+    const carrierParameters = (event as { parameters?: Record<string, unknown> }).parameters;
+    const relativeDirectory = workspaceRelativeDirectory(
+      (event as { cwd?: unknown }).cwd ?? carrierParameters?.cwd,
+      options.workspaceDirectory,
+    );
+    if (relativeDirectory !== undefined && metadata.cwd === undefined) {
+      metadata.cwd = relativeDirectory;
+    }
   }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;
