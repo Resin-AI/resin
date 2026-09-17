@@ -158,4 +158,38 @@ describe("workflow recipe recording", () => {
       policy: "recorded",
     });
   });
+
+  it("applies a later privacy classification to values captured earlier", () => {
+    const late: RecordedCallObservation[] = [
+      {
+        callId: "call_early",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-program", name: "local-echo" },
+        // Recorded as a plain literal: nothing marked it private at this point.
+        arguments: { text: "tok_late_999" },
+        argumentOrigins: { text: { type: "literal", value: "tok_late_999" } },
+        result: { ok: true },
+        observed: "succeeded",
+      },
+      {
+        callId: "call_later",
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-program", name: "local-check" },
+        arguments: { probe: "tok_late_999" },
+        argumentOrigins: { probe: { type: "literal", value: "tok_late_999" } },
+        // Only this later call's processing classifies the value as private.
+        isPrivateValue: (value) => value.includes("tok_late_999"),
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+
+    const recipe = recordWorkflowRecipe("wf_late_private", late)!;
+    // The earlier step no longer carries it as a literal.
+    const early = recipe.workflow.steps[0]!;
+    const earlyTemplate = leaf(early.arguments[0]!.source);
+    expect(earlyTemplate.type).toBe("private");
+    expect(JSON.stringify(recipe.workflow)).not.toContain("tok_late_999");
+    expect([...recipe.privateValues.values()]).toContain("tok_late_999");
+  });
 });

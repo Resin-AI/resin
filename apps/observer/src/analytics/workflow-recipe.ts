@@ -90,6 +90,9 @@ function recordWorkflowRecipeInternal(
   const skipped: Array<{ callId: string; reason: string }> = [];
   const steps: WorkflowStep[] = [];
   const inputTypes = new Map<string, "string" | "number" | "boolean" | "object" | "array">();
+  // A value may be classified private only after a later call is processed, so the union of every
+  // predicate seen is applied to the finished workflow as well.
+  const privatePredicates: Array<(value: string) => boolean> = [];
   let privateCounter = 0;
 
   const makePrivate = (value: WorkflowJsonValue): WorkflowValueTemplate => {
@@ -167,6 +170,7 @@ function recordWorkflowRecipeInternal(
       continue;
     }
     const stepId = `step${steps.length}`;
+    if (observation.isPrivateValue) privatePredicates.push(observation.isPrivateValue);
     const sources: Record<string, WorkflowValueTemplate> = {};
     for (const [name, value] of Object.entries(observation.arguments)) {
       const origin = observation.argumentOrigins?.[name];
@@ -220,6 +224,38 @@ function recordWorkflowRecipeInternal(
   }
 
   if (steps.length === 0) return undefined;
+
+  // Final privacy sweep: any literal leaf the record classifies as private becomes a private
+  // reference, wherever it ended up in the workflow.
+  const sweep = (template: WorkflowValueTemplate): WorkflowValueTemplate => {
+    switch (template.type) {
+      case "literal":
+        return typeof template.value === "string" &&
+          privatePredicates.some((predicate) => predicate(template.value as string))
+          ? makePrivate(template.value)
+          : template;
+      case "object": {
+        const entries: Record<string, WorkflowValueTemplate> = {};
+        for (const [key, entry] of Object.entries(template.entries)) entries[key] = sweep(entry);
+        return { type: "object", entries };
+      }
+      case "array":
+        return { type: "array", items: template.items.map(sweep) };
+      default:
+        return template;
+    }
+  };
+  for (const step of steps) {
+    step.arguments = step.arguments.map((argument) =>
+      argument.source.kind === "template"
+        ? {
+            ...argument,
+            source: { kind: "template" as const, template: sweep(argument.source.template) },
+          }
+        : argument,
+    );
+  }
+
   const workflow: RecordedWorkflow = {
     schemaVersion: 1,
     workflowId,
