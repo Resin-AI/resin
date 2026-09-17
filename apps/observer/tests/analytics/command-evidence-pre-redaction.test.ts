@@ -245,4 +245,42 @@ describe("command evidence derived before redaction", () => {
     });
     expect((projectedOutside.metadata as Record<string, unknown>).cwd).toBeUndefined();
   });
+
+  it("converts POSIX, Windows drive, and UNC directories without emitting host paths", async () => {
+    const pipeline = newPipeline();
+    const { event, preRedactionCommandCarrier } = await runPipeline(pipeline, "pnpm run check:all");
+    const project = (cwd: string | undefined, workspaceDirectory: string | undefined) =>
+      projectEventToMetadataOnly(
+        { ...event, ...(cwd === undefined ? {} : { cwd }) } as typeof event,
+        {
+          preRedactionCommandCarrier: preRedactionCommandCarrier as never,
+          ...(workspaceDirectory === undefined ? {} : { workspaceDirectory }),
+        },
+      );
+    const cwdOf = (projected: typeof event) => (projected.metadata as Record<string, unknown>).cwd;
+
+    // POSIX: inside, at the root, and outside the workspace.
+    expect(cwdOf(project("/srv/repo/apps/cli", "/srv/repo"))).toBe("apps/cli");
+    expect(cwdOf(project("/srv/repo", "/srv/repo"))).toBe(".");
+    expect(cwdOf(project(undefined, "/srv/repo"))).toBe(".");
+    expect(cwdOf(project("/srv/other", "/srv/repo"))).toBeUndefined();
+
+    // Windows drive paths, including case differences and mixed separators.
+    expect(cwdOf(project("C:\\Users\\dev\\repo\\apps\\cli", "C:\\Users\\dev\\repo"))).toBe(
+      "apps/cli",
+    );
+    expect(cwdOf(project("c:\\users\\dev\\repo", "C:\\Users\\Dev\\Repo"))).toBe(".");
+    expect(cwdOf(project(undefined, "C:\\Users\\dev\\repo"))).toBe(".");
+    expect(cwdOf(project("D:\\elsewhere", "C:\\Users\\dev\\repo"))).toBeUndefined();
+
+    // UNC paths.
+    expect(cwdOf(project("\\\\server\\share\\repo\\apps", "\\\\server\\share\\repo"))).toBe("apps");
+    expect(cwdOf(project(undefined, "\\\\server\\share\\repo"))).toBe(".");
+    expect(cwdOf(project("\\\\other\\share\\repo", "\\\\server\\share\\repo"))).toBeUndefined();
+
+    // No absolute host path ever reaches the evidence.
+    for (const value of ["/srv/other", "D:\\elsewhere", "\\\\other\\share\\repo"]) {
+      expect(JSON.stringify(project(value, "/srv/repo"))).not.toContain(value);
+    }
+  });
 });

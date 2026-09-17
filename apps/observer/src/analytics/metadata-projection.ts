@@ -741,18 +741,48 @@ function workspaceRelativeDirectory(
     typeof recorded === "string" && recorded.trim().length > 0 ? recorded.trim() : undefined;
   const workspace =
     typeof workspaceDirectory === "string" && workspaceDirectory.trim().length > 0
-      ? workspaceDirectory.trim().replace(/\/+$/, "")
+      ? workspaceDirectory.trim().replace(/[\\/]+$/, "")
       : undefined;
   const workspaceDefault = (): string | undefined => {
     if (workspace === undefined) return undefined;
-    return workspace.startsWith("/") ? "." : workspace;
+    return isAbsoluteDirectory(workspace) ? "." : toPosixSeparators(workspace);
   };
   if (directory === undefined) return workspaceDefault();
-  if (!directory.startsWith("/")) return directory;
+  // A recorded relative directory is the override and is kept as recorded.
+  if (!isAbsoluteDirectory(directory)) return toPosixSeparators(directory);
   if (workspace === undefined) return undefined;
-  if (directory === workspace) return ".";
-  if (directory.startsWith(`${workspace}/`)) return directory.slice(workspace.length + 1);
+  // Absolute directories are compared family-agnostically: a POSIX path, a Windows drive path and a
+  // UNC path all reduce to separators and, for Windows-style paths, case.
+  const normalizedDirectory = normalizeForComparison(directory);
+  const normalizedWorkspace = normalizeForComparison(workspace);
+  if (normalizedDirectory === normalizedWorkspace) return ".";
+  if (normalizedDirectory.startsWith(`${normalizedWorkspace}/`)) {
+    return toPosixSeparators(directory).slice(toPosixSeparators(workspace).length + 1);
+  }
+  // Outside the workspace, the directory cannot be expressed workspace-relative: it stays unknown
+  // rather than being emitted as an absolute host path.
   return undefined;
+}
+
+/** True for POSIX absolute, Windows drive, and UNC directories. */
+function isAbsoluteDirectory(value: string): boolean {
+  return (
+    value.startsWith("/") ||
+    value.startsWith("\\\\") ||
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    /^[a-zA-Z]:$/.test(value)
+  );
+}
+
+function toPosixSeparators(value: string): string {
+  return value.replace(/\\+/g, "/");
+}
+
+/** Separator- and case-insensitive comparison form; Windows-style paths fold case. */
+function normalizeForComparison(value: string): string {
+  const posix = toPosixSeparators(value);
+  const windowsStyle = /^[a-zA-Z]:/.test(posix) || value.startsWith("\\\\");
+  return windowsStyle ? posix.toLowerCase() : posix;
 }
 
 export function projectEventToMetadataOnly(
