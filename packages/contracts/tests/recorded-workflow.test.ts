@@ -6,7 +6,10 @@ function fourCallWorkflow(): RecordedWorkflow {
   return {
     schemaVersion: 1,
     workflowId: "wf_fetch_calculate_write_upload",
-    inputs: [{ name: "source" }, { name: "target" }],
+    inputs: [
+      { name: "source", type: "string" as const },
+      { name: "target", type: "string" as const },
+    ],
     privateReferences: ["secret:storage_token"],
     steps: [
       {
@@ -15,7 +18,8 @@ function fourCallWorkflow(): RecordedWorkflow {
         callable: { runtime: "mcp", name: "unfamiliar.fetch", connection: "srv_local" },
         arguments: [{ name: "source", source: { kind: "input", name: "source" } }],
         dependsOn: [],
-        failure: "abort",
+        failurePolicy: { onError: "abort" as const, policy: "recorded" as const },
+        observed: { outcome: "succeeded" as const },
       },
       {
         id: "calculate",
@@ -25,7 +29,8 @@ function fourCallWorkflow(): RecordedWorkflow {
           { name: "stdin", source: { kind: "result", stepId: "fetch", path: ["body", "rows", 0] } },
         ],
         dependsOn: ["fetch"],
-        failure: "abort",
+        failurePolicy: { onError: "abort" as const, policy: "recorded" as const },
+        observed: { outcome: "succeeded" as const },
       },
       {
         id: "write",
@@ -36,7 +41,8 @@ function fourCallWorkflow(): RecordedWorkflow {
           { name: "content", source: { kind: "result", stepId: "calculate", path: ["stdout"] } },
         ],
         dependsOn: ["calculate"],
-        failure: "abort",
+        failurePolicy: { onError: "abort" as const, policy: "recorded" as const },
+        observed: { outcome: "succeeded" as const },
       },
       {
         id: "upload",
@@ -47,7 +53,8 @@ function fourCallWorkflow(): RecordedWorkflow {
           { name: "token", source: { kind: "private", reference: "secret:storage_token" } },
         ],
         dependsOn: ["write"],
-        failure: "abort",
+        failurePolicy: { onError: "abort" as const, policy: "recorded" as const },
+        observed: { outcome: "succeeded" as const },
       },
     ],
   };
@@ -101,27 +108,149 @@ describe("recorded workflow validation", () => {
     expect(renamed.valid).toBe(true);
   });
 
-  it("requires a failure behavior and declared private references", () => {
+  it("requires a failure policy, an observed outcome, and a recorded input type", () => {
     const workflow = fourCallWorkflow();
-    const missingFailure = validateRecordedWorkflow({
+    const missingPolicy = validateRecordedWorkflow({
       ...workflow,
       steps: workflow.steps.map((step) => {
-        const { failure: _dropped, ...rest } = step;
+        const { failurePolicy: _dropped, ...rest } = step;
         return rest;
       }),
     });
-    expect(missingFailure.valid).toBe(false);
-    expect(missingFailure.errors.join("\n")).toContain("failure must be 'abort' or 'continue'");
+    expect(missingPolicy.valid).toBe(false);
+    expect(missingPolicy.errors.join("\n")).toContain("failurePolicy");
 
-    const undeclared = validateRecordedWorkflow({
+    const untypedInput = validateRecordedWorkflow({
       ...workflow,
-      privateReferences: [],
+      inputs: [{ name: "source" }],
     });
+    expect(untypedInput.valid).toBe(false);
+    expect(untypedInput.errors.join("\n")).toContain("recorded type");
+  });
+
+  it("validates recursively constructed arguments, including unknown origins", () => {
+    const workflow = fourCallWorkflow();
+    const templated = validateRecordedWorkflow({
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            {
+              name: "source",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: {
+                    inner: { type: "input", name: "source" },
+                    unknown: { type: "unresolved", reason: "not recorded" },
+                  },
+                },
+              },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+        workflow.steps[2]!,
+        workflow.steps[3]!,
+      ],
+    });
+    expect(templated.errors).toEqual([]);
+
+    const brokenTemplate = validateRecordedWorkflow({
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            {
+              name: "source",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: { inner: { type: "input", name: "missing" } },
+                },
+              },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+        workflow.steps[2]!,
+        workflow.steps[3]!,
+      ],
+    });
+    expect(brokenTemplate.valid).toBe(false);
+    expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
+  });
+
+  it("requires declared private references", () => {
+    const workflow = fourCallWorkflow();
+
+    const undeclared = validateRecordedWorkflow({ ...workflow, privateReferences: [] });
     expect(undeclared.valid).toBe(false);
     expect(undeclared.errors.join("\n")).toContain("undeclared private reference");
 
     const badPrivateList = validateRecordedWorkflow({ ...workflow, privateReferences: "secret" });
     expect(badPrivateList.valid).toBe(false);
     expect(badPrivateList.errors.join("\n")).toContain("privateReferences must be an array");
+  });
+
+  it("validates recursively constructed arguments, including unknown origins", () => {
+    const workflow = fourCallWorkflow();
+    const templated = validateRecordedWorkflow({
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            {
+              name: "source",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: {
+                    inner: { type: "input", name: "source" },
+                    unknown: { type: "unresolved", reason: "not recorded" },
+                  },
+                },
+              },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+        workflow.steps[2]!,
+        workflow.steps[3]!,
+      ],
+    });
+    expect(templated.errors).toEqual([]);
+
+    const brokenTemplate = validateRecordedWorkflow({
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            {
+              name: "source",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: { inner: { type: "input", name: "missing" } },
+                },
+              },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+        workflow.steps[2]!,
+        workflow.steps[3]!,
+      ],
+    });
+    expect(brokenTemplate.valid).toBe(false);
+    expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
   });
 });

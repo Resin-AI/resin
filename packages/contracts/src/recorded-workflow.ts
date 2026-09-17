@@ -24,6 +24,17 @@ export type WorkflowJsonValue =
 /** A path into a returned value: object keys and array indexes, in order. */
 export type WorkflowValuePath = ReadonlyArray<string | number>;
 
+/** One leaf of a recursively constructed argument. */
+export type WorkflowValueTemplate =
+  | { type: "literal"; value: WorkflowJsonValue }
+  | { type: "input"; name: string }
+  | { type: "result"; stepId: string; path: WorkflowValuePath }
+  | { type: "private"; reference: string }
+  /** Origin the record does not establish: preserved as such, never guessed. */
+  | { type: "unresolved"; reason: string }
+  | { type: "object"; entries: Record<string, WorkflowValueTemplate> }
+  | { type: "array"; items: WorkflowValueTemplate[] };
+
 export type WorkflowValueSource =
   | { kind: "literal"; value: WorkflowJsonValue }
   /** Supplied by the caller of the generated tool. */
@@ -31,7 +42,14 @@ export type WorkflowValueSource =
   /** The value a previous step returned, addressed by path — never by matching text. */
   | { kind: "result"; stepId: string; path: WorkflowValuePath }
   /** A private resource resolved locally at execution time and never uploaded. */
-  | { kind: "private"; reference: string };
+  | { kind: "private"; reference: string }
+  /**
+   * The record does not establish where this value came from. It is preserved as unknown rather
+   * than bound by guessing or frozen as a constant.
+   */
+  | { kind: "unresolved"; reason: string }
+  /** A recursively constructed value whose leaves carry their own sources. */
+  | { kind: "template"; template: WorkflowValueTemplate };
 
 /** How a step is called again: the original callable and the connection it was reached through. */
 export type WorkflowCallable = {
@@ -56,11 +74,24 @@ export type WorkflowArgument = {
   source: WorkflowValueSource;
 };
 
-export type WorkflowStepFailureBehavior =
-  /** A failure stops the workflow, as the recorded control flow did. */
-  | "abort"
-  /** The recorded control flow continued after this call's failure. */
-  | "continue";
+export type WorkflowStepFailureBehavior = "abort" | "continue";
+
+/**
+ * How the workflow behaves when this step fails, kept separate from what was observed.
+ *
+ * `policy` says where the behavior came from: `recorded` when the record shows the control flow,
+ * `default` when this representation chose it because the record does not say. An observed failure
+ * is evidence about one execution, not a description of the workflow's behavior.
+ */
+export type WorkflowStepFailurePolicy = {
+  onError: WorkflowStepFailureBehavior;
+  policy: "recorded" | "default";
+};
+
+/** What the recording observed about this step's execution, for diagnostics only. */
+export type WorkflowStepObservation = {
+  outcome: "succeeded" | "failed" | "unknown";
+};
 
 export type WorkflowStep = {
   /** Stable identity of this step inside the workflow. */
@@ -71,7 +102,10 @@ export type WorkflowStep = {
   arguments: WorkflowArgument[];
   /** Steps that must complete first, preserving the recorded ordering and dependencies. */
   dependsOn: string[];
-  failure: WorkflowStepFailureBehavior;
+  /** Recorded control flow, with the policy label it was derived under. */
+  failurePolicy: WorkflowStepFailurePolicy;
+  /** What the recording saw happen; never used as the workflow's behavior. */
+  observed: WorkflowStepObservation;
   /** Execution permissions the recorded call used, for reporting and for the runtime to enforce. */
   permissions?: WorkflowJsonValue;
 };
@@ -79,8 +113,12 @@ export type WorkflowStep = {
 export type RecordedWorkflow = {
   schemaVersion: typeof RECORDED_WORKFLOW_SCHEMA_VERSION;
   workflowId: string;
-  /** Caller-supplied inputs, in the order the workflow exposes them. */
-  inputs: Array<{ name: string; description?: string }>;
+  /** Caller-supplied inputs, in the order the workflow exposes them, with their recorded types. */
+  inputs: Array<{
+    name: string;
+    type: "string" | "number" | "boolean" | "object" | "array";
+    description?: string;
+  }>;
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
   privateReferences?: string[];
@@ -120,6 +158,7 @@ export function validateRecordedWorkflow(value: unknown): {
   const inputs = Array.isArray(value.inputs) ? value.inputs : null;
   if (!inputs) errors.push("inputs must be an array");
   const inputNames = new Set<string>();
+  const inputTypes = new Map<string, string>();
   for (const input of inputs ?? []) {
     if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
       errors.push("every input needs a non-empty name");
@@ -127,6 +166,17 @@ export function validateRecordedWorkflow(value: unknown): {
     }
     if (inputNames.has(input.name)) errors.push(`duplicate input: ${input.name}`);
     inputNames.add(input.name);
+    if (
+      input.type !== "string" &&
+      input.type !== "number" &&
+      input.type !== "boolean" &&
+      input.type !== "object" &&
+      input.type !== "array"
+    ) {
+      errors.push(`input ${input.name} needs a recorded type`);
+    } else {
+      inputTypes.set(input.name, input.type);
+    }
   }
   const declaredPrivates = new Set<string>();
   const privateReferences = (value as { privateReferences?: unknown }).privateReferences;
@@ -165,9 +215,22 @@ export function validateRecordedWorkflow(value: unknown): {
     ) {
       errors.push(`step ${step.id} needs a callable with a runtime and a recorded name`);
     }
-    const failure = (step as { failure?: unknown }).failure;
-    if (failure !== "abort" && failure !== "continue") {
-      errors.push(`step ${step.id} failure must be 'abort' or 'continue'`);
+    const failurePolicy = (step as { failurePolicy?: unknown }).failurePolicy;
+    if (
+      !isPlainObject(failurePolicy) ||
+      (failurePolicy.onError !== "abort" && failurePolicy.onError !== "continue") ||
+      (failurePolicy.policy !== "recorded" && failurePolicy.policy !== "default")
+    ) {
+      errors.push(`step ${step.id} needs a failurePolicy with onError and policy`);
+    }
+    const observed = (step as { observed?: unknown }).observed;
+    if (
+      !isPlainObject(observed) ||
+      (observed.outcome !== "succeeded" &&
+        observed.outcome !== "failed" &&
+        observed.outcome !== "unknown")
+    ) {
+      errors.push(`step ${step.id} needs an observed outcome`);
     }
     const permissions = (step as { permissions?: unknown }).permissions;
     if (permissions !== undefined && !isJsonValue(permissions)) {
@@ -233,6 +296,80 @@ export function validateRecordedWorkflow(value: unknown): {
       }
       if (source.kind === "literal" && !isJsonValue(source.value)) {
         errors.push(`step ${step.id} argument ${argument.name} has a non-JSON literal`);
+      }
+      if (source.kind === "unresolved" && typeof source.reason !== "string") {
+        errors.push(
+          `step ${step.id} argument ${argument.name} needs a reason for its unknown origin`,
+        );
+      }
+      if (source.kind === "template") {
+        const problems: string[] = [];
+        const walk = (template: unknown, where: string): void => {
+          if (!isPlainObject(template)) {
+            problems.push(`${where} is not a template node`);
+            return;
+          }
+          switch (template.type) {
+            case "literal":
+              if (!isJsonValue(template.value)) problems.push(`${where} has a non-JSON literal`);
+              return;
+            case "input":
+              if (typeof template.name !== "string" || !inputNames.has(template.name)) {
+                problems.push(`${where} reads unknown input ${String(template.name)}`);
+              }
+              return;
+            case "result": {
+              const stepRef = typeof template.stepId === "string" ? template.stepId : "";
+              if (!order.has(stepRef)) problems.push(`${where} reads unknown step ${stepRef}`);
+              else if (
+                (order.get(stepRef) ?? 0) >=
+                (order.get(
+                  typeof (step as { id?: unknown }).id === "string"
+                    ? (step as { id: string }).id
+                    : "",
+                ) ?? 0)
+              ) {
+                problems.push(`${where} reads ${stepRef}, which does not come earlier`);
+              }
+              return;
+            }
+            case "private":
+              if (
+                typeof template.reference !== "string" ||
+                !declaredPrivates.has(template.reference)
+              ) {
+                problems.push(
+                  `${where} reads undeclared private reference ${String(template.reference)}`,
+                );
+              }
+              return;
+            case "unresolved":
+              if (typeof template.reason !== "string") problems.push(`${where} needs a reason`);
+              return;
+            case "object": {
+              if (!isPlainObject(template.entries)) {
+                problems.push(`${where} object entries must be an object`);
+                return;
+              }
+              for (const [key, entry] of Object.entries(template.entries)) {
+                walk(entry, `${where}.${key}`);
+              }
+              return;
+            }
+            case "array": {
+              if (!Array.isArray(template.items)) {
+                problems.push(`${where} array items must be an array`);
+                return;
+              }
+              template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
+              return;
+            }
+            default:
+              problems.push(`${where} has unknown template type ${String(template.type)}`);
+          }
+        };
+        walk(source.template, `step ${step.id} argument ${argument.name}`);
+        errors.push(...problems);
       }
       if (source.kind === "private") {
         if (typeof source.reference !== "string" || source.reference.length === 0) {

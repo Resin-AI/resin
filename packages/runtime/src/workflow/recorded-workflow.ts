@@ -13,6 +13,7 @@ import type {
   WorkflowJsonValue,
   WorkflowStep,
   WorkflowValuePath,
+  WorkflowValueTemplate,
 } from "@resin/contracts";
 
 /** One call, with the callable the record names and the arguments resolved for it. */
@@ -102,6 +103,86 @@ function readPath(
   return current;
 }
 
+/** Builds a recursively constructed argument: every leaf keeps its own source. */
+async function buildTemplate(
+  template: WorkflowValueTemplate,
+  step: WorkflowStep,
+  argumentName: string,
+  options: RecordedWorkflowExecutionOptions,
+  results: Map<string, WorkflowJsonValue>,
+): Promise<WorkflowJsonValue> {
+  const resolveLeaf = async (leaf: WorkflowValueTemplate): Promise<WorkflowJsonValue> =>
+    buildTemplate(leaf, step, argumentName, options, results);
+  switch (template.type) {
+    case "literal":
+      return template.value;
+    case "input": {
+      if (!(template.name in options.inputs)) {
+        throw new WorkflowBindingError(
+          `input '${template.name}' was not supplied`,
+          step.id,
+          argumentName,
+        );
+      }
+      return options.inputs[template.name] as WorkflowJsonValue;
+    }
+    case "result": {
+      if (!results.has(template.stepId)) {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' has no result in this invocation; it did not complete`,
+          step.id,
+          argumentName,
+        );
+      }
+      const value = readPath(results.get(template.stepId) as WorkflowJsonValue, template.path);
+      if (value === undefined) {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' returned no value at path ${JSON.stringify(template.path)}`,
+          step.id,
+          argumentName,
+        );
+      }
+      return value;
+    }
+    case "private": {
+      if (!options.resolvePrivate) {
+        throw new WorkflowBindingError(
+          `private reference '${template.reference}' cannot be resolved in this environment`,
+          step.id,
+          argumentName,
+        );
+      }
+      return await options.resolvePrivate(template.reference);
+    }
+    case "unresolved":
+      throw new WorkflowBindingError(
+        `the origin of this value was not recorded (${template.reason}); re-record the call or supply it as an input`,
+        step.id,
+        argumentName,
+      );
+    case "object": {
+      const built: Record<string, WorkflowJsonValue> = {};
+      for (const [key, entry] of Object.entries(template.entries)) {
+        built[key] = await resolveLeaf(entry);
+      }
+      return built;
+    }
+    case "array": {
+      const built: WorkflowJsonValue[] = [];
+      for (const item of template.items) built.push(await resolveLeaf(item));
+      return built;
+    }
+    default: {
+      const exhaustive: never = template;
+      throw new WorkflowBindingError(
+        `unsupported template node ${JSON.stringify(exhaustive)}`,
+        step.id,
+        argumentName,
+      );
+    }
+  }
+}
+
 async function resolveArgument(
   step: WorkflowStep,
   argumentName: string,
@@ -150,6 +231,14 @@ async function resolveArgument(
       }
       return await options.resolvePrivate(source.reference);
     }
+    case "unresolved":
+      throw new WorkflowBindingError(
+        `the origin of this value was not recorded (${source.reason}); re-record the call or supply it as an input`,
+        step.id,
+        argumentName,
+      );
+    case "template":
+      return await buildTemplate(source.template, step, argumentName, options, results);
     default: {
       const exhaustive: never = source;
       throw new WorkflowBindingError(
@@ -198,7 +287,7 @@ export async function executeRecordedWorkflow(
       options.onUnavailable?.(step, reason);
       state.set(step.id, "failed");
       outcomes.push({ stepId: step.id, status: "failed", error: reason });
-      if (step.failure === "abort") aborted = true;
+      if (step.failurePolicy.onError === "abort") aborted = true;
       continue;
     }
 
@@ -218,7 +307,7 @@ export async function executeRecordedWorkflow(
       const message = error instanceof Error ? error.message : String(error);
       state.set(step.id, "failed");
       outcomes.push({ stepId: step.id, status: "failed", error: message });
-      if (step.failure === "abort") aborted = true;
+      if (step.failurePolicy.onError === "abort") aborted = true;
       continue;
     }
 
@@ -231,7 +320,7 @@ export async function executeRecordedWorkflow(
       const message = error instanceof Error ? error.message : String(error);
       state.set(step.id, "failed");
       outcomes.push({ stepId: step.id, status: "failed", error: message });
-      if (step.failure === "abort") aborted = true;
+      if (step.failurePolicy.onError === "abort") aborted = true;
     }
   }
 
@@ -247,10 +336,17 @@ export async function executeRecordedWorkflow(
 
 /** The input schema of a recorded workflow: every declared input is required. */
 export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<string, unknown> {
+  const JSON_SCHEMA_TYPES: Record<string, string> = {
+    string: "string",
+    number: "number",
+    boolean: "boolean",
+    object: "object",
+    array: "array",
+  };
   const properties: Record<string, unknown> = {};
   for (const input of workflow.inputs) {
     properties[input.name] = {
-      type: "string",
+      type: JSON_SCHEMA_TYPES[input.type] ?? "string",
       ...(input.description ? { description: input.description } : {}),
     };
   }
