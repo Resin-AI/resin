@@ -8,6 +8,7 @@ import type {
   InstallationRecord,
   InvocationRecord,
   NormalizedMessageEvent,
+  NormalizedToolCallEvent,
   ToolManifest,
   ToolVersion,
   WorkspaceRecord,
@@ -167,6 +168,118 @@ describe("Repositories End-to-End Round-Trip & Operations", () => {
 
     const latestSeq = await store.sessions.getLatestEventSequence("ses_01j7db4n000000000000000001");
     expect(latestSeq).toBe(1);
+
+    store.close();
+  });
+
+  it("stores causal fan-out siblings at one sequence and resolves them by step index", async () => {
+    const store = await createInMemoryStateStore();
+    const sessionId = "ses_01j7db4n00000000000000fan";
+    await store.sessions.saveSession({
+      sessionId,
+      harnessId: "omp",
+      startedAt: "2026-08-17T13:00:00.000Z",
+    });
+
+    const redaction = {
+      isRedacted: false,
+      redactedFields: [],
+      redactionStrategy: "none" as const,
+      scrubbedPatterns: [],
+    };
+    const message: NormalizedMessageEvent = {
+      eventId: "evt_fanout_message_01",
+      schemaVersion: "0.1.0",
+      sessionId,
+      timestamp: "2026-08-17T13:01:00.000Z",
+      causalRef: { causalSequence: 7 },
+      redaction,
+      type: "message",
+      role: "assistant",
+      content: "calling two tools in parallel",
+    };
+    const siblingA: NormalizedToolCallEvent = {
+      eventId: "evt_fanout_call_01",
+      schemaVersion: "0.1.0",
+      sessionId,
+      timestamp: "2026-08-17T13:01:00.000Z",
+      causalRef: { causalSequence: 7, stepIndex: 1 },
+      redaction,
+      type: "tool_call",
+      callId: "call_fanout_a",
+      toolName: "read",
+      parameters: { path: "a.ts" },
+    };
+    const siblingB: NormalizedToolCallEvent = {
+      ...siblingA,
+      eventId: "evt_fanout_call_02",
+      causalRef: { causalSequence: 7, stepIndex: 2 },
+      callId: "call_fanout_b",
+      toolName: "write",
+      parameters: { path: "b.ts" },
+    };
+
+    // Legacy fan-in event: no step index, so it keeps the implicit step 0.
+    expect(await store.sessions.insertEvent(message)).toBe(true);
+    expect(await store.sessions.insertEvent(siblingA)).toBe(true);
+    expect(await store.sessions.insertEvent(siblingB)).toBe(true);
+
+    const events = await store.sessions.getEvents(sessionId);
+    expect(events.map((event) => event.eventId)).toEqual([
+      "evt_fanout_message_01",
+      "evt_fanout_call_01",
+      "evt_fanout_call_02",
+    ]);
+
+    // Omitting stepIndex keeps the legacy single-row lookup at the implicit step 0.
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 7))?.eventId).toBe(
+      "evt_fanout_message_01",
+    );
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 7, 0))?.eventId).toBe(
+      "evt_fanout_message_01",
+    );
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 7, 1))?.eventId).toBe(
+      "evt_fanout_call_01",
+    );
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 7, 2))?.eventId).toBe(
+      "evt_fanout_call_02",
+    );
+    expect(await store.sessions.findEventBySessionAndSequence(sessionId, 7, 3)).toBeNull();
+
+    // Replaying a sibling under a new event id or re-sending the same event id
+    // must not widen the row count.
+    expect(
+      await store.sessions.insertEvent({
+        ...siblingA,
+        eventId: "evt_fanout_call_01_duplicate",
+      }),
+    ).toBe(false);
+    expect(await store.sessions.insertEvent(siblingA)).toBe(false);
+    expect(await store.sessions.insertEvent({ ...message, content: "edited content" })).toBe(false);
+
+    const rowCount = store.conn.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM normalized_events WHERE session_id = ?;",
+      [sessionId],
+    );
+    expect(rowCount?.c).toBe(3);
+    // The stored payload is never rewritten by a conflicting mutation.
+    expect(await store.sessions.getEventById("evt_fanout_message_01")).toEqual(message);
+
+    // A preexisting row whose only step is non-zero is still the row legacy
+    // callers expect to find when no step is supplied.
+    const lateSibling: NormalizedToolCallEvent = {
+      ...siblingA,
+      eventId: "evt_fanout_call_05",
+      causalRef: { causalSequence: 9, stepIndex: 5 },
+    };
+    expect(await store.sessions.insertEvent(lateSibling)).toBe(true);
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 9))?.eventId).toBe(
+      "evt_fanout_call_05",
+    );
+    expect(await store.sessions.findEventBySessionAndSequence(sessionId, 9, 0)).toBeNull();
+    expect((await store.sessions.findEventBySessionAndSequence(sessionId, 9, 5))?.eventId).toBe(
+      "evt_fanout_call_05",
+    );
 
     store.close();
   });

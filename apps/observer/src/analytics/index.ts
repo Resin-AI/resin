@@ -49,6 +49,12 @@ export {
 } from "./invocation-telemetry-uploader.js";
 
 export {
+  type ToolLinkEvidenceRecorderOptions,
+  ToolLinkEvidenceRecorder,
+  createToolLinkEvidenceRecorder,
+} from "./tool-links/recorder.js";
+
+export {
   extractRawCommandStringFromEvent,
   isDeterministicCommandSequence,
   parseDeterministicCommandSequence,

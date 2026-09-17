@@ -44,6 +44,9 @@ export * from "./computation-evidence.js";
 
 // Deterministic Command Sequence Evidence Contract
 export * from "./deterministic-command-sequence.js";
+
+// Tool Link Evidence (declared read/write data flow around one observed invocation)
+export * from "./tool-link-evidence.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {
   id: string;

@@ -11,6 +11,81 @@ describe("Idempotency & Deduplication", () => {
   const sessionId = "01J5XYZ7890ABCDEFGHJKMNPQR";
   const timestamp = "2026-08-17T12:00:00.000Z";
 
+  it("preserves legacy event identity while persisting and replaying distinct sibling steps", async () => {
+    const store = await createInMemoryStateStore();
+    await store.sessions.saveSession({
+      sessionId,
+      harnessId: "omp",
+      status: "running",
+      startedAt: timestamp,
+    });
+    const options = { sessionRepository: store.sessions, dbConnection: store.conn };
+    const original = {
+      type: "message" as const,
+      role: "assistant" as const,
+      content: "Checking files",
+      sessionId,
+      timestamp,
+      schemaVersion: "1.0.0",
+      causalRef: { causalSequence: 7, parentId: null },
+    };
+    const first = await new NormalizationPipeline(options).processIntermediateEvent(original);
+    expect(first.status).toBe("success");
+    if (first.status !== "success") throw new Error("Legacy event must normalize");
+    expect(await store.sessions.getEvents(sessionId)).toHaveLength(1);
+    const pipeline = new NormalizationPipeline(options);
+    const replay = await pipeline.processIntermediateEvent(original);
+    expect(replay).toMatchObject({
+      status: "success",
+      isDuplicate: true,
+      event: { eventId: first.event.eventId },
+    });
+    const call = {
+      type: "tool_call" as const,
+      toolName: "read",
+      callId: "embedded-call-one",
+      parameters: { path: "src/example.ts" },
+      sessionId,
+      timestamp,
+      schemaVersion: "1.0.0",
+      causalRef: { causalSequence: 7, parentId: null, stepIndex: 1 },
+    };
+    expect(await pipeline.processIntermediateEvent(call)).toMatchObject({
+      status: "success",
+      isDuplicate: false,
+    });
+    expect(
+      await pipeline.processIntermediateEvent({
+        ...call,
+        callId: "embedded-call-two",
+        causalRef: { ...call.causalRef, stepIndex: 2 },
+      }),
+    ).toMatchObject({ status: "success", isDuplicate: false });
+    expect(await new NormalizationPipeline(options).processIntermediateEvent(call)).toMatchObject({
+      status: "success",
+      isDuplicate: true,
+    });
+    expect(
+      await pipeline.processIntermediateEvent({ ...call, callId: "conflicting-call" }),
+    ).toMatchObject({ status: "dead_letter" });
+    // Playback order ties each sibling to its source sequence by causal step:
+    // the step-less legacy message resolves to step 0 and the recovered calls follow.
+    const persisted = await store.sessions.getEvents(sessionId);
+    expect(
+      persisted.map((event) => [
+        event.type,
+        event.causalRef.stepIndex ?? 0,
+        event.type === "tool_call" ? event.callId : null,
+      ]),
+    ).toEqual([
+      ["message", 0, null],
+      ["tool_call", 1, "embedded-call-one"],
+      ["tool_call", 2, "embedded-call-two"],
+    ]);
+    // Evidence keeps its original identity: the message is never renumbered by siblings.
+    expect(persisted[0]?.eventId).toBe(first.event.eventId);
+  });
+
   it("is completely idempotent when re-processing identical raw records", async () => {
     const store = await createInMemoryStateStore();
     const sessionRepo = store.sessions;
@@ -27,7 +102,7 @@ describe("Idempotency & Deduplication", () => {
     const pipeline = new NormalizationPipeline({
       sessionRepository: sessionRepo,
       syncRepository: syncRepo,
-      dbConnection: store.connection,
+      dbConnection: store.conn,
     });
 
     const rawRecord: RawHarnessRecord = {

@@ -31,7 +31,6 @@ import { SignatureExtractor } from "../../src/opportunity/signature.js";
 import { evaluateSuppression } from "../../src/opportunity/suppression.js";
 import type { Episode, WorkflowCluster } from "../../src/opportunity/types.js";
 
-const decoder = new OmpRecordDecoder();
 const families = buildComputationFixtureFamilies();
 const extractor = new SignatureExtractor();
 const clusterer = new StructuralClusterer();
@@ -90,7 +89,7 @@ function createFakeCloudClient() {
 
 function createCaptureEnvironment() {
   const pipeline = new NormalizationPipeline();
-  pipeline.registerDecoder(decoder);
+  pipeline.registerDecoder(new OmpRecordDecoder());
   const cloud = createFakeCloudClient();
   const localEvents: NormalizedSessionEvent[] = [];
   const coordinator = new TrajectoryCaptureCoordinator({
