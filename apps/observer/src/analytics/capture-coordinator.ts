@@ -10,14 +10,16 @@ import {
   NormalizationPipeline,
   type PipelineProcessContext,
   type PipelineProcessResult,
-  type PreRedactionCommandCarrier,
   generateDeterministicEventId,
 } from "../normalization/pipeline.js";
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
-import { projectEventToMetadataOnly } from "./metadata-projection.js";
+import {
+  deriveCommandSequenceFromCarrier,
+  projectEventToMetadataOnly,
+} from "./metadata-projection.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
@@ -179,28 +181,46 @@ interface GenericCoalescingBuffer {
  */
 export class TrajectoryCaptureCoordinator {
   /**
-   * Pre-redaction command-bearing fields, keyed by normalized event id, bridging the pipeline result
-   * that produced them and the projection that derives command evidence from them. Entries are
-   * deleted as soon as their event is projected, and the map is bounded so a stalled flush cannot
-   * grow it without limit.
+   * Sanitized command evidence, derived once per event from the pre-redaction fields the pipeline
+   * returned, keyed by session and event id.
+   *
+   * The same event is projected more than once — the local sink, the cloud batch, and a re-projected
+   * batch after a failed upload — so the derived result is retained and reused instead of being
+   * consumed by whichever consumer runs first. Raw argument values are never kept: what is retained
+   * is the sanitized sequence (typed parameters plus value commitments). Entries are dropped when
+   * their session is released, with an oldest-first bound as a backstop.
    */
-  private readonly preRedactionCarriers = new Map<string, PreRedactionCommandCarrier>();
+  private readonly commandSequences = new Map<string, unknown>();
 
-  private static readonly MAX_PRE_REDACTION_CARRIERS = 4096;
+  private static readonly MAX_RETAINED_COMMAND_SEQUENCES = 4096;
 
-  private rememberPreRedactionCarrier(result: PipelineProcessResult): void {
-    if (result.status !== "success" || !result.preRedactionCommandCarrier) return;
-    if (this.preRedactionCarriers.size >= TrajectoryCaptureCoordinator.MAX_PRE_REDACTION_CARRIERS) {
-      const oldest = this.preRedactionCarriers.keys().next().value;
-      if (oldest !== undefined) this.preRedactionCarriers.delete(oldest);
-    }
-    this.preRedactionCarriers.set(result.event.eventId, result.preRedactionCommandCarrier);
+  private static sequenceKey(sessionId: string, eventId: string): string {
+    return `${sessionId}\u0000${eventId}`;
   }
 
-  private takePreRedactionCarrier(eventId: string): PreRedactionCommandCarrier | undefined {
-    const carrier = this.preRedactionCarriers.get(eventId);
-    if (carrier !== undefined) this.preRedactionCarriers.delete(eventId);
-    return carrier;
+  private rememberCommandSequence(result: PipelineProcessResult): void {
+    if (result.status !== "success" || !result.preRedactionCommandCarrier) return;
+    const sequence = deriveCommandSequenceFromCarrier(result.preRedactionCommandCarrier);
+    if (sequence === undefined || sequence === null) return;
+    if (this.commandSequences.size >= TrajectoryCaptureCoordinator.MAX_RETAINED_COMMAND_SEQUENCES) {
+      const oldest = this.commandSequences.keys().next().value;
+      if (oldest !== undefined) this.commandSequences.delete(oldest);
+    }
+    this.commandSequences.set(
+      TrajectoryCaptureCoordinator.sequenceKey(result.event.sessionId, result.event.eventId),
+      sequence,
+    );
+  }
+
+  private commandSequenceFor(sessionId: string, eventId: string): unknown {
+    return this.commandSequences.get(TrajectoryCaptureCoordinator.sequenceKey(sessionId, eventId));
+  }
+
+  private forgetSessionCommandSequences(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of [...this.commandSequences.keys()]) {
+      if (key.startsWith(prefix)) this.commandSequences.delete(key);
+    }
   }
 
   private readonly pipeline: NormalizationPipeline;
@@ -436,6 +456,7 @@ export class TrajectoryCaptureCoordinator {
       }
     }
     this.activeSessions.delete(sessionId);
+    this.forgetSessionCommandSequences(sessionId);
     this.activeGenericSessions.delete(sessionId);
     this.genericSessionTails.delete(sessionId);
     this.genericSessions.delete(sessionId);
@@ -581,7 +602,7 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.event) {
               try {
-                this.rememberPreRedactionCarrier(res);
+                this.rememberCommandSequence(res);
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
                 // Declared data flow runs first: the computation recorder consumes and then removes
@@ -673,6 +694,7 @@ export class TrajectoryCaptureCoordinator {
               this.trajectoryResourceForbiddenRetries.delete(sessionId);
               this.finalizedSessions.add(sessionId);
               this.activeSessions.delete(sessionId);
+              this.forgetSessionCommandSequences(sessionId);
               await ack();
               return;
             }
@@ -710,6 +732,7 @@ export class TrajectoryCaptureCoordinator {
 
               this.finalizedSessions.add(sessionId);
               this.activeSessions.delete(sessionId);
+              this.forgetSessionCommandSequences(sessionId);
               await ack();
               return;
             }
@@ -722,6 +745,7 @@ export class TrajectoryCaptureCoordinator {
           }
           this.finalizedSessions.add(sessionId);
           this.activeSessions.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         if (!this.isTelemetryAllowed(telemetryGeneration)) {
@@ -771,7 +795,7 @@ export class TrajectoryCaptureCoordinator {
               continue;
             }
             if (res.status === "success" && res.event) {
-              this.rememberPreRedactionCarrier(res);
+              this.rememberCommandSequence(res);
               const ev = res.event;
               if (
                 ev.type === "session_lifecycle" &&
@@ -913,7 +937,7 @@ export class TrajectoryCaptureCoordinator {
     try {
       const projected = events.map((event) =>
         projectEventToMetadataOnly(event, {
-          preRedactionCommandCarrier: this.takePreRedactionCarrier(event.eventId),
+          derivedCommandSequence: this.commandSequenceFor(event.sessionId, event.eventId),
         }),
       );
       await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
@@ -1039,7 +1063,7 @@ export class TrajectoryCaptureCoordinator {
 
     const projectedEvents = validEvents.map((ev) =>
       projectEventToMetadataOnly(ev, {
-        preRedactionCommandCarrier: this.takePreRedactionCarrier(ev.eventId),
+        derivedCommandSequence: this.commandSequenceFor(ev.sessionId, ev.eventId),
       }),
     );
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by

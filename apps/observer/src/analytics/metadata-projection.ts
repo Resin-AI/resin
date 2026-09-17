@@ -649,6 +649,12 @@ export interface MetadataProjectionOptions {
    * evidence-derived value commitment — never a value.
    */
   preRedactionCommandCarrier?: PreRedactionCommandCarrier;
+  /**
+   * An already-derived command sequence for this event. Callers that produce several outputs from
+   * one event (local sink, cloud batch, upload retries) derive it once and reuse it, so every output
+   * carries identical command evidence instead of depending on which consumer ran first.
+   */
+  derivedCommandSequence?: unknown;
 }
 
 /**
@@ -685,6 +691,31 @@ function commandCarrierView(
     else view[key] = carrier[key];
   }
   return view as unknown as NormalizedSessionEvent;
+}
+
+/**
+ * Derives the deterministic command sequence from pre-redaction command-bearing fields. Returns the
+ * sanitized sequence (typed parameters plus value commitments) or undefined when the command cannot
+ * be represented — never raw argument values.
+ */
+export function deriveCommandSequenceFromCarrier(carrier: PreRedactionCommandCarrier): unknown {
+  const event = commandCarrierView(
+    {
+      eventId: "carrier",
+      schemaVersion: "1.0.0",
+      sessionId: "carrier",
+      timestamp: new Date(0).toISOString(),
+      causalRef: { causalSequence: 0 },
+      redaction: {
+        isRedacted: false,
+        redactedFields: [],
+        redactionStrategy: "none",
+        scrubbedPatterns: [],
+      },
+    } as unknown as NormalizedSessionEvent,
+    carrier,
+  );
+  return projectDeterministicCommandSequenceFromEvent(event);
 }
 
 export function projectEventToMetadataOnly(
@@ -751,11 +782,14 @@ export function projectEventToMetadataOnly(
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
   // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
-  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(
-    options.preRedactionCommandCarrier
-      ? commandCarrierView(event, options.preRedactionCommandCarrier)
-      : event,
-  );
+  const derivedCommandSequence =
+    options.derivedCommandSequence ??
+    projectDeterministicCommandSequenceFromEvent(
+      options.preRedactionCommandCarrier
+        ? commandCarrierView(event, options.preRedactionCommandCarrier)
+        : event,
+    ) ??
+    null;
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }
