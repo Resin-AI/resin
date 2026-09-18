@@ -15,6 +15,7 @@ import {
 } from "../../src/workflow/binding-validation.js";
 import {
   confirmPromotedPlan,
+  demonstrationEnvironment,
   validateAndConfirmCandidates,
 } from "../../src/workflow/binding-validation.js";
 import { RuntimeAdapterRegistry } from "../../src/workflow/recorded-workflow.js";
@@ -612,5 +613,130 @@ describe("a value embedded in a recorded program", () => {
     // the program is rendered rather than being silently replayed with the recorded text. Either way
     // the proposal is never accepted on evidence that does not exist.
     expect(outcomes[0]?.accepted).toBe(false);
+  });
+});
+
+/**
+ * A program whose recorded text was written with one token the two executions disagreed about.
+ *
+ * The token is a position inside the program, so the value a replay must bind is the token's own
+ * value read out of the demonstration's text — the same index, the other execution's program. These
+ * tests pin that the demonstration supplies exactly that value, that the plan a caller receives
+ * declares it at that token, and that a token the demonstration has no value for is refused rather
+ * than guessed at.
+ */
+const REPEAT_PROGRAM =
+  "printf '%s\\n' 'tok(bravo-seed)' > release.txt && printf '%s\\n' 'keep-me' >> release.txt";
+
+/** The recording, with the demonstration its own repeat offered: another run, on another seed. */
+function demonstratedProgramPlan(): RecordedWorkflow {
+  const plan = programPlan();
+  plan.heldOut = {
+    inputs: [{ stepId: "seal", argument: "command", reference: "private:demonstration:command" }],
+    observed: [{ stepId: "seal", reference: "private:demonstration:result" }],
+  };
+  plan.privateReferences = [
+    ...(plan.privateReferences ?? []),
+    "private:demonstration:command",
+    "private:demonstration:result",
+  ];
+  return plan;
+}
+
+/** The recording's own references, resolved by the host that kept those values. */
+function demonstrationResolver(reference: string): WorkflowJsonValue {
+  if (reference === "private:recorded-program") return RECORDED_PROGRAM;
+  if (reference === "private:demonstration:command") return REPEAT_PROGRAM;
+  if (reference === "private:demonstration:result") {
+    return { named: ["%s\\n", "tok(bravo-seed)", "%s\\n", "keep-me"] };
+  }
+  throw new Error(`unexpected reference '${reference}'`);
+}
+
+describe("a token of a recorded program a caller may supply", () => {
+  const tokenCandidate: WorkflowBindingCandidate = {
+    stepId: "seal",
+    argument: "command",
+    path: ["tokens", 2],
+    proposed: { kind: "input", name: "sh_command_2", type: "string" },
+    reason: "varies-across-executions",
+    missing:
+      "no execution used a value the record had never seen, so the record does not establish that a caller supplies this token",
+  };
+
+  /** The environment the recording's demonstration supplies, plus the work's own input. */
+  async function environmentFor(
+    plan: RecordedWorkflow,
+    candidate: WorkflowBindingCandidate,
+    seen: string[],
+  ): Promise<CandidateValidationEnvironment> {
+    const directory = await mkdtemp(join(tmpdir(), "resin-program-input-"));
+    workspaces.push(directory);
+    const environment = await demonstrationEnvironment({
+      plan,
+      candidates: [candidate],
+      adapters: programAdapters(seen),
+      workspaceDir: directory,
+      resolvePrivate: demonstrationResolver,
+    });
+    if (environment === undefined) throw new Error("the plan carries no demonstration");
+    // The demonstration supplies what the recording only suggests; the work's own inputs are the
+    // caller's and are handed to the replay as they are.
+    environment.inputs.seed = "replay-seed";
+    return environment;
+  }
+
+  it("binds the token to the demonstration's own value, and declares it at that token", async () => {
+    // The candidate names the same token in both texts: the recorded one holds the recording's seed,
+    // the demonstration's holds the value the replay never used.
+    expect(tokenizeProgram("shell", RECORDED_PROGRAM)[2]!.value).toBe("tok(recorded-seed)");
+    expect(tokenizeProgram("shell", REPEAT_PROGRAM)[2]!.value).toBe("tok(bravo-seed)");
+
+    const seen: string[] = [];
+    const plan = demonstratedProgramPlan();
+    const decided = await validateAndConfirmCandidates({
+      plan,
+      candidates: [tokenCandidate],
+      environment: await environmentFor(plan, tokenCandidate, seen),
+    });
+
+    const [outcome] = decided.outcomes;
+    expect(outcome.accepted).toBe(true);
+    expect(outcome.reason).toContain("seal.command");
+
+    // The plan a caller receives declares the input and carries it at the token it was proposed for.
+    expect(decided.plan.inputs).toContainEqual({ name: "sh_command_2", type: "string" });
+    const argument = decided.plan.steps[1]!.arguments[0]!;
+    const template = argument.source.kind === "template" ? argument.source.template : undefined;
+    expect(template).toMatchObject({
+      type: "program",
+      language: "shell",
+      holes: [{ token: 2, binding: { type: "input", name: "sh_command_2" } }],
+    });
+
+    // The bound run rendered the demonstration's value into that token and left the rest of the
+    // program as recorded; the run with the candidate reverted is the recorded text.
+    const bound = seen.find((command) => command.includes("tok(bravo-seed)"));
+    expect(bound).toBeDefined();
+    expect(bound).toContain("'keep-me'");
+    expect(bound).toContain("release.txt");
+    expect(seen.some((command) => command.includes("'tok(recorded-seed)'"))).toBe(true);
+    expect(decided.verification?.status).toBe("verified");
+  });
+
+  it("refuses it when the demonstration's program has no such token", async () => {
+    // The missing fact: the demonstration ran a program with no token at that index, so nothing
+    // shows what a caller's value there would produce. The candidate is refused for want of a
+    // value rather than replayed against a guess.
+    const plan = demonstratedProgramPlan();
+    const candidate: WorkflowBindingCandidate = { ...tokenCandidate, path: ["tokens", 999] };
+    const decided = await validateAndConfirmCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentFor(plan, candidate, []),
+    });
+
+    expect(decided.outcomes[0]!.accepted).toBe(false);
+    expect(decided.outcomes[0]!.reason).toContain("supplied no value for input 'sh_command_2'");
   });
 });

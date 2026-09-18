@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { readConfiguredOmpServers } from "@resin/adapter-omp";
 import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
+import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
 
 const PackageJsonSchema = z.object({
@@ -147,6 +149,43 @@ export interface McpShimRunner {
   stop: () => Promise<void>;
 }
 
+/**
+ * The protocol connections this host can dial, taken from the harness's own MCP configuration.
+ *
+ * A recorded callable that was reached over a server names that server; re-making the call means
+ * asking that server, so the descriptor is the entry the harness itself runs. A name the
+ * configuration does not declare — or one declared over a transport this host cannot speak — has no
+ * descriptor, and the step that names it is refused rather than answered from somewhere else.
+ */
+function harnessMcpConnections(
+  harnessId: string | undefined,
+  cwd: string | undefined,
+): ((name: string) => McpServerDescriptor | undefined) | undefined {
+  if (harnessId !== undefined && harnessId !== "omp") return undefined;
+  const workspaceRoot = cwd ?? process.cwd();
+  return (name) => {
+    const server = readConfiguredOmpServers({ workspaceRoot }).find((entry) => entry.name === name);
+    if (server === undefined) return undefined;
+    const { entry } = server;
+    const transport = entry.transport ?? entry.type;
+    if (entry.command !== undefined && (transport === undefined || transport === "stdio")) {
+      return {
+        name: server.name,
+        transport: {
+          kind: "stdio",
+          command: entry.command,
+          ...(entry.args === undefined ? {} : { args: entry.args }),
+          ...(entry.env === undefined ? {} : { env: entry.env }),
+        },
+      };
+    }
+    if (entry.url !== undefined && (transport === "http" || transport === "sse")) {
+      return { name: server.name, transport: { kind: "http", url: entry.url } };
+    }
+    return undefined;
+  };
+}
+
 export interface McpCommandOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?:
@@ -182,6 +221,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stdout: (options.stdout ?? process.stdout) as NodeJS.WritableStream,
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
+    recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
   };
 
   const shim = options.shimFactory

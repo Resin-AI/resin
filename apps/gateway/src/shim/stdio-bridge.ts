@@ -6,6 +6,7 @@ import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection } from "@resin/db";
 import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
+import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
 import type { ReconcileOutcome } from "../project/lock-manager.js";
@@ -38,6 +39,13 @@ export interface McpStdioShimOptions {
   resinHome?: string;
   tokenFilePath?: string;
   credentialStore?: CloudCredentialStore;
+  /**
+   * The protocol connections this host can dial by the name a recording carries, resolved from the
+   * harness's own MCP configuration. A recorded callable reached over a connection is re-made over
+   * that connection; a name this host cannot resolve is refused by the step, never answered from a
+   * same-named callable or from memory.
+   */
+  recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
@@ -337,6 +345,9 @@ export class McpStdioShim {
         home: this.options.home,
         resinHome: this.options.resinHome,
         tokenFilePath: this.options.tokenFilePath,
+        ...(this.options.recordedWorkflowConnections === undefined
+          ? {}
+          : { recordedWorkflowConnections: this.options.recordedWorkflowConnections }),
         onToolSyncError: (toolName: string, error: Error) => {
           this.writeStderr(`[WARN] ${toolName}: ${error.message}\n`);
           this.options.onToolSyncError?.(toolName, error);

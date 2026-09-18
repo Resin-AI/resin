@@ -4341,6 +4341,11 @@ var init_events = __esm({
       name: external_exports.string().min(1),
       description: external_exports.string().optional(),
       inputSchema: external_exports.record(external_exports.unknown()).optional(),
+      /**
+       * The protocol connection the callable was reached over, when the harness reports one — the
+       * same identity `NormalizedToolCallEvent.connection` carries on a call. Absent means the
+       * connection is unknown; it is never guessed from the name.
+       */
       provider: external_exports.string().optional()
     });
     NormalizedToolDiscoveryEventSchema = external_exports.object({
@@ -4355,6 +4360,12 @@ var init_events = __esm({
       type: external_exports.literal("tool_call"),
       callId: IdentifierSchema,
       toolName: external_exports.string().min(1),
+      /**
+       * The protocol connection this callable was reached over, when the recording established one
+       * (for example the MCP server behind a harness device-surface path). Absent means the
+       * connection is unknown: it is never defaulted to the harness or derived from the tool name.
+       */
+      connection: external_exports.string().min(1).optional(),
       parameters: external_exports.record(external_exports.unknown()),
       candidateRef: IdentifierSchema.optional(),
       isShadow: external_exports.boolean().default(false)
@@ -10133,11 +10144,21 @@ var init_adapter4 = __esm({
   }
 });
 
+// adapters/omp/dist/device-surface.js
+var init_device_surface = __esm({
+  "adapters/omp/dist/device-surface.js"() {
+    "use strict";
+    init_config_planner3();
+    init_discovery3();
+  }
+});
+
 // adapters/omp/dist/decoder.js
 var init_decoder4 = __esm({
   "adapters/omp/dist/decoder.js"() {
     "use strict";
     init_dist();
+    init_device_surface();
   }
 });
 
@@ -10148,6 +10169,7 @@ var init_dist5 = __esm({
     init_adapter4();
     init_config_planner3();
     init_decoder4();
+    init_device_surface();
     init_discovery3();
     init_instructions();
     init_refresh4();

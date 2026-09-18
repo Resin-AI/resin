@@ -27,6 +27,7 @@ import {
   resolvePrivateReference,
 } from "@resin/observer";
 import {
+  type McpToolConnection,
   RuntimeAdapterRegistry,
   type ToolProtocolDispatchRequest,
   type WorkflowPlanVerification,
@@ -89,6 +90,14 @@ export interface LocalWorkflowValidatorOptions {
   workspaceDir?: string;
   /** Dispatches a tool-protocol step through the host's own routing. */
   dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
+  /**
+   * Protocol connections already open, by the name a plan's callable carries. A replay that names
+   * a connection asks that connection, exactly as the invocation path does, so two servers
+   * exposing the same tool name are told apart here too.
+   */
+  connections?: Record<string, McpToolConnection>;
+  /** Dial a connection on first use, for a host that does not keep them open already. */
+  openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
   /** Wall-clock bound for the replay. */
   timeoutMs?: number;
 }
@@ -163,6 +172,10 @@ export function createLocalWorkflowValidator(
       adapters.register(
         createToolProtocolAdapter({
           ...(options.dispatch === undefined ? {} : { dispatch: options.dispatch }),
+          ...(options.connections === undefined ? {} : { connections: options.connections }),
+          ...(options.openConnection === undefined
+            ? {}
+            : { openConnection: options.openConnection }),
         }),
       );
       const environment = await demonstrationEnvironment({

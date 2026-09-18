@@ -33,6 +33,7 @@ import { containsRedactionPlaceholder } from "./private-value-store.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  type WorkflowCallCandidate,
   type WorkflowCallCarrier,
   type WorkflowCallHeldOut,
   readWorkflowCallCarrier,
@@ -607,11 +608,7 @@ export function recordCallsFromEvents(
     supportingEvents?: readonly RecordableEvent[];
   } = {},
 ): RecordedRecipe | undefined {
-  const ordered = [...events].sort(
-    (left, right) =>
-      (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
-      (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER),
-  );
+  const ordered = [...events].sort(causalOrder);
   const resultsByCallId = new Map<
     string,
     { value: WorkflowJsonValue | undefined; isError: boolean | undefined }
@@ -669,17 +666,63 @@ export function recordCallsFromEvents(
   const seenCallIds = new Set<string>();
   /** Suggestions the capture made, related to the steps of this recording. */
   const carrierCandidates: WorkflowBindingCandidate[] = [];
+  /**
+   * The other executions of this session, kept only as far as one of their calls can be about a
+   * step of this recording: their callables in order, and the token candidates those calls minted.
+   */
+  const repeats = new Map<
+    number,
+    { names: string[]; tokens: Map<number, WorkflowCallCandidate[]> }
+  >();
+  /**
+   * Records one call of an execution other than the recording's own.
+   *
+   * A repeat is not part of this recording, but a candidate the capture minted on one of its calls
+   * can still be about a step of it: the same token of the same program, at the same ordinal.
+   * Everything else the call suggests is dropped as before.
+   */
+  const noteRepeatCall = (
+    event: RecordableEvent,
+    carrier: WorkflowCallCarrier | undefined,
+    executionIndex: number,
+  ): void => {
+    let repeat = repeats.get(executionIndex);
+    if (repeat === undefined) {
+      repeat = { names: [], tokens: new Map() };
+      repeats.set(executionIndex, repeat);
+    }
+    const ordinal = repeat.names.length;
+    repeat.names.push(carrier?.name ?? event.toolName ?? "unknown");
+    const tokenCandidates = (carrier?.candidates ?? []).filter(
+      (candidate) => candidate.path[0] === "tokens",
+    );
+    if (tokenCandidates.length > 0) repeat.tokens.set(ordinal, tokenCandidates);
+  };
+  /**
+   * Claims a call for reading, once: the key it is read under, or undefined when the event is not a
+   * call or its call was already read. A call is classified by the execution its carrier names,
+   * never by the set of events it arrived in, and a redelivered call is the same execution rather
+   * than a second step of it.
+   */
+  const claimCall = (event: RecordableEvent): string | undefined => {
+    if (event.type !== "tool_call") return undefined;
+    const callId = event.callId ?? event.toolCallId ?? event.eventId;
+    const scopedCallKey = scopedKey(event.sessionId, callId);
+    if (seenCallIds.has(scopedCallKey)) return undefined;
+    seenCallIds.add(scopedCallKey);
+    return scopedCallKey;
+  };
   for (const event of ordered) {
     if (event.type !== "tool_call") continue;
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
-    const scopedCallKey = scopedKey(event.sessionId, callId);
-    // A redelivered call is the same execution, not a second step.
-    if (seenCallIds.has(scopedCallKey)) continue;
-    seenCallIds.add(scopedCallKey);
-
+    const scopedCallKey = claimCall(event);
+    if (scopedCallKey === undefined) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     const executionIndex = carrier?.executionIndex;
-    if (executionIndex !== undefined && executionIndex !== selectedExecutionIndex) continue;
+    if (executionIndex !== undefined && executionIndex !== selectedExecutionIndex) {
+      noteRepeatCall(event, carrier, executionIndex);
+      continue;
+    }
     const declaredFlow = declaredResourceFlowOf(event);
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
@@ -817,6 +860,46 @@ export function recordCallsFromEvents(
   }
   if (observations.length === 0) return undefined;
 
+  // The recording's own calls are the evidence's, and the session read beside it is where its other
+  // executions live. A repeat is the same work performed again wherever it was read, so the calls of
+  // the executions the evidence did not name are read here for exactly what they minted — never as
+  // steps: only the selected execution's calls are numbered.
+  for (const event of [...supporting].sort(causalOrder)) {
+    if (claimCall(event) === undefined) continue;
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    const executionIndex = carrier?.executionIndex;
+    if (executionIndex === undefined || executionIndex === selectedExecutionIndex) continue;
+    noteRepeatCall(event, carrier, executionIndex);
+  }
+
+  // A candidate a repeat's call minted about a token of its program is about the same token of this
+  // recording when the repeat ran the same callables in the same order — the ordinal of its call is
+  // the step the recording gave that ordinal. A repeat that did anything else is not a
+  // demonstration of this work, so nothing from it is re-targeted at a step of it.
+  const recordedNames = observations.map((observation) => observation.callable.name);
+  for (const repeat of repeats.values()) {
+    if (repeat.names.length !== recordedNames.length) continue;
+    if (repeat.names.some((name, index) => name !== recordedNames[index])) continue;
+    for (const [ordinal, tokenCandidates] of repeat.tokens) {
+      const stepId = stepIdByPosition.get(ordinal);
+      if (stepId === undefined) continue;
+      for (const candidate of tokenCandidates) {
+        // A result proposal from a repeat names a call this recording never numbered, so it cannot
+        // be expressed against one of its steps; only a proposed input is carried across.
+        if (candidate.proposed.kind !== "input") continue;
+        carrierCandidates.push({
+          stepId,
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+          reason: candidate.reason,
+          ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
+          missing: candidate.missing,
+        });
+      }
+    }
+  }
+
   // What the calls themselves establish about their own arguments: the dependencies their declared
   // resource use proves, and the bindings their values only suggest. A suggestion never becomes
   // executable here — it is reported so a replay can confirm or refuse it.
@@ -875,6 +958,14 @@ export function recordCallsFromEvents(
   }
   recipe.workflow.inputs = [...declared.values()];
   return recipe;
+}
+
+/** The order the capture recorded events in: the causal sequence it numbered, unnumbered last. */
+function causalOrder(left: RecordableEvent, right: RecordableEvent): number {
+  return (
+    (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
+    (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER)
+  );
 }
 
 /** The execution a recording is built from, and the demonstration a later one offers for it. */

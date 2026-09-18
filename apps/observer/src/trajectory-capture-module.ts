@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
 import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
-import { OmpHarnessAdapter, OmpRecordDecoder } from "@resin/adapter-omp";
+import { OmpHarnessAdapter, OmpRecordDecoder, readConfiguredOmpServers } from "@resin/adapter-omp";
 import type {
   LocalDatabaseConnection,
   LocalStateStore,
@@ -279,7 +279,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.decoders = options.decoders ?? [
       new ClaudeRecordDecoder(),
       new CodexRecordDecoder(),
-      new OmpRecordDecoder(),
+      // OMP's device paths are resolved against the server names the harness itself is configured
+      // with: the registry is read when a path needs it, so a server added mid-session is honored.
+      new OmpRecordDecoder({
+        deviceSurfaceServers: () => readConfiguredOmpServers().map((server) => server.name),
+      }),
     ];
 
     let dbConnection: LocalDatabaseConnection | undefined;

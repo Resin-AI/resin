@@ -919,6 +919,9 @@ export function projectEventToMetadataOnly(
         isShadow: event.isShadow,
       };
       if (event.candidateRef !== undefined) callEvent.candidateRef = event.candidateRef;
+      // The connection a callable was reached over is part of its identity, and it is not the
+      // caller's own value: it travels with the call.
+      if (event.connection !== undefined) callEvent.connection = event.connection;
       projected = callEvent;
       break;
     }

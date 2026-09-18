@@ -138,6 +138,11 @@ export const DiscoveredToolEntrySchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   inputSchema: z.record(z.unknown()).optional(),
+  /**
+   * The protocol connection the callable was reached over, when the harness reports one — the
+   * same identity `NormalizedToolCallEvent.connection` carries on a call. Absent means the
+   * connection is unknown; it is never guessed from the name.
+   */
   provider: z.string().optional(),
 });
 
@@ -164,6 +169,12 @@ export const NormalizedToolCallEventSchema = z.object({
   type: z.literal("tool_call"),
   callId: IdentifierSchema,
   toolName: z.string().min(1),
+  /**
+   * The protocol connection this callable was reached over, when the recording established one
+   * (for example the MCP server behind a harness device-surface path). Absent means the
+   * connection is unknown: it is never defaulted to the harness or derived from the tool name.
+   */
+  connection: z.string().min(1).optional(),
   parameters: z.record(z.unknown()),
   candidateRef: IdentifierSchema.optional(),
   isShadow: z.boolean().default(false),

@@ -22,6 +22,7 @@ import {
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   bindProgramToken,
+  tokenizeProgram,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
 import {
@@ -420,6 +421,29 @@ async function evaluateCandidate(
 }
 
 /**
+ * The value a replay must bind for a token candidate: the token's own value, read out of the
+ * whole-argument value the demonstration used, in the language the recorded step names.
+ *
+ * Undefined when the record cannot say where that token is — the plan has no such step, the step's
+ * record names no program for that argument, the demonstration's value is not text, or the index is
+ * outside it. The candidate is then left without a value and refused for exactly that reason,
+ * rather than bound to a guess.
+ */
+function demonstratedTokenValue(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+  supplied: WorkflowJsonValue,
+): string | undefined {
+  const index = candidate.path[1];
+  if (candidate.path.length !== 2) return undefined;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return undefined;
+  const program = plan.steps.find((entry) => entry.id === candidate.stepId)?.callable.program;
+  if (program === undefined || program.argument !== candidate.argument) return undefined;
+  if (typeof supplied !== "string") return undefined;
+  return tokenizeProgram(program.kind, supplied)[index]?.value;
+}
+
+/**
  * The replay environment a recording's own demonstration supplies.
  *
  * An ordinary session repeats itself, and the capture keeps that repeat as a demonstration on the
@@ -451,6 +475,14 @@ export async function demonstrationEnvironment(params: {
         supplied.stepId === candidate.stepId && supplied.argument === candidate.argument,
     );
     if (entry === undefined) continue;
+    // A token candidate is about one position of the program the argument's text holds, so the
+    // value the replay must bind is the token's own value — read out of the text the repeat
+    // actually ran, not out of the recorded text the candidate is proposed against.
+    if (candidate.path[0] === "tokens") {
+      const token = demonstratedTokenValue(params.plan, candidate, await resolve(entry.reference));
+      if (token !== undefined) inputs[candidate.proposed.name] = token;
+      continue;
+    }
     inputs[candidate.proposed.name] = await resolve(entry.reference);
   }
   const observed: Record<string, WorkflowJsonValue> = {};

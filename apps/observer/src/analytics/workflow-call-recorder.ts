@@ -24,6 +24,7 @@ import {
   type WorkflowRecordedProgram,
   type WorkflowValuePath,
   analyzeAgentArguments,
+  tokenizeProgram,
 } from "@resin/contracts";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
@@ -61,7 +62,7 @@ export const RESIN_NATIVE_RUNTIMES = [
   RESIN_PROGRAM_RUNTIME,
 ] as const;
 
-/** What discovery recorded about a callable, keyed by the name the harness called it by. */
+/** What discovery recorded about a callable: the connection that exposed it, and its own schema. */
 export interface DiscoveredCallable {
   provider?: string;
   inputSchema?: WorkflowJsonValue;
@@ -491,8 +492,16 @@ export class WorkflowCallRecorder {
   private readonly privateValues: PrivateValueStore;
   /** The workspace whose session is being observed; stamped on every private entry. */
   private observeAccess: PrivateValueOrigin | undefined;
-  /** Tool name → what the session's discovery events reported about the callable. */
-  private readonly discovered = new Map<string, DiscoveredCallable>();
+  /**
+   * What each session's discovery events reported about the callables it saw, keyed by the name the
+   * harness called them by and then by the connection that reported it. Discovery is per session
+   * because a connection is: two sessions, or two workspaces, may reach the same tool name over
+   * different servers, and one session's discovery must never supply the other's connection. Two
+   * connections of one session may expose the same name — that is ordinary for MCP — so what each
+   * of them reported is kept apart, and a report that carries less than an earlier one for the same
+   * connection (a device surface names the connection and nothing else) is merged into it.
+   */
+  private readonly discovered = new Map<string, Map<string, Map<string, DiscoveredCallable>>>();
   /**
    * Per-session derivation state: the observed calls whose values must stay here for the
    * conclusions that need them. Bounded per session and by session count.
@@ -537,6 +546,44 @@ export class WorkflowCallRecorder {
     return created;
   }
 
+  /**
+   * What one session's discovery reported about a callable; nothing is taken from another session.
+   *
+   * A call that resolved its own connection asks for what that connection reported: that report is
+   * the callable's own statement, and a same-named entry reported by another connection is not it.
+   * A call that established no connection takes the name's own report — the most recently reported
+   * one, which is all the record establishes.
+   */
+  private discoveredCallable(
+    sessionId: string,
+    toolName: string,
+    connection?: string,
+  ): DiscoveredCallable | undefined {
+    const byName = this.discovered.get(sessionId)?.get(toolName);
+    if (byName === undefined) return undefined;
+    if (connection !== undefined) {
+      const exact = byName.get(connection);
+      if (exact !== undefined) return exact;
+    }
+    let latest: DiscoveredCallable | undefined;
+    for (const reported of byName.values()) latest = reported;
+    return latest;
+  }
+
+  /** One session's discovery state, evicting the least recently created when the bound is reached. */
+  private discoveryState(sessionId: string): Map<string, Map<string, DiscoveredCallable>> {
+    const existing = this.discovered.get(sessionId);
+    if (existing !== undefined) return existing;
+    const created = new Map<string, Map<string, DiscoveredCallable>>();
+    this.discovered.set(sessionId, created);
+    while (this.discovered.size > MAX_SESSIONS) {
+      const oldest = this.discovered.keys().next();
+      if (oldest.done === true) break;
+      this.discovered.delete(oldest.value);
+    }
+    return created;
+  }
+
   observe(
     event: NormalizedSessionEvent,
     /**
@@ -547,13 +594,27 @@ export class WorkflowCallRecorder {
   ): NormalizedSessionEvent {
     this.observeAccess = access;
     if (event.type === "tool_discovery") {
+      const session = this.discoveryState(event.sessionId);
       for (const tool of event.tools) {
-        const recorded: DiscoveredCallable = {};
+        let byConnection = session.get(tool.name);
+        if (byConnection === undefined) {
+          byConnection = new Map<string, DiscoveredCallable>();
+          session.set(tool.name, byConnection);
+        }
+        // A report that carried no connection is filed under the name itself, so a session whose
+        // harness reports a bare tool list still supplies what it established.
+        const key = tool.provider ?? "";
+        const previous = byConnection.get(key);
+        // Merge: a later report for the same connection that carries less than an earlier one — a
+        // device surface names the connection and nothing else — does not drop what was established.
+        const recorded: DiscoveredCallable = { ...previous };
         if (tool.provider !== undefined) recorded.provider = tool.provider;
         if (tool.inputSchema !== undefined) {
           recorded.inputSchema = tool.inputSchema as WorkflowJsonValue;
         }
-        this.discovered.set(tool.name, recorded);
+        // Re-insert so the most recently reported entry for a name is the last one seen.
+        byConnection.delete(key);
+        byConnection.set(key, recorded);
       }
       return event;
     }
@@ -663,8 +724,11 @@ export class WorkflowCallRecorder {
       })),
       provenance,
     };
-    const discovered = this.discovered.get(routedName);
-    if (discovered?.provider !== undefined) carrier.connection = discovered.provider;
+    const discovered = this.discoveredCallable(event.sessionId, routedName, event.connection);
+    // The connection is the resolution the call itself carries, or what this session's discovery
+    // recorded for the callable. Nothing else: not the harness, never a guess from the name.
+    const connection = event.connection ?? discovered?.provider;
+    if (connection !== undefined) carrier.connection = connection;
     return this.withCallCarrier(event, carrier);
   }
 
@@ -705,8 +769,12 @@ export class WorkflowCallRecorder {
       provenance,
     };
     if (program !== undefined) carrier.program = program;
-    const discovered = this.discovered.get(event.toolName);
-    if (discovered?.provider !== undefined) carrier.connection = discovered.provider;
+    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
+    // The connection is the resolution the call itself carries (a device-surface path the adapter
+    // resolved), or what this session's discovery recorded for the callable. Nothing else: not the
+    // harness, never a guess from the name.
+    const connection = event.connection ?? discovered?.provider;
+    if (connection !== undefined) carrier.connection = connection;
     if (discovered?.inputSchema !== undefined) carrier.inputSchema = discovered.inputSchema;
 
     const state = this.sessionState(event.sessionId);
@@ -794,7 +862,7 @@ export class WorkflowCallRecorder {
     }
     const execution = state.executions[state.executions.length - 1]!;
     const flow = declaredFlowOfToolCall(event);
-    const discovered = this.discovered.get(event.toolName);
+    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
     const heldLocally = Object.entries(parameters)
       .filter(([, value]) => typeof value === "string" && containsRedactionPlaceholder(value))
       .map(([argument]) => argument);
@@ -884,7 +952,9 @@ export class WorkflowCallRecorder {
    * produced it is not evidence of anything, and offering it would turn a coincidence into a
    * dependency. An argument that took a different value in another task is offered as a caller
    * input: evidence that the value is not a constant of the work, not proof that a caller supplies
-   * it. Both are reported, neither executes.
+   * it. A program argument is never offered whole, because replacing it would replace the work:
+   * a program that ran with one token's text changed is offered token by token, and only when the
+   * two texts read as the same program. Both are reported, neither executes.
    */
   private relateLocalCall(
     state: SessionDerivationState,
@@ -906,6 +976,33 @@ export class WorkflowCallRecorder {
       }
     }
 
+    // What the calls of this execution establish about their own arguments, reached before the
+    // variation rule below because it is what owns a token an earlier call produced.
+    const index = calls.indexOf(call);
+    const ownStepId = index < 0 ? undefined : `local${index}`;
+    const derivation = deriveNativeCalls(
+      calls.map((entry, position) => ({
+        callId: entry.callId,
+        stepId: `local${position}`,
+        toolName: entry.toolName,
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: entry.arguments,
+        ...(entry.result === undefined ? {} : { result: entry.result }),
+        ...(entry.inputSchema === undefined ? {} : { inputSchema: entry.inputSchema }),
+        ...(entry.privateArguments === undefined
+          ? {}
+          : { privateArguments: entry.privateArguments }),
+        ...(entry.program === undefined ? {} : { program: entry.program }),
+      })),
+    );
+    /** Tokens an earlier call of this execution produced; the producer rule offers those already. */
+    const producedTokens = new Set<string>();
+    for (const candidate of derivation.candidates) {
+      if (candidate.stepId !== ownStepId) continue;
+      if (candidate.proposed.kind !== "result" || candidate.path[0] !== "tokens") continue;
+      producedTokens.add(`${candidate.argument}|${String(candidate.path[1])}`);
+    }
+
     // The same argument position, in another task, with a different value.
     for (const [argument, value] of Object.entries(call.arguments)) {
       if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
@@ -919,6 +1016,59 @@ export class WorkflowCallRecorder {
       }
       if (JSON.stringify(previous) === JSON.stringify(value)) continue;
       if (typeof previous !== typeof value) continue;
+      // A program argument is the work: replacing the whole of it would replace what the tool does,
+      // so it is offered only token by token — and only when the two texts read as the same program
+      // with the text of some of its tokens changed. Anything else is a different program, and a
+      // position inside one program is not a position inside another.
+      if (call.program?.argument === argument) {
+        if (typeof value === "string" && typeof previous === "string") {
+          const tokens = tokenizeProgram(call.program.kind, value);
+          const earlierTokens = tokenizeProgram(call.program.kind, previous);
+          const changed: number[] = [];
+          let aligned = tokens.length === earlierTokens.length;
+          if (aligned) {
+            for (const [tokenIndex, token] of tokens.entries()) {
+              const earlierToken = earlierTokens[tokenIndex]!;
+              // A kind that changed, or an operator whose text changed, is a change in the program
+              // itself: an operator denotes no value, so it is never a position offered here.
+              if (token.kind !== earlierToken.kind) {
+                aligned = false;
+                break;
+              }
+              if (token.kind === "operator" && token.raw !== earlierToken.raw) {
+                aligned = false;
+                break;
+              }
+              if (token.raw !== earlierToken.raw) changed.push(tokenIndex);
+            }
+          }
+          if (aligned) {
+            for (const tokenIndex of changed) {
+              // A token an earlier call of this execution produced is that call's output, and the
+              // producer rule already offers it at this position; a second candidate on one token
+              // would be decided against the first.
+              if (producedTokens.has(`${argument}|${tokenIndex}`)) continue;
+              candidates.push({
+                argument,
+                path: ["tokens", tokenIndex],
+                proposed: {
+                  kind: "input",
+                  name: `${call.toolName}_${argument}_${tokenIndex}`.replace(
+                    /[^A-Za-z0-9_]+/g,
+                    "_",
+                  ),
+                  type: "string",
+                },
+                reason: "varies-across-executions",
+                evidence: { tasks: 2, tokens: tokens.length, token: tokenIndex },
+                missing:
+                  "this token took a different text in another task, but no task used a value the record had never seen, so the record does not establish that a caller supplies it",
+              });
+            }
+          }
+        }
+        continue;
+      }
       if (typeof value === "string" && value.length < MIN_INPUT_CANDIDATE_LENGTH) continue;
       candidates.push({
         argument,
@@ -936,25 +1086,7 @@ export class WorkflowCallRecorder {
       });
     }
 
-    // Bindings the values suggest, over the calls this session has observed.
-    const index = calls.indexOf(call);
     if (index < 0) return { dependsOnCallIds, candidates };
-    const derivation = deriveNativeCalls(
-      calls.map((entry, position) => ({
-        callId: entry.callId,
-        stepId: `local${position}`,
-        toolName: entry.toolName,
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: entry.arguments,
-        ...(entry.result === undefined ? {} : { result: entry.result }),
-        ...(entry.inputSchema === undefined ? {} : { inputSchema: entry.inputSchema }),
-        ...(entry.privateArguments === undefined
-          ? {}
-          : { privateArguments: entry.privateArguments }),
-        ...(entry.program === undefined ? {} : { program: entry.program }),
-      })),
-    );
-    const ownStepId = `local${index}`;
     for (const candidate of derivation.candidates) {
       if (candidate.stepId !== ownStepId) continue;
       if (candidate.proposed.kind === "input") {

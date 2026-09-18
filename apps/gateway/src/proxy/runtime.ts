@@ -235,6 +235,15 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
+    // The protocol connections a recording can name, dialed on first use and kept for the life of
+    // the process. The same resolver serves the executor's recorded-workflow steps, this host's own
+    // routing of a named connection, and the replay the validation worker runs: every path that
+    // re-makes a recorded call reaches the server the record names, or fails naming it.
+    const resolveConnection =
+      options.recordedWorkflowConnections === undefined
+        ? undefined
+        : memoizedConnections(options.recordedWorkflowConnections);
+
     // The executor's stepInvoker resolves the router lazily: the router is constructed
     // after the executor because it takes the executor as its local dispatcher.
     const routerBox: { current?: CloudInvocationRouter } = {};
@@ -265,11 +274,7 @@ export async function createProductionProxyRuntime(
             createProcessAdapter(bounds),
             createProgramAdapter(bounds),
             createToolProtocolAdapter({
-              ...(options.recordedWorkflowConnections
-                ? {
-                    openConnection: memoizedConnections(options.recordedWorkflowConnections),
-                  }
-                : {}),
+              ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
               dispatch: async (request) => {
                 const result = await host.routeToHost({
                   name: request.name,
@@ -298,6 +303,7 @@ export async function createProductionProxyRuntime(
             toolId: request.name,
             name: request.name,
             version: "",
+            ...(request.connection ? { connection: request.connection } : {}),
             parameters: request.parameters as JsonRpcParams,
             context: request.context,
             ...(request.signal ? { signal: request.signal } : {}),
@@ -314,6 +320,7 @@ export async function createProductionProxyRuntime(
       fetchFn: options.fetchFn,
       localExecutor: executor,
       lockManager: options.lockManager,
+      ...(resolveConnection === undefined ? {} : { connectionResolver: resolveConnection }),
     });
     routerBox.current.setManagedToolAccess(managedToolAccess);
     // The validation worker answers the cloud's asks where the recording's values are: the plan's
@@ -341,6 +348,7 @@ export async function createProductionProxyRuntime(
           toolId: request.name,
           name: request.name,
           version: "",
+          ...(request.connection ? { connection: request.connection } : {}),
           parameters: request.arguments as JsonRpcParams,
           context: workspace,
         });
@@ -350,6 +358,7 @@ export async function createProductionProxyRuntime(
         }
         return composedResultValue(result);
       },
+      ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {

@@ -27,7 +27,7 @@ import {
 } from "@resin/contracts";
 import type { CloudRequestIdentity, PrivateValueStore } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import type { ToolProtocolDispatchRequest } from "@resin/runtime";
+import type { McpToolConnection, ToolProtocolDispatchRequest } from "@resin/runtime";
 import { z } from "zod";
 import {
   type LocalWorkflowValidationResult,
@@ -315,6 +315,13 @@ export interface WorkflowValidationWorkerOptions {
   /** Dispatches a tool-protocol step through the host's own routing. */
   dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
   /**
+   * Protocol connections already open, by the name a plan's callable carries, and the resolver
+   * that dials one that is not. A replay resolves a recorded callable over the connection the
+   * record names, exactly as an invocation does.
+   */
+  connections?: Record<string, McpToolConnection>;
+  openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  /**
    * Environment the replayed programs may see, and nothing else: a program recorded by somebody
    * else's session must not be able to read this operator's credentials.
    */
@@ -372,6 +379,8 @@ export class WorkflowValidationWorker {
   private readonly createValidator?: WorkflowValidationWorkerOptions["createValidator"];
   private readonly privateValues?: PrivateValueStore;
   private readonly dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
+  private readonly connections?: Record<string, McpToolConnection>;
+  private readonly openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
   private readonly environment?: Record<string, string>;
   private readonly environmentIdentity: string;
   private readonly timeoutMs: number;
@@ -391,6 +400,8 @@ export class WorkflowValidationWorker {
     this.createValidator = options.createValidator;
     this.privateValues = options.privateValues;
     this.dispatch = options.dispatch;
+    this.connections = options.connections;
+    this.openConnection = options.openConnection;
     this.environment = options.environment;
     this.environmentIdentity =
       options.environmentIdentity ?? DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT;
@@ -591,6 +602,8 @@ export class WorkflowValidationWorker {
       workspaceId: this.workspaceId,
       ...(this.privateValues === undefined ? {} : { privateValues: this.privateValues }),
       ...(this.dispatch === undefined ? {} : { dispatch: this.dispatch }),
+      ...(this.connections === undefined ? {} : { connections: this.connections }),
+      ...(this.openConnection === undefined ? {} : { openConnection: this.openConnection }),
       ...(this.environment === undefined ? {} : { environment: this.environment }),
       timeoutMs: this.timeoutMs,
     });

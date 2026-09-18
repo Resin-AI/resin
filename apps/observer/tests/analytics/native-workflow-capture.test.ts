@@ -3,6 +3,7 @@
  * compiler consumes, without the caller changing anything about how it calls.
  */
 
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { NormalizedSessionEventSchema, validateRecordedWorkflow } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
@@ -22,6 +23,7 @@ import {
   readWorkflowCallCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
 const SESSION = "session-native-capture";
 
@@ -40,9 +42,11 @@ function call(
   toolName: string,
   parameters: Record<string, unknown>,
   turnIndex = 0,
+  sessionId = SESSION,
 ): NormalizedSessionEvent {
   return event({
     eventId: `evt_call_${sequence}`,
+    sessionId,
     type: "tool_call",
     callId: `call_${sequence}`,
     toolName,
@@ -80,9 +84,13 @@ function userTurn(sequence: number): NormalizedSessionEvent {
   });
 }
 
-function discovery(tools: Array<{ name: string; provider?: string; inputSchema?: unknown }>) {
+function discovery(
+  tools: Array<{ name: string; provider?: string; inputSchema?: unknown }>,
+  sessionId = SESSION,
+) {
   return event({
     eventId: "evt_discovery",
+    sessionId,
     type: "tool_discovery",
     tools: tools.map((tool) => ({
       name: tool.name,
@@ -484,6 +492,81 @@ describe("a value embedded in a program an ordinary session ran", () => {
   });
 });
 
+describe("a program an ordinary session ran twice with one token changed", () => {
+  /** The recorded execution's program: what the first run of the work actually ran. */
+  const recorded = "printf '%s\\n' 'alpha-7f3c' > f";
+  /** The same work again, with the text of one quoted token changed. */
+  const repeatedProgram = "printf '%s\\n' 'bravo-9k2m' > f";
+
+  function session() {
+    return record([
+      discovery([{ name: "bash", provider: "omp" }]),
+      call(1, "bash", { command: recorded }),
+      userTurn(2),
+      call(3, "bash", { command: repeatedProgram }),
+    ]);
+  }
+
+  it("keeps the changed token's candidate on the recorded step, and the program as it ran", () => {
+    const { events, store } = session();
+    const recipe = recordCallsFromEvents("wf_program_variation", events);
+    expect(recipe).toBeDefined();
+    const workflow = recipe!.workflow;
+
+    // The repeat is a demonstration of the work, not a second step of it, so the candidate the
+    // capture minted on its call is related to the step the same ordinal of this recording has.
+    expect(workflow.steps).toHaveLength(1);
+    expect(workflow.candidates).toHaveLength(1);
+    expect(workflow.candidates![0]).toMatchObject({
+      stepId: "step0",
+      argument: "command",
+      path: ["tokens", 2],
+      proposed: { kind: "input", name: "bash_command_2", type: "string" },
+      reason: "varies-across-executions",
+      evidence: { tasks: 2, tokens: 5, token: 2 },
+    });
+
+    // The demonstration the repeat offered names the same step's program argument, which is the
+    // value a replay reads the token's own value out of — the half that makes the candidate
+    // decidable at all.
+    expect(workflow.heldOut?.inputs).toContainEqual({
+      stepId: "step0",
+      argument: "command",
+      reference: expect.stringContaining("private:"),
+    });
+
+    // The suggestion is reported and never applied — and the value it is about is not carried: the
+    // step still holds the program that actually ran, which is the recorded execution's text.
+    const argument = workflow.steps[0]!.arguments.find((entry) => entry.name === "command")!;
+    expect(argument.source.kind).toBe("template");
+    const template = argument.source.kind === "template" ? argument.source.template : undefined;
+    expect(template?.type).toBe("private");
+    const reference = template?.type === "private" ? template.reference : undefined;
+    expect(resolvePrivateReference(store, reference!)).toBe(recorded);
+    expect(JSON.stringify(workflow)).not.toContain("bravo-9k2m");
+    expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("never re-targets a step when the repeat did something else", () => {
+    // The repeat's first call is the same program on a different token, but the work it continued
+    // with is not this recording's work — so its candidate has no step of this recording to belong
+    // to, and is dropped as it always was. An ordinal is only a step identity when the callables
+    // around it are the same callables.
+    const { events } = record([
+      discovery([{ name: "bash", provider: "omp" }]),
+      call(1, "bash", { command: recorded }),
+      call(2, "vendor.finish", { note: "alpha-done" }),
+      userTurn(3),
+      call(4, "bash", { command: repeatedProgram }),
+      call(5, "vendor.other", { note: "bravo-done" }),
+    ]);
+
+    const recipe = recordCallsFromEvents("wf_program_other_work", events);
+    expect(recipe!.workflow.steps).toHaveLength(2);
+    expect(recipe!.workflow.candidates).toBeUndefined();
+  });
+});
+
 describe("the demonstration an ordinary session offers", () => {
   /** Two executions of the same work: the same callables in the same order, on different values. */
   function repeated(): NormalizedSessionEvent[] {
@@ -751,6 +834,178 @@ describe("the private value store the recorder writes to", () => {
     const carrier = carrierOf(observed)!;
     const reference = referenceOf(carrier.origins.source!);
     expect(store.origin?.(reference)?.workspaceId).toBe("ws_native");
+  });
+});
+
+/**
+ * Drives one session of OMP transcript records through the real pipeline: each invocation is the
+ * transport `write` plus a device path, with the invocation's own arguments in the assistant record
+ * that follows it. The server names are the harness's own registry, which is what the paths are
+ * resolved against.
+ */
+async function captureDeviceSurface(
+  invocations: Array<[string, string]>,
+  servers: readonly string[],
+  recorder = new WorkflowCallRecorder({ privateValues: new InMemoryPrivateValueStore() }),
+): Promise<NormalizedSessionEvent[]> {
+  const pipeline = new NormalizationPipeline();
+  pipeline.registerDecoder(new OmpRecordDecoder({ deviceSurfaceServers: () => servers }));
+  const sessionId = "session_device_surface_capture";
+  const observed: NormalizedSessionEvent[] = [];
+  let sequence = 0;
+  for (const [callId, path] of invocations) {
+    const payloads = [
+      {
+        type: "custom",
+        customType: "tool_execution_start",
+        data: { toolCallId: callId, toolName: "write", args: { path } },
+      },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: callId,
+              name: "write",
+              arguments: { path, content: '{"query":"rows"}' },
+            },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: callId,
+          toolName: "write",
+          content: [{ type: "text", text: "{}" }],
+        },
+      },
+    ];
+    for (const payload of payloads) {
+      sequence += 1;
+      const results = await pipeline.processRecord(
+        {
+          recordId: `rec_${sequence}`,
+          sessionId,
+          harnessId: "omp",
+          sequenceNumber: sequence,
+          timestamp: "2026-09-18T10:00:00.000Z",
+          recordType: "transcript_line",
+          rawPayload: payload,
+          cursor: {
+            offset: sequence * 10,
+            line: sequence,
+            sequence,
+            timestamp: "2026-09-18T10:00:00.000Z",
+          },
+          metadata: {},
+        },
+        { sessionId, harnessId: "omp", workspaceId: "ws_native" },
+      );
+      for (const result of results) {
+        if (result.status !== "success" || result.isDuplicate) continue;
+        observed.push(recorder.observe(result.event, { workspaceId: "ws_native" }));
+      }
+    }
+  }
+  return observed;
+}
+
+/** The carrier recorded for each call of an observed session, in order. */
+function carriersOf(events: NormalizedSessionEvent[]) {
+  return events.filter((entry) => entry.type === "tool_call").map((entry) => carrierOf(entry)!);
+}
+
+describe("the connection a callable was reached over", () => {
+  it("records the tool and the connection behind each device path, never a split of the path", async () => {
+    // `alpha` and `alpha_beta` both expose `run`, and `alpha` also exposes a name containing
+    // underscores. A naive split of the paths would record the middle call as `beta_run`.
+    const observed = await captureDeviceSurface(
+      [
+        ["call_alpha", "xd://mcp__alpha_run"],
+        ["call_alpha_beta", "xd://mcp__alpha_beta_run"],
+        ["call_deep", "xd://mcp__alpha_deep_tool_name"],
+      ],
+      ["alpha", "alpha_beta"],
+    );
+
+    const carriers = carriersOf(observed);
+    expect(carriers.map((carrier) => [carrier.name, carrier.connection])).toEqual([
+      ["run", "alpha"],
+      ["run", "alpha_beta"],
+      ["deep_tool_name", "alpha"],
+    ]);
+    // The invocation's own arguments are what was recorded — not the transport's device path.
+    expect(carriers[0]!.origins).toHaveProperty("query");
+    expect(carriers[0]!.origins).not.toHaveProperty("path");
+  });
+
+  it("keeps the harness-exposed name opaque when no configured server owns the path", async () => {
+    const observed = await captureDeviceSurface(
+      [["call_unknown", "xd://mcp__unconfigured_run"]],
+      ["alpha", "alpha_beta"],
+    );
+
+    const carriers = carriersOf(observed);
+    expect(carriers).toHaveLength(1);
+    // The call is still captured, exactly as the harness spelled it, and with no connection: an
+    // unidentified path is not turned into a guess.
+    expect(carriers[0]!.name).toBe("write");
+    expect(carriers[0]!.connection).toBeUndefined();
+    expect(observed.some((entry) => entry.type === "tool_discovery")).toBe(false);
+  });
+
+  it("leaves the connection absent when discovery reported none, and still records the call", () => {
+    const { events } = record([
+      discovery([{ name: "vendor.fetch", inputSchema: { type: "object" } }]),
+      call(1, "vendor.fetch", { source: "alpha-feed" }),
+    ]);
+
+    const carrier = carrierOf(events[1]!);
+    expect(carrier!.name).toBe("vendor.fetch");
+    expect(carrier!.runtime).toBe(RESIN_TOOL_PROTOCOL_RUNTIME);
+    expect(carrier!.connection).toBeUndefined();
+    expect(carrier!.inputSchema).toEqual({ type: "object" });
+  });
+
+  it("keeps the connection a call itself records when no discovery reported one", () => {
+    // A device-surface invocation whose start marker never arrived still resolved its path: the
+    // call carries the connection, and the carrier keeps it.
+    const recorder = new WorkflowCallRecorder({ privateValues: new InMemoryPrivateValueStore() });
+    const observed = recorder.observe(
+      event({
+        eventId: "evt_call_connection",
+        type: "tool_call",
+        callId: "call_connection",
+        toolName: "run",
+        connection: "alpha",
+        parameters: { query: "rows" },
+        causalRef: { causalSequence: 1, parentId: null },
+      }),
+      { workspaceId: "ws_native" },
+    );
+
+    const carrier = carrierOf(observed)!;
+    expect(carrier.name).toBe("run");
+    expect(carrier.connection).toBe("alpha");
+  });
+
+  it("never lets one session's discovery supply another session's connection", () => {
+    const { events } = record([
+      discovery([{ name: "run", provider: "alpha" }], "session_a"),
+      call(1, "run", { query: "rows" }, 0, "session_a"),
+      discovery([{ name: "run", provider: "alpha_beta" }], "session_b"),
+      call(2, "run", { query: "rows" }, 0, "session_b"),
+      // A session that saw no discovery at all keeps no connection, even though another did.
+      call(3, "run", { query: "rows" }, 0, "session_c"),
+    ]);
+
+    expect(carrierOf(events[1]!)!.connection).toBe("alpha");
+    expect(carrierOf(events[3]!)!.connection).toBe("alpha_beta");
+    expect(carrierOf(events[4]!)!.connection).toBeUndefined();
   });
 });
 
