@@ -20,14 +20,9 @@ import {
 } from "../../src/workflow/recorded-workflow.js";
 import {
   RESIN_PROCESS_RUNTIME,
-  RESIN_TOOL_PROTOCOL_RUNTIME,
-} from "../../src/workflow/runtime-families.js";
-import {
-  RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
 } from "../../src/workflow/runtime-families.js";
-import { createToolProtocolAdapter } from "../../src/workflow/tool-protocol-adapter.js";
 import { createToolProtocolAdapter } from "../../src/workflow/tool-protocol-adapter.js";
 
 const workspaces: string[] = [];
