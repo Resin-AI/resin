@@ -162,13 +162,8 @@ export class FilePrivateValueStore implements PrivateValueStore {
     } catch {
       // Best effort on filesystems without POSIX modes.
     }
-    try {
-      // Keep the cache authoritative for what we just wrote so the next load does not
-      // re-read; an external write still bumps mtime and forces a reload.
-      this.loadedMtimeMs = fs.statSync(this.file).mtimeMs;
-    } catch {
-      // If the stat fails the next load re-reads; correctness is unaffected.
-    }
+    // loadedMtimeMs is deliberately left stale: the next load() re-stats and re-reads,
+    // which captures this write and any external write with no same-tick miss window.
   }
 }
 
