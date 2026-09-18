@@ -84,15 +84,19 @@ describe("reference-aware invocation", () => {
     expect(calls[7]?.args.artifact).toBe("/out/ROW-BETA#2.txt");
     expect(calls[7]?.args.token).toBe("beta-local");
 
-    // The recording preserves the connections, not just the values.
-    expect(scope.referencesUsed().map((use) => use.reference)).toEqual([
-      "ref:sess_1:fetch",
-      "ref:sess_1:transform",
-      "ref:sess_1:write",
-      "ref:sess_1:fetch",
-      "ref:sess_1:transform",
-      "ref:sess_1:write",
+    // The recording preserves the connections, not just the values — including the field each
+    // reference addressed, which is what makes the binding reconstructable.
+    expect(scope.referencesUsed().slice(0, 3)).toEqual([
+      {
+        callId: "transform",
+        argument: "payload",
+        reference: "ref:sess_1:fetch",
+        path: ["body", "rows", 0],
+      },
+      { callId: "write", argument: "content", reference: "ref:sess_1:transform", path: ["stdout"] },
+      { callId: "upload", argument: "artifact", reference: "ref:sess_1:write", path: ["path"] },
     ]);
+    expect(scope.referencesUsed()).toHaveLength(6);
   });
 
   it("fails explicitly when a reference names nothing recorded", async () => {

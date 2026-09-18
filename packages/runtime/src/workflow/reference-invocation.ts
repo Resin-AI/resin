@@ -18,6 +18,14 @@ export type ReferenceArgument =
   | { kind: "value"; value: WorkflowJsonValue }
   | { kind: "reference"; reference: string; path?: WorkflowValuePath };
 
+/** One recorded use of a reference: which call used it, for which argument, and at which field. */
+export interface ReferenceUse {
+  callId: string;
+  argument: string;
+  reference: string;
+  path: WorkflowValuePath;
+}
+
 export class WorkflowReferenceError extends Error {
   constructor(message: string) {
     super(message);
@@ -49,9 +57,14 @@ function readPath(
  */
 export class WorkflowReferenceScope {
   private readonly values = new Map<string, WorkflowJsonValue>();
-  private readonly usage: Array<{ callId: string; argument: string; reference: string }> = [];
+  private readonly usage: ReferenceUse[] = [];
 
   constructor(private readonly scopeId: string) {}
+
+  /** Records that a call consumed a reference at a given field. */
+  recordUse(use: ReferenceUse): void {
+    this.usage.push(use);
+  }
 
   /** Registers an actual result and returns the reference later calls use for it. */
   registerResult(callId: string, result: WorkflowJsonValue): string {
@@ -74,9 +87,12 @@ export class WorkflowReferenceScope {
     return value;
   }
 
-  /** The references used so far, in order: what the recording preserves instead of the values. */
-  referencesUsed(): ReadonlyArray<{ callId: string; argument: string; reference: string }> {
-    return this.usage;
+  /**
+   * The references used so far, in order, with the nested field each one addressed: this is what the
+   * recording preserves instead of the values, and it is enough to rebuild the binding.
+   */
+  referencesUsed(): ReadonlyArray<ReferenceUse> {
+    return this.usage.map((use) => ({ ...use, path: [...use.path] }));
   }
 }
 
@@ -97,19 +113,24 @@ export async function invokeWithReferences(
   scope: WorkflowReferenceScope,
   request: ReferenceInvocationRequest,
   invoke: (callId: string, args: Record<string, WorkflowJsonValue>) => Promise<WorkflowJsonValue>,
-): Promise<{ result: WorkflowJsonValue; reference: string; referencesUsed: string[] }> {
+): Promise<{ result: WorkflowJsonValue; reference: string; referencesUsed: ReferenceUse[] }> {
   const args: Record<string, WorkflowJsonValue> = {};
-  const used: string[] = [];
+  const used: ReferenceUse[] = [];
   for (const [name, argument] of Object.entries(request.arguments)) {
     if (argument.kind === "value") {
       args[name] = argument.value;
       continue;
     }
-    args[name] = scope.resolve(argument.reference, argument.path ?? []);
-    used.push(argument.reference);
-    (
-      scope as unknown as { usage: Array<{ callId: string; argument: string; reference: string }> }
-    ).usage.push({ callId: request.callId, argument: name, reference: argument.reference });
+    const path = argument.path ?? [];
+    args[name] = scope.resolve(argument.reference, path);
+    const use: ReferenceUse = {
+      callId: request.callId,
+      argument: name,
+      reference: argument.reference,
+      path,
+    };
+    used.push(use);
+    scope.recordUse(use);
   }
   const result = await invoke(request.callId, args);
   return { result, reference: scope.registerResult(request.callId, result), referencesUsed: used };
