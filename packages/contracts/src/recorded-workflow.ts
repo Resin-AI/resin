@@ -33,7 +33,23 @@ export type WorkflowValueTemplate =
   /** Origin the record does not establish: preserved as such, never guessed. */
   | { type: "unresolved"; reason: string }
   | { type: "object"; entries: Record<string, WorkflowValueTemplate> }
-  | { type: "array"; items: WorkflowValueTemplate[] };
+  | { type: "array"; items: WorkflowValueTemplate[] }
+  /**
+   * A recorded program with the values a replay bound inside it.
+   *
+   * The program text stays where it was recorded — `source` resolves it locally, exactly as a
+   * private leaf does — because the program is the user's own work. `holes` says which token of the
+   * program is a binding rather than a literal of that program, by token index, so re-running the
+   * program renders the bound value into the recorded token and leaves every other byte alone.
+   * Token indices are the ones `tokenizeProgram(language, source)` yields, so the capture that
+   * found the token and the runtime that renders it agree on its position.
+   */
+  | {
+      type: "program";
+      language: WorkflowRecordedProgram["kind"];
+      source: WorkflowValueTemplate;
+      holes: Array<{ token: number; binding: WorkflowValueTemplate }>;
+    };
 
 export type WorkflowValueSource =
   | { kind: "literal"; value: WorkflowJsonValue }
@@ -134,7 +150,13 @@ export type WorkflowArgument = {
 export type WorkflowBindingCandidate = {
   stepId: string;
   argument: string;
-  /** Where inside the argument the value sits; empty for the whole argument. */
+  /**
+   * Where inside the argument the value sits; empty for the whole argument.
+   *
+   * A path of `["tokens", <index>]` names a token of the program the argument holds, as
+   * `tokenizeProgram` numbers it — the position inside a recorded program text, for a value the
+   * capture found embedded in it. Everything else is a path through the argument's own structure.
+   */
   path: WorkflowValuePath;
   proposed:
     | { kind: "result"; stepId: string; path: WorkflowValuePath }
@@ -470,6 +492,38 @@ export function validateRecordedWorkflow(value: unknown): {
               template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
               return;
             }
+            case "program": {
+              if (
+                template.language !== "shell" &&
+                template.language !== "python" &&
+                template.language !== "javascript" &&
+                template.language !== "typescript"
+              ) {
+                problems.push(`${where} program needs the language it runs in`);
+              }
+              if (!isPlainObject(template.source)) {
+                problems.push(`${where} program needs the recorded text it resolves`);
+              } else {
+                walk(template.source, `${where}<text>`);
+              }
+              if (!Array.isArray(template.holes)) {
+                problems.push(`${where} program holes must be an array`);
+                return;
+              }
+              for (const [index, hole] of template.holes.entries()) {
+                if (
+                  !isPlainObject(hole) ||
+                  typeof hole.token !== "number" ||
+                  !Number.isInteger(hole.token) ||
+                  hole.token < 0
+                ) {
+                  problems.push(`${where} hole ${index} must name a recorded token index`);
+                  continue;
+                }
+                walk(hole.binding, `${where}<token ${hole.token}>`);
+              }
+              return;
+            }
             default:
               problems.push(`${where} has unknown template type ${String(template.type)}`);
           }
@@ -547,6 +601,25 @@ export function validateRecordedWorkflow(value: unknown): {
         const args = isPlainObject(step) && Array.isArray(step.arguments) ? step.arguments : [];
         if (!args.some((entry) => isPlainObject(entry) && entry.name === candidate.argument)) {
           errors.push(`candidate ${stepId}.${candidate.argument} names no such argument`);
+        }
+        // A token path addresses the text of the program the step's own record names; a token that
+        // points anywhere else would be applied to a value no tokenizer has read.
+        const path = Array.isArray(candidate.path) ? candidate.path : [];
+        if (path[0] === "tokens") {
+          if (
+            !Number.isInteger(path[1]) ||
+            (path[1] as number) < 0 ||
+            path.length !== 2
+          ) {
+            errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
+          }
+          const program = isPlainObject(step) ? step.callable : undefined;
+          const recorded = isPlainObject(program) ? program.program : undefined;
+          if (!isPlainObject(recorded) || recorded.argument !== candidate.argument) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} names a token of a program the step's record does not hold in that argument`,
+            );
+          }
         }
         const proposed = candidate.proposed;
         if (!isPlainObject(proposed) || typeof proposed.kind !== "string") {
