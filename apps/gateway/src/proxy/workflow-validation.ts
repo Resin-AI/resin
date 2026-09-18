@@ -53,9 +53,27 @@ export interface LocalWorkflowValidationResult {
   verdicts: LocalCandidateVerdict[];
   /** Absent when the recording offered no demonstration to replay against. */
   verification?: WorkflowPlanVerification;
+  /**
+   * Set when no replay ran, with the reason. A caller must treat this as "not established": a
+   * recording whose proposals were never tried keeps every value it was recorded with.
+   */
+  unavailable?: string;
 }
 
 export interface LocalWorkflowValidatorOptions {
+  /**
+   * The authorization the replay runs under.
+   *
+   * A replay executes the recording's own programs and re-makes its own calls, so it runs under the
+   * workspace's grant or not at all. Validation is not a way around the capability envelope, and a
+   * caller that has no authorized envelope gets a recording whose proposals stay proposals.
+   */
+  authorization?: () => { envelopeId: string; workspaceId: string } | undefined;
+  /**
+   * Environment the replayed programs may see. Nothing else is inherited: a program recorded by
+   * somebody else's session must not be able to read this operator's credentials.
+   */
+  environment?: Record<string, string>;
   /** Store the plan's local references resolve from; defaults to the daemon's store. */
   privateValues?: PrivateValueStore;
   /** Directory the replay's programs run in. Defaults to a fresh disposable directory. */
@@ -74,20 +92,40 @@ export interface LocalWorkflowValidatorOptions {
  * reported as having no verification rather than as verified, and a caller that receives no
  * verification must not treat the plan as established.
  */
-export function createLocalWorkflowValidator(options: LocalWorkflowValidatorOptions = {}) {
+export function createLocalWorkflowValidator(
+  options: LocalWorkflowValidatorOptions = {},
+): (plan: RecordedWorkflow) => Promise<LocalWorkflowValidationResult> {
   return async (plan: RecordedWorkflow): Promise<LocalWorkflowValidationResult> => {
     const candidates = plan.candidates ?? [];
     if (candidates.length === 0) return { verdicts: [] };
+    // Read when the work is replayed, not when the service is built: a grant is in force for a
+    // while, not forever, and a recording made while one was is not evidence of a later one.
+    if (options.authorization?.() === undefined) {
+      return {
+        verdicts: [],
+        unavailable:
+          "the workspace has no authorization in force, so its recorded work was not replayed",
+      };
+    }
     const privateValues = options.privateValues ?? FilePrivateValueStore.default();
 
     // A replay may write files, so it never runs in the project the user is working in. The
     // directory lives only as long as the replay does.
     const owned = options.workspaceDir === undefined;
-    const workspaceDir = options.workspaceDir ?? mkdtempSync(path.join(os.tmpdir(), "resin-replay-"));
+    const workspaceDir =
+      options.workspaceDir ?? mkdtempSync(path.join(os.tmpdir(), "resin-replay-"));
     try {
       const adapters = new RuntimeAdapterRegistry();
-      adapters.register(createProcessAdapter({ cwd: workspaceDir }));
-      adapters.register(createProgramAdapter({ cwd: workspaceDir }));
+      // The replay's programs run in the disposable directory and see only what this service hands
+      // them. A temporary directory is not a sandbox for an outside process, so what the process may
+      // reach is bounded by its environment and by the grant the work was authorized under.
+      const programOptions = {
+        cwd: workspaceDir,
+        isolateEnvironment: true,
+        ...(options.environment === undefined ? {} : { env: options.environment }),
+      };
+      adapters.register(createProcessAdapter(programOptions));
+      adapters.register(createProgramAdapter(programOptions));
       adapters.register(
         createToolProtocolAdapter({
           ...(options.dispatch === undefined ? {} : { dispatch: options.dispatch }),

@@ -229,6 +229,31 @@ describe("recorded program adapters", () => {
     expect(await run("printf '\\n'")).toBe("\n");
   });
 
+  it("hands an isolated program only the environment it was given", async () => {
+    const workspace = await makeWorkspace();
+    process.env.RESIN_DAEMON_SECRET = "leaked-value";
+    try {
+      const isolated = await runRecordedProgram(
+        {
+          kind: "shell",
+          source: 'printf "%s|%s" "${RESIN_DAEMON_SECRET:-none}" "${RESIN_REPLAY:-none}"',
+        },
+        { cwd: workspace, isolateEnvironment: true, env: { RESIN_REPLAY: "1" } },
+      );
+      // The operator's own environment is not the replayed program's environment.
+      expect(isolated.value).toBe("none|1");
+
+      const inherited = await runRecordedProgram(
+        { kind: "shell", source: 'printf "%s" "${RESIN_DAEMON_SECRET:-none}"' },
+        { cwd: workspace },
+      );
+      // Without isolation the process's environment is used, which is what the daemon itself wants.
+      expect(inherited.value).toBe("leaked-value");
+    } finally {
+      delete process.env.RESIN_DAEMON_SECRET;
+    }
+  });
+
   it("carries a program's answer into the next call that consumes it", async () => {
     const workspace = await makeWorkspace();
     const adapters = new RuntimeAdapterRegistry();

@@ -33,6 +33,15 @@ export interface ProgramRunnerOptions {
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
   env?: Record<string, string>;
+  /**
+   * Hand the program ONLY the environment it was given, never the process's own.
+   *
+   * A replay is not the daemon: a recorded program has no business reading the operator's
+   * credentials, tokens or proxy configuration out of the environment, and inheriting them would
+   * make a validation run as powerful as the daemon itself. PATH is always provided, because a
+   * program text naming an interpreter needs one to be found.
+   */
+  isolateEnvironment?: boolean;
   /** Overridable for tests. */
   platform?: NodeJS.Platform;
 }
@@ -209,10 +218,10 @@ function killProcessTree(child: ChildProcess): void {
 function runChild(
   invocation: ChildInvocation,
   options: ProgramRunnerOptions,
+  env: NodeJS.ProcessEnv,
 ): Promise<CapturedRun> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
   const stdout = new BoundedOutput(maxOutputBytes);
   const stderr = new BoundedOutput(maxOutputBytes);
   const cwd = options.cwd ?? process.cwd();
@@ -296,9 +305,11 @@ export async function runRecordedProgram(
   options: ProgramRunnerOptions = {},
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
-  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
+  const env: NodeJS.ProcessEnv = options.isolateEnvironment
+    ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
+    : { ...process.env, ...options.env };
   const invocation = invocationFor(program, options, env);
-  const captured = await runChild(invocation, options);
+  const captured = await runChild(invocation, options, env);
   return {
     exitCode: captured.exitCode,
     stdout: captured.stdout,
