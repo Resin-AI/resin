@@ -469,14 +469,17 @@ export function recordCallsFromEvents(
   }
 
   const stepIdByCallId = new Map<string, string>();
-  const scopeSeparator = ":";
-  const scopeCallIdOf = (reference: string): string | undefined => {
-    // `ref:<scope>:<callId>`; the call id may itself contain colons, so keep everything after the
-    // second separator.
-    const parts = reference.split(scopeSeparator);
+  /**
+   * A reference is only usable when it names this recording's scope. Call ids are not unique across
+   * scopes, so a reference from another recording must never bind to a local call sharing its id.
+   */
+  const localCallIdOf = (reference: string, scopeId: string): string | undefined => {
+    const parts = reference.split(":");
     if (parts.length < 3 || parts[0] !== "ref") return undefined;
-    return parts.slice(2).join(scopeSeparator);
+    if (parts[1] !== scopeId) return undefined;
+    return parts.slice(2).join(":");
   };
+  const scopeId = workflowId;
 
   const observations: RecordedCallObservation[] = [];
   for (const event of ordered) {
@@ -486,7 +489,7 @@ export function recordCallsFromEvents(
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
     const argumentOrigins: Record<string, RecordedArgumentOrigin> = {};
     for (const [argumentName, use] of Object.entries(recordedReferences)) {
-      const producingCallId = scopeCallIdOf(use.reference);
+      const producingCallId = localCallIdOf(use.reference, scopeId);
       const producingStepId = producingCallId ? stepIdByCallId.get(producingCallId) : undefined;
       // A reference the recording cannot tie to an earlier step it recorded stays unestablished
       // rather than being guessed from the value that happens to be there.

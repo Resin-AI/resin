@@ -469,7 +469,7 @@ describe("workflow recipe recording", () => {
         // The calling program used the reference-aware interface: this is the connection the
         // plain-JSON recording never carried.
         metadata: {
-          references: { id: { reference: "ref:sess:call_1", path: ["hits", 0, "id"] } },
+          references: { id: { reference: "ref:wf_referenced:call_1", path: ["hits", 0, "id"] } },
         },
       },
       {
@@ -512,5 +512,49 @@ describe("workflow recipe recording", () => {
     expect(
       JSON.stringify(leaf(unresolvedRecipe.workflow.steps[1]!.arguments[0]!.source)),
     ).toContain("unresolved");
+  });
+
+  it("never binds a reference from another scope that reuses a local call id", () => {
+    const events = [
+      {
+        type: "tool_call",
+        eventId: "evt_s1",
+        sessionId: "sess",
+        causalRef: { causalSequence: 1 },
+        toolName: "vendor_search",
+        callId: "call_1",
+        parameters: { query: "alpha" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_s2",
+        sessionId: "sess",
+        causalRef: { causalSequence: 2 },
+        callId: "call_1",
+        result: { hits: [{ id: "row-9" }] },
+        isError: false,
+      },
+      {
+        type: "tool_call",
+        eventId: "evt_s3",
+        sessionId: "sess",
+        causalRef: { causalSequence: 3 },
+        toolName: "vendor_store",
+        callId: "call_2",
+        parameters: { id: "row-9" },
+        // Same call id, different scope: it names a result this recording never saw.
+        metadata: {
+          references: {
+            id: { reference: "ref:another_recording:call_1", path: ["hits", 0, "id"] },
+          },
+        },
+      },
+    ];
+
+    const recipe = recordCallsFromEvents("wf_scope_check", events)!;
+    expect(JSON.stringify(leaf(recipe.workflow.steps[1]!.arguments[0]!.source))).toContain(
+      "unresolved",
+    );
+    expect(recipe.workflow.steps[1]!.dependsOn).toEqual([]);
   });
 });
