@@ -349,6 +349,15 @@ export class LocalArtifactExecutor {
     return this.workspaceRoot;
   }
 
+  /**
+   * The store this executor resolves a plan's private references from. A companion service that
+   * replays a recording must resolve them from the same place the executor would, or a value would
+   * be available on one path and not the other.
+   */
+  getPrivateValueStore(): PrivateValueStore {
+    return this.privateValueStore ?? FilePrivateValueStore.default();
+  }
+
   setWorkspaceRoot(root: string): void {
     this.workspaceRoot = root;
   }
@@ -1107,7 +1116,7 @@ export class LocalArtifactExecutor {
         },
       });
 
-    const store = this.privateValueStore ?? FilePrivateValueStore.default();
+    const store = this.getPrivateValueStore();
     const artifact: CompiledWorkflowArtifact = {
       plan,
       digest: "",

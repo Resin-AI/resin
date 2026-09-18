@@ -5,6 +5,7 @@ import type {
   V1ProjectMetadata,
   V1RevocationMetadata,
   V1ToolLock,
+  WorkflowJsonValue,
 } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import {
@@ -27,6 +28,7 @@ import {
   type McpServerDescriptor,
   type McpToolConnection,
   type RuntimeTrustStore,
+  type ToolProtocolDispatchRequest,
   connectMcpServer,
   createProcessAdapter,
   createProgramAdapter,
@@ -50,6 +52,7 @@ import {
   type LockedSyncIdentity,
 } from "./sync.js";
 import { ManagedToolAccess } from "./tool-access.js";
+import { WorkflowValidationClient, WorkflowValidationWorker } from "./validation-worker.js";
 
 export interface ProductionProxyRuntimeOptions {
   credentialStore?: CloudCredentialStore;
@@ -88,6 +91,8 @@ export interface ProductionProxyRuntimeOptions {
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
+  /** Where the validation worker reports an ask it would not answer and an answer the cloud declined. */
+  onValidationLog?: (message: string) => void;
   isPinned?: (toolId: string) => boolean;
 }
 
@@ -104,6 +109,12 @@ export interface ProductionProxyRuntime {
   registry?: ToolRegistry;
   lockManager?: ProjectLockManager;
   executor?: LocalArtifactExecutor;
+  /**
+   * Answers the cloud's pending validation asks from this machine. Present only when credentials
+   * are valid: whether a recording's proposals hold is decided where its values are, on the
+   * authenticated connection that recorded them.
+   */
+  validationWorker?: WorkflowValidationWorker;
   onWorkspaceReady(workspace: WorkspaceContext): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -305,6 +316,42 @@ export async function createProductionProxyRuntime(
       lockManager: options.lockManager,
     });
     routerBox.current.setManagedToolAccess(managedToolAccess);
+    // The validation worker answers the cloud's asks where the recording's values are: the plan's
+    // private references resolve from the same store the executor resolves them from, and a step
+    // that calls a tool goes back through this host's own routing — the same entry the original
+    // call used — while the recorded programs run in the validator's own disposable directory.
+    const readyWorkspace: { current?: WorkspaceContext } = {};
+    const validationWorker = new WorkflowValidationWorker({
+      client: new WorkflowValidationClient({
+        identityProvider,
+        fetchImpl: fetchWithLifecycle,
+      }),
+      identity: { workspaceId: identity.workspaceId, deviceId: identity.deviceId },
+      privateValues: executor.getPrivateValueStore(),
+      dispatch: async (request: ToolProtocolDispatchRequest): Promise<WorkflowJsonValue> => {
+        const router = routerBox.current;
+        if (router === undefined) throw new Error("Step dispatcher is not ready");
+        const workspace = readyWorkspace.current;
+        if (workspace === undefined) {
+          throw new Error(
+            "the workspace is not ready, so a recorded tool step cannot be routed through this host",
+          );
+        }
+        const result = await router.invoke({
+          toolId: request.name,
+          name: request.name,
+          version: "",
+          parameters: request.arguments as JsonRpcParams,
+          context: workspace,
+        });
+        if (result.isError) {
+          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+          throw new Error(text ?? `callable '${request.name}' answered with an error`);
+        }
+        return composedResultValue(result);
+      },
+      ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
+    });
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -347,10 +394,12 @@ export async function createProductionProxyRuntime(
       cache,
       router: routerBox.current,
       executor,
+      validationWorker,
       coordinator,
       registry: options.registry,
       lockManager: options.lockManager,
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
+        readyWorkspace.current = workspace;
         const workspaceRoot =
           workspace.projectRoot ??
           workspace.canonicalRoot ??
@@ -476,10 +525,12 @@ export async function createProductionProxyRuntime(
 
       async start(): Promise<void> {
         coordinator.startPeriodicSync();
+        validationWorker.start();
       },
 
       async stop(): Promise<void> {
         lifecycleAbort.abort();
+        validationWorker.stop();
         coordinator.stopPeriodicSync();
         if (backgroundTasks.size > 0) {
           await Promise.allSettled([...backgroundTasks]);
