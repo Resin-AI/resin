@@ -9,3 +9,4 @@ export * from "./router.js";
 export * from "./sync.js";
 export * from "./runtime.js";
 export * from "./local-executor.js";
+export * from "./workflow-validation.js";
