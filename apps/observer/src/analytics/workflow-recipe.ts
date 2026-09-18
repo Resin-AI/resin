@@ -172,7 +172,6 @@ function recordWorkflowRecipeInternal(
           };
         }
         return privateHere(value) ?? origin;
-      case undefined:
       default: {
         const privateLeaf = privateHere(value);
         if (privateLeaf) return privateLeaf;
@@ -466,8 +465,7 @@ function bindCarrierOrigin(
         const scope = parts[1]!;
         const refCallId = parts.slice(2).join(":");
         const producingKey =
-          aliasByScopeCall.get(`${scope}${refCallId}`) ??
-          `${eventSessionId}${refCallId}`;
+          aliasByScopeCall.get(`${scope}${refCallId}`) ?? `${eventSessionId}${refCallId}`;
         const stepId = stepIdByCallId.get(producingKey);
         if (stepId !== undefined) {
           return { type: "result", stepId, path: origin.path };
@@ -521,7 +519,6 @@ function carrierArgumentValue(origin: AgentArgumentOrigin): WorkflowJsonValue {
   }
 }
 
-
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
@@ -562,9 +559,7 @@ export function recordCallsFromEvents(
       value: event.result ?? extractResultValue(event.content),
       isError: event.isError,
     });
-    const carrier = readWorkflowResultCarrier(
-      event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
-    );
+    const carrier = readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]);
     const handle = carrier?.handle;
     if (handle !== undefined) {
       const parts = handle.split(":");
@@ -601,9 +596,7 @@ export function recordCallsFromEvents(
     if (seenCallIds.has(scopedCallKey)) continue;
     seenCallIds.add(scopedCallKey);
 
-    const carrier = readWorkflowCallCarrier(
-      event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
-    );
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
     const recordedInputs =

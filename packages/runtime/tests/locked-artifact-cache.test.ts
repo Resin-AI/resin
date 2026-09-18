@@ -358,7 +358,10 @@ describe("Locked Artifact Cache", () => {
 
     const rogueArchiveDigest = normalizeSha256(computeSha256(rogueBuilt.archiveBuffer), false);
     const { digest: _rogueOmit, ...rogueManifestBody } = manifest;
-    const rogueManifestDigest = normalizeSha256(computeSha256(canonicalJson(rogueManifestBody)), false);
+    const rogueManifestDigest = normalizeSha256(
+      computeSha256(canonicalJson(rogueManifestBody)),
+      false,
+    );
 
     const rogueEntry: V1LockedToolEntry = {
       toolId: manifest.id,

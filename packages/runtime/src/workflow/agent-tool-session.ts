@@ -13,10 +13,10 @@
  */
 
 import {
-  analyzeAgentArguments,
   type AgentArgumentOrigin,
   type WorkflowJsonValue,
   type WorkflowValuePath,
+  analyzeAgentArguments,
 } from "@resin/contracts";
 import { type ReferenceUse, WorkflowReferenceScope } from "./reference-invocation.js";
 
@@ -69,10 +69,7 @@ export class AgentToolSession {
     return this.usage.map((use) => ({ ...use, path: [...use.path] }));
   }
 
-  async call(
-    toolName: string,
-    args: Record<string, WorkflowJsonValue>,
-  ): Promise<AgentCallOutcome> {
+  async call(toolName: string, args: Record<string, WorkflowJsonValue>): Promise<AgentCallOutcome> {
     const callId = `call_${++this.callCounter}`;
     const analysis = analyzeAgentArguments(args, {
       nameInput: (argument, path) =>

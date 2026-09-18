@@ -346,7 +346,6 @@ export class RedactionEngine {
         for (const [key, val] of Object.entries(objectParsed.data)) {
           const fieldPath = currentPath ? `${currentPath}.${key}` : key;
 
-
           // Preserved identifier / keyword field check
           if (PRESERVED_IDENTIFIER_FIELDS.has(key)) {
             // SAFETY: Preserved identifier fields are kept intact without redaction.

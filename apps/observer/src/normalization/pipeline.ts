@@ -49,7 +49,10 @@ export interface NormalizationPipelineOptions {
    * recorded workflow can recover private values on this machine at execution time.
    * Defaults to the shared daemon store.
    */
-  privateValueStore?: { get(key: string): unknown | undefined; set(key: string, value: unknown): void };
+  privateValueStore?: {
+    get(key: string): unknown | undefined;
+    set(key: string, value: unknown): void;
+  };
 }
 
 /**

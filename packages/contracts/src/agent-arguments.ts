@@ -79,9 +79,7 @@ export interface AgentArgumentAnalysis {
 
 export type AgentInputNamer = (argument: string, path: WorkflowValuePath) => string;
 
-export function agentValueTypeOf(
-  value: WorkflowJsonValue,
-): AgentArgumentInput["type"] {
+export function agentValueTypeOf(value: WorkflowJsonValue): AgentArgumentInput["type"] {
   if (typeof value === "number") return "number";
   if (typeof value === "boolean") return "boolean";
   if (Array.isArray(value)) return "array";

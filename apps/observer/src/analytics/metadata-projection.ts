@@ -775,13 +775,12 @@ export function projectEventToMetadataOnly(
   // re-read through the strict reader (frozen carrier vocabulary only) and copied by
   // value; literal argument values ride along because they are what the workflow is
   // made of, while private leaves were already replaced by local `private:` references.
-  const workflowCall = readWorkflowCallCarrier(
-    event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
-  );
+  const workflowCall = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
   if (workflowCall !== undefined) {
-    metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = JSON.parse(
-      JSON.stringify(workflowCall),
-    ) as Record<string, unknown>;
+    metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = JSON.parse(JSON.stringify(workflowCall)) as Record<
+      string,
+      unknown
+    >;
   }
   const workflowResult = readWorkflowResultCarrier(
     event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],

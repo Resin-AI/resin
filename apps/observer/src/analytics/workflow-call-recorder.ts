@@ -16,14 +16,14 @@
  */
 
 import {
-  analyzeAgentArguments,
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
   type WorkflowJsonValue,
+  analyzeAgentArguments,
 } from "@resin/contracts";
 import {
-  type PrivateValueStore,
   FilePrivateValueStore,
+  type PrivateValueStore,
   containsRedactionPlaceholder,
 } from "./private-value-store.js";
 
@@ -140,10 +140,7 @@ export class WorkflowCallRecorder {
    * references, writing the redacted leaf to the local store so the executor can
    * reconstruct the original at invocation time.
    */
-  private sweepOrigin(
-    origin: AgentArgumentOrigin,
-    sessionId: string,
-  ): AgentArgumentOrigin {
+  private sweepOrigin(origin: AgentArgumentOrigin, sessionId: string): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
         const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {

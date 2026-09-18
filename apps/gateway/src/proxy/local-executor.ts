@@ -11,11 +11,16 @@ import {
   type RecordedWorkflow,
   type ToolManifest,
   ToolManifestSchema,
+  type WorkflowJsonValue,
   canonicalJson,
   normalizeSha256,
   validateRecordedWorkflow,
-  type WorkflowJsonValue,
 } from "@resin/contracts";
+import {
+  FilePrivateValueStore,
+  RESIN_INVOKE_TOOL_RUNTIME,
+  resolvePrivateReference,
+} from "@resin/observer";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
@@ -26,6 +31,8 @@ import {
   CapabilityBrokerManager,
   type CapabilityPolicyEngine,
   type CompiledWorkflowArtifact,
+  DEFAULT_BUNDLE_LIMITS,
+  type KeyStore,
   RuntimeAdapterRegistry,
   ToolBundleLoader,
   WorkerProcess,
@@ -34,14 +41,7 @@ import {
   instantiateRecordedWorkflow,
   validateBundleEntryPath,
   verifyBundleSignature,
-  type KeyStore,
-  DEFAULT_BUNDLE_LIMITS,
 } from "@resin/runtime";
-import {
-  FilePrivateValueStore,
-  RESIN_INVOKE_TOOL_RUNTIME,
-  resolvePrivateReference,
-} from "@resin/observer";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -741,7 +741,6 @@ export class LocalArtifactExecutor {
       );
     }
 
-
     // 6. Set up invocation workspace root and capabilities
     const workspaceRoot = path.resolve(
       context.projectRoot ??
@@ -1027,8 +1026,7 @@ export class LocalArtifactExecutor {
     };
     const callable = instantiateRecordedWorkflow(artifact, {
       adapters,
-      resolvePrivate: (reference) =>
-        resolvePrivateReference(store, reference) as WorkflowJsonValue,
+      resolvePrivate: (reference) => resolvePrivateReference(store, reference) as WorkflowJsonValue,
     });
     try {
       const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
@@ -1050,4 +1048,3 @@ export class LocalArtifactExecutor {
     }
   }
 }
-

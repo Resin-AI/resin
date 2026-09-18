@@ -18,7 +18,6 @@ import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { projectEventToMetadataOnly } from "./metadata-projection.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
-import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
   type TrajectoryAttributionContextInput,
@@ -26,6 +25,7 @@ import {
   type TrajectoryEmitter,
   createTrajectoryEmitter,
 } from "./trajectory-emitter.js";
+import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -773,9 +773,7 @@ export class TrajectoryCaptureCoordinator {
                 // the identical carrier-bearing event.
                 validEvents.push(
                   this.computationEvidenceRecorder.observe(
-                    this.toolLinkEvidenceRecorder.observe(
-                      this.workflowCallRecorder.observe(ev),
-                    ),
+                    this.toolLinkEvidenceRecorder.observe(this.workflowCallRecorder.observe(ev)),
                   ),
                 );
               }
@@ -1262,7 +1260,6 @@ export class TrajectoryCaptureCoordinator {
   public clearComputationEvidence(): void {
     this.computationEvidenceRecorder.clear();
   }
-
 
   /** Clears per-session workflow carrier state (discovery providers) without detaching. */
   public clearWorkflowCallEvidence(): void {

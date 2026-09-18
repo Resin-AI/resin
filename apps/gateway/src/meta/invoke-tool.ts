@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import {
-  analyzeAgentArguments,
   type InvocationRecord,
   type InvocationUsageEstimate,
   TOOL_IO_UTF8_METHOD,
+  type WorkflowJsonValue,
+  analyzeAgentArguments,
   bytesToTokens,
   createUsageEstimate,
   estimatePayloadBytes,
   hashCanonicalContent,
   isSafetyGateBypassTool,
-  type WorkflowJsonValue,
 } from "@resin/contracts";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
@@ -171,8 +171,6 @@ export function createInvokeToolHandler(
     }
     // SAFETY: Verified rawTargetParams is a non-null, non-array object record.
     const targetParams = rawTargetParams as JsonRpcParams;
-
-
 
     // Use the canonical catalog resolver used by native invocation. It applies scope
     // precedence, active versions, pins, disables, and exposed-name collision handling.

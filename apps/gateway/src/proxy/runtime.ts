@@ -24,8 +24,8 @@ import {
 } from "@resin/protocol";
 import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
-import type { ToolRegistry } from "../registry/registry.js";
 import type { JsonRpcParams } from "../protocol/types.js";
+import type { ToolRegistry } from "../registry/registry.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
@@ -176,7 +176,9 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
-    let router: CloudInvocationRouter | undefined;
+    // The executor's stepInvoker resolves the router lazily: the router is constructed
+    // after the executor because it takes the executor as its local dispatcher.
+    const routerBox: { current?: CloudInvocationRouter } = {};
     const executor =
       options.executor ??
       new LocalArtifactExecutor({
@@ -190,6 +192,7 @@ export async function createProductionProxyRuntime(
         // Recorded-workflow plans dispatch their steps through the same router the
         // original calls used, so scope, pins, and permissions apply identically.
         stepInvoker: async (request) => {
+          const router = routerBox.current;
           if (!router) {
             return {
               isError: true,
@@ -208,7 +211,7 @@ export async function createProductionProxyRuntime(
         },
       });
     executor.setManagedToolAccess(managedToolAccess);
-    router = new CloudInvocationRouter({
+    routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
       baseUrl: identity.cloudUrl,
@@ -217,7 +220,7 @@ export async function createProductionProxyRuntime(
       localExecutor: executor,
       lockManager: options.lockManager,
     });
-    router.setManagedToolAccess(managedToolAccess);
+    routerBox.current.setManagedToolAccess(managedToolAccess);
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -230,7 +233,7 @@ export async function createProductionProxyRuntime(
       managedToolAccess,
       client,
       cache,
-      router,
+      router: routerBox.current,
       circuitBreaker,
       registry: options.registry,
       workspaceId: undefined,
@@ -258,7 +261,7 @@ export async function createProductionProxyRuntime(
       circuitBreaker,
       client,
       cache,
-      router,
+      router: routerBox.current,
       executor,
       coordinator,
       registry: options.registry,
@@ -300,7 +303,7 @@ export async function createProductionProxyRuntime(
           }
           coordinator.bindWorkspace({ workspaceId: workspace.workspaceId, lockManager });
           if (lockManager) {
-            router.setLockManager(lockManager);
+            routerBox.current?.setLockManager(lockManager);
           }
         }
 

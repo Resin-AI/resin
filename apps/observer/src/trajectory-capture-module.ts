@@ -22,6 +22,7 @@ import {
   type TrajectoryAttributionResolverFn,
   TrajectoryCaptureCoordinator,
 } from "./analytics/index.js";
+import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
@@ -31,7 +32,6 @@ import type {
   ModuleLifecycleState,
 } from "./lifecycle.js";
 import { NormalizationPipeline } from "./normalization/pipeline.js";
-import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import type { JsonObject } from "./normalization/redaction.js";
 import { ObserverCoordinator } from "./tailing/coordinator.js";
 import { SourceCursorManager } from "./tailing/cursor-manager.js";
