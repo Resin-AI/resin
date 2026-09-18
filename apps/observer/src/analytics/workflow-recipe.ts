@@ -50,6 +50,12 @@ export interface RecordedCallObservation {
 
 export interface RecordedRecipe {
   workflow: RecordedWorkflow;
+  /**
+   * Inputs proposed by comparing demonstrations, with the argument each came from. They are a
+   * proposal: an established binding is never replaced by a caller input, and an input that a caller
+   * declines to supply leaves the workflow refusing rather than inventing a value.
+   */
+  proposedInputs?: Array<{ name: string; from: string }>;
   /** Values the workflow needs locally at execution time, addressed by reference only. */
   privateValues: Map<string, WorkflowJsonValue>;
   /** Calls the recorder could not represent, with the reason. Never silently dropped. */
@@ -317,6 +323,7 @@ export function promoteVariationToInputs(
   recipes: readonly RecordedRecipe[],
 ): RecordedRecipe | undefined {
   if (recipes.length < 2) return recipes[0];
+  const proposedInputs: Array<{ name: string; from: string }> = [];
   const base = recipes[0]!;
   const workflow: RecordedWorkflow = JSON.parse(JSON.stringify(base.workflow)) as RecordedWorkflow;
   const inputs = new Map<string, { name: string; type: string }>(
@@ -362,6 +369,7 @@ export function promoteVariationToInputs(
       })();
       const name = `${step.id}_${argument.name}`;
       inputs.set(name, { name, type });
+      proposedInputs.push({ name, from: `${step.id}.${argument.name}` });
       argument.source = {
         kind: "template",
         template: { type: "input", name },
@@ -376,7 +384,12 @@ export function promoteVariationToInputs(
       type: input.type as RecordedWorkflow["inputs"][number]["type"],
     })),
   };
-  return { workflow: promoted, privateValues: base.privateValues, skipped: base.skipped };
+  return {
+    workflow: promoted,
+    privateValues: base.privateValues,
+    skipped: base.skipped,
+    proposedInputs,
+  };
 }
 
 /** A normalized event, as much of it as recording calls needs. */
@@ -440,20 +453,34 @@ export function recordCallsFromEvents(
     if (event.type !== "tool_call") continue;
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
     const toolName = event.toolName ?? "unknown";
-    const result = resultsByCallId.get(callId);
+    const recordedResult = resultsByCallId.get(callId);
+    const discovery = options.discoveryFor?.(toolName);
     const privateValues = (event.metadata?.maskedValues as string[] | undefined) ?? [];
     observations.push({
       callId,
       ...(event.causalRef?.causalSequence === undefined
         ? {}
         : { causalSequence: event.causalRef.causalSequence }),
-      callable: { runtime: options.runtimeFor?.(toolName) ?? "tool", name: toolName },
+      callable: {
+        runtime: discovery?.runtime ?? (event.metadata?.runtime as string | undefined) ?? "unknown",
+        name: toolName,
+        ...((discovery?.connection ?? (event.metadata?.connection as string | undefined))
+          ? { connection: (discovery?.connection ?? event.metadata?.connection) as string }
+          : {}),
+      },
       arguments: event.parameters ?? {},
-      ...(result === undefined ? {} : { result }),
+      ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(privateValues.length > 0
         ? { isPrivateValue: (value) => privateValues.includes(value) }
         : {}),
-      observed: result === undefined ? "unknown" : "succeeded",
+      observed:
+        recordedResult === undefined
+          ? "unknown"
+          : recordedResult.isError === true
+            ? "failed"
+            : recordedResult.isError === false
+              ? "succeeded"
+              : "unknown",
     });
   }
   if (observations.length === 0) return undefined;

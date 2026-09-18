@@ -352,11 +352,95 @@ describe("workflow recipe recording", () => {
       "vendor_search",
       "vendor_store",
     ]);
-    // The result is attached to the call it answers, and the argument's origin stays unresolved:
-    // the record does not say where "row-9" came from.
-    expect(recipe.workflow.steps[1]!.observed).toEqual({ outcome: "succeeded" });
+    // The result is attached to the call it answers, but having a result is not success: the record
+    // reported no outcome, so the observed outcome is unknown. The argument's origin stays
+    // unresolved too — the record does not say where "row-9" came from.
+    expect(recipe.workflow.steps[1]!.observed).toEqual({ outcome: "unknown" });
     expect(leaf(recipe.workflow.steps[1]!.arguments[0]!.source)).toMatchObject({
       type: "unresolved",
     });
+  });
+
+  it("treats variation as a proposal and never replaces an established binding", () => {
+    const demonstration = (source: string): RecordedCallObservation[] => [
+      {
+        callId: `call_source_${source}`,
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-program", name: "local-read" },
+        arguments: { path: source },
+        argumentOrigins: { path: { type: "literal", value: source } },
+        result: { id: `row-${source}` },
+        observed: "succeeded",
+      },
+      {
+        callId: `call_use_${source}`,
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-program", name: "local-send" },
+        // Bound to the earlier result, whose value naturally differs between demonstrations.
+        arguments: { id: `row-${source}` },
+        argumentOrigins: { id: { type: "result", stepId: "step0", path: ["id"] } },
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+
+    const promoted = promoteVariationToInputs([
+      recordWorkflowRecipe("wf_proposal", demonstration("alpha"))!,
+      recordWorkflowRecipe("wf_proposal", demonstration("beta"))!,
+    ])!;
+
+    // The changing intermediate result stays the binding it was recorded as.
+    expect(leaf(promoted.workflow.steps[1]!.arguments[0]!.source)).toEqual({
+      type: "result",
+      stepId: "step0",
+      path: ["id"],
+    });
+    expect(promoted.workflow.inputs.map((input) => input.name)).toEqual(["step0_path"]);
+    // And what was proposed is reported as exactly that.
+    expect(promoted.proposedInputs).toEqual([{ name: "step0_path", from: "step0.path" }]);
+  });
+
+  it("records the outcome the result reported, including failure", () => {
+    const events = [
+      {
+        type: "tool_call",
+        eventId: "evt_f1",
+        sessionId: "sess",
+        causalRef: { causalSequence: 1 },
+        toolName: "vendor_check",
+        callId: "call_ok",
+        parameters: { id: "row-1" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_f2",
+        sessionId: "sess",
+        causalRef: { causalSequence: 2 },
+        callId: "call_ok",
+        result: { ok: true },
+        isError: false,
+      },
+      {
+        type: "tool_call",
+        eventId: "evt_f3",
+        sessionId: "sess",
+        causalRef: { causalSequence: 3 },
+        toolName: "vendor_check",
+        callId: "call_bad",
+        parameters: { id: "row-2" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_f4",
+        sessionId: "sess",
+        causalRef: { causalSequence: 4 },
+        callId: "call_bad",
+        result: { ok: false },
+        isError: true,
+      },
+    ];
+    const recipe = recordCallsFromEvents("wf_outcomes", events)!;
+    expect(recipe.workflow.steps[0]!.observed).toEqual({ outcome: "succeeded" });
+    expect(recipe.workflow.steps[1]!.observed).toEqual({ outcome: "failed" });
   });
 });
