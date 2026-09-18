@@ -34,6 +34,12 @@ import {
   projectEnrichedToolParameters,
 } from "./evidence-normalization.js";
 
+import {
+  RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
+} from "./workflow-call-recorder.js";
 const DEFAULT_HOME_DIR = homedir();
 
 export type ParameterPrimitiveKind =
@@ -661,6 +667,43 @@ export interface MetadataProjectionOptions {
  * Redaction metadata reflects which fields were dropped (`drop`) or
  * normalized (`mask`).
  */
+/**
+ * Keeps the reference record a reference-aware caller produced: `{argument: {reference, path}}` with
+ * opaque identifiers and index/key paths only. Values never appear here, so this needs no masking.
+ */
+function projectRecordedReferences(
+  input: unknown,
+): Record<string, { reference: string; path: Array<string | number> }> | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const projected: Record<string, { reference: string; path: Array<string | number> }> = {};
+  for (const [argument, value] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const reference = (value as { reference?: unknown }).reference;
+    if (typeof reference !== "string" || reference.length === 0 || reference.length > 512) continue;
+    const rawPath = (value as { path?: unknown }).path;
+    const path: Array<string | number> = [];
+    let valid = true;
+    if (rawPath !== undefined) {
+      if (!Array.isArray(rawPath) || rawPath.length > 32) continue;
+      for (const part of rawPath) {
+        if (typeof part === "number" && Number.isFinite(part)) {
+          path.push(part);
+          continue;
+        }
+        if (typeof part === "string" && part.length <= 128) {
+          path.push(part);
+          continue;
+        }
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) continue;
+    projected[argument] = { reference, path };
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
   options: MetadataProjectionOptions = {},
@@ -694,6 +737,11 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
+  // References the caller's program used, as opaque scoped identifiers with the field they addressed.
+  // They carry no values, so they survive privacy filtering; anything malformed is dropped rather
+  // than guessed at.
+  const recordedReferences = projectRecordedReferences(event.metadata?.references);
+  if (recordedReferences) metadata.references = recordedReferences;
   if (sessionKind !== undefined) {
     metadata.sessionKind = sessionKind;
   }
@@ -721,6 +769,24 @@ export function projectEventToMetadataOnly(
       string,
       unknown
     >;
+  }
+
+  // The per-call workflow carrier is the record the general compiler consumes. It is
+  // re-read through the strict reader (frozen carrier vocabulary only) and copied by
+  // value; literal argument values ride along because they are what the workflow is
+  // made of, while private leaves were already replaced by local `private:` references.
+  const workflowCall = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+  if (workflowCall !== undefined) {
+    metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = JSON.parse(JSON.stringify(workflowCall)) as Record<
+      string,
+      unknown
+    >;
+  }
+  const workflowResult = readWorkflowResultCarrier(
+    event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+  );
+  if (workflowResult !== undefined) {
+    metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = workflowResult;
   }
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec

@@ -47,6 +47,12 @@ export interface RedactionConfig {
   maxStringLength?: number;
   /** Field names classified as local-only that should be stripped or masked */
   localOnlyFields?: string[];
+  /**
+   * Local-only hook invoked for every placeholder substitution, with the placeholder
+   * string and the original value it replaced. The workflow capture uses it to keep a
+   * private value recoverable on this machine without ever carrying it upstream.
+   */
+  onRedact?: (placeholder: string, original: JsonValue) => void;
   /** Custom secret scanner instance */
   scanner?: ContentScanner;
 }
@@ -231,6 +237,7 @@ export class RedactionEngine {
         changed = true;
         patterns.push(`env_var:${name}`);
         fingerprints.push(placeholder);
+        this.config.onRedact?.(placeholder, secret);
       }
     }
 
@@ -242,6 +249,7 @@ export class RedactionEngine {
         changed = true;
         patterns.push("custom_secret");
         fingerprints.push(fingerprint);
+        this.config.onRedact?.(placeholder, secret);
       }
     }
 
@@ -257,6 +265,7 @@ export class RedactionEngine {
           current = current.slice(0, m.start) + placeholder + current.slice(m.end);
           changed = true;
           patterns.push(m.patternId);
+          this.config.onRedact?.(placeholder, m.match);
           fingerprints.push(fp);
         }
       }
@@ -352,6 +361,7 @@ export class RedactionEngine {
               continue;
             }
             result[key] = `[REDACTED_LOCAL_FIELD:${key}]`;
+            this.config.onRedact?.(`[REDACTED_LOCAL_FIELD:${key}]`, val as JsonValue);
             continue;
           }
 

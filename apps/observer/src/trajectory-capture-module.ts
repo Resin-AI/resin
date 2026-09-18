@@ -22,6 +22,7 @@ import {
   type TrajectoryAttributionResolverFn,
   TrajectoryCaptureCoordinator,
 } from "./analytics/index.js";
+import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
@@ -301,6 +302,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         sessionRepository,
         syncRepository,
         dbConnection,
+        // The daemon's shared store: redaction placeholders stay recoverable locally so
+        // recorded workflows can resolve private values on this machine at execution.
+        privateValueStore: FilePrivateValueStore.default(),
       });
     for (const decoder of this.decoders) {
       this.normalizationPipeline.registerDecoder(decoder);

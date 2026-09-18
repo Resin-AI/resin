@@ -4568,7 +4568,7 @@ var init_tools = __esm({
       schema: external_exports.record(external_exports.unknown()).optional()
     });
     ToolRuntimeRequirementSchema = external_exports.object({
-      runtime: external_exports.enum(["deno", "node", "python", "wasm", "shell", "builtin"]),
+      runtime: external_exports.enum(["deno", "node", "python", "wasm", "shell", "builtin", "recorded-workflow"]),
       minRuntimeVersion: external_exports.string().optional(),
       memoryLimitMb: external_exports.number().int().positive().default(128),
       timeoutMs: external_exports.number().int().positive().default(3e4),
@@ -8904,6 +8904,20 @@ var init_tool_link_evidence = __esm({
   }
 });
 
+// packages/contracts/dist/recorded-workflow.js
+var init_recorded_workflow = __esm({
+  "packages/contracts/dist/recorded-workflow.js"() {
+    "use strict";
+  }
+});
+
+// packages/contracts/dist/agent-arguments.js
+var init_agent_arguments = __esm({
+  "packages/contracts/dist/agent-arguments.js"() {
+    "use strict";
+  }
+});
+
 // packages/contracts/dist/index.js
 var init_dist = __esm({
   "packages/contracts/dist/index.js"() {
@@ -8925,6 +8939,8 @@ var init_dist = __esm({
     init_computation_evidence();
     init_deterministic_command_sequence();
     init_tool_link_evidence();
+    init_recorded_workflow();
+    init_agent_arguments();
   }
 });
 

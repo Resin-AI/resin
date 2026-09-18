@@ -8,11 +8,21 @@ import {
   CapabilityManifestSchema,
   type CommandCapability,
   type FsCapability,
+  IdentifierSchema,
+  type RecordedWorkflow,
   type ToolManifest,
   ToolManifestSchema,
+  type WorkflowJsonValue,
   canonicalJson,
   normalizeSha256,
+  validateRecordedWorkflow,
 } from "@resin/contracts";
+import {
+  FilePrivateValueStore,
+  type PrivateValueStore,
+  RESIN_INVOKE_TOOL_RUNTIME,
+  resolvePrivateReference,
+} from "@resin/observer";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
@@ -22,12 +32,18 @@ import {
   BundleSignatureDataSchema,
   CapabilityBrokerManager,
   type CapabilityPolicyEngine,
+  type CompiledWorkflowArtifact,
   DEFAULT_BUNDLE_LIMITS,
   type KeyStore,
+  RESIN_PROCESS_RUNTIME,
+  RESIN_PROGRAM_RUNTIME,
+  type RuntimeAdapter,
+  RuntimeAdapterRegistry,
   ToolBundleLoader,
   WorkerProcess,
   createInvocationGrant,
   encodeDeterministicTar,
+  instantiateRecordedWorkflow,
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
@@ -36,6 +52,8 @@ import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
+
+import { composedResultValue } from "../meta/invoke-tool.js";
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -60,6 +78,24 @@ export interface LocalArtifactExecuteParams {
   onProgress?: (progress: number, total?: number) => void;
 }
 
+/**
+ * What a host needs to build the runtime families it can execute, for one invocation.
+ *
+ * `routeToHost` is the invocation's own routing, so a step the host reaches the same way it reached
+ * the original call keeps the workspace, the deadline and the cancellation that apply now.
+ */
+export interface RecordedWorkflowHostContext {
+  manifest: ToolManifest;
+  workspace: WorkspaceContext;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  routeToHost: (request: {
+    name: string;
+    connection?: string;
+    parameters: Record<string, unknown>;
+  }) => Promise<CallToolResult>;
+}
+
 export interface LocalArtifactExecutorOptions {
   cache: ArtifactCache;
   loader?: ToolBundleLoader | (() => ToolBundleLoader);
@@ -72,6 +108,31 @@ export interface LocalArtifactExecutorOptions {
   denoExecutable?: string;
   resinHome?: string;
   requireSignature?: boolean;
+  /**
+   * Dispatches a recorded workflow's step to its callable through the same routing the
+   * original call used. Required for `recorded-workflow` artifacts; without it a plan
+   * cannot execute and the call reports that honestly.
+   */
+  stepInvoker?: (request: {
+    name: string;
+    connection?: string;
+    parameters: Record<string, unknown>;
+    context: WorkspaceContext;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }) => Promise<CallToolResult>;
+  /**
+   * Runtime families this host can execute a recorded plan through, besides the call routing every
+   * host has. A plan naming a family no host provides fails with that reason instead of a
+   * substitute behaviour, so a recording of ordinary tools runs only where the host can really
+   * reach them.
+   *
+   * The hosts are built per invocation because a step that goes back through this host's routing
+   * needs the invoking workspace, its deadline and its cancellation.
+   */
+  recordedWorkflowAdapters?: (host: RecordedWorkflowHostContext) => readonly RuntimeAdapter[];
+  /** Store private workflow references resolve against; defaults to the daemon store. */
+  privateValueStore?: PrivateValueStore;
 }
 
 function checkExecutable(filePath: string): boolean {
@@ -221,6 +282,17 @@ function scanArtifactForBareImports(
   };
 }
 
+/**
+ * Whether an identity may scope a private reference. It is the same identifier the contracts use
+ * for a workspace (`WorkspaceRecordSchema.workspaceId`), so every workspace this product issues —
+ * a bootstrapped project UUID or a path-derived `ws_*` id — qualifies, while an absent, empty, or
+ * malformed value does not. A value that is not a usable identity is not an identity: it makes the
+ * reference unavailable rather than globally available.
+ */
+function isUsableWorkspaceId(value: unknown): value is string {
+  return typeof value === "string" && IdentifierSchema.safeParse(value).success;
+}
+
 function matchesManifestDigest(manifest: ToolManifest, expectedDigest: string): boolean {
   try {
     const normExpected = normalizeSha256(expectedDigest, false);
@@ -247,6 +319,9 @@ export class LocalArtifactExecutor {
   private readonly denoExecutable?: string;
   private readonly resinHome?: string;
   private readonly requireSignature?: boolean;
+  private readonly stepInvoker?: LocalArtifactExecutorOptions["stepInvoker"];
+  private readonly recordedWorkflowAdapters?: LocalArtifactExecutorOptions["recordedWorkflowAdapters"];
+  private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private managedToolAccess?: ManagedToolAccess;
 
   constructor(options: LocalArtifactExecutorOptions) {
@@ -261,6 +336,9 @@ export class LocalArtifactExecutor {
     this.denoExecutable = options.denoExecutable;
     this.resinHome = options.resinHome;
     this.requireSignature = options.requireSignature;
+    this.stepInvoker = options.stepInvoker;
+    this.recordedWorkflowAdapters = options.recordedWorkflowAdapters;
+    this.privateValueStore = options.privateValueStore;
   }
 
   setManagedToolAccess(access: ManagedToolAccess): void {
@@ -692,6 +770,21 @@ export class LocalArtifactExecutor {
       }
     }
 
+    // A recorded-workflow artifact is a compiled plan, not a Deno module: the verified
+    // entrypoint bytes are the frozen RecordedWorkflow, executed host-side through the
+    // same routing the original calls used. The worker sandbox cannot dispatch tool
+    // calls, so the plan runs here under the executor's own permissions.
+    if (manifest.runtime?.runtime === "recorded-workflow") {
+      return await this.executeRecordedWorkflowArtifact(
+        entrypointPath,
+        parameters,
+        context,
+        manifest,
+        params.signal,
+        params.timeoutMs,
+      );
+    }
+
     // 6. Set up invocation workspace root and capabilities
     const workspaceRoot = path.resolve(
       context.projectRoot ??
@@ -899,6 +992,187 @@ export class LocalArtifactExecutor {
     } finally {
       params.signal?.removeEventListener("abort", onAbort);
       brokerManager.cleanupInvocation(invocationId);
+    }
+  }
+
+  /**
+   * Executes a verified recorded-workflow artifact. The plan is the frozen
+   * RecordedWorkflow the compiler produced; each step dispatches through `stepInvoker`
+   * (the same routing the original call used) and private references resolve from the
+   * local value store. A plan that needs an adapter or a value this host does not have
+   * fails with the actual reason rather than a substituted behavior.
+   */
+  private async executeRecordedWorkflowArtifact(
+    entrypointPath: string,
+    parameters: JsonRpcParams,
+    context: WorkspaceContext,
+    manifest: ToolManifest,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<CallToolResult> {
+    const fail = (text: string): CallToolResult => ({
+      isError: true,
+      content: [{ type: "text", text }],
+    });
+    const stepInvoker = this.stepInvoker;
+    let plan: RecordedWorkflow;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(entrypointPath, "utf8"));
+      const validation = validateRecordedWorkflow(parsed);
+      if (!validation.valid) {
+        return fail(
+          `Recorded workflow artifact is not a valid plan: ${validation.errors.join("; ")}`,
+        );
+      }
+      plan = parsed as RecordedWorkflow;
+    } catch (err) {
+      return fail(
+        `Failed to read recorded workflow artifact: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // A plan that routes a step back through this host needs the dispatcher; a plan that only runs
+    // programs of its own does not, so the refusal is per requirement rather than per plan.
+    const requiredRuntimes = [...new Set(plan.steps.map((step) => step.callable.runtime))];
+    if (!stepInvoker && requiredRuntimes.includes(RESIN_INVOKE_TOOL_RUNTIME)) {
+      return fail(
+        "This recorded-workflow tool needs a step dispatcher, which this executor was not given",
+      );
+    }
+
+    const adapters = new RuntimeAdapterRegistry();
+    if (this.recordedWorkflowAdapters) {
+      const host: RecordedWorkflowHostContext = {
+        manifest,
+        workspace: context,
+        ...(signal ? { signal } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        routeToHost: async (request) => {
+          if (!stepInvoker) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "Step dispatcher is not ready" }],
+            };
+          }
+          return await stepInvoker({
+            name: request.name,
+            ...(request.connection ? { connection: request.connection } : {}),
+            parameters: request.parameters,
+            context,
+            ...(signal ? { signal } : {}),
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          });
+        },
+      };
+      for (const adapter of this.recordedWorkflowAdapters(host)) {
+        if (adapters.has(adapter.runtime)) continue;
+        adapters.register(adapter);
+      }
+    }
+    // Running a recorded program is a command execution, so it needs the grant a command needs. A
+    // plan the manifest does not authorize is refused here rather than run on the host's account.
+    const programRuntimes = requiredRuntimes.filter(
+      (runtime) => runtime === RESIN_PROCESS_RUNTIME || runtime === RESIN_PROGRAM_RUNTIME,
+    );
+    if (programRuntimes.length > 0) {
+      const capabilities = CapabilityManifestSchema.safeParse(manifest.capabilities ?? {});
+      const granted = capabilities.success
+        ? capabilities.data.command?.allowShellExecution === true
+        : false;
+      if (!granted) {
+        return fail(
+          `this recorded workflow runs a program (${programRuntimes.join(", ")}) but its manifest does not grant command execution`,
+        );
+      }
+    }
+    if (stepInvoker && !adapters.has(RESIN_INVOKE_TOOL_RUNTIME))
+      adapters.register({
+        runtime: RESIN_INVOKE_TOOL_RUNTIME,
+        call: async (request) => {
+          const result = await stepInvoker({
+            name: request.step.callable.name,
+            ...(request.step.callable.connection
+              ? { connection: request.step.callable.connection }
+              : {}),
+            parameters: request.arguments as Record<string, unknown>,
+            context,
+            ...(signal ? { signal } : {}),
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          });
+          if (result.isError) {
+            const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+            throw new Error(text ?? `step '${request.step.id}' failed`);
+          }
+          return composedResultValue(result);
+        },
+      });
+
+    const store = this.privateValueStore ?? FilePrivateValueStore.default();
+    const artifact: CompiledWorkflowArtifact = {
+      plan,
+      digest: "",
+      name: plan.workflowId,
+      inputSchema: {},
+      outputContract: { fromStep: plan.steps[plan.steps.length - 1]?.id ?? "", callable: "" },
+      requiredRuntimes,
+      requiredPrivateReferences: [...(plan.privateReferences ?? [])],
+      permissions: [],
+    };
+    // A private reference is a name, not a capability: the plan may resolve only the references
+    // it declares, and only when the value was recorded for the workspace this invocation runs
+    // in. Both identities must be present, well formed, and equal — a missing or malformed one is
+    // unavailable, never global, so an unscoped entry is not claimed by whoever reads it first and
+    // an invocation without a workspace identity resolves nothing. A workflow that merely knows
+    // another recording's exact reference string is refused here: the recorded origin decides,
+    // never the shape of the string.
+    const declaredPrivateReferences = new Set(plan.privateReferences ?? []);
+    const executingWorkspaceId = context.workspaceId;
+    const callable = instantiateRecordedWorkflow(artifact, {
+      adapters,
+      ...(executingWorkspaceId ? { access: { workspaceId: executingWorkspaceId } } : {}),
+      resolvePrivate: (reference: string, access?: { workspaceId?: string }) => {
+        if (!declaredPrivateReferences.has(reference)) {
+          throw new Error(
+            `private reference '${reference}' is not declared by this workflow's recorded plan`,
+          );
+        }
+        const recordedWorkspaceId = store.origin?.(reference)?.workspaceId;
+        if (!isUsableWorkspaceId(recordedWorkspaceId)) {
+          throw new Error(
+            `private reference '${reference}' has no usable recorded workspace origin and cannot be resolved here`,
+          );
+        }
+        const invokingWorkspaceId = access?.workspaceId;
+        if (!isUsableWorkspaceId(invokingWorkspaceId)) {
+          throw new Error(
+            `private reference '${reference}' cannot be resolved without a usable invoking workspace identity`,
+          );
+        }
+        if (invokingWorkspaceId !== recordedWorkspaceId) {
+          throw new Error(
+            `private reference '${reference}' was recorded for another workspace and cannot be resolved here`,
+          );
+        }
+        return resolvePrivateReference(store, reference) as WorkflowJsonValue;
+      },
+    });
+    try {
+      const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
+      if (execution.status !== "completed") {
+        return fail(execution.error ?? "Recorded workflow execution failed");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(execution.result ?? null),
+          },
+        ],
+      };
+    } catch (err) {
+      return fail(
+        `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }

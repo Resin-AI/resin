@@ -44,6 +44,15 @@ export interface NormalizationPipelineOptions {
   syncRepository?: SyncRepository;
   dbConnection?: LocalDatabaseConnection;
   schemaVersion?: string;
+  /**
+   * Local store that receives each redaction's placeholder→original mapping, so a
+   * recorded workflow can recover private values on this machine at execution time.
+   * Defaults to the shared daemon store.
+   */
+  privateValueStore?: {
+    get(key: string): unknown | undefined;
+    set(key: string, value: unknown): void;
+  };
 }
 
 /**
@@ -110,7 +119,15 @@ export class NormalizationPipeline {
 
   constructor(options: NormalizationPipelineOptions = {}) {
     this.decoderRegistry = options.decoderRegistry ?? new DecoderRegistry();
-    this.redactionEngine = new RedactionEngine(options.redactionConfig);
+    const privateValueStore = options.privateValueStore;
+    const userOnRedact = options.redactionConfig?.onRedact;
+    this.redactionEngine = new RedactionEngine({
+      ...options.redactionConfig,
+      onRedact: (placeholder, original) => {
+        privateValueStore?.set(placeholder, original);
+        userOnRedact?.(placeholder, original);
+      },
+    });
     this.deduplicator =
       options.deduplicator ??
       new NormalizationDeduplicator({

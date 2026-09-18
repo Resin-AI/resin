@@ -56,3 +56,5 @@ export interface ToolSpec {
 }
 
 export const CONTRACTS_VERSION = "1.0.0";
+export * from "./recorded-workflow.js";
+export * from "./agent-arguments.js";
