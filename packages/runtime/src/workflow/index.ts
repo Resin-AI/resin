@@ -5,3 +5,4 @@ export * from "./workflow-executor.js";
 export * from "./recorded-workflow.js";
 export * from "./compile-recorded-workflow.js";
 export * from "./reference-invocation.js";
+export * from "./agent-tool-session.js";
