@@ -74,6 +74,15 @@ export interface LocalWorkflowValidatorOptions {
    * somebody else's session must not be able to read this operator's credentials.
    */
   environment?: Record<string, string>;
+  /**
+   * The workspace this replay runs for.
+   *
+   * A private reference is a name, not a capability. The replay resolves only references whose
+   * recorded origin is this workspace, exactly as an invocation through the artifact executor does,
+   * so a plan that names a value another workspace recorded is refused here rather than served. A
+   * replay that names no workspace resolves nothing.
+   */
+  workspaceId?: string;
   /** Store the plan's local references resolve from; defaults to the daemon's store. */
   privateValues?: PrivateValueStore;
   /** Directory the replay's programs run in. Defaults to a fresh disposable directory. */
@@ -108,6 +117,31 @@ export function createLocalWorkflowValidator(
       };
     }
     const privateValues = options.privateValues ?? FilePrivateValueStore.default();
+    // Read once per replay: the plan's references are resolved through the same ownership rule the
+    // executor applies, so a workflow that merely knows another recording's exact reference string
+    // is refused by the replay as firmly as it is refused at invocation time.
+    const replayWorkspaceId = options.workspaceId;
+    const resolveOwned = (reference: string): WorkflowJsonValue => {
+      const recorded = privateValues.origin?.(reference)?.workspaceId;
+      const usable = (value: unknown): value is string =>
+        typeof value === "string" && value.trim().length > 0 && value !== "unknown";
+      if (!usable(recorded)) {
+        throw new Error(
+          `private reference '${reference}' has no usable recorded workspace origin and cannot be resolved by a replay`,
+        );
+      }
+      if (!usable(replayWorkspaceId)) {
+        throw new Error(
+          `private reference '${reference}' cannot be resolved without the workspace this replay runs for`,
+        );
+      }
+      if (recorded !== replayWorkspaceId) {
+        throw new Error(
+          `private reference '${reference}' was recorded for another workspace and cannot be resolved by this replay`,
+        );
+      }
+      return resolvePrivateReference(privateValues, reference) as WorkflowJsonValue;
+    };
 
     // A replay may write files, so it never runs in the project the user is working in. The
     // directory lives only as long as the replay does.
@@ -136,8 +170,7 @@ export function createLocalWorkflowValidator(
         candidates,
         adapters,
         workspaceDir,
-        resolvePrivate: (reference: string) =>
-          resolvePrivateReference(privateValues, reference) as WorkflowJsonValue,
+        resolvePrivate: resolveOwned,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
       if (environment === undefined) return { verdicts: [] };

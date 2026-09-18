@@ -586,6 +586,9 @@ export class WorkflowValidationWorker {
         if (grant.workspaceId !== this.workspaceId) return undefined;
         return { envelopeId: grant.envelopeId, workspaceId: grant.workspaceId };
       },
+      // The replay resolves references the way an invocation does: only the ones this identity's
+      // workspace recorded.
+      workspaceId: this.workspaceId,
       ...(this.privateValues === undefined ? {} : { privateValues: this.privateValues }),
       ...(this.dispatch === undefined ? {} : { dispatch: this.dispatch }),
       ...(this.environment === undefined ? {} : { environment: this.environment }),

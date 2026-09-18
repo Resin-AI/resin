@@ -108,12 +108,16 @@ function dispatchStub() {
   });
 }
 
-/** The demonstration's values, kept where every value of a recording is kept: locally. */
-function privateValues(): InMemoryPrivateValueStore {
+/**
+ * The demonstration's values, kept where every value of a recording is kept: locally, and stamped
+ * with the workspace that recorded them — which is what lets a replay resolve them and nothing
+ * else.
+ */
+function privateValues(workspaceId: string = WORKSPACE_ID): InMemoryPrivateValueStore {
   const store = new InMemoryPrivateValueStore();
-  store.set("private:replay:seed", "held-out-seed");
-  store.set("private:replay:produced", { token: "tok(held-out-seed)" });
-  store.set("private:replay:consumed", { echoed: "tok(held-out-seed)" });
+  store.set("private:replay:seed", "held-out-seed", { workspaceId });
+  store.set("private:replay:produced", { token: "tok(held-out-seed)" }, { workspaceId });
+  store.set("private:replay:consumed", { echoed: "tok(held-out-seed)" }, { workspaceId });
   return store;
 }
 
@@ -330,6 +334,34 @@ describe("WorkflowValidationWorker", () => {
     ]);
     expect(decision.verification?.status).toBe("verified");
     expect(dispatch).toHaveBeenCalled();
+  });
+
+  it("refuses to replay a recording whose references another workspace recorded", async () => {
+    // The same recording, but its values were recorded by a different workspace: a reference is a
+    // name, not a capability, so the replay must not resolve them even though the strings match. A
+    // refusal is not an answer — the ask stays pending, and the reason is reported.
+    const plan = recordedPlan();
+    const dispatch = dispatchStub();
+    const logs: string[] = [];
+    const { calls, fetchImpl } = recordingFetch((url) =>
+      url.includes("/pending") ? jsonResponse({ requests: [requestFor(plan)] }) : jsonResponse({}),
+    );
+    const worker = new WorkflowValidationWorker({
+      client: clientOver(fetchImpl),
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      privateValues: privateValues(OTHER_WORKSPACE_ID),
+      dispatch,
+      now: () => new Date(DECIDED_AT),
+      log: (message) => logs.push(message),
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ pending: 1, answered: 0, refused: 1 });
+    // Only the listing happened: no decision was posted and the replay never re-made a call.
+    expect(calls).toHaveLength(1);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("was not replayed");
   });
 
   it("refuses an ask that names another workspace, without posting anything", async () => {
