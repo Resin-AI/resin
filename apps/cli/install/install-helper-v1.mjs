@@ -8905,9 +8905,443 @@ var init_tool_link_evidence = __esm({
 });
 
 // packages/contracts/dist/recorded-workflow.js
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isJsonValue(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return true;
+  if (typeof value === "number")
+    return Number.isFinite(value);
+  if (Array.isArray(value))
+    return value.every(isJsonValue);
+  if (isPlainObject(value))
+    return Object.values(value).every(isJsonValue);
+  return false;
+}
+function validateRecordedWorkflow(value) {
+  const errors = [];
+  if (!isPlainObject(value))
+    return { valid: false, errors: ["workflow must be an object"] };
+  if (value.schemaVersion !== RECORDED_WORKFLOW_SCHEMA_VERSION) {
+    errors.push(`unsupported schemaVersion: ${String(value.schemaVersion)}`);
+  }
+  if (typeof value.workflowId !== "string" || value.workflowId.length === 0) {
+    errors.push("workflowId must be a non-empty string");
+  }
+  const inputs = Array.isArray(value.inputs) ? value.inputs : null;
+  if (!inputs)
+    errors.push("inputs must be an array");
+  const inputNames = /* @__PURE__ */ new Set();
+  const inputTypes = /* @__PURE__ */ new Map();
+  for (const input of inputs ?? []) {
+    if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
+      errors.push("every input needs a non-empty name");
+      continue;
+    }
+    if (inputNames.has(input.name))
+      errors.push(`duplicate input: ${input.name}`);
+    inputNames.add(input.name);
+    if (input.type !== "string" && input.type !== "number" && input.type !== "boolean" && input.type !== "object" && input.type !== "array") {
+      errors.push(`input ${input.name} needs a recorded type`);
+    } else {
+      inputTypes.set(input.name, input.type);
+    }
+  }
+  const declaredPrivates = /* @__PURE__ */ new Set();
+  const privateReferences = value.privateReferences;
+  if (privateReferences !== void 0) {
+    if (!Array.isArray(privateReferences)) {
+      errors.push("privateReferences must be an array when present");
+    } else {
+      for (const reference of privateReferences) {
+        if (typeof reference !== "string" || reference.length === 0) {
+          errors.push("every private reference must be a non-empty string");
+          continue;
+        }
+        declaredPrivates.add(reference);
+      }
+    }
+  }
+  const steps = Array.isArray(value.steps) ? value.steps : null;
+  if (!steps || steps.length === 0)
+    errors.push("steps must be a non-empty array");
+  const stepIds = /* @__PURE__ */ new Set();
+  for (const step of steps ?? []) {
+    if (!isPlainObject(step) || typeof step.id !== "string" || step.id.length === 0) {
+      errors.push("every step needs a non-empty id");
+      continue;
+    }
+    if (stepIds.has(step.id))
+      errors.push(`duplicate step id: ${step.id}`);
+    stepIds.add(step.id);
+    if (typeof step.callId !== "string" || step.callId.length === 0) {
+      errors.push(`step ${step.id} needs the callId it was recorded from`);
+    }
+    const callable = step.callable;
+    if (!isPlainObject(callable) || typeof callable.runtime !== "string" || typeof callable.name !== "string" || callable.name.length === 0) {
+      errors.push(`step ${step.id} needs a callable with a runtime and a recorded name`);
+    }
+    const failurePolicy = step.failurePolicy;
+    if (!isPlainObject(failurePolicy) || failurePolicy.onError !== "abort" && failurePolicy.onError !== "continue" || failurePolicy.policy !== "recorded" && failurePolicy.policy !== "default") {
+      errors.push(`step ${step.id} needs a failurePolicy with onError and policy`);
+    }
+    const observed = step.observed;
+    if (!isPlainObject(observed) || observed.outcome !== "succeeded" && observed.outcome !== "failed" && observed.outcome !== "unknown") {
+      errors.push(`step ${step.id} needs an observed outcome`);
+    }
+    const permissions = step.permissions;
+    if (permissions !== void 0 && !isJsonValue(permissions)) {
+      errors.push(`step ${step.id} permissions must be JSON`);
+    }
+  }
+  const order = /* @__PURE__ */ new Map();
+  (steps ?? []).forEach((step, index) => {
+    if (isPlainObject(step) && typeof step.id === "string")
+      order.set(step.id, index);
+  });
+  for (const step of steps ?? []) {
+    if (!isPlainObject(step) || typeof step.id !== "string")
+      continue;
+    const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn : null;
+    if (!dependsOn) {
+      errors.push(`step ${step.id} dependsOn must be an array`);
+    }
+    for (const dependency of dependsOn ?? []) {
+      if (typeof dependency !== "string" || !order.has(dependency)) {
+        errors.push(`step ${step.id} depends on unknown step ${String(dependency)}`);
+        continue;
+      }
+      if ((order.get(dependency) ?? 0) >= (order.get(step.id) ?? 0)) {
+        errors.push(`step ${step.id} depends on ${dependency}, which does not come earlier`);
+      }
+    }
+    const args = Array.isArray(step.arguments) ? step.arguments : null;
+    if (!args) {
+      errors.push(`step ${step.id} arguments must be an array`);
+      continue;
+    }
+    for (const argument of args) {
+      if (!isPlainObject(argument) || typeof argument.name !== "string") {
+        errors.push(`step ${step.id} has an argument without a name`);
+        continue;
+      }
+      const source = argument.source;
+      if (!isPlainObject(source) || typeof source.kind !== "string") {
+        errors.push(`step ${step.id} argument ${argument.name} needs a value source`);
+        continue;
+      }
+      if (source.kind === "input" && !inputNames.has(String(source.name))) {
+        errors.push(`step ${step.id} argument ${argument.name} reads unknown input ${String(source.name)}`);
+      }
+      if (source.kind === "result") {
+        const stepRef = String(source.stepId);
+        if (!order.has(stepRef)) {
+          errors.push(`step ${step.id} argument ${argument.name} reads unknown step ${stepRef}`);
+        } else if ((order.get(stepRef) ?? 0) >= (order.get(step.id) ?? 0)) {
+          errors.push(`step ${step.id} argument ${argument.name} reads ${stepRef}, which does not come earlier`);
+        }
+        const path10 = source.path;
+        if (!Array.isArray(path10) || !path10.every((part) => typeof part === "string" || typeof part === "number")) {
+          errors.push(`step ${step.id} argument ${argument.name} has an invalid result path`);
+        }
+      }
+      if (source.kind === "literal" && !isJsonValue(source.value)) {
+        errors.push(`step ${step.id} argument ${argument.name} has a non-JSON literal`);
+      }
+      if (source.kind === "unresolved" && typeof source.reason !== "string") {
+        errors.push(`step ${step.id} argument ${argument.name} needs a reason for its unknown origin`);
+      }
+      if (source.kind === "template") {
+        const problems = [];
+        const walk = (template, where) => {
+          if (!isPlainObject(template)) {
+            problems.push(`${where} is not a template node`);
+            return;
+          }
+          switch (template.type) {
+            case "literal":
+              if (!isJsonValue(template.value))
+                problems.push(`${where} has a non-JSON literal`);
+              return;
+            case "input":
+              if (typeof template.name !== "string" || !inputNames.has(template.name)) {
+                problems.push(`${where} reads unknown input ${String(template.name)}`);
+              }
+              return;
+            case "result": {
+              const stepRef = typeof template.stepId === "string" ? template.stepId : "";
+              if (!order.has(stepRef))
+                problems.push(`${where} reads unknown step ${stepRef}`);
+              else if ((order.get(stepRef) ?? 0) >= (order.get(typeof step.id === "string" ? step.id : "") ?? 0)) {
+                problems.push(`${where} reads ${stepRef}, which does not come earlier`);
+              }
+              return;
+            }
+            case "private":
+              if (typeof template.reference !== "string" || !declaredPrivates.has(template.reference)) {
+                problems.push(`${where} reads undeclared private reference ${String(template.reference)}`);
+              }
+              return;
+            case "unresolved":
+              if (typeof template.reason !== "string")
+                problems.push(`${where} needs a reason`);
+              return;
+            case "object": {
+              if (!isPlainObject(template.entries)) {
+                problems.push(`${where} object entries must be an object`);
+                return;
+              }
+              for (const [key, entry] of Object.entries(template.entries)) {
+                walk(entry, `${where}.${key}`);
+              }
+              return;
+            }
+            case "array": {
+              if (!Array.isArray(template.items)) {
+                problems.push(`${where} array items must be an array`);
+                return;
+              }
+              template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
+              return;
+            }
+            case "program": {
+              if (template.language !== "shell" && template.language !== "python" && template.language !== "javascript" && template.language !== "typescript") {
+                problems.push(`${where} program needs the language it runs in`);
+              }
+              if (!isPlainObject(template.source)) {
+                problems.push(`${where} program needs the recorded text it resolves`);
+              } else {
+                walk(template.source, `${where}<text>`);
+              }
+              if (!Array.isArray(template.holes)) {
+                problems.push(`${where} program holes must be an array`);
+                return;
+              }
+              for (const [index, hole] of template.holes.entries()) {
+                if (!isPlainObject(hole) || typeof hole.token !== "number" || !Number.isInteger(hole.token) || hole.token < 0) {
+                  problems.push(`${where} hole ${index} must name a recorded token index`);
+                  continue;
+                }
+                walk(hole.binding, `${where}<token ${hole.token}>`);
+              }
+              return;
+            }
+            default:
+              problems.push(`${where} has unknown template type ${String(template.type)}`);
+          }
+        };
+        walk(source.template, `step ${step.id} argument ${argument.name}`);
+        errors.push(...problems);
+      }
+      if (source.kind === "private") {
+        if (typeof source.reference !== "string" || source.reference.length === 0) {
+          errors.push(`step ${step.id} argument ${argument.name} needs a private reference`);
+        } else if (!declaredPrivates.has(source.reference)) {
+          errors.push(`step ${step.id} argument ${argument.name} reads undeclared private reference '${source.reference}'`);
+        }
+      }
+      const provenance = argument.provenance;
+      if (provenance !== void 0) {
+        if (!isPlainObject(provenance) || provenance.standing !== "recorded" && provenance.standing !== "derived" && provenance.standing !== "candidate" || typeof provenance.rule !== "string") {
+          errors.push(`step ${step.id} argument ${argument.name} has an invalid provenance`);
+        } else if (provenance.standing === "candidate" && typeof provenance.missing !== "string") {
+          errors.push(`step ${step.id} argument ${argument.name} is a candidate without the missing fact`);
+        }
+      }
+    }
+    const callable = step.callable;
+    const program = isPlainObject(callable) ? callable.program : void 0;
+    if (program !== void 0) {
+      if (!isPlainObject(program) || program.kind !== "shell" && program.kind !== "python" && program.kind !== "javascript" && program.kind !== "typescript" || typeof program.source !== "string") {
+        errors.push(`step ${step.id} has an invalid recorded program`);
+      } else if (program.source.length === 0 && (!Array.isArray(program.argv) || program.argv.length === 0) && typeof program.argument !== "string") {
+        errors.push(`step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`);
+      }
+    }
+  }
+  const candidates = value.candidates;
+  if (candidates !== void 0) {
+    if (!Array.isArray(candidates)) {
+      errors.push("candidates must be an array when present");
+    } else {
+      for (const candidate of candidates) {
+        if (!isPlainObject(candidate) || typeof candidate.argument !== "string") {
+          errors.push("every candidate needs a step and an argument");
+          continue;
+        }
+        const stepId = typeof candidate.stepId === "string" ? candidate.stepId : "";
+        if (!order.has(stepId)) {
+          errors.push(`candidate names unknown step ${stepId}`);
+          continue;
+        }
+        const step = (steps ?? []).find((entry) => isPlainObject(entry) && entry.id === stepId);
+        const args = isPlainObject(step) && Array.isArray(step.arguments) ? step.arguments : [];
+        if (!args.some((entry) => isPlainObject(entry) && entry.name === candidate.argument)) {
+          errors.push(`candidate ${stepId}.${candidate.argument} names no such argument`);
+        }
+        const path10 = Array.isArray(candidate.path) ? candidate.path : [];
+        if (path10[0] === "tokens") {
+          if (!Number.isInteger(path10[1]) || path10[1] < 0 || path10.length !== 2) {
+            errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
+          }
+          const program = isPlainObject(step) ? step.callable : void 0;
+          const recorded = isPlainObject(program) ? program.program : void 0;
+          if (!isPlainObject(recorded) || recorded.argument !== candidate.argument) {
+            errors.push(`candidate ${stepId}.${candidate.argument} names a token of a program the step's record does not hold in that argument`);
+          }
+        }
+        const proposed = candidate.proposed;
+        if (!isPlainObject(proposed) || typeof proposed.kind !== "string") {
+          errors.push(`candidate ${stepId}.${candidate.argument} needs a proposal`);
+        } else if (proposed.kind === "result") {
+          const stepRef = String(proposed.stepId);
+          if (!order.has(stepRef)) {
+            errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
+          }
+        } else if (proposed.kind === "input") {
+          if (typeof proposed.name !== "string" || proposed.name.length === 0) {
+            errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
+          }
+          if (proposed.type !== "string" && proposed.type !== "number" && proposed.type !== "boolean" && proposed.type !== "object" && proposed.type !== "array") {
+            errors.push(`candidate ${stepId}.${candidate.argument} needs an input type`);
+          }
+        } else {
+          errors.push(`candidate ${stepId}.${candidate.argument} has an unknown proposal kind`);
+        }
+        if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
+          errors.push(`candidate ${stepId}.${candidate.argument} must name the fact the record is missing`);
+        }
+      }
+    }
+  }
+  const heldOut = value.heldOut;
+  if (heldOut !== void 0) {
+    if (!isPlainObject(heldOut)) {
+      errors.push("heldOut must be an object when present");
+    } else {
+      const entries = [
+        ["inputs", heldOut.inputs],
+        ["observed", heldOut.observed]
+      ];
+      for (const [label, list] of entries) {
+        if (!Array.isArray(list)) {
+          errors.push(`heldOut.${label} must be an array`);
+          continue;
+        }
+        for (const entry of list) {
+          if (!isPlainObject(entry)) {
+            errors.push(`every heldOut.${label} entry must be an object`);
+            continue;
+          }
+          if (!order.has(String(entry.stepId))) {
+            errors.push(`heldOut.${label} names unknown step ${String(entry.stepId)}`);
+          }
+          if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
+            errors.push(`heldOut.${label} reads undeclared local reference ${String(entry.reference)}`);
+          }
+          if (label === "inputs" && typeof entry.argument !== "string") {
+            errors.push("every heldOut.inputs entry needs the argument it was supplied for");
+          }
+        }
+      }
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+var RECORDED_WORKFLOW_SCHEMA_VERSION;
 var init_recorded_workflow = __esm({
   "packages/contracts/dist/recorded-workflow.js"() {
     "use strict";
+    RECORDED_WORKFLOW_SCHEMA_VERSION = 1;
+  }
+});
+
+// packages/contracts/dist/program-tokens.js
+var init_program_tokens = __esm({
+  "packages/contracts/dist/program-tokens.js"() {
+    "use strict";
+  }
+});
+
+// packages/contracts/dist/workflow-validation.js
+var WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ValidationAuthorizationSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
+var init_workflow_validation = __esm({
+  "packages/contracts/dist/workflow-validation.js"() {
+    "use strict";
+    init_zod();
+    init_canonical();
+    init_recorded_workflow();
+    WORKFLOW_VALIDATION_SCHEMA_VERSION = 1;
+    NonEmptyString = external_exports.string().min(1);
+    WorkflowValuePathSchema = external_exports.array(external_exports.union([external_exports.string(), external_exports.number().int().nonnegative()]));
+    ProposedBindingSchema = external_exports.union([
+      external_exports.object({
+        kind: external_exports.literal("result"),
+        stepId: NonEmptyString,
+        path: WorkflowValuePathSchema
+      }),
+      external_exports.object({
+        kind: external_exports.literal("input"),
+        name: NonEmptyString,
+        type: external_exports.enum(["string", "number", "boolean", "object", "array"])
+      })
+    ]);
+    ValidationAuthorizationSchema = external_exports.object({
+      envelopeId: NonEmptyString,
+      workspaceId: NonEmptyString,
+      digest: external_exports.string().optional()
+    });
+    PlanVerificationSchema = external_exports.object({
+      status: external_exports.enum(["verified", "incomplete", "failed"]),
+      reproduced: external_exports.array(external_exports.string()),
+      missed: external_exports.array(external_exports.object({ stepId: external_exports.string(), detail: external_exports.string() })),
+      dropped: external_exports.array(external_exports.object({ candidate: external_exports.unknown(), reason: external_exports.string() }))
+    });
+    VerdictSchema = external_exports.object({
+      candidate: external_exports.object({
+        stepId: NonEmptyString,
+        argument: NonEmptyString,
+        path: WorkflowValuePathSchema,
+        proposed: ProposedBindingSchema
+      }),
+      confirmed: external_exports.boolean(),
+      reason: external_exports.string().optional()
+    });
+    WorkflowValidationRequestSchema = external_exports.object({
+      schemaVersion: external_exports.literal(WORKFLOW_VALIDATION_SCHEMA_VERSION),
+      requestId: NonEmptyString,
+      workspaceId: NonEmptyString,
+      deviceId: NonEmptyString.optional(),
+      attempt: NonEmptyString,
+      planDigest: NonEmptyString,
+      evidenceDigest: NonEmptyString,
+      authorization: ValidationAuthorizationSchema.nullable(),
+      createdAt: NonEmptyString,
+      expiresAt: NonEmptyString.optional(),
+      plan: external_exports.unknown().superRefine((plan, context) => {
+        const validation = validateRecordedWorkflow(plan);
+        if (!validation.valid) {
+          context.addIssue({ code: external_exports.ZodIssueCode.custom, message: validation.errors.join("; ") });
+        }
+      })
+    });
+    WorkflowValidationDecisionSchema = external_exports.object({
+      schemaVersion: external_exports.literal(WORKFLOW_VALIDATION_SCHEMA_VERSION),
+      requestId: NonEmptyString,
+      attempt: NonEmptyString,
+      planDigest: NonEmptyString,
+      evidenceDigest: NonEmptyString,
+      environment: NonEmptyString,
+      verdicts: external_exports.array(VerdictSchema),
+      verification: PlanVerificationSchema.optional(),
+      accepted: external_exports.array(external_exports.object({
+        stepId: NonEmptyString,
+        argument: NonEmptyString,
+        path: WorkflowValuePathSchema
+      })),
+      decidedAt: NonEmptyString
+    });
   }
 });
 
@@ -8940,6 +9374,8 @@ var init_dist = __esm({
     init_deterministic_command_sequence();
     init_tool_link_evidence();
     init_recorded_workflow();
+    init_program_tokens();
+    init_workflow_validation();
     init_agent_arguments();
   }
 });
@@ -14982,16 +15418,16 @@ function getActiveVersion(resinHome) {
 import crypto4 from "node:crypto";
 var REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 var ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-function canonicalJson(val) {
+function canonicalJson2(val) {
   if (val === null || val === void 0 || Array.isArray(val) || Object.prototype.toString.call(val) !== "[object Object]") {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
-    return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
+    return `[${val.map((item) => canonicalJson2(item)).join(",")}]`;
   }
   const obj = val;
   const keys = Object.keys(obj).filter((key) => obj[key] !== void 0).sort();
-  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(obj[key])}`);
+  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson2(obj[key])}`);
   return `{${pairs.join(",")}}`;
 }
 function createPublicKeyFromInput(key) {
@@ -15018,7 +15454,7 @@ function createPublicKeyFromInput(key) {
 function verifyEd25519Signature(payload, signatureHex, publicKey) {
   try {
     const keyObject = createPublicKeyFromInput(publicKey);
-    const canonicalString = canonicalJson(payload);
+    const canonicalString = canonicalJson2(payload);
     const dataBuffer = Buffer.from(canonicalString, "utf8");
     const signatureBuffer = Buffer.from(signatureHex, "hex");
     return crypto4.verify(null, dataBuffer, keyObject, signatureBuffer);
@@ -15318,7 +15754,7 @@ function verifyManifest(manifestData, options = {}) {
     }
   }
   if (options.expectedDigest) {
-    const digestInput = options.rawManifestBytes ?? canonicalJson(manifest);
+    const digestInput = options.rawManifestBytes ?? canonicalJson2(manifest);
     const actualDigest = crypto4.createHash("sha256").update(digestInput).digest("hex");
     if (actualDigest !== options.expectedDigest) {
       errors.push(
