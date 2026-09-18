@@ -12,6 +12,10 @@ import {
   type CandidateValidationEnvironment,
   validateBindingCandidates,
 } from "../../src/workflow/binding-validation.js";
+import {
+  confirmPromotedPlan,
+  validateAndConfirmCandidates,
+} from "../../src/workflow/binding-validation.js";
 import { RuntimeAdapterRegistry } from "../../src/workflow/recorded-workflow.js";
 
 const TEST_RUNTIME = "test-transform";
@@ -239,5 +243,78 @@ describe("binding candidate validation by replay", () => {
     expect(unknownStep.reason).toContain("no step 'absent'");
     expect(unknownArgument.reason).toContain("no argument 'absent'");
     expect(unobserved.reason).toContain("observed no result for step 'unobserved'");
+  });
+});
+
+describe("the plan that results from accepting proposals", () => {
+  /** A plan whose second step reads the first one's token as a frozen literal. */
+  function plan(): RecordedWorkflow {
+    return recordedPlan({ type: "literal", value: "tok(alpha)" });
+  }
+
+  /** The demonstration: the same work, run on another seed, as the replay must see it. */
+  async function environment(missedConsume = false) {
+    const directory = await mkdtemp(join(tmpdir(), "resin-confirm-"));
+    workspaces.push(directory);
+    return {
+      adapters: transformAdapters(),
+      workspaceDir: directory,
+      inputs: { seed: "bravo" },
+      observed: {
+        derive: { token: "tok(bravo)" },
+        consume: missedConsume
+          ? { echoed: "something no binding produces" }
+          : { echoed: "tok(bravo)" },
+      },
+    };
+  }
+
+  const candidates: WorkflowBindingCandidate[] = [
+    {
+      stepId: "consume",
+      argument: "text",
+      path: [],
+      proposed: { kind: "result", stepId: "derive", path: ["token"] },
+      reason: "equal-to-earlier-result",
+      missing: "the value appeared after that call returned",
+    },
+  ];
+
+  it("keeps a proposal the combined plan reproduces", async () => {
+    const confirmed = await confirmPromotedPlan({
+      plan: plan(),
+      accepted: candidates,
+      environment: await environment(),
+    });
+    expect(confirmed.accepted).toEqual(candidates);
+    expect(confirmed.dropped).toEqual([]);
+    expect(confirmed.missed).toEqual([]);
+  });
+
+  it("decides proposals and confirms the combined plan in one step", async () => {
+    const outcomes = await validateAndConfirmCandidates({
+      plan: plan(),
+      candidates,
+      environment: await environment(),
+    });
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.accepted).toBe(true);
+  });
+
+  it("withdraws a proposal when the plan it would publish cannot reproduce the work", async () => {
+    const confirmed = await confirmPromotedPlan({
+      plan: plan(),
+      accepted: candidates,
+      environment: await environment(true),
+    });
+    // The proposal was withdrawn rather than published on the strength of its own check alone.
+    expect(confirmed.accepted).toEqual([]);
+    expect(confirmed.dropped).toHaveLength(1);
+    expect(confirmed.dropped[0]!.reason).toContain("consume");
+    // What is left is the recording, which is what the user actually ran.
+    expect(confirmed.plan.steps[1]!.arguments[0]!.source).toEqual({
+      kind: "template",
+      template: { type: "literal", value: "tok(alpha)" },
+    });
   });
 });

@@ -189,8 +189,11 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
         // a fixed setting than a value a caller would vary, and this recording cannot separate the
         // two — so the conservative reading wins and the value stays as recorded.
         if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
-        // A value an earlier call of this recording produced is that call's output, not an input.
-        if (resultValues.some((values) => values.has(String(value)))) continue;
+        // A value an EARLIER call of this recording minted is that call's output, not an input. The
+        // call being examined is excluded on purpose: a callable that echoes what it was given
+        // (an id it just minted, a name it was handed) would otherwise disqualify its own input,
+        // and whether the result has arrived yet must not change what is proposed.
+        if (mintedBefore(String(value), index, calls, resultValues, argumentValues)) continue;
         const inputName = inputNameOf(call.toolName, argument);
         const recorded = declaredInputValues.get(value);
         declaredInputValues.set(value, {
@@ -264,11 +267,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       // A value an earlier call MINTED is that call's output, so it is a result binding rather than
       // the caller's input. A value an earlier call merely echoed back is not: the callable was
       // given it, and finding it somewhere else means the caller needed it in both places.
-      const mintedEarlier = calls.slice(0, indexOfCall).some((earlier, earlierIndex) => {
-        if (!resultValues[earlierIndex]!.has(leaf.value)) return false;
-        return !argumentValues[earlierIndex]!.has(leaf.value);
-      });
-      if (mintedEarlier) continue;
+      if (mintedBefore(leaf.value, indexOfCall, calls, resultValues, argumentValues)) continue;
       if (alreadyProposed(candidates, call.stepId, leaf)) continue;
       sharedCandidates.push({
         stepId: call.stepId,
@@ -283,6 +282,24 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     }
   }
   return { calls: derived, candidates: [...candidates, ...sharedCandidates] };
+}
+
+/**
+ * True when a call BEFORE `before` minted this value — it appeared in that call's result and not in
+ * its arguments. An echo of a value the callable was given is not an output: it is the caller's
+ * value passing through, and treating it as an output would lose the input it came from.
+ */
+function mintedBefore(
+  value: string,
+  before: number,
+  calls: readonly DerivationCall[],
+  resultValues: ReadonlyArray<ReadonlySet<string>>,
+  argumentValues: ReadonlyArray<ReadonlySet<string>>,
+): boolean {
+  return calls.slice(0, before).some((_earlier, index) => {
+    if (!resultValues[index]!.has(value)) return false;
+    return !argumentValues[index]!.has(value);
+  });
 }
 
 /** True when this exact position is already proposed, so one value is never proposed twice. */

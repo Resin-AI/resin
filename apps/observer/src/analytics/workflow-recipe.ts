@@ -575,6 +575,14 @@ export function recordCallsFromEvents(
      * never binds, so the scope must be stated rather than assumed from the workflow's name.
      */
     referenceScopeId?: string;
+    /**
+     * Events read from elsewhere in the recording's session, for validation evidence only.
+     *
+     * A demonstration is a second execution of the same work, which lives beside the work being
+     * compiled rather than inside it. These events may supply such a demonstration; they never
+     * become steps, never select a different execution, and never change what the workflow does.
+     */
+    supportingEvents?: readonly RecordableEvent[];
   } = {},
 ): RecordedRecipe | undefined {
   const ordered = [...events].sort(
@@ -627,12 +635,13 @@ export function recordCallsFromEvents(
     return parts.slice(2).join(":");
   };
   const scopeId = options.referenceScopeId ?? workflowId;
+  const supporting = options.supportingEvents ?? [];
 
   // One piece of work is one execution. When the capture recorded which execution each call belongs
   // to, the recording is built from the one a later, matching execution demonstrates: the calls of
   // the other executions are the same work performed again, and running them as extra steps of one
   // tool would make the tool do the job twice.
-  const executions = executionsOf(ordered);
+  const selectedExecutionIndex = selectedExecution(ordered);
   const observations: RecordedCallObservation[] = [];
   const stepIdByPosition = new Map<number, string>();
   const seenCallIds = new Set<string>();
@@ -648,7 +657,7 @@ export function recordCallsFromEvents(
 
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     const executionIndex = carrier?.executionIndex;
-    if (executionIndex !== undefined && executionIndex !== executions.target) continue;
+    if (executionIndex !== undefined && executionIndex !== selectedExecutionIndex) continue;
     const declaredFlow = declaredResourceFlowOf(event);
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
@@ -809,7 +818,10 @@ export function recordCallsFromEvents(
 
   const recipe = recordWorkflowRecipe(workflowId, observations, derivation.candidates);
   if (!recipe) return undefined;
-  const heldOut = demonstratedWorkflow(executions.demonstration, stepIdByPosition);
+  const heldOut = demonstratedWorkflow(
+    demonstrationOf([...ordered, ...supporting], selectedExecutionIndex),
+    stepIdByPosition,
+  );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
     // A suggestion the capture itself made, expressed against the calls it observed. It is carried
@@ -844,44 +856,51 @@ export function recordCallsFromEvents(
 }
 
 /** The execution a recording is built from, and the demonstration a later one offers for it. */
-function executionsOf(events: readonly RecordableEvent[]): {
-  target: number | undefined;
-  demonstration: WorkflowCallHeldOut | undefined;
-} {
+/**
+ * The execution a recording is built from: the earliest piece of work the events themselves name.
+ *
+ * Only the events of the work being compiled decide this. Evidence read from elsewhere in the
+ * session says what a replay may be checked against; it never chooses, replaces or extends the
+ * executable workflow, because a recording is one piece of work and a session is not.
+ */
+function selectedExecution(events: readonly RecordableEvent[]): number | undefined {
   const indices = new Set<number>();
+  for (const event of events) {
+    if (event.type !== "tool_call") continue;
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    if (carrier?.executionIndex === undefined) continue;
+    indices.add(carrier.executionIndex);
+  }
+  return indices.size === 0 ? undefined : Math.min(...indices);
+}
+
+/**
+ * The most complete demonstration that repeats the selected execution, from anywhere it was read.
+ *
+ * A repeat reports itself one call at a time and its observations arrive on the result side, so the
+ * last carrier that names it is the fullest. A demonstration of any other execution is not a
+ * demonstration of this work and is ignored.
+ */
+function demonstrationOf(
+  events: readonly RecordableEvent[],
+  target: number | undefined,
+): WorkflowCallHeldOut | undefined {
+  if (target === undefined) return undefined;
   let demonstration: WorkflowCallHeldOut | undefined;
-  /** The execution a demonstration repeats: the one this recording is built from. */
-  let demonstratedExecution: number | undefined;
-  // The most complete demonstration wins: a repeat reports itself one call at a time, and its
-  // observations arrive on the result side, so the last carrier that names it is the fullest.
-  const consider = (
-    candidate: WorkflowCallHeldOut | undefined,
-    execution: number | undefined,
-  ): void => {
-    if (candidate === undefined || execution === undefined) return;
+  for (const event of events) {
+    if (event.type !== "tool_call") continue;
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    const candidate = carrier?.heldOut;
+    if (candidate === undefined || candidate.repeats !== target) continue;
     if (
       demonstration === undefined ||
       candidate.inputs.length + candidate.observed.length >
         demonstration.inputs.length + demonstration.observed.length
     ) {
       demonstration = candidate;
-      demonstratedExecution = execution;
-    }
-  };
-  for (const event of events) {
-    if (event.type === "tool_call") {
-      const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
-      if (carrier?.executionIndex === undefined) continue;
-      indices.add(carrier.executionIndex);
-      consider(carrier.heldOut, carrier.heldOut?.repeats);
-      continue;
     }
   }
-  if (indices.size === 0) return { target: undefined, demonstration: undefined };
-  // The recording is built from the execution the demonstration repeats, and the demonstration is
-  // the repeat's own values: a replay of the recording then runs on inputs it never used.
-  const target = demonstratedExecution ?? Math.min(...indices);
-  return { target, demonstration };
+  return demonstration;
 }
 
 /** The demonstration, addressed by the steps this recording gave the work it demonstrates. */

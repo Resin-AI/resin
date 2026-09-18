@@ -509,6 +509,68 @@ describe("the demonstration an ordinary session offers", () => {
     expect(shared!.path).toEqual(["note"]);
   });
 
+  it("keeps a declared input whose own result echoes it, once that result has arrived", () => {
+    // A callable that echoes what it was given must not disqualify its own input: the value is in
+    // the result because it was passed in, and whether the result has arrived yet cannot decide
+    // what the recording proposes.
+    const withResult = deriveNativeCalls([
+      {
+        callId: "call_1",
+        stepId: "step0",
+        toolName: "pluto_intake",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { feed: "alpha-feed" },
+        result: { record: { handle: "hdl-alpha-feed", feed: "alpha-feed", note: "alpha-feed" } },
+        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
+      },
+      {
+        callId: "call_2",
+        stepId: "step1",
+        toolName: "vesta_commit",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { meta: { note: "alpha-feed" } },
+        result: { stored: { artifactId: "art-1" } },
+      },
+    ]);
+    const withoutResult = deriveNativeCalls([
+      {
+        callId: "call_1",
+        stepId: "step0",
+        toolName: "pluto_intake",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { feed: "alpha-feed" },
+        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
+      },
+      {
+        callId: "call_2",
+        stepId: "step1",
+        toolName: "vesta_commit",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { meta: { note: "alpha-feed" } },
+      },
+    ]);
+
+    const identity = (derivation: typeof withResult) =>
+      derivation.candidates
+        .map((candidate) => `${candidate.stepId}.${candidate.argument}@${candidate.reason}`)
+        .sort();
+    // The same proposals before and after the result arrives: the call is the same work either way.
+    expect(identity(withResult)).toEqual(identity(withoutResult));
+    expect(identity(withResult)).toEqual([
+      "step0.feed@declared-by-the-callable",
+      "step1.meta@shares-value-with-declared-input",
+    ]);
+    // The later argument is offered as the SAME caller's value, not a second input.
+    const shared = withResult.candidates.find(
+      (candidate) => candidate.reason === "shares-value-with-declared-input",
+    )!;
+    expect(shared.proposed).toEqual({ kind: "input", name: "pluto_intake_feed", type: "string" });
+    // And it is a proposal: nothing about it is executable.
+    expect(withResult.candidates.some((candidate) => candidate.proposed.kind === "result")).toBe(
+      false,
+    );
+  });
+
   it("leaves a value two arguments share, with nothing declaring it, exactly where it is", () => {
     const derivation = deriveNativeCalls([
       {
@@ -533,6 +595,84 @@ describe("the demonstration an ordinary session offers", () => {
         (candidate) => candidate.reason === "shares-value-with-declared-input",
       ),
     ).toEqual([]);
+  });
+});
+
+describe("a recording and the demonstrations read beside it", () => {
+  /** Two unrelated tasks, then a repeat of the first one only. */
+  function session(): NormalizedSessionEvent[] {
+    return record([
+      discovery([
+        {
+          name: "alpha_step",
+          provider: "srv",
+          inputSchema: { type: "object", properties: { seed: { type: "string" } } },
+        },
+        { name: "alpha_finish", provider: "srv" },
+      ]),
+      call(1, "alpha_step", { seed: "alpha-seed" }),
+      result(1, "alpha_step", { minted: { id: "alpha-1" } }),
+      call(2, "alpha_finish", { token: "alpha-1" }),
+      result(2, "alpha_finish", { done: true }),
+      userTurn(3),
+      call(4, "beta_sweep", { scope: "everything" }),
+      result(4, "beta_sweep", { swept: 12 }),
+      call(5, "beta_report", { rows: 12 }),
+      result(5, "beta_report", { reported: true }),
+      userTurn(6),
+      call(7, "alpha_step", { seed: "bravo-seed" }),
+      result(7, "alpha_step", { minted: { id: "alpha-2" } }),
+      call(8, "alpha_finish", { token: "alpha-2" }),
+      result(8, "alpha_finish", { done: true }),
+    ]).events;
+  }
+
+  function executionOf(events: readonly NormalizedSessionEvent[], index: number) {
+    return events.filter((event) => {
+      const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+      return carrier?.executionIndex === index;
+    });
+  }
+
+  it("keeps the selected work's own calls and never adds the session's other tasks", () => {
+    const events = session();
+    const recipe = recordCallsFromEvents("wf_selected", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 2),
+    });
+
+    // The compiled workflow is the task's two calls — not the unrelated task, and not the repeat.
+    expect(recipe!.workflow.steps).toHaveLength(2);
+    expect(recipe!.workflow.steps.map((step) => step.callable.name)).toEqual([
+      "alpha_step",
+      "alpha_finish",
+    ]);
+    // The repeat is present as evidence for a replay, addressed by the steps it repeats: the values
+    // it used sit beside the steps they were used at, and a candidate is only decided by the one
+    // that lands on its own position.
+    expect(recipe!.workflow.heldOut?.inputs.map((entry) => entry.stepId)).toEqual([
+      "step0",
+      "step1",
+    ]);
+    expect(recipe!.workflow.heldOut?.inputs.map((entry) => entry.argument).sort()).toEqual([
+      "seed",
+      "token",
+    ]);
+    expect(recipe!.workflow.heldOut?.observed.map((entry) => entry.stepId).sort()).toEqual([
+      "step0",
+      "step1",
+    ]);
+    expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("compiles each task to its own calls, and a repeat supports it without joining it", () => {
+    const events = session();
+    const second = recordCallsFromEvents("wf_selected_beta", executionOf(events, 1));
+    // The unrelated task stands on its own, with no demonstration borrowed from anywhere.
+    expect(second!.workflow.steps.map((step) => step.callable.name)).toEqual([
+      "beta_sweep",
+      "beta_report",
+    ]);
+    expect(second!.workflow.heldOut).toBeUndefined();
   });
 });
 
