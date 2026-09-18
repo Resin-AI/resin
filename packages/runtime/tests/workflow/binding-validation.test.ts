@@ -288,17 +288,19 @@ describe("the plan that results from accepting proposals", () => {
     });
     expect(confirmed.accepted).toEqual(candidates);
     expect(confirmed.dropped).toEqual([]);
-    expect(confirmed.missed).toEqual([]);
+    expect(confirmed.verification.status).toBe("verified");
+    expect(confirmed.verification.missed).toEqual([]);
   });
 
   it("decides proposals and confirms the combined plan in one step", async () => {
-    const outcomes = await validateAndConfirmCandidates({
+    const decided = await validateAndConfirmCandidates({
       plan: plan(),
       candidates,
       environment: await environment(),
     });
-    expect(outcomes).toHaveLength(1);
-    expect(outcomes[0]!.accepted).toBe(true);
+    expect(decided.outcomes).toHaveLength(1);
+    expect(decided.outcomes[0]!.accepted).toBe(true);
+    expect(decided.verification?.status).toBe("verified");
   });
 
   it("withdraws a proposal when the plan it would publish cannot reproduce the work", async () => {
@@ -311,10 +313,153 @@ describe("the plan that results from accepting proposals", () => {
     expect(confirmed.accepted).toEqual([]);
     expect(confirmed.dropped).toHaveLength(1);
     expect(confirmed.dropped[0]!.reason).toContain("consume");
+    // A plan that was disproven says so, rather than being reported as verified on the strength of
+    // the proposals that survived.
+    expect(confirmed.verification.status).toBe("failed");
     // What is left is the recording, which is what the user actually ran.
     expect(confirmed.plan.steps[1]!.arguments[0]!.source).toEqual({
       kind: "template",
       template: { type: "literal", value: "tok(alpha)" },
     });
+  });
+});
+
+describe("a plan is run once per attempt, as the work it is", () => {
+  /** Every step invocation, in order, so a run can be told from a step. */
+  function countingAdapters(invocations: string[]): RuntimeAdapterRegistry {
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      runtime: TEST_RUNTIME,
+      async call(request) {
+        invocations.push(request.step.id);
+        const args = request.arguments;
+        switch (request.step.callable.name) {
+          case "derive":
+            return { token: `tok(${String(args.seed ?? "")})` };
+          case "consume":
+            return { echoed: args.text ?? null };
+          case "finish":
+            return { finished: args.text ?? null };
+          default:
+            throw new Error(`unexpected callable '${request.step.callable.name}'`);
+        }
+      },
+    });
+    return registry;
+  }
+
+  /** derive -> consume -> finish, with the last two reading what the step before them produced. */
+  function chainPlan(): RecordedWorkflow {
+    return {
+      schemaVersion: 1,
+      workflowId: "wf-one-run",
+      inputs: [{ name: "seed", type: "string" }],
+      steps: [
+        {
+          id: "step0",
+          callId: "call-0",
+          callable: { runtime: TEST_RUNTIME, name: "derive" },
+          arguments: [{ name: "seed", source: { kind: "input", name: "seed" } }],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+        {
+          id: "step1",
+          callId: "call-1",
+          callable: { runtime: TEST_RUNTIME, name: "consume" },
+          arguments: [
+            { name: "text", source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } } },
+          ],
+          dependsOn: ["step0"],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+        {
+          id: "step2",
+          callId: "call-2",
+          callable: { runtime: TEST_RUNTIME, name: "finish" },
+          arguments: [
+            { name: "text", source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } } },
+          ],
+          dependsOn: ["step1"],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    };
+  }
+
+  const binding: WorkflowBindingCandidate = {
+    stepId: "step1",
+    argument: "text",
+    path: [],
+    proposed: { kind: "result", stepId: "step0", path: ["token"] },
+    reason: "equal-to-earlier-result",
+    missing: "the value appeared after that call returned",
+  };
+
+  /** The second link of the chain reads what the first one produced. */
+  const secondBinding: WorkflowBindingCandidate = {
+    stepId: "step2",
+    argument: "text",
+    path: [],
+    proposed: { kind: "result", stepId: "step1", path: ["echoed"] },
+    reason: "equal-to-earlier-result",
+    missing: "the value appeared after that call returned",
+  };
+
+  it("runs the whole plan once per attempt and compares every step against that one run", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resin-one-run-"));
+    workspaces.push(directory);
+    const invocations: string[] = [];
+    const confirmed = await confirmPromotedPlan({
+      plan: chainPlan(),
+      accepted: [binding, secondBinding],
+      environment: {
+        adapters: countingAdapters(invocations),
+        workspaceDir: directory,
+        inputs: { seed: "bravo" },
+        observed: {
+          step0: { token: "tok(bravo)" },
+          step1: { echoed: "tok(bravo)" },
+          step2: { finished: "tok(bravo)" },
+        },
+      },
+    });
+
+    expect(confirmed.verification.status).toBe("verified");
+    // One run: every step of the work executed exactly once. Running it once per observed step
+    // would show each of them three times.
+    expect(invocations).toEqual(["step0", "step1", "step2"]);
+  });
+
+  it("keeps a valid proposal when a step no proposal decided does not reproduce", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resin-unblamed-"));
+    workspaces.push(directory);
+    const invocations: string[] = [];
+    const decided = await validateAndConfirmCandidates({
+      plan: chainPlan(),
+      candidates: [binding],
+      environment: {
+        adapters: countingAdapters(invocations),
+        workspaceDir: directory,
+        inputs: { seed: "bravo" },
+        observed: {
+          step0: { token: "tok(bravo)" },
+          step1: { echoed: "tok(bravo)" },
+          // The last step was observed producing something no binding of this plan produces.
+          step2: { finished: "unreachable" },
+        },
+      },
+    });
+
+    // The proposal is sound and stays: the miss is not something withdrawing it could fix.
+    expect(decided.outcomes.find((outcome) => outcome.accepted)?.candidate).toEqual(binding);
+    expect(decided.verification?.status).toBe("incomplete");
+    // And the miss survives to the caller rather than being swallowed as a pass.
+    expect(decided.verification?.missed.map((entry) => entry.stepId)).toEqual(["step2"]);
+    expect(decided.verification?.reproduced.sort()).toEqual(["step0", "step1"]);
+    expect(decided.verification?.dropped).toEqual([]);
   });
 });

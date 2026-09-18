@@ -50,6 +50,25 @@ export interface CandidateValidationEnvironment {
   timeoutMs?: number;
 }
 
+/**
+ * What replaying the plan as a whole concluded.
+ *
+ * `verified` is the only pass: every step the demonstration observed was reproduced by a single run
+ * of the plan that would be published. `incomplete` means the plan is not disproven but the
+ * demonstration could not confirm it — a step it observed is decided by nothing a proposal
+ * controls. `failed` means the plan was disproven: proposals were withdrawn against the misses and
+ * the plan still did not reproduce the work.
+ */
+export interface WorkflowPlanVerification {
+  status: "verified" | "incomplete" | "failed";
+  /** The observed steps one run of the plan reproduced. */
+  reproduced: string[];
+  /** The observed steps it did not, with why. Never empty for a status other than `verified`. */
+  missed: Array<{ stepId: string; detail: string }>;
+  /** Proposals withdrawn because the plan they produced did not reproduce the work. */
+  dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
+}
+
 export interface CandidateValidationOutcome {
   candidate: WorkflowBindingCandidate;
   accepted: boolean;
@@ -430,22 +449,51 @@ export async function demonstrationEnvironment(params: {
 }
 
 /**
- * Replays a plan against a demonstration and reports which observed steps it reproduced.
+ * Replays a plan ONCE and reports which of its observed steps it reproduced.
  *
- * The plan is the one a caller will actually run, so this is the only check that sees the combined
- * effect of every decision made about it.
+ * The plan runs a single time per attempt. The work is a sequence — a later step reads what an
+ * earlier one produced — so running it once per step would both multiply the cost and compare
+ * traces that never existed: step 3 of a second run follows a first run's side effects, not the
+ * recorded execution's. One run, every observed step compared against that one trace.
  */
-async function reproducedSteps(
+async function replayPlanOnce(
   plan: RecordedWorkflow,
   environment: CandidateValidationEnvironment,
-): Promise<{ reproduced: string[]; missed: Array<{ stepId: string; detail: string }> }> {
+): Promise<{
+  reproduced: string[];
+  missed: Array<{ stepId: string; detail: string }>;
+}> {
+  const options: RecordedWorkflowExecutionOptions = {
+    inputs: environment.inputs,
+    adapters: environment.adapters,
+    ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
+  };
+  const execution = await withDeadline(
+    executeRecordedWorkflow(plan, options),
+    environment.timeoutMs,
+  );
   const reproduced: string[] = [];
   const missed: Array<{ stepId: string; detail: string }> = [];
   for (const entry of Object.entries(environment.observed)) {
     const [stepId, observed] = entry;
-    const outcome = await replayStep(plan, stepId, observed, environment);
-    if (outcome.reproduced) reproduced.push(stepId);
-    else missed.push({ stepId, detail: outcome.detail });
+    if (execution === undefined) {
+      missed.push({
+        stepId,
+        detail: `the replay exceeded its ${environment.timeoutMs}ms bound`,
+      });
+      continue;
+    }
+    const outcome = execution.steps.find((entry) => entry.stepId === stepId);
+    if (outcome === undefined) {
+      missed.push({ stepId, detail: `step '${stepId}' never ran` });
+      continue;
+    }
+    if (outcome.status !== "completed") {
+      missed.push({ stepId, detail: describeOutcome(execution, outcome) });
+      continue;
+    }
+    if (deepEqual(outcome.result, observed)) reproduced.push(stepId);
+    else missed.push({ stepId, detail: describeOutcome(execution, outcome) });
   }
   return { reproduced, missed };
 }
@@ -456,81 +504,105 @@ async function reproducedSteps(
  *
  * Deciding proposals one at a time is not enough: a plan that accepts some of them can still run on
  * a stale intermediate value, because the value it reads was produced by a step whose own proposal
- * was refused. So the combined plan is replayed, and when it does not reproduce what the
- * demonstration observed, the proposal that decided the earliest step the replay missed is dropped
- * and the rest are tried again. The loop is bounded by the number of accepted proposals, so it
- * always terminates, and it never promotes anything the demonstration does not support.
+ * was refused. So the combined plan is replayed as a whole — once per attempt — and when it does not
+ * reproduce what the demonstration observed, the proposal that decided the earliest step the replay
+ * missed is dropped and the rest are tried again. The loop is bounded, so it always terminates, and
+ * it never promotes anything the demonstration does not support.
+ *
+ * The outcome is reported as it stands, including when it is not a pass: a proposal can be valid and
+ * the plan it belongs to still unproven, and calling that verified would be a claim nothing made.
  */
 export async function confirmPromotedPlan(params: {
   plan: RecordedWorkflow;
   accepted: readonly WorkflowBindingCandidate[];
   environment: CandidateValidationEnvironment;
+  /** How many proposals may be withdrawn before the plan is called unestablished. */
+  maxRounds?: number;
 }): Promise<{
   accepted: WorkflowBindingCandidate[];
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   plan: RecordedWorkflow;
-  reproduced: string[];
-  missed: Array<{ stepId: string; detail: string }>;
+  verification: WorkflowPlanVerification;
 }> {
+  const rounds = params.maxRounds ?? Math.max(1, params.accepted.length);
   let accepted = [...params.accepted];
   const dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }> = [];
   let plan = applyAcceptedBindings(params.plan, accepted);
-  let replay = await reproducedSteps(plan, params.environment);
-  for (let round = 0; replay.missed.length > 0 && accepted.length > 0; round += 1) {
+  let replay = await replayPlanOnce(plan, params.environment);
+  // True when the replay missed a step no accepted proposal decided, so nothing withdrawn here
+  // could change it. That is a limit of the demonstration, not evidence against the proposals.
+  let unattributed = false;
+  for (let round = 0; round < rounds && replay.missed.length > 0; round += 1) {
     const missedStepId = replay.missed[0]!.stepId;
-    // The proposal that decided this step is the one to withdraw; failing that, the proposal that
-    // feeds it, so a stale intermediate is withdrawn along with the value that reads it.
     const blamed =
       accepted.find((candidate) => candidate.stepId === missedStepId) ??
       accepted.find(
         (candidate) =>
           candidate.proposed.kind === "result" && candidate.proposed.stepId === missedStepId,
       );
-    // No proposal decided this step, so nothing withdrawn here could change it. That is evidence
-    // about the demonstration rather than about the proposals, and it is reported as it stands:
-    // withdrawing proposals at random would refuse work the demonstration does support.
-    if (blamed === undefined) break;
+    if (blamed === undefined) {
+      unattributed = true;
+      break;
+    }
     accepted = accepted.filter((candidate) => candidate !== blamed);
     dropped.push({
       candidate: blamed,
       reason: `the plan that would have been published did not reproduce step '${missedStepId}' of the demonstration (${replay.missed[0]!.detail}), so this proposal was withdrawn with it`,
     });
     plan = applyAcceptedBindings(params.plan, accepted);
-    replay = await reproducedSteps(plan, params.environment);
+    replay = await replayPlanOnce(plan, params.environment);
   }
-  return { accepted, dropped, plan, reproduced: replay.reproduced, missed: replay.missed };
+  const verification: WorkflowPlanVerification = {
+    status:
+      replay.missed.length === 0 ? "verified" : unattributed ? "incomplete" : "failed",
+    reproduced: replay.reproduced,
+    missed: replay.missed,
+    dropped,
+  };
+  return { accepted, dropped, plan, verification };
 }
 
 /**
  * The whole decision, from proposals to the plan a caller will invoke.
  *
  * A proposal is decided by replay, and the plan that results from the accepted ones is confirmed by
- * replay again, so what is published is a plan that reproduced the demonstration as a whole.
+ * replay again — once, as a whole. The two answers are returned separately: which proposals are
+ * sound, and whether the plan that carries them reproduces the work. A caller that publishes on the
+ * strength of the first alone would publish a plan nothing had run.
  */
 export async function validateAndConfirmCandidates(params: {
   plan: RecordedWorkflow;
   candidates: readonly WorkflowBindingCandidate[];
   environment: CandidateValidationEnvironment;
-}): Promise<CandidateValidationOutcome[]> {
+  maxRounds?: number;
+}): Promise<{
+  outcomes: CandidateValidationOutcome[];
+  plan: RecordedWorkflow;
+  verification?: WorkflowPlanVerification;
+}> {
   const decided = await validateBindingCandidates({
     plan: params.plan,
     candidates: params.candidates,
     environment: params.environment,
   });
-  const accepted = decided
-    .filter((outcome) => outcome.accepted)
-    .map((outcome) => outcome.candidate);
-  if (accepted.length === 0) return decided;
+  const accepted = decided.filter((outcome) => outcome.accepted).map((outcome) => outcome.candidate);
   const confirmed = await confirmPromotedPlan({
     plan: params.plan,
     accepted,
     environment: params.environment,
+    ...(params.maxRounds === undefined ? {} : { maxRounds: params.maxRounds }),
   });
-  const droppedBy = new Map(confirmed.dropped.map((entry) => [entry.candidate, entry.reason]));
-  return decided.map((outcome) => {
-    const dropped = droppedBy.get(outcome.candidate);
-    return dropped === undefined ? outcome : { ...outcome, accepted: false, reason: dropped };
-  });
+  const droppedBy = new Map(
+    confirmed.dropped.map((entry) => [entry.candidate, entry.reason] as const),
+  );
+  return {
+    outcomes: decided.map((outcome) => {
+      const dropped = droppedBy.get(outcome.candidate);
+      return dropped === undefined ? outcome : { ...outcome, accepted: false, reason: dropped };
+    }),
+    plan: confirmed.plan,
+    verification: confirmed.verification,
+  };
 }
 
 /**
