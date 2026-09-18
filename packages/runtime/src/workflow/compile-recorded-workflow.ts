@@ -194,7 +194,12 @@ export function instantiateRecordedWorkflow(
   artifact: CompiledWorkflowArtifact,
   host: {
     adapters: RuntimeAdapterRegistry;
-    resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+    /** The workspace the invocation runs in, forwarded to the private resolver. */
+    access?: { workspaceId?: string };
+    resolvePrivate?: (
+      reference: string,
+      access?: { workspaceId?: string },
+    ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   },
 ): {
   name: string;
@@ -212,6 +217,7 @@ export function instantiateRecordedWorkflow(
       return executeRecordedWorkflow(artifact.plan, {
         inputs,
         adapters: host.adapters,
+        ...(host.access ? { access: host.access } : {}),
         ...(host.resolvePrivate ? { resolvePrivate: host.resolvePrivate } : {}),
       });
     },

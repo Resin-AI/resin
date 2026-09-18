@@ -22,9 +22,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/**
+ * Where a stored value came from. A `private:` reference is a name, not a capability: the
+ * workspace that recorded the value is what an executor checks before resolving it, so a
+ * workflow that merely knows another recording's reference string is still refused.
+ */
+export interface PrivateValueOrigin {
+  workspaceId?: string;
+}
+
 export interface PrivateValueStore {
   get(key: string): unknown | undefined;
-  set(key: string, value: unknown): void;
+  set(key: string, value: unknown, origin?: PrivateValueOrigin): void;
+  /** The recorded origin of a key, when the writer stated one. */
+  origin?(key: string): PrivateValueOrigin | undefined;
 }
 
 const STORE_FILE = "private-values.json";
@@ -84,7 +95,9 @@ export class FilePrivateValueStore implements PrivateValueStore {
   private static shared: FilePrivateValueStore | undefined;
 
   private readonly file: string;
-  private entries: Map<string, { value: unknown; at: number }> | undefined;
+  private entries:
+    | Map<string, { value: unknown; at: number; origin?: PrivateValueOrigin }>
+    | undefined;
   private loadedMtimeMs = -1;
 
   constructor(dataDir: string) {
@@ -103,7 +116,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return FilePrivateValueStore.shared;
   }
 
-  private load(): Map<string, { value: unknown; at: number }> {
+  private load(): Map<string, { value: unknown; at: number; origin?: PrivateValueOrigin }> {
     // Reload only when the file changed on disk: a long-lived executor must see secrets
     // recorded after its first resolution, not a snapshot cached forever. The mtime gate
     // keeps the shared instance cheap when nothing was written.
@@ -119,9 +132,14 @@ export class FilePrivateValueStore implements PrivateValueStore {
       const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as unknown;
       if (isPlainObject(raw)) {
         for (const [key, entry] of Object.entries(raw)) {
+          const origin =
+            isPlainObject(entry) && isPlainObject(entry.origin)
+              ? (entry.origin as PrivateValueOrigin)
+              : undefined;
           this.entries.set(key, {
             value: isPlainObject(entry) && "value" in entry ? entry.value : entry,
             at: isPlainObject(entry) && typeof entry.at === "number" ? entry.at : 0,
+            ...(origin ? { origin } : {}),
           });
         }
       }
@@ -136,10 +154,14 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return this.load().get(key)?.value;
   }
 
-  set(key: string, value: unknown): void {
+  origin(key: string): PrivateValueOrigin | undefined {
+    return this.load().get(key)?.origin;
+  }
+
+  set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
     const entries = this.load();
     entries.delete(key);
-    entries.set(key, { value, at: Date.now() });
+    entries.set(key, { value, at: Date.now(), ...(origin ? { origin } : {}) });
     while (entries.size > MAX_ENTRIES) {
       const oldest = entries.keys().next().value;
       if (oldest === undefined) break;
@@ -153,7 +175,12 @@ export class FilePrivateValueStore implements PrivateValueStore {
       // Best effort on filesystems without POSIX modes.
     }
     const body: Record<string, unknown> = {};
-    for (const [k, entry] of entries) body[k] = { value: entry.value, at: entry.at };
+    for (const [k, entry] of entries)
+      body[k] = {
+        value: entry.value,
+        at: entry.at,
+        ...(entry.origin ? { origin: entry.origin } : {}),
+      };
     const tmp = `${this.file}.${process.pid}.${createHash("sha1").update(String(Date.now())).digest("hex").slice(0, 8)}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
     fs.renameSync(tmp, this.file);
@@ -169,13 +196,17 @@ export class FilePrivateValueStore implements PrivateValueStore {
 
 /** Test and in-process seam: same contract, nothing persisted. */
 export class InMemoryPrivateValueStore implements PrivateValueStore {
-  private readonly entries = new Map<string, unknown>();
+  private readonly entries = new Map<string, { value: unknown; origin?: PrivateValueOrigin }>();
 
   get(key: string): unknown | undefined {
-    return this.entries.get(key);
+    return this.entries.get(key)?.value;
   }
 
-  set(key: string, value: unknown): void {
-    this.entries.set(key, value);
+  origin(key: string): PrivateValueOrigin | undefined {
+    return this.entries.get(key)?.origin;
+  }
+
+  set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
+    this.entries.set(key, { value, ...(origin ? { origin } : {}) });
   }
 }

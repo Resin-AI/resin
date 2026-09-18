@@ -219,4 +219,28 @@ describe("recorded workflow execution", () => {
     // Nothing was invented to make it run.
     expect(calls).toHaveLength(0);
   });
+  it("hands the workspace access context to the private resolver on every reference", async () => {
+    const calls: RecordedCallRequest[] = [];
+    const seen: Array<{ reference: string; workspaceId?: string }> = [];
+    const result = await executeRecordedWorkflow(workflow(), {
+      inputs: { source: "alpha", target: "/tmp/one.txt" },
+      adapters: adapters(calls),
+      access: { workspaceId: "ws_recording" },
+      resolvePrivate: (reference, access) => {
+        seen.push({
+          reference,
+          ...(access?.workspaceId ? { workspaceId: access.workspaceId } : {}),
+        });
+        return "token-from-environment";
+      },
+    });
+    expect(result.status).toBe("completed");
+    // The host receives the reference together with the workspace the invocation runs in, so it
+    // can refuse a reference recorded elsewhere instead of resolving it from the string alone.
+    expect(seen.length).toBeGreaterThan(0);
+    for (const entry of seen) {
+      expect(entry.reference.length).toBeGreaterThan(0);
+      expect(entry.workspaceId).toBe("ws_recording");
+    }
+  });
 });

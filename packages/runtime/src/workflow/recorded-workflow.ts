@@ -55,8 +55,17 @@ export class RuntimeAdapterRegistry {
 export interface RecordedWorkflowExecutionOptions {
   inputs: Record<string, WorkflowJsonValue>;
   adapters: RuntimeAdapterRegistry;
-  /** Private resources are resolved here, at execution time; they are never part of the plan. */
-  resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+  /** The workspace this invocation runs in, checked before any private reference resolves. */
+  access?: { workspaceId?: string };
+  /**
+   * Private resources are resolved here, at execution time; they are never part of the plan.
+   * The access context names the workspace the invocation runs in so the host can refuse a
+   * reference recorded elsewhere, instead of treating the reference string as a capability.
+   */
+  resolvePrivate?: (
+    reference: string,
+    access?: { workspaceId?: string },
+  ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Reported when a required adapter or binding is missing, instead of pretending to succeed. */
   onUnavailable?: (step: WorkflowStep, reason: string) => void;
 }
@@ -152,7 +161,7 @@ async function buildTemplate(
           argumentName,
         );
       }
-      return await options.resolvePrivate(template.reference);
+      return await options.resolvePrivate(template.reference, options.access);
     }
     case "unresolved":
       throw new WorkflowBindingError(
@@ -229,7 +238,7 @@ async function resolveArgument(
           argumentName,
         );
       }
-      return await options.resolvePrivate(source.reference);
+      return await options.resolvePrivate(source.reference, options.access);
     }
     case "unresolved":
       throw new WorkflowBindingError(

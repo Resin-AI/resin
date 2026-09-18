@@ -23,6 +23,7 @@ import {
 } from "@resin/contracts";
 import {
   FilePrivateValueStore,
+  type PrivateValueOrigin,
   type PrivateValueStore,
   containsRedactionPlaceholder,
 } from "./private-value-store.js";
@@ -104,6 +105,8 @@ export interface WorkflowCallRecorderOptions {
 
 export class WorkflowCallRecorder {
   private readonly privateValues: PrivateValueStore;
+  /** The workspace whose session is being observed; stamped on every private entry. */
+  private observeAccess: PrivateValueOrigin | undefined;
   /** Tool name → provider, as the session's discovery events reported it. */
   private readonly providers = new Map<string, string>();
   private privateCounter = 0;
@@ -116,9 +119,18 @@ export class WorkflowCallRecorder {
   clear(): void {
     this.providers.clear();
     this.privateCounter = 0;
+    this.observeAccess = undefined;
   }
 
-  observe(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  observe(
+    event: NormalizedSessionEvent,
+    /**
+     * The workspace the observed session belongs to. Private entries are stamped with it so a
+     * later executor can refuse a workflow that only knows the reference string.
+     */
+    access?: PrivateValueOrigin,
+  ): NormalizedSessionEvent {
+    this.observeAccess = access;
     if (event.type === "tool_discovery") {
       const tools = (event as { tools?: Array<{ name?: unknown; provider?: unknown }> }).tools;
       if (Array.isArray(tools)) {
@@ -146,7 +158,7 @@ export class WorkflowCallRecorder {
         const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {
           if (typeof value === "string" && containsRedactionPlaceholder(value)) {
             const reference = `private:${sessionId}:${this.privateCounter++}`;
-            this.privateValues.set(reference, value);
+            this.privateValues.set(reference, value, this.observeAccess);
             return { type: "private", reference };
           }
           if (Array.isArray(value)) {

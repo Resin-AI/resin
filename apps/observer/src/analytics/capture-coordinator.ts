@@ -572,7 +572,9 @@ export class TrajectoryCaptureCoordinator {
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
                 const observed = this.computationEvidenceRecorder.observe(
                   this.toolLinkEvidenceRecorder.observe(
-                    this.workflowCallRecorder.observe(res.event),
+                    this.workflowCallRecorder.observe(res.event, {
+                      workspaceId: session.workspaceId,
+                    }),
                   ),
                 );
                 emitter.ingest(observed);
@@ -773,7 +775,11 @@ export class TrajectoryCaptureCoordinator {
                 // the identical carrier-bearing event.
                 validEvents.push(
                   this.computationEvidenceRecorder.observe(
-                    this.toolLinkEvidenceRecorder.observe(this.workflowCallRecorder.observe(ev)),
+                    this.toolLinkEvidenceRecorder.observe(
+                      this.workflowCallRecorder.observe(ev, {
+                        workspaceId: session.workspaceId,
+                      }),
+                    ),
                   ),
                 );
               }

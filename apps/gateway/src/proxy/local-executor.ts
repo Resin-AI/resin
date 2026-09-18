@@ -18,6 +18,7 @@ import {
 } from "@resin/contracts";
 import {
   FilePrivateValueStore,
+  type PrivateValueStore,
   RESIN_INVOKE_TOOL_RUNTIME,
   resolvePrivateReference,
 } from "@resin/observer";
@@ -99,10 +100,7 @@ export interface LocalArtifactExecutorOptions {
     timeoutMs?: number;
   }) => Promise<CallToolResult>;
   /** Store private workflow references resolve against; defaults to the daemon store. */
-  privateValueStore?: {
-    get(key: string): unknown | undefined;
-    set(key: string, value: unknown): void;
-  };
+  privateValueStore?: PrivateValueStore;
 }
 
 function checkExecutable(filePath: string): boolean {
@@ -1024,9 +1022,33 @@ export class LocalArtifactExecutor {
       requiredPrivateReferences: [...(plan.privateReferences ?? [])],
       permissions: [],
     };
+    // A private reference is a name, not a capability: the plan may resolve only the references
+    // it declares, and only when the value was recorded for the workspace this invocation runs
+    // in. A workflow that merely knows another recording's exact reference string is refused
+    // here — the recorded origin decides, never the shape of the string.
+    const declaredPrivateReferences = new Set(plan.privateReferences ?? []);
+    const executingWorkspaceId = context.workspaceId;
     const callable = instantiateRecordedWorkflow(artifact, {
       adapters,
-      resolvePrivate: (reference) => resolvePrivateReference(store, reference) as WorkflowJsonValue,
+      ...(executingWorkspaceId ? { access: { workspaceId: executingWorkspaceId } } : {}),
+      resolvePrivate: (reference: string, access?: { workspaceId?: string }) => {
+        if (!declaredPrivateReferences.has(reference)) {
+          throw new Error(
+            `private reference '${reference}' is not declared by this workflow's recorded plan`,
+          );
+        }
+        const recordedWorkspaceId = store.origin?.(reference)?.workspaceId;
+        if (
+          access?.workspaceId !== undefined &&
+          recordedWorkspaceId !== undefined &&
+          access.workspaceId !== recordedWorkspaceId
+        ) {
+          throw new Error(
+            `private reference '${reference}' was recorded for another workspace and cannot be resolved here`,
+          );
+        }
+        return resolvePrivateReference(store, reference) as WorkflowJsonValue;
+      },
     });
     try {
       const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
