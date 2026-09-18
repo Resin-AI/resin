@@ -8,6 +8,7 @@ import {
   CapabilityManifestSchema,
   type CommandCapability,
   type FsCapability,
+  IdentifierSchema,
   type RecordedWorkflow,
   type ToolManifest,
   ToolManifestSchema,
@@ -248,6 +249,17 @@ function scanArtifactForBareImports(
     bareImports: Array.from(bareImports),
     errors,
   };
+}
+
+/**
+ * Whether an identity may scope a private reference. It is the same identifier the contracts use
+ * for a workspace (`WorkspaceRecordSchema.workspaceId`), so every workspace this product issues —
+ * a bootstrapped project UUID or a path-derived `ws_*` id — qualifies, while an absent, empty, or
+ * malformed value does not. A value that is not a usable identity is not an identity: it makes the
+ * reference unavailable rather than globally available.
+ */
+function isUsableWorkspaceId(value: unknown): value is string {
+  return typeof value === "string" && IdentifierSchema.safeParse(value).success;
 }
 
 function matchesManifestDigest(manifest: ToolManifest, expectedDigest: string): boolean {
@@ -1024,8 +1036,11 @@ export class LocalArtifactExecutor {
     };
     // A private reference is a name, not a capability: the plan may resolve only the references
     // it declares, and only when the value was recorded for the workspace this invocation runs
-    // in. A workflow that merely knows another recording's exact reference string is refused
-    // here — the recorded origin decides, never the shape of the string.
+    // in. Both identities must be present, well formed, and equal — a missing or malformed one is
+    // unavailable, never global, so an unscoped entry is not claimed by whoever reads it first and
+    // an invocation without a workspace identity resolves nothing. A workflow that merely knows
+    // another recording's exact reference string is refused here: the recorded origin decides,
+    // never the shape of the string.
     const declaredPrivateReferences = new Set(plan.privateReferences ?? []);
     const executingWorkspaceId = context.workspaceId;
     const callable = instantiateRecordedWorkflow(artifact, {
@@ -1038,11 +1053,18 @@ export class LocalArtifactExecutor {
           );
         }
         const recordedWorkspaceId = store.origin?.(reference)?.workspaceId;
-        if (
-          access?.workspaceId !== undefined &&
-          recordedWorkspaceId !== undefined &&
-          access.workspaceId !== recordedWorkspaceId
-        ) {
+        if (!isUsableWorkspaceId(recordedWorkspaceId)) {
+          throw new Error(
+            `private reference '${reference}' has no usable recorded workspace origin and cannot be resolved here`,
+          );
+        }
+        const invokingWorkspaceId = access?.workspaceId;
+        if (!isUsableWorkspaceId(invokingWorkspaceId)) {
+          throw new Error(
+            `private reference '${reference}' cannot be resolved without a usable invoking workspace identity`,
+          );
+        }
+        if (invokingWorkspaceId !== recordedWorkspaceId) {
           throw new Error(
             `private reference '${reference}' was recorded for another workspace and cannot be resolved here`,
           );
