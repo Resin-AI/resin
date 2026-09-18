@@ -62,12 +62,32 @@ export interface PipelineProcessContext extends RecordDecoderContext {
 /**
  * Outcome of processing a raw harness record or intermediate event.
  */
+/**
+ * Command-bearing fields of one event BEFORE redaction.
+ *
+ * Deterministic command evidence is derived from these fields locally. Redaction replaces argument
+ * values with opaque tokens, and a sequence derived after that point cannot tell a caller-supplied
+ * path from a masked secret, so it would either lose the command or guess at the value's kind.
+ * Nothing here is written to the event, to the local sink, or to the wire: the caller derives the
+ * sequence from it, and a derived sequence carries typed parameters and value commitments, never
+ * values.
+ */
+export interface PreRedactionCommandCarrier {
+  type: string;
+  toolName?: string;
+  command?: unknown;
+  args?: unknown;
+  parameters?: unknown;
+}
+
 export type PipelineProcessResult =
   | {
       status: "success";
       event: NormalizedSessionEvent;
       isDuplicate: boolean;
       revisionNumber?: number;
+      /** Present when the payload carried command-bearing fields before redaction. */
+      preRedactionCommandCarrier?: PreRedactionCommandCarrier;
     }
   | {
       status: "dead_letter";
@@ -79,6 +99,35 @@ export type PipelineProcessResult =
 /**
  * Generates a deterministic, collision-resistant event ID from session ID, sequence, and content.
  */
+/**
+ * Copies the command-bearing fields of one payload before redaction, or nothing when the payload
+ * carries none. Reads are descriptor-safe: an accessor property yields no carrier rather than
+ * running caller code.
+ */
+function buildPreRedactionCommandCarrier(
+  source: Record<string, unknown>,
+): PreRedactionCommandCarrier | undefined {
+  const read = (key: string): unknown => {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    if (descriptor === undefined) return undefined;
+    if (!("value" in descriptor)) return undefined;
+    return descriptor.value;
+  };
+  const type = read("type");
+  if (typeof type !== "string") return undefined;
+  const carrier: PreRedactionCommandCarrier = { type };
+  const toolName = read("toolName");
+  if (typeof toolName === "string" && toolName.length > 0) carrier.toolName = toolName;
+  let carriesCommand = false;
+  for (const key of ["command", "args", "parameters"] as const) {
+    const value = read(key);
+    if (value === undefined) continue;
+    carrier[key] = value;
+    carriesCommand = true;
+  }
+  return carriesCommand ? carrier : undefined;
+}
+
 export function generateDeterministicEventId<T = JsonValue>(
   sessionId: string,
   causalSequence: number,
@@ -248,6 +297,9 @@ export class NormalizationPipeline {
       eventId: _e,
       ...payloadFields
     } = intermediateObj;
+    const preRedactionCommandCarrier = buildPreRedactionCommandCarrier(
+      intermediateObj as unknown as Record<string, unknown>,
+    );
     const redactionResult = this.redactionEngine.redact(payloadFields);
     const redactionMeta: RedactionMeta = {
       isRedacted: redactionResult.isRedacted,
@@ -412,6 +464,7 @@ export class NormalizationPipeline {
         status: "success",
         event: validEvent,
         isDuplicate: true,
+        ...(preRedactionCommandCarrier ? { preRedactionCommandCarrier } : {}),
       };
     }
 
@@ -429,6 +482,7 @@ export class NormalizationPipeline {
       status: "success",
       event: validEvent,
       isDuplicate: false,
+      ...(preRedactionCommandCarrier ? { preRedactionCommandCarrier } : {}),
     };
   }
 

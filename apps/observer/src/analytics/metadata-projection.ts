@@ -27,6 +27,7 @@ import {
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
+import type { PreRedactionCommandCarrier } from "../normalization/pipeline.js";
 import { projectDeterministicCommandSequenceFromEvent } from "./deterministic-command-sequence.js";
 import {
   normalizeCommandProfile,
@@ -640,6 +641,27 @@ export interface MetadataProjectionOptions {
   enrichEvidence?: boolean;
   /** Home directory prefix to strip from path patterns (default: os.homedir()). */
   homeDir?: string;
+  /**
+   * Command-bearing fields captured before redaction. When present, the deterministic command
+   * sequence is derived from these instead of from the redacted event, so redaction masking an
+   * argument value cannot cost the command its evidence and cannot force a guess about the value's
+   * kind. The derived sequence carries typed parameters and, for string parameters, an
+   * evidence-derived value commitment — never a value.
+   */
+  preRedactionCommandCarrier?: PreRedactionCommandCarrier;
+  /**
+   * An already-derived command sequence for this event. Callers that produce several outputs from
+   * one event (local sink, cloud batch, upload retries) derive it once and reuse it, so every output
+   * carries identical command evidence instead of depending on which consumer ran first.
+   */
+  derivedCommandSequence?: unknown;
+  /**
+   * The directory the recorded session ran in, as the harness recorded it. OMP records no
+   * per-command directory, so a command without one of its own ran in the session workspace: the
+   * shared projection derives the workspace-relative directory from this and leaves it unknown when
+   * the harness recorded none. An explicit recorded override is preserved.
+   */
+  workspaceDirectory?: string;
 }
 
 /**
@@ -661,6 +683,108 @@ export interface MetadataProjectionOptions {
  * Redaction metadata reflects which fields were dropped (`drop`) or
  * normalized (`mask`).
  */
+/**
+ * Builds the event view the sequence derivation reads: the redacted event with its command-bearing
+ * fields replaced by the pre-redaction ones when they were captured.
+ */
+function commandCarrierView(
+  event: NormalizedSessionEvent,
+  carrier: PreRedactionCommandCarrier,
+): NormalizedSessionEvent {
+  const view: Record<string, unknown> = { ...event, type: carrier.type };
+  if (carrier.toolName !== undefined) view.toolName = carrier.toolName;
+  for (const key of ["command", "args", "parameters"] as const) {
+    if (carrier[key] === undefined) delete view[key];
+    else view[key] = carrier[key];
+  }
+  return view as unknown as NormalizedSessionEvent;
+}
+
+/**
+ * Derives the deterministic command sequence from pre-redaction command-bearing fields. Returns the
+ * sanitized sequence (typed parameters plus value commitments) or undefined when the command cannot
+ * be represented — never raw argument values.
+ */
+export function deriveCommandSequenceFromCarrier(carrier: PreRedactionCommandCarrier): unknown {
+  const event = commandCarrierView(
+    {
+      eventId: "carrier",
+      schemaVersion: "1.0.0",
+      sessionId: "carrier",
+      timestamp: new Date(0).toISOString(),
+      causalRef: { causalSequence: 0 },
+      redaction: {
+        isRedacted: false,
+        redactedFields: [],
+        redactionStrategy: "none",
+        scrubbedPatterns: [],
+      },
+    } as unknown as NormalizedSessionEvent,
+    carrier,
+  );
+  return projectDeterministicCommandSequenceFromEvent(event);
+}
+
+/**
+ * Workspace-relative form of the directory a command ran in.
+ *
+ * - a recorded relative directory is the override and is kept as recorded;
+ * - a recorded absolute directory inside the session workspace becomes its relative part;
+ * - a command with no directory of its own runs in the session workspace (".");
+ * - anything else (absolute but outside the workspace, or no recorded workspace) is unknown.
+ */
+function workspaceRelativeDirectory(
+  recorded: unknown,
+  workspaceDirectory: unknown,
+): string | undefined {
+  const directory =
+    typeof recorded === "string" && recorded.trim().length > 0 ? recorded.trim() : undefined;
+  const workspace =
+    typeof workspaceDirectory === "string" && workspaceDirectory.trim().length > 0
+      ? workspaceDirectory.trim().replace(/[\\/]+$/, "")
+      : undefined;
+  const workspaceDefault = (): string | undefined => {
+    if (workspace === undefined) return undefined;
+    return isAbsoluteDirectory(workspace) ? "." : toPosixSeparators(workspace);
+  };
+  if (directory === undefined) return workspaceDefault();
+  // A recorded relative directory is the override and is kept as recorded.
+  if (!isAbsoluteDirectory(directory)) return toPosixSeparators(directory);
+  if (workspace === undefined) return undefined;
+  // Absolute directories are compared family-agnostically: a POSIX path, a Windows drive path and a
+  // UNC path all reduce to separators and, for Windows-style paths, case.
+  const normalizedDirectory = normalizeForComparison(directory);
+  const normalizedWorkspace = normalizeForComparison(workspace);
+  if (normalizedDirectory === normalizedWorkspace) return ".";
+  if (normalizedDirectory.startsWith(`${normalizedWorkspace}/`)) {
+    return toPosixSeparators(directory).slice(toPosixSeparators(workspace).length + 1);
+  }
+  // Outside the workspace, the directory cannot be expressed workspace-relative: it stays unknown
+  // rather than being emitted as an absolute host path.
+  return undefined;
+}
+
+/** True for POSIX absolute, Windows drive, and UNC directories. */
+function isAbsoluteDirectory(value: string): boolean {
+  return (
+    value.startsWith("/") ||
+    value.startsWith("\\\\") ||
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    /^[a-zA-Z]:$/.test(value)
+  );
+}
+
+function toPosixSeparators(value: string): string {
+  return value.replace(/\\+/g, "/");
+}
+
+/** Separator- and case-insensitive comparison form; Windows-style paths fold case. */
+function normalizeForComparison(value: string): string {
+  const posix = toPosixSeparators(value);
+  const windowsStyle = /^[a-zA-Z]:/.test(posix) || value.startsWith("\\\\");
+  return windowsStyle ? posix.toLowerCase() : posix;
+}
+
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
   options: MetadataProjectionOptions = {},
@@ -725,9 +849,27 @@ export function projectEventToMetadataOnly(
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
   // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
-  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(event);
+  const derivedCommandSequence =
+    options.derivedCommandSequence ??
+    projectDeterministicCommandSequenceFromEvent(
+      options.preRedactionCommandCarrier
+        ? commandCarrierView(event, options.preRedactionCommandCarrier)
+        : event,
+    ) ??
+    null;
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
+    // Command evidence carries the directory it ran in, workspace-relative, for the admission
+    // decision that replays it. Absolute host paths never enter the evidence, and a directory that
+    // cannot be established stays unknown.
+    const carrierParameters = (event as { parameters?: Record<string, unknown> }).parameters;
+    const relativeDirectory = workspaceRelativeDirectory(
+      (event as { cwd?: unknown }).cwd ?? carrierParameters?.cwd,
+      options.workspaceDirectory,
+    );
+    if (relativeDirectory !== undefined && metadata.cwd === undefined) {
+      metadata.cwd = relativeDirectory;
+    }
   }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;

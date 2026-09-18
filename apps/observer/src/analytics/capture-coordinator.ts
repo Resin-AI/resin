@@ -16,7 +16,10 @@ import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
-import { projectEventToMetadataOnly } from "./metadata-projection.js";
+import {
+  deriveCommandSequenceFromCarrier,
+  projectEventToMetadataOnly,
+} from "./metadata-projection.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
@@ -176,7 +179,61 @@ interface GenericCoalescingBuffer {
  * Coordinates raw record ingestion through normalization, per-session trajectory aggregation,
  * attribution resolution, and privacy-safe cloud observation submission.
  */
+/**
+ * The directory the recorded session ran in, as the harness recorded it. Both the live capture path
+ * and the historical import path hand the same session object to the coordinator, so command
+ * evidence derives its workspace-relative directory from the same place and leaves it unknown when
+ * the harness recorded none.
+ */
+function sessionDirectory(session: unknown): string | undefined {
+  const recorded = (session as { cwd?: unknown } | undefined)?.cwd;
+  return typeof recorded === "string" && recorded.trim().length > 0 ? recorded.trim() : undefined;
+}
+
 export class TrajectoryCaptureCoordinator {
+  /**
+   * Sanitized command evidence, derived once per event from the pre-redaction fields the pipeline
+   * returned, keyed by session and event id.
+   *
+   * The same event is projected more than once — the local sink, the cloud batch, and a re-projected
+   * batch after a failed upload — so the derived result is retained and reused instead of being
+   * consumed by whichever consumer runs first. Raw argument values are never kept: what is retained
+   * is the sanitized sequence (typed parameters plus value commitments). Entries are dropped when
+   * their session is released, with an oldest-first bound as a backstop.
+   */
+  private readonly commandSequences = new Map<string, unknown>();
+
+  private static readonly MAX_RETAINED_COMMAND_SEQUENCES = 4096;
+
+  private static sequenceKey(sessionId: string, eventId: string): string {
+    return `${sessionId}\u0000${eventId}`;
+  }
+
+  private rememberCommandSequence(result: PipelineProcessResult): void {
+    if (result.status !== "success" || !result.preRedactionCommandCarrier) return;
+    const sequence = deriveCommandSequenceFromCarrier(result.preRedactionCommandCarrier);
+    if (sequence === undefined || sequence === null) return;
+    if (this.commandSequences.size >= TrajectoryCaptureCoordinator.MAX_RETAINED_COMMAND_SEQUENCES) {
+      const oldest = this.commandSequences.keys().next().value;
+      if (oldest !== undefined) this.commandSequences.delete(oldest);
+    }
+    this.commandSequences.set(
+      TrajectoryCaptureCoordinator.sequenceKey(result.event.sessionId, result.event.eventId),
+      sequence,
+    );
+  }
+
+  private commandSequenceFor(sessionId: string, eventId: string): unknown {
+    return this.commandSequences.get(TrajectoryCaptureCoordinator.sequenceKey(sessionId, eventId));
+  }
+
+  private forgetSessionCommandSequences(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of [...this.commandSequences.keys()]) {
+      if (key.startsWith(prefix)) this.commandSequences.delete(key);
+    }
+  }
+
   private readonly pipeline: NormalizationPipeline;
   private readonly observationClient: CloudObservationClient;
   private readonly attributionResolver?: TrajectoryAttributionResolver;
@@ -410,6 +467,7 @@ export class TrajectoryCaptureCoordinator {
       }
     }
     this.activeSessions.delete(sessionId);
+    this.forgetSessionCommandSequences(sessionId);
     this.activeGenericSessions.delete(sessionId);
     this.genericSessionTails.delete(sessionId);
     this.genericSessions.delete(sessionId);
@@ -555,6 +613,7 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.event) {
               try {
+                this.rememberCommandSequence(res);
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
                 // Declared data flow runs first: the computation recorder consumes and then removes
@@ -646,6 +705,7 @@ export class TrajectoryCaptureCoordinator {
               this.trajectoryResourceForbiddenRetries.delete(sessionId);
               this.finalizedSessions.add(sessionId);
               this.activeSessions.delete(sessionId);
+              this.forgetSessionCommandSequences(sessionId);
               await ack();
               return;
             }
@@ -683,6 +743,7 @@ export class TrajectoryCaptureCoordinator {
 
               this.finalizedSessions.add(sessionId);
               this.activeSessions.delete(sessionId);
+              this.forgetSessionCommandSequences(sessionId);
               await ack();
               return;
             }
@@ -695,6 +756,7 @@ export class TrajectoryCaptureCoordinator {
           }
           this.finalizedSessions.add(sessionId);
           this.activeSessions.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         if (!this.isTelemetryAllowed(telemetryGeneration)) {
@@ -744,6 +806,7 @@ export class TrajectoryCaptureCoordinator {
               continue;
             }
             if (res.status === "success" && res.event) {
+              this.rememberCommandSequence(res);
               const ev = res.event;
               if (
                 ev.type === "session_lifecycle" &&
@@ -805,6 +868,7 @@ export class TrajectoryCaptureCoordinator {
             this.finalizedSessions.add(sessionId);
             this.activeGenericSessions.delete(sessionId);
             this.genericSessionTails.delete(sessionId);
+            this.forgetSessionCommandSequences(sessionId);
           }
           await ack();
           return;
@@ -883,7 +947,12 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
     try {
-      const projected = events.map((event) => projectEventToMetadataOnly(event));
+      const projected = events.map((event) =>
+        projectEventToMetadataOnly(event, {
+          derivedCommandSequence: this.commandSequenceFor(event.sessionId, event.eventId),
+          workspaceDirectory: sessionDirectory(session),
+        }),
+      );
       await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
     } catch (err) {
       // Local consumers must never break capture or cloud submission.
@@ -989,6 +1058,7 @@ export class TrajectoryCaptureCoordinator {
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
       for (const ack of acks) {
         await ack();
       }
@@ -999,13 +1069,19 @@ export class TrajectoryCaptureCoordinator {
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
       for (const ack of acks) {
         await ack();
       }
       return;
     }
 
-    const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    const projectedEvents = validEvents.map((ev) =>
+      projectEventToMetadataOnly(ev, {
+        derivedCommandSequence: this.commandSequenceFor(ev.sessionId, ev.eventId),
+        workspaceDirectory: sessionDirectory(buffer.session),
+      }),
+    );
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by
     // more than 1000ms (CURSOR_ORDERING_ERROR). Transcript records can arrive out of
     // order, and records missing a timestamp fall back to a wall-clock stamp, so sort
@@ -1090,6 +1166,7 @@ export class TrajectoryCaptureCoordinator {
           this.finalizedSessions.add(sessionId);
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         for (const ack of acks) {
@@ -1141,6 +1218,7 @@ export class TrajectoryCaptureCoordinator {
           this.finalizedSessions.add(sessionId);
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
+          this.forgetSessionCommandSequences(sessionId);
         }
 
         for (const ack of acks) {
@@ -1169,6 +1247,7 @@ export class TrajectoryCaptureCoordinator {
       this.finalizedSessions.add(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessionTails.delete(sessionId);
+      this.forgetSessionCommandSequences(sessionId);
     }
 
     for (const ack of acks) {
@@ -1269,6 +1348,14 @@ export class TrajectoryCaptureCoordinator {
    */
   public getActiveSessionCount(): number {
     return this.activeSessions.size + this.activeGenericSessions.size;
+  }
+
+  /**
+   * Returns the count of sanitized command sequences retained for the sessions currently in flight.
+   * Entries are dropped when their session ends, so a healthy coordinator returns to zero.
+   */
+  public getRetainedCommandSequenceCount(): number {
+    return this.commandSequences.size;
   }
 
   /**
