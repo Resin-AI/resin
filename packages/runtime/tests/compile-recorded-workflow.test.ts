@@ -183,4 +183,62 @@ describe("recorded workflow compilation", () => {
       /no adapter for fam-alpha/,
     );
   });
+
+  it("rejects an unresolved origin expressed as a plain source", () => {
+    const plain = workflow();
+    plain.steps[1]!.arguments = [
+      {
+        name: "request",
+        source: { kind: "unresolved", reason: "the record does not establish this origin" },
+      },
+    ] as (typeof plain.steps)[1]["arguments"];
+    expect(() => compileRecordedWorkflow(plain)).toThrow(/step1\.request/);
+  });
+
+  it("compiles an isolated plan that later mutation of the recording cannot change", async () => {
+    const recording = workflow();
+    const artifact = compileRecordedWorkflow(recording);
+    const digestBefore = artifact.digest;
+
+    // Mutate the recording after compilation.
+    recording.steps[0]!.arguments[0]!.source = {
+      kind: "template",
+      template: { type: "literal", value: "tampered" },
+    };
+    recording.steps.splice(1);
+    recording.inputs.push({ name: "injected", type: "string" });
+
+    expect(artifact.digest).toBe(digestBefore);
+    expect(Object.isFrozen(artifact.plan)).toBe(true);
+    expect(artifact.plan.steps).toHaveLength(4);
+
+    const calls: Array<Record<string, unknown>> = [];
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      runtime: "fam-alpha",
+      call: async (request) => {
+        calls.push(request.arguments);
+        return { body: { text: `fetched-${request.arguments.source}` } };
+      },
+    });
+    registry.register({
+      runtime: "fam-beta",
+      call: async (request) => {
+        calls.push(request.arguments);
+        const nested = request.arguments.request as { text: string; options: { depth: number } };
+        return request.step.callable.name === "local-transform"
+          ? { stdout: `${nested.text}#${nested.options.depth}` }
+          : { path: `/out/${String(request.arguments.content)}` };
+      },
+    });
+
+    const tool = instantiateRecordedWorkflow(artifact, {
+      adapters: registry,
+      resolvePrivate: () => "tok",
+    });
+    const result = await tool.invoke({ source: "alpha", retries: 1 });
+    // The artifact still runs what was compiled, not what the recording became.
+    expect(result.status).toBe("completed");
+    expect(calls[1]).toEqual({ request: { text: "fetched-alpha", options: { depth: 2 } } });
+  });
 });

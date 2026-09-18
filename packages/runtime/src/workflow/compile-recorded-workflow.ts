@@ -50,6 +50,14 @@ export interface CompiledWorkflowArtifact {
 
 function collectUnresolved(workflow: RecordedWorkflow): string[] {
   const unresolved: string[] = [];
+  for (const step of workflow.steps) {
+    for (const argument of step.arguments) {
+      // Unresolved origins are refused in every representation, not only inside templates.
+      if (argument.source.kind === "unresolved") {
+        unresolved.push(`${step.id}.${argument.name}: ${argument.source.reason}`);
+      }
+    }
+  }
   const walk = (template: WorkflowValueTemplate, where: string): void => {
     switch (template.type) {
       case "unresolved":
@@ -73,6 +81,18 @@ function collectUnresolved(workflow: RecordedWorkflow): string[] {
     }
   }
   return unresolved;
+}
+
+/** A frozen structural copy: later mutation of the recording cannot reach the artifact. */
+function isolate<T>(value: T): T {
+  const copy = JSON.parse(JSON.stringify(value)) as T;
+  const freeze = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    for (const entry of Object.values(node as Record<string, unknown>)) freeze(entry);
+    Object.freeze(node);
+  };
+  freeze(copy);
+  return copy;
 }
 
 function canonicalise(value: unknown): string {
@@ -130,7 +150,10 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
       "unresolved_origin",
     );
   }
-  const last = workflow.steps[workflow.steps.length - 1]!;
+  // The artifact owns an isolated, immutable plan: what was compiled cannot be changed afterwards,
+  // and the digest always describes the executable contents.
+  const plan = isolate(workflow);
+  const last = plan.steps[plan.steps.length - 1]!;
 
   const JSON_SCHEMA_TYPES: Record<string, string> = {
     string: "string",
@@ -140,24 +163,24 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
     array: "array",
   };
   const properties: Record<string, unknown> = {};
-  for (const input of workflow.inputs) {
+  for (const input of plan.inputs) {
     properties[input.name] = { type: JSON_SCHEMA_TYPES[input.type] ?? "string" };
   }
 
   return {
-    plan: workflow,
-    digest: digestOf(workflow),
-    name: nameOf(workflow),
+    plan,
+    digest: digestOf(plan),
+    name: nameOf(plan),
     inputSchema: {
       type: "object",
       properties,
-      required: workflow.inputs.map((input) => input.name),
+      required: plan.inputs.map((input) => input.name),
       additionalProperties: false,
     },
     outputContract: { fromStep: last.id, callable: last.callable.name },
-    requiredRuntimes: [...new Set(workflow.steps.map((step) => step.callable.runtime))],
-    requiredPrivateReferences: [...(workflow.privateReferences ?? [])],
-    permissions: workflow.steps
+    requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
+    requiredPrivateReferences: [...(plan.privateReferences ?? [])],
+    permissions: plan.steps
       .filter((step) => step.permissions !== undefined)
       .map((step) => ({ stepId: step.id, permissions: step.permissions as WorkflowJsonValue })),
   };

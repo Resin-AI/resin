@@ -192,4 +192,68 @@ describe("workflow recipe recording", () => {
     expect(JSON.stringify(recipe.workflow)).not.toContain("tok_late_999");
     expect([...recipe.privateValues.values()]).toContain("tok_late_999");
   });
+
+  it("keeps a binding even when the value it names is private", () => {
+    const bound: RecordedCallObservation[] = [
+      {
+        callId: "call_source",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-program", name: "local-read" },
+        arguments: { path: "in.txt" },
+        argumentOrigins: { path: { type: "literal", value: "in.txt" } },
+        result: { secret: "tok_bound_1" },
+        observed: "succeeded",
+      },
+      {
+        callId: "call_uses",
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-program", name: "local-send" },
+        arguments: { token: "tok_bound_1" },
+        // The record establishes where it came from, and it is private.
+        argumentOrigins: { token: { type: "result", stepId: "step0", path: ["secret"] } },
+        isPrivateValue: (value) => value.includes("tok_bound_1"),
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_bound_private", bound)!;
+    const send = recipe.workflow.steps[1]!;
+    // The connection survives privacy: still the earlier result, resolved fresh at execution time.
+    expect(leaf(send.arguments[0]!.source)).toEqual({
+      type: "result",
+      stepId: "step0",
+      path: ["secret"],
+    });
+    expect(JSON.stringify(recipe.workflow)).not.toContain("tok_bound_1");
+  });
+
+  it("applies privacy inside a literal object and array, recursively", () => {
+    const nestedLiteral: RecordedCallObservation[] = [
+      {
+        callId: "call_literal_composite",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-program", name: "local-call" },
+        arguments: { payload: { auth: { tokens: ["plain", "tok_inner_7"] } } },
+        argumentOrigins: {
+          payload: { type: "literal", value: { auth: { tokens: ["plain", "tok_inner_7"] } } },
+        },
+        isPrivateValue: (value) => value.includes("tok_inner_7"),
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_literal_composite", nestedLiteral)!;
+    const payload = leaf(recipe.workflow.steps[0]!.arguments[0]!.source) as {
+      type: string;
+      entries: { auth: { entries: { tokens: { type: string; items: Array<{ type: string }> } } } };
+    };
+    expect(payload.type).toBe("object");
+    expect(payload.entries.auth.entries.tokens.type).toBe("array");
+    expect(payload.entries.auth.entries.tokens.items).toEqual([
+      { type: "literal", value: "plain" },
+      { type: "private", reference: expect.any(String) },
+    ]);
+    expect(JSON.stringify(recipe.workflow)).not.toContain("tok_inner_7");
+    expect([...recipe.privateValues.values()]).toContain("tok_inner_7");
+  });
 });

@@ -111,13 +111,32 @@ function recordWorkflowRecipeInternal(
       if (typeof leaf === "string" && isPrivate?.(leaf) === true) return makePrivate(leaf);
       return undefined;
     };
+    /**
+     * A recorded literal is rebuilt so privacy applies inside it too: a composite literal becomes an
+     * object/array template whose leaves are literals, except the private ones.
+     */
+    const literalTemplate = (value: WorkflowJsonValue): WorkflowValueTemplate => {
+      const privateLeaf = privateHere(value);
+      if (privateLeaf) return privateLeaf;
+      if (Array.isArray(value)) return { type: "array", items: value.map(literalTemplate) };
+      if (isPlainObjectValue(value)) {
+        const entries: Record<string, WorkflowValueTemplate> = {};
+        for (const [key, entry] of Object.entries(value)) entries[key] = literalTemplate(entry);
+        return { type: "object", entries };
+      }
+      return { type: "literal", value };
+    };
     switch (origin?.type) {
       case "literal":
+        // Only a literal may be replaced by a private reference. A recorded binding stays a binding:
+        // the value it names is fetched fresh and resolved locally at execution time, so privacy
+        // does not cost the workflow its connection.
+        return literalTemplate(value);
       case "input":
       case "result":
       case "private":
       case "unresolved":
-        return privateHere(value) ?? origin;
+        return origin;
       case "object":
         // A recorded origin may describe only part of the value; keep its leaves, and decide the rest
         // from the record.
@@ -229,11 +248,24 @@ function recordWorkflowRecipeInternal(
   // reference, wherever it ended up in the workflow.
   const sweep = (template: WorkflowValueTemplate): WorkflowValueTemplate => {
     switch (template.type) {
-      case "literal":
-        return typeof template.value === "string" &&
-          privatePredicates.some((predicate) => predicate(template.value as string))
-          ? makePrivate(template.value)
-          : template;
+      case "literal": {
+        const expand = (value: WorkflowJsonValue): WorkflowValueTemplate => {
+          if (
+            typeof value === "string" &&
+            privatePredicates.some((predicate) => predicate(value))
+          ) {
+            return makePrivate(value);
+          }
+          if (Array.isArray(value)) return { type: "array", items: value.map(expand) };
+          if (isPlainObjectValue(value)) {
+            const entries: Record<string, WorkflowValueTemplate> = {};
+            for (const [key, entry] of Object.entries(value)) entries[key] = expand(entry);
+            return { type: "object", entries };
+          }
+          return { type: "literal", value };
+        };
+        return expand(template.value);
+      }
       case "object": {
         const entries: Record<string, WorkflowValueTemplate> = {};
         for (const [key, entry] of Object.entries(template.entries)) entries[key] = sweep(entry);
