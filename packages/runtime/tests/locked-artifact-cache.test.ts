@@ -98,7 +98,10 @@ describe("Locked Artifact Cache", () => {
     });
 
     const validatedManifest = ToolManifestSchema.parse(manifest);
-    const manifestDigest = normalizeSha256(computeSha256(canonicalJson(validatedManifest)), false);
+    // The lockfile pins the manifest body digest (computeManifestDigest semantics): the
+    // self-referential `digest` field is excluded so an embedded digest verifies consistently.
+    const { digest: _omit, ...manifestBody } = validatedManifest;
+    const manifestDigest = normalizeSha256(computeSha256(canonicalJson(manifestBody)), false);
     const artifactDigest = normalizeSha256(computeSha256(built.archiveBuffer), false);
 
     const lockedEntry: V1LockedToolEntry = {
@@ -354,7 +357,8 @@ describe("Locked Artifact Cache", () => {
     });
 
     const rogueArchiveDigest = normalizeSha256(computeSha256(rogueBuilt.archiveBuffer), false);
-    const rogueManifestDigest = normalizeSha256(computeSha256(canonicalJson(manifest)), false);
+    const { digest: _rogueOmit, ...rogueManifestBody } = manifest;
+    const rogueManifestDigest = normalizeSha256(computeSha256(canonicalJson(rogueManifestBody)), false);
 
     const rogueEntry: V1LockedToolEntry = {
       toolId: manifest.id,
