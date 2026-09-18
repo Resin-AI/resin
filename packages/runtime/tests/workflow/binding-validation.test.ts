@@ -369,7 +369,10 @@ describe("a plan is run once per attempt, as the work it is", () => {
           callId: "call-1",
           callable: { runtime: TEST_RUNTIME, name: "consume" },
           arguments: [
-            { name: "text", source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } } },
+            {
+              name: "text",
+              source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } },
+            },
           ],
           dependsOn: ["step0"],
           failurePolicy: { onError: "abort", policy: "recorded" },
@@ -380,7 +383,10 @@ describe("a plan is run once per attempt, as the work it is", () => {
           callId: "call-2",
           callable: { runtime: TEST_RUNTIME, name: "finish" },
           arguments: [
-            { name: "text", source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } } },
+            {
+              name: "text",
+              source: { kind: "template", template: { type: "literal", value: "tok(alpha)" } },
+            },
           ],
           dependsOn: ["step1"],
           failurePolicy: { onError: "abort", policy: "recorded" },

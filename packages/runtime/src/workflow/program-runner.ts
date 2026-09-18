@@ -270,15 +270,19 @@ function runChild(
   });
 }
 
-function parseValue(stdout: string): WorkflowJsonValue {
-  const text = stdout.trim();
-  if (text.length === 0) return text;
-  try {
-    return JSON.parse(text) as WorkflowJsonValue;
-  } catch {
-    // Not JSON: the program's stdout is text, and that text is its value.
-    return text;
-  }
+/**
+ * The value a recorded program's result has.
+ *
+ * A program's result is what the interface that ran it produced, and for a process that is its
+ * standard output as text — the same bytes, unchanged. Trimming it would lose meaningful
+ * whitespace, and parsing it would turn a program that printed `2` into a number the recorded call
+ * never returned; both would make the replay disagree with the recording it is checked against, and
+ * neither is what the tool the user ran actually received. A result that is structured is
+ * structured because the interface that returned it says so, which is the tool-protocol adapter's
+ * business rather than this one's.
+ */
+function resultValue(stdout: string): WorkflowJsonValue {
+  return stdout;
 }
 
 /**
@@ -299,7 +303,7 @@ export async function runRecordedProgram(
     exitCode: captured.exitCode,
     stdout: captured.stdout,
     stderr: captured.stderr,
-    value: parseValue(captured.stdout),
+    value: resultValue(captured.stdout),
   };
 }
 

@@ -553,8 +553,7 @@ export async function confirmPromotedPlan(params: {
     replay = await replayPlanOnce(plan, params.environment);
   }
   const verification: WorkflowPlanVerification = {
-    status:
-      replay.missed.length === 0 ? "verified" : unattributed ? "incomplete" : "failed",
+    status: replay.missed.length === 0 ? "verified" : unattributed ? "incomplete" : "failed",
     reproduced: replay.reproduced,
     missed: replay.missed,
     dropped,
@@ -585,7 +584,9 @@ export async function validateAndConfirmCandidates(params: {
     candidates: params.candidates,
     environment: params.environment,
   });
-  const accepted = decided.filter((outcome) => outcome.accepted).map((outcome) => outcome.candidate);
+  const accepted = decided
+    .filter((outcome) => outcome.accepted)
+    .map((outcome) => outcome.candidate);
   const confirmed = await confirmPromotedPlan({
     plan: params.plan,
     accepted,

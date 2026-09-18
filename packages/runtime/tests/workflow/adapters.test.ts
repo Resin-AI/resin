@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  RecordedWorkflow,
   WorkflowArgument,
   WorkflowJsonValue,
   WorkflowRecordedProgram,
@@ -14,10 +15,19 @@ import { createProcessAdapter } from "../../src/workflow/process-adapter.js";
 import { createProgramAdapter } from "../../src/workflow/program-adapter.js";
 import { runRecordedProgram } from "../../src/workflow/program-runner.js";
 import {
+  RuntimeAdapterRegistry,
+  executeRecordedWorkflow,
+} from "../../src/workflow/recorded-workflow.js";
+import {
+  RESIN_PROCESS_RUNTIME,
+  RESIN_TOOL_PROTOCOL_RUNTIME,
+} from "../../src/workflow/runtime-families.js";
+import {
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
 } from "../../src/workflow/runtime-families.js";
+import { createToolProtocolAdapter } from "../../src/workflow/tool-protocol-adapter.js";
 import { createToolProtocolAdapter } from "../../src/workflow/tool-protocol-adapter.js";
 
 const workspaces: string[] = [];
@@ -151,7 +161,9 @@ describe("recorded program adapters", () => {
     });
 
     // The pipe decided the order; the `&&` branch wrote the redirect file.
-    expect(value).toBe("beta\nalpha");
+    // The program's result is its standard output, byte for byte: the trailing newline of the last
+    // line is part of what the program printed and part of what the recorded call returned.
+    expect(value).toBe("beta\nalpha\n");
     expect(await readFile(join(workspace, "redirect.txt"), "utf8")).toBe("done\n");
   });
 
@@ -176,7 +188,7 @@ describe("recorded program adapters", () => {
     expect(message).toContain("boom");
   });
 
-  it("runs a recorded python program and turns its JSON answer into a structured value", async () => {
+  it("returns a program's answer exactly as the program printed it", async () => {
     const workspace = await makeWorkspace();
     const adapter = createProgramAdapter({ cwd: workspace });
 
@@ -193,7 +205,90 @@ describe("recorded program adapters", () => {
       arguments: {},
     });
 
-    expect(value).toEqual({ count: 3, label: "ok" });
+    // The tool the caller ran answered with text; a replay that returned an object would answer
+    // differently from the recording, and would do so only for programs that happen to print JSON.
+    expect(value).toBe('{"count": 3, "label": "ok"}\n');
+  });
+
+  it("keeps numeric-looking, boolean-looking and whitespace-bearing answers as the text they are", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter({ cwd: workspace });
+    const run = async (program: string) =>
+      await adapter.call({
+        step: recordedStep({
+          id: "print",
+          runtime: RESIN_PROCESS_RUNTIME,
+          name: "run-command",
+          program: { kind: "shell", source: program },
+        }),
+        arguments: {},
+      });
+
+    // Each of these would be a different value if the replay trimmed or parsed the output, and each
+    // is what the recorded call actually returned.
+    expect(await run("printf '2\\n'")).toBe("2\n");
+    expect(await run("printf 'true\\n'")).toBe("true\n");
+    expect(await run("printf 'null\\n'")).toBe("null\n");
+    expect(await run("printf '  spaced  \\n'")).toBe("  spaced  \n");
+    expect(await run("printf 'a\\n\\nb\\n'")).toBe("a\n\nb\n");
+    expect(await run("printf '\\n'")).toBe("\n");
+  });
+
+  it("carries a program's answer into the next call that consumes it", async () => {
+    const workspace = await makeWorkspace();
+    const adapters = new RuntimeAdapterRegistry();
+    adapters.register(createProcessAdapter({ cwd: workspace }));
+    const seen: Array<Record<string, WorkflowJsonValue>> = [];
+    adapters.register(
+      createToolProtocolAdapter({
+        dispatch: async (request) => {
+          seen.push(request.arguments);
+          return { received: request.arguments.text ?? null };
+        },
+      }),
+    );
+    const plan = {
+      schemaVersion: 1,
+      workflowId: "wf-program-chain",
+      inputs: [],
+      steps: [
+        {
+          id: "step0",
+          callId: "call_0",
+          callable: {
+            runtime: RESIN_PROCESS_RUNTIME,
+            name: "run-command",
+            program: { kind: "shell", source: "printf '  42  \\n'" },
+          },
+          arguments: [],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+        {
+          id: "step1",
+          callId: "call_1",
+          callable: { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name: "handoff" },
+          arguments: [
+            {
+              name: "text",
+              source: { kind: "template", template: { type: "result", stepId: "step0", path: [] } },
+            },
+          ],
+          dependsOn: ["step0"],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    } as unknown as RecordedWorkflow;
+
+    const execution = await executeRecordedWorkflow(plan, { inputs: {}, adapters });
+    expect(execution.status).toBe("completed");
+    // The earlier program's answer — whitespace included — is what the later call was given.
+    expect(seen).toEqual([{ text: "  42  \n" }]);
+    expect(execution.steps[1]!.status === "completed" && execution.steps[1]!.result).toEqual({
+      received: "  42  \n",
+    });
   });
 
   it("runs the program text the recorded argument carried, and the source when it carries none", async () => {
@@ -208,9 +303,9 @@ describe("recorded program adapters", () => {
     });
 
     expect(await adapter.call({ step, arguments: { command: "echo from-argument" } })).toBe(
-      "from-argument",
+      "from-argument\n",
     );
-    expect(await adapter.call({ step, arguments: {} })).toBe("from-source");
+    expect(await adapter.call({ step, arguments: {} })).toBe("from-source\n");
   });
 
   it("kills a program that outlives its time budget instead of waiting for it", async () => {

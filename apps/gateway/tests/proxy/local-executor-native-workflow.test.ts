@@ -318,7 +318,7 @@ describe("recorded workflows of ordinary calls", () => {
               name: "rows",
               source: {
                 kind: "template",
-                template: { type: "result", stepId: "step0", path: ["rows"] },
+                template: { type: "result", stepId: "step0", path: [] },
               },
             },
           ],
@@ -363,9 +363,10 @@ describe("recorded workflows of ordinary calls", () => {
       context,
     );
     expect(result.isError, String(result.content[0]?.text)).toBeUndefined();
-    // The recorded program's rows reached the callable, and the callable was reached by its own name.
+    // The program's answer reached the callable exactly as the program printed it, and the
+    // callable was reached by its own name through the host's routing.
     expect(seen).toHaveLength(1);
     expect(seen[0]!.name).toBe("vendor.score");
-    expect(seen[0]!.parameters).toEqual({ rows: [1, 2, 3] });
+    expect(seen[0]!.parameters).toEqual({ rows: '{"rows": [1, 2, 3]}\n' });
   });
 });
