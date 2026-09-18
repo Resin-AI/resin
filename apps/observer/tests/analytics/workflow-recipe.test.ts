@@ -1,4 +1,5 @@
 import type { RecordedWorkflow } from "@resin/contracts";
+import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import {
   type RecordedCallObservation,
   acceptInputProposals,
@@ -556,5 +557,51 @@ describe("workflow recipe recording", () => {
       "unresolved",
     );
     expect(recipe.workflow.steps[1]!.dependsOn).toEqual([]);
+  });
+
+  it("keeps the caller's reference record through both capture paths", async () => {
+    // The record a reference-aware caller produces, as the runtime's session reports it.
+    const recorded = {
+      id: { reference: "ref:sess_agent:call_1", path: ["body", "rows", 0, "id"] },
+      plain: { reference: "ref:sess_agent:call_2", path: [] },
+    };
+    const projected = projectEventToMetadataOnly(
+      {
+        eventId: "evt_refs",
+        sessionId: "sess_agent",
+        type: "tool_call",
+        toolName: "vendor_store",
+        callId: "call_3",
+        parameters: { id: "row-9" },
+        metadata: { references: recorded },
+      } as never,
+      {},
+    );
+    // The opaque references survive the privacy projection intact: they are identifiers, not values.
+    expect((projected.metadata as Record<string, unknown>).references).toEqual(recorded);
+
+    // A malformed entry is dropped rather than guessed at.
+    const malformed = projectEventToMetadataOnly(
+      {
+        eventId: "evt_refs_bad",
+        sessionId: "sess_agent",
+        type: "tool_call",
+        toolName: "vendor_store",
+        callId: "call_4",
+        parameters: { id: "row-9" },
+        metadata: {
+          references: {
+            good: { reference: "ref:sess_agent:call_1", path: ["a", 1] },
+            missing: {},
+            badPath: { reference: "ref:sess_agent:call_1", path: [{ nested: true }] },
+            empty: { reference: "" },
+          },
+        },
+      } as never,
+      {},
+    );
+    expect((malformed.metadata as Record<string, unknown>).references).toEqual({
+      good: { reference: "ref:sess_agent:call_1", path: ["a", 1] },
+    });
   });
 });
