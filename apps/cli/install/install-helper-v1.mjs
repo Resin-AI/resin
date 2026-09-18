@@ -12440,6 +12440,17 @@ var AccountToolAccessResponseSchema = external_exports.object({
   toolAccess: external_exports.enum(["allowed", "subscription_inactive"])
 }).strict();
 
+// packages/protocol/dist/account-profile.js
+init_zod();
+var MembershipTypeSchema = external_exports.enum(["free", "pro", "max", "founder"]);
+var AccountProfileResponseSchema = external_exports.object({
+  schemaVersion: external_exports.literal("1.0.0"),
+  accountId: external_exports.string().min(1),
+  userId: external_exports.string().min(1),
+  email: external_exports.string().email().max(254),
+  membershipType: MembershipTypeSchema
+});
+
 // packages/protocol/dist/http.js
 init_dist();
 init_zod();

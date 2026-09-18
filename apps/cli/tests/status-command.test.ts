@@ -4,13 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { FrameDecoder, encodeFrame } from "@resin/observer";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   collectStatus,
   formatStatusForTerminal,
   parseStatusFlags,
   statusCommand,
 } from "../src/commands/status.js";
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 })),
+  );
+});
+afterEach(() => vi.unstubAllGlobals());
 
 function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   const files = new Map<string, string>(Object.entries(initialFiles));
@@ -56,6 +64,31 @@ describe("status command & collector", () => {
 
     const flags2 = parseStatusFlags(["-h"]);
     expect(flags2.help).toBe(true);
+  });
+
+  it.each(["--verbose", "-v"])("accepts %s for detailed status", (flag) => {
+    expect(parseStatusFlags([flag]).verbose).toBe(true);
+    expect(parseStatusFlags([flag, "--json"]).json).toBe(true);
+  });
+
+  it("documents detailed status in help without collecting status", async () => {
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    const fsBridge = createMockFsBridge();
+    const readFile = vi.spyOn(fsBridge, "readFile");
+    try {
+      expect(await statusCommand(["--help", "--verbose"], { fsBridge })).toBe(0);
+      const output = chunks.join("");
+      expect(output).toContain("--verbose");
+      expect(output).toContain("-v");
+      expect(output).toContain("--json");
+      expect(readFile).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+    }
   });
 
   it("collects comprehensive status report", async () => {
@@ -170,9 +203,10 @@ describe("status command & collector", () => {
             platform: "external",
           });
           expect(summary.remediations.some((item) => item.code === "install_daemon")).toBe(false);
-          const terminal = formatStatusForTerminal(summary);
+          const terminal = formatStatusForTerminal(summary, { verbose: true });
           expect(terminal).toContain("EXTERNALLY MANAGED (foreground)");
           expect(terminal).not.toContain("State:      NOT INSTALLED");
+          expect(formatStatusForTerminal(summary)).not.toContain("Not installed");
         }
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -232,7 +266,7 @@ describe("status command & collector", () => {
       ],
     };
 
-    const terminalOutput = formatStatusForTerminal(summary);
+    const terminalOutput = formatStatusForTerminal(summary, { verbose: true });
     expect(terminalOutput).toContain("RESIN SYSTEM STATUS");
     expect(terminalOutput).toContain("[Daemon Service]");
     expect(terminalOutput).toContain("PID:        9999");
@@ -302,7 +336,7 @@ describe("status command & collector", () => {
     expect(summary.cloud.authenticated).toBe(false);
 
     const formatted = formatStatusForTerminal(summary);
-    expect(formatted).toContain("LOCAL ONLY (Cloud Unconfigured)");
+    expect(formatted).toMatch(/Cloud\s+Local only/);
   });
 
   it("retains missing status when no completed local-only install journal exists", async () => {
@@ -317,12 +351,14 @@ describe("status command & collector", () => {
     expect(summary.cloud.authenticated).toBe(false);
 
     const formatted = formatStatusForTerminal(summary);
-    expect(formatted).toContain("NOT AUTHENTICATED");
+    expect(formatted).toMatch(/Cloud\s+Not signed in/);
   });
 
-  it("retains valid status when credentials exist without proactive remote revocation network calls", async () => {
+  it("keeps authentication valid when the display-only profile lookup fails", async () => {
     const tokenPath = path.join(homeDir, ".resin", "state", "device-token.json");
-    const customFetch: typeof fetch = vi.fn();
+    const customFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 401 }));
 
     const fsBridge = createMockFsBridge({
       [tokenPath]: JSON.stringify({
@@ -358,6 +394,10 @@ describe("status command & collector", () => {
     expect(summary.cloud.authenticated).toBe(true);
     expect(summary.cloud.deviceId).toBe("dev_test_42");
     expect(summary.cloud.accountId).toBe("acc_test_42");
-    expect(customFetch).not.toHaveBeenCalled();
+    expect(summary.account).toMatchObject({ email: null, membershipType: null });
+    expect(customFetch).toHaveBeenCalledExactlyOnceWith(
+      "https://api.resin.sh/v1/account/profile",
+      expect.objectContaining({ method: "GET", redirect: "error" }),
+    );
   });
 });

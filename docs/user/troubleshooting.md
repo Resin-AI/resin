@@ -12,7 +12,7 @@ resin doctor
 resin repair
 ```
 
-`status` is the live snapshot (service / IPC / cloud / safety gate / locked meta-tools / harnesses). `doctor` diagnoses. `repair` (or `doctor --fix`) remediates directories, lockfile, user service, harness MCP, and the local safety attestation.
+`status` gives a short health summary with any problems and next steps. Use `resin status --verbose` for the full diagnostic snapshot or `resin status --json` for machine-readable output. `doctor` diagnoses. `repair` (or `doctor --fix`) remediates directories, lockfile, user service, harness MCP, and the local safety attestation.
 
 ---
 
@@ -20,7 +20,7 @@ resin repair
 
 ### Recipe 1: Daemon Fails To Start
 
-**Symptom**: `resin status` reports `[Daemon Service] State: STOPPED (inactive)` or `NOT INSTALLED`.
+**Symptom**: `resin status` reports `Daemon Stopped` or `Daemon Not installed`.
 
 **Causes & solutions**:
 
