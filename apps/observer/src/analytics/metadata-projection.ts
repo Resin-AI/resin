@@ -34,6 +34,12 @@ import {
   projectEnrichedToolParameters,
 } from "./evidence-normalization.js";
 
+import {
+  RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
+} from "./workflow-call-recorder.js";
 const DEFAULT_HOME_DIR = homedir();
 
 export type ParameterPrimitiveKind =
@@ -763,6 +769,25 @@ export function projectEventToMetadataOnly(
       string,
       unknown
     >;
+  }
+
+  // The per-call workflow carrier is the record the general compiler consumes. It is
+  // re-read through the strict reader (frozen carrier vocabulary only) and copied by
+  // value; literal argument values ride along because they are what the workflow is
+  // made of, while private leaves were already replaced by local `private:` references.
+  const workflowCall = readWorkflowCallCarrier(
+    event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+  );
+  if (workflowCall !== undefined) {
+    metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = JSON.parse(
+      JSON.stringify(workflowCall),
+    ) as Record<string, unknown>;
+  }
+  const workflowResult = readWorkflowResultCarrier(
+    event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+  );
+  if (workflowResult !== undefined) {
+    metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = workflowResult;
   }
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec

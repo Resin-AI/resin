@@ -25,6 +25,7 @@ import {
 import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { ToolRegistry } from "../registry/registry.js";
+import type { JsonRpcParams } from "../protocol/types.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
@@ -175,6 +176,7 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
+    let router: CloudInvocationRouter | undefined;
     const executor =
       options.executor ??
       new LocalArtifactExecutor({
@@ -185,10 +187,28 @@ export async function createProductionProxyRuntime(
         requireSignature: localKeyStore ? true : undefined,
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+        // Recorded-workflow plans dispatch their steps through the same router the
+        // original calls used, so scope, pins, and permissions apply identically.
+        stepInvoker: async (request) => {
+          if (!router) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "Step dispatcher is not ready" }],
+            };
+          }
+          return await router.invoke({
+            toolId: request.name,
+            name: request.name,
+            version: "",
+            parameters: request.parameters as JsonRpcParams,
+            context: request.context,
+            ...(request.signal ? { signal: request.signal } : {}),
+            ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+          });
+        },
       });
     executor.setManagedToolAccess(managedToolAccess);
-
-    const router = new CloudInvocationRouter({
+    router = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
       baseUrl: identity.cloudUrl,

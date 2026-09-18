@@ -12,12 +12,20 @@
  */
 
 import type {
+  AgentArgumentOrigin,
   RecordedWorkflow,
   WorkflowJsonValue,
   WorkflowStep,
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
+import { containsRedactionPlaceholder } from "./private-value-store.js";
+import {
+  RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
+} from "./workflow-call-recorder.js";
 
 /** Where a recorded argument's value came from, as the record establishes it. */
 export type RecordedArgumentOrigin = WorkflowValueTemplate;
@@ -135,10 +143,11 @@ function recordWorkflowRecipeInternal(
     };
     switch (origin?.type) {
       case "literal":
-        // Only a literal may be replaced by a private reference. A recorded binding stays a binding:
-        // the value it names is fetched fresh and resolved locally at execution time, so privacy
-        // does not cost the workflow its connection.
-        return literalTemplate(value);
+        // The recorded literal is rebuilt from the origin's own value so privacy applies
+        // inside it too: a composite literal becomes an object/array template whose
+        // leaves are literals, except the private ones. The origin's value is the record;
+        // the observed argument may be a projected shape that no longer carries it.
+        return literalTemplate(origin.value);
       case "input":
       case "result":
       case "private":
@@ -438,6 +447,81 @@ export interface RecordedReferenceUse {
   path?: Array<string | number>;
 }
 
+/**
+ * Binds a carrier origin's references to the steps this recording observed. The
+ * reference token carries its own scope; the producing call's recorded handle maps the
+ * invocation surface's call id onto this recording's call id. A reference that names
+ * nothing stays unresolved rather than being guessed from a matching value.
+ */
+function bindCarrierOrigin(
+  origin: AgentArgumentOrigin,
+  aliasByScopeCall: Map<string, string>,
+  stepIdByCallId: Map<string, string>,
+  eventSessionId: string,
+): WorkflowValueTemplate {
+  switch (origin.type) {
+    case "reference": {
+      const parts = origin.reference.split(":");
+      if (parts.length >= 3 && parts[0] === "ref") {
+        const scope = parts[1]!;
+        const refCallId = parts.slice(2).join(":");
+        const producingKey =
+          aliasByScopeCall.get(`${scope}${refCallId}`) ??
+          `${eventSessionId}${refCallId}`;
+        const stepId = stepIdByCallId.get(producingKey);
+        if (stepId !== undefined) {
+          return { type: "result", stepId, path: origin.path };
+        }
+      }
+      return {
+        type: "unresolved",
+        reason: `reference '${origin.reference}' does not name a recorded call in this session`,
+      };
+    }
+    case "object": {
+      const entries: Record<string, WorkflowValueTemplate> = {};
+      for (const [key, entry] of Object.entries(origin.entries)) {
+        entries[key] = bindCarrierOrigin(entry, aliasByScopeCall, stepIdByCallId, eventSessionId);
+      }
+      return { type: "object", entries };
+    }
+    case "array":
+      return {
+        type: "array",
+        items: origin.items.map((item) =>
+          bindCarrierOrigin(item, aliasByScopeCall, stepIdByCallId, eventSessionId),
+        ),
+      };
+    default:
+      // literal / input / private carry through verbatim.
+      return origin;
+  }
+}
+
+/**
+ * The display value a carrier origin stands for: literals keep their recorded value;
+ * inputs, references and private leaves have no uploadable value, so they read as null.
+ * The executable template comes from the origin itself, never from this value.
+ */
+function carrierArgumentValue(origin: AgentArgumentOrigin): WorkflowJsonValue {
+  switch (origin.type) {
+    case "literal":
+      return origin.value;
+    case "object": {
+      const out: Record<string, WorkflowJsonValue> = {};
+      for (const [key, entry] of Object.entries(origin.entries)) {
+        out[key] = carrierArgumentValue(entry);
+      }
+      return out;
+    }
+    case "array":
+      return origin.items.map(carrierArgumentValue);
+    default:
+      return null;
+  }
+}
+
+
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
@@ -463,14 +547,33 @@ export function recordCallsFromEvents(
     string,
     { value: WorkflowJsonValue | undefined; isError: boolean | undefined }
   >();
+  /**
+   * The handle a composed call returned for its result, keyed by scope: it maps the
+   * invocation surface's call id onto this recording's call id, so a later reference
+   * token binds to the call that produced the value it names.
+   */
+  const resultAliasByCallId = new Map<string, string>();
+  const scopedKey = (sessionId: string, callId: string): string => `${sessionId}${callId}`;
   for (const event of ordered) {
     if (event.type !== "tool_result") continue;
     const callId = event.callId ?? event.toolCallId;
     if (!callId) continue;
-    resultsByCallId.set(callId, {
+    resultsByCallId.set(scopedKey(event.sessionId, callId), {
       value: event.result ?? extractResultValue(event.content),
       isError: event.isError,
     });
+    const carrier = readWorkflowResultCarrier(
+      event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+    );
+    const handle = carrier?.handle;
+    if (handle !== undefined) {
+      const parts = handle.split(":");
+      if (parts.length >= 3 && parts[0] === "ref") {
+        const scope = parts[1]!;
+        const gatewayCallId = parts.slice(2).join(":");
+        resultAliasByCallId.set(`${scope}${gatewayCallId}`, scopedKey(event.sessionId, callId));
+      }
+    }
   }
 
   const stepIdByCallId = new Map<string, string>();
@@ -489,9 +592,18 @@ export function recordCallsFromEvents(
   const scopeId = options.referenceScopeId ?? workflowId;
 
   const observations: RecordedCallObservation[] = [];
+  const seenCallIds = new Set<string>();
   for (const event of ordered) {
     if (event.type !== "tool_call") continue;
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
+    const scopedCallKey = scopedKey(event.sessionId, callId);
+    // A redelivered call is the same execution, not a second step.
+    if (seenCallIds.has(scopedCallKey)) continue;
+    seenCallIds.add(scopedCallKey);
+
+    const carrier = readWorkflowCallCarrier(
+      event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+    );
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
     const recordedInputs =
@@ -499,14 +611,37 @@ export function recordCallsFromEvents(
         | Array<{ name: string; argument: string; type: string }>
         | undefined) ?? [];
     const argumentOrigins: Record<string, RecordedArgumentOrigin> = {};
+    const argumentTypes: Record<string, "string" | "number" | "boolean" | "object" | "array"> = {};
+    const callArguments: Record<string, WorkflowJsonValue> = {};
+
+    if (carrier !== undefined) {
+      // The carrier is the caller's own statement of every argument's origin. A
+      // reference binds through the producing call's recorded handle; one that names
+      // nothing this session recorded stays unbound rather than being guessed.
+      for (const input of carrier.inputs) {
+        recordedInputTypes.set(input.name, input.type);
+        argumentTypes[input.argument] = input.type as (typeof argumentTypes)[string];
+      }
+      for (const [argumentName, origin] of Object.entries(carrier.origins)) {
+        argumentOrigins[argumentName] = bindCarrierOrigin(
+          origin,
+          resultAliasByCallId,
+          stepIdByCallId,
+          event.sessionId,
+        );
+        callArguments[argumentName] = carrierArgumentValue(origin);
+      }
+    }
+
     for (const input of recordedInputs) {
       argumentOrigins[input.argument] = { type: "input", name: input.name };
       recordedInputTypes.set(input.name, input.type);
     }
     for (const [argumentName, use] of Object.entries(recordedReferences)) {
       const producingCallId = localCallIdOf(use.reference, scopeId);
-      const producingStepId = producingCallId ? stepIdByCallId.get(producingCallId) : undefined;
-      // A reference the recording cannot tie to an earlier step it recorded stays unestablished
+      const producingStepId = producingCallId
+        ? stepIdByCallId.get(scopedKey(event.sessionId, producingCallId))
+        : undefined;
       // rather than being guessed from the value that happens to be there.
       if (producingStepId) {
         argumentOrigins[argumentName] = {
@@ -516,28 +651,43 @@ export function recordCallsFromEvents(
         };
       }
     }
-    const toolName = event.toolName ?? "unknown";
-    const recordedResult = resultsByCallId.get(callId);
+    const toolName = carrier?.name ?? event.toolName ?? "unknown";
+    const recordedResult = resultsByCallId.get(scopedCallKey);
     const discovery = options.discoveryFor?.(toolName);
     const privateValues = (event.metadata?.maskedValues as string[] | undefined) ?? [];
+    const isPrivateValue =
+      privateValues.length > 0
+        ? (value: string) => privateValues.includes(value)
+        : carrier !== undefined
+          ? containsRedactionPlaceholder
+          : undefined;
     observations.push({
       callId,
       ...(event.causalRef?.causalSequence === undefined
         ? {}
         : { causalSequence: event.causalRef.causalSequence }),
       callable: {
-        runtime: discovery?.runtime ?? (event.metadata?.runtime as string | undefined) ?? "unknown",
+        runtime:
+          carrier?.runtime ??
+          discovery?.runtime ??
+          (event.metadata?.runtime as string | undefined) ??
+          "unknown",
         name: toolName,
-        ...((discovery?.connection ?? (event.metadata?.connection as string | undefined))
-          ? { connection: (discovery?.connection ?? event.metadata?.connection) as string }
+        ...((carrier?.connection ??
+        discovery?.connection ??
+        (event.metadata?.connection as string | undefined))
+          ? {
+              connection: (carrier?.connection ??
+                discovery?.connection ??
+                event.metadata?.connection) as string,
+            }
           : {}),
       },
-      arguments: event.parameters ?? {},
+      arguments: carrier !== undefined ? callArguments : (event.parameters ?? {}),
       ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
+      ...(Object.keys(argumentTypes).length > 0 ? { argumentTypes } : {}),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
-      ...(privateValues.length > 0
-        ? { isPrivateValue: (value) => privateValues.includes(value) }
-        : {}),
+      ...(isPrivateValue ? { isPrivateValue } : {}),
       observed:
         recordedResult === undefined
           ? "unknown"
@@ -548,7 +698,7 @@ export function recordCallsFromEvents(
               : "unknown",
     });
     // The observation was just pushed, so this call's step is the last one.
-    stepIdByCallId.set(callId, `step${observations.length - 1}`);
+    stepIdByCallId.set(scopedCallKey, `step${observations.length - 1}`);
   }
   if (observations.length === 0) return undefined;
   const recipe = recordWorkflowRecipe(workflowId, observations);

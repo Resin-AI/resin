@@ -31,6 +31,7 @@ import type {
   ModuleLifecycleState,
 } from "./lifecycle.js";
 import { NormalizationPipeline } from "./normalization/pipeline.js";
+import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import type { JsonObject } from "./normalization/redaction.js";
 import { ObserverCoordinator } from "./tailing/coordinator.js";
 import { SourceCursorManager } from "./tailing/cursor-manager.js";
@@ -301,6 +302,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         sessionRepository,
         syncRepository,
         dbConnection,
+        // The daemon's shared store: redaction placeholders stay recoverable locally so
+        // recorded workflows can resolve private values on this machine at execution.
+        privateValueStore: FilePrivateValueStore.default(),
       });
     for (const decoder of this.decoders) {
       this.normalizationPipeline.registerDecoder(decoder);

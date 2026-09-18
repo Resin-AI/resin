@@ -8,10 +8,13 @@ import {
   CapabilityManifestSchema,
   type CommandCapability,
   type FsCapability,
+  type RecordedWorkflow,
   type ToolManifest,
   ToolManifestSchema,
   canonicalJson,
   normalizeSha256,
+  validateRecordedWorkflow,
+  type WorkflowJsonValue,
 } from "@resin/contracts";
 import {
   type ArtifactCache,
@@ -22,20 +25,30 @@ import {
   BundleSignatureDataSchema,
   CapabilityBrokerManager,
   type CapabilityPolicyEngine,
-  DEFAULT_BUNDLE_LIMITS,
-  type KeyStore,
+  type CompiledWorkflowArtifact,
+  RuntimeAdapterRegistry,
   ToolBundleLoader,
   WorkerProcess,
   createInvocationGrant,
   encodeDeterministicTar,
+  instantiateRecordedWorkflow,
   validateBundleEntryPath,
   verifyBundleSignature,
+  type KeyStore,
+  DEFAULT_BUNDLE_LIMITS,
 } from "@resin/runtime";
+import {
+  FilePrivateValueStore,
+  RESIN_INVOKE_TOOL_RUNTIME,
+  resolvePrivateReference,
+} from "@resin/observer";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
+
+import { composedResultValue } from "../meta/invoke-tool.js";
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -72,6 +85,24 @@ export interface LocalArtifactExecutorOptions {
   denoExecutable?: string;
   resinHome?: string;
   requireSignature?: boolean;
+  /**
+   * Dispatches a recorded workflow's step to its callable through the same routing the
+   * original call used. Required for `recorded-workflow` artifacts; without it a plan
+   * cannot execute and the call reports that honestly.
+   */
+  stepInvoker?: (request: {
+    name: string;
+    connection?: string;
+    parameters: Record<string, unknown>;
+    context: WorkspaceContext;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }) => Promise<CallToolResult>;
+  /** Store private workflow references resolve against; defaults to the daemon store. */
+  privateValueStore?: {
+    get(key: string): unknown | undefined;
+    set(key: string, value: unknown): void;
+  };
 }
 
 function checkExecutable(filePath: string): boolean {
@@ -247,6 +278,8 @@ export class LocalArtifactExecutor {
   private readonly denoExecutable?: string;
   private readonly resinHome?: string;
   private readonly requireSignature?: boolean;
+  private readonly stepInvoker?: LocalArtifactExecutorOptions["stepInvoker"];
+  private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private managedToolAccess?: ManagedToolAccess;
 
   constructor(options: LocalArtifactExecutorOptions) {
@@ -261,6 +294,8 @@ export class LocalArtifactExecutor {
     this.denoExecutable = options.denoExecutable;
     this.resinHome = options.resinHome;
     this.requireSignature = options.requireSignature;
+    this.stepInvoker = options.stepInvoker;
+    this.privateValueStore = options.privateValueStore;
   }
 
   setManagedToolAccess(access: ManagedToolAccess): void {
@@ -692,6 +727,21 @@ export class LocalArtifactExecutor {
       }
     }
 
+    // A recorded-workflow artifact is a compiled plan, not a Deno module: the verified
+    // entrypoint bytes are the frozen RecordedWorkflow, executed host-side through the
+    // same routing the original calls used. The worker sandbox cannot dispatch tool
+    // calls, so the plan runs here under the executor's own permissions.
+    if (manifest.runtime?.runtime === "recorded-workflow") {
+      return await this.executeRecordedWorkflowArtifact(
+        entrypointPath,
+        parameters,
+        context,
+        params.signal,
+        params.timeoutMs,
+      );
+    }
+
+
     // 6. Set up invocation workspace root and capabilities
     const workspaceRoot = path.resolve(
       context.projectRoot ??
@@ -901,4 +951,103 @@ export class LocalArtifactExecutor {
       brokerManager.cleanupInvocation(invocationId);
     }
   }
+
+  /**
+   * Executes a verified recorded-workflow artifact. The plan is the frozen
+   * RecordedWorkflow the compiler produced; each step dispatches through `stepInvoker`
+   * (the same routing the original call used) and private references resolve from the
+   * local value store. A plan that needs an adapter or a value this host does not have
+   * fails with the actual reason rather than a substituted behavior.
+   */
+  private async executeRecordedWorkflowArtifact(
+    entrypointPath: string,
+    parameters: JsonRpcParams,
+    context: WorkspaceContext,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<CallToolResult> {
+    const fail = (text: string): CallToolResult => ({
+      isError: true,
+      content: [{ type: "text", text }],
+    });
+    if (!this.stepInvoker) {
+      return fail(
+        "This recorded-workflow tool needs a step dispatcher, which this executor was not given",
+      );
+    }
+    let plan: RecordedWorkflow;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(entrypointPath, "utf8"));
+      const validation = validateRecordedWorkflow(parsed);
+      if (!validation.valid) {
+        return fail(
+          `Recorded workflow artifact is not a valid plan: ${validation.errors.join("; ")}`,
+        );
+      }
+      plan = parsed as RecordedWorkflow;
+    } catch (err) {
+      return fail(
+        `Failed to read recorded workflow artifact: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const adapters = new RuntimeAdapterRegistry();
+    const stepInvoker = this.stepInvoker;
+    adapters.register({
+      runtime: RESIN_INVOKE_TOOL_RUNTIME,
+      call: async (request) => {
+        const result = await stepInvoker({
+          name: request.step.callable.name,
+          ...(request.step.callable.connection
+            ? { connection: request.step.callable.connection }
+            : {}),
+          parameters: request.arguments as Record<string, unknown>,
+          context,
+          ...(signal ? { signal } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        });
+        if (result.isError) {
+          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+          throw new Error(text ?? `step '${request.step.id}' failed`);
+        }
+        return composedResultValue(result);
+      },
+    });
+
+    const store = this.privateValueStore ?? FilePrivateValueStore.default();
+    const artifact: CompiledWorkflowArtifact = {
+      plan,
+      digest: "",
+      name: plan.workflowId,
+      inputSchema: {},
+      outputContract: { fromStep: plan.steps[plan.steps.length - 1]?.id ?? "", callable: "" },
+      requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
+      requiredPrivateReferences: [...(plan.privateReferences ?? [])],
+      permissions: [],
+    };
+    const callable = instantiateRecordedWorkflow(artifact, {
+      adapters,
+      resolvePrivate: (reference) =>
+        resolvePrivateReference(store, reference) as WorkflowJsonValue,
+    });
+    try {
+      const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
+      if (execution.status !== "completed") {
+        return fail(execution.error ?? "Recorded workflow execution failed");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(execution.result ?? null),
+          },
+        ],
+      };
+    } catch (err) {
+      return fail(
+        `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }
+

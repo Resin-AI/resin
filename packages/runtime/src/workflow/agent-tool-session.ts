@@ -6,9 +6,18 @@
  * resolves handles locally immediately before dispatching, so tool servers receive ordinary JSON and
  * need no Resin-specific changes, and it reports the references each call used so the recorder can
  * preserve the connection rather than a snapshot of the value.
+ *
+ * Arguments use the shared envelope contract from `@resin/contracts`: `{value}` declares a
+ * caller input, `{reference, path}` names an earlier result, `{literal}` escapes a value that
+ * looks like an envelope, and objects/arrays mix all three recursively.
  */
 
-import type { WorkflowJsonValue, WorkflowValuePath } from "@resin/contracts";
+import {
+  analyzeAgentArguments,
+  type AgentArgumentOrigin,
+  type WorkflowJsonValue,
+  type WorkflowValuePath,
+} from "@resin/contracts";
 import { type ReferenceUse, WorkflowReferenceScope } from "./reference-invocation.js";
 
 /** What the agent receives instead of a bare value. */
@@ -37,19 +46,12 @@ export interface AgentCallOutcome {
   references: ReferenceUse[];
 }
 
-function valueTypeOf(value: WorkflowJsonValue): AgentCallInput["type"] {
-  if (typeof value === "number") return "number";
-  if (typeof value === "boolean") return "boolean";
-  if (Array.isArray(value)) return "array";
-  if (typeof value === "object" && value !== null) return "object";
-  return "string";
-}
-
 export class AgentToolSession {
   private readonly scope: WorkflowReferenceScope;
   private callCounter = 0;
   private readonly usage: ReferenceUse[] = [];
   private readonly inputs = new Map<string, AgentCallInput[]>();
+  private readonly origins = new Map<string, Record<string, AgentArgumentOrigin>>();
 
   constructor(
     private readonly sessionId: string,
@@ -67,32 +69,36 @@ export class AgentToolSession {
     return this.usage.map((use) => ({ ...use, path: [...use.path] }));
   }
 
-  async call(toolName: string, args: Record<string, AgentArgument>): Promise<AgentCallOutcome> {
+  async call(
+    toolName: string,
+    args: Record<string, WorkflowJsonValue>,
+  ): Promise<AgentCallOutcome> {
     const callId = `call_${++this.callCounter}`;
-    const resolved: Record<string, WorkflowJsonValue> = {};
-    const references: ReferenceUse[] = [];
-    const supplied: AgentCallInput[] = [];
-    for (const [argument, entry] of Object.entries(args)) {
-      if ("value" in entry) {
-        resolved[argument] = entry.value;
-        // The caller supplied this value: the recording keeps it as that call's input, with the type
-        // the caller used, so the compiled tool can accept a new value instead of a frozen one.
-        supplied.push({
-          name: `${callId}_${argument}`,
-          argument,
-          type: valueTypeOf(entry.value),
-        });
-        continue;
-      }
-      const path = entry.path ?? [];
-      resolved[argument] = this.scope.resolve(entry.reference.handle, path);
-      const use: ReferenceUse = { callId, argument, reference: entry.reference.handle, path };
-      references.push(use);
+    const analysis = analyzeAgentArguments(args, {
+      nameInput: (argument, path) =>
+        path.length === 0
+          ? `${callId}_${argument}`
+          : `${callId}_${argument}.${path.map(String).join(".")}`,
+      resolveReference: (reference, path) => this.scope.resolve(reference, path),
+    });
+    const references: ReferenceUse[] = analysis.references.map((ref) => ({
+      callId,
+      argument: ref.argument,
+      reference: ref.reference,
+      path: ref.referencePath,
+    }));
+    for (const use of references) {
       this.usage.push(use);
       this.scope.recordUse(use);
     }
+    const supplied: AgentCallInput[] = analysis.inputs.map((input) => ({
+      name: input.name,
+      argument: input.argument,
+      type: input.type,
+    }));
     if (supplied.length > 0) this.inputs.set(callId, supplied);
-    const result = await this.dispatch(toolName, resolved);
+    this.origins.set(callId, analysis.origins);
+    const result = await this.dispatch(toolName, analysis.resolved ?? {});
     return {
       result,
       handle: { handle: this.scope.registerResult(callId, result) },
@@ -102,12 +108,14 @@ export class AgentToolSession {
 
   /**
    * The record the shared capture path consumes: per call, which argument used which reference at
-   * which field. A call whose arguments were all plain values contributes no connections.
+   * which field, which inputs the caller supplied, and the full origin tree of every argument.
+   * A call whose arguments were all plain values contributes literal origins and no connections.
    */
   recordedCalls(): Array<{
     callId: string;
     references: Record<string, { reference: string; path: WorkflowValuePath }>;
     inputs: AgentCallInput[];
+    origins: Record<string, AgentArgumentOrigin>;
   }> {
     const byCall = new Map<
       string,
@@ -118,11 +126,12 @@ export class AgentToolSession {
       entry[use.argument] = { reference: use.reference, path: [...use.path] };
       byCall.set(use.callId, entry);
     }
-    const callIds = new Set([...byCall.keys(), ...this.inputs.keys()]);
+    const callIds = new Set([...byCall.keys(), ...this.inputs.keys(), ...this.origins.keys()]);
     return [...callIds].map((callId) => ({
       callId,
       references: byCall.get(callId) ?? {},
       inputs: this.inputs.get(callId) ?? [],
+      origins: this.origins.get(callId) ?? {},
     }));
   }
 }
