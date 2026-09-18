@@ -26,6 +26,7 @@ import {
   areClaimsExpired,
   filterActionableNotifications,
 } from "@resin/protocol";
+import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
 import {
   DEFAULT_GATEWAY_URL,
@@ -34,6 +35,7 @@ import {
   verifyHarnessRegistration,
 } from "../installer/harness-config.js";
 import { resolveLocalSourceResinCommand } from "../installer/harness-health.js";
+import { fetchAccountProfile } from "../service/account-profile.js";
 import {
   type CloudCredentialLoadResult,
   type CloudCredentialStatus,
@@ -161,6 +163,8 @@ export interface DaemonStatusSummary {
     status: AccountStatus;
     accountId: string | null;
     emailOrUser: string | null;
+    email?: string | null;
+    membershipType?: MembershipType | null;
     expiresAt: string | null;
     expired: boolean | null;
   };
@@ -246,6 +250,7 @@ export interface DaemonStatusSummary {
 
 export interface StatusCommandFlags {
   json?: boolean;
+  verbose?: boolean;
   home?: string;
   socket?: string;
   help?: boolean;
@@ -291,6 +296,7 @@ export function parseStatusFlags(args: string[]): StatusCommandFlags {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") flags.json = true;
+    else if (arg === "--verbose" || arg === "-v") flags.verbose = true;
     else if (arg === "--home") {
       const value = args[index + 1];
       if (!value) throw new Error("--home requires a path");
@@ -312,12 +318,13 @@ export function printStatusHelp(): void {
 Usage:
   resin status [options]
 
-Shows a versioned, privacy-safe view of the local Resin workspace, daemon,
-cloud identity, privacy posture, harnesses, recovery state, and updates.
-Degraded and offline states are reported successfully with contextual hints.
+Shows a brief summary of Resin's health, cloud sign-in, integrations, and sharing.
+Problems and suggested next steps are always shown.
+Use --verbose for full diagnostics or --json for machine-readable status.
 
 Options:
   --json           Output schema-versioned JSON.
+  -v, --verbose    Show detailed diagnostics.
   --home <path>    Use an alternate user home directory.
   --socket <path>  Use an alternate daemon IPC socket.
   -h, --help       Show this help message.
@@ -480,6 +487,10 @@ export async function fetchDaemonStatusSummary(
   const expiresAt = safeIsoTimestamp(credentials?.claims.expiresAt);
   const expired = credentials ? areClaimsExpired(credentials.claims) : null;
   const accountId = safePublicString(credentials?.claims.accountId);
+  const profile =
+    credentials && accountStatus === "valid" && !expired
+      ? await fetchAccountProfile(credentials, options.customFetch)
+      : null;
   const workspaceIdFromCredentials = safePublicString(credentials?.workspaceId);
   const cloud = {
     authenticated: Boolean(credentials?.accessToken),
@@ -500,6 +511,8 @@ export async function fetchDaemonStatusSummary(
     status: accountStatus,
     accountId,
     emailOrUser: safePublicString(credentials?.claims.subject ?? credentials?.claims.userId),
+    email: profile?.email ?? null,
+    membershipType: profile?.membershipType ?? null,
     expiresAt,
     expired,
   } satisfies DaemonStatusSummary["account"];
@@ -609,7 +622,125 @@ export async function fetchDaemonStatusSummary(
   };
 }
 
-export function formatStatusForTerminal(summary: DaemonStatusSummary): string {
+export function formatStatusForTerminal(
+  summary: DaemonStatusSummary,
+  options: { verbose?: boolean } = {},
+): string {
+  if (options.verbose) return formatDetailedStatusForTerminal(summary);
+
+  const notificationHeader = formatActionableNotificationsForTerminal(summary.notifications ?? []);
+  const remediations = summary.remediations ?? [];
+  const overall = summary.status ?? deriveLegacyOverallStatus(summary);
+  const accountStatus =
+    summary.account?.status ??
+    summary.cloud.status ??
+    (summary.cloud.authenticated ? "valid" : "missing");
+  const gate = summary.safetyGate;
+  const needsAttention =
+    overall === "degraded" ||
+    remediations.length > 0 ||
+    notificationHeader.length > 0 ||
+    (accountStatus !== "valid" && accountStatus !== "local_only") ||
+    summary.account?.expired ||
+    gate?.status === "failed" ||
+    gate?.unsafeOverrideActive;
+  const headline =
+    overall === "stopped" ? "Stopped" : needsAttention ? "Needs attention" : "Running";
+  const lines = [`Resin: ${headline}`, ""];
+  const row = (label: string, value: string) => lines.push(`  ${label.padEnd(12)} ${value}`);
+
+  let daemon: string;
+  if (!summary.ipc.connected) {
+    daemon = summary.service.active
+      ? "Not responding"
+      : summary.service.installed || summary.service.status === "externally_managed"
+        ? "Stopped"
+        : "Not installed";
+  } else if (summary.daemon?.health === "starting") {
+    daemon = "Starting";
+  } else if (summary.daemon?.health === "degraded") {
+    daemon = "Needs attention";
+  } else if (summary.daemon?.health === "stopped") {
+    daemon = "Stopped";
+  } else if (summary.daemon?.health === "unknown") {
+    daemon = "Responding (health unknown)";
+  } else {
+    daemon = summary.service.status === "externally_managed" ? "Running (foreground)" : "Running";
+  }
+  row("Daemon", daemon);
+
+  const cloudLabels: Record<AccountStatus, string> = {
+    valid: "Signed in",
+    missing: "Not signed in",
+    expired: "Sign-in expired",
+    invalid: "Sign-in invalid",
+    revoked: "Sign-in revoked",
+    offline: "Offline (local tools still available)",
+    local_only: "Local only",
+  };
+  row("Cloud", summary.account?.expired ? cloudLabels.expired : cloudLabels[accountStatus]);
+  if (summary.account?.linked) {
+    row(
+      "Email",
+      summary.account.email ? escapeTerminalControls(summary.account.email) : "Unavailable",
+    );
+    row("Membership", formatMembershipType(summary.account.membershipType));
+  }
+
+  const agents = summary.harnesses
+    .filter((harness) => harness.installed)
+    .map((harness) => {
+      const name = escapeTerminalControls(harness.name);
+      if (harness.status === "drift" || harness.status === "error") return `${name} (needs repair)`;
+      if (!harness.configured || !harness.mcpAttached || harness.status !== "attached") {
+        return `${name} (needs setup)`;
+      }
+      return name;
+    });
+  row("Agents", agents.length > 0 ? agents.join(", ") : "None configured");
+
+  const privacy = summary.privacy;
+  const metadata =
+    privacy?.effectiveMetadataTelemetryEnabled ?? summary.telemetry?.enabled ?? false;
+  const consentUnknown =
+    privacy?.deviceMetadataTelemetryEnabled && privacy.cloudMetadataTelemetryEnabled === null;
+  const rawUploads =
+    privacy?.rawTranscriptUploadEnabled ?? summary.telemetry?.rawTranscriptsAllowed ?? false;
+  row(
+    "Sharing",
+    `Metadata ${consentUnknown ? "unknown" : metadata ? "on" : "off"}; raw transcripts ${rawUploads ? "on" : "off"}`,
+  );
+
+  if (gate?.unsafeOverrideActive) {
+    row("Production", "Unsafe override");
+  } else if (gate && !gate.isOpen) {
+    row("Production", gate.status === "uninitialized" ? "Not verified" : "Blocked");
+  }
+
+  if (remediations.length > 0) {
+    lines.push("", "Next steps:");
+    for (const remediation of remediations) {
+      lines.push(`  - ${escapeTerminalControls(remediation.message)}`);
+      if (remediation.command)
+        lines.push(`    Run: ${escapeTerminalControls(remediation.command)}`);
+    }
+  }
+
+  lines.push("", "Details: resin status --verbose");
+  return `${notificationHeader}${lines.join("\n")}\n`;
+}
+
+function formatMembershipType(membershipType: MembershipType | null | undefined): string {
+  const labels: Record<MembershipType, string> = {
+    free: "Free",
+    pro: "Pro",
+    max: "Max",
+    founder: "Founder",
+  };
+  return membershipType ? labels[membershipType] : "Unavailable";
+}
+
+function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
   const notificationHeader = formatActionableNotificationsForTerminal(summary.notifications ?? []);
   const lines: string[] = [];
   const overall = summary.status ?? deriveLegacyOverallStatus(summary);
@@ -673,6 +804,12 @@ export function formatStatusForTerminal(summary: DaemonStatusSummary): string {
   );
   if (account.accountId) lines.push(`  Account:    ${account.accountId}`);
   if (account.emailOrUser) lines.push(`  User:       ${account.emailOrUser}`);
+  if (account.linked) {
+    lines.push(
+      `  Email:      ${summary.account?.email ? escapeTerminalControls(summary.account.email) : "Unavailable"}`,
+    );
+    lines.push(`  Membership: ${formatMembershipType(summary.account?.membershipType)}`);
+  }
   if (cloud.workspaceId) lines.push(`  Workspace:  ${cloud.workspaceId}`);
   if (account.expiresAt) {
     lines.push(`  Expires:    ${account.expiresAt}${account.expired ? " (EXPIRED)" : ""}`);
@@ -784,6 +921,7 @@ export async function statusCommand(
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     now?: () => number;
+    verbose?: boolean;
     notificationConsumer?: NotificationConsumer;
   } = {},
 ): Promise<number> {
@@ -828,7 +966,9 @@ export async function statusCommand(
     });
     const output = { ...summary, notifications };
     process.stdout.write(
-      flags.json ? `${JSON.stringify(output, null, 2)}\n` : formatStatusForTerminal(output),
+      flags.json
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : formatStatusForTerminal(output, { verbose: flags.verbose || options.verbose }),
     );
     return 0;
   } catch {
