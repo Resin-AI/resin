@@ -74,7 +74,7 @@ Do not use an unqualified `npx resin` command to validate source changes. It res
 The `main` branch is strictly protected and enforces PR-only release gates:
 - **Direct Pushes Blocked:** Direct commits and pushes to `main` are disabled. All changes must arrive via pull request.
 - **Force Pushes Disabled:** Force-pushing to `main` is strictly forbidden.
-- **Review Policy:** Pull requests enforce PR-only integration with zero required approving reviews. Code ownership entries in `.github/CODEOWNERS` are informational, and human code-owner reviews are optional. Automated gating relies entirely on required machine verification: all 13 parallel CI status checks, package and privacy boundary checks, security scans, and the rollup `ci-gate` must pass before merging.
+- **Review Policy:** Pull requests enforce PR-only integration with zero required approving reviews. Human reviews are optional and are not automatically requested through code ownership rules. Automated gating relies entirely on required machine verification: all 13 parallel CI status checks, package and privacy boundary checks, security scans, and the rollup `ci-gate` must pass before merging.
 - **Branch Protection Automation:** Run `./scripts/configure-branch-protection.sh` (or `pnpm exec ./scripts/configure-branch-protection.sh`) to automatically configure strict branch protection rules via GitHub API / gh CLI.
 - **Required Status Checks:** All 13 parallel CI jobs and the rollup `ci-gate` must pass before merging:
   1. `lint` (Biome Lint & Format Check)
