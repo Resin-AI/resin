@@ -312,84 +312,100 @@ export function recordWorkflowRecipe(
 }
 
 /**
- * Turns values that varied between demonstrations of the same workflow into caller inputs.
+ * Proposes parameterization from what varied between demonstrations.
  *
- * This is evidence, not inference: a literal that took different values across recorded executions
- * of the same call cannot be a constant of the workflow, and the type of the input is the type those
- * values actually had. Values that were identical in every demonstration stay constants, and a value
- * the record marked private is never promoted to an input.
+ * A proposal is not the workflow: nothing executable changes here. The proposal names the arguments
+ * that took different values across recorded executions, with the values seen and the type they had,
+ * so a caller (or an operator) can accept it deliberately. An established binding is never proposed
+ * for replacement, and nothing the record marked private is ever proposed.
  */
-export function promoteVariationToInputs(
-  recipes: readonly RecordedRecipe[],
-): RecordedRecipe | undefined {
-  if (recipes.length < 2) return recipes[0];
-  const proposedInputs: Array<{ name: string; from: string }> = [];
-  const base = recipes[0]!;
-  const workflow: RecordedWorkflow = JSON.parse(JSON.stringify(base.workflow)) as RecordedWorkflow;
-  const inputs = new Map<string, { name: string; type: string }>(
-    workflow.inputs.map((input) => [input.name, { name: input.name, type: input.type }]),
-  );
+export interface InputProposal {
+  name: string;
+  from: string;
+  type: "string" | "number" | "boolean" | "object" | "array";
+  seenValues: WorkflowJsonValue[];
+}
 
-  const literalAt = (
+export interface InputProposalSet {
+  /** The recorded workflow, unchanged: accepting the proposals is a separate, deliberate step. */
+  workflow: RecordedWorkflow;
+  proposals: InputProposal[];
+}
+
+export function proposeInputsFromVariation(
+  recipes: readonly RecordedRecipe[],
+): InputProposalSet | undefined {
+  if (recipes.length === 0) return undefined;
+  const base = recipes[0]!;
+  const proposals: InputProposal[] = [];
+  if (recipes.length < 2) return { workflow: base.workflow, proposals };
+
+  const templateAt = (
     recipe: RecordedRecipe,
     stepIndex: number,
     argumentName: string,
   ): WorkflowValueTemplate | undefined => {
-    const step = recipe.workflow.steps[stepIndex];
-    const argument = step?.arguments.find((entry) => entry.name === argumentName);
-    if (!argument || argument.source.kind !== "template") return undefined;
-    return argument.source.template;
+    const argument = recipe.workflow.steps[stepIndex]?.arguments.find(
+      (entry) => entry.name === argumentName,
+    );
+    return argument?.source.kind === "template" ? argument.source.template : undefined;
   };
 
-  for (let stepIndex = 0; stepIndex < workflow.steps.length; stepIndex += 1) {
-    const step = workflow.steps[stepIndex]!;
-    const template = literalAt(base, stepIndex, step.arguments[0]?.name ?? "") && undefined;
-    void template;
+  for (let stepIndex = 0; stepIndex < base.workflow.steps.length; stepIndex += 1) {
+    const step = base.workflow.steps[stepIndex]!;
     for (const argument of step.arguments) {
-      const first = literalAt(base, stepIndex, argument.name);
+      const first = templateAt(base, stepIndex, argument.name);
+      // Only a constant can be proposed as an input; a recorded binding stays a binding.
       if (!first || first.type !== "literal") continue;
       const values = recipes.map((recipe) => {
-        const candidate = literalAt(recipe, stepIndex, argument.name);
+        const candidate = templateAt(recipe, stepIndex, argument.name);
         return candidate?.type === "literal" ? candidate.value : undefined;
       });
-      if (values.some((value) => value === undefined)) continue;
-      const distinct = new Set(values.map((value) => JSON.stringify(value)));
-      if (distinct.size < 2) continue;
-      const type = (() => {
-        if (values.every((value) => typeof value === "number")) return "number";
-        if (values.every((value) => typeof value === "boolean")) return "boolean";
-        if (values.every((value) => Array.isArray(value))) return "array";
-        if (
-          values.every(
-            (value) => typeof value === "object" && value !== null && !Array.isArray(value),
-          )
-        )
-          return "object";
-        return "string";
-      })();
-      const name = `${step.id}_${argument.name}`;
-      inputs.set(name, { name, type });
-      proposedInputs.push({ name, from: `${step.id}.${argument.name}` });
-      argument.source = {
-        kind: "template",
-        template: { type: "input", name },
-      };
+      if (values.some((entry) => entry === undefined)) continue;
+      if (new Set(values.map((entry) => JSON.stringify(entry))).size < 2) continue;
+      const seen = values as WorkflowJsonValue[];
+      const type: InputProposal["type"] = seen.every((entry) => typeof entry === "number")
+        ? "number"
+        : seen.every((entry) => typeof entry === "boolean")
+          ? "boolean"
+          : seen.every((entry) => Array.isArray(entry))
+            ? "array"
+            : seen.every(
+                  (entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry),
+                )
+              ? "object"
+              : "string";
+      proposals.push({
+        name: `${step.id}_${argument.name}`,
+        from: `${step.id}.${argument.name}`,
+        type,
+        seenValues: seen,
+      });
     }
   }
+  return { workflow: base.workflow, proposals };
+}
 
-  const promoted: RecordedWorkflow = {
-    ...workflow,
-    inputs: [...inputs.values()].map((input) => ({
-      name: input.name,
-      type: input.type as RecordedWorkflow["inputs"][number]["type"],
-    })),
-  };
-  return {
-    workflow: promoted,
-    privateValues: base.privateValues,
-    skipped: base.skipped,
-    proposedInputs,
-  };
+/**
+ * Applies accepted proposals. Only this step changes the executable workflow, and it is the caller's
+ * decision: a proposal that was not accepted leaves the workflow exactly as recorded.
+ */
+export function acceptInputProposals(
+  workflow: RecordedWorkflow,
+  proposals: readonly InputProposal[],
+): RecordedWorkflow {
+  const accepted: RecordedWorkflow = JSON.parse(JSON.stringify(workflow)) as RecordedWorkflow;
+  const inputs = new Map(accepted.inputs.map((input) => [input.name, input]));
+  for (const proposal of proposals) {
+    const [stepId, argumentName] = proposal.from.split(".");
+    const step = accepted.steps.find((entry) => entry.id === stepId);
+    const argument = step?.arguments.find((entry) => entry.name === argumentName);
+    if (!argument || argument.source.kind !== "template") continue;
+    inputs.set(proposal.name, { name: proposal.name, type: proposal.type });
+    argument.source = { kind: "template", template: { type: "input", name: proposal.name } };
+  }
+  accepted.inputs = [...inputs.values()];
+  return accepted;
 }
 
 /** A normalized event, as much of it as recording calls needs. */
@@ -411,13 +427,6 @@ export interface RecordableEvent {
   metadata?: Record<string, unknown>;
 }
 
-/**
- * Pairs recorded calls with their results and records the workflow of a session.
- *
- * This is the capture entry point both the live tailer and the historical importer use: the calls
- * come from the record itself, arguments are their recorded values, and a result is attached only
- * when the record ties it to that call's identity. Nothing is inferred from equal values.
- */
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],

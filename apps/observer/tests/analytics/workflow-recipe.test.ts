@@ -1,8 +1,8 @@
 import type { RecordedWorkflow } from "@resin/contracts";
-import { describe, expect, it } from "vitest";
 import {
   type RecordedCallObservation,
-  promoteVariationToInputs,
+  acceptInputProposals,
+  proposeInputsFromVariation,
   recordCallsFromEvents,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
@@ -259,16 +259,17 @@ describe("workflow recipe recording", () => {
     expect([...recipe.privateValues.values()]).toContain("tok_inner_7");
   });
 
-  it("promotes values that varied between demonstrations to typed inputs", () => {
+  it("proposes inputs from variation without changing the executable workflow", () => {
     const demonstration = (source: string, retries: number): RecordedCallObservation[] => [
       {
         callId: `call_${source}`,
         causalSequence: 1,
         callable: { runtime: "unfamiliar-protocol", name: "vendor.fetch" },
-        arguments: { source, retries },
+        arguments: { source, retries, mode: "full" },
         argumentOrigins: {
           source: { type: "literal", value: source },
           retries: { type: "literal", value: retries },
+          mode: { type: "literal", value: "full" },
         },
         result: { body: { text: `text-${source}` } },
         observed: "succeeded",
@@ -277,35 +278,67 @@ describe("workflow recipe recording", () => {
 
     const first = recordWorkflowRecipe("wf_variation", demonstration("alpha", 1))!;
     const second = recordWorkflowRecipe("wf_variation", demonstration("beta", 5))!;
-    const promoted = promoteVariationToInputs([first, second])!;
+    const proposalSet = proposeInputsFromVariation([first, second])!;
 
-    const step = promoted.workflow.steps[0]!;
-    // Both values differed across demonstrations, so neither is a constant; their types are recorded.
-    expect(leaf(step.arguments[0]!.source)).toEqual({ type: "input", name: "step0_source" });
-    expect(leaf(step.arguments[1]!.source)).toEqual({ type: "input", name: "step0_retries" });
-    expect(promoted.workflow.inputs).toEqual([
+    // The workflow is exactly as recorded until a proposal is accepted.
+    expect(proposalSet.workflow.inputs).toEqual([]);
+    expect(leaf(proposalSet.workflow.steps[0]!.arguments[0]!.source)).toEqual({
+      type: "literal",
+      value: "alpha",
+    });
+    expect(proposalSet.proposals).toEqual([
+      { name: "step0_source", from: "step0.source", type: "string", seenValues: ["alpha", "beta"] },
+      { name: "step0_retries", from: "step0.retries", type: "number", seenValues: [1, 5] },
+    ]);
+
+    // Accepting is deliberate and is the only step that changes the executable workflow.
+    const accepted = acceptInputProposals(proposalSet.workflow, proposalSet.proposals);
+    expect(leaf(accepted.steps[0]!.arguments[0]!.source)).toEqual({
+      type: "input",
+      name: "step0_source",
+    });
+    expect(accepted.inputs).toEqual([
       { name: "step0_source", type: "string" },
       { name: "step0_retries", type: "number" },
     ]);
+    // A constant that never varied is not proposed.
+    expect(proposalSet.proposals.map((proposal) => proposal.name)).not.toContain("step0_mode");
+  });
 
-    // A value identical in every demonstration stays a constant.
-    const stable: RecordedCallObservation[] = demonstration("alpha", 1).map((observation) => ({
-      ...observation,
-      arguments: { ...observation.arguments, mode: "full" },
-      argumentOrigins: { ...observation.argumentOrigins, mode: { type: "literal", value: "full" } },
-    }));
-    const stableSecond: RecordedCallObservation[] = demonstration("beta", 5).map((observation) => ({
-      ...observation,
-      arguments: { ...observation.arguments, mode: "full" },
-      argumentOrigins: { ...observation.argumentOrigins, mode: { type: "literal", value: "full" } },
-    }));
-    const stablePromoted = promoteVariationToInputs([
-      recordWorkflowRecipe("wf_stable", stable)!,
-      recordWorkflowRecipe("wf_stable", stableSecond)!,
+  it("never proposes replacing an established binding", () => {
+    const demonstration = (source: string): RecordedCallObservation[] => [
+      {
+        callId: `call_source_${source}`,
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-program", name: "local-read" },
+        arguments: { path: source },
+        argumentOrigins: { path: { type: "literal", value: source } },
+        result: { id: `row-${source}` },
+        observed: "succeeded",
+      },
+      {
+        callId: `call_use_${source}`,
+        causalSequence: 2,
+        callable: { runtime: "unfamiliar-program", name: "local-send" },
+        arguments: { id: `row-${source}` },
+        argumentOrigins: { id: { type: "result", stepId: "step0", path: ["id"] } },
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+
+    const proposalSet = proposeInputsFromVariation([
+      recordWorkflowRecipe("wf_binding", demonstration("alpha"))!,
+      recordWorkflowRecipe("wf_binding", demonstration("beta"))!,
     ])!;
-    expect(leaf(stablePromoted.workflow.steps[0]!.arguments[2]!.source)).toEqual({
-      type: "literal",
-      value: "full",
+
+    // The changing intermediate stays a dependency: nothing about it is proposed.
+    expect(proposalSet.proposals.map((proposal) => proposal.from)).toEqual(["step0.path"]);
+    const accepted = acceptInputProposals(proposalSet.workflow, proposalSet.proposals);
+    expect(leaf(accepted.steps[1]!.arguments[0]!.source)).toEqual({
+      type: "result",
+      stepId: "step0",
+      path: ["id"],
     });
   });
 
@@ -359,45 +392,6 @@ describe("workflow recipe recording", () => {
     expect(leaf(recipe.workflow.steps[1]!.arguments[0]!.source)).toMatchObject({
       type: "unresolved",
     });
-  });
-
-  it("treats variation as a proposal and never replaces an established binding", () => {
-    const demonstration = (source: string): RecordedCallObservation[] => [
-      {
-        callId: `call_source_${source}`,
-        causalSequence: 1,
-        callable: { runtime: "unfamiliar-program", name: "local-read" },
-        arguments: { path: source },
-        argumentOrigins: { path: { type: "literal", value: source } },
-        result: { id: `row-${source}` },
-        observed: "succeeded",
-      },
-      {
-        callId: `call_use_${source}`,
-        causalSequence: 2,
-        callable: { runtime: "unfamiliar-program", name: "local-send" },
-        // Bound to the earlier result, whose value naturally differs between demonstrations.
-        arguments: { id: `row-${source}` },
-        argumentOrigins: { id: { type: "result", stepId: "step0", path: ["id"] } },
-        result: { ok: true },
-        observed: "succeeded",
-      },
-    ];
-
-    const promoted = promoteVariationToInputs([
-      recordWorkflowRecipe("wf_proposal", demonstration("alpha"))!,
-      recordWorkflowRecipe("wf_proposal", demonstration("beta"))!,
-    ])!;
-
-    // The changing intermediate result stays the binding it was recorded as.
-    expect(leaf(promoted.workflow.steps[1]!.arguments[0]!.source)).toEqual({
-      type: "result",
-      stepId: "step0",
-      path: ["id"],
-    });
-    expect(promoted.workflow.inputs.map((input) => input.name)).toEqual(["step0_path"]);
-    // And what was proposed is reported as exactly that.
-    expect(promoted.proposedInputs).toEqual([{ name: "step0_path", from: "step0.path" }]);
   });
 
   it("records the outcome the result reported, including failure", () => {
