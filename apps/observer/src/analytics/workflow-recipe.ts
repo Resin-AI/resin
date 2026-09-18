@@ -304,3 +304,77 @@ export function recordWorkflowRecipe(
 ): RecordedRecipe | undefined {
   return recordWorkflowRecipeInternal(workflowId, observations);
 }
+
+/**
+ * Turns values that varied between demonstrations of the same workflow into caller inputs.
+ *
+ * This is evidence, not inference: a literal that took different values across recorded executions
+ * of the same call cannot be a constant of the workflow, and the type of the input is the type those
+ * values actually had. Values that were identical in every demonstration stay constants, and a value
+ * the record marked private is never promoted to an input.
+ */
+export function promoteVariationToInputs(
+  recipes: readonly RecordedRecipe[],
+): RecordedRecipe | undefined {
+  if (recipes.length < 2) return recipes[0];
+  const base = recipes[0]!;
+  const workflow: RecordedWorkflow = JSON.parse(JSON.stringify(base.workflow)) as RecordedWorkflow;
+  const inputs = new Map<string, { name: string; type: string }>(
+    workflow.inputs.map((input) => [input.name, { name: input.name, type: input.type }]),
+  );
+
+  const literalAt = (
+    recipe: RecordedRecipe,
+    stepIndex: number,
+    argumentName: string,
+  ): WorkflowValueTemplate | undefined => {
+    const step = recipe.workflow.steps[stepIndex];
+    const argument = step?.arguments.find((entry) => entry.name === argumentName);
+    if (!argument || argument.source.kind !== "template") return undefined;
+    return argument.source.template;
+  };
+
+  for (let stepIndex = 0; stepIndex < workflow.steps.length; stepIndex += 1) {
+    const step = workflow.steps[stepIndex]!;
+    const template = literalAt(base, stepIndex, step.arguments[0]?.name ?? "") && undefined;
+    void template;
+    for (const argument of step.arguments) {
+      const first = literalAt(base, stepIndex, argument.name);
+      if (!first || first.type !== "literal") continue;
+      const values = recipes.map((recipe) => {
+        const candidate = literalAt(recipe, stepIndex, argument.name);
+        return candidate?.type === "literal" ? candidate.value : undefined;
+      });
+      if (values.some((value) => value === undefined)) continue;
+      const distinct = new Set(values.map((value) => JSON.stringify(value)));
+      if (distinct.size < 2) continue;
+      const type = (() => {
+        if (values.every((value) => typeof value === "number")) return "number";
+        if (values.every((value) => typeof value === "boolean")) return "boolean";
+        if (values.every((value) => Array.isArray(value))) return "array";
+        if (
+          values.every(
+            (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+          )
+        )
+          return "object";
+        return "string";
+      })();
+      const name = `${step.id}_${argument.name}`;
+      inputs.set(name, { name, type });
+      argument.source = {
+        kind: "template",
+        template: { type: "input", name },
+      };
+    }
+  }
+
+  const promoted: RecordedWorkflow = {
+    ...workflow,
+    inputs: [...inputs.values()].map((input) => ({
+      name: input.name,
+      type: input.type as RecordedWorkflow["inputs"][number]["type"],
+    })),
+  };
+  return { workflow: promoted, privateValues: base.privateValues, skipped: base.skipped };
+}

@@ -2,6 +2,7 @@ import type { RecordedWorkflow } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
   type RecordedCallObservation,
+  promoteVariationToInputs,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
 
@@ -255,5 +256,55 @@ describe("workflow recipe recording", () => {
     ]);
     expect(JSON.stringify(recipe.workflow)).not.toContain("tok_inner_7");
     expect([...recipe.privateValues.values()]).toContain("tok_inner_7");
+  });
+
+  it("promotes values that varied between demonstrations to typed inputs", () => {
+    const demonstration = (source: string, retries: number): RecordedCallObservation[] => [
+      {
+        callId: `call_${source}`,
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.fetch" },
+        arguments: { source, retries },
+        argumentOrigins: {
+          source: { type: "literal", value: source },
+          retries: { type: "literal", value: retries },
+        },
+        result: { body: { text: `text-${source}` } },
+        observed: "succeeded",
+      },
+    ];
+
+    const first = recordWorkflowRecipe("wf_variation", demonstration("alpha", 1))!;
+    const second = recordWorkflowRecipe("wf_variation", demonstration("beta", 5))!;
+    const promoted = promoteVariationToInputs([first, second])!;
+
+    const step = promoted.workflow.steps[0]!;
+    // Both values differed across demonstrations, so neither is a constant; their types are recorded.
+    expect(leaf(step.arguments[0]!.source)).toEqual({ type: "input", name: "step0_source" });
+    expect(leaf(step.arguments[1]!.source)).toEqual({ type: "input", name: "step0_retries" });
+    expect(promoted.workflow.inputs).toEqual([
+      { name: "step0_source", type: "string" },
+      { name: "step0_retries", type: "number" },
+    ]);
+
+    // A value identical in every demonstration stays a constant.
+    const stable: RecordedCallObservation[] = demonstration("alpha", 1).map((observation) => ({
+      ...observation,
+      arguments: { ...observation.arguments, mode: "full" },
+      argumentOrigins: { ...observation.argumentOrigins, mode: { type: "literal", value: "full" } },
+    }));
+    const stableSecond: RecordedCallObservation[] = demonstration("beta", 5).map((observation) => ({
+      ...observation,
+      arguments: { ...observation.arguments, mode: "full" },
+      argumentOrigins: { ...observation.argumentOrigins, mode: { type: "literal", value: "full" } },
+    }));
+    const stablePromoted = promoteVariationToInputs([
+      recordWorkflowRecipe("wf_stable", stable)!,
+      recordWorkflowRecipe("wf_stable", stableSecond)!,
+    ])!;
+    expect(leaf(stablePromoted.workflow.steps[0]!.arguments[2]!.source)).toEqual({
+      type: "literal",
+      value: "full",
+    });
   });
 });
