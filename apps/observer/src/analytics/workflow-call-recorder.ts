@@ -192,9 +192,11 @@ export class WorkflowCallRecorder {
         ? parameters.toolName
         : typeof parameters.name === "string"
           ? parameters.name
-          : typeof parameters.toolId === "string"
-            ? parameters.toolId
-            : undefined;
+          : typeof parameters.tool_name === "string"
+            ? parameters.tool_name
+            : typeof parameters.toolId === "string"
+              ? parameters.toolId
+              : undefined;
     if (routedName === undefined) return event;
     const inner = parameters.parameters ?? parameters.arguments;
     const analysis = analyzeAgentArguments(isPlainObject(inner) ? inner : {});

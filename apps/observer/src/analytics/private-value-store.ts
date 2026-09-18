@@ -86,6 +86,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
 
   private readonly file: string;
   private entries: Map<string, { value: unknown; at: number }> | undefined;
+  private loadedMtimeMs = -1;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
@@ -104,7 +105,16 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   private load(): Map<string, { value: unknown; at: number }> {
-    if (this.entries) return this.entries;
+    // Reload only when the file changed on disk: a long-lived executor must see secrets
+    // recorded after its first resolution, not a snapshot cached forever. The mtime gate
+    // keeps the shared instance cheap when nothing was written.
+    let mtimeMs = -1;
+    try {
+      mtimeMs = fs.statSync(this.file).mtimeMs;
+    } catch {
+      // Missing file: fall through and serve whatever is cached (empty on first call).
+    }
+    if (this.entries && mtimeMs === this.loadedMtimeMs) return this.entries;
     this.entries = new Map();
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as unknown;
@@ -116,6 +126,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
           });
         }
       }
+      this.loadedMtimeMs = mtimeMs;
     } catch {
       // A missing or unreadable store is an empty one; resolution fails honestly later.
     }
@@ -151,6 +162,13 @@ export class FilePrivateValueStore implements PrivateValueStore {
       fs.chmodSync(this.file, 0o600);
     } catch {
       // Best effort on filesystems without POSIX modes.
+    }
+    try {
+      // Keep the cache authoritative for what we just wrote so the next load does not
+      // re-read; an external write still bumps mtime and forces a reload.
+      this.loadedMtimeMs = fs.statSync(this.file).mtimeMs;
+    } catch {
+      // If the stat fails the next load re-reads; correctness is unaffected.
     }
   }
 }
