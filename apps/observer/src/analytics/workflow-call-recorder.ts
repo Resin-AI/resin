@@ -101,6 +101,26 @@ export interface WorkflowCallCarrier {
   dependsOnCallIds?: string[];
   /** Bindings the values only suggest. Reported here; never executable as recorded. */
   candidates?: WorkflowCallCandidate[];
+  /** Which execution of this session this call belongs to, so a recording can keep them apart. */
+  executionIndex?: number;
+  /** The repeat of earlier work this call is part of, as far as it has repeated it yet. */
+  heldOut?: WorkflowCallHeldOut;
+}
+
+/**
+ * A second execution of the same work, offered by the capture itself.
+ *
+ * An ordinary session repeats itself: the same callables in the same order, on different values.
+ * That repeat is the only evidence a recording can hold about what its own proposals would do on
+ * inputs it never used, so the capture keeps it — by reference, because it is the user's own work —
+ * and a replay can then check a candidate against what actually happened, with nothing supplied by
+ * hand.
+ */
+export interface WorkflowCallHeldOut {
+  /** The earlier execution this one repeats: the one a recording is compiled from. */
+  repeats: number;
+  inputs: Array<{ position: number; argument: string; reference: string }>;
+  observed: Array<{ position: number; reference: string }>;
 }
 
 /**
@@ -123,6 +143,7 @@ export interface WorkflowCallCandidate {
     | "equal-to-earlier-result"
     | "varies-across-executions"
     | "declared-by-the-callable"
+    | "shares-value-with-declared-input"
     | "tracks-earlier-result-across-executions";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
@@ -143,15 +164,40 @@ interface LocalCall {
   inputSchema?: WorkflowJsonValue;
   /** Arguments this call kept as local resources rather than as caller values. */
   privateArguments?: string[];
+  /** The execution this call belongs to, so two executions of one session can be told apart. */
+  executionIndex: number;
 }
+
+/** One execution of a session: the calls one task made, in order. */
+interface LocalExecution {
+  index: number;
+  calls: LocalCall[];
+  /** The demonstration this execution is, accumulated as its calls and results arrive. */
+  accumulatedHeldOut?: WorkflowCallHeldOut;
+  /**
+   * The demonstration this execution is, once it has been seen to repeat an earlier one. Values are
+   * stored as they are observed, so a replay has what the repeat actually produced.
+   */
+  heldOut?: WorkflowCallHeldOut;
+}
+
+/** Executions kept per session: enough to recognise a repeat, bounded so a long session cannot grow. */
+const MAX_EXECUTIONS = 8;
 
 /** Per-session derivation state, bounded so a long session cannot grow without limit. */
 interface SessionDerivationState {
   turnKey: string;
   position: number;
-  calls: LocalCall[];
+  /** The current execution, which is the last one seen. */
+  executions: LocalExecution[];
   /** The first value each argument position took, for comparing later tasks against it. */
   baseline: Map<string, WorkflowJsonValue>;
+  /**
+   * A new instruction arrived, so the next call begins a new piece of work. A task boundary is what
+   * a person means by "and then I asked for it again"; it is the only boundary a harness reports
+   * uniformly, and the turn index a transcript may carry is not set by every decoder.
+   */
+  newExecutionPending: boolean;
 }
 
 /** Observed calls kept per session for derivation. */
@@ -238,6 +284,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "equal-to-earlier-result": true,
   "varies-across-executions": true,
   "declared-by-the-callable": true,
+  "shares-value-with-declared-input": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -329,7 +376,37 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
       if (readCandidate(entry) === undefined) return false;
     }
   }
+  if (value.executionIndex !== undefined && !Number.isInteger(value.executionIndex)) return false;
+  if (value.heldOut !== undefined && readHeldOut(value.heldOut) === undefined) return false;
   return true;
+}
+
+/** Reads a demonstration back through the frozen vocabulary, or drops it. */
+function readHeldOut(value: unknown): WorkflowCallHeldOut | undefined {
+  if (!isPlainObject(value)) return undefined;
+  if (!Number.isInteger(value.repeats)) return undefined;
+  const readList = (
+    raw: unknown,
+    withArgument: boolean,
+  ): Array<{ position: number; argument: string; reference: string }> | undefined => {
+    if (!Array.isArray(raw)) return undefined;
+    const out: Array<{ position: number; argument: string; reference: string }> = [];
+    for (const entry of raw) {
+      if (!isPlainObject(entry) || !Number.isInteger(entry.position)) return undefined;
+      if (typeof entry.reference !== "string" || entry.reference.length === 0) return undefined;
+      if (withArgument && typeof entry.argument !== "string") return undefined;
+      out.push({
+        position: entry.position as number,
+        argument: withArgument ? (entry.argument as string) : "",
+        reference: entry.reference,
+      });
+    }
+    return out;
+  };
+  const inputs = readList(value.inputs, true);
+  const observed = readList(value.observed, false);
+  if (inputs === undefined || observed === undefined) return undefined;
+  return { repeats: value.repeats as number, inputs, observed };
 }
 
 /**
@@ -370,15 +447,32 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
     }
     carrier.candidates = candidates;
   }
+  if (value.executionIndex !== undefined) carrier.executionIndex = value.executionIndex;
+  if (value.heldOut !== undefined) {
+    const heldOut = readHeldOut(value.heldOut);
+    if (heldOut !== undefined) carrier.heldOut = heldOut;
+  }
   return carrier;
 }
 
-/** Re-reads a result carrier for projection: the handle token only. */
-export function readWorkflowResultCarrier(value: unknown): { handle: string } | undefined {
-  if (!isPlainObject(value) || typeof value.handle !== "string" || value.handle.length === 0) {
-    return undefined;
+/**
+ * Re-reads a result carrier for projection.
+ *
+ * A composed call's handle rides here, and so does the demonstration a repeating session is: its
+ * observations are exactly what the results of that execution produced, so they belong on the
+ * result side rather than on a call that was already recorded before they happened.
+ */
+export function readWorkflowResultCarrier(
+  value: unknown,
+): { handle?: string; heldOut?: WorkflowCallHeldOut } | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const carrier: { handle?: string; heldOut?: WorkflowCallHeldOut } = {};
+  if (typeof value.handle === "string" && value.handle.length > 0) carrier.handle = value.handle;
+  if (value.heldOut !== undefined) {
+    const heldOut = readHeldOut(value.heldOut);
+    if (heldOut !== undefined) carrier.heldOut = heldOut;
   }
-  return { handle: value.handle };
+  return carrier.handle === undefined && carrier.heldOut === undefined ? undefined : carrier;
 }
 
 export interface WorkflowCallRecorderOptions {
@@ -423,8 +517,9 @@ export class WorkflowCallRecorder {
     const created: SessionDerivationState = {
       turnKey: "",
       position: 0,
-      calls: [],
+      executions: [],
       baseline: new Map(),
+      newExecutionPending: false,
     };
     this.sessions.set(sessionId, created);
     while (this.sessions.size > MAX_SESSIONS) {
@@ -453,6 +548,12 @@ export class WorkflowCallRecorder {
         }
         this.discovered.set(tool.name, recorded);
       }
+      return event;
+    }
+    if (event.type === "message" && event.role === "user") {
+      // The instruction that starts a piece of work. Nothing else in a transcript separates one
+      // piece of work from the next often enough to rely on.
+      this.sessionState(event.sessionId).newExecutionPending = true;
       return event;
     }
     if (event.type === "tool_call") return this.observeCall(event);
@@ -604,6 +705,9 @@ export class WorkflowCallRecorder {
     const state = this.sessionState(event.sessionId);
     const call = this.recordLocalCall(state, event, parameters);
     const relationships = this.relateLocalCall(state, call);
+    carrier.executionIndex = call.executionIndex;
+    const heldOut = this.heldOutSoFar(state, call);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
@@ -647,6 +751,13 @@ export class WorkflowCallRecorder {
     }
   }
 
+  /** Stores one value of a demonstration and returns the reference a replay resolves it by. */
+  private localReference(value: WorkflowJsonValue, executionIndex: number): string {
+    const reference = `private:demonstration:${executionIndex}:${this.privateCounter++}`;
+    this.privateValues.set(reference, value, this.observeAccess);
+    return reference;
+  }
+
   private storeLocalValue(value: WorkflowJsonValue, sessionId: string): AgentArgumentOrigin {
     const reference = `private:${sessionId}:${this.privateCounter++}`;
     this.privateValues.set(reference, value, this.observeAccess);
@@ -659,11 +770,20 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     parameters: Record<string, WorkflowJsonValue>,
   ): LocalCall {
-    const turnKey = `${event.causalRef?.turnIndex ?? 0}`;
-    if (state.turnKey !== turnKey) {
-      state.turnKey = turnKey;
+    const startsExecution = state.executions.length === 0 || state.newExecutionPending;
+    if (startsExecution) {
+      state.newExecutionPending = false;
       state.position = 0;
+      state.executions.push({
+        index:
+          state.executions.length === 0
+            ? 0
+            : state.executions[state.executions.length - 1]!.index + 1,
+        calls: [],
+      });
+      while (state.executions.length > MAX_EXECUTIONS) state.executions.shift();
     }
+    const execution = state.executions[state.executions.length - 1]!;
     const flow = declaredFlowOfToolCall(event);
     const discovered = this.discovered.get(event.toolName);
     const heldLocally = Object.entries(parameters)
@@ -673,6 +793,7 @@ export class WorkflowCallRecorder {
       callId: event.callId,
       toolName: event.toolName,
       position: state.position,
+      executionIndex: execution.index,
       arguments: parameters,
       ...(discovered?.inputSchema === undefined ? {} : { inputSchema: discovered.inputSchema }),
       ...(heldLocally.length === 0 ? {} : { privateArguments: heldLocally }),
@@ -684,9 +805,59 @@ export class WorkflowCallRecorder {
           }),
     };
     state.position += 1;
-    state.calls.push(call);
-    while (state.calls.length > MAX_LOCAL_CALLS) state.calls.shift();
+    execution.calls.push(call);
     return call;
+  }
+
+  /** The calls of the execution a call belongs to. */
+  private callsOf(state: SessionDerivationState, executionIndex: number): LocalCall[] {
+    return state.executions.find((entry) => entry.index === executionIndex)?.calls ?? [];
+  }
+
+  /**
+   * The earlier work this execution is repeating, as far as it has repeated it.
+   *
+   * "The same work" is the same callables in the same order — a shape two executions share, which is
+   * what makes their values comparable. The demonstration is THIS execution's values: it is the one
+   * that ran on different inputs, so a replay of the earlier, recorded execution has both inputs the
+   * recording never used and what those inputs actually produced. It never extends past the point
+   * the repeat has reached, so a session that diverges half way never presents the earlier half as
+   * if the whole thing had been performed twice.
+   *
+   * Values are stored by reference: they are the user's own work and stay where they were performed.
+   */
+  private heldOutSoFar(
+    state: SessionDerivationState,
+    call: LocalCall,
+  ): WorkflowCallHeldOut | undefined {
+    const execution = state.executions.find((entry) => entry.index === call.executionIndex);
+    const earlier = state.executions.find((entry) => entry.index < call.executionIndex);
+    if (execution === undefined || earlier === undefined) return undefined;
+    const inputs: WorkflowCallHeldOut["inputs"] = [];
+    const observed: WorkflowCallHeldOut["observed"] = [];
+    for (const mine of execution.calls) {
+      const theirs = earlier.calls.find((entry) => entry.position === mine.position);
+      if (theirs === undefined || mine.toolName !== theirs.toolName) break;
+      for (const [argument, value] of Object.entries(mine.arguments)) {
+        if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+          continue;
+        }
+        inputs.push({
+          position: mine.position,
+          argument,
+          reference: this.localReference(value, execution.index),
+        });
+      }
+      if (mine.result !== undefined) {
+        observed.push({
+          position: mine.position,
+          reference: this.localReference(mine.result, execution.index),
+        });
+      }
+    }
+    if (inputs.length === 0 && observed.length === 0) return undefined;
+    execution.accumulatedHeldOut = { repeats: earlier.index, inputs, observed };
+    return execution.accumulatedHeldOut;
   }
 
   /**
@@ -705,13 +876,14 @@ export class WorkflowCallRecorder {
     call: LocalCall,
   ): { dependsOnCallIds: string[]; candidates: WorkflowCallCandidate[] } {
     const candidates: WorkflowCallCandidate[] = [];
+    const calls = this.callsOf(state, call.executionIndex);
 
     // Resources the earlier calls declared they wrote and this call declared it reads. Both sides
     // named the resource, so the order is a fact of the record rather than a guess from the values.
     const dependsOnCallIds: string[] = [];
     if (call.reads !== undefined && call.reads.length > 0) {
       const reads = new Set(call.reads);
-      for (const earlier of state.calls) {
+      for (const earlier of calls) {
         if (earlier === call) break;
         if (earlier.writes === undefined) continue;
         if (!earlier.writes.some((resource) => reads.has(resource))) continue;
@@ -750,10 +922,10 @@ export class WorkflowCallRecorder {
     }
 
     // Bindings the values suggest, over the calls this session has observed.
-    const index = state.calls.indexOf(call);
+    const index = calls.indexOf(call);
     if (index < 0) return { dependsOnCallIds, candidates };
     const derivation = deriveNativeCalls(
-      state.calls.map((entry, position) => ({
+      calls.map((entry, position) => ({
         callId: entry.callId,
         stepId: `local${position}`,
         toolName: entry.toolName,
@@ -781,7 +953,7 @@ export class WorkflowCallRecorder {
         continue;
       }
       const producingIndex = Number.parseInt(candidate.proposed.stepId.slice("local".length), 10);
-      const producingCall = state.calls[producingIndex];
+      const producingCall = calls[producingIndex];
       if (producingCall === undefined) continue;
       candidates.push({
         argument: candidate.argument,
@@ -855,18 +1027,57 @@ export class WorkflowCallRecorder {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
       const state = this.sessionState(event.sessionId);
-      for (let index = state.calls.length - 1; index >= 0; index -= 1) {
-        const call = state.calls[index]!;
-        if (call.callId !== event.callId) continue;
+      for (let e = state.executions.length - 1; e >= 0; e -= 1) {
+        const execution = state.executions[e]!;
+        const call = execution.calls.find((entry) => entry.callId === event.callId);
+        if (call === undefined) continue;
         call.result = extractResultValueOf(event.result);
+        // A repeat's own observations are what its results produced, so the demonstration grows
+        // here rather than at a call that was recorded before they happened.
+        if (execution.accumulatedHeldOut !== undefined && call.result !== undefined) {
+          execution.accumulatedHeldOut.observed = [
+            ...execution.accumulatedHeldOut.observed.filter(
+              (entry) => entry.position !== call.position,
+            ),
+            {
+              position: call.position,
+              reference: this.localReference(call.result, execution.index),
+            },
+          ];
+        }
         break;
       }
     }
     const handle = this.resultHandle(event);
-    if (handle === undefined) return event;
+    const heldOut =
+      event.type === "tool_result"
+        ? this.demonstrationCarrier(event.sessionId, event.callId)
+        : undefined;
+    if (handle === undefined && heldOut === undefined) return event;
     const metadata: Record<string, unknown> = { ...(event.metadata ?? {}) };
-    metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = { handle };
+    metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = {
+      ...(handle === undefined ? {} : { handle }),
+      ...(heldOut === undefined ? {} : { heldOut }),
+    };
     return { ...event, metadata } as NormalizedSessionEvent;
+  }
+
+  /** The demonstration so far of the execution this result belongs to, when it is a repeat. */
+  private demonstrationCarrier(sessionId: string, callId: string): WorkflowCallHeldOut | undefined {
+    const state = this.sessions.get(sessionId);
+    if (state === undefined) return undefined;
+    for (let index = state.executions.length - 1; index >= 0; index -= 1) {
+      const execution = state.executions[index]!;
+      if (!execution.calls.some((call) => call.callId === callId)) continue;
+      const heldOut = execution.accumulatedHeldOut;
+      if (heldOut === undefined || heldOut.observed.length === 0) return undefined;
+      return {
+        repeats: heldOut.repeats,
+        inputs: [...heldOut.inputs],
+        observed: [...heldOut.observed],
+      };
+    }
+    return undefined;
   }
 
   /**

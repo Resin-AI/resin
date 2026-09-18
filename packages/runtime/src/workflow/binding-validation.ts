@@ -381,6 +381,54 @@ async function evaluateCandidate(
 }
 
 /**
+ * The replay environment a recording's own demonstration supplies.
+ *
+ * An ordinary session repeats itself, and the capture keeps that repeat as a demonstration on the
+ * plan. It is what makes a candidate decidable without anyone handing in inputs or expectations:
+ * the inputs are the values the repeat actually used at the positions candidates propose, and the
+ * observations are what the repeat actually produced. Both are resolved locally, because both are
+ * the user's own work, so the values never have to leave the machine the work was performed on.
+ *
+ * Returns undefined when the recording offers no demonstration, which leaves every candidate a
+ * proposal — reported, never frozen into a binding.
+ */
+export async function demonstrationEnvironment(params: {
+  plan: RecordedWorkflow;
+  candidates: readonly WorkflowBindingCandidate[];
+  adapters: RuntimeAdapterRegistry;
+  workspaceDir: string;
+  resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+  timeoutMs?: number;
+}): Promise<CandidateValidationEnvironment | undefined> {
+  const demonstration = params.plan.heldOut;
+  if (demonstration === undefined) return undefined;
+  const resolve = params.resolvePrivate;
+  if (resolve === undefined) return undefined;
+  const inputs: Record<string, WorkflowJsonValue> = {};
+  for (const candidate of params.candidates) {
+    if (candidate.proposed.kind !== "input") continue;
+    const entry = demonstration.inputs.find(
+      (supplied) =>
+        supplied.stepId === candidate.stepId && supplied.argument === candidate.argument,
+    );
+    if (entry === undefined) continue;
+    inputs[candidate.proposed.name] = await resolve(entry.reference);
+  }
+  const observed: Record<string, WorkflowJsonValue> = {};
+  for (const entry of demonstration.observed) {
+    observed[entry.stepId] = await resolve(entry.reference);
+  }
+  return {
+    adapters: params.adapters,
+    workspaceDir: params.workspaceDir,
+    inputs,
+    observed,
+    resolvePrivate: resolve,
+    ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
+  };
+}
+
+/**
  * Decides each candidate by replay. Every candidate is evaluated independently and a per-candidate
  * failure is reported as a refusal, never thrown: one unusable candidate must not hide the others.
  */

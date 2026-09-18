@@ -133,9 +133,17 @@ function inputNameOf(callableName: string, argument: string): string {
 export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDerivation {
   const derived: DerivedCall[] = [];
   const candidates: WorkflowBindingCandidate[] = [];
+  /**
+   * The value each declared input was given. A value the callable itself declares as an input, used
+   * again somewhere else in the same recording, is the same caller's value in both places — it is
+   * neither a dependency on an earlier result nor a constant of the work.
+   */
+  const declaredInputValues = new Map<string, { name: string; count: number }>();
 
   /** Every string leaf the record had shown once a call's result arrived, before it arrived. */
   const seenBeforeResult: Array<Set<string>> = [];
+  /** The string leaves each call's own arguments carried, so an echo is told from a minting. */
+  const argumentValues: Array<Set<string>> = [];
   /** The string leaves each call's own result contributed. */
   const resultValues: Array<Set<string>> = [];
   const seen = new Set<string>();
@@ -146,6 +154,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       stringLeaves(value, [argument], argumentLeaves);
     }
     for (const leaf of argumentLeaves) seen.add(leaf.value);
+    argumentValues.push(new Set(argumentLeaves.map((leaf) => leaf.value)));
     seenBeforeResult.push(new Set(seen));
 
     const resultLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
@@ -182,11 +191,17 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
         if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
         // A value an earlier call of this recording produced is that call's output, not an input.
         if (resultValues.some((values) => values.has(String(value)))) continue;
+        const inputName = inputNameOf(call.toolName, argument);
+        const recorded = declaredInputValues.get(value);
+        declaredInputValues.set(value, {
+          name: recorded?.name ?? inputName,
+          count: (recorded?.count ?? 0) + 1,
+        });
         candidates.push({
           stepId: call.stepId,
           argument,
           path: [],
-          proposed: { kind: "input", name: inputNameOf(call.toolName, argument), type: "string" },
+          proposed: { kind: "input", name: inputName, type: "string" },
           reason: "declared-by-the-callable",
           evidence: { declaredProperties: declared.size },
           missing:
@@ -232,7 +247,55 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     }
   }
 
-  return { calls: derived, candidates };
+  // Every other place the same caller's value was used, once it is known which values those are.
+  // A value two arguments share without that justification stays where it is: two constants that
+  // happen to be equal say nothing about where either came from.
+  const sharedCandidates: WorkflowBindingCandidate[] = [];
+  for (const [indexOfCall, call] of calls.entries()) {
+    if (sharedCandidates.length >= MAX_CANDIDATES) break;
+    const leaves: Array<{ path: WorkflowValuePath; value: string }> = [];
+    for (const [argument, value] of Object.entries(call.arguments)) {
+      stringLeaves(value, [argument], leaves);
+    }
+    for (const leaf of leaves) {
+      const declared = declaredInputValues.get(leaf.value);
+      if (declared === undefined || declared.count !== 1) continue;
+      if (typeof leaf.path[0] !== "string") continue;
+      // A value an earlier call MINTED is that call's output, so it is a result binding rather than
+      // the caller's input. A value an earlier call merely echoed back is not: the callable was
+      // given it, and finding it somewhere else means the caller needed it in both places.
+      const mintedEarlier = calls.slice(0, indexOfCall).some((earlier, earlierIndex) => {
+        if (!resultValues[earlierIndex]!.has(leaf.value)) return false;
+        return !argumentValues[earlierIndex]!.has(leaf.value);
+      });
+      if (mintedEarlier) continue;
+      if (alreadyProposed(candidates, call.stepId, leaf)) continue;
+      sharedCandidates.push({
+        stepId: call.stepId,
+        argument: leaf.path[0],
+        path: leaf.path.slice(1),
+        proposed: { kind: "input", name: declared.name, type: "string" },
+        reason: "shares-value-with-declared-input",
+        evidence: { declaredInputs: 1 },
+        missing:
+          "this argument was given the same value the callable's own schema declares as an input elsewhere in the recording, but nothing shows whether a caller supplies it",
+      });
+    }
+  }
+  return { calls: derived, candidates: [...candidates, ...sharedCandidates] };
+}
+
+/** True when this exact position is already proposed, so one value is never proposed twice. */
+function alreadyProposed(
+  candidates: readonly WorkflowBindingCandidate[],
+  stepId: string,
+  leaf: { path: WorkflowValuePath },
+): boolean {
+  return candidates.some(
+    (candidate) =>
+      candidate.stepId === stepId &&
+      JSON.stringify([candidate.argument, ...candidate.path]) === JSON.stringify(leaf.path),
+  );
 }
 
 /** One argument position of one execution, as far as comparing executions needs to see it. */

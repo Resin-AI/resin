@@ -69,6 +69,17 @@ function result(
   });
 }
 
+/** The instruction that starts a new piece of work. */
+function userTurn(sequence: number): NormalizedSessionEvent {
+  return event({
+    eventId: `evt_user_${sequence}`,
+    type: "message",
+    role: "user",
+    content: "do the same thing again with a different name",
+    causalRef: { causalSequence: sequence, parentId: null },
+  });
+}
+
 function discovery(tools: Array<{ name: string; provider?: string; inputSchema?: unknown }>) {
   return event({
     eventId: "evt_discovery",
@@ -335,12 +346,13 @@ describe("what the derivation offers, and what it refuses to offer", () => {
     const recorder = new WorkflowCallRecorder({ privateValues: store });
     const observed = [
       discovery([{ name: "vendor.score", provider: "vendor-srv" }]),
-      call(2, "vendor.score", { dataset: "alpha-set" }, 0),
-      call(3, "vendor.score", { dataset: "beta-set" }, 1),
+      call(2, "vendor.score", { dataset: "alpha-set" }),
+      userTurn(3),
+      call(4, "vendor.score", { dataset: "beta-set" }),
     ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
 
     expect(carrierOf(observed[1]!)!.candidates).toBeUndefined();
-    const carrier = carrierOf(observed[2]!);
+    const carrier = carrierOf(observed[3]!);
     expect(carrier!.candidates).toHaveLength(1);
     expect(carrier!.candidates![0]!.proposed).toEqual({
       kind: "input",
@@ -406,6 +418,121 @@ describe("the recording an ordinary session produces", () => {
 
     const recipe = recordCallsFromEvents("wf_native_redelivery", events);
     expect(recipe!.workflow.steps).toHaveLength(1);
+  });
+});
+
+describe("the demonstration an ordinary session offers", () => {
+  /** Two executions of the same work: the same callables in the same order, on different values. */
+  function repeated(): NormalizedSessionEvent[] {
+    return [
+      discovery([
+        {
+          name: "vendor.score",
+          provider: "vendor-srv",
+          inputSchema: { type: "object", properties: { dataset: { type: "string" } } },
+        },
+      ]),
+      call(1, "vendor.score", { dataset: "alpha-set", tag: "ops-run" }),
+      result(1, "vendor.score", { scored: { label: "alpha-set:42" } }),
+      userTurn(2),
+      call(3, "vendor.score", { dataset: "bravo-set", tag: "ops-run" }),
+      result(3, "vendor.score", { scored: { label: "bravo-set:84" } }),
+    ];
+  }
+
+  it("records a repeat of earlier work as a demonstration, kept by reference", () => {
+    const { events, store } = record(repeated());
+    const repeat = carrierOf(events[4]!)!;
+    expect(repeat.executionIndex).toBe(1);
+    // The demonstration is the repeat's own values: the inputs the earlier recording never used,
+    // and what those inputs actually produced.
+    expect(repeat.heldOut?.repeats).toBe(0);
+    expect(repeat.heldOut?.inputs.map((entry) => entry.argument).sort()).toEqual([
+      "dataset",
+      "tag",
+    ]);
+    expect(repeat.heldOut?.observed.map((entry) => entry.position)).toEqual([0]);
+    for (const entry of repeat.heldOut?.inputs ?? []) {
+      expect(entry.reference.startsWith("private:")).toBe(true);
+    }
+    const dataset = (repeat.heldOut?.inputs ?? []).find((entry) => entry.argument === "dataset")!;
+    expect(resolvePrivateReference(store, dataset.reference)).toBe("bravo-set");
+    const produced = repeat.heldOut!.observed[0]!;
+    expect(resolvePrivateReference(store, produced.reference)).toEqual({
+      scored: { label: "bravo-set:84" },
+    });
+  });
+
+  it("compiles the work once, with the demonstration declared and resolvable", () => {
+    const observed = record(repeated()).events;
+    const recipe = recordCallsFromEvents("wf_repeat", observed);
+    // One execution is the plan; performing it twice is not two tools' worth of steps.
+    expect(recipe!.workflow.steps).toHaveLength(1);
+    expect(recipe!.workflow.steps[0]!.callable.name).toBe("vendor.score");
+    const heldOut = recipe!.workflow.heldOut;
+    expect(heldOut?.inputs).toHaveLength(2);
+    expect(heldOut?.observed).toHaveLength(1);
+    expect(heldOut?.inputs.every((entry) => entry.stepId === "step0")).toBe(true);
+    expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("offers a value the callable declares as an input wherever else it was used", () => {
+    const derivation = deriveNativeCalls([
+      {
+        callId: "call_1",
+        stepId: "step0",
+        toolName: "vendor.intake",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { feed: "alpha-feed" },
+        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
+      },
+      {
+        callId: "call_2",
+        stepId: "step1",
+        toolName: "vendor.commit",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { meta: { note: "alpha-feed" } },
+      },
+    ]);
+
+    const shared = derivation.candidates.find(
+      (candidate) => candidate.reason === "shares-value-with-declared-input",
+    );
+    expect(shared).toBeDefined();
+    // The same input, not a second one: a caller supplies the value once and both calls get it.
+    expect(shared!.proposed).toEqual({
+      kind: "input",
+      name: "vendor_intake_feed",
+      type: "string",
+    });
+    expect(shared!.argument).toBe("meta");
+    expect(shared!.path).toEqual(["note"]);
+  });
+
+  it("leaves a value two arguments share, with nothing declaring it, exactly where it is", () => {
+    const derivation = deriveNativeCalls([
+      {
+        callId: "call_1",
+        stepId: "step0",
+        toolName: "vendor.intake",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { meta: { tag: "ops-run" } },
+        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
+      },
+      {
+        callId: "call_2",
+        stepId: "step1",
+        toolName: "vendor.commit",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { meta: { tag: "ops-run" } },
+      },
+    ]);
+
+    expect(
+      derivation.candidates.filter(
+        (candidate) => candidate.reason === "shares-value-with-declared-input",
+      ),
+    ).toEqual([]);
   });
 });
 

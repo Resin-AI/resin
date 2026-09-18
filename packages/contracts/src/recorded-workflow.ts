@@ -147,7 +147,8 @@ export type WorkflowBindingCandidate = {
     | "equal-to-earlier-result"
     | "tracks-earlier-result-across-executions"
     | "varies-across-executions"
-    | "declared-by-the-callable";
+    | "declared-by-the-callable"
+    | "shares-value-with-declared-input";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -189,6 +190,20 @@ export type WorkflowStep = {
   permissions?: WorkflowJsonValue;
 };
 
+/**
+ * A second execution of the same work, on inputs the recording under compilation did not use.
+ *
+ * The plan is compiled from one execution; this is what a replay is checked against. Every value in
+ * it is a local reference the host resolves, never a value the plan carries: a demonstration is the
+ * user's own work, and it stays on the machine that performed it.
+ */
+export type WorkflowHeldOutDemonstration = {
+  /** The inputs the demonstration used, at the argument each one landed in. */
+  inputs: Array<{ stepId: string; argument: string; reference: string }>;
+  /** What each step of the demonstration produced. */
+  observed: Array<{ stepId: string; reference: string }>;
+};
+
 export type RecordedWorkflow = {
   schemaVersion: typeof RECORDED_WORKFLOW_SCHEMA_VERSION;
   workflowId: string;
@@ -207,6 +222,12 @@ export type RecordedWorkflow = {
    * inputs in a disposable environment.
    */
   candidates?: WorkflowBindingCandidate[];
+  /**
+   * A second execution of the same work, kept locally by reference. It is what makes a candidate
+   * decidable without anyone supplying inputs or expectations by hand: the replay runs the plan on
+   * the demonstration's inputs and compares each step with what that execution actually produced.
+   */
+  heldOut?: WorkflowHeldOutDemonstration;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -555,6 +576,41 @@ export function validateRecordedWorkflow(value: unknown): {
           errors.push(
             `candidate ${stepId}.${candidate.argument} must name the fact the record is missing`,
           );
+        }
+      }
+    }
+  }
+  // The demonstration addresses real steps, and every value in it is a declared local reference.
+  const heldOut = value.heldOut;
+  if (heldOut !== undefined) {
+    if (!isPlainObject(heldOut)) {
+      errors.push("heldOut must be an object when present");
+    } else {
+      const entries: ReadonlyArray<readonly [string, unknown]> = [
+        ["inputs", heldOut.inputs],
+        ["observed", heldOut.observed],
+      ];
+      for (const [label, list] of entries) {
+        if (!Array.isArray(list)) {
+          errors.push(`heldOut.${label} must be an array`);
+          continue;
+        }
+        for (const entry of list) {
+          if (!isPlainObject(entry)) {
+            errors.push(`every heldOut.${label} entry must be an object`);
+            continue;
+          }
+          if (!order.has(String(entry.stepId))) {
+            errors.push(`heldOut.${label} names unknown step ${String(entry.stepId)}`);
+          }
+          if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
+            errors.push(
+              `heldOut.${label} reads undeclared local reference ${String(entry.reference)}`,
+            );
+          }
+          if (label === "inputs" && typeof entry.argument !== "string") {
+            errors.push("every heldOut.inputs entry needs the argument it was supplied for");
+          }
         }
       }
     }

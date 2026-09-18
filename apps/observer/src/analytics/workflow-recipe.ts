@@ -33,6 +33,8 @@ import { containsRedactionPlaceholder } from "./private-value-store.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  type WorkflowCallCarrier,
+  type WorkflowCallHeldOut,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
 } from "./workflow-call-recorder.js";
@@ -626,7 +628,13 @@ export function recordCallsFromEvents(
   };
   const scopeId = options.referenceScopeId ?? workflowId;
 
+  // One piece of work is one execution. When the capture recorded which execution each call belongs
+  // to, the recording is built from the one a later, matching execution demonstrates: the calls of
+  // the other executions are the same work performed again, and running them as extra steps of one
+  // tool would make the tool do the job twice.
+  const executions = executionsOf(ordered);
   const observations: RecordedCallObservation[] = [];
+  const stepIdByPosition = new Map<number, string>();
   const seenCallIds = new Set<string>();
   /** Suggestions the capture made, related to the steps of this recording. */
   const carrierCandidates: WorkflowBindingCandidate[] = [];
@@ -639,6 +647,8 @@ export function recordCallsFromEvents(
     seenCallIds.add(scopedCallKey);
 
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    const executionIndex = carrier?.executionIndex;
+    if (executionIndex !== undefined && executionIndex !== executions.target) continue;
     const declaredFlow = declaredResourceFlowOf(event);
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
@@ -740,6 +750,8 @@ export function recordCallsFromEvents(
     // The observation was just pushed, so this call's step is the last one.
     const ownStepId = `step${observations.length - 1}`;
     stepIdByCallId.set(scopedCallKey, ownStepId);
+    // Steps are numbered in the order the calls arrived, which is the order the demonstration used.
+    if (executionIndex !== undefined) stepIdByPosition.set(observations.length - 1, ownStepId);
     if (carrier?.candidates !== undefined) {
       for (const candidate of carrier.candidates) {
         if (candidate.proposed.kind !== "result") {
@@ -797,6 +809,8 @@ export function recordCallsFromEvents(
 
   const recipe = recordWorkflowRecipe(workflowId, observations, derivation.candidates);
   if (!recipe) return undefined;
+  const heldOut = demonstratedWorkflow(executions.demonstration, stepIdByPosition);
+  if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
     // A suggestion the capture itself made, expressed against the calls it observed. It is carried
     // through as a suggestion: the steps keep the values the record shows.
@@ -810,6 +824,14 @@ export function recordCallsFromEvents(
       collectPrivateReferences(argument.source, declaredPrivateReferences);
     }
   }
+  // The demonstration is kept the same way its leaves are: the plan names it, and the host resolves
+  // it locally, so a recording never carries the user's own second run as data.
+  for (const entry of recipe.workflow.heldOut?.inputs ?? []) {
+    declaredPrivateReferences.add(entry.reference);
+  }
+  for (const entry of recipe.workflow.heldOut?.observed ?? []) {
+    declaredPrivateReferences.add(entry.reference);
+  }
   if (declaredPrivateReferences.size > 0) {
     recipe.workflow.privateReferences = [...declaredPrivateReferences];
   }
@@ -819,6 +841,69 @@ export function recordCallsFromEvents(
   }
   recipe.workflow.inputs = [...declared.values()];
   return recipe;
+}
+
+/** The execution a recording is built from, and the demonstration a later one offers for it. */
+function executionsOf(events: readonly RecordableEvent[]): {
+  target: number | undefined;
+  demonstration: WorkflowCallHeldOut | undefined;
+} {
+  const indices = new Set<number>();
+  let demonstration: WorkflowCallHeldOut | undefined;
+  /** The execution a demonstration repeats: the one this recording is built from. */
+  let demonstratedExecution: number | undefined;
+  // The most complete demonstration wins: a repeat reports itself one call at a time, and its
+  // observations arrive on the result side, so the last carrier that names it is the fullest.
+  const consider = (
+    candidate: WorkflowCallHeldOut | undefined,
+    execution: number | undefined,
+  ): void => {
+    if (candidate === undefined || execution === undefined) return;
+    if (
+      demonstration === undefined ||
+      candidate.inputs.length + candidate.observed.length >
+        demonstration.inputs.length + demonstration.observed.length
+    ) {
+      demonstration = candidate;
+      demonstratedExecution = execution;
+    }
+  };
+  for (const event of events) {
+    if (event.type === "tool_call") {
+      const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+      if (carrier?.executionIndex === undefined) continue;
+      indices.add(carrier.executionIndex);
+      consider(carrier.heldOut, carrier.heldOut?.repeats);
+      continue;
+    }
+  }
+  if (indices.size === 0) return { target: undefined, demonstration: undefined };
+  // The recording is built from the execution the demonstration repeats, and the demonstration is
+  // the repeat's own values: a replay of the recording then runs on inputs it never used.
+  const target = demonstratedExecution ?? Math.min(...indices);
+  return { target, demonstration };
+}
+
+/** The demonstration, addressed by the steps this recording gave the work it demonstrates. */
+function demonstratedWorkflow(
+  demonstration: WorkflowCallHeldOut | undefined,
+  stepIdByPosition: ReadonlyMap<number, string>,
+): RecordedWorkflow["heldOut"] | undefined {
+  if (demonstration === undefined) return undefined;
+  const inputs: NonNullable<RecordedWorkflow["heldOut"]>["inputs"] = [];
+  const observed: NonNullable<RecordedWorkflow["heldOut"]>["observed"] = [];
+  for (const entry of demonstration.inputs) {
+    const stepId = stepIdByPosition.get(entry.position);
+    if (stepId === undefined) continue;
+    inputs.push({ stepId, argument: entry.argument, reference: entry.reference });
+  }
+  for (const entry of demonstration.observed) {
+    const stepId = stepIdByPosition.get(entry.position);
+    if (stepId === undefined) continue;
+    observed.push({ stepId, reference: entry.reference });
+  }
+  if (inputs.length === 0 && observed.length === 0) return undefined;
+  return { inputs, observed };
 }
 
 /** Collects every local reference a value source can resolve, so the plan can declare them. */
