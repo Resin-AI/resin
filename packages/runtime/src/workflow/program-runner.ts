@@ -20,7 +20,7 @@ export interface RecordedProgramRun {
   exitCode: number;
   stdout: string;
   stderr: string;
-  /** stdout parsed as JSON when it is a single JSON value; otherwise the raw text. */
+  /** The program's standard output, byte for byte: a process's result is the text it printed. */
   value: WorkflowJsonValue;
 }
 
