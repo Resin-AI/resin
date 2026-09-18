@@ -474,6 +474,8 @@ export function recordCallsFromEvents(
   }
 
   const stepIdByCallId = new Map<string, string>();
+  /** Inputs the calling program supplied, with the types it used. */
+  const recordedInputTypes = new Map<string, string>();
   /**
    * A reference is only usable when it names this recording's scope. Call ids are not unique across
    * scopes, so a reference from another recording must never bind to a local call sharing its id.
@@ -492,7 +494,15 @@ export function recordCallsFromEvents(
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
+    const recordedInputs =
+      (event.metadata?.inputs as
+        | Array<{ name: string; argument: string; type: string }>
+        | undefined) ?? [];
     const argumentOrigins: Record<string, RecordedArgumentOrigin> = {};
+    for (const input of recordedInputs) {
+      argumentOrigins[input.argument] = { type: "input", name: input.name };
+      recordedInputTypes.set(input.name, input.type);
+    }
     for (const [argumentName, use] of Object.entries(recordedReferences)) {
       const producingCallId = localCallIdOf(use.reference, scopeId);
       const producingStepId = producingCallId ? stepIdByCallId.get(producingCallId) : undefined;
@@ -541,7 +551,14 @@ export function recordCallsFromEvents(
     stepIdByCallId.set(callId, `step${observations.length - 1}`);
   }
   if (observations.length === 0) return undefined;
-  return recordWorkflowRecipe(workflowId, observations);
+  const recipe = recordWorkflowRecipe(workflowId, observations);
+  if (!recipe) return undefined;
+  const declared = new Map(recipe.workflow.inputs.map((input) => [input.name, input]));
+  for (const [name, type] of recordedInputTypes) {
+    declared.set(name, { name, type: type as RecordedWorkflow["inputs"][number]["type"] });
+  }
+  recipe.workflow.inputs = [...declared.values()];
+  return recipe;
 }
 
 function extractResultValue(content: unknown): WorkflowJsonValue | undefined {

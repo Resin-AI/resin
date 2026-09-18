@@ -49,12 +49,18 @@ describe("agent-facing tool session", () => {
     });
 
     // The session reports exactly which argument used which reference, nested paths included.
-    expect(session.recordedCalls()[0]).toEqual({
-      callId: "call_2",
-      references: {
-        entry: { reference: "ref:sess_agent:call_1", path: ["body", "rows", 0] },
-      },
+    const firstCall = session.recordedCalls().find((entry) => entry.callId === "call_2")!;
+    // The connection the caller used...
+    expect(firstCall.references).toEqual({
+      entry: { reference: "ref:sess_agent:call_1", path: ["body", "rows", 0] },
     });
+    // ...and the inputs it supplied, with their types, so the tool can take new ones.
+    expect(session.recordedCalls().find((entry) => entry.callId === "call_1")!.inputs).toEqual([
+      { name: "call_1_source", argument: "source", type: "string" },
+    ]);
+    expect(session.recordedCalls().find((entry) => entry.callId === "call_4")!.inputs).toEqual([
+      { name: "call_4_token", argument: "token", type: "string" },
+    ]);
     expect(session.referencesUsed().map((use) => use.reference)).toEqual([
       "ref:sess_agent:call_1",
       "ref:sess_agent:call_2",

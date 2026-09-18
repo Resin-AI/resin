@@ -21,6 +21,13 @@ export type AgentArgument =
   | { value: WorkflowJsonValue }
   | { reference: ResultHandle; path?: WorkflowValuePath };
 
+/** An input the caller supplied for a call, with the type the caller used. */
+export interface AgentCallInput {
+  name: string;
+  argument: string;
+  type: "string" | "number" | "boolean" | "object" | "array";
+}
+
 export interface AgentCallOutcome {
   /** The value the tool returned, for the agent's own use. */
   result: WorkflowJsonValue;
@@ -30,10 +37,19 @@ export interface AgentCallOutcome {
   references: ReferenceUse[];
 }
 
+function valueTypeOf(value: WorkflowJsonValue): AgentCallInput["type"] {
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object" && value !== null) return "object";
+  return "string";
+}
+
 export class AgentToolSession {
   private readonly scope: WorkflowReferenceScope;
   private callCounter = 0;
   private readonly usage: ReferenceUse[] = [];
+  private readonly inputs = new Map<string, AgentCallInput[]>();
 
   constructor(
     private readonly sessionId: string,
@@ -55,9 +71,17 @@ export class AgentToolSession {
     const callId = `call_${++this.callCounter}`;
     const resolved: Record<string, WorkflowJsonValue> = {};
     const references: ReferenceUse[] = [];
+    const supplied: AgentCallInput[] = [];
     for (const [argument, entry] of Object.entries(args)) {
       if ("value" in entry) {
         resolved[argument] = entry.value;
+        // The caller supplied this value: the recording keeps it as that call's input, with the type
+        // the caller used, so the compiled tool can accept a new value instead of a frozen one.
+        supplied.push({
+          name: `${callId}_${argument}`,
+          argument,
+          type: valueTypeOf(entry.value),
+        });
         continue;
       }
       const path = entry.path ?? [];
@@ -67,6 +91,7 @@ export class AgentToolSession {
       this.usage.push(use);
       this.scope.recordUse(use);
     }
+    if (supplied.length > 0) this.inputs.set(callId, supplied);
     const result = await this.dispatch(toolName, resolved);
     return {
       result,
@@ -82,6 +107,7 @@ export class AgentToolSession {
   recordedCalls(): Array<{
     callId: string;
     references: Record<string, { reference: string; path: WorkflowValuePath }>;
+    inputs: AgentCallInput[];
   }> {
     const byCall = new Map<
       string,
@@ -92,6 +118,11 @@ export class AgentToolSession {
       entry[use.argument] = { reference: use.reference, path: [...use.path] };
       byCall.set(use.callId, entry);
     }
-    return [...byCall.entries()].map(([callId, references]) => ({ callId, references }));
+    const callIds = new Set([...byCall.keys(), ...this.inputs.keys()]);
+    return [...callIds].map((callId) => ({
+      callId,
+      references: byCall.get(callId) ?? {},
+      inputs: this.inputs.get(callId) ?? [],
+    }));
   }
 }
