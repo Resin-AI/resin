@@ -69,6 +69,12 @@ function collectUnresolved(workflow: RecordedWorkflow): string[] {
       case "array":
         template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
         return;
+      case "program":
+        walk(template.source, `${where}<text>`);
+        for (const hole of template.holes) {
+          walk(hole.binding, `${where}<token ${hole.token}>`);
+        }
+        return;
       default:
         return;
     }

@@ -421,6 +421,69 @@ describe("the recording an ordinary session produces", () => {
   });
 });
 
+describe("a value embedded in a program an ordinary session ran", () => {
+  /** A shell command that writes a value an earlier call's result minted. */
+  const command = "printf '%s\\n' 'alpha-7f3c' > f";
+
+  function session() {
+    return record([
+      discovery([{ name: "bash", provider: "omp" }]),
+      call(1, "bash", { command: "printf '%s\\n' 'placeholder' > f" }),
+      result(1, "bash", { stdout: "alpha-7f3c" }),
+      call(2, "bash", { command }),
+    ]);
+  }
+
+  it("offers the token an earlier result produced, at its position in the program", () => {
+    const { events } = session();
+    const carrier = carrierOf(events[3]!)!;
+    // The record still says the call was a program, and which argument held its text.
+    expect(carrier.program).toEqual({ kind: "shell", source: "", argument: "command" });
+
+    expect(carrier.candidates).toHaveLength(1);
+    const candidate = carrier.candidates![0]!;
+    expect(candidate.argument).toBe("command");
+    expect(candidate.path).toEqual(["tokens", 2]);
+    expect(candidate.proposed).toEqual({ kind: "result", callId: "call_1", path: ["stdout"] });
+    expect(candidate.reason).toBe("equal-to-earlier-result");
+    expect(candidate.evidence).toEqual({ tokens: 5, token: 2, producers: 1 });
+
+    // A candidate is a reason, never the value: nothing the record carries names the token's text.
+    expect(JSON.stringify(projectEventToMetadataOnly(events[3]!).metadata ?? {})).not.toContain(
+      "alpha-7f3c",
+    );
+  });
+
+  it("carries the token candidate's path into the plan unchanged, and does not apply it", () => {
+    const { events, store } = session();
+    const recipe = recordCallsFromEvents("wf_program_token", events);
+    expect(recipe).toBeDefined();
+    const workflow = recipe!.workflow;
+    expect(workflow.steps).toHaveLength(2);
+
+    // The call the capture numbered `step1` keeps the position the capture gave the token: the
+    // recording renumbers calls, and a token index is not a step identity.
+    expect(workflow.candidates).toHaveLength(1);
+    expect(workflow.candidates![0]).toMatchObject({
+      stepId: "step1",
+      argument: "command",
+      path: ["tokens", 2],
+      proposed: { kind: "result", stepId: "step0", path: ["stdout"] },
+      reason: "equal-to-earlier-result",
+    });
+
+    // The suggestion is reported and not executed: the step still carries the recorded program.
+    const argument = workflow.steps[1]!.arguments.find((entry) => entry.name === "command")!;
+    expect(argument.source.kind).toBe("template");
+    const template = argument.source.kind === "template" ? argument.source.template : undefined;
+    expect(template?.type).toBe("private");
+    const reference = template?.type === "private" ? template.reference : undefined;
+    expect(reference).toBeDefined();
+    expect(resolvePrivateReference(store, reference!)).toBe(command);
+    expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
+  });
+});
+
 describe("the demonstration an ordinary session offers", () => {
   /** Two executions of the same work: the same callables in the same order, on different values. */
   function repeated(): NormalizedSessionEvent[] {

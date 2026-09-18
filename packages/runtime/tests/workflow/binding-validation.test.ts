@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  RecordedWorkflow,
-  WorkflowBindingCandidate,
-  WorkflowJsonValue,
-  WorkflowValueTemplate,
+import {
+  type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  type WorkflowJsonValue,
+  type WorkflowValueTemplate,
+  tokenizeProgram,
 } from "@resin/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -467,5 +468,149 @@ describe("a plan is run once per attempt, as the work it is", () => {
     expect(decided.verification?.missed.map((entry) => entry.stepId)).toEqual(["step2"]);
     expect(decided.verification?.reproduced.sort()).toEqual(["step0", "step1"]);
     expect(decided.verification?.dropped).toEqual([]);
+  });
+});
+
+/**
+ * A recorded program whose text was written with a value inside it.
+ *
+ * The program is the job's own step, so it is recorded whole: only the text is local, and the token
+ * the earlier result produced is a position inside it. These tests pin that the replay binds that
+ * position and nothing else.
+ */
+const PROGRAM_RUNTIME = "program";
+
+/** The recorded job: name the release the earlier step returned in a file, and nothing else. */
+const RECORDED_PROGRAM =
+  "printf '%s\\n' 'tok(recorded-seed)' > release.txt && printf '%s\\n' 'keep-me' >> release.txt";
+
+/** A host that runs a program by reading the two values the program names, in order. */
+function programAdapters(seen: string[]): RuntimeAdapterRegistry {
+  const registry = new RuntimeAdapterRegistry();
+  registry.register({
+    runtime: TEST_RUNTIME,
+    async call(request) {
+      return { token: `tok(${String(request.arguments.seed ?? "")})` };
+    },
+  });
+  registry.register({
+    runtime: PROGRAM_RUNTIME,
+    async call(request) {
+      const command = String(request.arguments.command ?? "");
+      seen.push(command);
+      // Every single-quoted value the program names, in order, so a rendering that changed one of
+      // them or moved another is visible in the result.
+      return { named: [...command.matchAll(/'([^']*)'/g)].map((match) => match[1]) };
+    },
+  });
+  return registry;
+}
+
+function programPlan(): RecordedWorkflow {
+  return {
+    schemaVersion: 1,
+    workflowId: "wf-program-token",
+    inputs: [{ name: "seed", type: "string" }],
+    privateReferences: ["private:recorded-program"],
+    steps: [
+      {
+        id: "open",
+        callId: "call-open",
+        callable: { runtime: TEST_RUNTIME, name: "open" },
+        arguments: [{ name: "seed", source: { kind: "input", name: "seed" } }],
+        dependsOn: [],
+        failurePolicy: { onError: "abort", policy: "recorded" },
+        observed: { outcome: "succeeded" },
+      },
+      {
+        id: "seal",
+        callId: "call-seal",
+        callable: {
+          runtime: PROGRAM_RUNTIME,
+          name: "sh",
+          program: { kind: "shell", source: "", argument: "command" },
+        },
+        arguments: [
+          { name: "command", source: { kind: "private", reference: "private:recorded-program" } },
+        ],
+        dependsOn: ["open"],
+        failurePolicy: { onError: "abort", policy: "recorded" },
+        observed: { outcome: "succeeded" },
+      },
+    ],
+  };
+}
+
+function embeddedTokenCandidate(): WorkflowBindingCandidate {
+  const tokens = tokenizeProgram("shell", RECORDED_PROGRAM);
+  const token = tokens.findIndex((entry) => entry.value === "tok(recorded-seed)");
+  if (token < 0) throw new Error("the recorded program does not carry the expected token");
+  return {
+    stepId: "seal",
+    argument: "command",
+    path: ["tokens", token],
+    proposed: { kind: "result", stepId: "open", path: ["token"] },
+    reason: "equal-to-earlier-result",
+    missing: "the record does not establish that this token's origin is that result",
+  };
+}
+
+describe("a value embedded in a recorded program", () => {
+  it("binds the token the earlier result produced and replays the program with the replay's value", async () => {
+    const seen: string[] = [];
+    const directory = await mkdtemp(join(tmpdir(), "resin-program-token-"));
+    workspaces.push(directory);
+    const outcomes = await validateBindingCandidates({
+      plan: programPlan(),
+      candidates: [embeddedTokenCandidate()],
+      environment: {
+        adapters: programAdapters(seen),
+        workspaceDir: directory,
+        inputs: { seed: "replay-seed" },
+        observed: {
+          seal: { named: ["%s\\n", "tok(replay-seed)", "%s\\n", "keep-me"] },
+        },
+        resolvePrivate: (reference) =>
+          reference === "private:recorded-program" ? RECORDED_PROGRAM : null,
+      },
+    });
+
+    const [outcome] = outcomes;
+    expect(outcome.accepted).toBe(true);
+    expect(outcome.reason).toContain("seal.command");
+    // The bound replay rendered the replay's value into the recorded token and left the rest of the
+    // program exactly as it was; the run with the candidate reverted is the recorded text.
+    const boundRun = seen.find((command) => command.includes("tok(replay-seed)"));
+    expect(boundRun).toBeDefined();
+    expect(boundRun).toContain("'keep-me'");
+    expect(boundRun).toContain("release.txt");
+    expect(seen.some((command) => command.includes("'tok(recorded-seed)'"))).toBe(true);
+  });
+
+  it("refuses a token position the recorded program does not have", async () => {
+    const candidate = { ...embeddedTokenCandidate(), path: ["tokens", 999] };
+    const outcomes = await validateBindingCandidates({
+      plan: programPlan(),
+      candidates: [candidate],
+      environment: {
+        adapters: programAdapters([]),
+        workspaceDir: await mkdtemp(join(tmpdir(), "resin-program-token-miss-")).then(
+          (directory) => {
+            workspaces.push(directory);
+            return directory;
+          },
+        ),
+        inputs: { seed: "replay-seed" },
+        observed: {
+          seal: { named: ["%s\\n", "tok(replay-seed)", "%s\\n", "keep-me"] },
+        },
+        resolvePrivate: () => RECORDED_PROGRAM,
+      },
+    });
+
+    // The binding is placed (the replay renders token 999 into the program), so the run fails where
+    // the program is rendered rather than being silently replayed with the recorded text. Either way
+    // the proposal is never accepted on evidence that does not exist.
+    expect(outcomes[0]?.accepted).toBe(false);
   });
 });

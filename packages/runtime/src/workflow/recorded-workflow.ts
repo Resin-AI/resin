@@ -8,6 +8,10 @@
  * change here.
  */
 
+import {
+  applyProgramTokenValues,
+  tokenizeProgram,
+} from "@resin/contracts";
 import type {
   RecordedWorkflow,
   WorkflowJsonValue,
@@ -180,6 +184,32 @@ async function buildTemplate(
       const built: WorkflowJsonValue[] = [];
       for (const item of template.items) built.push(await resolveLeaf(item));
       return built;
+    }
+    case "program": {
+      // A program is executed as the text it was recorded as, with each confirmed binding rendered
+      // back into the exact token it replaced: quoting is the recorded token's, and a value that
+      // would otherwise read as syntax is quoted so it stays data. Every other byte is untouched.
+      const text = await resolveLeaf(template.source);
+      if (typeof text !== "string") {
+        throw new WorkflowBindingError(
+          "the recorded program did not resolve to program text",
+          step.id,
+          argumentName,
+        );
+      }
+      const values = new Map<number, string>();
+      for (const hole of template.holes) {
+        const bound = await resolveLeaf(hole.binding);
+        values.set(
+          hole.token,
+          typeof bound === "string"
+            ? bound
+            : typeof bound === "number" || typeof bound === "boolean"
+              ? String(bound)
+              : JSON.stringify(bound),
+        );
+      }
+      return applyProgramTokenValues(text, tokenizeProgram(template.language, text), values);
     }
     default: {
       const exhaustive: never = template;

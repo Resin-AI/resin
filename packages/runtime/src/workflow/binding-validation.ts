@@ -12,16 +12,18 @@
  */
 
 import { mkdir } from "node:fs/promises";
-import type {
-  RecordedWorkflow,
-  WorkflowArgument,
-  WorkflowBindingCandidate,
-  WorkflowJsonValue,
-  WorkflowValuePath,
-  WorkflowValueSource,
-  WorkflowValueTemplate,
+import {
+  type RecordedWorkflow,
+  type WorkflowArgument,
+  type WorkflowBindingCandidate,
+  type WorkflowJsonValue,
+  type WorkflowStep,
+  type WorkflowValuePath,
+  type WorkflowValueSource,
+  type WorkflowValueTemplate,
+  bindProgramToken,
 } from "@resin/contracts";
-import { applyAcceptedBindings } from "./candidate-promotion.js";
+import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
 import {
   type RecordedStepOutcome,
   type RecordedWorkflowExecution,
@@ -130,10 +132,27 @@ function proposedSource(candidate: WorkflowBindingCandidate): WorkflowValueSourc
  * replayed as a leaf binding and is refused instead of approximated.
  */
 function bindCandidateLeaf(
+  step: WorkflowStep,
   argument: WorkflowArgument,
   candidate: WorkflowBindingCandidate,
 ): boolean {
   const path = candidate.path;
+  // A token position is a leaf of the program text the argument holds: it addresses a token of the
+  // recorded program, not a node of a value, so the recorded text is lifted into a program template
+  // and the proposal is bound at that token.
+  if (path[0] === "tokens") {
+    const program = step.callable.program;
+    const token = path[1];
+    if (program === undefined || program.argument !== candidate.argument) return false;
+    if (typeof token !== "number" || !Number.isInteger(token) || token < 0) return false;
+    if (path.length !== 2) return false;
+    const recorded = sourceAsTemplate(argument.source);
+    argument.source = {
+      kind: "template",
+      template: bindProgramToken(recorded, program.kind, token, proposedTemplate(candidate)),
+    };
+    return true;
+  }
   if (path.length === 0) {
     if (argument.source.kind === "template" && !isLeafTemplate(argument.source.template)) {
       return false;
@@ -212,7 +231,7 @@ function bindEveryCandidate(
       );
       continue;
     }
-    if (!bindCandidateLeaf(argument, candidate)) {
+    if (!bindCandidateLeaf(step, argument, candidate)) {
       unaddressable.set(
         candidate,
         `${evidence} does not address a template leaf in the recorded plan, so the candidate cannot be replayed as a leaf binding`,

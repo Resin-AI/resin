@@ -1,4 +1,4 @@
-import type { RecordedWorkflow } from "@resin/contracts";
+import { type RecordedWorkflow, validateRecordedWorkflow } from "@resin/contracts";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import {
   type RecordedCallObservation,
@@ -258,6 +258,124 @@ describe("workflow recipe recording", () => {
     ]);
     expect(JSON.stringify(recipe.workflow)).not.toContain("tok_inner_7");
     expect([...recipe.privateValues.values()]).toContain("tok_inner_7");
+  });
+
+  it("keeps a program's text and its holes, and depends on the step a hole reads", () => {
+    const programRun: RecordedCallObservation[] = [
+      {
+        callId: "call_mint",
+        causalSequence: 1,
+        callable: { runtime: "unfamiliar-protocol", name: "vendor.mint", connection: "srv_9" },
+        arguments: { seed: "alpha" },
+        argumentOrigins: { seed: { type: "literal", value: "alpha" } },
+        result: { id: "alpha-7f3c" },
+        observed: "succeeded",
+      },
+      {
+        callId: "call_run",
+        causalSequence: 2,
+        callable: {
+          runtime: "unfamiliar-process",
+          name: "bash",
+          // The record says this call ran a program, and which argument held its text.
+          program: { kind: "shell", source: "", argument: "command" },
+        },
+        arguments: { command: "printf '%s\\n' 'alpha-7f3c' > f" },
+        argumentOrigins: {
+          command: {
+            type: "program",
+            language: "shell",
+            // The text is the user's own work, so it stays local behind a reference.
+            source: { type: "private", reference: "private:wf_program:0" },
+            // The token a value the replay confirmed is rendered into.
+            holes: [{ token: 2, binding: { type: "result", stepId: "step0", path: ["id"] } }],
+          },
+        },
+        result: { stdout: "" },
+        observed: "succeeded",
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_program", programRun, [
+      {
+        stepId: "step1",
+        argument: "command",
+        path: ["tokens", 2],
+        proposed: { kind: "result", stepId: "step0", path: ["id"] },
+        reason: "equal-to-earlier-result",
+        evidence: { tokens: 5, token: 2, producers: 1 },
+        missing: "the record does not show this token was rendered from its result",
+      },
+    ])!;
+    const run = recipe.workflow.steps[1]!;
+
+    // The program survives whole: its language, the text it resolves, and the token a bound value
+    // is rendered into are all still there.
+    expect(leaf(run.arguments[0]!.source)).toEqual({
+      type: "program",
+      language: "shell",
+      source: { type: "private", reference: "private:wf_program:0" },
+      holes: [{ token: 2, binding: { type: "result", stepId: "step0", path: ["id"] } }],
+    });
+    // A hole that reads a step makes that step a dependency of the program's step.
+    expect(run.dependsOn).toEqual(["step0"]);
+    // The candidate addresses the token of the program the step's own record holds.
+    expect(recipe.workflow.candidates![0]!.path).toEqual(["tokens", 2]);
+  });
+
+  it("redacts a private literal inside a program, wherever the program sits", () => {
+    const programRun: RecordedCallObservation[] = [
+      {
+        callId: "call_run",
+        causalSequence: 1,
+        callable: {
+          runtime: "unfamiliar-process",
+          name: "bash",
+          program: { kind: "shell", source: "", argument: "command" },
+        },
+        arguments: { command: "printf '%s\\n' 'ghp_secret_value' > f" },
+        argumentOrigins: {
+          command: {
+            type: "program",
+            language: "shell",
+            source: { type: "literal", value: "printf '%s\\n' 'ghp_secret_value' > f" },
+            holes: [{ token: 2, binding: { type: "literal", value: "ghp_secret_value" } }],
+          },
+        },
+        isPrivateValue: (value) => value.includes("ghp_secret_value"),
+        result: { ok: true },
+        observed: "succeeded",
+      },
+    ];
+    const recipe = recordWorkflowRecipe("wf_program_private", programRun, [
+      {
+        stepId: "step0",
+        argument: "command",
+        path: ["tokens", 2],
+        proposed: { kind: "result", stepId: "step0", path: ["ok"] },
+        reason: "equal-to-earlier-result",
+        evidence: { tokens: 5, token: 2, producers: 1 },
+        missing: "the record does not show this token was rendered from its result",
+      },
+    ])!;
+    const program = leaf(recipe.workflow.steps[0]!.arguments[0]!.source) as {
+      type: string;
+      source: { type: string; reference?: string };
+      holes: Array<{ token: number; binding: { type: string; reference?: string } }>;
+    };
+
+    expect(program.type).toBe("program");
+    // The text and the value a hole renders are both leaves of the plan, so both are replaced by a
+    // local reference rather than carried.
+    expect(program.source.type).toBe("private");
+    expect(recipe.privateValues.get(program.source.reference!)).toBe(
+      "printf '%s\\n' 'ghp_secret_value' > f",
+    );
+    expect(program.holes[0]!.token).toBe(2);
+    expect(program.holes[0]!.binding.type).toBe("private");
+    expect(recipe.privateValues.get(program.holes[0]!.binding.reference!)).toBe("ghp_secret_value");
+    expect(JSON.stringify(recipe.workflow)).not.toContain("ghp_secret_value");
+    // Both references are declared, so the plan is structurally sound as well as silent.
+    expect(validateRecordedWorkflow(recipe.workflow)).toEqual({ valid: true, errors: [] });
   });
 
   it("proposes inputs from variation without changing the executable workflow", () => {

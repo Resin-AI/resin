@@ -7,12 +7,32 @@
  * the step keeps the value the user actually passed.
  */
 
-import type {
-  RecordedWorkflow,
-  WorkflowBindingCandidate,
-  WorkflowValuePath,
-  WorkflowValueTemplate,
+import {
+  type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  type WorkflowValuePath,
+  type WorkflowValueSource,
+  type WorkflowValueTemplate,
+  bindProgramToken,
 } from "@resin/contracts";
+
+/** The template a recorded source resolves through, so a binding can be placed inside it. */
+export function sourceAsTemplate(source: WorkflowValueSource): WorkflowValueTemplate {
+  switch (source.kind) {
+    case "literal":
+      return { type: "literal", value: source.value };
+    case "input":
+      return { type: "input", name: source.name };
+    case "result":
+      return { type: "result", stepId: source.stepId, path: [...source.path] };
+    case "private":
+      return { type: "private", reference: source.reference };
+    case "unresolved":
+      return { type: "unresolved", reason: source.reason };
+    case "template":
+      return source.template;
+  }
+}
 
 /** The template a step's argument resolves through, or undefined when it is not a template. */
 function templateOf(
@@ -68,8 +88,15 @@ export function applyAcceptedBindings(
   for (const candidate of accepted) {
     const step = next.steps.find((entry) => entry.id === candidate.stepId);
     const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
+    if (argument === undefined || step === undefined) continue;
     const template = templateOf(next, candidate.stepId, candidate.argument);
-    if (argument === undefined || template === undefined) continue;
+    // A token binding names a position inside the program the step's own record holds in that
+    // argument, so it binds the recorded text into a program template rather than walking a path
+    // through a value.
+    const isTokenBinding = candidate.path[0] === "tokens";
+    const program = isTokenBinding ? step.callable.program : undefined;
+    if (isTokenBinding && program?.argument !== candidate.argument) continue;
+    if (!isTokenBinding && template === undefined) continue;
     let leaf: WorkflowValueTemplate;
     if (candidate.proposed.kind === "result") {
       leaf = { type: "result", stepId: candidate.proposed.stepId, path: candidate.proposed.path };
@@ -80,7 +107,20 @@ export function applyAcceptedBindings(
         type: candidate.proposed.type,
       });
     }
-    const replaced = withLeafAt(template, candidate.path, leaf);
+    let replaced: WorkflowValueTemplate | undefined;
+    if (isTokenBinding) {
+      const token = candidate.path[1];
+      if (program === undefined) continue;
+      if (typeof token !== "number" || !Number.isInteger(token) || token < 0) continue;
+      replaced = bindProgramToken(
+        template ?? sourceAsTemplate(argument.source),
+        program.kind,
+        token,
+        leaf,
+      );
+    } else {
+      replaced = withLeafAt(template as WorkflowValueTemplate, candidate.path, leaf);
+    }
     if (replaced === undefined) continue;
     argument.source = { kind: "template", template: replaced };
   }

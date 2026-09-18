@@ -18,6 +18,7 @@
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
+  type ProgramLanguage,
   type WorkflowArgumentProvenance,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
@@ -164,6 +165,12 @@ interface LocalCall {
   inputSchema?: WorkflowJsonValue;
   /** Arguments this call kept as local resources rather than as caller values. */
   privateArguments?: string[];
+  /**
+   * The program this call ran: the language its record established and the argument whose text
+   * holds it. Kept so the derivation can read the text as the program it is rather than as one
+   * opaque argument.
+   */
+  program?: { kind: ProgramLanguage; argument: string };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
 }
@@ -703,7 +710,7 @@ export class WorkflowCallRecorder {
     if (discovered?.inputSchema !== undefined) carrier.inputSchema = discovered.inputSchema;
 
     const state = this.sessionState(event.sessionId);
-    const call = this.recordLocalCall(state, event, parameters);
+    const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call);
     carrier.executionIndex = call.executionIndex;
     const heldOut = this.heldOutSoFar(state, call);
@@ -769,6 +776,8 @@ export class WorkflowCallRecorder {
     state: SessionDerivationState,
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     parameters: Record<string, WorkflowJsonValue>,
+    /** The program the record established for this call, when it established one. */
+    program?: WorkflowRecordedProgram,
   ): LocalCall {
     const startsExecution = state.executions.length === 0 || state.newExecutionPending;
     if (startsExecution) {
@@ -797,6 +806,12 @@ export class WorkflowCallRecorder {
       arguments: parameters,
       ...(discovered?.inputSchema === undefined ? {} : { inputSchema: discovered.inputSchema }),
       ...(heldLocally.length === 0 ? {} : { privateArguments: heldLocally }),
+      // Only a program whose text arrived in a named argument can be read as a program here: with
+      // no argument there is no text to tokenize, and a program that only arrived as an argv has no
+      // token positions to address.
+      ...(program?.argument === undefined
+        ? {}
+        : { program: { kind: program.kind, argument: program.argument } }),
       ...(flow === undefined
         ? {}
         : {
@@ -936,6 +951,7 @@ export class WorkflowCallRecorder {
         ...(entry.privateArguments === undefined
           ? {}
           : { privateArguments: entry.privateArguments }),
+        ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
     );
     const ownStepId = `local${index}`;

@@ -179,6 +179,10 @@ function recordWorkflowRecipeInternal(
       case "result":
       case "private":
       case "unresolved":
+      // A program origin already says everything the plan needs — the language, the text it
+      // resolves, and the tokens a bound value is rendered into — so it is kept as it is rather
+      // than re-read from the argument's value.
+      case "program":
         return origin;
       case "object":
         // A recorded origin may describe only part of the value; keep its leaves, and decide the rest
@@ -252,6 +256,12 @@ function recordWorkflowRecipeInternal(
             return Object.values(template.entries).flatMap(collect);
           case "array":
             return template.items.flatMap(collect);
+          // A program's text is a leaf, but a hole renders a binding into the program: when that
+          // binding reads a step, the step runs before the program does.
+          case "program":
+            return [template.source, ...template.holes.map((hole) => hole.binding)].flatMap(
+              collect,
+            );
           default:
             return [];
         }
@@ -326,6 +336,18 @@ function recordWorkflowRecipeInternal(
       }
       case "array":
         return { type: "array", items: template.items.map(sweep) };
+      // A program's text and every hole binding are swept like any other leaf: a private value inside
+      // a program is replaced by its reference wherever it sits.
+      case "program":
+        return {
+          type: "program",
+          language: template.language,
+          source: sweep(template.source),
+          holes: template.holes.map((hole) => ({
+            token: hole.token,
+            binding: sweep(hole.binding),
+          })),
+        };
       default:
         return template;
     }
@@ -949,6 +971,12 @@ function collectTemplateReferences(template: WorkflowValueTemplate, into: Set<st
       return;
     case "array":
       for (const entry of template.items) collectTemplateReferences(entry, into);
+      return;
+    // A program resolves its text like any other leaf — usually a private reference — and each hole
+    // resolves the binding rendered into its token.
+    case "program":
+      collectTemplateReferences(template.source, into);
+      for (const hole of template.holes) collectTemplateReferences(hole.binding, into);
       return;
     default:
       return;

@@ -14,7 +14,7 @@
  * carries spaces, quotes or shell metacharacters is rendered quoted rather than pasted as syntax.
  */
 
-import type { WorkflowRecordedProgram } from "./recorded-workflow.js";
+import type { WorkflowRecordedProgram, WorkflowValueTemplate } from "./recorded-workflow.js";
 
 export type ProgramLanguage = WorkflowRecordedProgram["kind"];
 
@@ -229,8 +229,7 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
     }
     if (char === "'" || char === '"') {
       const start = index;
-      const triple =
-        language === "python" && source.slice(index, index + 3) === char.repeat(3);
+      const triple = language === "python" && source.slice(index, index + 3) === char.repeat(3);
       const quoteLength = triple ? 3 : 1;
       index += quoteLength;
       let closed = false;
@@ -368,4 +367,30 @@ export function applyProgramTokenValues(
       rewritten.slice(0, replacement.start) + replacement.text + rewritten.slice(replacement.end);
   }
   return rewritten;
+}
+
+/**
+ * The program an argument resolves through, with one token bound to a value the replay confirmed.
+ *
+ * A program argument is recorded as the text it was — usually a private leaf — so the first bound
+ * token has to lift that text into a program template; a later one adds a hole to the template that
+ * is already there. Both the local replay and the compiler of the published artifact call this one
+ * function, so a binding confirmed in a replay is written into the plan exactly as the artifact
+ * will render it.
+ */
+export function bindProgramToken(
+  source: WorkflowValueTemplate,
+  language: ProgramLanguage,
+  token: number,
+  binding: WorkflowValueTemplate,
+): WorkflowValueTemplate {
+  if (source.type !== "program") {
+    return { type: "program", language, source, holes: [{ token, binding }] };
+  }
+  // A program template already carries the language its record established; a caller that disagrees
+  // would be describing another program, so the recorded one wins.
+  const holes = source.holes.filter((hole) => hole.token !== token);
+  holes.push({ token, binding });
+  holes.sort((left, right) => left.token - right.token);
+  return { ...source, holes };
 }

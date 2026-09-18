@@ -14,6 +14,9 @@
  *   - a value that was already present in the record before the earlier call produced it is NOT
  *     offered at all: equality there is a coincidence the record cannot resolve, and proposing it
  *     would be exactly the mistake of turning a coincidence into a dependency;
+ *   - a value embedded in the text of a program the call ran is offered under that same rule, but
+ *     addressed by the token it sits at rather than by a path of leaves: the program's text is one
+ *     argument, and a value inside it is not a leaf of that argument;
  *   - the same argument position taking different values across distinct executions of the same
  *     call is offered as a candidate input, never as an input.
  *
@@ -22,10 +25,12 @@
  * fact the record is missing.
  */
 
-import type {
-  WorkflowBindingCandidate,
-  WorkflowJsonValue,
-  WorkflowValuePath,
+import {
+  type ProgramLanguage,
+  type WorkflowBindingCandidate,
+  type WorkflowJsonValue,
+  type WorkflowValuePath,
+  tokenizeProgram,
 } from "@resin/contracts";
 
 /** Local identities of the resources one call declared it would read and write. */
@@ -53,6 +58,12 @@ export interface DerivationCall {
    * recording deliberately held back.
    */
   privateArguments?: readonly string[];
+  /**
+   * The program this call ran, as the record established it: the language it is written in, and the
+   * argument whose text holds it. A value embedded in that text is part of the program rather than a
+   * leaf of an argument, so it is only comparable once the text has been read as the program it is.
+   */
+  program?: { kind: ProgramLanguage; argument: string };
 }
 
 export interface DerivedCall {
@@ -221,18 +232,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       if (leaf.value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
       const argumentName = leaf.path[0];
       if (typeof argumentName !== "string") continue;
-      const producers: Array<{ stepId: string; path: WorkflowValuePath }> = [];
-      for (let producerIndex = 0; producerIndex < index; producerIndex += 1) {
-        const producer = calls[producerIndex]!;
-        if (!resultValues[producerIndex]!.has(leaf.value)) continue;
-        if (seenBeforeResult[producerIndex]!.has(leaf.value)) continue;
-        const produceLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
-        stringLeaves(producer.result, [], produceLeaves);
-        for (const produced of produceLeaves) {
-          if (produced.value !== leaf.value) continue;
-          producers.push({ stepId: producer.stepId, path: produced.path });
-        }
-      }
+      const producers = producersOfValue(leaf.value, index, calls, resultValues, seenBeforeResult);
       if (producers.length === 0) continue;
       const first = producers[0]!;
       candidates.push({
@@ -247,6 +247,42 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
             ? `the record shows ${producers.length} earlier calls returning this value, so it does not establish which one this argument came from`
             : "the value first appeared after that call returned, but the record does not show this call read its result",
       });
+    }
+
+    // A value embedded in the text of a program this call ran. The string leaves above are the
+    // arguments' own values; a value inside a program is part of its text, so it is read as the
+    // tokenizer both halves of the round-trip share reads it, and the candidate names the token
+    // position rather than the text the value happens to sit in. Only a word or a string is offered
+    // — an operator denotes no value — and the same producer rule decides it, so a token that merely
+    // repeats something the record already contained is not offered either.
+    if (call.program !== undefined && candidates.length < MAX_CANDIDATES) {
+      const text = call.arguments[call.program.argument];
+      if (typeof text === "string") {
+        const tokens = tokenizeProgram(call.program.kind, text);
+        for (const [tokenIndex, token] of tokens.entries()) {
+          if (candidates.length >= MAX_CANDIDATES) break;
+          if (token.kind === "operator") continue;
+          const value = token.value;
+          if (value === undefined || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
+          const producers = producersOfValue(value, index, calls, resultValues, seenBeforeResult);
+          if (producers.length === 0) continue;
+          const first = producers[0]!;
+          candidates.push({
+            stepId: call.stepId,
+            argument: call.program.argument,
+            path: ["tokens", tokenIndex],
+            proposed: { kind: "result", stepId: first.stepId, path: first.path },
+            reason: "equal-to-earlier-result",
+            // Structural only: how many tokens the program has, which one this is, and how many
+            // calls returned the value. The token's text never leaves the recording.
+            evidence: { tokens: tokens.length, token: tokenIndex, producers: producers.length },
+            missing:
+              producers.length > 1
+                ? `the record shows ${producers.length} earlier calls returning this value, so it does not establish which one this token came from`
+                : "the token's text first appeared after that call returned, but the record does not show this token was rendered from its result rather than written into the program as a literal",
+          });
+        }
+      }
     }
   }
 
@@ -282,6 +318,33 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     }
   }
   return { calls: derived, candidates: [...candidates, ...sharedCandidates] };
+}
+
+/**
+ * The earlier calls whose result minted this value: it appeared in that call's result, and nowhere
+ * the record had already shown — neither in an earlier result nor in that call's own arguments. A
+ * value the record already contained, or one the callable was given, is not an output of that call,
+ * so it never becomes a producer.
+ */
+function producersOfValue(
+  value: string,
+  before: number,
+  calls: readonly DerivationCall[],
+  resultValues: ReadonlyArray<ReadonlySet<string>>,
+  seenBeforeResult: ReadonlyArray<ReadonlySet<string>>,
+): Array<{ stepId: string; path: WorkflowValuePath }> {
+  const producers: Array<{ stepId: string; path: WorkflowValuePath }> = [];
+  for (let producerIndex = 0; producerIndex < before; producerIndex += 1) {
+    if (!resultValues[producerIndex]!.has(value)) continue;
+    if (seenBeforeResult[producerIndex]!.has(value)) continue;
+    const produceLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
+    stringLeaves(calls[producerIndex]!.result, [], produceLeaves);
+    for (const produced of produceLeaves) {
+      if (produced.value !== value) continue;
+      producers.push({ stepId: calls[producerIndex]!.stepId, path: produced.path });
+    }
+  }
+  return producers;
 }
 
 /**
