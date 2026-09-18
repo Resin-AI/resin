@@ -15,6 +15,7 @@ import type {
   RecordedWorkflow,
   WorkflowJsonValue,
   WorkflowStep,
+  WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
 
@@ -427,6 +428,16 @@ export interface RecordableEvent {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * A connection the capture actually observed: the call consumed a reference the scope assigned to an
+ * earlier result, at an optional nested field. Present only when the calling program used the
+ * reference-aware interface; a plain-JSON recording has none.
+ */
+export interface RecordedReferenceUse {
+  reference: string;
+  path?: Array<string | number>;
+}
+
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
@@ -457,10 +468,36 @@ export function recordCallsFromEvents(
     });
   }
 
+  const stepIdByCallId = new Map<string, string>();
+  const scopeSeparator = ":";
+  const scopeCallIdOf = (reference: string): string | undefined => {
+    // `ref:<scope>:<callId>`; the call id may itself contain colons, so keep everything after the
+    // second separator.
+    const parts = reference.split(scopeSeparator);
+    if (parts.length < 3 || parts[0] !== "ref") return undefined;
+    return parts.slice(2).join(scopeSeparator);
+  };
+
   const observations: RecordedCallObservation[] = [];
   for (const event of ordered) {
     if (event.type !== "tool_call") continue;
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
+    const recordedReferences =
+      (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
+    const argumentOrigins: Record<string, RecordedArgumentOrigin> = {};
+    for (const [argumentName, use] of Object.entries(recordedReferences)) {
+      const producingCallId = scopeCallIdOf(use.reference);
+      const producingStepId = producingCallId ? stepIdByCallId.get(producingCallId) : undefined;
+      // A reference the recording cannot tie to an earlier step it recorded stays unestablished
+      // rather than being guessed from the value that happens to be there.
+      if (producingStepId) {
+        argumentOrigins[argumentName] = {
+          type: "result",
+          stepId: producingStepId,
+          path: (use.path ?? []) as WorkflowValuePath,
+        };
+      }
+    }
     const toolName = event.toolName ?? "unknown";
     const recordedResult = resultsByCallId.get(callId);
     const discovery = options.discoveryFor?.(toolName);
@@ -478,6 +515,7 @@ export function recordCallsFromEvents(
           : {}),
       },
       arguments: event.parameters ?? {},
+      ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(privateValues.length > 0
         ? { isPrivateValue: (value) => privateValues.includes(value) }
@@ -491,6 +529,8 @@ export function recordCallsFromEvents(
               ? "succeeded"
               : "unknown",
     });
+    // The observation was just pushed, so this call's step is the last one.
+    stepIdByCallId.set(callId, `step${observations.length - 1}`);
   }
   if (observations.length === 0) return undefined;
   return recordWorkflowRecipe(workflowId, observations);

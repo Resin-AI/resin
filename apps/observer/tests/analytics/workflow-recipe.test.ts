@@ -437,4 +437,80 @@ describe("workflow recipe recording", () => {
     expect(recipe.workflow.steps[0]!.observed).toEqual({ outcome: "succeeded" });
     expect(recipe.workflow.steps[1]!.observed).toEqual({ outcome: "failed" });
   });
+
+  it("turns an observed reference into a recorded binding", () => {
+    const events = [
+      {
+        type: "tool_call",
+        eventId: "evt_r1",
+        sessionId: "sess",
+        causalRef: { causalSequence: 1 },
+        toolName: "vendor_search",
+        callId: "call_1",
+        parameters: { query: "alpha" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_r2",
+        sessionId: "sess",
+        causalRef: { causalSequence: 2 },
+        callId: "call_1",
+        result: { hits: [{ id: "row-9" }] },
+        isError: false,
+      },
+      {
+        type: "tool_call",
+        eventId: "evt_r3",
+        sessionId: "sess",
+        causalRef: { causalSequence: 3 },
+        toolName: "vendor_store",
+        callId: "call_2",
+        parameters: { id: "row-9" },
+        // The calling program used the reference-aware interface: this is the connection the
+        // plain-JSON recording never carried.
+        metadata: {
+          references: { id: { reference: "ref:sess:call_1", path: ["hits", 0, "id"] } },
+        },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_r4",
+        sessionId: "sess",
+        causalRef: { causalSequence: 4 },
+        callId: "call_2",
+        result: { stored: true },
+        isError: false,
+      },
+    ];
+
+    const recipe = recordCallsFromEvents("wf_referenced", events)!;
+    const store = recipe.workflow.steps[1]!;
+    // The connection is recorded as the dependency it is, with the nested field it used.
+    expect(leaf(store.arguments[0]!.source)).toEqual({
+      type: "result",
+      stepId: "step0",
+      path: ["hits", 0, "id"],
+    });
+    expect(store.dependsOn).toEqual(["step0"]);
+    // The recorded outcome is what the result reported.
+    expect(recipe.workflow.steps[0]!.observed).toEqual({ outcome: "succeeded" });
+
+    // A reference to a call this recording never observed stays unestablished.
+    const withUnknown = events.map((event) =>
+      event.eventId === "evt_r3"
+        ? {
+            ...event,
+            metadata: {
+              references: {
+                id: { reference: "ref:sess:call_never_seen", path: ["hits", 0, "id"] },
+              },
+            },
+          }
+        : event,
+    );
+    const unresolvedRecipe = recordCallsFromEvents("wf_referenced_unknown", withUnknown)!;
+    expect(
+      JSON.stringify(leaf(unresolvedRecipe.workflow.steps[1]!.arguments[0]!.source)),
+    ).toContain("unresolved");
+  });
 });
