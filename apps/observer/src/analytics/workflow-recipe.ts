@@ -378,3 +378,85 @@ export function promoteVariationToInputs(
   };
   return { workflow: promoted, privateValues: base.privateValues, skipped: base.skipped };
 }
+
+/** A normalized event, as much of it as recording calls needs. */
+export interface RecordableEvent {
+  type: string;
+  eventId: string;
+  sessionId: string;
+  timestamp?: string;
+  causalRef?: { causalSequence?: number };
+  /** Tool calls carry the name and arguments; results carry the value and the call they answer. */
+  toolName?: string;
+  callId?: string;
+  toolCallId?: string;
+  parameters?: Record<string, WorkflowJsonValue>;
+  result?: WorkflowJsonValue;
+  content?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Pairs recorded calls with their results and records the workflow of a session.
+ *
+ * This is the capture entry point both the live tailer and the historical importer use: the calls
+ * come from the record itself, arguments are their recorded values, and a result is attached only
+ * when the record ties it to that call's identity. Nothing is inferred from equal values.
+ */
+export function recordCallsFromEvents(
+  workflowId: string,
+  events: readonly RecordableEvent[],
+  options: { runtimeFor?: (toolName: string) => string } = {},
+): RecordedRecipe | undefined {
+  const ordered = [...events].sort(
+    (left, right) =>
+      (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
+      (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER),
+  );
+  const resultsByCallId = new Map<string, WorkflowJsonValue>();
+  for (const event of ordered) {
+    if (event.type !== "tool_result") continue;
+    const callId = event.callId ?? event.toolCallId;
+    if (!callId) continue;
+    const value = event.result ?? extractResultValue(event.content);
+    if (value !== undefined) resultsByCallId.set(callId, value);
+  }
+
+  const observations: RecordedCallObservation[] = [];
+  for (const event of ordered) {
+    if (event.type !== "tool_call") continue;
+    const callId = event.callId ?? event.toolCallId ?? event.eventId;
+    const toolName = event.toolName ?? "unknown";
+    const result = resultsByCallId.get(callId);
+    const privateValues = (event.metadata?.maskedValues as string[] | undefined) ?? [];
+    observations.push({
+      callId,
+      ...(event.causalRef?.causalSequence === undefined
+        ? {}
+        : { causalSequence: event.causalRef.causalSequence }),
+      callable: { runtime: options.runtimeFor?.(toolName) ?? "tool", name: toolName },
+      arguments: event.parameters ?? {},
+      ...(result === undefined ? {} : { result }),
+      ...(privateValues.length > 0
+        ? { isPrivateValue: (value) => privateValues.includes(value) }
+        : {}),
+      observed: result === undefined ? "unknown" : "succeeded",
+    });
+  }
+  if (observations.length === 0) return undefined;
+  return recordWorkflowRecipe(workflowId, observations);
+}
+
+function extractResultValue(content: unknown): WorkflowJsonValue | undefined {
+  if (content === undefined) return undefined;
+  if (typeof content === "string" || typeof content === "number" || typeof content === "boolean") {
+    return content;
+  }
+  if (Array.isArray(content)) return content as WorkflowJsonValue;
+  if (typeof content === "object" && content !== null) {
+    const text = (content as { text?: unknown }).text;
+    if (typeof text === "string") return text;
+    return content as WorkflowJsonValue;
+  }
+  return undefined;
+}

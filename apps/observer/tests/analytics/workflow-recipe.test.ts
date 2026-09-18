@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type RecordedCallObservation,
   promoteVariationToInputs,
+  recordCallsFromEvents,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
 
@@ -305,6 +306,57 @@ describe("workflow recipe recording", () => {
     expect(leaf(stablePromoted.workflow.steps[0]!.arguments[2]!.source)).toEqual({
       type: "literal",
       value: "full",
+    });
+  });
+
+  it("records a workflow from captured events, pairing results by call identity", () => {
+    const events = [
+      {
+        type: "tool_call",
+        eventId: "evt_1",
+        sessionId: "sess",
+        causalRef: { causalSequence: 1 },
+        toolName: "vendor_search",
+        callId: "call_1",
+        parameters: { query: "alpha" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_2",
+        sessionId: "sess",
+        causalRef: { causalSequence: 2 },
+        callId: "call_1",
+        result: { hits: [{ id: "row-9" }] },
+      },
+      {
+        type: "tool_call",
+        eventId: "evt_3",
+        sessionId: "sess",
+        causalRef: { causalSequence: 3 },
+        toolName: "vendor_store",
+        callId: "call_2",
+        parameters: { id: "row-9" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_4",
+        sessionId: "sess",
+        causalRef: { causalSequence: 4 },
+        callId: "call_2",
+        result: { stored: true },
+      },
+    ];
+
+    const recipe = recordCallsFromEvents("wf_captured", events)!;
+    expect(recipe.workflow.steps.map((step) => step.callable.name)).toEqual([
+      "vendor_search",
+      "vendor_store",
+    ]);
+    // The result is attached to the call it answers, and the argument's origin stays unresolved:
+    // the record does not say where "row-9" came from.
+    expect(recipe.workflow.steps[1]!.observed).toEqual({ outcome: "succeeded" });
+    expect(leaf(recipe.workflow.steps[1]!.arguments[0]!.source)).toMatchObject({
+      type: "unresolved",
     });
   });
 });
