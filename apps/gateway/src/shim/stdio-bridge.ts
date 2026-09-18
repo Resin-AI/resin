@@ -140,6 +140,12 @@ export class McpStdioShim {
   private readonly stderr: NodeJS.WritableStream;
 
   private activeGateway?: LocalMcpGateway;
+  /**
+   * The cloud runtime this session composed, kept so the session can stop it: the validation worker
+   * it starts polls for as long as this host is alive, and a host that outlives its transport would
+   * keep asking the cloud for work nothing is left to answer with.
+   */
+  private activeCloudRuntime?: ProductionProxyRuntime;
   private activeSocket?: net.Socket;
   private isRunning = false;
   private surface?: ToolSearchSurface;
@@ -370,6 +376,11 @@ export class McpStdioShim {
       if (registry && cloudRuntime.router) {
         router = createRegistryGatewayRouter(registry, cloudRuntime.router);
       }
+      // The runtime starts with the host that owns it. Until this line the workspace could read the
+      // catalog but never answer the cloud's validation asks for its own recordings: the worker that
+      // does that is started by `start()` and nothing else.
+      await cloudRuntime.start();
+      this.activeCloudRuntime = cloudRuntime;
     } catch (error) {
       if (error instanceof LocalArtifactTrustConfigurationError) throw error;
       cloudRuntime = undefined;
@@ -427,6 +438,12 @@ export class McpStdioShim {
     if (this.activeGateway) {
       this.activeGateway.close();
       this.activeGateway = undefined;
+    }
+
+    if (this.activeCloudRuntime) {
+      const runtime = this.activeCloudRuntime;
+      this.activeCloudRuntime = undefined;
+      await runtime.stop();
     }
   }
 }
