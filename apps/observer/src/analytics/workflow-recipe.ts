@@ -14,11 +14,21 @@
 import type {
   AgentArgumentOrigin,
   RecordedWorkflow,
+  WorkflowArgumentProvenance,
+  WorkflowBindingCandidate,
   WorkflowJsonValue,
+  WorkflowRecordedProgram,
   WorkflowStep,
   WorkflowValuePath,
+  WorkflowValueSource,
   WorkflowValueTemplate,
 } from "@resin/contracts";
+import { RESIN_TOOL_LINK_EVIDENCE_KEY, readToolLinkEvidence } from "@resin/contracts";
+import {
+  type DerivationCall,
+  type ObservedResourceFlow,
+  deriveNativeCalls,
+} from "./native-argument-derivation.js";
 import { containsRedactionPlaceholder } from "./private-value-store.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
@@ -34,7 +44,15 @@ export interface RecordedCallObservation {
   callId: string;
   /** Position in the session, for ordering the calls. */
   causalSequence?: number;
-  callable: { runtime: string; name: string; connection?: string };
+  callable: {
+    runtime: string;
+    name: string;
+    connection?: string;
+    /** The schema discovery recorded for this callable, when the record carries one. */
+    inputSchema?: WorkflowJsonValue;
+    /** The recorded program this callable runs, when the call was a program execution. */
+    program?: WorkflowRecordedProgram;
+  };
   /** Values the call was made with, exactly as recorded. */
   arguments: Record<string, WorkflowJsonValue>;
   /**
@@ -42,8 +60,14 @@ export interface RecordedCallObservation {
    * unresolved.
    */
   argumentOrigins?: Record<string, RecordedArgumentOrigin>;
+  /** What the record says about each argument's origin, where it says anything. */
+  argumentProvenance?: Record<string, WorkflowArgumentProvenance>;
   /** Recorded types of the arguments, used for the workflow's input schema. */
   argumentTypes?: Record<string, "string" | "number" | "boolean" | "object" | "array">;
+  /** The declared data flow the capture recorded for this call, when it recorded one. */
+  flow?: ObservedResourceFlow;
+  /** Steps the record established this call must follow, from the calls' own declared resource use. */
+  establishedDependsOn?: readonly string[];
   result?: WorkflowJsonValue;
   /**
    * Whether this value is private, decided by the privacy layer. It may match a whole value or a
@@ -95,6 +119,7 @@ function jsonTypeOf(
 function recordWorkflowRecipeInternal(
   workflowId: string,
   observations: readonly RecordedCallObservation[],
+  candidates?: readonly WorkflowBindingCandidate[],
 ): RecordedRecipe | undefined {
   const ordered = [...observations].sort(
     (left, right) =>
@@ -216,24 +241,25 @@ function recordWorkflowRecipeInternal(
       sources[name] = templateFor(value, origin, observation.isPrivateValue);
     }
 
-    const dependsOn = [
-      ...new Set(
-        Object.values(sources)
-          .flatMap(function collect(template: WorkflowValueTemplate): string[] {
-            switch (template.type) {
-              case "result":
-                return [template.stepId];
-              case "object":
-                return Object.values(template.entries).flatMap(collect);
-              case "array":
-                return template.items.flatMap(collect);
-              default:
-                return [];
-            }
-          })
-          .filter((dependency) => steps.some((step) => step.id === dependency)),
-      ),
-    ];
+    const bound = Object.values(sources)
+      .flatMap(function collect(template: WorkflowValueTemplate): string[] {
+        switch (template.type) {
+          case "result":
+            return [template.stepId];
+          case "object":
+            return Object.values(template.entries).flatMap(collect);
+          case "array":
+            return template.items.flatMap(collect);
+          default:
+            return [];
+        }
+      })
+      .filter((dependency) => steps.some((step) => step.id === dependency));
+    // A dependency the recording established (the call that declared the write the producer's
+    // reader declared) is kept as firmly as one a binding implies: both are facts of the record.
+    const dependsOn = [...new Set([...bound, ...(observation.establishedDependsOn ?? [])])].filter(
+      (dependency) => steps.some((step) => step.id === dependency),
+    );
 
     steps.push({
       id: stepId,
@@ -242,11 +268,21 @@ function recordWorkflowRecipeInternal(
         runtime: observation.callable.runtime,
         name: observation.callable.name,
         ...(observation.callable.connection ? { connection: observation.callable.connection } : {}),
+        ...(observation.callable.inputSchema === undefined
+          ? {}
+          : { inputSchema: observation.callable.inputSchema }),
+        ...(observation.callable.program === undefined
+          ? {}
+          : { program: observation.callable.program }),
       },
-      arguments: Object.entries(sources).map(([name, template]) => ({
-        name,
-        source: { kind: "template" as const, template },
-      })),
+      arguments: Object.entries(sources).map(([name, template]) => {
+        const provenance = observation.argumentProvenance?.[name];
+        return {
+          name,
+          source: { kind: "template" as const, template },
+          ...(provenance === undefined ? {} : { provenance }),
+        };
+      }),
       dependsOn,
       failurePolicy:
         observation.recordedFailureControl === undefined
@@ -309,6 +345,9 @@ function recordWorkflowRecipeInternal(
     inputs: [...inputTypes.entries()].map(([name, type]) => ({ name, type })),
     steps,
     ...(privateValues.size > 0 ? { privateReferences: [...privateValues.keys()] } : {}),
+    // Candidates are reported, never executed: the steps above keep the values the record shows
+    // until a replay confirms a suggestion on inputs the recording never contained.
+    ...(candidates === undefined || candidates.length === 0 ? {} : { candidates: [...candidates] }),
   };
   return { workflow, privateValues, skipped };
 }
@@ -316,8 +355,9 @@ function recordWorkflowRecipeInternal(
 export function recordWorkflowRecipe(
   workflowId: string,
   observations: readonly RecordedCallObservation[],
+  candidates?: readonly WorkflowBindingCandidate[],
 ): RecordedRecipe | undefined {
-  return recordWorkflowRecipeInternal(workflowId, observations);
+  return recordWorkflowRecipeInternal(workflowId, observations, candidates);
 }
 
 /**
@@ -588,6 +628,8 @@ export function recordCallsFromEvents(
 
   const observations: RecordedCallObservation[] = [];
   const seenCallIds = new Set<string>();
+  /** Suggestions the capture made, related to the steps of this recording. */
+  const carrierCandidates: WorkflowBindingCandidate[] = [];
   for (const event of ordered) {
     if (event.type !== "tool_call") continue;
     const callId = event.callId ?? event.toolCallId ?? event.eventId;
@@ -597,6 +639,7 @@ export function recordCallsFromEvents(
     seenCallIds.add(scopedCallKey);
 
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    const declaredFlow = declaredResourceFlowOf(event);
     const recordedReferences =
       (event.metadata?.references as Record<string, RecordedReferenceUse> | undefined) ?? {};
     const recordedInputs =
@@ -675,10 +718,14 @@ export function recordCallsFromEvents(
                 event.metadata?.connection) as string,
             }
           : {}),
+        ...(carrier?.inputSchema === undefined ? {} : { inputSchema: carrier.inputSchema }),
+        ...(carrier?.program === undefined ? {} : { program: carrier.program }),
       },
       arguments: carrier !== undefined ? callArguments : (event.parameters ?? {}),
       ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
       ...(Object.keys(argumentTypes).length > 0 ? { argumentTypes } : {}),
+      ...(carrier?.provenance === undefined ? {} : { argumentProvenance: carrier.provenance }),
+      ...(declaredFlow === undefined ? {} : { flow: declaredFlow }),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(isPrivateValue ? { isPrivateValue } : {}),
       observed:
@@ -691,17 +738,137 @@ export function recordCallsFromEvents(
               : "unknown",
     });
     // The observation was just pushed, so this call's step is the last one.
-    stepIdByCallId.set(scopedCallKey, `step${observations.length - 1}`);
+    const ownStepId = `step${observations.length - 1}`;
+    stepIdByCallId.set(scopedCallKey, ownStepId);
+    if (carrier?.candidates !== undefined) {
+      for (const candidate of carrier.candidates) {
+        if (candidate.proposed.kind !== "result") {
+          carrierCandidates.push({
+            stepId: ownStepId,
+            argument: candidate.argument,
+            path: candidate.path,
+            proposed: candidate.proposed,
+            reason: candidate.reason,
+            ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
+            missing: candidate.missing,
+          });
+          continue;
+        }
+        // The suggestion names the call that produced the value; the recording numbers that call as
+        // a step, so the two are related here and only here.
+        const producingStepId = stepIdByCallId.get(
+          scopedKey(event.sessionId, candidate.proposed.callId),
+        );
+        if (producingStepId === undefined) continue;
+        carrierCandidates.push({
+          stepId: ownStepId,
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: { kind: "result", stepId: producingStepId, path: candidate.proposed.path },
+          reason: candidate.reason,
+          ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
+          missing: candidate.missing,
+        });
+      }
+    }
   }
   if (observations.length === 0) return undefined;
-  const recipe = recordWorkflowRecipe(workflowId, observations);
+
+  // What the calls themselves establish about their own arguments: the dependencies their declared
+  // resource use proves, and the bindings their values only suggest. A suggestion never becomes
+  // executable here — it is reported so a replay can confirm or refuse it.
+  const derivationCalls: DerivationCall[] = observations.map((observation, index) => ({
+    callId: observation.callId,
+    stepId: `step${index}`,
+    toolName: observation.callable.name,
+    runtime: observation.callable.runtime,
+    arguments: observation.arguments,
+    ...(observation.result === undefined ? {} : { result: observation.result }),
+    ...(observation.flow === undefined ? {} : { flow: observation.flow }),
+  }));
+  const derivation = deriveNativeCalls(derivationCalls);
+  const dependsOnByStep = new Map(derivation.calls.map((call) => [call.stepId, call.dependsOn]));
+  for (const [index, observation] of observations.entries()) {
+    const established = dependsOnByStep.get(`step${index}`);
+    if (established !== undefined && established.length > 0) {
+      observation.establishedDependsOn = established;
+    }
+  }
+
+  const recipe = recordWorkflowRecipe(workflowId, observations, derivation.candidates);
   if (!recipe) return undefined;
+  if (carrierCandidates.length > 0) {
+    // A suggestion the capture itself made, expressed against the calls it observed. It is carried
+    // through as a suggestion: the steps keep the values the record shows.
+    recipe.workflow.candidates = [...(recipe.workflow.candidates ?? []), ...carrierCandidates];
+  }
+  // Every local reference the plan can resolve must be declared, because a private reference is a
+  // name the executor checks against the plan rather than a capability the plan implies.
+  const declaredPrivateReferences = new Set(recipe.workflow.privateReferences ?? []);
+  for (const step of recipe.workflow.steps) {
+    for (const argument of step.arguments) {
+      collectPrivateReferences(argument.source, declaredPrivateReferences);
+    }
+  }
+  if (declaredPrivateReferences.size > 0) {
+    recipe.workflow.privateReferences = [...declaredPrivateReferences];
+  }
   const declared = new Map(recipe.workflow.inputs.map((input) => [input.name, input]));
   for (const [name, type] of recordedInputTypes) {
     declared.set(name, { name, type: type as RecordedWorkflow["inputs"][number]["type"] });
   }
   recipe.workflow.inputs = [...declared.values()];
   return recipe;
+}
+
+/** Collects every local reference a value source can resolve, so the plan can declare them. */
+function collectPrivateReferences(source: WorkflowValueSource, into: Set<string>): void {
+  switch (source.kind) {
+    case "private":
+      into.add(source.reference);
+      return;
+    case "template":
+      collectTemplateReferences(source.template, into);
+      return;
+    default:
+      return;
+  }
+}
+
+function collectTemplateReferences(template: WorkflowValueTemplate, into: Set<string>): void {
+  switch (template.type) {
+    case "private":
+      into.add(template.reference);
+      return;
+    case "object":
+      for (const entry of Object.values(template.entries)) collectTemplateReferences(entry, into);
+      return;
+    case "array":
+      for (const entry of template.items) collectTemplateReferences(entry, into);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * The declared resources a call read and wrote, as the capture recorded them.
+ *
+ * The carrier names resources by a per-scope ordinal and never by their value, so two calls share a
+ * resource exactly when the capture held the same value for both. The scope is part of the identity:
+ * two sessions number their resources independently, and an ordinal alone would make one session's
+ * file look like another's.
+ */
+function declaredResourceFlowOf(event: RecordableEvent): ObservedResourceFlow | undefined {
+  const evidence = readToolLinkEvidence(event.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY]);
+  if (evidence === undefined) return undefined;
+  if (evidence.reads.length === 0 && evidence.writes.length === 0) return undefined;
+  const identityOf = (ref: { kind: string; ref: string }): string =>
+    `${evidence.scopeId}|${ref.kind}:${ref.ref}`;
+  return {
+    reads: evidence.reads.map(identityOf),
+    writes: evidence.writes.map(identityOf),
+  };
 }
 
 function extractResultValue(content: unknown): WorkflowJsonValue | undefined {

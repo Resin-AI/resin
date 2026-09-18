@@ -22,7 +22,17 @@ import {
   ProtocolError,
   ValidationError,
 } from "@resin/protocol";
-import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
+import {
+  ArtifactCache,
+  type McpServerDescriptor,
+  type McpToolConnection,
+  type RuntimeTrustStore,
+  connectMcpServer,
+  createProcessAdapter,
+  createProgramAdapter,
+  createToolProtocolAdapter,
+} from "@resin/runtime";
+import { composedResultValue } from "../meta/invoke-tool.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -69,6 +79,12 @@ export interface ProductionProxyRuntimeOptions {
   revocationProvider?: () => Promise<V1RevocationMetadata | null> | V1RevocationMetadata | null;
   allowDevKeys?: boolean;
   executor?: LocalArtifactExecutor;
+  /**
+   * Protocol connections the host can dial by the name a recording carries, for a step whose
+   * callable was reached over a protocol rather than through this host's own routing. A name the
+   * host cannot resolve is refused by the step, never answered from a remembered value.
+   */
+  recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
@@ -92,6 +108,38 @@ export interface ProductionProxyRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
   sync(options?: { force?: boolean }): Promise<CatalogSnapshotResponse | null>;
+}
+
+/**
+ * A resolver of protocol connections, dialed on first use and reused afterwards.
+ *
+ * A step that runs mid-workflow must not pay a fresh handshake, so an opened connection is kept for
+ * the life of the process. A connection that fails to open is NOT cached: the failure is the step's
+ * failure, and a later attempt may still succeed once the server is back.
+ */
+function memoizedConnections(
+  resolve: (name: string) => McpServerDescriptor | undefined,
+): (name: string) => Promise<McpToolConnection | undefined> {
+  const live = new Map<string, McpToolConnection>();
+  const opening = new Map<string, Promise<McpToolConnection | undefined>>();
+  return async (name: string): Promise<McpToolConnection | undefined> => {
+    const existing = live.get(name);
+    if (existing !== undefined) return existing;
+    const inFlight = opening.get(name);
+    if (inFlight !== undefined) return await inFlight;
+    const descriptor = resolve(name);
+    if (descriptor === undefined) return undefined;
+    const attempt = connectMcpServer(descriptor)
+      .then((connection) => {
+        live.set(name, connection);
+        return connection;
+      })
+      .finally(() => {
+        opening.delete(name);
+      });
+    opening.set(name, attempt);
+    return await attempt;
+  };
 }
 
 /**
@@ -189,8 +237,44 @@ export async function createProductionProxyRuntime(
         requireSignature: localKeyStore ? true : undefined,
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
-        // Recorded-workflow plans dispatch their steps through the same router the
-        // original calls used, so scope, pins, and permissions apply identically.
+        // A plan recorded from ordinary tools runs through the families this host can really
+        // reach: a recorded program on the host, and a tool by name either over the connection the
+        // recording names or through the same router the original call used, so scope, pins and
+        // permissions apply identically.
+        recordedWorkflowAdapters: (host) => {
+          const workspaceRoot =
+            host.workspace.projectRoot ??
+            host.workspace.canonicalRoot ??
+            host.workspace.roots?.[0]?.path;
+          const bounds = {
+            ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+            ...(host.timeoutMs === undefined ? {} : { timeoutMs: host.timeoutMs }),
+          };
+          return [
+            createProcessAdapter(bounds),
+            createProgramAdapter(bounds),
+            createToolProtocolAdapter({
+              ...(options.recordedWorkflowConnections
+                ? {
+                    openConnection: memoizedConnections(options.recordedWorkflowConnections),
+                  }
+                : {}),
+              dispatch: async (request) => {
+                const result = await host.routeToHost({
+                  name: request.name,
+                  ...(request.connection ? { connection: request.connection } : {}),
+                  parameters: request.arguments as Record<string, unknown>,
+                });
+                if (result.isError) {
+                  const text =
+                    result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+                  throw new Error(text ?? `callable '${request.name}' answered with an error`);
+                }
+                return composedResultValue(result);
+              },
+            }),
+          ];
+        },
         stepInvoker: async (request) => {
           const router = routerBox.current;
           if (!router) {

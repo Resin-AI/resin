@@ -51,6 +51,27 @@ export type WorkflowValueSource =
   /** A recursively constructed value whose leaves carry their own sources. */
   | { kind: "template"; template: WorkflowValueTemplate };
 
+/**
+ * A program the recording actually executed, preserved verbatim.
+ *
+ * The program is the executable artifact: it is never split, re-parsed, re-quoted or reduced to a
+ * list of commands, because a shell's `&&`, pipelines, redirections and exit status are part of what
+ * the call did. Reuse means running this text again through the same family of runtime, not
+ * reconstructing an equivalent one.
+ */
+export type WorkflowRecordedProgram = {
+  /** How the program runs: the family of shell or interpreter the record establishes. */
+  kind: "shell" | "python" | "javascript" | "typescript";
+  /** The complete program text exactly as recorded. Empty when the record carries only an argv. */
+  source: string;
+  /** The exact argument vector, when the record has one and it is not a shell wrapper. */
+  argv?: string[];
+  /** The argument the program arrived in, when it came as a tool argument rather than an event. */
+  argument?: string;
+  /** Working directory the program ran in, when the record identifies one. */
+  cwd?: string;
+};
+
 /** How a step is called again: the original callable and the connection it was reached through. */
 export type WorkflowCallable = {
   /** Protocol/runtime family the callable speaks, e.g. a tool protocol or a program runner. */
@@ -66,12 +87,70 @@ export type WorkflowCallable = {
   inputSchema?: WorkflowJsonValue;
   /** The output contract observed for this call, when the record carries one. */
   outputSchema?: WorkflowJsonValue;
+  /** The recorded program this callable runs, when the call was a program execution. */
+  program?: WorkflowRecordedProgram;
+};
+
+/**
+ * Where one argument's origin came from, and how firmly the record establishes it.
+ *
+ * `recorded` is a fact the caller stated; `derived` is a conclusion local analysis reached from the
+ * record and can point at; `candidate` is a suggestion the record only *suggests* (for instance a
+ * value that merely equals an earlier result) and that may never execute as recorded. Keeping the
+ * three apart is what stops a coincidence from becoming a dependency.
+ */
+export type WorkflowArgumentProvenance = {
+  standing: "recorded" | "derived" | "candidate";
+  /** Finite rule vocabulary — never free text, so a consumer can act on it without parsing prose. */
+  rule:
+    | "caller-stated"
+    | "declared-resource"
+    | "variation-across-executions"
+    | "replay-confirmed"
+    | "equal-to-earlier-result"
+    | "invariant-across-executions"
+    | "single-observation";
+  /** Structural, privacy-safe evidence for the rule. Never a value the recording may not carry. */
+  evidence?: WorkflowJsonValue;
+  /** For a candidate: the exact fact the record does not establish. */
+  missing?: string;
 };
 
 export type WorkflowArgument = {
   /** Argument name as the callable's schema names it. */
   name: string;
   source: WorkflowValueSource;
+  /** What the record says about this origin. Absent means the recording predates the vocabulary. */
+  provenance?: WorkflowArgumentProvenance;
+};
+
+/**
+ * A binding the capture proposes but has not established.
+ *
+ * A candidate is deliberately NOT executable: the plan keeps the recorded value until a caller
+ * validates the proposed behaviour on different inputs in a disposable environment. Every candidate
+ * names the fact the record is missing, so a refusal is reportable instead of silent.
+ */
+export type WorkflowBindingCandidate = {
+  stepId: string;
+  argument: string;
+  /** Where inside the argument the value sits; empty for the whole argument. */
+  path: WorkflowValuePath;
+  proposed:
+    | { kind: "result"; stepId: string; path: WorkflowValuePath }
+    | {
+        kind: "input";
+        name: string;
+        type: "string" | "number" | "boolean" | "object" | "array";
+      };
+  reason:
+    | "equal-to-earlier-result"
+    | "tracks-earlier-result-across-executions"
+    | "varies-across-executions"
+    | "declared-by-the-callable";
+  /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
+  evidence?: WorkflowJsonValue;
+  missing: string;
 };
 
 export type WorkflowStepFailureBehavior = "abort" | "continue";
@@ -122,6 +201,12 @@ export type RecordedWorkflow = {
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
   privateReferences?: string[];
+  /**
+   * Bindings the capture proposes but has not established. They are diagnostic, never executable:
+   * the steps above keep the recorded values until a validator confirms a candidate on different
+   * inputs in a disposable environment.
+   */
+  candidates?: WorkflowBindingCandidate[];
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -377,6 +462,98 @@ export function validateRecordedWorkflow(value: unknown): {
         } else if (!declaredPrivates.has(source.reference)) {
           errors.push(
             `step ${step.id} argument ${argument.name} reads undeclared private reference '${source.reference}'`,
+          );
+        }
+      }
+      const provenance = argument.provenance;
+      if (provenance !== undefined) {
+        if (
+          !isPlainObject(provenance) ||
+          (provenance.standing !== "recorded" &&
+            provenance.standing !== "derived" &&
+            provenance.standing !== "candidate") ||
+          typeof provenance.rule !== "string"
+        ) {
+          errors.push(`step ${step.id} argument ${argument.name} has an invalid provenance`);
+        } else if (provenance.standing === "candidate" && typeof provenance.missing !== "string") {
+          // A candidate that does not name what the record is missing is not reportable.
+          errors.push(
+            `step ${step.id} argument ${argument.name} is a candidate without the missing fact`,
+          );
+        }
+      }
+    }
+    const callable = step.callable;
+    const program = isPlainObject(callable) ? callable.program : undefined;
+    if (program !== undefined) {
+      if (
+        !isPlainObject(program) ||
+        (program.kind !== "shell" &&
+          program.kind !== "python" &&
+          program.kind !== "javascript" &&
+          program.kind !== "typescript") ||
+        typeof program.source !== "string"
+      ) {
+        errors.push(`step ${step.id} has an invalid recorded program`);
+      } else if (
+        program.source.length === 0 &&
+        (!Array.isArray(program.argv) || program.argv.length === 0) &&
+        typeof program.argument !== "string"
+      ) {
+        errors.push(
+          `step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`,
+        );
+      }
+    }
+  }
+  // A candidate addresses a real argument of a real step, and never executes.
+  const candidates = value.candidates;
+  if (candidates !== undefined) {
+    if (!Array.isArray(candidates)) {
+      errors.push("candidates must be an array when present");
+    } else {
+      for (const candidate of candidates) {
+        if (!isPlainObject(candidate) || typeof candidate.argument !== "string") {
+          errors.push("every candidate needs a step and an argument");
+          continue;
+        }
+        const stepId = typeof candidate.stepId === "string" ? candidate.stepId : "";
+        if (!order.has(stepId)) {
+          errors.push(`candidate names unknown step ${stepId}`);
+          continue;
+        }
+        const step = (steps ?? []).find((entry) => isPlainObject(entry) && entry.id === stepId);
+        const args = isPlainObject(step) && Array.isArray(step.arguments) ? step.arguments : [];
+        if (!args.some((entry) => isPlainObject(entry) && entry.name === candidate.argument)) {
+          errors.push(`candidate ${stepId}.${candidate.argument} names no such argument`);
+        }
+        const proposed = candidate.proposed;
+        if (!isPlainObject(proposed) || typeof proposed.kind !== "string") {
+          errors.push(`candidate ${stepId}.${candidate.argument} needs a proposal`);
+        } else if (proposed.kind === "result") {
+          const stepRef = String(proposed.stepId);
+          if (!order.has(stepRef)) {
+            errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
+          }
+        } else if (proposed.kind === "input") {
+          if (typeof proposed.name !== "string" || proposed.name.length === 0) {
+            errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
+          }
+          if (
+            proposed.type !== "string" &&
+            proposed.type !== "number" &&
+            proposed.type !== "boolean" &&
+            proposed.type !== "object" &&
+            proposed.type !== "array"
+          ) {
+            errors.push(`candidate ${stepId}.${candidate.argument} needs an input type`);
+          }
+        } else {
+          errors.push(`candidate ${stepId}.${candidate.argument} has an unknown proposal kind`);
+        }
+        if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
+          errors.push(
+            `candidate ${stepId}.${candidate.argument} must name the fact the record is missing`,
           );
         }
       }

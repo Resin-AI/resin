@@ -35,6 +35,9 @@ import {
   type CompiledWorkflowArtifact,
   DEFAULT_BUNDLE_LIMITS,
   type KeyStore,
+  RESIN_PROCESS_RUNTIME,
+  RESIN_PROGRAM_RUNTIME,
+  type RuntimeAdapter,
   RuntimeAdapterRegistry,
   ToolBundleLoader,
   WorkerProcess,
@@ -75,6 +78,24 @@ export interface LocalArtifactExecuteParams {
   onProgress?: (progress: number, total?: number) => void;
 }
 
+/**
+ * What a host needs to build the runtime families it can execute, for one invocation.
+ *
+ * `routeToHost` is the invocation's own routing, so a step the host reaches the same way it reached
+ * the original call keeps the workspace, the deadline and the cancellation that apply now.
+ */
+export interface RecordedWorkflowHostContext {
+  manifest: ToolManifest;
+  workspace: WorkspaceContext;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  routeToHost: (request: {
+    name: string;
+    connection?: string;
+    parameters: Record<string, unknown>;
+  }) => Promise<CallToolResult>;
+}
+
 export interface LocalArtifactExecutorOptions {
   cache: ArtifactCache;
   loader?: ToolBundleLoader | (() => ToolBundleLoader);
@@ -100,6 +121,16 @@ export interface LocalArtifactExecutorOptions {
     signal?: AbortSignal;
     timeoutMs?: number;
   }) => Promise<CallToolResult>;
+  /**
+   * Runtime families this host can execute a recorded plan through, besides the call routing every
+   * host has. A plan naming a family no host provides fails with that reason instead of a
+   * substitute behaviour, so a recording of ordinary tools runs only where the host can really
+   * reach them.
+   *
+   * The hosts are built per invocation because a step that goes back through this host's routing
+   * needs the invoking workspace, its deadline and its cancellation.
+   */
+  recordedWorkflowAdapters?: (host: RecordedWorkflowHostContext) => readonly RuntimeAdapter[];
   /** Store private workflow references resolve against; defaults to the daemon store. */
   privateValueStore?: PrivateValueStore;
 }
@@ -289,6 +320,7 @@ export class LocalArtifactExecutor {
   private readonly resinHome?: string;
   private readonly requireSignature?: boolean;
   private readonly stepInvoker?: LocalArtifactExecutorOptions["stepInvoker"];
+  private readonly recordedWorkflowAdapters?: LocalArtifactExecutorOptions["recordedWorkflowAdapters"];
   private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private managedToolAccess?: ManagedToolAccess;
 
@@ -305,6 +337,7 @@ export class LocalArtifactExecutor {
     this.resinHome = options.resinHome;
     this.requireSignature = options.requireSignature;
     this.stepInvoker = options.stepInvoker;
+    this.recordedWorkflowAdapters = options.recordedWorkflowAdapters;
     this.privateValueStore = options.privateValueStore;
   }
 
@@ -746,6 +779,7 @@ export class LocalArtifactExecutor {
         entrypointPath,
         parameters,
         context,
+        manifest,
         params.signal,
         params.timeoutMs,
       );
@@ -972,6 +1006,7 @@ export class LocalArtifactExecutor {
     entrypointPath: string,
     parameters: JsonRpcParams,
     context: WorkspaceContext,
+    manifest: ToolManifest,
     signal?: AbortSignal,
     timeoutMs?: number,
   ): Promise<CallToolResult> {
@@ -979,11 +1014,7 @@ export class LocalArtifactExecutor {
       isError: true,
       content: [{ type: "text", text }],
     });
-    if (!this.stepInvoker) {
-      return fail(
-        "This recorded-workflow tool needs a step dispatcher, which this executor was not given",
-      );
-    }
+    const stepInvoker = this.stepInvoker;
     let plan: RecordedWorkflow;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(entrypointPath, "utf8"));
@@ -1000,28 +1031,81 @@ export class LocalArtifactExecutor {
       );
     }
 
+    // A plan that routes a step back through this host needs the dispatcher; a plan that only runs
+    // programs of its own does not, so the refusal is per requirement rather than per plan.
+    const requiredRuntimes = [...new Set(plan.steps.map((step) => step.callable.runtime))];
+    if (!stepInvoker && requiredRuntimes.includes(RESIN_INVOKE_TOOL_RUNTIME)) {
+      return fail(
+        "This recorded-workflow tool needs a step dispatcher, which this executor was not given",
+      );
+    }
+
     const adapters = new RuntimeAdapterRegistry();
-    const stepInvoker = this.stepInvoker;
-    adapters.register({
-      runtime: RESIN_INVOKE_TOOL_RUNTIME,
-      call: async (request) => {
-        const result = await stepInvoker({
-          name: request.step.callable.name,
-          ...(request.step.callable.connection
-            ? { connection: request.step.callable.connection }
-            : {}),
-          parameters: request.arguments as Record<string, unknown>,
-          context,
-          ...(signal ? { signal } : {}),
-          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-        });
-        if (result.isError) {
-          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
-          throw new Error(text ?? `step '${request.step.id}' failed`);
-        }
-        return composedResultValue(result);
-      },
-    });
+    if (this.recordedWorkflowAdapters) {
+      const host: RecordedWorkflowHostContext = {
+        manifest,
+        workspace: context,
+        ...(signal ? { signal } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        routeToHost: async (request) => {
+          if (!stepInvoker) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "Step dispatcher is not ready" }],
+            };
+          }
+          return await stepInvoker({
+            name: request.name,
+            ...(request.connection ? { connection: request.connection } : {}),
+            parameters: request.parameters,
+            context,
+            ...(signal ? { signal } : {}),
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          });
+        },
+      };
+      for (const adapter of this.recordedWorkflowAdapters(host)) {
+        if (adapters.has(adapter.runtime)) continue;
+        adapters.register(adapter);
+      }
+    }
+    // Running a recorded program is a command execution, so it needs the grant a command needs. A
+    // plan the manifest does not authorize is refused here rather than run on the host's account.
+    const programRuntimes = requiredRuntimes.filter(
+      (runtime) => runtime === RESIN_PROCESS_RUNTIME || runtime === RESIN_PROGRAM_RUNTIME,
+    );
+    if (programRuntimes.length > 0) {
+      const capabilities = CapabilityManifestSchema.safeParse(manifest.capabilities ?? {});
+      const granted = capabilities.success
+        ? capabilities.data.command?.allowShellExecution === true
+        : false;
+      if (!granted) {
+        return fail(
+          `this recorded workflow runs a program (${programRuntimes.join(", ")}) but its manifest does not grant command execution`,
+        );
+      }
+    }
+    if (stepInvoker && !adapters.has(RESIN_INVOKE_TOOL_RUNTIME))
+      adapters.register({
+        runtime: RESIN_INVOKE_TOOL_RUNTIME,
+        call: async (request) => {
+          const result = await stepInvoker({
+            name: request.step.callable.name,
+            ...(request.step.callable.connection
+              ? { connection: request.step.callable.connection }
+              : {}),
+            parameters: request.arguments as Record<string, unknown>,
+            context,
+            ...(signal ? { signal } : {}),
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          });
+          if (result.isError) {
+            const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+            throw new Error(text ?? `step '${request.step.id}' failed`);
+          }
+          return composedResultValue(result);
+        },
+      });
 
     const store = this.privateValueStore ?? FilePrivateValueStore.default();
     const artifact: CompiledWorkflowArtifact = {
@@ -1030,7 +1114,7 @@ export class LocalArtifactExecutor {
       name: plan.workflowId,
       inputSchema: {},
       outputContract: { fromStep: plan.steps[plan.steps.length - 1]?.id ?? "", callable: "" },
-      requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
+      requiredRuntimes,
       requiredPrivateReferences: [...(plan.privateReferences ?? [])],
       permissions: [],
     };

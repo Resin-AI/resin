@@ -1,0 +1,404 @@
+/**
+ * Validating a proposed binding by replay, not by similarity.
+ *
+ * The capture proposes candidates it cannot establish: a value that equals an earlier result, or one
+ * that moved with it across executions. Similarity is never proof — an incidental equality would
+ * become a dependency, and a dependency that was not there would break the next execution. So every
+ * candidate is decided by running it: the recorded plan with the candidate bound is executed in a
+ * disposable environment on different inputs, and the recorded plan as it stands is executed too,
+ * and a candidate is only promoted when its binding reproduces the held-out observation *and* the
+ * recorded value does not. When both reproduce it, or neither does, the fact the record is missing
+ * is reported instead of a promotion.
+ */
+
+import { mkdir } from "node:fs/promises";
+import type {
+  RecordedWorkflow,
+  WorkflowArgument,
+  WorkflowBindingCandidate,
+  WorkflowJsonValue,
+  WorkflowValuePath,
+  WorkflowValueSource,
+  WorkflowValueTemplate,
+} from "@resin/contracts";
+import {
+  type RecordedStepOutcome,
+  type RecordedWorkflowExecution,
+  type RecordedWorkflowExecutionOptions,
+  type RuntimeAdapterRegistry,
+  executeRecordedWorkflow,
+} from "./recorded-workflow.js";
+
+export interface CandidateValidationEnvironment {
+  adapters: RuntimeAdapterRegistry;
+  /** A disposable directory the workflow may write to; it is never the user's project. */
+  workspaceDir: string;
+  /** Inputs for this replay. */
+  inputs: Record<string, WorkflowJsonValue>;
+  /** What the held-out demonstration observed: stepId -> the value it produced. */
+  observed: Record<string, WorkflowJsonValue>;
+  /**
+   * Resolves the plan's local references for the replay.
+   *
+   * The values a recording kept on its own machine are what the plan's steps actually pass, so a
+   * replay that cannot resolve them fails for a reason that has nothing to do with the candidate
+   * under test. Only the holder of those values can run this, which is why validation is a seam
+   * rather than something decided where the recording is stored.
+   */
+  resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+  timeoutMs?: number;
+}
+
+export interface CandidateValidationOutcome {
+  candidate: WorkflowBindingCandidate;
+  accepted: boolean;
+  /** Why it was accepted or refused; always names the evidence. */
+  reason: string;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Structural equality over JSON values: how a replayed result is compared with an observation. */
+function deepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    return (
+      left.length === right.length && left.every((item, index) => deepEqual(item, right[index]))
+    );
+  }
+  if (isPlainObject(left) && isPlainObject(right)) {
+    const keys = Object.keys(left);
+    return (
+      keys.length === Object.keys(right).length &&
+      keys.every((key) => Object.hasOwn(right, key) && deepEqual(left[key], right[key]))
+    );
+  }
+  return false;
+}
+
+/** What a message calls a path: `["token", 0]` rather than a JSON dump. */
+function pathText(path: WorkflowValuePath): string {
+  const parts = path.map((part) =>
+    typeof part === "number" ? String(part) : JSON.stringify(part),
+  );
+  return `[${parts.join(", ")}]`;
+}
+
+/** A leaf template is one that carries a value; `object` and `array` carry structure instead. */
+function isLeafTemplate(template: WorkflowValueTemplate): boolean {
+  return template.type !== "object" && template.type !== "array";
+}
+
+function proposedTemplate(candidate: WorkflowBindingCandidate): WorkflowValueTemplate {
+  return candidate.proposed.kind === "result"
+    ? { type: "result", stepId: candidate.proposed.stepId, path: [...candidate.proposed.path] }
+    : { type: "input", name: candidate.proposed.name };
+}
+
+function proposedSource(candidate: WorkflowBindingCandidate): WorkflowValueSource {
+  return candidate.proposed.kind === "result"
+    ? { kind: "result", stepId: candidate.proposed.stepId, path: [...candidate.proposed.path] }
+    : { kind: "input", name: candidate.proposed.name };
+}
+
+/**
+ * Binds the candidate into one argument of a plan copy. The path must address a template leaf: a
+ * candidate that addresses a whole structure, or a path the record does not have, cannot be
+ * replayed as a leaf binding and is refused instead of approximated.
+ */
+function bindCandidateLeaf(
+  argument: WorkflowArgument,
+  candidate: WorkflowBindingCandidate,
+): boolean {
+  const path = candidate.path;
+  if (path.length === 0) {
+    if (argument.source.kind === "template" && !isLeafTemplate(argument.source.template)) {
+      return false;
+    }
+    argument.source = proposedSource(candidate);
+    return true;
+  }
+  if (argument.source.kind !== "template") return false;
+  const replacement = proposedTemplate(candidate);
+  let node: WorkflowValueTemplate = argument.source.template;
+  for (let index = 0; index < path.length; index += 1) {
+    const part = path[index];
+    const last = index === path.length - 1;
+    if (typeof part === "number") {
+      if (node.type !== "array" || part < 0 || part >= node.items.length) return false;
+      const item = node.items[part];
+      if (last) {
+        if (!isLeafTemplate(item)) return false;
+        node.items[part] = replacement;
+        return true;
+      }
+      node = item;
+      continue;
+    }
+    if (node.type !== "object" || !Object.hasOwn(node.entries, part)) return false;
+    const entry = node.entries[part];
+    if (last) {
+      if (!isLeafTemplate(entry)) return false;
+      node.entries[part] = replacement;
+      return true;
+    }
+    node = entry;
+  }
+  return false;
+}
+
+type CandidatePlans =
+  | { kind: "plans"; bound: RecordedWorkflow; literal: RecordedWorkflow }
+  | { kind: "refused"; reason: string };
+
+/**
+ * Binds every candidate the environment can actually support, reporting the ones it cannot.
+ *
+ * An input candidate is only bindable when the replay supplies a value for it: binding it to an
+ * input nobody provides would fail the run for a reason that has nothing to do with whether the
+ * binding is real, and would take every other candidate down with it. Such a candidate is therefore
+ * left out of the shared plan and refused on its own.
+ */
+function bindEveryCandidate(
+  plan: RecordedWorkflow,
+  candidates: readonly WorkflowBindingCandidate[],
+  environment: CandidateValidationEnvironment,
+): { plan: RecordedWorkflow; unaddressable: Map<WorkflowBindingCandidate, string> } {
+  const bound = structuredClone(plan);
+  const unaddressable = new Map<WorkflowBindingCandidate, string>();
+  for (const candidate of candidates) {
+    const evidence = `${candidate.stepId}.${candidate.argument}${pathText(candidate.path)}`;
+    const proposal = candidate.proposed;
+    if (proposal.kind === "input" && !Object.hasOwn(environment.inputs, proposal.name)) {
+      unaddressable.set(
+        candidate,
+        `the replay supplied no value for input '${proposal.name}', so it cannot decide whether a caller supplies it`,
+      );
+      continue;
+    }
+    const step = bound.steps.find((entry) => entry.id === candidate.stepId);
+    if (step === undefined) {
+      unaddressable.set(candidate, `the recorded plan has no step '${candidate.stepId}'`);
+      continue;
+    }
+    const argument = step.arguments.find((entry) => entry.name === candidate.argument);
+    if (argument === undefined) {
+      unaddressable.set(
+        candidate,
+        `step '${candidate.stepId}' has no argument '${candidate.argument}' to bind`,
+      );
+      continue;
+    }
+    if (!bindCandidateLeaf(argument, candidate)) {
+      unaddressable.set(
+        candidate,
+        `${evidence} does not address a template leaf in the recorded plan, so the candidate cannot be replayed as a leaf binding`,
+      );
+      continue;
+    }
+    if (proposal.kind === "input") {
+      const declared = bound.inputs.some((input) => input.name === proposal.name);
+      if (!declared) bound.inputs.push({ name: proposal.name, type: proposal.type });
+    }
+  }
+  return { plan: bound, unaddressable };
+}
+
+/**
+ * Builds the two plans a candidate is decided with: every usable proposal bound, and every usable
+ * proposal bound except this one. The two runs therefore differ only in what this candidate asserts.
+ *
+ * A candidate cannot be decided in isolation. The observations a replay is checked against were
+ * produced by the whole work, so a plan that binds only the candidate under test still carries the
+ * recorded values everywhere else — and every one of them makes the later steps disagree with the
+ * held-out run. Holding every proposal at its best hypothesis and varying exactly one at a time is
+ * what makes the comparison mean what it says.
+ */
+function buildCandidatePlans(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+  candidates: readonly WorkflowBindingCandidate[],
+  environment: CandidateValidationEnvironment,
+): CandidatePlans {
+  const all = bindEveryCandidate(plan, candidates, environment);
+  const unusable = all.unaddressable.get(candidate);
+  if (unusable !== undefined) return { kind: "refused", reason: unusable };
+  const without = bindEveryCandidate(
+    plan,
+    candidates.filter((entry) => entry !== candidate),
+    environment,
+  );
+  return { kind: "plans", bound: all.plan, literal: without.plan };
+}
+
+/**
+ * Bounds one replay. `executeRecordedWorkflow` exposes no cancellation, so a run that outlives the
+ * bound keeps going in the background while the candidate is refused for being unproven.
+ */
+async function withDeadline(
+  execution: Promise<RecordedWorkflowExecution>,
+  timeoutMs: number | undefined,
+): Promise<RecordedWorkflowExecution | undefined> {
+  if (timeoutMs === undefined) return await execution;
+  let timer: NodeJS.Timeout | undefined;
+  const expiry = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  try {
+    return await Promise.race([execution, expiry]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+interface StepReplay {
+  /** Whether the step produced the value the held-out demonstration observed. */
+  reproduced: boolean;
+  /** What the replay showed — a mismatch, a failed step, a skipped step. Never the value itself. */
+  detail: string;
+}
+
+function describeOutcome(
+  execution: RecordedWorkflowExecution,
+  outcome: RecordedStepOutcome,
+): string {
+  switch (outcome.status) {
+    case "completed":
+      return `step '${outcome.stepId}' produced a result the demonstration did not observe`;
+    case "failed":
+      return `step '${outcome.stepId}' failed: ${outcome.error}`;
+    case "skipped": {
+      // A step that was skipped is only as informative as the failure that stopped it.
+      const failed = execution.steps.find((entry) => entry.status === "failed");
+      return failed && failed.status === "failed"
+        ? `step '${outcome.stepId}' was skipped (${outcome.reason}); step '${failed.stepId}' failed: ${failed.error}`
+        : `step '${outcome.stepId}' was skipped: ${outcome.reason}`;
+    }
+    default: {
+      const exhaustive: never = outcome;
+      return `step outcome ${JSON.stringify(exhaustive)}`;
+    }
+  }
+}
+
+async function replayStep(
+  plan: RecordedWorkflow,
+  stepId: string,
+  observed: WorkflowJsonValue,
+  environment: CandidateValidationEnvironment,
+): Promise<StepReplay> {
+  const options: RecordedWorkflowExecutionOptions = {
+    inputs: environment.inputs,
+    adapters: environment.adapters,
+    ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
+  };
+  const execution = await withDeadline(
+    executeRecordedWorkflow(plan, options),
+    environment.timeoutMs,
+  );
+  if (!execution) {
+    return {
+      reproduced: false,
+      detail: `the replay exceeded its ${environment.timeoutMs}ms bound`,
+    };
+  }
+  const outcome = execution.steps.find((entry) => entry.stepId === stepId);
+  if (!outcome) return { reproduced: false, detail: `step '${stepId}' never ran` };
+  if (outcome.status !== "completed") {
+    return { reproduced: false, detail: describeOutcome(execution, outcome) };
+  }
+  const reproduced = deepEqual(outcome.result, observed);
+  return {
+    reproduced,
+    detail: reproduced
+      ? `step '${stepId}' reproduced the observed result`
+      : describeOutcome(execution, outcome),
+  };
+}
+
+function refused(candidate: WorkflowBindingCandidate, reason: string): CandidateValidationOutcome {
+  return { candidate, accepted: false, reason };
+}
+
+async function evaluateCandidate(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+  candidates: readonly WorkflowBindingCandidate[],
+  environment: CandidateValidationEnvironment,
+): Promise<CandidateValidationOutcome> {
+  const evidence = `${candidate.stepId}.${candidate.argument}${pathText(candidate.path)}`;
+  try {
+    if (!Object.hasOwn(environment.observed, candidate.stepId)) {
+      return refused(
+        candidate,
+        `the held-out demonstration observed no result for step '${candidate.stepId}', so the candidate cannot be checked against it`,
+      );
+    }
+    const observed: WorkflowJsonValue | undefined = environment.observed[candidate.stepId];
+    if (observed === undefined) {
+      return refused(
+        candidate,
+        `the held-out demonstration recorded no usable value for step '${candidate.stepId}'`,
+      );
+    }
+    const plans = buildCandidatePlans(plan, candidate, candidates, environment);
+    if (plans.kind === "refused") return refused(candidate, plans.reason);
+    // Two runs. The adapters must be stateless, or the caller must hand in a registry whose
+    // adapters hold no per-run state: a registry that remembered the first run would decide the
+    // second one for it.
+    const bound = await replayStep(plans.bound, candidate.stepId, observed, environment);
+    const literal = await replayStep(plans.literal, candidate.stepId, observed, environment);
+    if (bound.reproduced && !literal.reproduced) {
+      return {
+        candidate,
+        accepted: true,
+        reason: `the bound plan reproduced the held-out result for ${evidence} and the recorded value did not (${literal.detail})`,
+      };
+    }
+    if (bound.reproduced) {
+      return refused(
+        candidate,
+        `the bound plan and the plan with this candidate reverted both reproduced the held-out result for ${evidence}, so the observation does not establish the dependency it proposes (missing: ${candidate.missing})`,
+      );
+    }
+    if (literal.reproduced) {
+      return refused(
+        candidate,
+        `the plan with this candidate reverted already reproduces the held-out result for ${evidence} and the bound plan does not (${bound.detail})`,
+      );
+    }
+    return refused(
+      candidate,
+      `neither the bound plan nor the plan with this candidate reverted reproduced the held-out result for ${evidence}: ${bound.detail}; ${literal.detail}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return refused(candidate, `the replay could not be completed: ${message}`);
+  }
+}
+
+/**
+ * Decides each candidate by replay. Every candidate is evaluated independently and a per-candidate
+ * failure is reported as a refusal, never thrown: one unusable candidate must not hide the others.
+ */
+export async function validateBindingCandidates(params: {
+  plan: RecordedWorkflow;
+  candidates: readonly WorkflowBindingCandidate[];
+  environment: CandidateValidationEnvironment;
+}): Promise<CandidateValidationOutcome[]> {
+  const { plan, candidates, environment } = params;
+  if (environment.workspaceDir.length === 0) {
+    throw new Error("the replay environment needs a disposable workspace directory");
+  }
+  // Replays may write files. The workspace is guaranteed to exist before any run, and the adapters
+  // handed in are expected to execute there — never in the caller's project.
+  await mkdir(environment.workspaceDir, { recursive: true });
+  const outcomes: CandidateValidationOutcome[] = [];
+  for (const candidate of candidates) {
+    outcomes.push(await evaluateCandidate(plan, candidate, candidates, environment));
+  }
+  return outcomes;
+}
