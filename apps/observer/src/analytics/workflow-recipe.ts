@@ -393,6 +393,8 @@ export interface RecordableEvent {
   parameters?: Record<string, WorkflowJsonValue>;
   result?: WorkflowJsonValue;
   content?: unknown;
+  /** Whether the recorded result reported an error; absent means the record does not say. */
+  isError?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -406,20 +408,31 @@ export interface RecordableEvent {
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
-  options: { runtimeFor?: (toolName: string) => string } = {},
+  options: {
+    /**
+     * Runtime and connection as discovery/dispatch recorded them. A callable the record only names
+     * keeps an unknown runtime: the runtime is not guessed from the tool's name.
+     */
+    discoveryFor?: (toolName: string) => { runtime?: string; connection?: string } | undefined;
+  } = {},
 ): RecordedRecipe | undefined {
   const ordered = [...events].sort(
     (left, right) =>
       (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
       (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER),
   );
-  const resultsByCallId = new Map<string, WorkflowJsonValue>();
+  const resultsByCallId = new Map<
+    string,
+    { value: WorkflowJsonValue | undefined; isError: boolean | undefined }
+  >();
   for (const event of ordered) {
     if (event.type !== "tool_result") continue;
     const callId = event.callId ?? event.toolCallId;
     if (!callId) continue;
-    const value = event.result ?? extractResultValue(event.content);
-    if (value !== undefined) resultsByCallId.set(callId, value);
+    resultsByCallId.set(callId, {
+      value: event.result ?? extractResultValue(event.content),
+      isError: event.isError,
+    });
   }
 
   const observations: RecordedCallObservation[] = [];
