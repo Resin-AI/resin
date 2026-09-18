@@ -447,6 +447,11 @@ export function recordCallsFromEvents(
      * keeps an unknown runtime: the runtime is not guessed from the tool's name.
      */
     discoveryFor?: (toolName: string) => { runtime?: string; connection?: string } | undefined;
+    /**
+     * The reference scope the calling program used for this session. A reference from another scope
+     * never binds, so the scope must be stated rather than assumed from the workflow's name.
+     */
+    referenceScopeId?: string;
   } = {},
 ): RecordedRecipe | undefined {
   const ordered = [...events].sort(
@@ -479,7 +484,7 @@ export function recordCallsFromEvents(
     if (parts[1] !== scopeId) return undefined;
     return parts.slice(2).join(":");
   };
-  const scopeId = workflowId;
+  const scopeId = options.referenceScopeId ?? workflowId;
 
   const observations: RecordedCallObservation[] = [];
   for (const event of ordered) {

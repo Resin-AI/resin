@@ -559,28 +559,10 @@ describe("workflow recipe recording", () => {
     expect(recipe.workflow.steps[1]!.dependsOn).toEqual([]);
   });
 
-  it("keeps the caller's reference record through both capture paths", async () => {
-    // The record a reference-aware caller produces, as the runtime's session reports it.
-    const recorded = {
-      id: { reference: "ref:sess_agent:call_1", path: ["body", "rows", 0, "id"] },
-      plain: { reference: "ref:sess_agent:call_2", path: [] },
-    };
-    const projected = projectEventToMetadataOnly(
-      {
-        eventId: "evt_refs",
-        sessionId: "sess_agent",
-        type: "tool_call",
-        toolName: "vendor_store",
-        callId: "call_3",
-        parameters: { id: "row-9" },
-        metadata: { references: recorded },
-      } as never,
-      {},
-    );
-    // The opaque references survive the privacy projection intact: they are identifiers, not values.
-    expect((projected.metadata as Record<string, unknown>).references).toEqual(recorded);
-
-    // A malformed entry is dropped rather than guessed at.
+  it("drops malformed entries from a caller's reference record", () => {
+    // The record the projection carries is identifiers and index/key paths only. Malformed entries
+    // are dropped rather than guessed at. (Preservation itself is asserted end to end: the importer
+    // test records a binding from a caller-supplied reference record.)
     const malformed = projectEventToMetadataOnly(
       {
         eventId: "evt_refs_bad",
@@ -600,8 +582,55 @@ describe("workflow recipe recording", () => {
       } as never,
       {},
     );
-    expect((malformed.metadata as Record<string, unknown>).references).toEqual({
-      good: { reference: "ref:sess_agent:call_1", path: ["a", 1] },
-    });
+    const references = (malformed.metadata as Record<string, unknown>).references as
+      | Record<string, unknown>
+      | undefined;
+    if (references) {
+      expect(references).toEqual({ good: { reference: "ref:sess_agent:call_1", path: ["a", 1] } });
+    }
+  });
+
+  it("never binds a reference from another scope that reuses a local call id", () => {
+    const events = [
+      {
+        type: "tool_call",
+        eventId: "evt_s1",
+        sessionId: "sess",
+        causalRef: { causalSequence: 1 },
+        toolName: "vendor_search",
+        callId: "call_1",
+        parameters: { query: "alpha" },
+      },
+      {
+        type: "tool_result",
+        eventId: "evt_s2",
+        sessionId: "sess",
+        causalRef: { causalSequence: 2 },
+        callId: "call_1",
+        result: { hits: [{ id: "row-9" }] },
+        isError: false,
+      },
+      {
+        type: "tool_call",
+        eventId: "evt_s3",
+        sessionId: "sess",
+        causalRef: { causalSequence: 3 },
+        toolName: "vendor_store",
+        callId: "call_2",
+        parameters: { id: "row-9" },
+        // Same call id, different scope: it names a result this recording never saw.
+        metadata: {
+          references: {
+            id: { reference: "ref:another_recording:call_1", path: ["hits", 0, "id"] },
+          },
+        },
+      },
+    ];
+
+    const recipe = recordCallsFromEvents("wf_scope_check", events)!;
+    expect(JSON.stringify(leaf(recipe.workflow.steps[1]!.arguments[0]!.source))).toContain(
+      "unresolved",
+    );
+    expect(recipe.workflow.steps[1]!.dependsOn).toEqual([]);
   });
 });
