@@ -54,6 +54,15 @@ export interface WorkflowCallCarrier {
 function isPlainObject(value: unknown): value is Record<string, WorkflowJsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+/**
+ * The reference-aware invocation surface, however the harness spelled it: bare
+ * `invoke_tool`/`sys_invoke_tool`, or an MCP-prefixed `mcp__<server>__invoke_tool`.
+ */
+function isInvokeToolCallName(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value === "invoke_tool" || value === "sys_invoke_tool") return true;
+  return value.endsWith("__invoke_tool") && value.startsWith("mcp__");
+}
 
 function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
   if (!isPlainObject(value)) return false;
@@ -176,7 +185,7 @@ export class WorkflowCallRecorder {
     const parameters = (event as { parameters?: unknown }).parameters;
     // Only a call routed through the reference-aware surface gets a carrier: the outer
     // tool must be invoke_tool itself, and the routed callable is named by its params.
-    if ((event as { toolName?: unknown }).toolName !== "invoke_tool") return event;
+    if (!isInvokeToolCallName((event as { toolName?: unknown }).toolName)) return event;
     if (!isPlainObject(parameters)) return event;
     const routedName =
       typeof parameters.toolName === "string"
