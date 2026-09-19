@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           umask 022
           pnpm install --frozen-lockfile
-          pnpm exec biome check --write apps/observer/src/analytics/private-value-store.ts apps/observer/src/analytics/workflow-call-recorder.ts apps/observer/src/normalization/local-workflow-payload.ts apps/observer/src/normalization/pipeline.ts apps/observer/tests/analytics/immutable-private-store.test.ts apps/observer/tests/analytics/workflow-private-replay.test.ts apps/observer/tests/analytics/native-supporting-results.test.ts packages/runtime/tests/workflow/native-private-reuse.test.mjs
+          pnpm exec biome check --write apps/observer/src/analytics/private-value-store.ts apps/observer/src/analytics/workflow-call-recorder.ts apps/observer/src/normalization/local-workflow-payload.ts apps/observer/src/normalization/pipeline.ts apps/observer/tests/analytics/immutable-private-store.test.ts apps/observer/tests/analytics/workflow-private-replay.test.ts apps/observer/tests/analytics/native-supporting-results.test.ts apps/observer/tests/analytics/workflow-demonstration-results.test.ts packages/runtime/tests/workflow/native-private-reuse.test.mjs
           pnpm build
           pnpm exec vitest run --no-file-parallelism apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
           pnpm typecheck
