@@ -584,6 +584,18 @@ function carrierArgumentValue(origin: AgentArgumentOrigin): WorkflowJsonValue {
   }
 }
 
+/**
+ * One call of an execution other than the recording's own, kept only as far as re-targeting what it
+ * suggested at a step of this recording needs: the callable it reached and what it proposed.
+ */
+interface RepeatCall {
+  /** The id this call was recorded under, which a result proposal from that execution names. */
+  callId: string;
+  name: string;
+  connection?: string;
+  candidates: readonly WorkflowCallCandidate[];
+}
+
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
@@ -668,35 +680,62 @@ export function recordCallsFromEvents(
   const carrierCandidates: WorkflowBindingCandidate[] = [];
   /**
    * The other executions of this session, kept only as far as one of their calls can be about a
-   * step of this recording: their callables in order, and the token candidates those calls minted.
+   * step of this recording: the callable each call reached, in order, and what that call proposed.
    */
-  const repeats = new Map<
-    number,
-    { names: string[]; tokens: Map<number, WorkflowCallCandidate[]> }
-  >();
+  const repeats = new Map<number, RepeatCall[]>();
+  /** The id a call is read under, whatever the transport called it. */
+  const callIdOf = (event: RecordableEvent): string =>
+    event.callId ?? event.toolCallId ?? event.eventId;
+  /**
+   * The callable an event reached, exactly as a step of this recording would state it: the name the
+   * carrier gives, the connection it was reached through, and the runtime discovery recorded. One
+   * resolution for the recording's own calls and for a repeat's, so the two are comparable.
+   */
+  const callableOf = (
+    event: RecordableEvent,
+    carrier: WorkflowCallCarrier | undefined,
+  ): { runtime: string; name: string; connection?: string } => {
+    const name = carrier?.name ?? event.toolName ?? "unknown";
+    const discovery = options.discoveryFor?.(name);
+    const connection =
+      carrier?.connection ??
+      discovery?.connection ??
+      (event.metadata?.connection as string | undefined);
+    return {
+      runtime:
+        carrier?.runtime ??
+        discovery?.runtime ??
+        (event.metadata?.runtime as string | undefined) ??
+        "unknown",
+      name,
+      ...(connection === undefined ? {} : { connection }),
+    };
+  };
   /**
    * Records one call of an execution other than the recording's own.
    *
-   * A repeat is not part of this recording, but a candidate the capture minted on one of its calls
-   * can still be about a step of it: the same token of the same program, at the same ordinal.
-   * Everything else the call suggests is dropped as before.
+   * A repeat is not part of this recording, and its calls never become steps of it, but a candidate
+   * the capture minted on one of its calls can still be about a step of it: the same argument of the
+   * same callable, reached at the same ordinal. Which candidates those are is decided where the
+   * recording's own callables are known, so the call is kept whole here.
    */
   const noteRepeatCall = (
     event: RecordableEvent,
     carrier: WorkflowCallCarrier | undefined,
     executionIndex: number,
   ): void => {
-    let repeat = repeats.get(executionIndex);
-    if (repeat === undefined) {
-      repeat = { names: [], tokens: new Map() };
-      repeats.set(executionIndex, repeat);
+    let calls = repeats.get(executionIndex);
+    if (calls === undefined) {
+      calls = [];
+      repeats.set(executionIndex, calls);
     }
-    const ordinal = repeat.names.length;
-    repeat.names.push(carrier?.name ?? event.toolName ?? "unknown");
-    const tokenCandidates = (carrier?.candidates ?? []).filter(
-      (candidate) => candidate.path[0] === "tokens",
-    );
-    if (tokenCandidates.length > 0) repeat.tokens.set(ordinal, tokenCandidates);
+    const callable = callableOf(event, carrier);
+    calls.push({
+      callId: callIdOf(event),
+      name: callable.name,
+      ...(callable.connection === undefined ? {} : { connection: callable.connection }),
+      candidates: carrier?.candidates ?? [],
+    });
   };
   /**
    * Claims a call for reading, once: the key it is read under, or undefined when the event is not a
@@ -771,9 +810,8 @@ export function recordCallsFromEvents(
         };
       }
     }
-    const toolName = carrier?.name ?? event.toolName ?? "unknown";
     const recordedResult = resultsByCallId.get(scopedCallKey);
-    const discovery = options.discoveryFor?.(toolName);
+    const callable = callableOf(event, carrier);
     const privateValues = (event.metadata?.maskedValues as string[] | undefined) ?? [];
     const isPrivateValue =
       privateValues.length > 0
@@ -787,21 +825,9 @@ export function recordCallsFromEvents(
         ? {}
         : { causalSequence: event.causalRef.causalSequence }),
       callable: {
-        runtime:
-          carrier?.runtime ??
-          discovery?.runtime ??
-          (event.metadata?.runtime as string | undefined) ??
-          "unknown",
-        name: toolName,
-        ...((carrier?.connection ??
-        discovery?.connection ??
-        (event.metadata?.connection as string | undefined))
-          ? {
-              connection: (carrier?.connection ??
-                discovery?.connection ??
-                event.metadata?.connection) as string,
-            }
-          : {}),
+        runtime: callable.runtime,
+        name: callable.name,
+        ...(callable.connection === undefined ? {} : { connection: callable.connection }),
         ...(carrier?.inputSchema === undefined ? {} : { inputSchema: carrier.inputSchema }),
         ...(carrier?.program === undefined ? {} : { program: carrier.program }),
       },
@@ -872,26 +898,60 @@ export function recordCallsFromEvents(
     noteRepeatCall(event, carrier, executionIndex);
   }
 
-  // A candidate a repeat's call minted about a token of its program is about the same token of this
-  // recording when the repeat ran the same callables in the same order — the ordinal of its call is
-  // the step the recording gave that ordinal. A repeat that did anything else is not a
-  // demonstration of this work, so nothing from it is re-targeted at a step of it.
-  const recordedNames = observations.map((observation) => observation.callable.name);
-  for (const repeat of repeats.values()) {
-    if (repeat.names.length !== recordedNames.length) continue;
-    if (repeat.names.some((name, index) => name !== recordedNames[index])) continue;
-    for (const [ordinal, tokenCandidates] of repeat.tokens) {
+  // What a repeat's calls proposed is about this recording when the repeat performed the same work:
+  // the same callables, reached through the same connections, in the same order — so the ordinal of
+  // its call is the step this recording gave that ordinal, and a call of the repeat is the step that
+  // call is here. A repeat that did anything else is not a demonstration of this work, and nothing
+  // from it is re-targeted at a step of it.
+  for (const calls of repeats.values()) {
+    if (calls.length !== observations.length) continue;
+    if (
+      calls.some(
+        (call, ordinal) =>
+          call.name !== observations[ordinal]!.callable.name ||
+          call.connection !== observations[ordinal]!.callable.connection,
+      )
+    ) {
+      continue;
+    }
+    const stepIdByRepeatCallId = new Map<string, string>();
+    for (const [ordinal, call] of calls.entries()) {
+      const stepId = stepIdByPosition.get(ordinal);
+      if (stepId !== undefined) stepIdByRepeatCallId.set(call.callId, stepId);
+    }
+    for (const [ordinal, call] of calls.entries()) {
       const stepId = stepIdByPosition.get(ordinal);
       if (stepId === undefined) continue;
-      for (const candidate of tokenCandidates) {
-        // A result proposal from a repeat names a call this recording never numbered, so it cannot
-        // be expressed against one of its steps; only a proposed input is carried across.
-        if (candidate.proposed.kind !== "input") continue;
+      for (const candidate of call.candidates) {
+        // A result proposal names the call of the repeat that produced the value; that call is the
+        // step the same call is here, so the proposal is expressed against it. A producing call the
+        // repeat never made is one this recording cannot name, so the proposal is dropped.
+        const producingStepId =
+          candidate.proposed.kind === "result"
+            ? stepIdByRepeatCallId.get(candidate.proposed.callId)
+            : undefined;
+        if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
+        // One position is proposed once, and what this recording's own call established about a
+        // value it actually used outranks a repeat's suggestion about the same position.
+        if (
+          carrierCandidates.some(
+            (entry) =>
+              entry.stepId === stepId &&
+              entry.argument === candidate.argument &&
+              entry.path.length === candidate.path.length &&
+              entry.path.every((part, index) => part === candidate.path[index]),
+          )
+        ) {
+          continue;
+        }
         carrierCandidates.push({
           stepId,
           argument: candidate.argument,
           path: candidate.path,
-          proposed: candidate.proposed,
+          proposed:
+            candidate.proposed.kind === "result"
+              ? { kind: "result", stepId: producingStepId!, path: candidate.proposed.path }
+              : candidate.proposed,
           reason: candidate.reason,
           ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
           missing: candidate.missing,
