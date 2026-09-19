@@ -479,6 +479,7 @@ describe("Provider Capture Integration", () => {
 
         const ack = vi.fn(async () => {});
         await coordinator.handleRecords(session, [rawRecord], ack);
+        await coordinator.handleRecords(session, [], async () => {});
 
         expect(ack).toHaveBeenCalledTimes(1);
         expect(fakeCloud.submittedObservations.length).toBe(1);
@@ -544,6 +545,7 @@ describe("Provider Capture Integration", () => {
 
       const ack = vi.fn(async () => {});
       await coordinator.handleRecords(session, [rawRecord], ack);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
       expect(fakeCloud.submittedObservations.length).toBe(1);
@@ -655,6 +657,7 @@ describe("Provider Capture Integration", () => {
       ];
       const ack = vi.fn(async () => {});
       await coordinator.handleRecords(session, records, ack);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
       expect(fakeCloud.submittedObservations.length).toBe(1);
@@ -698,6 +701,7 @@ describe("Provider Capture Integration", () => {
       // Ingest the exact same record twice in the batch
       const ack = vi.fn(async () => {});
       await coordinator.handleRecords(session, [record, record], ack);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
       expect(fakeCloud.submittedObservations.length).toBe(1);
@@ -736,10 +740,11 @@ describe("Provider Capture Integration", () => {
         },
         timestamp: new Date().toISOString(),
       };
+      await coordinator.handleRecords(session, [record], async () => {});
 
-      // 1. First attempt fails due to cloud error
+      // 1. The drained terminal notification fails due to cloud error.
       const ackFirst = vi.fn(async () => {});
-      await expect(coordinator.handleRecords(session, [record], ackFirst)).rejects.toThrow(
+      await expect(coordinator.handleRecords(session, [], ackFirst)).rejects.toThrow(
         "Simulated transient upstream 503 Service Unavailable",
       );
 
@@ -755,7 +760,7 @@ describe("Provider Capture Integration", () => {
 
       // 2. Retry attempt succeeds
       const ackRetry = vi.fn(async () => {});
-      await coordinator.handleRecords(session, [record], ackRetry);
+      await coordinator.handleRecords(session, [], ackRetry);
 
       expect(ackRetry).toHaveBeenCalledTimes(1);
       expect(clientMock).toHaveBeenCalledTimes(2);
@@ -807,6 +812,7 @@ describe("Provider Capture Integration", () => {
         [record],
         vi.fn(async () => {}),
       );
+      await coordinator.handleRecords(session, [], async () => {});
 
       const obs = fakeCloud.submittedObservations[0];
       expect(obs.parentTrajectoryId).toBeNull();
@@ -843,6 +849,7 @@ describe("Provider Capture Integration", () => {
         [record],
         vi.fn(async () => {}),
       );
+      await coordinator.handleRecords(session, [], async () => {});
 
       const obs = fakeCloud.submittedObservations[0];
       expect(obs.trajectoryId).toBe("traj_subagent_200");
@@ -903,6 +910,7 @@ describe("Provider Capture Integration", () => {
 
       const ack = vi.fn(async () => {});
       await coordinator.handleRecords(session, records, ack);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
       expect(fakeCloud.submittedObservations.length).toBe(1);

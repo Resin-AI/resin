@@ -93,6 +93,16 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
+function captureTerminalOmpSession(session: HarnessSession, startedAt: number): boolean {
+  if (session.harnessId !== "omp" || typeof session.metadata?.fileMtime !== "string") {
+    return false;
+  }
+  // Require actual file activity as well as the coordinator's transcript timestamp boundary.
+  // Neither touching an old transcript nor future-dated content grants historical capture.
+  const modifiedAt = Date.parse(session.metadata.fileMtime);
+  return modifiedAt >= startedAt && modifiedAt <= Date.now();
+}
+
 export interface TrajectoryCaptureRuntimeModuleOptions {
   /**
    * Getter or factory function to resolve the CloudObservationClient dynamically.
@@ -310,7 +320,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.adapters = options.adapters ?? [
       new ClaudeHarnessAdapter(),
       new CodexHarnessAdapter(),
-      new OmpHarnessAdapter(),
+      new OmpHarnessAdapter({ activeOnly: false }),
     ];
 
     this.cursorManager =
@@ -329,7 +339,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
-          session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+          session.harnessId === "omp" ? { mode: "all" } : undefined,
+        captureTerminalSessions: captureTerminalOmpSession,
         captureUserSessionsOnly: this.captureUserSessionsOnly,
         logger: this.logger,
       });
@@ -693,7 +704,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
-        session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+        session.harnessId === "omp" ? { mode: "all" } : undefined,
+      captureTerminalSessions: captureTerminalOmpSession,
       captureUserSessionsOnly: this.captureUserSessionsOnly,
       logger: this.logger,
     });

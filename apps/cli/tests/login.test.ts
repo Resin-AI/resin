@@ -343,6 +343,9 @@ describe("performPairing reuse and rollback", () => {
     const mutation = await performPairing({
       home,
       cloudUrl: "https://api.resin.sh",
+      accountId: "acc_requested_not_authenticated",
+      workspaceId: "/local/workspace",
+      deviceId: "dev_requested_not_authenticated",
       // SAFETY: Mock fetch function implementing fetch interface for testing.
       customFetch: customFetch as typeof fetch,
     });
@@ -363,6 +366,26 @@ describe("performPairing reuse and rollback", () => {
     }
     const content = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
     expect(content.accessToken).toBe("pre-existing-access-token");
+  });
+
+  it("reports the authenticated tenant rather than requested pairing hints", async () => {
+    const mutation = await performPairing({
+      home,
+      cloudUrl: "https://api.resin.sh",
+      accountId: "acc_requested_not_authenticated",
+      workspaceId: "/local/workspace",
+      customFetch: successfulDeviceFetch(),
+      openBrowser: () => false,
+      stdout: { write: () => true },
+      restartService: false,
+    });
+
+    expect(mutation).toMatchObject({
+      paired: true,
+      reused: false,
+      accountId: "acc_live_01",
+      workspaceId: "ws_live_01",
+    });
   });
 
   it("re-pairs an unexpired legacy refresh family instead of reusing or refreshing it", async () => {
@@ -566,11 +589,24 @@ describe("performPairing reuse and rollback", () => {
     const openBrowser = vi.fn(async () => true);
 
     const result = await captureOutput(() =>
-      loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
-        // SAFETY: Mock fetch function implementing fetch interface for testing.
-        customFetch: customFetch as typeof fetch,
-        openBrowser,
-      }),
+      loginCommand(
+        [
+          "--home",
+          home,
+          "--cloud-url",
+          "https://api.resin.sh",
+          "--account",
+          "acc_requested_not_authenticated",
+          "--workspace",
+          "ws_requested_not_authenticated",
+          "--device-id",
+          "dev_requested_not_authenticated",
+        ],
+        {
+          customFetch,
+          openBrowser,
+        },
+      ),
     );
 
     expect(result.exitCode).toBe(0);

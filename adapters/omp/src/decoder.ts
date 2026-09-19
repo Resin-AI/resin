@@ -128,6 +128,35 @@ export function asArray(
   return Array.isArray(value) ? value : undefined;
 }
 
+/** Recognizes the normal custom exit emitted by OMP v18.2.6; unknown kinds stay unclaimed. */
+export function getOmpSessionExitReason(value: unknown): string | undefined {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("type" in value) ||
+    value.type !== "custom" ||
+    !("customType" in value) ||
+    value.customType !== "session_exit" ||
+    !("data" in value)
+  ) {
+    return undefined;
+  }
+  const data = value.data;
+  if (
+    !data ||
+    typeof data !== "object" ||
+    Array.isArray(data) ||
+    !("kind" in data) ||
+    data.kind !== "normal" ||
+    !("reason" in data) ||
+    typeof data.reason !== "string" ||
+    data.reason.trim().length === 0
+  ) {
+    return undefined;
+  }
+  return data.reason;
+}
+
 const TOOL_CALL_BLOCK_TYPES: Record<string, true> = {
   toolcall: true,
   tool_call: true,
@@ -1159,6 +1188,16 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     }
 
     // 4. Session Lifecycle & Agent Start / End
+    const customExitReason = getOmpSessionExitReason(obj);
+    if (customExitReason !== undefined) {
+      return this.normalizeLifecycle(
+        { ...obj, lifecycleType: "end", exitReason: customExitReason },
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+      );
+    }
     if (
       rawType === "session_start" ||
       rawType === "session_init" ||

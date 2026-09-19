@@ -345,6 +345,8 @@ export function normalizePathPattern(rawPath: unknown, homeDir?: string): string
   if (typeof rawPath !== "string") return "$PATH";
   let cleaned = rawPath.replace(/\\/g, "/").trim();
   if (!cleaned) return "$PATH";
+  // Preserve an explicit workspace-relative root before stripping private path prefixes.
+  if (cleaned === "." || cleaned === "./") return ".";
   if (URL_TOKEN.test(cleaned)) return "$URL";
   if (homeDir && cleaned.startsWith(homeDir.replace(/\\/g, "/"))) {
     cleaned = cleaned.slice(homeDir.length);

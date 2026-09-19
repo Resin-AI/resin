@@ -5,6 +5,7 @@ import path from "node:path";
 import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
 import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
 import { OmpHarnessAdapter, OmpRecordDecoder } from "@resin/adapter-omp";
+import type { NormalizedSessionEvent } from "@resin/contracts";
 import { type LocalStateStore, createLocalStateStore } from "@resin/db";
 import type {
   HarnessAdapter,
@@ -361,44 +362,6 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       expect(module.getAdapters().map((a) => a.id)).toEqual(["custom-harness"]);
       expect(module.getDecoders().map((d) => d.harnessId)).toEqual(["custom-harness"]);
     });
-
-    it("configures owned observerCoordinator with default latest backfill and all for active omp sessions", () => {
-      const module = new TrajectoryCaptureRuntimeModule({ adapters: [] });
-      const coordinator = module.getObserverCoordinator();
-      expect(coordinator).toBeDefined();
-
-      const ompActiveSession: HarnessSession = {
-        sessionId: "sess-omp-active",
-        workspaceId: "ws-1",
-        harnessId: "omp",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const ompCompletedSession: HarnessSession = {
-        sessionId: "sess-omp-completed",
-        workspaceId: "ws-1",
-        harnessId: "omp",
-        status: "completed",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const claudeActiveSession: HarnessSession = {
-        sessionId: "sess-claude-active",
-        workspaceId: "ws-1",
-        harnessId: "claude-code",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      // Coordinator's backfillPolicyForSession returns { mode: "all" } for active OMP session and undefined for non-OMP or completed sessions
-      // @ts-expect-error accessing private property for test verification
-      const backfillFn = coordinator.backfillPolicyForSession;
-      expect(backfillFn(ompActiveSession)).toEqual({ mode: "all" });
-      expect(backfillFn(ompCompletedSession)).toBeUndefined();
-      expect(backfillFn(claudeActiveSession)).toBeUndefined();
-    });
   });
 
   describe("Lifecycle & Health Checks", () => {
@@ -695,6 +658,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
 
       const ack = vi.fn().mockResolvedValue(undefined);
       await captureCoordinator.handleRecords(session, rawRecords, ack);
+      await captureCoordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalled();
       expect(mockSubmit).toHaveBeenCalledTimes(1);
@@ -1043,6 +1007,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
           });
         });
         await module.getCaptureCoordinator().handleRecords(session, rawRecords, ack);
+        await module.getCaptureCoordinator().handleRecords(session, [], async () => {});
         await module.stop(context);
 
         expect(uploadAcknowledged).toBe(true);
@@ -1192,6 +1157,164 @@ describe("TrajectoryCaptureRuntimeModule", () => {
   });
 
   describe("OMP Lifecycle Grace, Stale History Exclusion, and Restart Persistence", () => {
+    it("captures a completed OMP session across batches before finalizing and does not replay it after polls or restart", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-19T12:00:00.000Z"));
+      const adapter = new FakeHarnessAdapter({ id: "omp" });
+      const workspace = {
+        workspaceId: "ws-short-omp",
+        harnessId: "omp",
+        name: "Short OMP session",
+        rootPath: "/tmp/short-omp",
+      };
+      adapter.addWorkspace(workspace);
+      const module = new TrajectoryCaptureRuntimeModule({
+        adapters: [adapter],
+        observationClient: mockCloudObservationClient({}),
+      });
+      const context = createMockModuleContext();
+      const received: Array<{
+        sessionId: string;
+        events: NormalizedSessionEvent[];
+        terminal: boolean;
+      }> = [];
+      module.getCaptureCoordinator().setSessionEventSink((session, events, sinkContext) => {
+        received.push({ sessionId: session.sessionId, events, terminal: sinkContext.isTerminal });
+      });
+
+      try {
+        await module.start(context);
+        vi.setSystemTime(new Date("2026-09-19T12:00:01.000Z"));
+        const session: HarnessSession = {
+          sessionId: "short-omp-batched",
+          workspaceId: workspace.workspaceId,
+          harnessId: "omp",
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          metadata: { sessionKind: "user", fileMtime: new Date().toISOString() },
+        };
+        adapter.addSession(session);
+        const source = adapter.getOrCreateEventSource(session.sessionId);
+        for (let index = 0; index < 50; index++) {
+          source.appendRecord(
+            {
+              type: "tool_call",
+              toolName: "read",
+              callId: `read-${index}`,
+              parameters: { path: `file-${index}.ts` },
+              timestamp: new Date().toISOString(),
+            },
+            "transcript_line",
+            "omp",
+          );
+        }
+        source.appendRecord(
+          {
+            type: "tool_result",
+            toolName: "read",
+            callId: "read-0",
+            result: "export const captured = true;",
+            isError: false,
+            timestamp: new Date().toISOString(),
+          },
+          "transcript_line",
+          "omp",
+        );
+        source.appendRecord(
+          {
+            type: "custom",
+            customType: "session_exit",
+            data: { reason: "normal" },
+            timestamp: new Date().toISOString(),
+          },
+          "transcript_line",
+          "omp",
+        );
+        // Real OMP sources number records from one; the generic fake starts at zero.
+        for (const record of source.getAllRecords()) {
+          record.sequenceNumber++;
+          record.cursor.sequence++;
+        }
+        const historical: HarnessSession = {
+          ...session,
+          sessionId: "old-omp-terminal",
+          updatedAt: "2026-09-19T11:59:59.999Z",
+        };
+        adapter.addSession(historical);
+        const historicalSource = adapter.getOrCreateEventSource(historical.sessionId);
+        historicalSource.appendRecord({ type: "message", role: "user", content: "Old session" });
+        const excludedSessions: HarnessSession[] = [
+          { ...historical, sessionId: "old-touched-omp-terminal" },
+          {
+            ...session,
+            sessionId: "old-file-recent-content",
+            metadata: { ...session.metadata, fileMtime: "2026-09-19T11:59:59.999Z" },
+          },
+          { ...session, sessionId: "future-content", updatedAt: "2026-09-19T12:00:02.000Z" },
+          {
+            ...session,
+            sessionId: "future-file",
+            metadata: { ...session.metadata, fileMtime: "2026-09-19T12:00:02.000Z" },
+          },
+          { ...session, sessionId: "invalid-content-time", updatedAt: "invalid" },
+          {
+            ...session,
+            sessionId: "invalid-file-time",
+            metadata: { ...session.metadata, fileMtime: "invalid" },
+          },
+          { ...session, sessionId: "missing-file-time", metadata: { sessionKind: "user" } },
+          {
+            ...session,
+            sessionId: "short-agent-session",
+            metadata: { ...session.metadata, sessionKind: "agent" },
+          },
+          { ...session, sessionId: "other-harness", harnessId: "claude-code" },
+        ];
+        for (const excludedSession of excludedSessions) {
+          adapter.addSession(excludedSession);
+          adapter.getOrCreateEventSource(excludedSession.sessionId).appendRecord({
+            type: "message",
+            role: "user",
+            content: "Excluded content",
+          });
+        }
+
+        const summary = await module.getObserverCoordinator().pollOnce();
+        expect(summary.errors).toEqual([]);
+        const events = received.flatMap((batch) => batch.events);
+        expect(events.filter((event) => event.type === "tool_call")).toHaveLength(50);
+        expect(events.filter((event) => event.type === "tool_result")).toHaveLength(1);
+        expect(events.filter((event) => event.type === "session_lifecycle")).toHaveLength(1);
+        expect(received[0].terminal).toBe(false);
+        expect(received.at(-1)?.terminal).toBe(true);
+        expect(received.every((batch) => batch.sessionId === session.sessionId)).toBe(true);
+        expect(module.getCaptureCoordinator().isSessionFinalized(session.sessionId)).toBe(true);
+        expect(historicalSource.getCursor()).toBeNull();
+        for (const excludedSession of excludedSessions) {
+          expect(adapter.getOrCreateEventSource(excludedSession.sessionId).getCursor()).toBeNull();
+        }
+        expect(source.isClosed()).toBe(true);
+        expect(await module.getCursorManager().getCursor(session.sessionId)).toMatchObject({
+          sequence: 52,
+        });
+        const batchCount = received.length;
+        await module.getObserverCoordinator().pollOnce();
+        await module.stop(context);
+        vi.setSystemTime(new Date("2026-09-19T12:00:02.000Z"));
+        await module.start(context);
+        await module.getObserverCoordinator().pollOnce();
+        expect(received).toHaveLength(batchCount);
+        expect(module.getObserverCoordinator().getTailer().getActiveSessions()).toEqual([]);
+      } finally {
+        try {
+          await module.stop(context);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
+
     it("attaches newly discovered active session within grace once, ignores stale completed session, and persists cursor across restart without duplicating records", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-grace-restart-test-"));
       const stateDbPath = path.join(tmpDir, "state.db");

@@ -545,6 +545,8 @@ describe("Bounded Coalescing for Generic Streaming Observation Sessions", () => 
       [createCompletionRecord(session.sessionId, 2)],
       ack2,
     );
+    expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+    await coordinator.handleRecords(completedSession, [], async () => {});
 
     expect(ack2).toHaveBeenCalledTimes(1);
     // Submits ONCE at finalization

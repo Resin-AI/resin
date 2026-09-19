@@ -13,6 +13,7 @@ import type {
   SessionStatus,
 } from "@resin/harness-contracts";
 import { z } from "zod";
+import { getOmpSessionExitReason } from "./decoder.js";
 
 const execFileAsync = promisify(execFile);
 const ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 60_000;
@@ -720,15 +721,21 @@ export async function inspectTranscriptFile(
               updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
             }
             const eventType = String(parsed.type ?? parsed.event ?? "");
+            const customExitReason = getOmpSessionExitReason(parsed);
             if (
               eventType === "session_lifecycle" ||
               eventType === "lifecycle" ||
               eventType === "session" ||
               eventType === "agent_end" ||
-              eventType === "agent_start"
+              eventType === "agent_start" ||
+              customExitReason !== undefined
             ) {
               const defaultAction =
-                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
+                customExitReason !== undefined || eventType === "agent_end"
+                  ? "end"
+                  : eventType === "agent_start"
+                    ? "start"
+                    : "";
               const action = String(
                 parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
               ).toLowerCase();
@@ -816,15 +823,21 @@ export async function inspectTranscriptFile(
               updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
             }
             const eventType = String(parsed.type ?? parsed.event ?? "");
+            const customExitReason = getOmpSessionExitReason(parsed);
             if (
               eventType === "session_lifecycle" ||
               eventType === "lifecycle" ||
               eventType === "session" ||
               eventType === "agent_end" ||
-              eventType === "agent_start"
+              eventType === "agent_start" ||
+              customExitReason !== undefined
             ) {
               const defaultAction =
-                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
+                customExitReason !== undefined || eventType === "agent_end"
+                  ? "end"
+                  : eventType === "agent_start"
+                    ? "start"
+                    : "";
               const action = String(
                 parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
               ).toLowerCase();
@@ -1339,6 +1352,7 @@ export async function buildOmpDiscoveryCatalog(
         updatedAt: t.updatedAt,
         metadata: {
           fileSize: t.fileSize,
+          fileMtime: t.fileMtime,
           totalLines: t.totalLines,
           hasExplicitLifecycle: t.hasExplicitLifecycle,
           inspectedBytes: t.inspectedBytes,
@@ -1434,6 +1448,7 @@ export async function buildOmpDiscoveryCatalog(
           updatedAt: t.updatedAt,
           metadata: {
             fileSize: t.fileSize,
+            fileMtime: t.fileMtime,
             totalLines: t.totalLines,
             hasExplicitLifecycle: t.hasExplicitLifecycle,
             inspectedBytes: t.inspectedBytes,
