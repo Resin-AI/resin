@@ -365,7 +365,7 @@ function mintedBefore(
   argumentValues: ReadonlyArray<ReadonlySet<string>>,
 ): boolean {
   return calls.slice(0, before).some((_earlier, index) => {
-    if (!resultValues[producerIndex]!.has(value)) return false;
+    if (!resultValues[index]!.has(value)) return false;
     return !argumentValues[index]!.has(value);
   });
 }
