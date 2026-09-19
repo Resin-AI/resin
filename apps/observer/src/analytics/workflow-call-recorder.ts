@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { createHash } from "node:crypto";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
@@ -509,7 +510,6 @@ export class WorkflowCallRecorder {
    * conclusions that need them. Bounded per session and by session count.
    */
   private readonly sessions = new Map<string, SessionDerivationState>();
-  private privateCounter = 0;
 
   constructor(options: WorkflowCallRecorderOptions = {}) {
     this.privateValues = options.privateValues ?? FilePrivateValueStore.default();
@@ -519,7 +519,6 @@ export class WorkflowCallRecorder {
   clear(): void {
     this.discovered.clear();
     this.sessions.clear();
-    this.privateCounter = 0;
     this.observeAccess = undefined;
   }
 
@@ -635,38 +634,48 @@ export class WorkflowCallRecorder {
    * references, writing the redacted leaf to the local store so the executor can
    * reconstruct the original at invocation time.
    */
-  private sweepOrigin(origin: AgentArgumentOrigin, sessionId: string): AgentArgumentOrigin {
+  private sweepOrigin(
+    origin: AgentArgumentOrigin,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {
+        const expand = (value: WorkflowJsonValue, currentPath: WorkflowValuePath): AgentArgumentOrigin => {
           if (typeof value === "string" && containsRedactionPlaceholder(value)) {
-            const reference = `private:${sessionId}:${this.privateCounter++}`;
-            this.privateValues.set(reference, value, this.observeAccess);
-            return { type: "private", reference };
+            return this.storeLocalValue(value, sessionId, callId, currentPath);
           }
           if (Array.isArray(value)) {
-            return { type: "array", items: value.map(expand) };
+            return {
+              type: "array",
+              items: value.map((item, index) => expand(item, [...currentPath, index])),
+            };
           }
           if (isPlainObject(value)) {
             const entries: Record<string, AgentArgumentOrigin> = {};
-            for (const [key, entry] of Object.entries(value)) entries[key] = expand(entry);
+            for (const [key, entry] of Object.entries(value)) {
+              entries[key] = expand(entry, [...currentPath, key]);
+            }
             return { type: "object", entries };
           }
           return { type: "literal", value };
         };
-        return expand(origin.value);
+        return expand(origin.value, path);
       }
       case "object": {
         const entries: Record<string, AgentArgumentOrigin> = {};
         for (const [key, entry] of Object.entries(origin.entries)) {
-          entries[key] = this.sweepOrigin(entry, sessionId);
+          entries[key] = this.sweepOrigin(entry, sessionId, callId, [...path, key]);
         }
         return { type: "object", entries };
       }
       case "array":
         return {
           type: "array",
-          items: origin.items.map((item) => this.sweepOrigin(item, sessionId)),
+          items: origin.items.map((item, index) =>
+            this.sweepOrigin(item, sessionId, callId, [...path, index]),
+          ),
         };
       default:
         return origin;
@@ -710,7 +719,7 @@ export class WorkflowCallRecorder {
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
-      origins[argument] = this.sweepOrigin(origin, event.sessionId);
+      origins[argument] = this.sweepOrigin(origin, event.sessionId, event.callId, [argument]);
       provenance[argument] = { standing: "recorded", rule: "caller-stated" };
     }
     const carrier: WorkflowCallCarrier = {
@@ -754,7 +763,7 @@ export class WorkflowCallRecorder {
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
-      origins[argument] = this.launderOrigin(origin, event.sessionId);
+      origins[argument] = this.launderOrigin(origin, event.sessionId, event.callId, [argument]);
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
     const carrier: WorkflowCallCarrier = {
@@ -782,7 +791,7 @@ export class WorkflowCallRecorder {
     const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call);
     carrier.executionIndex = call.executionIndex;
-    const heldOut = this.heldOutSoFar(state, call);
+    const heldOut = this.heldOutSoFar(state, call, event.sessionId);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
@@ -796,46 +805,75 @@ export class WorkflowCallRecorder {
    * this machine. A composite keeps its shape — which is what a workflow argument is made of — and
    * each leaf is stored locally, exactly as a private leaf already is.
    */
-  private launderOrigin(origin: AgentArgumentOrigin, sessionId: string): AgentArgumentOrigin {
+  private launderOrigin(
+    origin: AgentArgumentOrigin,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {
-          if (Array.isArray(value)) return { type: "array", items: value.map(expand) };
+        const expand = (value: WorkflowJsonValue, currentPath: WorkflowValuePath): AgentArgumentOrigin => {
+          if (Array.isArray(value)) {
+            return {
+              type: "array",
+              items: value.map((item, index) => expand(item, [...currentPath, index])),
+            };
+          }
           if (isPlainObject(value)) {
             const entries: Record<string, AgentArgumentOrigin> = {};
-            for (const [key, entry] of Object.entries(value)) entries[key] = expand(entry);
+            for (const [key, entry] of Object.entries(value)) {
+              entries[key] = expand(entry, [...currentPath, key]);
+            }
             return { type: "object", entries };
           }
-          return this.storeLocalValue(value, sessionId);
+          return this.storeLocalValue(value, sessionId, callId, currentPath);
         };
-        return expand(origin.value);
+        return expand(origin.value, path);
       }
       case "object": {
         const entries: Record<string, AgentArgumentOrigin> = {};
         for (const [key, entry] of Object.entries(origin.entries)) {
-          entries[key] = this.launderOrigin(entry, sessionId);
+          entries[key] = this.launderOrigin(entry, sessionId, callId, [...path, key]);
         }
         return { type: "object", entries };
       }
       case "array":
         return {
           type: "array",
-          items: origin.items.map((item) => this.launderOrigin(item, sessionId)),
+          items: origin.items.map((item, index) =>
+            this.launderOrigin(item, sessionId, callId, [...path, index]),
+          ),
         };
       default:
         return origin;
     }
   }
 
-  /** Stores one value of a demonstration and returns the reference a replay resolves it by. */
-  private localReference(value: WorkflowJsonValue, executionIndex: number): string {
-    const reference = `private:demonstration:${executionIndex}:${this.privateCounter++}`;
+  private privateReference(namespace: "value" | "demonstration", parts: readonly unknown[]): string {
+    const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
+    return `private:${namespace}:${digest}`;
+  }
+
+  /** Stores one value of a demonstration and returns the stable reference a replay resolves it by. */
+  private localReference(
+    value: WorkflowJsonValue,
+    sessionId: string,
+    callId: string,
+    slot: string,
+  ): string {
+    const reference = this.privateReference("demonstration", [sessionId, callId, slot]);
     this.privateValues.set(reference, value, this.observeAccess);
     return reference;
   }
 
-  private storeLocalValue(value: WorkflowJsonValue, sessionId: string): AgentArgumentOrigin {
-    const reference = `private:${sessionId}:${this.privateCounter++}`;
+  private storeLocalValue(
+    value: WorkflowJsonValue,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
+    const reference = this.privateReference("value", [sessionId, callId, path]);
     this.privateValues.set(reference, value, this.observeAccess);
     return { type: "private", reference };
   }
@@ -916,6 +954,7 @@ export class WorkflowCallRecorder {
   private heldOutSoFar(
     state: SessionDerivationState,
     call: LocalCall,
+    sessionId: string,
   ): WorkflowCallHeldOut | undefined {
     const execution = state.executions.find((entry) => entry.index === call.executionIndex);
     if (execution === undefined) return undefined;
@@ -950,13 +989,13 @@ export class WorkflowCallRecorder {
         inputs.push({
           position: mine.position,
           argument,
-          reference: this.localReference(value, execution.index),
+          reference: this.localReference(value, sessionId, mine.callId, `argument:${argument}`),
         });
       }
       if (mine.result !== undefined) {
         observed.push({
           position: mine.position,
-          reference: this.localReference(mine.result, execution.index),
+          reference: this.localReference(mine.result, sessionId, mine.callId, "result"),
         });
       }
     }
@@ -1211,7 +1250,7 @@ export class WorkflowCallRecorder {
             ),
             {
               position: call.position,
-              reference: this.localReference(call.result, execution.index),
+              reference: this.localReference(call.result, event.sessionId, call.callId, "result"),
             },
           ];
         }

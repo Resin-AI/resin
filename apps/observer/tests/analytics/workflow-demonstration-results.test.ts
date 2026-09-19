@@ -8,8 +8,12 @@ import {
 import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 
-function recording(sessionId = "session-result-evidence", secondConnection = "files") {
-  const store = new InMemoryPrivateValueStore();
+function recording(
+  sessionId = "session-result-evidence",
+  secondConnection = "files",
+  store = new InMemoryPrivateValueStore(),
+  secondResult = "second contents",
+) {
   const recorder = new WorkflowCallRecorder({ privateValues: store });
   const event = (sequence: number, fields: Record<string, unknown>) =>
     NormalizedSessionEventSchema.parse({
@@ -49,7 +53,7 @@ function recording(sessionId = "session-result-evidence", secondConnection = "fi
       type: "tool_result",
       callId: "second",
       toolName: "load",
-      result: "second contents",
+      result: secondResult,
       isError: false,
       executionDurationMs: 1,
     }),
@@ -74,6 +78,36 @@ describe("demonstrations reconstructed from stored call and result events", () =
       true,
     );
     expect(JSON.stringify(recipe.workflow)).not.toContain("second contents");
+  });
+
+  it("keeps demonstrations from separate recorder instances distinct in one store", () => {
+    const store = new InMemoryPrivateValueStore();
+    const first = recording("session-alpha", "files", store, "alpha contents");
+    const second = recording("session-beta", "files", store, "beta contents");
+    const firstRecipe = recordCallsFromEvents("wf-alpha", first.events.slice(0, 2), {
+      supportingEvents: first.events.slice(2),
+    })!;
+    const secondRecipe = recordCallsFromEvents("wf-beta", second.events.slice(0, 2), {
+      supportingEvents: second.events.slice(2),
+    })!;
+    const firstRef = firstRecipe.workflow.heldOut!.observed[0]!.reference;
+    const secondRef = secondRecipe.workflow.heldOut!.observed[0]!.reference;
+    expect(firstRef).not.toBe(secondRef);
+    expect(resolvePrivateReference(store, firstRef)).toBe("alpha contents");
+    expect(resolvePrivateReference(store, secondRef)).toBe("beta contents");
+  });
+
+  it("refuses to let an existing private reference change value or owner", () => {
+    const store = new InMemoryPrivateValueStore();
+    store.set("private:test:stable", "first", { workspaceId: "ws_one" });
+    store.set("private:test:stable", "first", { workspaceId: "ws_one" });
+    expect(() =>
+      store.set("private:test:stable", "second", { workspaceId: "ws_one" }),
+    ).toThrow(/already exists/);
+    expect(() =>
+      store.set("private:test:stable", "first", { workspaceId: "ws_two" }),
+    ).toThrow(/already exists/);
+    expect(store.get("private:test:stable")).toBe("first");
   });
 
   it("does not borrow execution zero's demonstration from a different session", () => {

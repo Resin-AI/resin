@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 /**
  * Where a stored value came from. A `private:` reference is a name, not a capability: the
@@ -159,8 +160,18 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
+    // Always merge against the latest on-disk view before writing. A stable reference is immutable:
+    // redelivery is idempotent, while a different value or owner for the same identity is corruption.
+    this.entries = undefined;
+    this.loadedMtimeMs = -1;
     const entries = this.load();
-    entries.delete(key);
+    const existing = entries.get(key);
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing.value, value) || !isDeepStrictEqual(existing.origin, origin)) {
+        throw new Error(`private value reference '${key}' already exists with different content or origin`);
+      }
+      return;
+    }
     entries.set(key, { value, at: Date.now(), ...(origin ? { origin } : {}) });
     while (entries.size > MAX_ENTRIES) {
       const oldest = entries.keys().next().value;
@@ -207,6 +218,13 @@ export class InMemoryPrivateValueStore implements PrivateValueStore {
   }
 
   set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
+    const existing = this.entries.get(key);
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing.value, value) || !isDeepStrictEqual(existing.origin, origin)) {
+        throw new Error(`private value reference '${key}' already exists with different content or origin`);
+      }
+      return;
+    }
     this.entries.set(key, { value, ...(origin ? { origin } : {}) });
   }
 }
