@@ -156,6 +156,7 @@ export interface WorkflowCallCandidate {
 interface LocalCall {
   callId: string;
   toolName: string;
+  connection?: string;
   /** Ordinal inside its task, so two tasks can be compared position by position. */
   position: number;
   arguments: Record<string, WorkflowJsonValue>;
@@ -293,6 +294,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "varies-across-executions": true,
   "declared-by-the-callable": true,
   "shares-value-with-declared-input": true,
+  "tracks-earlier-result-across-executions": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -562,8 +564,7 @@ export class WorkflowCallRecorder {
     const byName = this.discovered.get(sessionId)?.get(toolName);
     if (byName === undefined) return undefined;
     if (connection !== undefined) {
-      const exact = byName.get(connection);
-      if (exact !== undefined) return exact;
+      return byName.get(connection);
     }
     let latest: DiscoveredCallable | undefined;
     for (const reported of byName.values()) latest = reported;
@@ -869,6 +870,9 @@ export class WorkflowCallRecorder {
     const call: LocalCall = {
       callId: event.callId,
       toolName: event.toolName,
+      ...((event.connection ?? discovered?.provider) === undefined
+        ? {}
+        : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
       executionIndex: execution.index,
       arguments: parameters,
@@ -914,17 +918,35 @@ export class WorkflowCallRecorder {
     call: LocalCall,
   ): WorkflowCallHeldOut | undefined {
     const execution = state.executions.find((entry) => entry.index === call.executionIndex);
-    const earlier = state.executions.find((entry) => entry.index < call.executionIndex);
-    if (execution === undefined || earlier === undefined) return undefined;
+    if (execution === undefined) return undefined;
+    const earlier = [...state.executions].reverse().find(
+      (entry) =>
+        entry.index < call.executionIndex &&
+        execution.calls.length <= entry.calls.length &&
+        execution.calls.every((mine, position) => {
+          const theirs = entry.calls[position];
+          return (
+            theirs !== undefined &&
+            mine.toolName === theirs.toolName &&
+            mine.connection === theirs.connection &&
+            mine.program?.kind === theirs.program?.kind &&
+            mine.program?.argument === theirs.program?.argument
+          );
+        }),
+    );
+    if (earlier === undefined) {
+      // A diverging prefix must not leave an old demonstration advertised on later results.
+      execution.accumulatedHeldOut = undefined;
+      return undefined;
+    }
     const inputs: WorkflowCallHeldOut["inputs"] = [];
     const observed: WorkflowCallHeldOut["observed"] = [];
     for (const mine of execution.calls) {
       const theirs = earlier.calls.find((entry) => entry.position === mine.position);
       if (theirs === undefined || mine.toolName !== theirs.toolName) break;
       for (const [argument, value] of Object.entries(mine.arguments)) {
-        if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-          continue;
-        }
+        // Nested arguments are part of an ordinary call too. Keep the complete value by local
+        // reference; validation selects the candidate's nested path without uploading the value.
         inputs.push({
           position: mine.position,
           argument,
@@ -1008,7 +1030,7 @@ export class WorkflowCallRecorder {
       if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
         continue;
       }
-      const key = `${call.toolName}|${call.position}|${argument}`;
+      const key = JSON.stringify([call.connection ?? null, call.toolName, call.position, argument]);
       const previous = state.baseline.get(key);
       if (previous === undefined) {
         state.baseline.set(key, value);

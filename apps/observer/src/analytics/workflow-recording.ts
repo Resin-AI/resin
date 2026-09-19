@@ -591,6 +591,7 @@ function carrierArgumentValue(origin: AgentArgumentOrigin): WorkflowJsonValue {
 interface RepeatCall {
   /** The id this call was recorded under, which a result proposal from that execution names. */
   callId: string;
+  runtime: string;
   name: string;
   connection?: string;
   candidates: readonly WorkflowCallCandidate[];
@@ -732,6 +733,7 @@ export function recordCallsFromEvents(
     const callable = callableOf(event, carrier);
     calls.push({
       callId: callIdOf(event),
+      runtime: callable.runtime,
       name: callable.name,
       ...(callable.connection === undefined ? {} : { connection: callable.connection }),
       candidates: carrier?.candidates ?? [],
@@ -909,6 +911,7 @@ export function recordCallsFromEvents(
       calls.some(
         (call, ordinal) =>
           call.name !== observations[ordinal]!.callable.name ||
+          call.runtime !== observations[ordinal]!.callable.runtime ||
           call.connection !== observations[ordinal]!.callable.connection,
       )
     ) {

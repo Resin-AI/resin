@@ -20,10 +20,10 @@ function recording(sessionId = "session-result-evidence", secondConnection = "fi
     });
   const raw = [
     event(1, { type: "tool_call", callId: "first", toolName: "load", connection: "files", parameters: { path: "first.csv" } }),
-    event(2, { type: "tool_result", callId: "first", toolName: "load", result: "first contents", isError: false }),
+    event(2, { type: "tool_result", callId: "first", toolName: "load", result: "first contents", isError: false, executionDurationMs: 1 }),
     event(3, { type: "message", role: "user", content: "Repeat for the other file" }),
     event(4, { type: "tool_call", callId: "second", toolName: "load", connection: secondConnection, parameters: { path: "second.csv" } }),
-    event(5, { type: "tool_result", callId: "second", toolName: "load", result: "second contents", isError: false }),
+    event(5, { type: "tool_result", callId: "second", toolName: "load", result: "second contents", isError: false, executionDurationMs: 1 }),
   ];
   const events = raw.map((entry) => projectEventToMetadataOnly(recorder.observe(entry, { workspaceId: "ws_results" })));
   return { store, events };

@@ -721,7 +721,13 @@ describe("a token of a recorded program a caller may supply", () => {
     expect(bound).toContain("'keep-me'");
     expect(bound).toContain("release.txt");
     expect(seen.some((command) => command.includes("'tok(recorded-seed)'"))).toBe(true);
-    expect(decided.verification?.status).toBe("verified");
+    // The demonstration observed only the program step, so the plan reproduces that step but is not
+    // a whole-plan verification: the step it never observed is named instead of being assumed.
+    expect(decided.verification).toMatchObject({
+      status: "incomplete",
+      reproduced: ["seal"],
+      missed: [{ stepId: "open" }],
+    });
   });
 
   it("refuses it when the demonstration's program has no such token", async () => {
