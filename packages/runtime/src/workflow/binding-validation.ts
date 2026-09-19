@@ -750,9 +750,31 @@ export async function validateBindingCandidates(params: {
   // Replays may write files. The workspace is guaranteed to exist before any run, and the adapters
   // handed in are expected to execute there — never in the caller's project.
   await mkdir(environment.workspaceDir, { recursive: true });
+  // Older capture versions proposed the entire executable argument from discovery's schema.
+  // Replacing it proves only that another program ran, not that the recorded program accepts new
+  // data. Exclude such proposals from ALL A/B plans too: otherwise a whole-source replacement can
+  // shadow a legitimate token binding and make its evidence appear inconclusive. Explicit inputs
+  // already present in an authored plan and result-to-program dependencies are unaffected.
+  const sourceInputs = new Set(
+    candidates.filter(
+      (candidate) =>
+        candidate.proposed.kind === "input" &&
+        candidate.path.length === 0 &&
+        plan.steps.find((step) => step.id === candidate.stepId)?.callable.program?.argument ===
+          candidate.argument,
+    ),
+  );
+  const dataCandidates = candidates.filter((candidate) => !sourceInputs.has(candidate));
   const outcomes: CandidateValidationOutcome[] = [];
   for (const candidate of candidates) {
-    outcomes.push(await evaluateCandidate(plan, candidate, candidates, environment));
+    outcomes.push(
+      sourceInputs.has(candidate)
+        ? refused(
+            candidate,
+            "the whole executable program is the recorded implementation, not an inferred caller input; propose the changing data positions within it instead",
+          )
+        : await evaluateCandidate(plan, candidate, dataCandidates, environment),
+    );
   }
   return outcomes;
 }
