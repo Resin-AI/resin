@@ -5,8 +5,8 @@ import { createLocalStateStore } from "@resin/db";
 import { CloudCredentialStore, type CloudRequestIdentity } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
 import { z } from "zod";
-import { resolvePlatformPaths } from "../platform/paths.js";
 import { createAuthorizationPlan } from "../installer/auth-plan.js";
+import { resolvePlatformPaths } from "../platform/paths.js";
 
 /**
  * Owner-facing authorization for Resin's generated tools.
@@ -223,17 +223,14 @@ export async function authorizeCommand(
 
     let response: Response;
     try {
-      response = await fetchImpl(
-        `${identity.cloudUrl.replace(/\/$/, "")}${GENERATE_ROUTE}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...requestHeaders(identity) },
-          body: JSON.stringify({
-            opportunityId: flags.opportunityId,
-            options: { envelope },
-          }),
-        },
-      );
+      response = await fetchImpl(`${identity.cloudUrl.replace(/\/$/, "")}${GENERATE_ROUTE}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...requestHeaders(identity) },
+        body: JSON.stringify({
+          opportunityId: flags.opportunityId,
+          options: { envelope },
+        }),
+      });
     } catch {
       throw new AuthorizeCommandError("CLOUD_UNREACHABLE", "Resin Cloud is unreachable");
     }

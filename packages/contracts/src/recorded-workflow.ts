@@ -606,11 +606,7 @@ export function validateRecordedWorkflow(value: unknown): {
         // points anywhere else would be applied to a value no tokenizer has read.
         const path = Array.isArray(candidate.path) ? candidate.path : [];
         if (path[0] === "tokens") {
-          if (
-            !Number.isInteger(path[1]) ||
-            (path[1] as number) < 0 ||
-            path.length !== 2
-          ) {
+          if (!Number.isInteger(path[1]) || (path[1] as number) < 0 || path.length !== 2) {
             errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
           }
           const program = isPlainObject(step) ? step.callable : undefined;

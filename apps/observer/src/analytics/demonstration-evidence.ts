@@ -34,8 +34,7 @@ export function selectDemonstration(
   if (
     !first ||
     selected.some(
-      (call) =>
-        call.sessionId !== first.sessionId || call.executionIndex !== first.executionIndex,
+      (call) => call.sessionId !== first.sessionId || call.executionIndex !== first.executionIndex,
     )
   ) {
     return undefined;

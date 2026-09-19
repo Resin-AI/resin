@@ -488,9 +488,11 @@ function matchesDemonstratedType(
   type: "string" | "number" | "boolean" | "object" | "array",
 ): boolean {
   if (type === "array") return Array.isArray(value);
-  if (type === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (type === "object")
+    return value !== null && typeof value === "object" && !Array.isArray(value);
   if (type === "number") return typeof value === "number" && Number.isFinite(value);
-  return typeof value === type;
+  if (type === "boolean") return typeof value === "boolean";
+  return typeof value === "string";
 }
 
 export async function demonstrationEnvironment(params: {

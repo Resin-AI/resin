@@ -66,9 +66,8 @@ export function recordCallsFromEvents(
   );
   // Older explicitly composed recordings have no execution indices. Preserve their existing path.
   if (!first) return reconstructCalls(workflowId, events, options);
-  const execution = readWorkflowCallCarrier(
-    first.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
-  )!.executionIndex!;
+  const execution = readWorkflowCallCarrier(first.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])!
+    .executionIndex!;
   const session = first.sessionId;
   const ownCallIds = new Set<string>();
   for (const event of ordered) {
@@ -84,7 +83,10 @@ export function recordCallsFromEvents(
   const supporting = [...ordered, ...(options.supportingEvents ?? [])]
     .filter((event) => event.sessionId === session && !selectedIds.has(event.eventId))
     .sort(order);
-  const recipe = reconstructCalls(workflowId, selected, { ...options, supportingEvents: supporting });
+  const recipe = reconstructCalls(workflowId, selected, {
+    ...options,
+    supportingEvents: supporting,
+  });
   if (!recipe) return undefined;
 
   const calls: DemonstrationCall[] = [];
@@ -121,9 +123,7 @@ export function recordCallsFromEvents(
     calls.filter((call) => call.executionIndex === execution).map((call) => [call.callId, call]),
   );
   const selectedCalls = recipe.workflow.steps.map((step) => byId.get(step.callId ?? ""));
-  const demonstration = selectedCalls.every(
-    (call): call is DemonstrationCall => call !== undefined,
-  )
+  const demonstration = selectedCalls.every((call): call is DemonstrationCall => call !== undefined)
     ? selectDemonstration(selectedCalls, calls, observations)
     : undefined;
   delete recipe.workflow.heldOut;
@@ -144,11 +144,13 @@ export function recordCallsFromEvents(
   const references = new Set<string>();
   const collectTemplate = (template: WorkflowValueTemplate): void => {
     if (template.type === "private") references.add(template.reference);
-    else if (template.type === "object") Object.values(template.entries).forEach(collectTemplate);
-    else if (template.type === "array") template.items.forEach(collectTemplate);
-    else if (template.type === "program") {
+    else if (template.type === "object") {
+      for (const entry of Object.values(template.entries)) collectTemplate(entry);
+    } else if (template.type === "array") {
+      for (const item of template.items) collectTemplate(item);
+    } else if (template.type === "program") {
       collectTemplate(template.source);
-      template.holes.forEach((hole) => collectTemplate(hole.binding));
+      for (const hole of template.holes) collectTemplate(hole.binding);
     }
   };
   const collect = (source: WorkflowValueSource): void => {
@@ -156,7 +158,7 @@ export function recordCallsFromEvents(
     else if (source.kind === "template") collectTemplate(source.template);
   };
   for (const step of recipe.workflow.steps) {
-    step.arguments.forEach((argument) => collect(argument.source));
+    for (const argument of step.arguments) collect(argument.source);
   }
   for (const entry of recipe.workflow.heldOut?.inputs ?? []) references.add(entry.reference);
   for (const entry of recipe.workflow.heldOut?.observed ?? []) references.add(entry.reference);
