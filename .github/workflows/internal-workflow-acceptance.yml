@@ -1,0 +1,55 @@
+name: Internal workflow acceptance
+
+on:
+  push:
+    branches: [gwc2-work]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: internal-workflow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve exact tested source
+        run: git archive --format=tar HEAD -o "$RUNNER_TEMP/workflow-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workflow-source-${{ github.sha }}
+          path: ${{ runner.temp }}/workflow-source.tar
+          retention-days: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Preserve isolated replay runtime
+        run: |
+          pnpm --filter @resin/runtime deploy --legacy --prod "$RUNNER_TEMP/replay-runtime"
+          tar -czf "$RUNNER_TEMP/replay-runtime.tgz" -C "$RUNNER_TEMP/replay-runtime" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: replay-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/replay-runtime.tgz
+          retention-days: 1
+      - name: Capture, local privacy, and replay regressions
+        run: |
+          umask 022
+          pnpm exec vitest run apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
+      - name: Typecheck
+        run: pnpm typecheck

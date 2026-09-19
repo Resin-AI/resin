@@ -8,10 +8,7 @@
  * change here.
  */
 
-import {
-  applyProgramTokenValues,
-  tokenizeProgram,
-} from "@resin/contracts";
+import { applyProgramTokenValues, tokenizeProgram } from "@resin/contracts";
 import type {
   RecordedWorkflow,
   WorkflowJsonValue,

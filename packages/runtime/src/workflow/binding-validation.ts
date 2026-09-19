@@ -455,6 +455,46 @@ function demonstratedTokenValue(
  * Returns undefined when the recording offers no demonstration, which leaves every candidate a
  * proposal — reported, never frozen into a binding.
  */
+/** Selects an own JSON leaf; malformed paths never silently collapse to the whole argument. */
+function demonstratedValueAtPath(
+  supplied: WorkflowJsonValue,
+  path: WorkflowValuePath,
+): WorkflowJsonValue | undefined {
+  let value: WorkflowJsonValue = supplied;
+  for (const part of path) {
+    if (typeof part === "number") {
+      if (!Number.isInteger(part) || part < 0 || !Array.isArray(value) || part >= value.length) {
+        return undefined;
+      }
+      value = value[part]!;
+    } else {
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        !Object.hasOwn(value, part)
+      ) {
+        return undefined;
+      }
+      value = value[part]!;
+    }
+  }
+  return value;
+}
+
+/** The proposed input's recorded type must agree with the demonstration, without coercion. */
+function matchesDemonstratedType(
+  value: WorkflowJsonValue,
+  type: "string" | "number" | "boolean" | "object" | "array",
+): boolean {
+  if (type === "array") return Array.isArray(value);
+  if (type === "object")
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  if (type === "boolean") return typeof value === "boolean";
+  return typeof value === "string";
+}
+
 export async function demonstrationEnvironment(params: {
   plan: RecordedWorkflow;
   candidates: readonly WorkflowBindingCandidate[];
@@ -467,7 +507,17 @@ export async function demonstrationEnvironment(params: {
   if (demonstration === undefined) return undefined;
   const resolve = params.resolvePrivate;
   if (resolve === undefined) return undefined;
-  const inputs: Record<string, WorkflowJsonValue> = {};
+  const inputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  const conflictingInputs = new Set<string>();
+  const values = new Map<string, Promise<WorkflowJsonValue>>();
+  const resolveOnce = (reference: string): Promise<WorkflowJsonValue> => {
+    let value = values.get(reference);
+    if (value === undefined) {
+      value = Promise.resolve().then(() => resolve(reference));
+      values.set(reference, value);
+    }
+    return value;
+  };
   for (const candidate of params.candidates) {
     if (candidate.proposed.kind !== "input") continue;
     const entry = demonstration.inputs.find(
@@ -478,16 +528,31 @@ export async function demonstrationEnvironment(params: {
     // A token candidate is about one position of the program the argument's text holds, so the
     // value the replay must bind is the token's own value — read out of the text the repeat
     // actually ran, not out of the recorded text the candidate is proposed against.
-    if (candidate.path[0] === "tokens") {
-      const token = demonstratedTokenValue(params.plan, candidate, await resolve(entry.reference));
-      if (token !== undefined) inputs[candidate.proposed.name] = token;
+    const supplied = await resolveOnce(entry.reference);
+    const value =
+      candidate.path[0] === "tokens"
+        ? demonstratedTokenValue(params.plan, candidate, supplied)
+        : demonstratedValueAtPath(supplied, candidate.path);
+    const name = candidate.proposed.name;
+    if (
+      value === undefined ||
+      !matchesDemonstratedType(value, candidate.proposed.type) ||
+      conflictingInputs.has(name)
+    ) {
       continue;
     }
-    inputs[candidate.proposed.name] = await resolve(entry.reference);
+    if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) {
+      // One input cannot simultaneously represent two different caller values. Removing the
+      // ambiguous value leaves the proposals unestablished instead of choosing the last writer.
+      delete inputs[name];
+      conflictingInputs.add(name);
+      continue;
+    }
+    inputs[name] = value;
   }
   const observed: Record<string, WorkflowJsonValue> = {};
   for (const entry of demonstration.observed) {
-    observed[entry.stepId] = await resolve(entry.reference);
+    observed[entry.stepId] = await resolveOnce(entry.reference);
   }
   return {
     adapters: params.adapters,
@@ -525,8 +590,16 @@ async function replayPlanOnce(
   );
   const reproduced: string[] = [];
   const missed: Array<{ stepId: string; detail: string }> = [];
-  for (const entry of Object.entries(environment.observed)) {
-    const [stepId, observed] = entry;
+  for (const step of plan.steps) {
+    const stepId = step.id;
+    if (!Object.hasOwn(environment.observed, stepId)) {
+      missed.push({
+        stepId,
+        detail: `the demonstration did not observe step '${stepId}', so the whole plan is unverified`,
+      });
+      continue;
+    }
+    const observed = environment.observed[stepId];
     if (execution === undefined) {
       missed.push({
         stepId,
@@ -585,6 +658,10 @@ export async function confirmPromotedPlan(params: {
   let unattributed = false;
   for (let round = 0; round < rounds && replay.missed.length > 0; round += 1) {
     const missedStepId = replay.missed[0]!.stepId;
+    if (!Object.hasOwn(params.environment.observed, missedStepId)) {
+      unattributed = true;
+      break;
+    }
     const blamed =
       accepted.find((candidate) => candidate.stepId === missedStepId) ??
       accepted.find(
@@ -673,9 +750,31 @@ export async function validateBindingCandidates(params: {
   // Replays may write files. The workspace is guaranteed to exist before any run, and the adapters
   // handed in are expected to execute there — never in the caller's project.
   await mkdir(environment.workspaceDir, { recursive: true });
+  // Older capture versions proposed the entire executable argument from discovery's schema.
+  // Replacing it proves only that another program ran, not that the recorded program accepts new
+  // data. Exclude such proposals from ALL A/B plans too: otherwise a whole-source replacement can
+  // shadow a legitimate token binding and make its evidence appear inconclusive. Explicit inputs
+  // already present in an authored plan and result-to-program dependencies are unaffected.
+  const sourceInputs = new Set(
+    candidates.filter(
+      (candidate) =>
+        candidate.proposed.kind === "input" &&
+        candidate.path.length === 0 &&
+        plan.steps.find((step) => step.id === candidate.stepId)?.callable.program?.argument ===
+          candidate.argument,
+    ),
+  );
+  const dataCandidates = candidates.filter((candidate) => !sourceInputs.has(candidate));
   const outcomes: CandidateValidationOutcome[] = [];
   for (const candidate of candidates) {
-    outcomes.push(await evaluateCandidate(plan, candidate, candidates, environment));
+    outcomes.push(
+      sourceInputs.has(candidate)
+        ? refused(
+            candidate,
+            "the whole executable program is the recorded implementation, not an inferred caller input; propose the changing data positions within it instead",
+          )
+        : await evaluateCandidate(plan, candidate, dataCandidates, environment),
+    );
   }
   return outcomes;
 }

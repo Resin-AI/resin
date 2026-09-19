@@ -149,6 +149,7 @@ export class RedactionEngine {
       entropyThreshold: config.entropyThreshold ?? 4.3,
       maxStringLength: config.maxStringLength ?? 65536,
       localOnlyFields: config.localOnlyFields ?? DEFAULT_LOCAL_ONLY_FIELDS,
+      onRedact: config.onRedact,
     };
 
     this.scanner =
