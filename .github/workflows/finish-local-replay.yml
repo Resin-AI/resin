@@ -33,7 +33,7 @@ jobs:
           set -euo pipefail
           sed -i 's/private redactedArguments: Record<string, WorkflowJsonValue>/private redactedArguments: Record<string, unknown>/' .ci/finish-local-replay.py
           python3 .ci/finish-local-replay.py
-          git rm .ci/finish-local-replay.py .github/workflows/finish-local-replay.yml
+          git rm -f .ci/finish-local-replay.py .github/workflows/finish-local-replay.yml
       - uses: actions/setup-node@v4
         with:
           node-version: 22
