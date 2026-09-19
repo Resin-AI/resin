@@ -38,6 +38,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
+      - name: Typecheck
+        run: pnpm typecheck
       - name: Preserve isolated replay runtime
         run: |
           pnpm --filter @resin/runtime deploy --legacy --prod "$RUNNER_TEMP/replay-runtime"
@@ -50,6 +52,4 @@ jobs:
       - name: Capture, local privacy, and replay regressions
         run: |
           umask 022
-          pnpm exec vitest run apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
-      - name: Typecheck
-        run: pnpm typecheck
+          pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --minWorkers=1 apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
