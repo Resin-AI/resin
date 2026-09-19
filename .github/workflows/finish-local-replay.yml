@@ -31,6 +31,7 @@ jobs:
       - name: Apply guarded source correction
         run: |
           set -euo pipefail
+          sed -i 's/private redactedArguments: Record<string, WorkflowJsonValue>/private redactedArguments: Record<string, unknown>/' .ci/finish-local-replay.py
           python3 .ci/finish-local-replay.py
           git rm .ci/finish-local-replay.py .github/workflows/finish-local-replay.yml
       - uses: actions/setup-node@v4
@@ -57,6 +58,19 @@ jobs:
           pnpm lint
           pnpm test
           git add apps/observer/src apps/observer/tests/analytics packages/runtime/tests/workflow/native-private-reuse.test.mjs
+      - name: Preserve source and diagnostics if a check fails
+        if: failure()
+        run: |
+          git diff HEAD > "$RUNNER_TEMP/local-replay.diff"
+          tar -czf "$RUNNER_TEMP/local-replay-source.tgz" --exclude=node_modules --exclude=.git --exclude=.turbo apps packages
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: local-replay-diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/local-replay.diff
+            ${{ runner.temp }}/local-replay-source.tgz
+          retention-days: 1
       - name: Fast-forward verified source only if the branch is unchanged
         env:
           GH_TOKEN: ${{ github.token }}
