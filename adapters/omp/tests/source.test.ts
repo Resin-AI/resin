@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
+import { OmpRecordDecoder } from "../src/decoder.js";
 import { OmpSessionEventSource } from "../src/source.js";
 
 describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
@@ -60,6 +61,60 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
 
       await source.close();
     } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("decodes an appended custom session exit once while draining subsequent buffered records", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-exit-"));
+    let source: OmpSessionEventSource | undefined;
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const timestamp = "2026-09-19T16:21:41.724Z";
+      await fsp.writeFile(transcriptPath, "");
+      source = new OmpSessionEventSource({
+        sessionId: "session-custom-exit",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        transcriptPath,
+        status: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        metadata: {},
+      });
+      expect(await source.readBatch()).toEqual([]);
+
+      await fsp.appendFile(
+        transcriptPath,
+        `${[
+          JSON.stringify({
+            type: "custom",
+            customType: "session_exit",
+            data: { reason: "dispose", kind: "normal", recordedAt: timestamp },
+            id: "exit-record",
+            parentId: "previous-transcript-record",
+            timestamp,
+          }),
+          JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "Buffered final message",
+            timestamp,
+          }),
+        ].join("\n")}\n`,
+      );
+      const decoder = new OmpRecordDecoder();
+      const terminalBatch = await source.readBatch(1);
+      expect(terminalBatch.flatMap((record) => decoder.decode(record) ?? [])).toMatchObject([
+        { type: "session_lifecycle", lifecycleType: "end", sessionId: "session-custom-exit" },
+      ]);
+      const remainingBatch = await source.readBatch(1);
+      expect(remainingBatch.flatMap((record) => decoder.decode(record) ?? [])).toMatchObject([
+        { type: "message", content: "Buffered final message", sessionId: "session-custom-exit" },
+      ]);
+      expect(await source.readBatch()).toEqual([]);
+    } finally {
+      await source?.close();
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
   });

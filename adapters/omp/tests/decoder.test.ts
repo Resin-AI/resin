@@ -1281,6 +1281,48 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       metadata: {},
     });
 
+    it("normalizes the OMP v18.2.6 custom session exit without treating its parent as a subagent", () => {
+      const record = v18Record(7, {
+        type: "custom",
+        customType: "session_exit",
+        data: {
+          reason: "dispose",
+          kind: "normal",
+          recordedAt: "2026-09-19T16:21:41.724Z",
+        },
+        id: "exit-record",
+        parentId: "previous-transcript-record",
+        timestamp: "2026-09-19T16:21:41.724Z",
+      });
+      expect(decoder.decode(record, { parentEventId: "previous-normalized-event" })).toMatchObject({
+        type: "session_lifecycle",
+        lifecycleType: "end",
+        exitReason: "dispose",
+        sessionId: "session-v18-rwr-1",
+        timestamp: record.timestamp,
+        causalRef: { causalSequence: 7, parentId: "previous-normalized-event" },
+      });
+    });
+
+    it.each([
+      { type: "custom", customType: "session_exit" },
+      { type: "custom", customType: "session_exit", data: null },
+      { type: "custom", customType: "session_exit", data: [] },
+      { type: "custom", customType: "session_exit", data: { reason: "dispose" } },
+      {
+        type: "custom",
+        customType: "session_exit",
+        data: { kind: "future-kind", reason: "dispose" },
+      },
+      { type: "custom", customType: "session_exit", data: { kind: "normal", reason: 42 } },
+      { type: "custom", customType: "unrelated", data: { kind: "normal", reason: "dispose" } },
+    ])("does not invent terminal lifecycle from unsupported custom record %j", (payload) => {
+      expect(decoder.decode(v18Record(1, payload))).toMatchObject({
+        type: "unknown_passthrough",
+        rawPayload: payload,
+      });
+    });
+
     it("decodes genuine OMP v18.1.1 read-write-read session fixture without noise or duplicate events", async () => {
       const fixturePath = path.join(fixturesDir, "session-v18-read-write-read.jsonl");
       const content = await fsp.readFile(fixturePath, "utf8");

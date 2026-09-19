@@ -9582,6 +9582,14 @@ var init_dist4 = __esm({
   }
 });
 
+// adapters/omp/dist/decoder.js
+var init_decoder4 = __esm({
+  "adapters/omp/dist/decoder.js"() {
+    "use strict";
+    init_dist();
+  }
+});
+
 // adapters/omp/dist/discovery.js
 import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify3 } from "node:util";
@@ -9590,6 +9598,7 @@ var init_discovery3 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
     init_zod();
+    init_decoder4();
     execFileAsync3 = promisify3(execFile3);
     ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 6e4;
     OmpWorkspaceEntrySchema = external_exports.union([
@@ -9678,14 +9687,6 @@ var init_adapter4 = __esm({
     init_discovery3();
     init_refresh4();
     init_source4();
-  }
-});
-
-// adapters/omp/dist/decoder.js
-var init_decoder4 = __esm({
-  "adapters/omp/dist/decoder.js"() {
-    "use strict";
-    init_dist();
   }
 });
 

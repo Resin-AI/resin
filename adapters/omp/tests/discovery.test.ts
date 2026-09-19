@@ -494,6 +494,84 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
+  it.each(["full", "tail"])(
+    "recognizes the genuine custom session exit in the %s transcript scan",
+    async (scan) => {
+      const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-custom-exit-"));
+      try {
+        const transcriptPath = path.join(tmpDir, "session.jsonl");
+        const timestamp = "2026-09-19T16:21:41.724Z";
+        const rows = [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "custom-exit-session",
+            cwd: tmpDir,
+            timestamp,
+          }),
+        ];
+        if (scan === "tail") {
+          const filler = JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: "X".repeat(500),
+          });
+          rows.push(...Array.from({ length: 300 }, () => filler));
+        }
+        rows.push(
+          JSON.stringify({
+            type: "custom",
+            customType: "session_exit",
+            data: { reason: "dispose", kind: "normal", recordedAt: timestamp },
+            id: "exit-record",
+            parentId: "previous-transcript-record",
+            timestamp,
+          }),
+        );
+        await fsp.writeFile(transcriptPath, `${rows.join("\n")}\n`);
+        await fsp.utimes(transcriptPath, new Date(timestamp), new Date(timestamp));
+
+        const parsed = await inspectTranscriptFile(transcriptPath, { now: new Date(timestamp) });
+        expect(parsed).toMatchObject({
+          sessionId: "custom-exit-session",
+          status: "completed",
+          hasExplicitLifecycle: true,
+          updatedAt: timestamp,
+        });
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { type: "custom", customType: "session_exit" },
+    { type: "custom", customType: "session_exit", data: null },
+    { type: "custom", customType: "session_exit", data: [] },
+    { type: "custom", customType: "session_exit", data: { reason: "dispose" } },
+    {
+      type: "custom",
+      customType: "session_exit",
+      data: { kind: "future-kind", reason: "dispose" },
+    },
+    { type: "custom", customType: "session_exit", data: { kind: "normal", reason: 42 } },
+    { type: "custom", customType: "unrelated", data: { kind: "normal", reason: "dispose" } },
+  ])("does not discover unsupported custom record %j as explicit completion", async (payload) => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-invalid-exit-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const now = new Date("2026-09-19T16:21:41.724Z");
+      await fsp.writeFile(transcriptPath, `${JSON.stringify(payload)}\n`);
+      await fsp.utimes(transcriptPath, now, now);
+      expect(await inspectTranscriptFile(transcriptPath, { now })).toMatchObject({
+        status: "active",
+        hasExplicitLifecycle: false,
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("assigns sessions only to the exact workspace owning the header cwd", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-workspace-isolation-"));
     try {

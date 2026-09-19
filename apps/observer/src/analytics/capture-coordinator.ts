@@ -574,8 +574,9 @@ export class TrajectoryCaptureCoordinator {
           }
         }
 
-        // Check if session has reached a terminal state
-        if (!emitter.isFinalized()) {
+        // A discovered terminal snapshot may still have unread source batches.
+        // Infer completion from status only on the tailer's drained notification.
+        if (records.length === 0 && !emitter.isFinalized()) {
           if (session.status === "completed") {
             emitter.finalize({ status: "success" });
           } else if (session.status === "failed") {
@@ -774,9 +775,10 @@ export class TrajectoryCaptureCoordinator {
         }
 
         const isTerminalStatus =
-          session.status === "completed" ||
-          session.status === "failed" ||
-          session.status === "interrupted";
+          records.length === 0 &&
+          (session.status === "completed" ||
+            session.status === "failed" ||
+            session.status === "interrupted");
 
         if (isTerminalStatus && !hasExplicitTerminal && latestTail) {
           const syntheticEvent = this.createSyntheticTerminalEvent(session, latestTail);

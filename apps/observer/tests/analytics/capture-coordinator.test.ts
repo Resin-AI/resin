@@ -294,6 +294,8 @@ describe("TrajectoryCaptureCoordinator", () => {
     ];
 
     await coordinator.handleRecords(session, records, ack);
+    expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+    await coordinator.handleRecords(session, [], async () => {});
 
     expect(ack).toHaveBeenCalledTimes(1);
     expect(mockObservationClient.sendTrajectoryObservationBatch).toHaveBeenCalledTimes(1);
@@ -545,6 +547,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(sendObservationBatchCalled).toBe(true);
       expect(sendObsResolvedBeforeAck).toBe(true);
       expect(ackCalled).toBe(true);
+      await coordinator.handleRecords(session, [], async () => {});
       expect(mockObservationClient.sendTrajectoryObservationBatch).not.toHaveBeenCalled();
       expect(submittedObservations.length).toBe(3);
       // The uploaded batch is sorted by event timestamp before submission, so the
@@ -649,6 +652,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       shouldFail = false;
       const ackSuccess = vi.fn(async () => {});
       await coordinator.handleRecords(session, records, ackSuccess);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ackSuccess).toHaveBeenCalledTimes(1);
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
@@ -743,11 +747,13 @@ describe("TrajectoryCaptureCoordinator", () => {
 
         const ack1 = vi.fn(async () => {});
         await coordinator.handleRecords(session, [promptRec, compRec], ack1);
+        expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+        await coordinator.handleRecords(session, [], async () => {});
 
         expect(ack1).toHaveBeenCalledTimes(1);
-        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(2);
         expect(submittedObservations.length).toBe(3);
-        expect(submittedObservations.map((event) => event.timestamp)).toEqual(
+        expect(submittedObservations.map((event) => event.timestamp).sort()).toEqual(
           [promptRec.timestamp, compRec.timestamp, terminalTimestamp].sort(),
         );
         // Wire order follows timestamps, while the local sink and causal references
@@ -784,7 +790,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         const ack2 = vi.fn(async () => {});
         await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 3)], ack2);
         expect(ack2).toHaveBeenCalledTimes(1);
-        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+        expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(2);
       },
     );
 
@@ -854,9 +860,11 @@ describe("TrajectoryCaptureCoordinator", () => {
       const promptRec = createPromptRecord(session.sessionId, 1);
       const ack = vi.fn(async () => {});
       await coordinator.handleRecords(session, [promptRec], ack);
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
-      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(1);
+      expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(2);
       expect(submittedObservations.length).toBe(2);
 
       const terminalEvents = submittedObservations.filter(
@@ -1122,9 +1130,10 @@ describe("TrajectoryCaptureCoordinator", () => {
         createPromptRecord(session.sessionId, 1),
         createCompletionRecord(session.sessionId, 2),
       ];
+      await coordinator.handleRecords(session, records, async () => {});
 
       // First attempt fails
-      await expect(coordinator.handleRecords(session, records, ackFail)).rejects.toThrow(
+      await expect(coordinator.handleRecords(session, [], ackFail)).rejects.toThrow(
         "Cloud service 503",
       );
 
@@ -1134,7 +1143,7 @@ describe("TrajectoryCaptureCoordinator", () => {
       // Second attempt (retry) succeeds
       shouldFail = false;
       const ackSuccess = vi.fn(async () => {});
-      await coordinator.handleRecords(session, records, ackSuccess);
+      await coordinator.handleRecords(session, [], ackSuccess);
 
       expect(ackSuccess).toHaveBeenCalledTimes(1);
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
@@ -1441,6 +1450,11 @@ describe("TrajectoryCaptureCoordinator", () => {
           ackC,
         ),
       ]);
+      await Promise.all(
+        [sessionA, sessionB, sessionC].map((session) =>
+          coordinator.handleRecords(session, [], async () => {}),
+        ),
+      );
 
       expect(ackA).toHaveBeenCalledTimes(1);
       expect(ackB).toHaveBeenCalledTimes(1);
@@ -1608,6 +1622,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         ],
         ack,
       );
+      await coordinator.handleRecords(session, [], async () => {});
 
       expect(ack).toHaveBeenCalledTimes(1);
       expect(sentObservation).not.toBeNull();

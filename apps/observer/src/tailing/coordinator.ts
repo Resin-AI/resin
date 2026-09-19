@@ -56,6 +56,8 @@ export interface ObserverCoordinatorOptions {
   backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
   defaultMaxInFlightBatches?: number;
   captureUserSessionsOnly?: boolean;
+  /** Opt into terminal catchup during this run; historical sessions are never attached. */
+  captureTerminalSessions?: (session: HarnessSession, startedAt: number) => boolean;
   terminalNotificationTimeoutMs?: number;
   logger?: CoordinatorLogger;
 }
@@ -77,11 +79,17 @@ export class ObserverCoordinator extends EventEmitter {
   private readonly pollIntervalMs: number;
   private readonly trackedWorkspaces = new Map<string, HarnessWorkspace>();
   private readonly activeSessionStates = new Map<string, HarnessSession>();
+  private readonly terminalNotifications = new Map<string, Promise<void>>();
   private readonly backfillPolicyForSession?: (
     session: HarnessSession,
   ) => BackfillPolicy | undefined;
   private readonly defaultMaxInFlightBatches?: number;
   private readonly captureUserSessionsOnly: boolean;
+  private readonly captureTerminalSessions?: (
+    session: HarnessSession,
+    startedAt: number,
+  ) => boolean;
+  private startedAt?: number;
   private readonly terminalNotificationTimeoutMs: number;
   private readonly logger?: CoordinatorLogger;
   private readonly loggedIgnoredAgentSessions = new Set<string>();
@@ -99,6 +107,7 @@ export class ObserverCoordinator extends EventEmitter {
     this.backfillPolicyForSession = options.backfillPolicyForSession;
     this.defaultMaxInFlightBatches = options.defaultMaxInFlightBatches;
     this.captureUserSessionsOnly = options.captureUserSessionsOnly ?? true;
+    this.captureTerminalSessions = options.captureTerminalSessions;
     this.terminalNotificationTimeoutMs = options.terminalNotificationTimeoutMs ?? 5000;
     this.logger = options.logger;
     this.tailer =
@@ -173,6 +182,7 @@ export class ObserverCoordinator extends EventEmitter {
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
+    this.startedAt = Date.now();
     this.isRunning = true;
 
     try {
@@ -272,7 +282,23 @@ export class ObserverCoordinator extends EventEmitter {
                 currentDiscoveredSessions.add(session.sessionId);
                 const previousSession = this.activeSessionStates.get(session.sessionId);
 
-                if (session.status === "active") {
+                const isTerminal =
+                  session.status === "completed" ||
+                  session.status === "failed" ||
+                  session.status === "interrupted";
+                const activityAt = Date.parse(session.updatedAt);
+                const catchUpTerminal =
+                  isTerminal &&
+                  !previousSession &&
+                  this.startedAt !== undefined &&
+                  activityAt >= this.startedAt &&
+                  activityAt <= Date.now() &&
+                  this.captureTerminalSessions?.(session, this.startedAt) === true;
+                if (isTerminal && !catchUpTerminal && !previousSession) {
+                  continue;
+                }
+
+                if (session.status === "active" || catchUpTerminal) {
                   if (this.captureUserSessionsOnly && session.metadata?.sessionKind === "agent") {
                     if (!this.loggedIgnoredAgentSessions.has(session.sessionId)) {
                       this.loggedIgnoredAgentSessions.add(session.sessionId);
@@ -315,21 +341,30 @@ export class ObserverCoordinator extends EventEmitter {
                     });
                     summary.sessionsAttached++;
                   }
-                  this.activeSessionStates.set(session.sessionId, session);
-                } else if (
-                  session.status === "completed" ||
-                  session.status === "failed" ||
-                  session.status === "interrupted"
-                ) {
+                }
+                if (isTerminal) {
                   const activeSessions = this.tailer.getActiveSessions();
                   if (activeSessions.includes(session.sessionId)) {
-                    if (previousSession?.status === "active") {
+                    if (previousSession?.status === "active" || !previousSession) {
+                      let notification = this.terminalNotifications.get(session.sessionId);
+                      if (!notification) {
+                        notification = this.tailer
+                          .notifyTerminalState(session)
+                          .then(() => {
+                            this.activeSessionStates.set(session.sessionId, session);
+                          })
+                          .finally(() => {
+                            this.terminalNotifications.delete(session.sessionId);
+                          });
+                        this.terminalNotifications.set(session.sessionId, notification);
+                      }
+                      // A timeout bounds this poll, not the drain itself. Later polls must
+                      // join the same drain rather than deliver completion a second time.
                       await withTimeout(
-                        this.tailer.notifyTerminalState(session),
+                        notification,
                         this.terminalNotificationTimeoutMs,
                         `notifyTerminalState:${session.sessionId}`,
                       );
-                      this.activeSessionStates.set(session.sessionId, session);
                     }
                     await this.tailer.detachSession(session.sessionId);
                     summary.sessionsDetached++;

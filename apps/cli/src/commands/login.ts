@@ -194,9 +194,10 @@ export async function performPairing(
 
   if (!options.force && isReusableCredentialRecord(priorSnapshot, cloudUrl)) {
     const claims = priorSnapshot.claims;
-    const accountId = options.accountId || claims.accountId;
-    const workspaceId = options.workspaceId || priorSnapshot.workspaceId || claims.workspaceId;
-    const deviceId = options.deviceId || priorSnapshot.deviceId || claims.deviceId;
+    // Requested IDs are pairing hints, never authority for the authenticated identity.
+    const accountId = claims.accountId;
+    const workspaceId = claims.workspaceId;
+    const deviceId = claims.deviceId;
     const userId = claims.userId ?? claims.subject;
 
     return {
@@ -273,9 +274,9 @@ export async function performPairing(
     throw new Error(result.error ?? "Device authentication bootstrap failed");
   }
 
-  const accountId = options.accountId || result.claims.accountId;
-  const workspaceId = options.workspaceId || result.workspaceId || result.claims.workspaceId;
-  const deviceId = options.deviceId || result.deviceId || result.claims.deviceId;
+  const accountId = result.claims.accountId;
+  const workspaceId = result.claims.workspaceId;
+  const deviceId = result.claims.deviceId;
   const userId = result.claims.userId ?? result.claims.subject;
 
   // Externally managed daemons must reload credentials without touching user services.
@@ -532,9 +533,9 @@ export async function loginCommand(
       const priorSnapshot = await authClient.snapshotCredentials();
       if (isReusableCredentialRecord(priorSnapshot, cloudUrl)) {
         const claims = priorSnapshot.claims;
-        const accountId = flags.accountId || claims.accountId;
-        const workspaceId = flags.workspaceId || priorSnapshot.workspaceId || claims.workspaceId;
-        const deviceId = flags.deviceId || priorSnapshot.deviceId || claims.deviceId;
+        const accountId = claims.accountId;
+        const workspaceId = claims.workspaceId;
+        const deviceId = claims.deviceId;
         const userId = claims.userId ?? claims.subject;
 
         await restartActiveServiceIfRunning(home, options.fsBridge);
