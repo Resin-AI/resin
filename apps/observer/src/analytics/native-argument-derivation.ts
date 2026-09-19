@@ -196,6 +196,11 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
         if (candidates.length >= MAX_CANDIDATES) break;
         if (!declared.has(argument)) continue;
         if (heldLocally.has(argument)) continue;
+        // Discovery describes the executor's API, not the reusable workflow's inputs. Its program
+        // argument is the implementation we recorded. Lifting that entire string asks the next
+        // caller to implement the work again and competes with legitimate data-token proposals.
+        // Program identity comes from capture, never from the tool or argument name.
+        if (call.program?.argument === argument) continue;
         // Only a string is offered. A number or a boolean at a declared position is far more often
         // a fixed setting than a value a caller would vary, and this recording cannot separate the
         // two — so the conservative reading wins and the value stays as recorded.
@@ -360,7 +365,7 @@ function mintedBefore(
   argumentValues: ReadonlyArray<ReadonlySet<string>>,
 ): boolean {
   return calls.slice(0, before).some((_earlier, index) => {
-    if (!resultValues[index]!.has(value)) return false;
+    if (!resultValues[producerIndex]!.has(value)) return false;
     return !argumentValues[index]!.has(value);
   });
 }
