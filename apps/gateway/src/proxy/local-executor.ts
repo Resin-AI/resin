@@ -133,6 +133,11 @@ export interface LocalArtifactExecutorOptions {
   recordedWorkflowAdapters?: (host: RecordedWorkflowHostContext) => readonly RuntimeAdapter[];
   /** Store private workflow references resolve against; defaults to the daemon store. */
   privateValueStore?: PrivateValueStore;
+  /**
+   * Authoritative tenant that owns captured private values. This is distinct from the local
+   * project UUID in WorkspaceContext, which scopes catalog installation and execution.
+   */
+  privateValueOwnerWorkspaceId?: string;
 }
 
 function checkExecutable(filePath: string): boolean {
@@ -322,6 +327,7 @@ export class LocalArtifactExecutor {
   private readonly stepInvoker?: LocalArtifactExecutorOptions["stepInvoker"];
   private readonly recordedWorkflowAdapters?: LocalArtifactExecutorOptions["recordedWorkflowAdapters"];
   private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
+  private readonly privateValueOwnerWorkspaceId?: string;
   private managedToolAccess?: ManagedToolAccess;
 
   constructor(options: LocalArtifactExecutorOptions) {
@@ -339,6 +345,7 @@ export class LocalArtifactExecutor {
     this.stepInvoker = options.stepInvoker;
     this.recordedWorkflowAdapters = options.recordedWorkflowAdapters;
     this.privateValueStore = options.privateValueStore;
+    this.privateValueOwnerWorkspaceId = options.privateValueOwnerWorkspaceId;
   }
 
   setManagedToolAccess(access: ManagedToolAccess): void {
@@ -1128,17 +1135,18 @@ export class LocalArtifactExecutor {
       permissions: [],
     };
     // A private reference is a name, not a capability: the plan may resolve only the references
-    // it declares, and only when the value was recorded for the workspace this invocation runs
-    // in. Both identities must be present, well formed, and equal — a missing or malformed one is
-    // unavailable, never global, so an unscoped entry is not claimed by whoever reads it first and
-    // an invocation without a workspace identity resolves nothing. A workflow that merely knows
+    // it declares, and only when the value was recorded for the tenant authorized by this
+    // invocation. Paired cloud identity is that tenant; WorkspaceContext.workspaceId is the local
+    // project UUID and remains the fallback for offline/local-only execution. Both identities must
+    // be present, well formed, and equal — a missing or malformed one is unavailable, never global,
+    // so an unscoped entry is not claimed by whoever reads it first. A workflow that merely knows
     // another recording's exact reference string is refused here: the recorded origin decides,
     // never the shape of the string.
     const declaredPrivateReferences = new Set(plan.privateReferences ?? []);
-    const executingWorkspaceId = context.workspaceId;
+    const executingWorkspaceId = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
     const callable = instantiateRecordedWorkflow(artifact, {
       adapters,
-      ...(executingWorkspaceId ? { access: { workspaceId: executingWorkspaceId } } : {}),
+      access: { workspaceId: executingWorkspaceId },
       resolvePrivate: (reference: string, access?: { workspaceId?: string }) => {
         if (!declaredPrivateReferences.has(reference)) {
           throw new Error(

@@ -257,6 +257,7 @@ export async function createProductionProxyRuntime(
         requireSignature: localKeyStore ? true : undefined,
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+        privateValueOwnerWorkspaceId: identity.workspaceId,
         // A plan recorded from ordinary tools runs through the families this host can really
         // reach: a recorded program on the host, and a tool by name either over the connection the
         // recording names or through the same router the original call used, so scope, pins and
