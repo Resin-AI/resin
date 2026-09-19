@@ -41,19 +41,19 @@
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
-    "@oxlint/plugins": "1.80.0",
-    "@types/node": "^22.13.4",
+    "@oxlint/plugins": "1.83.0",
+    "@types/node": "^22.20.3",
     "esbuild": "0.28.2",
-    "oxlint": "1.80.0",
-    "turbo": "^2.4.4",
+    "oxlint": "1.83.0",
+    "turbo": "^2.10.13",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5",
-    "yaml": "2.8.3"
+    "yaml": "2.9.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"],
     "overrides": {
-      "yaml": "2.8.3"
+      "yaml": "2.9.1"
     }
   }
 }
