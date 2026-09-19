@@ -53,16 +53,16 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec biome check --write apps/observer/src/analytics/private-value-store.ts apps/observer/src/analytics/workflow-call-recorder.ts apps/observer/src/normalization/local-workflow-payload.ts apps/observer/src/normalization/pipeline.ts apps/observer/tests/analytics/immutable-private-store.test.ts apps/observer/tests/analytics/workflow-private-replay.test.ts apps/observer/tests/analytics/native-supporting-results.test.ts packages/runtime/tests/workflow/native-private-reuse.test.mjs
           pnpm build
-          pnpm exec vitest run apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
+          pnpm exec vitest run --no-file-parallelism apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
           pnpm typecheck
           pnpm lint
-          pnpm test
+          pnpm test --no-file-parallelism
           git add apps/observer/src apps/observer/tests/analytics packages/runtime/tests/workflow/native-private-reuse.test.mjs
-      - name: Preserve source and diagnostics if a check fails
+      - name: Preserve source and isolated test dependencies if a check fails
         if: failure()
         run: |
           git diff HEAD > "$RUNNER_TEMP/local-replay.diff"
-          tar -czf "$RUNNER_TEMP/local-replay-source.tgz" --exclude=node_modules --exclude=.git --exclude=.turbo apps packages
+          tar -czf "$RUNNER_TEMP/local-replay-source.tgz" --exclude=.git --exclude=.turbo --exclude=.github .
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
