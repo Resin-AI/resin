@@ -13,7 +13,12 @@ export type PrivateValueRepresentation = "literal" | "redacted";
 
 export interface PrivateValueStore {
   get(key: string): unknown | undefined;
-  set(key: string, value: unknown, origin?: PrivateValueOrigin, representation?: PrivateValueRepresentation): void;
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation?: PrivateValueRepresentation,
+  ): void;
   origin?(key: string): PrivateValueOrigin | undefined;
   representation?(key: string): PrivateValueRepresentation | undefined;
 }
@@ -31,14 +36,17 @@ export function containsRedactionPlaceholder(value: string): boolean {
 /** Legacy masks are resolved locally; exact originals retain their types and literal text. */
 export function resolvePrivateReference(store: PrivateValueStore, reference: string): unknown {
   const stored = store.get(reference);
-  if (stored === undefined) throw new Error(`private reference '${reference}' is not in the local value store`);
+  if (stored === undefined)
+    throw new Error(`private reference '${reference}' is not in the local value store`);
   if (store.representation?.(reference) === "literal") return stored;
   const substitute = (value: unknown): unknown => {
     if (typeof value === "string") {
       return value.replace(PLACEHOLDER_PATTERN, (placeholder) => {
         const original = store.get(placeholder);
         if (original === undefined) {
-          throw new Error(`private reference '${reference}' needs '${placeholder}', which is not in the local value store`);
+          throw new Error(
+            `private reference '${reference}' needs '${placeholder}', which is not in the local value store`,
+          );
         }
         return typeof original === "string" ? original : JSON.stringify(original);
       });
@@ -69,14 +77,25 @@ interface ImmutableEntry extends PrivateEntry {
 }
 
 function assertSameEntry(current: PrivateEntry, next: PrivateEntry, key: string): void {
-  if (!isDeepStrictEqual(current.value, next.value) || !isDeepStrictEqual(current.origin, next.origin) ||
-      (current.representation ?? "redacted") !== (next.representation ?? "redacted")) {
-    throw new Error(`private value reference '${key}' already exists with different content or origin (different value or owner)`);
+  if (
+    !isDeepStrictEqual(current.value, next.value) ||
+    !isDeepStrictEqual(current.origin, next.origin) ||
+    (current.representation ?? "redacted") !== (next.representation ?? "redacted")
+  ) {
+    throw new Error(
+      `private value reference '${key}' already exists with different content or origin (different value or owner)`,
+    );
   }
 }
 
-function snapshot(value: unknown, origin: PrivateValueOrigin | undefined, representation: PrivateValueRepresentation): PrivateEntry {
-  const result = JSON.parse(JSON.stringify({ value, origin, representation, at: Date.now() })) as PrivateEntry;
+function snapshot(
+  value: unknown,
+  origin: PrivateValueOrigin | undefined,
+  representation: PrivateValueRepresentation,
+): PrivateEntry {
+  const result = JSON.parse(
+    JSON.stringify({ value, origin, representation, at: Date.now() }),
+  ) as PrivateEntry;
   if (!Object.hasOwn(result, "value")) throw new Error("A private reference requires a JSON value");
   return result;
 }
@@ -98,12 +117,18 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   static default(): FilePrivateValueStore {
-    FilePrivateValueStore.shared ??= new FilePrivateValueStore(path.join(os.homedir(), ".resin", "data"));
+    FilePrivateValueStore.shared ??= new FilePrivateValueStore(
+      path.join(os.homedir(), ".resin", "data"),
+    );
     return FilePrivateValueStore.shared;
   }
 
   private immutablePath(key: string): string {
-    return path.join(path.dirname(this.file), "entries-v2", `${createHash("sha256").update(key).digest("hex")}.json`);
+    return path.join(
+      path.dirname(this.file),
+      "entries-v2",
+      `${createHash("sha256").update(key).digest("hex")}.json`,
+    );
   }
 
   private readImmutable(key: string): ImmutableEntry | undefined {
@@ -122,8 +147,12 @@ export class FilePrivateValueStore implements PrivateValueStore {
     } catch {
       throw new Error(`Corrupt local private reference '${key}'`);
     }
-    if (!isPlainObject(value) || value.key !== key || !Object.hasOwn(value, "value") ||
-        (value.representation !== "literal" && value.representation !== "redacted")) {
+    if (
+      !isPlainObject(value) ||
+      value.key !== key ||
+      !Object.hasOwn(value, "value") ||
+      (value.representation !== "literal" && value.representation !== "redacted")
+    ) {
       throw new Error(`Invalid local private reference '${key}'`);
     }
     const entry = value as unknown as ImmutableEntry;
@@ -173,12 +202,17 @@ export class FilePrivateValueStore implements PrivateValueStore {
       const raw: unknown = JSON.parse(fs.readFileSync(this.file, "utf8"));
       if (isPlainObject(raw)) {
         for (const [key, entry] of Object.entries(raw)) {
-          const origin = isPlainObject(entry) && isPlainObject(entry.origin) ? entry.origin as PrivateValueOrigin : undefined;
+          const origin =
+            isPlainObject(entry) && isPlainObject(entry.origin)
+              ? (entry.origin as PrivateValueOrigin)
+              : undefined;
           this.entries.set(key, {
             value: isPlainObject(entry) && "value" in entry ? entry.value : entry,
             at: isPlainObject(entry) && typeof entry.at === "number" ? entry.at : 0,
             ...(origin ? { origin } : {}),
-            ...(isPlainObject(entry) && entry.representation === "literal" ? { representation: "literal" as const } : {}),
+            ...(isPlainObject(entry) && entry.representation === "literal"
+              ? { representation: "literal" as const }
+              : {}),
           });
         }
       }
@@ -190,18 +224,29 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   get(key: string): unknown | undefined {
-    return key.startsWith("private:v2:") ? structuredClone(this.readImmutable(key)?.value) : this.load().get(key)?.value;
+    return key.startsWith("private:v2:")
+      ? structuredClone(this.readImmutable(key)?.value)
+      : this.load().get(key)?.value;
   }
 
   origin(key: string): PrivateValueOrigin | undefined {
-    return key.startsWith("private:v2:") ? structuredClone(this.readImmutable(key)?.origin) : this.load().get(key)?.origin;
+    return key.startsWith("private:v2:")
+      ? structuredClone(this.readImmutable(key)?.origin)
+      : this.load().get(key)?.origin;
   }
 
   representation(key: string): PrivateValueRepresentation | undefined {
-    return key.startsWith("private:v2:") ? this.readImmutable(key)?.representation : this.load().get(key)?.representation;
+    return key.startsWith("private:v2:")
+      ? this.readImmutable(key)?.representation
+      : this.load().get(key)?.representation;
   }
 
-  set(key: string, value: unknown, origin?: PrivateValueOrigin, representation: PrivateValueRepresentation = "redacted"): void {
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation: PrivateValueRepresentation = "redacted",
+  ): void {
     const entry = snapshot(value, origin, representation);
     if (key.startsWith("private:v2:")) {
       this.writeImmutable(key, entry);
@@ -225,12 +270,23 @@ export class FilePrivateValueStore implements PrivateValueStore {
     }
     const directory = path.dirname(this.file);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(directory, 0o700); } catch { /* Filesystems without POSIX modes. */ }
+    try {
+      fs.chmodSync(directory, 0o700);
+    } catch {
+      /* Filesystems without POSIX modes. */
+    }
     const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), { flag: "wx", mode: 0o600 });
+      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), {
+        flag: "wx",
+        mode: 0o600,
+      });
       fs.renameSync(temporary, this.file);
-      try { fs.chmodSync(this.file, 0o600); } catch { /* Filesystems without POSIX modes. */ }
+      try {
+        fs.chmodSync(this.file, 0o600);
+      } catch {
+        /* Filesystems without POSIX modes. */
+      }
     } finally {
       fs.rmSync(temporary, { force: true });
     }
@@ -240,10 +296,21 @@ export class FilePrivateValueStore implements PrivateValueStore {
 /** Same identity/value rules for tests and non-persisting local consumers. */
 export class InMemoryPrivateValueStore implements PrivateValueStore {
   private readonly entries = new Map<string, PrivateEntry>();
-  get(key: string): unknown | undefined { return structuredClone(this.entries.get(key)?.value); }
-  origin(key: string): PrivateValueOrigin | undefined { return structuredClone(this.entries.get(key)?.origin); }
-  representation(key: string): PrivateValueRepresentation | undefined { return this.entries.get(key)?.representation; }
-  set(key: string, value: unknown, origin?: PrivateValueOrigin, representation: PrivateValueRepresentation = "redacted"): void {
+  get(key: string): unknown | undefined {
+    return structuredClone(this.entries.get(key)?.value);
+  }
+  origin(key: string): PrivateValueOrigin | undefined {
+    return structuredClone(this.entries.get(key)?.origin);
+  }
+  representation(key: string): PrivateValueRepresentation | undefined {
+    return this.entries.get(key)?.representation;
+  }
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation: PrivateValueRepresentation = "redacted",
+  ): void {
     const next = snapshot(value, origin, representation);
     const current = this.entries.get(key);
     if (key.startsWith("private:") && current !== undefined) assertSameEntry(current, next, key);

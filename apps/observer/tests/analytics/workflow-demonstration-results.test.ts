@@ -101,12 +101,12 @@ describe("demonstrations reconstructed from stored call and result events", () =
     const store = new InMemoryPrivateValueStore();
     store.set("private:test:stable", "first", { workspaceId: "ws_one" });
     store.set("private:test:stable", "first", { workspaceId: "ws_one" });
-    expect(() =>
-      store.set("private:test:stable", "second", { workspaceId: "ws_one" }),
-    ).toThrow(/already exists/);
-    expect(() =>
-      store.set("private:test:stable", "first", { workspaceId: "ws_two" }),
-    ).toThrow(/already exists/);
+    expect(() => store.set("private:test:stable", "second", { workspaceId: "ws_one" })).toThrow(
+      /already exists/,
+    );
+    expect(() => store.set("private:test:stable", "first", { workspaceId: "ws_two" })).toThrow(
+      /already exists/,
+    );
     expect(store.get("private:test:stable")).toBe("first");
   });
 

@@ -27,6 +27,7 @@ import {
   analyzeAgentArguments,
   tokenizeProgram,
 } from "@resin/contracts";
+import { localWorkflowEvent } from "../normalization/local-workflow-payload.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { deriveNativeCalls } from "./native-argument-derivation.js";
@@ -161,7 +162,9 @@ interface LocalCall {
   /** Ordinal inside its task, so two tasks can be compared position by position. */
   position: number;
   arguments: Record<string, WorkflowJsonValue>;
+  argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
+  resultReference?: string;
   reads?: string[];
   writes?: string[];
   /** The callable's discovered input schema, when discovery recorded one. */
@@ -495,6 +498,8 @@ export class WorkflowCallRecorder {
   private readonly privateValues: PrivateValueStore;
   /** The workspace whose session is being observed; stamped on every private entry. */
   private observeAccess: PrivateValueOrigin | undefined;
+  private privateRepresentation: "literal" | "redacted" = "redacted";
+  private redactedArguments: Record<string, unknown> | undefined;
   /**
    * What each session's discovery events reported about the callables it saw, keyed by the name the
    * harness called them by and then by the connection that reported it. Discovery is per session
@@ -593,6 +598,10 @@ export class WorkflowCallRecorder {
     access?: PrivateValueOrigin,
   ): NormalizedSessionEvent {
     this.observeAccess = access;
+    this.redactedArguments = event.type === "tool_call" ? event.parameters : undefined;
+    const original = localWorkflowEvent(event);
+    this.privateRepresentation =
+      original !== undefined || event.redaction?.isRedacted === false ? "literal" : "redacted";
     if (event.type === "tool_discovery") {
       const session = this.discoveryState(event.sessionId);
       for (const tool of event.tools) {
@@ -625,7 +634,10 @@ export class WorkflowCallRecorder {
       return event;
     }
     if (event.type === "tool_call") return this.observeCall(event);
-    if (event.type === "tool_result") return this.observeResult(event);
+    if (event.type === "tool_result") {
+      const observed = this.observeResult(original ?? event, event);
+      return { ...event, metadata: observed.metadata };
+    }
     return event;
   }
 
@@ -642,7 +654,10 @@ export class WorkflowCallRecorder {
   ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue, currentPath: WorkflowValuePath): AgentArgumentOrigin => {
+        const expand = (
+          value: WorkflowJsonValue,
+          currentPath: WorkflowValuePath,
+        ): AgentArgumentOrigin => {
           if (typeof value === "string" && containsRedactionPlaceholder(value)) {
             return this.storeLocalValue(value, sessionId, callId, currentPath);
           }
@@ -693,8 +708,13 @@ export class WorkflowCallRecorder {
    */
   private observeCall(event: NormalizedSessionEvent): NormalizedSessionEvent {
     if (event.type !== "tool_call") return event;
-    if (isInvokeToolCallName(event.toolName)) return this.observeComposedCall(event);
-    return this.observeNativeCall(event);
+    if (isInvokeToolCallName(event.toolName)) {
+      this.privateRepresentation = "redacted";
+      return this.observeComposedCall(event);
+    }
+    const observed = this.observeNativeCall(localWorkflowEvent(event) ?? event);
+    // Only reference-bearing metadata leaves the local raw view.
+    return { ...event, metadata: observed.metadata };
   }
 
   /** Records a call composed through the reference-aware surface, keeping the caller's envelopes. */
@@ -759,11 +779,16 @@ export class WorkflowCallRecorder {
   ): NormalizedSessionEvent {
     const parameters = isPlainObject(event.parameters) ? event.parameters : {};
     const program = this.programOf(event, parameters);
-    const analysis = analyzeAgentArguments(parameters);
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
-    for (const [argument, origin] of Object.entries(analysis.origins)) {
-      origins[argument] = this.launderOrigin(origin, event.sessionId, event.callId, [argument]);
+    // Ordinary native JSON is data, not the explicit composition interface.
+    for (const [argument, value] of Object.entries(parameters)) {
+      origins[argument] = this.launderOrigin(
+        { type: "literal", value },
+        event.sessionId,
+        event.callId,
+        [argument],
+      );
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
     const carrier: WorkflowCallCarrier = {
@@ -791,7 +816,7 @@ export class WorkflowCallRecorder {
     const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call);
     carrier.executionIndex = call.executionIndex;
-    const heldOut = this.heldOutSoFar(state, call, event.sessionId);
+    const heldOut = this.heldOutSoFar(state, call);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
@@ -813,7 +838,10 @@ export class WorkflowCallRecorder {
   ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue, currentPath: WorkflowValuePath): AgentArgumentOrigin => {
+        const expand = (
+          value: WorkflowJsonValue,
+          currentPath: WorkflowValuePath,
+        ): AgentArgumentOrigin => {
           if (Array.isArray(value)) {
             return {
               type: "array",
@@ -850,9 +878,20 @@ export class WorkflowCallRecorder {
     }
   }
 
-  private privateReference(namespace: "value" | "demonstration", parts: readonly unknown[]): string {
-    const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
-    return `private:${namespace}:${digest}`;
+  private privateReference(
+    namespace: "value" | "demonstration",
+    parts: readonly unknown[],
+  ): string {
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify([
+          this.observeAccess?.workspaceId ?? null,
+          this.privateRepresentation,
+          ...parts,
+        ]),
+      )
+      .digest("hex");
+    return `private:v2:${namespace}:${digest}`;
   }
 
   /** Stores one value of a demonstration and returns the stable reference a replay resolves it by. */
@@ -863,7 +902,7 @@ export class WorkflowCallRecorder {
     slot: string,
   ): string {
     const reference = this.privateReference("demonstration", [sessionId, callId, slot]);
-    this.privateValues.set(reference, value, this.observeAccess);
+    this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return reference;
   }
 
@@ -874,7 +913,7 @@ export class WorkflowCallRecorder {
     path: WorkflowValuePath,
   ): AgentArgumentOrigin {
     const reference = this.privateReference("value", [sessionId, callId, path]);
-    this.privateValues.set(reference, value, this.observeAccess);
+    this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return { type: "private", reference };
   }
 
@@ -902,7 +941,7 @@ export class WorkflowCallRecorder {
     const execution = state.executions[state.executions.length - 1]!;
     const flow = declaredFlowOfToolCall(event);
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
-    const heldLocally = Object.entries(parameters)
+    const heldLocally = Object.entries(this.redactedArguments ?? parameters)
       .filter(([, value]) => typeof value === "string" && containsRedactionPlaceholder(value))
       .map(([argument]) => argument);
     const call: LocalCall = {
@@ -914,6 +953,12 @@ export class WorkflowCallRecorder {
       position: state.position,
       executionIndex: execution.index,
       arguments: parameters,
+      argumentReferences: Object.fromEntries(
+        Object.entries(parameters).map(([argument, value]) => [
+          argument,
+          this.localReference(value, event.sessionId, event.callId, `argument:${argument}`),
+        ]),
+      ),
       ...(discovered?.inputSchema === undefined ? {} : { inputSchema: discovered.inputSchema }),
       ...(heldLocally.length === 0 ? {} : { privateArguments: heldLocally }),
       // Only a program whose text arrived in a named argument can be read as a program here: with
@@ -954,7 +999,6 @@ export class WorkflowCallRecorder {
   private heldOutSoFar(
     state: SessionDerivationState,
     call: LocalCall,
-    sessionId: string,
   ): WorkflowCallHeldOut | undefined {
     const execution = state.executions.find((entry) => entry.index === call.executionIndex);
     if (execution === undefined) return undefined;
@@ -983,19 +1027,19 @@ export class WorkflowCallRecorder {
     for (const mine of execution.calls) {
       const theirs = earlier.calls.find((entry) => entry.position === mine.position);
       if (theirs === undefined || mine.toolName !== theirs.toolName) break;
-      for (const [argument, value] of Object.entries(mine.arguments)) {
+      for (const [argument, reference] of Object.entries(mine.argumentReferences)) {
         // Nested arguments are part of an ordinary call too. Keep the complete value by local
         // reference; validation selects the candidate's nested path without uploading the value.
         inputs.push({
           position: mine.position,
           argument,
-          reference: this.localReference(value, sessionId, mine.callId, `argument:${argument}`),
+          reference,
         });
       }
-      if (mine.result !== undefined) {
+      if (mine.resultReference !== undefined) {
         observed.push({
           position: mine.position,
-          reference: this.localReference(mine.result, sessionId, mine.callId, "result"),
+          reference: mine.resultReference,
         });
       }
     }
@@ -1231,7 +1275,10 @@ export class WorkflowCallRecorder {
     return { ...event, metadata } as NormalizedSessionEvent;
   }
 
-  private observeResult(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  private observeResult(
+    event: NormalizedSessionEvent,
+    publicEvent: NormalizedSessionEvent = event,
+  ): NormalizedSessionEvent {
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -1241,23 +1288,27 @@ export class WorkflowCallRecorder {
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
         call.result = extractResultValueOf(event.result);
+        call.resultReference =
+          call.result === undefined
+            ? undefined
+            : this.localReference(call.result, event.sessionId, call.callId, "result");
         // A repeat's own observations are what its results produced, so the demonstration grows
         // here rather than at a call that was recorded before they happened.
-        if (execution.accumulatedHeldOut !== undefined && call.result !== undefined) {
+        if (execution.accumulatedHeldOut !== undefined && call.resultReference !== undefined) {
           execution.accumulatedHeldOut.observed = [
             ...execution.accumulatedHeldOut.observed.filter(
               (entry) => entry.position !== call.position,
             ),
             {
               position: call.position,
-              reference: this.localReference(call.result, event.sessionId, call.callId, "result"),
+              reference: call.resultReference,
             },
           ];
         }
         break;
       }
     }
-    const handle = this.resultHandle(event);
+    const handle = this.resultHandle(publicEvent);
     const heldOut =
       event.type === "tool_result"
         ? this.demonstrationCarrier(event.sessionId, event.callId)
