@@ -46,6 +46,13 @@ export interface McpStdioShimOptions {
    * same-named callable or from memory.
    */
   recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
+  /** Executes a recorded builtin through the harness implementation that owns this shim. */
+  recordedHarnessToolInvoker?: (request: {
+    name: string;
+    parameters: Record<string, unknown>;
+    cwd: string;
+    signal?: AbortSignal;
+  }) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
@@ -348,6 +355,9 @@ export class McpStdioShim {
         ...(this.options.recordedWorkflowConnections === undefined
           ? {}
           : { recordedWorkflowConnections: this.options.recordedWorkflowConnections }),
+        ...(this.options.recordedHarnessToolInvoker === undefined
+          ? {}
+          : { recordedHarnessToolInvoker: this.options.recordedHarnessToolInvoker }),
         onToolSyncError: (toolName: string, error: Error) => {
           this.writeStderr(`[WARN] ${toolName}: ${error.message}\n`);
           this.options.onToolSyncError?.(toolName, error);

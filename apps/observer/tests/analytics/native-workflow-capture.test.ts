@@ -15,6 +15,7 @@ import {
   resolvePrivateReference,
 } from "../../src/analytics/private-value-store.js";
 import {
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
@@ -1071,7 +1072,7 @@ describe("the connection a callable was reached over", () => {
 
     const carrier = carrierOf(events[1]!);
     expect(carrier!.name).toBe("vendor.fetch");
-    expect(carrier!.runtime).toBe(RESIN_TOOL_PROTOCOL_RUNTIME);
+    expect(carrier!.runtime).toBe(RESIN_HARNESS_TOOL_RUNTIME);
     expect(carrier!.connection).toBeUndefined();
     expect(carrier!.inputSchema).toEqual({ type: "object" });
   });

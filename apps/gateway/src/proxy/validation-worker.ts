@@ -27,7 +27,7 @@ import {
 } from "@resin/contracts";
 import type { CloudRequestIdentity, PrivateValueStore } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import type { McpToolConnection, ToolProtocolDispatchRequest } from "@resin/runtime";
+import type { McpToolConnection, RuntimeAdapter, ToolProtocolDispatchRequest } from "@resin/runtime";
 import { z } from "zod";
 import {
   type LocalWorkflowValidationResult,
@@ -321,6 +321,8 @@ export interface WorkflowValidationWorkerOptions {
    */
   connections?: Record<string, McpToolConnection>;
   openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  /** Additional host-owned runtime families, built for each replay workspace. */
+  runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   /**
    * Environment the replayed programs may see, and nothing else: a program recorded by somebody
    * else's session must not be able to read this operator's credentials.
@@ -381,6 +383,7 @@ export class WorkflowValidationWorker {
   private readonly dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
   private readonly connections?: Record<string, McpToolConnection>;
   private readonly openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  private readonly runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   private readonly environment?: Record<string, string>;
   private readonly environmentIdentity: string;
   private readonly timeoutMs: number;
@@ -403,6 +406,7 @@ export class WorkflowValidationWorker {
     this.connections = options.connections;
     this.openConnection = options.openConnection;
     this.environment = options.environment;
+    this.runtimeAdapters = options.runtimeAdapters;
     this.environmentIdentity =
       options.environmentIdentity ?? DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT;
     this.timeoutMs = boundedTimeout(options.timeoutMs);
@@ -604,6 +608,7 @@ export class WorkflowValidationWorker {
       ...(this.dispatch === undefined ? {} : { dispatch: this.dispatch }),
       ...(this.connections === undefined ? {} : { connections: this.connections }),
       ...(this.openConnection === undefined ? {} : { openConnection: this.openConnection }),
+      ...(this.runtimeAdapters === undefined ? {} : { runtimeAdapters: this.runtimeAdapters }),
       ...(this.environment === undefined ? {} : { environment: this.environment }),
       timeoutMs: this.timeoutMs,
     });

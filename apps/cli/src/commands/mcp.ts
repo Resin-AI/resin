@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { readConfiguredOmpServers } from "@resin/adapter-omp";
+import { invokeOmpNativeTool, readConfiguredOmpServers } from "@resin/adapter-omp";
 import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
 import type { McpServerDescriptor } from "@resin/runtime";
@@ -222,6 +222,9 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
     recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
+    ...(parsedArgs.harnessId === "omp"
+      ? { recordedHarnessToolInvoker: invokeOmpNativeTool }
+      : {}),
   };
 
   const shim = options.shimFactory

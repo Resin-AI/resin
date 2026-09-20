@@ -27,6 +27,8 @@ import {
   ArtifactCache,
   type McpServerDescriptor,
   type McpToolConnection,
+  RESIN_HARNESS_TOOL_RUNTIME,
+  type RuntimeAdapter,
   type RuntimeTrustStore,
   type ToolProtocolDispatchRequest,
   connectMcpServer,
@@ -88,6 +90,13 @@ export interface ProductionProxyRuntimeOptions {
    * host cannot resolve is refused by the step, never answered from a remembered value.
    */
   recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
+  /** Executes an ordinary builtin through the active harness's own implementation. */
+  recordedHarnessToolInvoker?: (request: {
+    name: string;
+    parameters: Record<string, unknown>;
+    cwd: string;
+    signal?: AbortSignal;
+  }) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
@@ -274,6 +283,28 @@ export async function createProductionProxyRuntime(
           return [
             createProcessAdapter(bounds),
             createProgramAdapter(bounds),
+            ...(options.recordedHarnessToolInvoker === undefined
+              ? []
+              : ([
+                  {
+                    runtime: RESIN_HARNESS_TOOL_RUNTIME,
+                    call: async (request) => {
+                      const result = await options.recordedHarnessToolInvoker!({
+                        name: request.step.callable.name,
+                        parameters: request.arguments as Record<string, unknown>,
+                        cwd: workspaceRoot ?? process.cwd(),
+                        ...(host.signal ? { signal: host.signal } : {}),
+                      });
+                      if (result.isError) {
+                        throw new Error(
+                          result.content[0]?.text ??
+                            `harness tool '${request.step.callable.name}' answered with an error`,
+                        );
+                      }
+                      return composedResultValue(result);
+                    },
+                  },
+                ] satisfies RuntimeAdapter[])),
             createToolProtocolAdapter({
               ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
               dispatch: async (request) => {
@@ -359,6 +390,29 @@ export async function createProductionProxyRuntime(
         }
         return composedResultValue(result);
       },
+      ...(options.recordedHarnessToolInvoker === undefined
+        ? {}
+        : {
+            runtimeAdapters: (workspaceDir: string) => [
+              {
+                runtime: RESIN_HARNESS_TOOL_RUNTIME,
+                call: async (request) => {
+                  const result = await options.recordedHarnessToolInvoker!({
+                    name: request.step.callable.name,
+                    parameters: request.arguments as Record<string, unknown>,
+                    cwd: workspaceDir,
+                  });
+                  if (result.isError) {
+                    throw new Error(
+                      result.content[0]?.text ??
+                        `harness tool '${request.step.callable.name}' answered with an error`,
+                    );
+                  }
+                  return composedResultValue(result);
+                },
+              },
+            ],
+          }),
       ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });

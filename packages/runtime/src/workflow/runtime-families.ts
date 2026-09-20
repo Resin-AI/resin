@@ -9,7 +9,10 @@
  * unreachable.
  */
 
-/** A callable the harness reached over a tool protocol: an MCP server, a harness builtin surface. */
+/** A native builtin owned and executed by the recording harness. */
+export const RESIN_HARNESS_TOOL_RUNTIME = "resin-harness-tool";
+
+/** A callable the harness reached over an external tool protocol such as MCP. */
 export const RESIN_TOOL_PROTOCOL_RUNTIME = "resin-tool-protocol";
 
 /** A callable whose recorded artifact is a process program: a shell command or an exact argv. */

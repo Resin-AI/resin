@@ -6,4 +6,5 @@ export * from "./device-surface.js";
 export * from "./discovery.js";
 export * from "./instructions.js";
 export * from "./refresh.js";
+export * from "./native-tool-invoker.js";
 export * from "./source.js";

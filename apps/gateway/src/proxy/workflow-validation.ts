@@ -28,6 +28,7 @@ import {
 } from "@resin/observer";
 import {
   type McpToolConnection,
+  type RuntimeAdapter,
   RuntimeAdapterRegistry,
   type ToolProtocolDispatchRequest,
   type WorkflowPlanVerification,
@@ -98,6 +99,8 @@ export interface LocalWorkflowValidatorOptions {
   connections?: Record<string, McpToolConnection>;
   /** Dial a connection on first use, for a host that does not keep them open already. */
   openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  /** Additional host-owned runtime families, built for the replay's disposable workspace. */
+  runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   /** Wall-clock bound for the replay. */
   timeoutMs?: number;
 }
@@ -169,6 +172,9 @@ export function createLocalWorkflowValidator(
       };
       adapters.register(createProcessAdapter(programOptions));
       adapters.register(createProgramAdapter(programOptions));
+      for (const adapter of options.runtimeAdapters?.(workspaceDir) ?? []) {
+        if (!adapters.has(adapter.runtime)) adapters.register(adapter);
+      }
       adapters.register(
         createToolProtocolAdapter({
           ...(options.dispatch === undefined ? {} : { dispatch: options.dispatch }),

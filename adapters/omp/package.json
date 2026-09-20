@@ -17,7 +17,12 @@
     "access": "public",
     "provenance": true
   },
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -35,6 +40,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.2.6",
     "@resin/contracts": "workspace:*",
     "@resin/harness-contracts": "workspace:*",
     "zod": "^3.25.76"

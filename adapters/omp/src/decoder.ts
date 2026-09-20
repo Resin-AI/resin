@@ -62,6 +62,21 @@ function boundedNativeArguments(
   };
 }
 
+/** Decode the value returned by a confirmed MCP device-surface call. */
+function deviceSurfaceResultValue(result: DecoderMetadataValue): DecoderMetadataValue {
+  if (!Array.isArray(result) || result.length !== 1) return result;
+  const part = asObject(result[0]);
+  const text = asString(part?.text);
+  if (part?.type !== "text" || text === undefined) return result;
+  try {
+    const parsed: DecoderMetadataValue = JSON.parse(text);
+    return parsed;
+  } catch {
+    // A protocol tool that returned text returned these exact bytes, not normalized prose.
+    return text;
+  }
+}
+
 /** Recover target metadata from native edit syntax before content is redacted. */
 function editTargetPaths(parameters: DecoderMetadataRecord): string[] {
   const input = asString(parameters.input) ?? asString(parameters.patch);
@@ -851,6 +866,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private readonly pendingDeviceSurfaceCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /** Confirmed device-surface calls awaiting their result payload. */
+  private readonly deviceSurfaceResultCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
   private readonly deviceSurfaceServers?: () => readonly string[];
 
   constructor(options: OmpRecordDecoderOptions = {}) {
@@ -895,6 +914,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.callToolArguments.clearSession(sessionId);
     this.announcedToolCalls.clearSession(sessionId);
     this.pendingDeviceSurfaceCalls.clearSession(sessionId);
+    this.deviceSurfaceResultCalls.clearSession(sessionId);
   }
 
   /**
@@ -942,6 +962,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     identity: OmpDeviceSurfaceCall,
     args: OmpTranscriptPayload | undefined,
   ): IntermediateToolCallEvent {
+    if (event.callId !== undefined) {
+      this.deviceSurfaceResultCalls.set(event.sessionId, event.callId, identity);
+    }
     return {
       ...event,
       toolName: identity.tool,
@@ -1914,6 +1937,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const pendingSurface = rawCallId
       ? this.pendingDeviceSurfaceCalls.getAndClear(sessionId, rawCallId)
       : undefined;
+    const resultSurface = this.deviceSurfaceResultCalls.getAndClear(sessionId, callId);
     // OMP may append the argument-less start marker before the assistant record. At result time,
     // consume those genuinely observed late arguments by RAW id (which can contain a pipe suffix).
     const lateArgs = rawCallId
@@ -1954,6 +1978,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       toolResultObj.content ??
       toolResultObj.data ??
       toolResultObj.response;
+    if (resultSurface !== undefined) rawResult = deviceSurfaceResultValue(rawResult);
 
     if (Array.isArray(rawResult)) {
       const allText = rawResult

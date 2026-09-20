@@ -45,10 +45,10 @@ export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
 /** The runtime family every invoke_tool-routed callable belongs to. */
 export const RESIN_INVOKE_TOOL_RUNTIME = "resin-invoke-tool";
 
-/**
- * A callable the harness reached over a tool protocol (an MCP server, a harness builtin surface).
- * The call is re-made by name through the connection discovery recorded for it.
- */
+/** A native builtin owned and executed by the recording harness. */
+export const RESIN_HARNESS_TOOL_RUNTIME = "resin-harness-tool";
+
+/** A callable the harness reached over an external tool protocol such as MCP. */
 export const RESIN_TOOL_PROTOCOL_RUNTIME = "resin-tool-protocol";
 
 /** A callable whose recorded artifact is a process program: a shell command or an exact argv. */
@@ -59,6 +59,7 @@ export const RESIN_PROGRAM_RUNTIME = "resin-program";
 
 /** The runtime families an ordinary native call can belong to, decided by the record, not by name. */
 export const RESIN_NATIVE_RUNTIMES = [
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
@@ -791,10 +792,14 @@ export class WorkflowCallRecorder {
       );
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
+    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
+    const connection = event.connection ?? discovered?.provider;
     const carrier: WorkflowCallCarrier = {
       runtime:
         program === undefined
-          ? RESIN_TOOL_PROTOCOL_RUNTIME
+          ? connection === undefined
+            ? RESIN_HARNESS_TOOL_RUNTIME
+            : RESIN_TOOL_PROTOCOL_RUNTIME
           : program.kind === "shell"
             ? RESIN_PROCESS_RUNTIME
             : RESIN_PROGRAM_RUNTIME,
@@ -804,11 +809,6 @@ export class WorkflowCallRecorder {
       provenance,
     };
     if (program !== undefined) carrier.program = program;
-    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
-    // The connection is the resolution the call itself carries (a device-surface path the adapter
-    // resolved), or what this session's discovery recorded for the callable. Nothing else: not the
-    // harness, never a guess from the name.
-    const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
     if (discovered?.inputSchema !== undefined) carrier.inputSchema = discovered.inputSchema;
 
