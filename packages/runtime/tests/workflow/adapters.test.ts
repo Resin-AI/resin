@@ -590,12 +590,7 @@ describe("runtime family names", () => {
       RESIN_PROCESS_RUNTIME,
       RESIN_PROGRAM_RUNTIME,
       RESIN_TOOL_PROTOCOL_RUNTIME,
-    ]).toEqual([
-      "resin-harness-tool",
-      "resin-process",
-      "resin-program",
-      "resin-tool-protocol",
-    ]);
+    ]).toEqual(["resin-harness-tool", "resin-process", "resin-program", "resin-tool-protocol"]);
 
     const names = [
       "RESIN_HARNESS_TOOL_RUNTIME",

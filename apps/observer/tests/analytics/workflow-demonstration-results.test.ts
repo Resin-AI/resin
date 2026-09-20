@@ -1,5 +1,6 @@
 import { NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { selectDemonstration } from "../../src/analytics/demonstration-evidence.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import {
   InMemoryPrivateValueStore,
@@ -7,7 +8,6 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
-import { selectDemonstration } from "../../src/analytics/demonstration-evidence.js";
 
 function recording(
   sessionId = "session-result-evidence",
@@ -149,21 +149,17 @@ describe("demonstration slice selection", () => {
       { sessionId: "session", callId: "load-original", executionIndex: 0, identity: "load" },
       { sessionId: "session", callId: "load-repeat", executionIndex: 1, identity: "load" },
     ];
-    const demonstration = selectDemonstration(
-      [calls[1]!],
-      calls,
-      [
-        {
-          sessionId: "session",
-          callId: "load-repeat",
-          snapshot: {
-            repeats: 0,
-            inputs: [{ position: 0, argument: "path", reference: "private:input" }],
-            observed: [{ position: 0, reference: "private:result" }],
-          },
+    const demonstration = selectDemonstration([calls[1]!], calls, [
+      {
+        sessionId: "session",
+        callId: "load-repeat",
+        snapshot: {
+          repeats: 0,
+          inputs: [{ position: 0, argument: "path", reference: "private:input" }],
+          observed: [{ position: 0, reference: "private:result" }],
         },
-      ],
-    );
+      },
+    ]);
 
     expect(demonstration).toEqual({
       repeats: 0,

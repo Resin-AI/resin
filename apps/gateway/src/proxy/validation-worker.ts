@@ -581,8 +581,7 @@ export class WorkflowValidationWorker {
       (result.verdicts.length === 0 && result.verification === undefined)
     ) {
       const reason =
-        result.unavailable ??
-        "the validator returned no verdicts and no whole-plan verification";
+        result.unavailable ?? "the validator returned no verdicts and no whole-plan verification";
       this.log(`workflow validation: ask '${request.requestId}' replay failed (${reason})`);
       return this.failedDecision(request, planDigest, reason);
     }

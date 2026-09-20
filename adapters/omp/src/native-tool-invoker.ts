@@ -14,7 +14,12 @@ export interface OmpNativeToolResult {
 }
 
 function parseResult(value: unknown): OmpNativeToolResult {
-  if (!value || typeof value !== "object" || !("content" in value) || !Array.isArray(value.content)) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("content" in value) ||
+    !Array.isArray(value.content)
+  ) {
     throw new Error("OMP native tool host returned an invalid result");
   }
   const content: Array<{ type: "text"; text: string }> = [];

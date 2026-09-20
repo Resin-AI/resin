@@ -111,9 +111,7 @@ export function readConfiguredOmpServers(options?: {
   ];
   if (options?.workspaceRoot !== undefined) {
     documents.push(
-      readServerEntries(
-        path.join(path.resolve(options.workspaceRoot), ".omp", "mcp.json"),
-      ),
+      readServerEntries(path.join(path.resolve(options.workspaceRoot), ".omp", "mcp.json")),
     );
   }
   const byName: Record<string, OmpConfiguredServer> = {};

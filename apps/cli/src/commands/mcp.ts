@@ -222,9 +222,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
     recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
-    ...(parsedArgs.harnessId === "omp"
-      ? { recordedHarnessToolInvoker: invokeOmpNativeTool }
-      : {}),
+    ...(parsedArgs.harnessId === "omp" ? { recordedHarnessToolInvoker: invokeOmpNativeTool } : {}),
   };
 
   const shim = options.shimFactory

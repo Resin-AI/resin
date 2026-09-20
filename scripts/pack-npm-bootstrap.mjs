@@ -279,10 +279,7 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     );
     const destinationKey = path.resolve(destinationDir);
     if (copiedLocations.has(destinationKey)) {
-      const installedManifest = readManifest(
-        destinationDir,
-        `Materialized dependency '${name}'`,
-      );
+      const installedManifest = readManifest(destinationDir, `Materialized dependency '${name}'`);
       if (installedManifest.version !== sourceManifest.version) {
         throw new Error(
           `Portable bootstrap dependency location conflict for '${name}': ${installedManifest.version} vs ${sourceManifest.version}.`,

@@ -173,7 +173,6 @@ interface GenericSessionTail {
   stepIndex: number;
 }
 
-
 interface GenericCoalescingBuffer {
   sessionId: string;
   session: HarnessSession;

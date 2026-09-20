@@ -1,10 +1,6 @@
-import { writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import {
-  BUILTIN_TOOLS,
-  Settings,
-  type ToolSession,
-} from "@oh-my-pi/pi-coding-agent";
+import { writeSync } from "node:fs";
+import { BUILTIN_TOOLS, Settings, type ToolSession } from "@oh-my-pi/pi-coding-agent";
 
 interface Request {
   name: string;
@@ -18,7 +14,10 @@ const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Request;
 const factory = (BUILTIN_TOOLS as Record<string, ((session: ToolSession) => unknown) | undefined>)[
   request.name
 ];
-if (!factory) throw new Error(`OMP native tool '${request.name}' is not available in the installed harness SDK`);
+if (!factory)
+  throw new Error(
+    `OMP native tool '${request.name}' is not available in the installed harness SDK`,
+  );
 
 const settings = Settings.isolated({
   "tools.xdev": false,
@@ -35,7 +34,12 @@ const session = {
   getSessionSpawns: () => null,
 } as ToolSession;
 const tool = await factory(session);
-if (!tool || typeof tool !== "object" || !("execute" in tool) || typeof tool.execute !== "function") {
+if (
+  !tool ||
+  typeof tool !== "object" ||
+  !("execute" in tool) ||
+  typeof tool.execute !== "function"
+) {
   throw new Error(`OMP native tool '${request.name}' is disabled by the installed harness SDK`);
 }
 const result = await tool.execute(`resin-${randomUUID()}`, request.parameters);
@@ -53,4 +57,7 @@ for (const part of parts) {
     content.push({ type: "text", text: part.text });
   }
 }
-writeSync(1, JSON.stringify({ content, ...(result.isError === undefined ? {} : { isError: result.isError }) }));
+writeSync(
+  1,
+  JSON.stringify({ content, ...(result.isError === undefined ? {} : { isError: result.isError }) }),
+);
