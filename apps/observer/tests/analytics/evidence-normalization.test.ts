@@ -242,6 +242,29 @@ describe("normalizePathPattern", () => {
     expect(normalizePathPattern("")).toBe("$PATH");
     expect(normalizePathPattern(42)).toBe("$PATH");
   });
+
+  it("keeps redacted paths opaque across repeated projection", () => {
+    for (const marker of [
+      "[REDACTED_LOCAL_FIELD:cwd]",
+      "_REDACTED_LOCAL_FIELD_cwd_",
+      "[REDACTED_SECRET:12345678]/private.ts",
+      "_REDACTED_SECRET_12345678_/private.ts",
+      "<REDACTED>",
+      "$PATH",
+      "_PATH",
+    ]) {
+      expect(normalizePathPattern(marker)).toBe("$PATH");
+      const projected = projectEnrichedToolParameters("read", {
+        path: marker,
+        paths: [marker],
+      });
+      expect(projected?.parameters).toEqual({ path: "$PATH", paths: ["$PATH"] });
+      expect(projectEnrichedToolParameters("read", projected?.parameters)?.parameters).toEqual({
+        path: "$PATH",
+        paths: ["$PATH"],
+      });
+    }
+  });
 });
 
 describe("classifyPathAlias", () => {

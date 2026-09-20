@@ -733,7 +733,8 @@ describe("cloud authentication recovery", () => {
     await restartedTailer.notifyTerminalState(session);
     expect(restartedHandlerCalls).toBe(3);
     expect(deliveredRecordIds).toEqual([firstRecord.recordId, secondRecord.recordId]);
-    expect(uploadedSequences).toEqual([1, 2, 3]);
+    // The synthetic end uses a later step of source row 2, not the next unread source row.
+    expect(uploadedSequences).toEqual([1, 2, 2]);
     expect(attemptedBatchIds).toHaveLength(3);
     expect(await cursorManager.getCursor(session.sessionId)).toMatchObject({ sequence: 2 });
     expect(restartedSource.getCursor()).toMatchObject({ sequence: 2 });

@@ -326,7 +326,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
     }
   });
 
-  it("resolves active sessions and retains recent completed sessions for transition delivery", async () => {
+  it("resolves active sessions and retains recently idle sessions for continued observation", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-active-"));
     try {
       const ompHome = path.join(tmpDir, ".omp");
@@ -350,7 +350,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
         ].join("\n")}\n`,
       );
 
-      // Recently stale session (>60s old) remains discoverable long enough to report completion.
+      // Recently stale session (>60s old) remains discoverable without inventing completion.
       const staleTranscript = path.join(sessionsDir, "stale.jsonl");
       const staleTime = new Date(Date.now() - 90_000);
       await fsp.writeFile(
@@ -382,7 +382,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
 
       const sessions = await adapter.listSessions(workspace);
       const staleSession = sessions.find((session) => session.sessionId === "sess-stale");
-      expect(staleSession?.status).toBe("completed");
+      expect(staleSession?.status).toBe("idle");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

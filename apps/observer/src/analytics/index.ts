@@ -43,6 +43,8 @@ export {
   type ParameterShapeOptions,
 } from "./metadata-projection.js";
 
+export { MetadataEventProjector } from "./metadata-event-projector.js";
+
 export {
   type InvocationTelemetryUploaderOptions,
   InvocationTelemetryUploader,

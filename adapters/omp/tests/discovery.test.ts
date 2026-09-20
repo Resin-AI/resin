@@ -376,7 +376,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
-  it("marks no-lifecycle v18 transcript as completed when mtime is older than 60s", async () => {
+  it("marks no-lifecycle v18 transcript as idle when mtime is older than 60s", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-v18-stale-"));
     try {
       const ompHome = path.join(tmpDir, ".omp");
@@ -414,7 +414,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessions = await discoverOmpSessions(workspace, { ompHome });
       expect(sessions.length).toBe(1);
       expect(sessions[0].sessionId).toBe("v18-stale-sess-1");
-      expect(sessions[0].status).toBe("completed");
+      expect(sessions[0].status).toBe("idle");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
@@ -429,7 +429,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessionsDir = path.join(ompHome, "agent", "sessions", "-projects-explicit-app");
       await fsp.mkdir(sessionsDir, { recursive: true });
 
-      // 1. Session with explicit start but old mtime (10 hours ago) -> completed
+      // 1. Session with explicit start but old mtime (10 hours ago) -> idle
       const startTranscript = path.join(sessionsDir, "session-start.jsonl");
       const tenHoursAgo = new Date(Date.now() - 36_000_000);
       await fsp.writeFile(
@@ -485,7 +485,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const endSession = sessions.find((s) => s.sessionId === "sess-explicit-end");
 
       expect(startSession).toBeDefined();
-      expect(startSession?.status).toBe("completed");
+      expect(startSession?.status).toBe("idle");
 
       expect(endSession).toBeDefined();
       expect(endSession?.status).toBe("completed");
@@ -537,6 +537,202 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
           status: "completed",
           hasExplicitLifecycle: true,
           updatedAt: timestamp,
+        });
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["full", "tail"])(
+    "reopens real exits only for native message activity in the %s transcript scan",
+    async (scan) => {
+      const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-resumed-exit-"));
+      try {
+        const transcriptPath = path.join(tmpDir, "session.jsonl");
+        const exitedAt = new Date("2026-09-19T12:00:00.000Z");
+        const resumedAt = new Date("2026-09-19T12:02:00.000Z");
+        const rows = [
+          JSON.stringify({
+            type: "session",
+            id: "resumed-session",
+            cwd: tmpDir,
+            timestamp: exitedAt.toISOString(),
+          }),
+        ];
+        if (scan === "tail") {
+          rows.push(
+            ...Array.from({ length: 300 }, () =>
+              JSON.stringify({ type: "message", role: "assistant", content: "X".repeat(500) }),
+            ),
+          );
+        }
+        const exit = {
+          type: "custom",
+          customType: "session_exit",
+          data: { reason: "dispose", kind: "normal" },
+          timestamp: exitedAt.toISOString(),
+        };
+        rows.push(JSON.stringify(exit));
+        await fsp.writeFile(transcriptPath, `${rows.join("\n")}\n`);
+        await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+        expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+          sessionId: "resumed-session",
+          status: "completed",
+          updatedAt: exitedAt.toISOString(),
+        });
+
+        // Neither touching the file nor timestamped custom/malformed messages resume it.
+        await fsp.appendFile(
+          transcriptPath,
+          `${[
+            JSON.stringify({
+              type: "custom",
+              customType: "unrelated",
+              timestamp: resumedAt.toISOString(),
+            }),
+            JSON.stringify({
+              type: "message",
+              message: { role: "user", content: 42 },
+              timestamp: resumedAt.toISOString(),
+            }),
+            '{"type":"message",',
+          ].join("\n")}\n`,
+        );
+        await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+        expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+          status: "completed",
+          updatedAt: exitedAt.toISOString(),
+        });
+
+        for (const timestamp of [undefined, "invalid", "2026-09-19T13:00:00.000Z"]) {
+          await fsp.appendFile(
+            transcriptPath,
+            `${JSON.stringify({
+              type: "message",
+              timestamp,
+              message: { role: "user", content: [{ type: "text", text: "Untrusted time" }] },
+            })}\n`,
+          );
+          await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+          expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+            status: "completed",
+            updatedAt: exitedAt.toISOString(),
+          });
+        }
+
+        for (const role of ["user", "assistant", "toolResult"]) {
+          await fsp.appendFile(
+            transcriptPath,
+            `${JSON.stringify({
+              type: "message",
+              timestamp: resumedAt.toISOString(),
+              message: { role, content: [{ type: "text", text: "Resumed activity" }] },
+            })}\n`,
+          );
+          await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+          expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+            sessionId: "resumed-session",
+            status: "active",
+            updatedAt: resumedAt.toISOString(),
+          });
+          expect(
+            await inspectTranscriptFile(transcriptPath, { now: resumedAt.getTime() + 61_000 }),
+          ).toMatchObject({ status: "idle" });
+
+          // Failure is also terminal until the next supported message.
+          await fsp.appendFile(
+            transcriptPath,
+            `${JSON.stringify({
+              type: "session_lifecycle",
+              lifecycleType: "crash",
+              timestamp: resumedAt.toISOString(),
+            })}\n`,
+          );
+          await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+          expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+            status: "failed",
+          });
+        }
+        await fsp.appendFile(
+          transcriptPath,
+          `${JSON.stringify({ ...exit, timestamp: resumedAt.toISOString() })}\n`,
+        );
+        await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+        expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+          sessionId: "resumed-session",
+          status: "completed",
+          updatedAt: resumedAt.toISOString(),
+        });
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["full", "tail", "overlap"])(
+    "does not carry an old exit across an unread resume gap in the %s scan",
+    async (scan) => {
+      const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-resume-gap-"));
+      try {
+        const transcriptPath = path.join(tmpDir, "session.jsonl");
+        const exitedAt = "2026-09-19T12:00:00.000Z";
+        const resumedAt = new Date("2026-09-19T12:02:00.000Z");
+        const noise = {
+          type: "custom",
+          customType: "unrelated",
+          data: "X".repeat(scan === "tail" ? 70 * 1024 : scan === "overlap" ? 20 * 1024 : 100),
+        };
+        const rows = [
+          { type: "session", id: "gap-session", cwd: tmpDir, timestamp: exitedAt },
+          {
+            type: "custom",
+            customType: "session_exit",
+            data: { reason: "dispose", kind: "normal" },
+            timestamp: exitedAt,
+          },
+          noise,
+          {
+            type: "message",
+            message: {
+              role: "user",
+              content:
+                scan === "overlap" ? "R".repeat(50 * 1024) : "Resume inside the unread middle",
+            },
+            timestamp: resumedAt.toISOString(),
+          },
+          noise,
+          { type: "custom", customType: "unrelated", timestamp: resumedAt.toISOString() },
+        ];
+        await fsp.writeFile(
+          transcriptPath,
+          `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+        );
+        await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+
+        expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+          sessionId: "gap-session",
+          headerCwd: tmpDir,
+          createdAt: exitedAt,
+          status: "active",
+        });
+        expect(
+          await inspectTranscriptFile(transcriptPath, { now: resumedAt.getTime() + 61_000 }),
+        ).toMatchObject({ status: "idle" });
+
+        // A terminal record actually present in the tail remains authoritative.
+        await fsp.appendFile(
+          transcriptPath,
+          `${JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "crash",
+            timestamp: resumedAt.toISOString(),
+          })}\n`,
+        );
+        await fsp.utimes(transcriptPath, resumedAt, resumedAt);
+        expect(await inspectTranscriptFile(transcriptPath, { now: resumedAt })).toMatchObject({
+          sessionId: "gap-session",
+          status: "failed",
         });
       } finally {
         await fsp.rm(tmpDir, { recursive: true, force: true });
@@ -915,7 +1111,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
-  it("stale start-only transcript becomes completed after 60s inactivity timeout", async () => {
+  it("stale start-only transcript becomes idle after 60s inactivity timeout", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-stale-session-"));
     try {
       const wsPath = path.join(tmpDir, "workspace");
@@ -950,7 +1146,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessions = await discoverOmpSessions(workspace, { ompHome: path.join(tmpDir, ".omp") });
       expect(sessions.length).toBe(1);
       expect(sessions[0].sessionId).toBe("print-mode");
-      expect(sessions[0].status).toBe("completed");
+      expect(sessions[0].status).toBe("idle");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
@@ -996,7 +1192,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
-  it("recent pause transcript remains idle within 60s window and becomes completed when stale", async () => {
+  it("pause transcript remains idle within and beyond the 60s inactivity window", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-idle-session-"));
     try {
       const wsPath = path.join(tmpDir, "workspace");
@@ -1035,13 +1231,13 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       });
       expect(recentSessions[0].status).toBe("idle");
 
-      // When stale -> completed
+      // Staleness does not turn a paused session into a completed session.
       const staleTime = new Date(Date.now() - 120_000);
       await fsp.utimes(idleFile, staleTime, staleTime);
       const staleSessions = await discoverOmpSessions(workspace, {
         ompHome: path.join(tmpDir, ".omp"),
       });
-      expect(staleSessions[0].status).toBe("completed");
+      expect(staleSessions[0].status).toBe("idle");
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

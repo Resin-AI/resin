@@ -63,12 +63,12 @@ const CurrentTelemetryPrivacyCheckpointSchema = z
   })
   .strict();
 
-const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
+export const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
   LegacyTelemetryPrivacyCheckpointSchema,
   CurrentTelemetryPrivacyCheckpointSchema,
 ]);
 
-type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
+export type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
 
 export interface ReconcileRemoteTelemetryConsentResult {
   valid: boolean;
@@ -93,7 +93,7 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
-function captureTerminalOmpSession(session: HarnessSession, startedAt: number): boolean {
+function captureInactiveOmpSession(session: HarnessSession, startedAt: number): boolean {
   if (session.harnessId !== "omp" || typeof session.metadata?.fileMtime !== "string") {
     return false;
   }
@@ -340,7 +340,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
           session.harnessId === "omp" ? { mode: "all" } : undefined,
-        captureTerminalSessions: captureTerminalOmpSession,
+        captureInactiveSessions: captureInactiveOmpSession,
         captureUserSessionsOnly: this.captureUserSessionsOnly,
         logger: this.logger,
       });
@@ -705,7 +705,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
         session.harnessId === "omp" ? { mode: "all" } : undefined,
-      captureTerminalSessions: captureTerminalOmpSession,
+      captureInactiveSessions: captureInactiveOmpSession,
       captureUserSessionsOnly: this.captureUserSessionsOnly,
       logger: this.logger,
     });
@@ -812,6 +812,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       throw err;
     } finally {
       this.captureCoordinator.clearComputationEvidence();
+      this.captureCoordinator.clearCommandSequenceEvidence();
     }
   }
 

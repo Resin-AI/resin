@@ -248,7 +248,17 @@ export class NormalizationPipeline {
       eventId: _e,
       ...payloadFields
     } = intermediateObj;
-    const redactionResult = this.redactionEngine.redact(payloadFields);
+    if (
+      intermediate.type === "command_exec" &&
+      intermediate.cwd === undefined &&
+      typeof intermediate.workingDirectory === "string"
+    ) {
+      Object.assign(payloadFields, { cwd: intermediate.workingDirectory });
+    }
+    const redactionResult = this.redactionEngine.redact(
+      payloadFields,
+      type === "tool_call" ? "parameters.cwd" : type === "command_exec" ? "cwd" : undefined,
+    );
     const redactionMeta: RedactionMeta = {
       isRedacted: redactionResult.isRedacted,
       redactedFields: redactionResult.redactedFields,

@@ -1157,6 +1157,111 @@ describe("TrajectoryCaptureRuntimeModule", () => {
   });
 
   describe("OMP Lifecycle Grace, Stale History Exclusion, and Restart Persistence", () => {
+    it("catches up current-run idle OMP activity without admitting touched, future, malformed, or agent history", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-19T12:00:00.000Z"));
+      const adapter = new FakeHarnessAdapter({ id: "omp" });
+      const workspace = {
+        workspaceId: "ws-idle-omp",
+        harnessId: "omp",
+        rootPath: "/tmp/idle-omp",
+      };
+      adapter.addWorkspace(workspace);
+      const module = new TrajectoryCaptureRuntimeModule({
+        adapters: [adapter],
+        observationClient: mockCloudObservationClient({}),
+      });
+      const context = createMockModuleContext();
+      const historical: HarnessSession = {
+        sessionId: "historical-idle",
+        workspaceId: workspace.workspaceId,
+        harnessId: "omp",
+        status: "idle",
+        createdAt: "2026-09-19T11:00:00.000Z",
+        updatedAt: "2026-09-19T11:59:59.999Z",
+        metadata: { sessionKind: "user", fileMtime: "2026-09-19T11:59:59.999Z" },
+      };
+      adapter.addSession(historical);
+      const observer = module.getObserverCoordinator();
+      const delivered = Promise.withResolvers<void>();
+      const received: string[] = [];
+      observer.onRecords(async (session, records, ack) => {
+        if (records.length > 0) {
+          received.push(session.sessionId);
+          await ack();
+          delivered.resolve();
+        }
+      });
+      try {
+        await module.start(context);
+        // Discovery misses the active window, but activity belongs to this run.
+        vi.setSystemTime(new Date("2026-09-19T12:02:00.000Z"));
+        const current: HarnessSession = {
+          ...historical,
+          sessionId: "current-run-idle",
+          updatedAt: "2026-09-19T12:00:01.000Z",
+          metadata: { sessionKind: "user", fileMtime: "2026-09-19T12:00:01.000Z" },
+        };
+        const excluded: HarnessSession[] = [
+          historical,
+          { ...historical, sessionId: "touched-idle", metadata: current.metadata },
+          { ...current, sessionId: "old-file-idle", metadata: historical.metadata },
+          { ...current, sessionId: "future-content-idle", updatedAt: "2026-09-19T13:00:00.000Z" },
+          {
+            ...current,
+            sessionId: "future-file-idle",
+            metadata: { ...current.metadata, fileMtime: "2026-09-19T13:00:00.000Z" },
+          },
+          { ...current, sessionId: "invalid-content-idle", updatedAt: "invalid" },
+          {
+            ...current,
+            sessionId: "invalid-file-idle",
+            metadata: { ...current.metadata, fileMtime: "invalid" },
+          },
+          { ...current, sessionId: "missing-file-idle", metadata: { sessionKind: "user" } },
+          {
+            ...current,
+            sessionId: "agent-idle",
+            metadata: { ...current.metadata, sessionKind: "agent" },
+          },
+          { ...current, sessionId: "other-harness-idle", harnessId: "claude-code" },
+        ];
+        for (const session of [...excluded, current]) {
+          adapter.addSession(session);
+          const record = adapter
+            .getOrCreateEventSource(session.sessionId)
+            .appendRecord(
+              { type: "message", role: "user", content: session.sessionId },
+              "transcript_line",
+              session.harnessId,
+            );
+          record.sequenceNumber++;
+          record.cursor.sequence++;
+        }
+        expect(await observer.pollOnce()).toMatchObject({
+          sessionsAttached: 1,
+          sessionsDetached: 0,
+          errors: [],
+        });
+        await delivered.promise;
+        expect(received).toEqual([current.sessionId]);
+        expect(observer.getTailer().getActiveSessions()).toEqual([current.sessionId]);
+        // Merely remembering an idle snapshot must not become admission on poll two.
+        expect(await observer.pollOnce()).toMatchObject({ sessionsAttached: 0, errors: [] });
+        expect(await observer.pollOnce()).toMatchObject({ sessionsAttached: 0, errors: [] });
+        expect(received).toEqual([current.sessionId]);
+        for (const session of excluded) {
+          expect(adapter.getOrCreateEventSource(session.sessionId).getCursor()).toBeNull();
+        }
+      } finally {
+        try {
+          await module.stop(context);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
+
     it("captures a completed OMP session across batches before finalizing and does not replay it after polls or restart", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-09-19T12:00:00.000Z"));

@@ -76,6 +76,7 @@ function createCaptureDoubles() {
     handleRecords: vi.fn(async (_session, _records, ack: () => Promise<void>) => ack()),
     setTelemetryEnabled: vi.fn(),
     clearComputationEvidence: vi.fn(),
+    clearCommandSequenceEvidence: vi.fn(),
     getActiveSessionCount: vi.fn(() => 0),
     getFinalizedSessionCount: vi.fn(() => 0),
     getUnattributedSessionCount: vi.fn(() => 0),
@@ -466,6 +467,7 @@ describe("observer telemetry gating", () => {
       expect(fixture.supervisor.getModule("trajectory-capture")).toBe(fixture.captureModule);
       expect(fixture.doubles.observer.stop).toHaveBeenCalled();
       expect(fixture.doubles.capture.clearComputationEvidence).toHaveBeenCalledOnce();
+      expect(fixture.doubles.capture.clearCommandSequenceEvidence).toHaveBeenCalledOnce();
       expect(fixture.captureController.getStatus()).toMatchObject({
         deviceEnabled: false,
         effectiveEnabled: false,
@@ -1219,6 +1221,7 @@ describe("observer telemetry gating", () => {
       expect(fixture.doubles.unsubscribe).toHaveBeenCalled();
       expect(fixture.doubles.observer.stop).toHaveBeenCalledOnce();
       expect(fixture.doubles.capture.clearComputationEvidence).toHaveBeenCalledOnce();
+      expect(fixture.doubles.capture.clearCommandSequenceEvidence).toHaveBeenCalledOnce();
       expect((await fixture.client.getHealth()).telemetry).toMatchObject({
         deviceEnabled: false,
         effectiveEnabled: false,

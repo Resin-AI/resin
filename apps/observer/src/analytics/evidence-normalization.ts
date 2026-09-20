@@ -345,6 +345,15 @@ export function normalizePathPattern(rawPath: unknown, homeDir?: string): string
   if (typeof rawPath !== "string") return "$PATH";
   let cleaned = rawPath.replace(/\\/g, "/").trim();
   if (!cleaned) return "$PATH";
+  // Redaction destroys path evidence; neither raw markers nor their previously
+  // normalized spelling may become plausible filesystem paths on projection.
+  if (
+    /(?:\[|<|_)REDACTED(?:[_:\]>])/i.test(cleaned) ||
+    cleaned === "$PATH" ||
+    cleaned === "_PATH"
+  ) {
+    return "$PATH";
+  }
   // Preserve an explicit workspace-relative root before stripping private path prefixes.
   if (cleaned === "." || cleaned === "./") return ".";
   if (URL_TOKEN.test(cleaned)) return "$URL";
