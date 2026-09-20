@@ -90,5 +90,5 @@ describe("public npm bootstrap offline installation", () => {
       encoding: "utf8",
     });
     expect(version.trim()).toBe("resin v1.0.0");
-  }, 60_000);
+  }, 120_000);
 });

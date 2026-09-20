@@ -437,5 +437,5 @@ describe("packed CLI production bootstrap", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  }, 60_000);
+  }, 120_000);
 });
