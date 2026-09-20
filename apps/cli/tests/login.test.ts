@@ -1,3 +1,5 @@
+import type * as childProcess from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +14,22 @@ import {
   validateCloudUrl,
 } from "../src/commands/login.js";
 import { DEFAULT_DEVICE_AUTH_SCOPES, DeviceAuthClient } from "../src/service/auth-bootstrap.js";
+
+// Catch missing browser injection without opening anything on the developer's desktop.
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof childProcess>()),
+  spawn: vi.fn(() => {
+    throw new Error("Login tests must inject openBrowser instead of launching a process");
+  }),
+}));
+
+beforeEach(() => {
+  vi.mocked(spawn).mockClear();
+});
+
+afterEach(() => {
+  expect(spawn).not.toHaveBeenCalled();
+});
 
 const ACCESS_TOKEN = "access-token-must-never-be-printed";
 const REFRESH_TOKEN = "refresh-token-must-never-be-printed";
@@ -483,6 +501,7 @@ describe("performPairing reuse and rollback", () => {
       force: true,
       // SAFETY: Mock fetch function implementing fetch interface for testing.
       customFetch: customFetch as typeof fetch,
+      openBrowser: () => false,
     });
 
     expect(mutation.paired).toBe(true);
@@ -510,6 +529,7 @@ describe("performPairing reuse and rollback", () => {
       cloudUrl: "https://api.resin.sh",
       // SAFETY: Mock fetch function implementing fetch interface for testing.
       customFetch: customFetch as typeof fetch,
+      openBrowser: () => false,
     });
 
     expect(mutation.paired).toBe(true);
@@ -727,6 +747,7 @@ describe("performPairing reuse and rollback", () => {
       cloudUrl: "https://api.resin.sh",
       // SAFETY: Mock fetch function implementing fetch interface for testing.
       customFetch: customFetch as typeof fetch,
+      openBrowser: () => false,
     });
 
     expect(mutation.paired).toBe(true);
@@ -756,6 +777,7 @@ describe("performPairing reuse and rollback", () => {
       cloudUrl: "https://api.resin.sh",
       // SAFETY: Mock fetch function implementing fetch interface for testing.
       customFetch: customFetch as typeof fetch,
+      openBrowser: () => false,
     });
 
     expect(mutation.paired).toBe(true);
