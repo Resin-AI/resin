@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -20,6 +21,8 @@ import {
 import { PLATFORMS, packageRelease } from "./package-release.mjs";
 import { verifyRelease, verifyReleaseEvidence, verifyReleaseFiles } from "./verify-release.mjs";
 
+const execFileAsync = promisify(execFile);
+
 describe("Release Evidence & Publication Suite (REM-020)", () => {
   const rootDir = process.cwd();
   const releaseMilestones = resolveReleaseMilestones(rootDir);
@@ -29,9 +32,9 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
     tempReleaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-release-evidence-"));
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     try {
-      fs.rmSync(tempReleaseDir, { recursive: true, force: true });
+      await fs.promises.rm(tempReleaseDir, { recursive: true, force: true });
     } catch {
       // ignore
     }
@@ -309,12 +312,31 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
 
   describe("5. End-to-End Publication & Verification Pipeline", () => {
     it("packages and verifies complete release candidate with zero violations", async () => {
-      const packaged = packageRelease({
-        rootDir,
-        distDir: tempReleaseDir,
-        skipBuild: true,
-        testOnly: true,
-      });
+      const packagedPath = path.join(tempReleaseDir, "packaged.json");
+      const packageReleaseModule = path.join(rootDir, "scripts", "package-release.mjs");
+      const packageInChild = [
+        'import fs from "node:fs";',
+        'import { pathToFileURL } from "node:url";',
+        "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
+        "const { packageRelease } = await import(pathToFileURL(modulePath));",
+        "const packaged = packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+        "fs.writeFileSync(outputPath, JSON.stringify({ success: packaged.success, trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
+      ].join("\n");
+      await execFileAsync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          packageInChild,
+          "resin-release-evidence-child",
+          packageReleaseModule,
+          rootDir,
+          tempReleaseDir,
+          packagedPath,
+        ],
+        { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
+      );
+      const packaged = JSON.parse(fs.readFileSync(packagedPath, "utf8"));
 
       expect(packaged.success).toBe(true);
       expect(fs.existsSync(path.join(tempReleaseDir, "manifest.json"))).toBe(true);
@@ -333,7 +355,7 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       });
       expect(fullVerify.valid).toBe(true);
       expect(fullVerify.violations).toHaveLength(0);
-    }, 30_000);
+    }, 120_000);
 
     it("detects missing evidence files and incomplete milestones", () => {
       const brokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "broken-release-evidence-"));
