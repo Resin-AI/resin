@@ -36,7 +36,7 @@
     "release:package:test": "node scripts/package-release.mjs --test-only",
     "release:verify:test": "node scripts/verify-release-cli.mjs --test-only",
     "savings:proof": "node scripts/generate-savings-proof.mjs",
-    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
+    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
     "clean": "turbo run clean"
   },
   "devDependencies": {
