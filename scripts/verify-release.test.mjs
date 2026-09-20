@@ -1441,6 +1441,25 @@ describe("Release Packaging & Verification Suite", () => {
       expect(missingLicViolations.some((v) => v.rule === "MISSING_LEGAL_FILE")).toBe(true);
     });
 
+    it("allows published third-party runtime paths but rejects Resin-owned private paths", () => {
+      for (const thirdPartyPath of [
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/prompts/tools/read.md",
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/eval/backend.ts",
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/cli/gallery-fixtures/fs.ts",
+      ]) {
+        expect(isForbiddenTarballPath(thirdPartyPath, boundary)).toBe(false);
+      }
+      expect(isForbiddenTarballPath("resin/apps/observer/dist/prompts/internal.md", boundary)).toBe(
+        true,
+      );
+      expect(
+        isForbiddenTarballPath(
+          "resin/node_modules/@resin/observer/dist/prompts/internal.md",
+          boundary,
+        ),
+      ).toBe(true);
+    });
+
     it("verifyTarballEntries rejects injected forbidden cloud/web/serverless/map paths", () => {
       const baseValidEntries = [
         {
