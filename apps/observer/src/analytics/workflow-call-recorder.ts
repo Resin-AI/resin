@@ -1100,12 +1100,11 @@ export class WorkflowCallRecorder {
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
     );
-    /** Tokens an earlier call of this execution produced; the producer rule offers those already. */
-    const producedTokens = new Set<string>();
+    /** Positions an earlier call produced; the producer rule owns them instead of variation. */
+    const producedPositions = new Set<string>();
     for (const candidate of derivation.candidates) {
-      if (candidate.stepId !== ownStepId) continue;
-      if (candidate.proposed.kind !== "result" || candidate.path[0] !== "tokens") continue;
-      producedTokens.add(`${candidate.argument}|${String(candidate.path[1])}`);
+      if (candidate.stepId !== ownStepId || candidate.proposed.kind !== "result") continue;
+      producedPositions.add(JSON.stringify([candidate.argument, candidate.path]));
     }
 
     // The same argument position, in another task, with a different value.
@@ -1152,7 +1151,8 @@ export class WorkflowCallRecorder {
               // A token an earlier call of this execution produced is that call's output, and the
               // producer rule already offers it at this position; a second candidate on one token
               // would be decided against the first.
-              if (producedTokens.has(`${argument}|${tokenIndex}`)) continue;
+              if (producedPositions.has(JSON.stringify([argument, ["tokens", tokenIndex]])))
+                continue;
               candidates.push({
                 argument,
                 path: ["tokens", tokenIndex],
@@ -1174,6 +1174,8 @@ export class WorkflowCallRecorder {
         }
         continue;
       }
+      // A changed value that still came from an earlier step is data flow, not a caller input.
+      if (producedPositions.has(JSON.stringify([argument, []]))) continue;
       if (typeof value === "string" && value.length < MIN_INPUT_CANDIDATE_LENGTH) continue;
       candidates.push({
         argument,

@@ -926,6 +926,38 @@ describe("what a repeat's own calls proposed", () => {
     });
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
+
+  it("keeps a varied primitive produced by an earlier call as data flow", () => {
+    const { events } = record([
+      discovery([
+        { name: "measure", provider: "srv" },
+        { name: "render", provider: "srv" },
+      ]),
+      call(1, "measure", { text: "red blue" }),
+      result(1, "measure", { stats: { count: 2 } }),
+      call(2, "render", { count: 2 }),
+      result(2, "render", { text: "Words: 2\n" }),
+      userTurn(3),
+      call(4, "measure", { text: "amber green blue silver white" }),
+      result(4, "measure", { stats: { count: 5 } }),
+      call(5, "render", { count: 5 }),
+      result(5, "render", { text: "Words: 5\n" }),
+    ]);
+
+    const recipe = recordCallsFromEvents("wf_repeat_number", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 1),
+    });
+    const countCandidates = recipe!.workflow.candidates?.filter(
+      (candidate) => candidate.stepId === "step1" && candidate.argument === "count",
+    );
+    expect(countCandidates).toEqual([
+      expect.objectContaining({
+        path: [],
+        proposed: { kind: "result", stepId: "step0", path: ["stats", "count"] },
+        reason: "equal-to-earlier-result",
+      }),
+    ]);
+  });
 });
 
 describe("the private value store the recorder writes to", () => {
