@@ -52,4 +52,4 @@ jobs:
       - name: Capture, local privacy, and replay regressions
         run: |
           umask 022
-          pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --minWorkers=1 apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow
+          pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --minWorkers=1 apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow apps/gateway/tests/proxy/validation-worker.test.ts apps/gateway/tests/proxy/validation-unavailable.test.ts apps/gateway/tests/proxy/workflow-slice-reuse.test.ts
