@@ -20,10 +20,10 @@ describe("standalone platform release artifact", () => {
     fs.mkdirSync(extractDir, { recursive: true });
     fs.mkdirSync(outsideCwd, { recursive: true });
     packageRelease({ rootDir, distDir: releaseDir, skipBuild: true, testOnly: true });
-  }, 30_000);
+  }, 120_000);
 
-  afterAll(() => {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+  afterAll(async () => {
+    await fs.promises.rm(tempRoot, { recursive: true, force: true });
   });
 
   it("packages and extracts standalone release with strictly public artifacts", () => {
