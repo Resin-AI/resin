@@ -73,3 +73,5 @@ export {
   projectDeterministicCommandSequenceFromEvent,
   safeParseDeterministicCommandSequence,
 } from "./deterministic-command-sequence.js";
+
+export { compareRecordedEvents } from "./recorded-event-order.js";

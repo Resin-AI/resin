@@ -1,3 +1,4 @@
+import { compareRecordedEvents } from "./recorded-event-order.js";
 /**
  * Recording the recipe of a session's executable work.
  *
@@ -488,7 +489,7 @@ export interface RecordableEvent {
   eventId: string;
   sessionId: string;
   timestamp?: string;
-  causalRef?: { causalSequence?: number };
+  causalRef?: { causalSequence?: number; stepIndex?: number };
   /** Tool calls carry the name and arguments; results carry the value and the call they answer. */
   toolName?: string;
   callId?: string;
@@ -621,7 +622,7 @@ export function recordCallsFromEvents(
     supportingEvents?: readonly RecordableEvent[];
   } = {},
 ): RecordedRecipe | undefined {
-  const ordered = [...events].sort(causalOrder);
+  const ordered = [...events].sort(compareRecordedEvents);
   const resultsByCallId = new Map<
     string,
     { value: WorkflowJsonValue | undefined; isError: boolean | undefined }
@@ -892,7 +893,7 @@ export function recordCallsFromEvents(
   // executions live. A repeat is the same work performed again wherever it was read, so the calls of
   // the executions the evidence did not name are read here for exactly what they minted — never as
   // steps: only the selected execution's calls are numbered.
-  for (const event of [...supporting].sort(causalOrder)) {
+  for (const event of [...supporting].sort(compareRecordedEvents)) {
     if (claimCall(event) === undefined) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     const executionIndex = carrier?.executionIndex;
@@ -900,42 +901,52 @@ export function recordCallsFromEvents(
     noteRepeatCall(event, carrier, executionIndex);
   }
 
-  // What a repeat's calls proposed is about this recording when the repeat performed the same work:
-  // the same callables, reached through the same connections, in the same order — so the ordinal of
-  // its call is the step this recording gave that ordinal, and a call of the repeat is the step that
-  // call is here. A repeat that did anything else is not a demonstration of this work, and nothing
-  // from it is re-targeted at a step of it.
+  // A selected workflow can be a slice of a larger execution. Match repetitions against the
+  // complete original execution, then map only the selected call ids to steps. Unselected calls
+  // remain supporting evidence; their proposals and effects never become extra executable steps.
+  const selectedSession = ordered.find((event) => event.type === "tool_call")?.sessionId;
+  const baselineCalls = new Map<string, RepeatCall>();
+  for (const event of [...ordered, ...supporting].sort(compareRecordedEvents)) {
+    if (event.type !== "tool_call" || event.sessionId !== selectedSession) continue;
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    if (carrier?.executionIndex !== selectedExecutionIndex) continue;
+    const id = callIdOf(event);
+    if (!baselineCalls.has(id))
+      baselineCalls.set(id, {
+        callId: id,
+        ...callableOf(event, carrier),
+        candidates: carrier?.candidates ?? [],
+      });
+  }
+  const baseline = [...baselineCalls.values()];
   for (const calls of repeats.values()) {
-    if (calls.length !== observations.length) continue;
+    if (calls.length !== baseline.length) continue;
     if (
-      calls.some(
-        (call, ordinal) =>
-          call.name !== observations[ordinal]!.callable.name ||
-          call.runtime !== observations[ordinal]!.callable.runtime ||
-          call.connection !== observations[ordinal]!.callable.connection,
-      )
-    ) {
+      calls.some((call, ordinal) => {
+        const original = baseline[ordinal]!;
+        return (
+          call.name !== original.name ||
+          call.runtime !== original.runtime ||
+          call.connection !== original.connection
+        );
+      })
+    )
       continue;
-    }
     const stepIdByRepeatCallId = new Map<string, string>();
     for (const [ordinal, call] of calls.entries()) {
-      const stepId = stepIdByPosition.get(ordinal);
+      const original = baseline[ordinal]!;
+      const stepId = stepIdByCallId.get(scopedKey(selectedSession!, original.callId));
       if (stepId !== undefined) stepIdByRepeatCallId.set(call.callId, stepId);
     }
-    for (const [ordinal, call] of calls.entries()) {
-      const stepId = stepIdByPosition.get(ordinal);
+    for (const call of calls) {
+      const stepId = stepIdByRepeatCallId.get(call.callId);
       if (stepId === undefined) continue;
       for (const candidate of call.candidates) {
-        // A result proposal names the call of the repeat that produced the value; that call is the
-        // step the same call is here, so the proposal is expressed against it. A producing call the
-        // repeat never made is one this recording cannot name, so the proposal is dropped.
         const producingStepId =
           candidate.proposed.kind === "result"
             ? stepIdByRepeatCallId.get(candidate.proposed.callId)
             : undefined;
         if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
-        // One position is proposed once, and what this recording's own call established about a
-        // value it actually used outranks a repeat's suggestion about the same position.
         if (
           carrierCandidates.some(
             (entry) =>
@@ -944,9 +955,8 @@ export function recordCallsFromEvents(
               entry.path.length === candidate.path.length &&
               entry.path.every((part, index) => part === candidate.path[index]),
           )
-        ) {
+        )
           continue;
-        }
         carrierCandidates.push({
           stepId,
           argument: candidate.argument,
@@ -1021,14 +1031,6 @@ export function recordCallsFromEvents(
   }
   recipe.workflow.inputs = [...declared.values()];
   return recipe;
-}
-
-/** The order the capture recorded events in: the causal sequence it numbered, unnumbered last. */
-function causalOrder(left: RecordableEvent, right: RecordableEvent): number {
-  return (
-    (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
-    (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER)
-  );
 }
 
 /** The execution a recording is built from, and the demonstration a later one offers for it. */

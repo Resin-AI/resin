@@ -50,10 +50,22 @@ export function selectDemonstration(
     members.push(call);
     executions.set(call.executionIndex, members);
   }
+  const baseline = executions.get(first.executionIndex);
+  if (baseline === undefined) return undefined;
+  const selectedPosition = new Map<number, number>();
+  let previous = -1;
+  for (const [ordinal, call] of selected.entries()) {
+    const position = baseline.findIndex(
+      (entry) => entry.callId === call.callId && entry.identity === call.identity,
+    );
+    if (position <= previous) return undefined;
+    selectedPosition.set(position, ordinal);
+    previous = position;
+  }
   const matching = new Set<number>();
   for (const [index, members] of executions) {
-    if (index === first.executionIndex || members.length !== selected.length) continue;
-    if (members.every((call, ordinal) => call.identity === selected[ordinal]!.identity)) {
+    if (index === first.executionIndex || members.length !== baseline.length) continue;
+    if (members.every((call, ordinal) => call.identity === baseline[ordinal]!.identity)) {
       matching.add(index);
     }
   }
@@ -67,7 +79,7 @@ export function selectDemonstration(
     const snapshot = observation.snapshot;
     if (snapshot.repeats !== first.executionIndex) continue;
     const inRange = (position: number): boolean =>
-      Number.isSafeInteger(position) && position >= 0 && position < selected.length;
+      Number.isSafeInteger(position) && position >= 0 && position < baseline.length;
     if (
       snapshot.inputs.some((entry) => !inRange(entry.position)) ||
       snapshot.observed.some((entry) => !inRange(entry.position))
@@ -86,19 +98,28 @@ export function selectDemonstration(
     ) {
       continue;
     }
+    // Snapshot positions belong to the full recorded execution, not this workflow's compact
+    // step numbers. Preserve only the selected slice and never mix observations from two runs.
+    const inputs = snapshot.inputs
+      .filter((entry) => selectedPosition.has(entry.position))
+      .map((entry) => ({
+        ...entry,
+        position: selectedPosition.get(entry.position)!,
+      }));
+    const observed = snapshot.observed
+      .filter((entry) => selectedPosition.has(entry.position))
+      .map((entry) => ({
+        ...entry,
+        position: selectedPosition.get(entry.position)!,
+      }));
     if (
-      snapshot.observed.length < observedCount ||
-      (snapshot.observed.length === observedCount && snapshot.inputs.length <= inputCount)
-    ) {
+      observed.length < observedCount ||
+      (observed.length === observedCount && inputs.length <= inputCount)
+    )
       continue;
-    }
-    observedCount = snapshot.observed.length;
-    inputCount = snapshot.inputs.length;
-    chosen = {
-      repeats: snapshot.repeats,
-      inputs: snapshot.inputs.map((entry) => ({ ...entry })),
-      observed: snapshot.observed.map((entry) => ({ ...entry })),
-    };
+    observedCount = observed.length;
+    inputCount = inputs.length;
+    chosen = { repeats: snapshot.repeats, inputs, observed };
   }
   return chosen;
 }

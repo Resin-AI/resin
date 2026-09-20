@@ -439,16 +439,13 @@ describe("WorkflowValidationWorker", () => {
 
     const summary = await worker.runOnce();
 
-    expect(summary.answered).toBe(1);
-    const decision = postedDecision(calls);
+    expect(summary).toMatchObject({ answered: 0, refused: 1 });
     // A replay under somebody else's grant would have confirmed both proposals here.
     expect(dispatch).not.toHaveBeenCalled();
-    expect(decision.verdicts).toEqual([]);
-    expect(decision.accepted).toEqual([]);
-    expect(decision.verification).toBeUndefined();
+    expect(calls.filter((call) => call.init.method === "POST")).toEqual([]);
   });
 
-  it("answers without a replay when the ask carries no grant", async () => {
+  it("keeps an ungranted ask pending without uploading a decision", async () => {
     const plan = recordedPlan();
     const dispatch = dispatchStub();
     const { calls, fetchImpl } = recordingFetch((url) =>
@@ -466,11 +463,9 @@ describe("WorkflowValidationWorker", () => {
 
     const summary = await worker.runOnce();
 
-    expect(summary.answered).toBe(1);
+    expect(summary).toMatchObject({ answered: 0, refused: 1 });
     expect(dispatch).not.toHaveBeenCalled();
-    const decision = postedDecision(calls);
-    expect(decision.verdicts).toEqual([]);
-    expect(decision.verification).toBeUndefined();
+    expect(calls.filter((call) => call.init.method === "POST")).toEqual([]);
   });
 
   it("tolerates a duplicate delivery", async () => {
@@ -518,10 +513,8 @@ describe("WorkflowValidationWorker", () => {
       const worker = new WorkflowValidationWorker({
         client: clientOver(fetchImpl),
         identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-        createValidator: () =>
-          vi.fn(async () => ({
-            verdicts: [],
-          })),
+        privateValues: privateValues(),
+        dispatch: dispatchStub(),
         log: (message) => logs.push(message),
       });
 
@@ -553,7 +546,8 @@ describe("WorkflowValidationWorker", () => {
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      createValidator: () => vi.fn(async () => ({ verdicts: [] })),
+      privateValues: privateValues(),
+      dispatch: dispatchStub(),
       log: (message) => logs.push(message),
     });
 

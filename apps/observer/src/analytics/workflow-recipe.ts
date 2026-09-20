@@ -5,6 +5,7 @@ import {
   type DemonstrationObservation,
   selectDemonstration,
 } from "./demonstration-evidence.js";
+import { compareRecordedEvents } from "./recorded-event-order.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
@@ -34,30 +35,12 @@ type CaptureOptions = NonNullable<Parameters<typeof reconstructCalls>[2]>;
 const callIdOf = (event: RecordableEvent): string | undefined =>
   event.callId ?? event.toolCallId ?? (event.type === "tool_call" ? event.eventId : undefined);
 
-function order(left: RecordableEvent, right: RecordableEvent): number {
-  // Causal ordinals are session-local, so never compare different sessions by their counters.
-  if (left.sessionId === right.sessionId) {
-    const delta =
-      (left.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER) -
-      (right.causalRef?.causalSequence ?? Number.MAX_SAFE_INTEGER);
-    if (delta !== 0) return delta;
-    const rank = (type: string): number =>
-      type === "tool_call" ? 0 : type === "tool_result" ? 1 : 2;
-    if (left.type !== right.type) return rank(left.type) - rank(right.type);
-  }
-  return (
-    (left.timestamp ?? "").localeCompare(right.timestamp ?? "") ||
-    left.sessionId.localeCompare(right.sessionId) ||
-    left.eventId.localeCompare(right.eventId)
-  );
-}
-
 export function recordCallsFromEvents(
   workflowId: string,
   events: readonly RecordableEvent[],
   options: CaptureOptions = {},
 ): RecordedRecipe | undefined {
-  const ordered = [...events].sort(order);
+  const ordered = [...events].sort(compareRecordedEvents);
   const first = ordered.find(
     (event) =>
       event.type === "tool_call" &&
@@ -82,7 +65,7 @@ export function recordCallsFromEvents(
   const selectedIds = new Set(selected.map((event) => event.eventId));
   const supporting = [...ordered, ...(options.supportingEvents ?? [])]
     .filter((event) => event.sessionId === session && !selectedIds.has(event.eventId))
-    .sort(order);
+    .sort(compareRecordedEvents);
   const recipe = reconstructCalls(workflowId, selected, {
     ...options,
     supportingEvents: supporting,
@@ -91,7 +74,7 @@ export function recordCallsFromEvents(
 
   const calls: DemonstrationCall[] = [];
   const observations: DemonstrationObservation[] = [];
-  for (const event of [...selected, ...supporting].sort(order)) {
+  for (const event of [...selected, ...supporting].sort(compareRecordedEvents)) {
     const callId = callIdOf(event);
     if (callId === undefined) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);

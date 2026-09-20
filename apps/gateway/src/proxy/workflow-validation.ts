@@ -118,7 +118,6 @@ export function createLocalWorkflowValidator(
 ): (plan: RecordedWorkflow) => Promise<LocalWorkflowValidationResult> {
   return async (plan: RecordedWorkflow): Promise<LocalWorkflowValidationResult> => {
     const candidates = plan.candidates ?? [];
-    if (candidates.length === 0) return { verdicts: [] };
     // Read when the work is replayed, not when the service is built: a grant is in force for a
     // while, not forever, and a recording made while one was is not evidence of a later one.
     if (options.authorization?.() === undefined) {
@@ -192,7 +191,12 @@ export function createLocalWorkflowValidator(
         resolvePrivate: resolveOwned,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
-      if (environment === undefined) return { verdicts: [] };
+      if (environment === undefined)
+        return {
+          verdicts: [],
+          unavailable:
+            "the selected workflow has no matching recorded demonstration; no replay or parameter decision was performed",
+        };
       const decided = await validateAndConfirmCandidates({ plan, candidates, environment });
       return {
         verdicts: decided.outcomes.map((outcome) => ({

@@ -27,7 +27,11 @@ import {
 } from "@resin/contracts";
 import type { CloudRequestIdentity, PrivateValueStore } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import type { McpToolConnection, RuntimeAdapter, ToolProtocolDispatchRequest } from "@resin/runtime";
+import type {
+  McpToolConnection,
+  RuntimeAdapter,
+  ToolProtocolDispatchRequest,
+} from "@resin/runtime";
 import { z } from "zod";
 import {
   type LocalWorkflowValidationResult,
@@ -555,6 +559,15 @@ export class WorkflowValidationWorker {
     } catch (error) {
       this.log(
         `workflow validation: ask '${request.requestId}' was not replayed (${describe(error)})`,
+      );
+      return undefined;
+    }
+    if (
+      result.unavailable !== undefined ||
+      (result.verdicts.length === 0 && result.verification === undefined)
+    ) {
+      this.log(
+        `workflow validation: ask '${request.requestId}' was not replayed (${result.unavailable ?? "the validator returned no verdicts and no whole-plan verification"})`,
       );
       return undefined;
     }
