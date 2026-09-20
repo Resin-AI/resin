@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type { ToolManifest, V1LockedToolEntry, V1ToolLock } from "@resin/contracts";
+import type { McpToolConnection } from "@resin/runtime";
 import type { ToolInvocationRequest, ToolInvocationRouter } from "../meta/router-contract.js";
 import type { ProjectLockManager } from "../project/lock-manager.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
@@ -56,6 +57,12 @@ export interface CloudInvocationRouterOptions {
   ) => Promise<CallToolResult>;
   localExecutor?: LocalArtifactExecutor;
   lockManager?: ProjectLockManager;
+  /**
+   * Dial a protocol connection by the name a recording carries. A request that names a connection
+   * this resolver does not know is refused: the callable it wants is reachable only over that
+   * connection, so a same-named tool of another connection is never substituted for it.
+   */
+  connectionResolver?: (name: string) => Promise<McpToolConnection | undefined>;
 }
 
 export class CloudInvocationRouter implements ToolInvocationRouter {
@@ -74,6 +81,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
   ) => Promise<CallToolResult>;
   private localExecutor?: LocalArtifactExecutor;
   private lockManager?: ProjectLockManager;
+  private readonly connectionResolver?: (name: string) => Promise<McpToolConnection | undefined>;
   private isPaused = false;
   private managedToolAccess?: ManagedToolAccess;
   fallbackHandler?: (
@@ -94,6 +102,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
     this.invocationForwarder = options.invocationForwarder;
     this.localExecutor = options.localExecutor;
     this.lockManager = options.lockManager;
+    this.connectionResolver = options.connectionResolver;
   }
 
   setManagedToolAccess(access: ManagedToolAccess): void {
@@ -195,8 +204,14 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
 
   /**
    * Routes tool invocation via ToolInvocationRouter interface.
+   *
+   * A request that names a protocol connection is answered by that connection alone: the name is
+   * the callable's identity, not a hint, so nothing else may stand in for it.
    */
   async invoke(request: ToolInvocationRequest): Promise<CallToolResult> {
+    if (request.connection !== undefined) {
+      return await this.invokeOverConnection(request, request.connection);
+    }
     return await this.forwardInvocation(
       request.toolId || request.name,
       request.parameters,
@@ -208,6 +223,44 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
       },
       request.manifest,
     );
+  }
+
+  /**
+   * Asks the connection the request names, and only that connection.
+   *
+   * Another server may expose the same tool name, and this host's cloud route answers by bare
+   * name; neither is the callable the record reached. A connection that cannot be dialed fails
+   * the step with the connection's name rather than being answered from anywhere else.
+   */
+  private async invokeOverConnection(
+    request: ToolInvocationRequest,
+    connection: string,
+  ): Promise<CallToolResult> {
+    let resolved: McpToolConnection | undefined;
+    try {
+      resolved = await this.connectionResolver?.(connection);
+    } catch (error) {
+      // A dial that failed is the step's failure, and it says which connection failed.
+      throw new McpProtocolError(
+        MCP_ERROR_CODES.CONNECTION_CLOSED,
+        `connection '${connection}' could not be reached: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    if (resolved === undefined) {
+      throw new McpProtocolError(
+        MCP_ERROR_CODES.TOOL_NOT_FOUND,
+        `callable '${request.name}' was reached over connection '${connection}', which this host cannot dial`,
+      );
+    }
+    const value = await resolved.callTool(
+      request.name,
+      request.parameters as Record<string, unknown>,
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(value) }],
+    };
   }
 
   /**

@@ -425,8 +425,11 @@ export class ArtifactCache {
       };
     }
 
-    // Canonical manifest digest verification
-    const computedManifestDigest = computeSha256(canonicalJson(manifest));
+    // Canonical manifest digest verification. The lockfile pins the digest of the
+    // manifest body without its self-referential `digest` field (computeManifestDigest
+    // semantics); strip it before hashing so an embedded digest verifies consistently.
+    const { digest: _manifestDigestField, ...manifestBody } = manifest;
+    const computedManifestDigest = computeSha256(canonicalJson(manifestBody));
     if (computedManifestDigest !== expectedManifestDigest) {
       return {
         valid: false,

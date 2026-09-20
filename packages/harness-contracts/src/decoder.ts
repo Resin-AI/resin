@@ -70,6 +70,11 @@ export interface IntermediateToolCallEvent extends BaseIntermediateEventFields {
   toolCallId?: string;
   callId?: string;
   toolName: string;
+  /**
+   * The protocol connection the callable was reached over, when the decoder resolved one (for
+   * example the MCP server behind a harness device-surface path). Absent means unknown.
+   */
+  connection?: string;
   toolVersion?: string;
   input?: DecoderMetadataRecord;
   parameters?: DecoderMetadataRecord;

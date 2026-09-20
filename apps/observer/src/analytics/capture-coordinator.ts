@@ -25,6 +25,7 @@ import {
   type TrajectoryEmitter,
   createTrajectoryEmitter,
 } from "./trajectory-emitter.js";
+import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -158,6 +159,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * the embedded copy of a persisted eval call's arguments.
    */
   toolLinkEvidenceRecorder?: ToolLinkEvidenceRecorder;
+  /**
+   * Per-call workflow carrier recorder. Defaults to a new recorder so every coordinator
+   * instance records invoke_tool compositions without a new flag. It observes each
+   * post-dedup event alongside the other evidence recorders, before projection.
+   */
+  workflowCallRecorder?: WorkflowCallRecorder;
 }
 
 interface GenericSessionTail {
@@ -208,6 +215,7 @@ export class TrajectoryCaptureCoordinator {
   private onSessionEvents?: SessionEventSink;
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
+  private workflowCallRecorder: WorkflowCallRecorder;
   private readonly metadataEventProjector = new MetadataEventProjector();
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
@@ -245,6 +253,7 @@ export class TrajectoryCaptureCoordinator {
       this.onSessionEvents = undefined;
       this.computationEvidenceRecorder = new ComputationEvidenceRecorder();
       this.toolLinkEvidenceRecorder = new ToolLinkEvidenceRecorder();
+      this.workflowCallRecorder = new WorkflowCallRecorder();
     } else {
       this.pipeline = pipelineOrOptions.pipeline;
       this.observationClient =
@@ -265,6 +274,8 @@ export class TrajectoryCaptureCoordinator {
         pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
       this.toolLinkEvidenceRecorder =
         pipelineOrOptions.toolLinkEvidenceRecorder ?? new ToolLinkEvidenceRecorder();
+      this.workflowCallRecorder =
+        pipelineOrOptions.workflowCallRecorder ?? new WorkflowCallRecorder();
     }
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
@@ -363,6 +374,7 @@ export class TrajectoryCaptureCoordinator {
     // before revocation can never be revived into later evidence.
     this.clearComputationEvidence();
     this.clearToolLinkEvidence();
+    this.clearWorkflowCallEvidence();
     this.clearCommandSequenceEvidence();
     for (const buf of this.genericCoalescingBuffers.values()) {
       if (buf.timer) clearTimeout(buf.timer);
@@ -391,6 +403,7 @@ export class TrajectoryCaptureCoordinator {
       // revocation may be revived into evidence if telemetry is later re-enabled.
       this.clearComputationEvidence();
       this.clearToolLinkEvidence();
+      this.clearWorkflowCallEvidence();
       this.clearCommandSequenceEvidence();
       for (const buf of this.genericCoalescingBuffers.values()) {
         if (buf.timer) clearTimeout(buf.timer);
@@ -571,10 +584,12 @@ export class TrajectoryCaptureCoordinator {
               try {
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
-                // Declared data flow runs first: the computation recorder consumes and then removes
-                // the local native-call handoff a persisted eval result may still carry.
                 const observed = this.computationEvidenceRecorder.observe(
-                  this.toolLinkEvidenceRecorder.observe(res.event),
+                  this.toolLinkEvidenceRecorder.observe(
+                    this.workflowCallRecorder.observe(res.event, {
+                      workspaceId: session.workspaceId,
+                    }),
+                  ),
                 );
                 emitter.ingest(observed);
                 ingestedEvents.push(this.metadataEventProjector.project(observed));
@@ -780,7 +795,11 @@ export class TrajectoryCaptureCoordinator {
                 // the identical carrier-bearing event.
                 validEvents.push(
                   this.computationEvidenceRecorder.observe(
-                    this.toolLinkEvidenceRecorder.observe(ev),
+                    this.toolLinkEvidenceRecorder.observe(
+                      this.workflowCallRecorder.observe(ev, {
+                        workspaceId: session.workspaceId,
+                      }),
+                    ),
                   ),
                 );
               }
@@ -1294,6 +1313,10 @@ export class TrajectoryCaptureCoordinator {
     this.computationEvidenceRecorder.clear();
   }
 
+  /** Clears per-session workflow carrier state (discovery providers) without detaching. */
+  public clearWorkflowCallEvidence(): void {
+    this.workflowCallRecorder.clear();
+  }
   /** Clears bounded declared data-flow state (scopes, pending calls, ordinals) without detaching. */
   public clearToolLinkEvidence(): void {
     this.toolLinkEvidenceRecorder.clear();
@@ -1312,6 +1335,7 @@ export class TrajectoryCaptureCoordinator {
   public dispose(): void {
     this.clearComputationEvidence();
     this.clearToolLinkEvidence();
+    this.clearWorkflowCallEvidence();
     this.clearCommandSequenceEvidence();
     this.onSessionEvents = undefined;
   }

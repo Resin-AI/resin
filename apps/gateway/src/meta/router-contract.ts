@@ -11,6 +11,12 @@ export interface ToolInvocationRequest {
   toolId: string;
   name: string;
   version: string;
+  /**
+   * The protocol connection the callable must be reached over, when the record names one. A
+   * request that names a connection is answered by that connection or fails: it is never routed
+   * to a same-named callable of another connection, nor to the cloud route by bare name.
+   */
+  connection?: string;
   parameters: JsonRpcParams;
   context: WorkspaceContext;
   manifest?: ToolManifest;

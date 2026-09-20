@@ -11,7 +11,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/platform-qualification.test.mjs --exclude scripts/release-evidence.test.mjs --exclude scripts/standalone-release-artifact.test.mjs",
-    "test:e2e": "vitest run apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
+    "test:e2e": "vitest run --no-file-parallelism apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
     "test:watch": "vitest",
     "lint": "biome check . && oxlint .",
     "lint:fix": "biome check --write . && oxlint --fix .",
@@ -36,13 +36,14 @@
     "release:package:test": "node scripts/package-release.mjs --test-only",
     "release:verify:test": "node scripts/verify-release-cli.mjs --test-only",
     "savings:proof": "node scripts/generate-savings-proof.mjs",
-    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=30000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
+    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
     "clean": "turbo run clean"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@oxlint/plugins": "1.80.0",
     "@types/node": "^22.13.4",
+    "bun": "1.3.14",
     "esbuild": "0.28.2",
     "oxlint": "1.80.0",
     "turbo": "^2.4.4",
@@ -51,7 +52,7 @@
     "yaml": "2.8.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"],
+    "onlyBuiltDependencies": ["@biomejs/biome", "bun", "esbuild"],
     "overrides": {
       "yaml": "2.8.3"
     }

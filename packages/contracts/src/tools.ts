@@ -43,7 +43,7 @@ export type ToolOutputSchema = z.infer<typeof ToolOutputSchema>;
  * Tool Runtime Requirement specification.
  */
 export const ToolRuntimeRequirementSchema = z.object({
-  runtime: z.enum(["deno", "node", "python", "wasm", "shell", "builtin"]),
+  runtime: z.enum(["deno", "node", "python", "wasm", "shell", "builtin", "recorded-workflow"]),
   minRuntimeVersion: z.string().optional(),
   memoryLimitMb: z.number().int().positive().default(128),
   timeoutMs: z.number().int().positive().default(30000),

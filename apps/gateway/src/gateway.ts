@@ -311,17 +311,23 @@ export class LocalMcpGateway {
       connectionId?: string;
       harnessId?: string;
       cwd?: string;
+      /** Session scope for composed invoke_tool references; defaults to the connection id. */
+      sessionId?: string;
       sendMessage?: (msg: JsonRpcMessage) => void;
     } = {},
   ): McpConnection {
+    const connectionId = options.connectionId ?? crypto.randomUUID();
     const workspace = resolveWorkspaceContext({
       cwd: options.cwd,
       harnessId: options.harnessId,
       disableBootstrap: true,
+      // A connection is the session boundary: composed calls on it share one
+      // reference scope, and another connection's handles never resolve here.
+      sessionId: options.sessionId ?? connectionId,
     });
 
     const connection = new McpConnection({
-      connectionId: options.connectionId,
+      connectionId,
       harnessId: options.harnessId,
       workspaceContext: workspace,
       rateLimiterOptions: {
@@ -574,6 +580,9 @@ export class LocalMcpGateway {
       harnessId: detectedHarness,
       clientInfo: params.clientInfo,
       cwd: connection.workspaceContext.canonicalRoot,
+      // The session scope bound at connection time survives the initialize handshake:
+      // composed references keep resolving against this connection's results.
+      sessionId: connection.workspaceContext.sessionId,
     });
     this.catalogNotices.reset(connection);
     connection.updateWorkspace(workspace);

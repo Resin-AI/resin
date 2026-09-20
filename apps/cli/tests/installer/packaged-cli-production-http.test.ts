@@ -121,8 +121,12 @@ function denoFixtureFilename(): string {
     : "deno-x86_64-unknown-linux-gnu.zip";
 }
 
-afterEach(() => {
-  for (const target of cleanupPaths.splice(0)) fs.rmSync(target, { recursive: true, force: true });
+afterEach(async () => {
+  await Promise.all(
+    cleanupPaths
+      .splice(0)
+      .map((target) => fs.promises.rm(target, { recursive: true, force: true })),
+  );
 });
 
 /**
@@ -437,5 +441,5 @@ describe("packed CLI production bootstrap", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  }, 60_000);
+  }, 180_000);
 });

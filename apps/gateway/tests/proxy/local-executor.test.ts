@@ -3,12 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { type ToolManifest, canonicalJson } from "@resin/contracts";
+import { InMemoryPrivateValueStore, RESIN_INVOKE_TOOL_RUNTIME } from "@resin/observer";
 import {
   ArtifactCache,
   CapabilityBrokerManager,
   type GeneratedKeyPair,
   InMemoryKeyStore,
   type KeyStore,
+  compileRecordedWorkflow,
   encodeDeterministicTar,
   generateBundleKeyPair,
   signBundlePayload,
@@ -1436,6 +1438,180 @@ export default defineTool(async (context: { input: { val: string } }) => {
       expect(tmpdirShimAfter.length).toBe(tmpdirShimBefore.length);
     },
   );
+
+  describe("recorded workflow private references", () => {
+    const PRIVATE_SECRET = "sk-live-super-secret-value-9f2a";
+    const REDACTED = "[REDACTED_SECRET:token]";
+    const REFERENCE = "private:sess_owner:0";
+
+    function recordedPlan(declared: string[] = [REFERENCE]) {
+      return {
+        schemaVersion: 1 as const,
+        workflowId: "wf_private_reference",
+        inputs: [],
+        privateReferences: declared,
+        steps: [
+          {
+            id: "step0",
+            callId: "call_1",
+            callable: { runtime: RESIN_INVOKE_TOOL_RUNTIME, name: "vendor_push" },
+            arguments: [
+              {
+                name: "token",
+                source: {
+                  kind: "template" as const,
+                  template: { type: "private" as const, reference: REFERENCE },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort" as const, policy: "default" as const },
+            observed: { outcome: "succeeded" as const },
+          },
+        ],
+      };
+    }
+
+    /** The local value store as a recording writes it, under the origin the caller states. */
+    function privateStore(origin?: { workspaceId?: string }): InMemoryPrivateValueStore {
+      const store = new InMemoryPrivateValueStore();
+      store.set(REDACTED, PRIVATE_SECRET, origin);
+      store.set(REFERENCE, REDACTED, origin);
+      return store;
+    }
+
+    async function invokeRecordedPlan(
+      store: InMemoryPrivateValueStore,
+      options: {
+        executingWorkspaceId?: string;
+        privateValueOwnerWorkspaceId?: string;
+        declared?: string[];
+        uncompiled?: boolean;
+      } = {},
+    ): Promise<{ isError: boolean | undefined; text: string; seen: unknown }> {
+      const manifestInput: TestManifestInput = {
+        id: "test-recorded-private-001",
+        name: "wf_private_reference",
+        version: "1.0.0",
+        description: "private reference access probe",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 5000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65536,
+        },
+      };
+      const plan = recordedPlan(options.declared);
+      // A plan the compiler refuses never reaches an executor through the product path; passing it
+      // uncompiled checks that the executor itself still refuses to resolve what it may not.
+      const entrypoint = options.uncompiled
+        ? JSON.stringify(plan)
+        : JSON.stringify(compileRecordedWorkflow(plan as never).plan);
+      const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+        manifestInput,
+        entrypoint,
+      );
+
+      let seen: unknown;
+      const executor = new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        development: true,
+        allowDevKeys: true,
+        privateValueStore: store,
+        privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
+        stepInvoker: async (request) => {
+          seen = request.parameters.token;
+          return { content: [{ type: "text" as const, text: JSON.stringify({ pushed: true }) }] };
+        },
+      });
+
+      const result = await executor.execute({
+        entry: {
+          toolId: manifestInput.id,
+          name: manifestInput.name,
+          version: "1.0.0",
+          artifactDigest,
+          manifestDigest,
+        },
+        manifest,
+        parameters: {},
+        context: {
+          ...resolveWorkspaceContext({ cwd: workspaceDir }),
+          workspaceId: options.executingWorkspaceId,
+        } as never,
+      });
+
+      return { isError: result.isError, text: JSON.stringify(result), seen };
+    }
+
+    function expectDenied(
+      attempt: { isError?: boolean; text: string; seen: unknown },
+      reason: string,
+    ): void {
+      expect(attempt.isError).toBe(true);
+      expect(attempt.text).toContain(reason);
+      // The protected value reached neither the step nor the response.
+      expect(attempt.seen).toBeUndefined();
+      expect(attempt.text).not.toContain(PRIVATE_SECRET);
+    }
+
+    it("resolves a declared reference for the workspace the value was recorded in", async () => {
+      const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_owner" }), {
+        executingWorkspaceId: "ws_owner",
+      });
+      expect(attempt.isError).toBeFalsy();
+      expect(attempt.seen).toBe(PRIVATE_SECRET);
+      expect(JSON.parse(attempt.text).content[0].text).toBe(JSON.stringify({ pushed: true }));
+    });
+
+    it("uses paired tenant ownership independently from the local project UUID", async () => {
+      const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_cloud_owner" }), {
+        executingWorkspaceId: "local-project-uuid",
+        privateValueOwnerWorkspaceId: "ws_cloud_owner",
+      });
+      expect(attempt.isError).toBeFalsy();
+      expect(attempt.seen).toBe(PRIVATE_SECRET);
+    });
+
+    it("refuses a reference recorded for another workspace", async () => {
+      const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_owner" }), {
+        executingWorkspaceId: "ws_attacker",
+      });
+      expectDenied(attempt, "another workspace");
+    });
+
+    it("refuses an entry whose recorded origin is missing, empty, or malformed", async () => {
+      for (const origin of [undefined, { workspaceId: "" }, { workspaceId: "not a workspace!" }]) {
+        // Even the workspace that recorded the value resolves nothing: an unusable origin is
+        // unavailable, not owned by whoever reads it first.
+        const attempt = await invokeRecordedPlan(privateStore(origin), {
+          executingWorkspaceId: "ws_owner",
+        });
+        expectDenied(attempt, "no usable recorded workspace origin");
+      }
+    });
+
+    it("refuses a reference when the invocation carries no usable workspace identity", async () => {
+      for (const executingWorkspaceId of [undefined, "", "not a workspace!"]) {
+        const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_owner" }), {
+          executingWorkspaceId,
+        });
+        expectDenied(attempt, "invoking workspace identity");
+      }
+    });
+
+    it("refuses a reference the recorded plan does not declare", async () => {
+      const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_owner" }), {
+        executingWorkspaceId: "ws_owner",
+        declared: [],
+        uncompiled: true,
+      });
+      expectDenied(attempt, "undeclared private reference");
+    });
+  });
 });
 
 describe("resolveDenoExecutable resolution order", () => {

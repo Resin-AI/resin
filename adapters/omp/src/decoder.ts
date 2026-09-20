@@ -26,6 +26,13 @@ import type {
   RawHarnessRecord,
   RecordDecoderContext,
 } from "@resin/harness-contracts";
+import {
+  OMP_DEVICE_SURFACE_PREFIX,
+  OMP_DEVICE_SURFACE_READ_TOOL,
+  OMP_DEVICE_SURFACE_WRITE_TOOL,
+  type OmpDeviceSurfaceCall,
+  resolveOmpDeviceSurfaceCall,
+} from "./device-surface.js";
 
 export const OMP_PROVIDER = "omp";
 export const OMP_ACCOUNTING_VERSION = "omp-v1";
@@ -53,6 +60,21 @@ function boundedNativeArguments(
     code: args.code,
     ...(args.reset === true ? { reset: true } : {}),
   };
+}
+
+/** Decode the value returned by a confirmed MCP device-surface call. */
+function deviceSurfaceResultValue(result: DecoderMetadataValue): DecoderMetadataValue {
+  if (!Array.isArray(result) || result.length !== 1) return result;
+  const part = asObject(result[0]);
+  const text = asString(part?.text);
+  if (part?.type !== "text" || text === undefined) return result;
+  try {
+    const parsed: DecoderMetadataValue = JSON.parse(text);
+    return parsed;
+  } catch {
+    // A protocol tool that returned text returned these exact bytes, not normalized prose.
+    return text;
+  }
 }
 
 /** Recover target metadata from native edit syntax before content is redacted. */
@@ -842,6 +864,16 @@ class BoundedSessionCallMap<T> {
   }
 }
 
+export interface OmpRecordDecoderOptions {
+  /**
+   * The MCP server names the harness itself is configured with (the `mcpServers` keys of its own
+   * config). A device-surface path is resolved against this registry and nothing else: it is the
+   * authority for which connection a callable was reached over, and a path that does not resolve
+   * against it stays unresolved rather than guessed at.
+   */
+  deviceSurfaceServers?: () => readonly string[];
+}
+
 /**
  * High-fidelity record decoder for Oh My Pi transcripts and structured records.
  */
@@ -855,6 +887,23 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private readonly callToolArguments = new BoundedSessionCallMap<OmpTranscriptPayload>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /**
+   * Device-surface invocations whose tool identity is known but whose arguments the record has not
+   * carried yet: the surface's start marker names only the path, and the invocation's own
+   * arguments arrive in the assistant record that follows.
+   */
+  private readonly pendingDeviceSurfaceCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+  /** Confirmed device-surface calls awaiting their result payload. */
+  private readonly deviceSurfaceResultCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+  private readonly deviceSurfaceServers?: () => readonly string[];
+
+  constructor(options: OmpRecordDecoderOptions = {}) {
+    this.deviceSurfaceServers = options.deviceSurfaceServers;
+  }
 
   /**
    * Session-scoped call identities already announced as tool_call events, keyed by raw call id and
@@ -893,6 +942,88 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.callToolNames.clearSession(sessionId);
     this.callToolArguments.clearSession(sessionId);
     this.announcedToolCalls.clearSession(sessionId);
+    this.pendingDeviceSurfaceCalls.clearSession(sessionId);
+    this.deviceSurfaceResultCalls.clearSession(sessionId);
+  }
+
+  /**
+   * The invocation a device-surface call carried, when the harness's own configured servers
+   * resolve its path.
+   *
+   * The surface invokes a tool by writing JSON to the path, so the invocation's own arguments are
+   * the payload; a callable that takes no arguments is reached by reading the path instead, so its
+   * payload is empty. Either way the transport's envelope is not an argument of the tool.
+   * `undefined` means the path is not one a configured server owns (or two own equally): the call
+   * keeps the harness's own naming and no connection.
+   */
+  private deviceSurfaceCallOf(
+    toolName: string,
+    parameters: OmpTranscriptPayload,
+  ): { identity: OmpDeviceSurfaceCall; arguments: OmpTranscriptPayload | undefined } | undefined {
+    if (toolName !== OMP_DEVICE_SURFACE_WRITE_TOOL && toolName !== OMP_DEVICE_SURFACE_READ_TOOL) {
+      return undefined;
+    }
+    const devicePath = asString(parameters.path);
+    if (devicePath === undefined || !devicePath.startsWith(OMP_DEVICE_SURFACE_PREFIX)) {
+      return undefined;
+    }
+    const identity = resolveOmpDeviceSurfaceCall(devicePath, this.deviceSurfaceServers?.() ?? []);
+    if (identity === undefined) return undefined;
+    const content = parameters.content;
+    let payload = asObject(content);
+    if (payload === undefined && typeof content === "string") {
+      try {
+        payload = asObject(JSON.parse(content));
+      } catch {
+        payload = undefined;
+      }
+    }
+    return { identity, arguments: payload };
+  }
+
+  /**
+   * Records a device-surface invocation as the tool the surface reached, over the connection the
+   * harness's own registry resolved to: the tool's own name, that connection as a separate field,
+   * and the invocation's own arguments, never the transport's envelope.
+   */
+  private asDeviceSurfaceCall(
+    event: IntermediateToolCallEvent,
+    identity: OmpDeviceSurfaceCall,
+    args: OmpTranscriptPayload | undefined,
+  ): IntermediateToolCallEvent {
+    if (event.callId !== undefined) {
+      this.deviceSurfaceResultCalls.set(event.sessionId, event.callId, identity);
+    }
+    return {
+      ...event,
+      toolName: identity.tool,
+      connection: identity.connection,
+      parameters: args ?? {},
+    };
+  }
+
+  /**
+   * The discovery a resolved device-surface call is recorded by: the tool it reached, over the
+   * connection that owns its path. It travels on the record that announces the path, which carries
+   * nothing else, so the connection is recorded where every other connection is.
+   */
+  private deviceSurfaceDiscovery(
+    identity: OmpDeviceSurfaceCall,
+    sessionId: string,
+    timestamp: string,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+  ): IntermediateToolDiscoveryEvent {
+    return {
+      sessionId,
+      timestamp,
+      schemaVersion: "1.0.0",
+      causalRef,
+      metadata,
+      type: "tool_discovery",
+      tools: [{ name: identity.tool, provider: identity.connection }],
+      source: "mcp",
+    };
   }
 
   /**
@@ -934,8 +1065,8 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateToolCallEvent[] {
-    const events: IntermediateToolCallEvent[] = [];
+  ): IntermediateSessionEvent[] {
+    const events: IntermediateSessionEvent[] = [];
     for (const call of calls) {
       const toolName = call.toolName;
       const parameters = call.parameters;
@@ -945,9 +1076,12 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       this.announcedToolCalls.set(sessionId, call.rawCallId, "assistant_message");
 
       const callId = normalizeCallId(call.rawCallId, call.rawCallId);
+      const recordedParameters = this.withEditTargets(toolName, parameters);
+      const surface = this.deviceSurfaceCallOf(toolName, recordedParameters);
       // Results may only carry the sanitized identity, so keep the name resolvable under it too.
-      this.setToolCallName(sessionId, callId, toolName);
-      events.push({
+      this.setToolCallName(sessionId, callId, surface?.identity.tool ?? toolName);
+      this.pendingDeviceSurfaceCalls.getAndClear(sessionId, call.rawCallId);
+      const event: IntermediateToolCallEvent = {
         sessionId,
         timestamp,
         schemaVersion: "1.0.0",
@@ -957,8 +1091,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         toolName,
         callId,
         toolCallId: callId,
-        parameters: this.withEditTargets(toolName, parameters),
-      });
+        parameters: recordedParameters,
+      };
+      events.push(
+        surface === undefined
+          ? event
+          : this.asDeviceSurfaceCall(event, surface.identity, surface.arguments),
+      );
     }
     return events;
   }
@@ -1708,7 +1847,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateToolCallEvent | null {
+  ): IntermediateToolCallEvent | IntermediateSessionEvent[] | null {
     const toolCallObj =
       asObject(obj.toolCall) ??
       asObject(obj.tool_call) ??
@@ -1778,6 +1917,21 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     }
     parameters = this.withEditTargets(toolName, parameters);
 
+    // A device-surface invocation is recorded as the tool it reached, over the connection the
+    // harness's own registry resolved, not as the transport that carried it. The surface's start
+    // marker names only the path; the invocation's own arguments arrive with the assistant record
+    // that follows, so the call is held for it, and its result emits it if none comes. The
+    // discovery goes out with this record, which carries nothing else.
+    const surface = this.deviceSurfaceCallOf(toolName, parameters);
+    if (surface !== undefined && surface.arguments === undefined) {
+      this.announcedToolCalls.getAndClear(sessionId, cacheCallId);
+      this.setToolCallName(sessionId, callId, surface.identity.tool);
+      this.pendingDeviceSurfaceCalls.set(sessionId, cacheCallId, surface.identity);
+      return [
+        this.deviceSurfaceDiscovery(surface.identity, sessionId, timestamp, causalRef, metadata),
+      ];
+    }
+
     if (toolCallObj.intent !== undefined && metadata.intent === undefined) {
       metadata.intent = toolCallObj.intent;
     }
@@ -1798,7 +1952,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     if (providerUsage) {
       evt.providerUsage = providerUsage;
     }
-    return evt;
+    return surface === undefined
+      ? evt
+      : this.asDeviceSurfaceCall(evt, surface.identity, surface.arguments);
   }
 
   private normalizeToolResult(
@@ -1807,7 +1963,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateToolResultEvent {
+  ): IntermediateToolResultEvent | IntermediateSessionEvent[] {
     const toolResultObj = asObject(obj.toolResult) ?? asObject(obj.tool_result) ?? obj;
 
     const rawCallId =
@@ -1817,6 +1973,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asString(toolResultObj.tool_call_id) ??
       asString(toolResultObj.id);
     const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
+    const pendingSurface = rawCallId
+      ? this.pendingDeviceSurfaceCalls.getAndClear(sessionId, rawCallId)
+      : undefined;
+    const resultSurface = this.deviceSurfaceResultCalls.getAndClear(sessionId, callId);
     // OMP may append the argument-less start marker before the assistant record. At result time,
     // consume those genuinely observed late arguments by RAW id (which can contain a pipe suffix).
     const lateArgs = rawCallId
@@ -1840,6 +2000,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         toolName = "unknown_tool";
       }
     } else {
+      // A device-surface result names the transport that carried the call (a `write` or the `read`
+      // that reaches a callable taking no arguments), not the tool the call reached: the name the
+      // call itself recorded is the one to keep.
+      if (
+        (toolName === OMP_DEVICE_SURFACE_WRITE_TOOL || toolName === OMP_DEVICE_SURFACE_READ_TOOL) &&
+        lateName !== undefined
+      ) {
+        toolName = lateName;
+      }
       this.getAndClearToolCallName(sessionId, callId);
     }
     let rawResult =
@@ -1848,6 +2017,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       toolResultObj.content ??
       toolResultObj.data ??
       toolResultObj.response;
+    if (resultSurface !== undefined) rawResult = deviceSurfaceResultValue(rawResult);
 
     if (Array.isArray(rawResult)) {
       const allText = rawResult
@@ -1913,6 +2083,29 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     };
     if (providerUsage) {
       evt.providerUsage = providerUsage;
+    }
+    // A device-surface call whose arguments never arrived is still recorded, when its result is:
+    // an invocation that ran is not dropped because the record that carried its arguments did not.
+    if (pendingSurface !== undefined) {
+      return [
+        this.asDeviceSurfaceCall(
+          {
+            sessionId,
+            timestamp,
+            schemaVersion: "1.0.0",
+            causalRef,
+            metadata: eventMetadata,
+            type: "tool_call",
+            toolName: OMP_DEVICE_SURFACE_WRITE_TOOL,
+            callId,
+            toolCallId: callId,
+            parameters: {},
+          },
+          pendingSurface,
+          undefined,
+        ),
+        evt,
+      ];
     }
     return evt;
   }
@@ -2239,7 +2432,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         name: String(asString(item.name) || asString(item.id) || "unknown_tool"),
         description: asString(item.description),
         inputSchema: paramsObj,
-        provider: asString(item.provider) || OMP_PROVIDER,
+        // A tool's provider is the connection it was reached over. The harness id is not one: a
+        // record that names no connection leaves the entry without one, never with a guess.
+        provider: asString(item.provider),
       };
     });
 

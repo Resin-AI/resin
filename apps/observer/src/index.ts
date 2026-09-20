@@ -84,3 +84,6 @@ export function createObserver(): ObserverService {
     },
   };
 }
+export * from "./analytics/workflow-recipe.js";
+export * from "./analytics/private-value-store.js";
+export * from "./analytics/workflow-call-recorder.js";

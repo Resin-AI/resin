@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
 import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
-import { OmpHarnessAdapter, OmpRecordDecoder } from "@resin/adapter-omp";
+import { OmpHarnessAdapter, OmpRecordDecoder, readConfiguredOmpServers } from "@resin/adapter-omp";
 import type {
   LocalDatabaseConnection,
   LocalStateStore,
@@ -22,6 +22,8 @@ import {
   type TrajectoryAttributionResolverFn,
   TrajectoryCaptureCoordinator,
 } from "./analytics/index.js";
+import { FilePrivateValueStore } from "./analytics/private-value-store.js";
+import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
@@ -113,6 +115,11 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    * Directly injected CloudObservationClient instance.
    */
   observationClient?: CloudObservationClient;
+
+  /**
+   * Paired cloud workspace that owns private workflow values across local project identities.
+   */
+  privateValueOwnerWorkspaceId?: string;
 
   /**
    * Optional custom ObserverCoordinator.
@@ -288,7 +295,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.decoders = options.decoders ?? [
       new ClaudeRecordDecoder(),
       new CodexRecordDecoder(),
-      new OmpRecordDecoder(),
+      // OMP's device paths are resolved against the server names the harness itself is configured
+      // with: the registry is read when a path needs it, so a server added mid-session is honored.
+      new OmpRecordDecoder({
+        deviceSurfaceServers: () => readConfiguredOmpServers().map((server) => server.name),
+      }),
     ];
 
     let dbConnection: LocalDatabaseConnection | undefined;
@@ -311,6 +322,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         sessionRepository,
         syncRepository,
         dbConnection,
+        // The daemon's shared store: redaction placeholders stay recoverable locally so
+        // recorded workflows can resolve private values on this machine at execution.
+        privateValueStore: FilePrivateValueStore.default(),
       });
     for (const decoder of this.decoders) {
       this.normalizationPipeline.registerDecoder(decoder);
@@ -382,6 +396,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
+        workflowCallRecorder: new WorkflowCallRecorder({
+          privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
+        }),
       });
     }
 

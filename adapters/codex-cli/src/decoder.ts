@@ -1070,7 +1070,9 @@ export class CodexSessionDecoder {
         return {
           name: String(asString(item.name) || asString(item.id) || "unknown_tool"),
           inputSchema: paramsObj,
-          provider: asString(item.provider) || "codex-cli",
+          // A tool's provider is the connection it was reached over. The harness id is not one: a
+          // record that names no connection leaves the entry without one, never with a guess.
+          provider: asString(item.provider),
         };
       });
       const header = this.emitHeader("tool_discovery", timestamp, rawEventId);

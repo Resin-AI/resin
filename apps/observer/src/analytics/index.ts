@@ -51,6 +51,17 @@ export {
 } from "./invocation-telemetry-uploader.js";
 
 export {
+  type DerivationCall,
+  type DerivedCall,
+  type ExecutionArgument,
+  type ExecutionRecording,
+  type NativeDerivation,
+  type ObservedResourceFlow,
+  deriveNativeCalls,
+  proposeInputsAcrossExecutions,
+} from "./native-argument-derivation.js";
+
+export {
   type ToolLinkEvidenceRecorderOptions,
   ToolLinkEvidenceRecorder,
   createToolLinkEvidenceRecorder,
@@ -64,3 +75,5 @@ export {
   projectDeterministicCommandSequenceFromEvent,
   safeParseDeterministicCommandSequence,
 } from "./deterministic-command-sequence.js";
+
+export { compareRecordedEvents } from "./recorded-event-order.js";

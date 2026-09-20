@@ -4,13 +4,15 @@ import {
   type InvocationRecord,
   type InvocationUsageEstimate,
   TOOL_IO_UTF8_METHOD,
+  type WorkflowJsonValue,
+  analyzeAgentArguments,
   bytesToTokens,
   createUsageEstimate,
   estimatePayloadBytes,
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
-import type { SafetyGateEvaluator } from "@resin/runtime";
+import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -59,6 +61,36 @@ function isSameLogicalTool(left: RegistryTool, right: RegistryTool): boolean {
 }
 
 /**
+ * Per-session reference scopes for composed invoke_tool calls. A session that passes
+ * `{reference}` envelopes gets one scope holding that session's registered results;
+ * references from another scope never resolve here. Bounded like the discovery tracker.
+ */
+interface ComposedSessionScope {
+  scope: WorkflowReferenceScope;
+  callCounter: number;
+}
+
+const MAX_COMPOSED_SCOPES = 512;
+
+/**
+ * The value a composed call's result is registered under and reported back to the
+ * caller: the tool's own result, not the transport wrapper. A single text payload is
+ * parsed as JSON when it is one; otherwise the raw text stands.
+ */
+export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
+  const content = result.content;
+  if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text") {
+    const text = content[0].text;
+    try {
+      return JSON.parse(text) as WorkflowJsonValue;
+    } catch {
+      return text;
+    }
+  }
+  return content === undefined ? null : (content as unknown as WorkflowJsonValue);
+}
+
+/**
  * Factory for creating the invoke_tool handler.
  */
 export function createInvokeToolHandler(
@@ -85,6 +117,20 @@ export function createInvokeToolHandler(
       }
     }
   }
+  const composedScopes = new Map<string, ComposedSessionScope>();
+  const composedScopeFor = (sessionId: string): ComposedSessionScope => {
+    let entry = composedScopes.get(sessionId);
+    if (!entry) {
+      if (composedScopes.size >= MAX_COMPOSED_SCOPES) {
+        const oldest = composedScopes.keys().next().value;
+        if (oldest !== undefined) composedScopes.delete(oldest);
+      }
+      entry = { scope: new WorkflowReferenceScope(sessionId), callCounter: 0 };
+      composedScopes.set(sessionId, entry);
+    }
+    return entry;
+  };
+
   return async (
     context: WorkspaceContext,
     params: JsonRpcParams,
@@ -292,6 +338,54 @@ export function createInvokeToolHandler(
         }
       }
     };
+    // Composed calls carry argument envelopes ({value}, {reference}, {literal}, nested
+    // composites). They are analyzed once here: the transcript records the envelope form
+    // the caller sent, while validation and dispatch see the resolved values. A
+    // reference that names nothing in this session's scope fails the call explicitly.
+    let composed: { entry: ComposedSessionScope; callId: string } | undefined;
+    let dispatchParams = targetParams as Record<string, WorkflowJsonValue>;
+    const preliminary = analyzeAgentArguments(dispatchParams);
+    if (preliminary.composed) {
+      if (!context.sessionId) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "Composed invocation arguments require a session scope; none is bound to this context.",
+            },
+          ],
+        };
+      }
+      const entry = composedScopeFor(context.sessionId);
+      const callId = `call_${++entry.callCounter}`;
+      let resolvedArgs: Record<string, WorkflowJsonValue>;
+      try {
+        resolvedArgs =
+          analyzeAgentArguments(dispatchParams, {
+            nameInput: (argument, path) =>
+              path.length === 0
+                ? `${callId}_${argument}`
+                : `${callId}_${argument}.${path.map(String).join(".")}`,
+            resolveReference: (reference, path) => entry.scope.resolve(reference, path),
+          }).resolved ?? {};
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const res: CallToolResult = {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Failed to resolve composed arguments for '${displayIdentifier}': ${message}`,
+            },
+          ],
+        };
+        recordInvocation("error", res, message);
+        return res;
+      }
+      composed = { entry, callId };
+      dispatchParams = resolvedArgs;
+    }
 
     const requestedVersion = normalizeIdentifier(params.version);
     if (requestedVersion) {
@@ -366,7 +460,7 @@ export function createInvokeToolHandler(
     }
 
     const paramSchema = resolvedTool.parameters ?? resolvedTool.manifest?.parameters;
-    const validation = validateParameters(paramSchema, targetParams);
+    const validation = validateParameters(paramSchema, dispatchParams as JsonRpcParams);
     if (!validation.valid) {
       const res: CallToolResult = {
         isError: true,
@@ -428,7 +522,7 @@ export function createInvokeToolHandler(
         toolId: resolvedTool.toolId,
         name: resolvedTool.name,
         version: resolvedTool.version,
-        parameters: targetParams,
+        parameters: dispatchParams as JsonRpcParams,
         context,
         manifest: resolvedTool.manifest,
         signal: abortController.signal,
@@ -441,6 +535,21 @@ export function createInvokeToolHandler(
           : "error"
         : "success";
       recordInvocation(status, result);
+      if (composed && !result.isError) {
+        // The caller composed this call, so it gets a handle to the result rather than
+        // the bare payload: later calls in the same session can name the handle instead
+        // of copying the value, and the record keeps the connection.
+        const value = composedResultValue(result);
+        const handle = composed.entry.scope.registerResult(composed.callId, value);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ result: value, handle }),
+            },
+          ],
+        };
+      }
       return result;
     } catch (error) {
       if (timedOut) {

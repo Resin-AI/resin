@@ -5,6 +5,7 @@ import type {
   V1ProjectMetadata,
   V1RevocationMetadata,
   V1ToolLock,
+  WorkflowJsonValue,
 } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import {
@@ -22,8 +23,22 @@ import {
   ProtocolError,
   ValidationError,
 } from "@resin/protocol";
-import { ArtifactCache, type RuntimeTrustStore } from "@resin/runtime";
+import {
+  ArtifactCache,
+  type McpServerDescriptor,
+  type McpToolConnection,
+  RESIN_HARNESS_TOOL_RUNTIME,
+  type RuntimeAdapter,
+  type RuntimeTrustStore,
+  type ToolProtocolDispatchRequest,
+  connectMcpServer,
+  createProcessAdapter,
+  createProgramAdapter,
+  createToolProtocolAdapter,
+} from "@resin/runtime";
+import { composedResultValue } from "../meta/invoke-tool.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
+import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
@@ -39,6 +54,7 @@ import {
   type LockedSyncIdentity,
 } from "./sync.js";
 import { ManagedToolAccess } from "./tool-access.js";
+import { WorkflowValidationClient, WorkflowValidationWorker } from "./validation-worker.js";
 
 export interface ProductionProxyRuntimeOptions {
   credentialStore?: CloudCredentialStore;
@@ -68,9 +84,24 @@ export interface ProductionProxyRuntimeOptions {
   revocationProvider?: () => Promise<V1RevocationMetadata | null> | V1RevocationMetadata | null;
   allowDevKeys?: boolean;
   executor?: LocalArtifactExecutor;
+  /**
+   * Protocol connections the host can dial by the name a recording carries, for a step whose
+   * callable was reached over a protocol rather than through this host's own routing. A name the
+   * host cannot resolve is refused by the step, never answered from a remembered value.
+   */
+  recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
+  /** Executes an ordinary builtin through the active harness's own implementation. */
+  recordedHarnessToolInvoker?: (request: {
+    name: string;
+    parameters: Record<string, unknown>;
+    cwd: string;
+    signal?: AbortSignal;
+  }) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
+  /** Where the validation worker reports an ask it would not answer and an answer the cloud declined. */
+  onValidationLog?: (message: string) => void;
   isPinned?: (toolId: string) => boolean;
 }
 
@@ -87,10 +118,48 @@ export interface ProductionProxyRuntime {
   registry?: ToolRegistry;
   lockManager?: ProjectLockManager;
   executor?: LocalArtifactExecutor;
+  /**
+   * Answers the cloud's pending validation asks from this machine. Present only when credentials
+   * are valid: whether a recording's proposals hold is decided where its values are, on the
+   * authenticated connection that recorded them.
+   */
+  validationWorker?: WorkflowValidationWorker;
   onWorkspaceReady(workspace: WorkspaceContext): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   sync(options?: { force?: boolean }): Promise<CatalogSnapshotResponse | null>;
+}
+
+/**
+ * A resolver of protocol connections, dialed on first use and reused afterwards.
+ *
+ * A step that runs mid-workflow must not pay a fresh handshake, so an opened connection is kept for
+ * the life of the process. A connection that fails to open is NOT cached: the failure is the step's
+ * failure, and a later attempt may still succeed once the server is back.
+ */
+function memoizedConnections(
+  resolve: (name: string) => McpServerDescriptor | undefined,
+): (name: string) => Promise<McpToolConnection | undefined> {
+  const live = new Map<string, McpToolConnection>();
+  const opening = new Map<string, Promise<McpToolConnection | undefined>>();
+  return async (name: string): Promise<McpToolConnection | undefined> => {
+    const existing = live.get(name);
+    if (existing !== undefined) return existing;
+    const inFlight = opening.get(name);
+    if (inFlight !== undefined) return await inFlight;
+    const descriptor = resolve(name);
+    if (descriptor === undefined) return undefined;
+    const attempt = connectMcpServer(descriptor)
+      .then((connection) => {
+        live.set(name, connection);
+        return connection;
+      })
+      .finally(() => {
+        opening.delete(name);
+      });
+    opening.set(name, attempt);
+    return await attempt;
+  };
 }
 
 /**
@@ -175,6 +244,18 @@ export async function createProductionProxyRuntime(
 
     const cache = options.cache ?? new CloudCatalogCache();
 
+    // The protocol connections a recording can name, dialed on first use and kept for the life of
+    // the process. The same resolver serves the executor's recorded-workflow steps, this host's own
+    // routing of a named connection, and the replay the validation worker runs: every path that
+    // re-makes a recorded call reaches the server the record names, or fails naming it.
+    const resolveConnection =
+      options.recordedWorkflowConnections === undefined
+        ? undefined
+        : memoizedConnections(options.recordedWorkflowConnections);
+
+    // The executor's stepInvoker resolves the router lazily: the router is constructed
+    // after the executor because it takes the executor as its local dispatcher.
+    const routerBox: { current?: CloudInvocationRouter } = {};
     const executor =
       options.executor ??
       new LocalArtifactExecutor({
@@ -185,10 +266,85 @@ export async function createProductionProxyRuntime(
         requireSignature: localKeyStore ? true : undefined,
         resinHome:
           options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+        privateValueOwnerWorkspaceId: identity.workspaceId,
+        // A plan recorded from ordinary tools runs through the families this host can really
+        // reach: a recorded program on the host, and a tool by name either over the connection the
+        // recording names or through the same router the original call used, so scope, pins and
+        // permissions apply identically.
+        recordedWorkflowAdapters: (host) => {
+          const workspaceRoot =
+            host.workspace.projectRoot ??
+            host.workspace.canonicalRoot ??
+            host.workspace.roots?.[0]?.path;
+          const bounds = {
+            ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+            ...(host.timeoutMs === undefined ? {} : { timeoutMs: host.timeoutMs }),
+          };
+          return [
+            createProcessAdapter(bounds),
+            createProgramAdapter(bounds),
+            ...(options.recordedHarnessToolInvoker === undefined
+              ? []
+              : ([
+                  {
+                    runtime: RESIN_HARNESS_TOOL_RUNTIME,
+                    call: async (request) => {
+                      const result = await options.recordedHarnessToolInvoker!({
+                        name: request.step.callable.name,
+                        parameters: request.arguments as Record<string, unknown>,
+                        cwd: workspaceRoot ?? process.cwd(),
+                        ...(host.signal ? { signal: host.signal } : {}),
+                      });
+                      if (result.isError) {
+                        throw new Error(
+                          result.content[0]?.text ??
+                            `harness tool '${request.step.callable.name}' answered with an error`,
+                        );
+                      }
+                      return composedResultValue(result);
+                    },
+                  },
+                ] satisfies RuntimeAdapter[])),
+            createToolProtocolAdapter({
+              ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
+              dispatch: async (request) => {
+                const result = await host.routeToHost({
+                  name: request.name,
+                  ...(request.connection ? { connection: request.connection } : {}),
+                  parameters: request.arguments as Record<string, unknown>,
+                });
+                if (result.isError) {
+                  const text =
+                    result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+                  throw new Error(text ?? `callable '${request.name}' answered with an error`);
+                }
+                return composedResultValue(result);
+              },
+            }),
+          ];
+        },
+        stepInvoker: async (request) => {
+          const router = routerBox.current;
+          if (!router) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "Step dispatcher is not ready" }],
+            };
+          }
+          return await router.invoke({
+            toolId: request.name,
+            name: request.name,
+            version: "",
+            ...(request.connection ? { connection: request.connection } : {}),
+            parameters: request.parameters as JsonRpcParams,
+            context: request.context,
+            ...(request.signal ? { signal: request.signal } : {}),
+            ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+          });
+        },
       });
     executor.setManagedToolAccess(managedToolAccess);
-
-    const router = new CloudInvocationRouter({
+    routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
       baseUrl: identity.cloudUrl,
@@ -196,8 +352,70 @@ export async function createProductionProxyRuntime(
       fetchFn: options.fetchFn,
       localExecutor: executor,
       lockManager: options.lockManager,
+      ...(resolveConnection === undefined ? {} : { connectionResolver: resolveConnection }),
     });
-    router.setManagedToolAccess(managedToolAccess);
+    routerBox.current.setManagedToolAccess(managedToolAccess);
+    // The validation worker answers the cloud's asks where the recording's values are: the plan's
+    // private references resolve from the same store the executor resolves them from, and a step
+    // that calls a tool goes back through this host's own routing — the same entry the original
+    // call used — while the recorded programs run in the validator's own disposable directory.
+    const readyWorkspace: { current?: WorkspaceContext } = {};
+    const validationWorker = new WorkflowValidationWorker({
+      client: new WorkflowValidationClient({
+        identityProvider,
+        fetchImpl: fetchWithLifecycle,
+      }),
+      identity: { workspaceId: identity.workspaceId, deviceId: identity.deviceId },
+      privateValues: executor.getPrivateValueStore(),
+      dispatch: async (request: ToolProtocolDispatchRequest): Promise<WorkflowJsonValue> => {
+        const router = routerBox.current;
+        if (router === undefined) throw new Error("Step dispatcher is not ready");
+        const workspace = readyWorkspace.current;
+        if (workspace === undefined) {
+          throw new Error(
+            "the workspace is not ready, so a recorded tool step cannot be routed through this host",
+          );
+        }
+        const result = await router.invoke({
+          toolId: request.name,
+          name: request.name,
+          version: "",
+          ...(request.connection ? { connection: request.connection } : {}),
+          parameters: request.arguments as JsonRpcParams,
+          context: workspace,
+        });
+        if (result.isError) {
+          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+          throw new Error(text ?? `callable '${request.name}' answered with an error`);
+        }
+        return composedResultValue(result);
+      },
+      ...(options.recordedHarnessToolInvoker === undefined
+        ? {}
+        : {
+            runtimeAdapters: (workspaceDir: string) => [
+              {
+                runtime: RESIN_HARNESS_TOOL_RUNTIME,
+                call: async (request) => {
+                  const result = await options.recordedHarnessToolInvoker!({
+                    name: request.step.callable.name,
+                    parameters: request.arguments as Record<string, unknown>,
+                    cwd: workspaceDir,
+                  });
+                  if (result.isError) {
+                    throw new Error(
+                      result.content[0]?.text ??
+                        `harness tool '${request.step.callable.name}' answered with an error`,
+                    );
+                  }
+                  return composedResultValue(result);
+                },
+              },
+            ],
+          }),
+      ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
+      ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
+    });
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -210,7 +428,7 @@ export async function createProductionProxyRuntime(
       managedToolAccess,
       client,
       cache,
-      router,
+      router: routerBox.current,
       circuitBreaker,
       registry: options.registry,
       workspaceId: undefined,
@@ -238,12 +456,14 @@ export async function createProductionProxyRuntime(
       circuitBreaker,
       client,
       cache,
-      router,
+      router: routerBox.current,
       executor,
+      validationWorker,
       coordinator,
       registry: options.registry,
       lockManager: options.lockManager,
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
+        readyWorkspace.current = workspace;
         const workspaceRoot =
           workspace.projectRoot ??
           workspace.canonicalRoot ??
@@ -280,7 +500,7 @@ export async function createProductionProxyRuntime(
           }
           coordinator.bindWorkspace({ workspaceId: workspace.workspaceId, lockManager });
           if (lockManager) {
-            router.setLockManager(lockManager);
+            routerBox.current?.setLockManager(lockManager);
           }
         }
 
@@ -369,10 +589,12 @@ export async function createProductionProxyRuntime(
 
       async start(): Promise<void> {
         coordinator.startPeriodicSync();
+        validationWorker.start();
       },
 
       async stop(): Promise<void> {
         lifecycleAbort.abort();
+        validationWorker.stop();
         coordinator.stopPeriodicSync();
         if (backgroundTasks.size > 0) {
           await Promise.allSettled([...backgroundTasks]);

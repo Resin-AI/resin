@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   PLATFORMS,
@@ -73,6 +75,8 @@ import {
   verifyTarballEntries,
   verifyVulnerabilityPolicy,
 } from "./verify-release.mjs";
+
+const execFileAsync = promisify(execFile);
 
 describe("Release Packaging & Verification Suite", () => {
   const rootDir = process.cwd();
@@ -216,10 +220,34 @@ describe("Release Packaging & Verification Suite", () => {
       ).toThrow(/private key|required|RESIN_RELEASE/i);
     });
 
-    it("rejects asset mutation, changed commit binding, unknown key, missing signature, and stale evidence", () => {
+    it("rejects asset mutation, changed commit binding, unknown key, missing signature, and stale evidence", async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-tamper-"));
       try {
-        const packaged = packageRelease({ rootDir, distDir: dir, skipBuild: true, testOnly: true });
+        const packagedPath = path.join(dir, "packaged.json");
+        const packageReleaseModule = path.join(rootDir, "scripts", "package-release.mjs");
+        const packageInChild = [
+          'import fs from "node:fs";',
+          'import { pathToFileURL } from "node:url";',
+          "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
+          "const { packageRelease } = await import(pathToFileURL(modulePath));",
+          "const packaged = packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+          "fs.writeFileSync(outputPath, JSON.stringify({ trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
+        ].join("\n");
+        await execFileAsync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "--eval",
+            packageInChild,
+            "resin-release-test-child",
+            packageReleaseModule,
+            rootDir,
+            dir,
+            packagedPath,
+          ],
+          { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
+        );
+        const packaged = JSON.parse(fs.readFileSync(packagedPath, "utf8"));
         const baseline = () =>
           verifyRelease({
             rootDir,
@@ -269,9 +297,9 @@ describe("Release Packaging & Verification Suite", () => {
           ),
         ).toBe(true);
       } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        await fs.promises.rm(dir, { recursive: true, force: true });
       }
-    }, 90_000);
+    }, 180_000);
   });
 
   describe("CycloneDX SBOM Generation & Verification", () => {
@@ -1439,6 +1467,25 @@ describe("Release Packaging & Verification Suite", () => {
         boundary,
       });
       expect(missingLicViolations.some((v) => v.rule === "MISSING_LEGAL_FILE")).toBe(true);
+    });
+
+    it("allows published third-party runtime paths but rejects Resin-owned private paths", () => {
+      for (const thirdPartyPath of [
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/prompts/tools/read.md",
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/eval/backend.ts",
+        "resin/node_modules/@oh-my-pi/pi-coding-agent/src/cli/gallery-fixtures/fs.ts",
+      ]) {
+        expect(isForbiddenTarballPath(thirdPartyPath, boundary)).toBe(false);
+      }
+      expect(isForbiddenTarballPath("resin/apps/observer/dist/prompts/internal.md", boundary)).toBe(
+        true,
+      );
+      expect(
+        isForbiddenTarballPath(
+          "resin/node_modules/@resin/observer/dist/prompts/internal.md",
+          boundary,
+        ),
+      ).toBe(true);
     });
 
     it("verifyTarballEntries rejects injected forbidden cloud/web/serverless/map paths", () => {

@@ -197,6 +197,9 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
 export function isForbiddenTarballPath(entryPath, boundary = null) {
   if (!entryPath || Object.prototype.toString.call(entryPath) !== "[object String]") return false;
   const normalized = entryPath.replace(/\\/g, "/");
+  const isPublishedThirdPartyDependency =
+    normalized.startsWith("resin/node_modules/") &&
+    !normalized.startsWith("resin/node_modules/@resin/");
 
   if (
     (isForbiddenReleasePath instanceof Function ||
@@ -218,7 +221,10 @@ export function isForbiddenTarballPath(entryPath, boundary = null) {
     return true;
   }
 
-  if (/(?:fixtures\/(?!test-fixtures)|eval\/|prompts\/|__tests__|__mocks__)/i.test(normalized)) {
+  if (
+    !isPublishedThirdPartyDependency &&
+    /(?:fixtures\/(?!test-fixtures)|eval\/|(?:^|\/)prompts\/|__tests__|__mocks__)/i.test(normalized)
+  ) {
     return true;
   }
 

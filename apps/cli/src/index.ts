@@ -183,6 +183,7 @@ export * from "./service/notifications.js";
 export * from "./commands/init.js";
 export * from "./commands/status.js";
 export * from "./commands/privacy.js";
+export * from "./commands/authorize.js";
 export * from "./commands/control.js";
 export * from "./commands/doctor.js";
 export * from "./commands/upgrade.js";

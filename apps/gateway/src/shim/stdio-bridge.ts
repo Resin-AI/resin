@@ -6,6 +6,7 @@ import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection } from "@resin/db";
 import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
+import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
 import type { ReconcileOutcome } from "../project/lock-manager.js";
@@ -38,6 +39,20 @@ export interface McpStdioShimOptions {
   resinHome?: string;
   tokenFilePath?: string;
   credentialStore?: CloudCredentialStore;
+  /**
+   * The protocol connections this host can dial by the name a recording carries, resolved from the
+   * harness's own MCP configuration. A recorded callable reached over a connection is re-made over
+   * that connection; a name this host cannot resolve is refused by the step, never answered from a
+   * same-named callable or from memory.
+   */
+  recordedWorkflowConnections?: (name: string) => McpServerDescriptor | undefined;
+  /** Executes a recorded builtin through the harness implementation that owns this shim. */
+  recordedHarnessToolInvoker?: (request: {
+    name: string;
+    parameters: Record<string, unknown>;
+    cwd: string;
+    signal?: AbortSignal;
+  }) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>;
   onToolQualified?: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => void;
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
@@ -140,6 +155,12 @@ export class McpStdioShim {
   private readonly stderr: NodeJS.WritableStream;
 
   private activeGateway?: LocalMcpGateway;
+  /**
+   * The cloud runtime this session composed, kept so the session can stop it: the validation worker
+   * it starts polls for as long as this host is alive, and a host that outlives its transport would
+   * keep asking the cloud for work nothing is left to answer with.
+   */
+  private activeCloudRuntime?: ProductionProxyRuntime;
   private activeSocket?: net.Socket;
   private isRunning = false;
   private surface?: ToolSearchSurface;
@@ -331,6 +352,12 @@ export class McpStdioShim {
         home: this.options.home,
         resinHome: this.options.resinHome,
         tokenFilePath: this.options.tokenFilePath,
+        ...(this.options.recordedWorkflowConnections === undefined
+          ? {}
+          : { recordedWorkflowConnections: this.options.recordedWorkflowConnections }),
+        ...(this.options.recordedHarnessToolInvoker === undefined
+          ? {}
+          : { recordedHarnessToolInvoker: this.options.recordedHarnessToolInvoker }),
         onToolSyncError: (toolName: string, error: Error) => {
           this.writeStderr(`[WARN] ${toolName}: ${error.message}\n`);
           this.options.onToolSyncError?.(toolName, error);
@@ -370,6 +397,11 @@ export class McpStdioShim {
       if (registry && cloudRuntime.router) {
         router = createRegistryGatewayRouter(registry, cloudRuntime.router);
       }
+      // The runtime starts with the host that owns it. Until this line the workspace could read the
+      // catalog but never answer the cloud's validation asks for its own recordings: the worker that
+      // does that is started by `start()` and nothing else.
+      await cloudRuntime.start();
+      this.activeCloudRuntime = cloudRuntime;
     } catch (error) {
       if (error instanceof LocalArtifactTrustConfigurationError) throw error;
       cloudRuntime = undefined;
@@ -427,6 +459,12 @@ export class McpStdioShim {
     if (this.activeGateway) {
       this.activeGateway.close();
       this.activeGateway = undefined;
+    }
+
+    if (this.activeCloudRuntime) {
+      const runtime = this.activeCloudRuntime;
+      this.activeCloudRuntime = undefined;
+      await runtime.stop();
     }
   }
 }
