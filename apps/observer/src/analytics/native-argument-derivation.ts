@@ -99,26 +99,46 @@ function isPlainObject(value: unknown): value is Record<string, WorkflowJsonValu
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Every string leaf of a value, with the path it sits at, in a stable traversal order. */
-function stringLeaves(
+type CandidateScalar = string | number | boolean;
+
+/** Every comparable primitive leaf, with type preserved so `1` never aliases `"1"`. */
+function scalarLeaves(
   value: WorkflowJsonValue | undefined,
   path: WorkflowValuePath,
-  out: Array<{ path: WorkflowValuePath; value: string }>,
+  out: Array<{ path: WorkflowValuePath; value: CandidateScalar }>,
   depth = 0,
 ): void {
   if (depth > MAX_LEAF_DEPTH || out.length >= MAX_LEAVES) return;
-  if (typeof value === "string") {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     out.push({ path, value });
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((entry, index) => stringLeaves(entry, [...path, index], out, depth + 1));
+    value.forEach((entry, index) => scalarLeaves(entry, [...path, index], out, depth + 1));
     return;
   }
   if (isPlainObject(value)) {
     for (const [key, entry] of Object.entries(value)) {
-      stringLeaves(entry, [...path, key], out, depth + 1);
+      scalarLeaves(entry, [...path, key], out, depth + 1);
     }
+  }
+}
+
+/** Stable typed identity for exact primitive comparison. */
+function scalarKey(value: CandidateScalar): string {
+  return JSON.stringify([typeof value, value]);
+}
+
+/** String-only view used by input-declaration and program-token inference. */
+function stringLeaves(
+  value: WorkflowJsonValue | undefined,
+  path: WorkflowValuePath,
+  out: Array<{ path: WorkflowValuePath; value: string }>,
+): void {
+  const leaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+  scalarLeaves(value, path, leaves);
+  for (const leaf of leaves) {
+    if (typeof leaf.value === "string") out.push({ path: leaf.path, value: leaf.value });
   }
 }
 
@@ -151,27 +171,27 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
    */
   const declaredInputValues = new Map<string, { name: string; count: number }>();
 
-  /** Every string leaf the record had shown once a call's result arrived, before it arrived. */
+  /** Every typed primitive leaf shown before each call's result arrived. */
   const seenBeforeResult: Array<Set<string>> = [];
-  /** The string leaves each call's own arguments carried, so an echo is told from a minting. */
+  /** Typed primitive leaves each call's own arguments carried, so echoes are not minting. */
   const argumentValues: Array<Set<string>> = [];
-  /** The string leaves each call's own result contributed. */
+  /** Typed primitive leaves each call's own result contributed. */
   const resultValues: Array<Set<string>> = [];
   const seen = new Set<string>();
 
   for (const [index, call] of calls.entries()) {
-    const argumentLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
+    const argumentLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
     for (const [argument, value] of Object.entries(call.arguments)) {
-      stringLeaves(value, [argument], argumentLeaves);
+      scalarLeaves(value, [argument], argumentLeaves);
     }
-    for (const leaf of argumentLeaves) seen.add(leaf.value);
-    argumentValues.push(new Set(argumentLeaves.map((leaf) => leaf.value)));
+    for (const leaf of argumentLeaves) seen.add(scalarKey(leaf.value));
+    argumentValues.push(new Set(argumentLeaves.map((leaf) => scalarKey(leaf.value))));
     seenBeforeResult.push(new Set(seen));
 
-    const resultLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
-    stringLeaves(call.result, [], resultLeaves);
-    resultValues.push(new Set(resultLeaves.map((leaf) => leaf.value)));
-    for (const leaf of resultLeaves) seen.add(leaf.value);
+    const resultLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+    scalarLeaves(call.result, [], resultLeaves);
+    resultValues.push(new Set(resultLeaves.map((leaf) => scalarKey(leaf.value))));
+    for (const leaf of resultLeaves) seen.add(scalarKey(leaf.value));
 
     // Declared-resource edges: the earlier call declared it wrote what this call declared it reads,
     // so the order is a fact of the record rather than an inference from the values involved.
@@ -196,6 +216,11 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
         if (candidates.length >= MAX_CANDIDATES) break;
         if (!declared.has(argument)) continue;
         if (heldLocally.has(argument)) continue;
+        // Discovery describes the executor's API, not the reusable workflow's inputs. Its program
+        // argument is the implementation we recorded. Lifting that entire string asks the next
+        // caller to implement the work again and competes with legitimate data-token proposals.
+        // Program identity comes from capture, never from the tool or argument name.
+        if (call.program?.argument === argument) continue;
         // Only a string is offered. A number or a boolean at a declared position is far more often
         // a fixed setting than a value a caller would vary, and this recording cannot separate the
         // two — so the conservative reading wins and the value stays as recorded.
@@ -229,7 +254,8 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     if (candidates.length >= MAX_CANDIDATES) continue;
     for (const leaf of argumentLeaves) {
       if (candidates.length >= MAX_CANDIDATES) break;
-      if (leaf.value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
+      if (typeof leaf.value === "string" && leaf.value.length < MIN_CANDIDATE_STRING_LENGTH)
+        continue;
       const argumentName = leaf.path[0];
       if (typeof argumentName !== "string") continue;
       const producers = producersOfValue(leaf.value, index, calls, resultValues, seenBeforeResult);
@@ -327,20 +353,21 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
  * so it never becomes a producer.
  */
 function producersOfValue(
-  value: string,
+  value: CandidateScalar,
   before: number,
   calls: readonly DerivationCall[],
   resultValues: ReadonlyArray<ReadonlySet<string>>,
   seenBeforeResult: ReadonlyArray<ReadonlySet<string>>,
 ): Array<{ stepId: string; path: WorkflowValuePath }> {
   const producers: Array<{ stepId: string; path: WorkflowValuePath }> = [];
+  const key = scalarKey(value);
   for (let producerIndex = 0; producerIndex < before; producerIndex += 1) {
-    if (!resultValues[producerIndex]!.has(value)) continue;
-    if (seenBeforeResult[producerIndex]!.has(value)) continue;
-    const produceLeaves: Array<{ path: WorkflowValuePath; value: string }> = [];
-    stringLeaves(calls[producerIndex]!.result, [], produceLeaves);
+    if (!resultValues[producerIndex]!.has(key)) continue;
+    if (seenBeforeResult[producerIndex]!.has(key)) continue;
+    const produceLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+    scalarLeaves(calls[producerIndex]!.result, [], produceLeaves);
     for (const produced of produceLeaves) {
-      if (produced.value !== value) continue;
+      if (produced.value !== value || typeof produced.value !== typeof value) continue;
       producers.push({ stepId: calls[producerIndex]!.stepId, path: produced.path });
     }
   }
@@ -359,9 +386,10 @@ function mintedBefore(
   resultValues: ReadonlyArray<ReadonlySet<string>>,
   argumentValues: ReadonlyArray<ReadonlySet<string>>,
 ): boolean {
+  const key = scalarKey(value);
   return calls.slice(0, before).some((_earlier, index) => {
-    if (!resultValues[index]!.has(value)) return false;
-    return !argumentValues[index]!.has(value);
+    if (!resultValues[index]!.has(key)) return false;
+    return !argumentValues[index]!.has(key);
   });
 }
 

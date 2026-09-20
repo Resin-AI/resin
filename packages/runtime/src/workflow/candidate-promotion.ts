@@ -89,6 +89,15 @@ export function applyAcceptedBindings(
     const step = next.steps.find((entry) => entry.id === candidate.stepId);
     const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
     if (argument === undefined || step === undefined) continue;
+    // A validation verdict cannot turn the recorded implementation into a data input. Explicit
+    // inputs already in the plan and source bound to an earlier result are unaffected.
+    if (
+      candidate.proposed.kind === "input" &&
+      candidate.path.length === 0 &&
+      step.callable.program?.argument === candidate.argument
+    ) {
+      continue;
+    }
     const template = templateOf(next, candidate.stepId, candidate.argument);
     // A token binding names a position inside the program the step's own record holds in that
     // argument, so it binds the recorded text into a program template rather than walking a path

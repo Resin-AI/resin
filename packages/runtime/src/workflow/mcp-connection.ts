@@ -94,13 +94,11 @@ function readTextPart(content: unknown): string | undefined {
 }
 
 function parseToolText(text: string): WorkflowJsonValue {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return trimmed;
   try {
-    return JSON.parse(trimmed) as WorkflowJsonValue;
+    return JSON.parse(text) as WorkflowJsonValue;
   } catch {
-    // The tool answered with text, and that text is its value.
-    return trimmed;
+    // Non-JSON tool output is an exact value; whitespace is observable.
+    return text;
   }
 }
 

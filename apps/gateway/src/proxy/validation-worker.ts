@@ -27,7 +27,11 @@ import {
 } from "@resin/contracts";
 import type { CloudRequestIdentity, PrivateValueStore } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import type { McpToolConnection, ToolProtocolDispatchRequest } from "@resin/runtime";
+import type {
+  McpToolConnection,
+  RuntimeAdapter,
+  ToolProtocolDispatchRequest,
+} from "@resin/runtime";
 import { z } from "zod";
 import {
   type LocalWorkflowValidationResult,
@@ -321,6 +325,8 @@ export interface WorkflowValidationWorkerOptions {
    */
   connections?: Record<string, McpToolConnection>;
   openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  /** Additional host-owned runtime families, built for each replay workspace. */
+  runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   /**
    * Environment the replayed programs may see, and nothing else: a program recorded by somebody
    * else's session must not be able to read this operator's credentials.
@@ -381,6 +387,7 @@ export class WorkflowValidationWorker {
   private readonly dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
   private readonly connections?: Record<string, McpToolConnection>;
   private readonly openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  private readonly runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   private readonly environment?: Record<string, string>;
   private readonly environmentIdentity: string;
   private readonly timeoutMs: number;
@@ -403,6 +410,7 @@ export class WorkflowValidationWorker {
     this.connections = options.connections;
     this.openConnection = options.openConnection;
     this.environment = options.environment;
+    this.runtimeAdapters = options.runtimeAdapters;
     this.environmentIdentity =
       options.environmentIdentity ?? DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT;
     this.timeoutMs = boundedTimeout(options.timeoutMs);
@@ -545,14 +553,38 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
+    if (
+      request.authorization === null ||
+      request.authorization === undefined ||
+      request.authorization.workspaceId !== this.workspaceId
+    ) {
+      this.log(
+        `workflow validation: refused ask '${request.requestId}': it has no grant for this identity's workspace`,
+      );
+      return undefined;
+    }
     let result: LocalWorkflowValidationResult;
     try {
       result = await this.buildValidator(request)(request.plan);
     } catch (error) {
       this.log(
-        `workflow validation: ask '${request.requestId}' was not replayed (${describe(error)})`,
+        `workflow validation: ask '${request.requestId}' replay failed (${describe(error)})`,
       );
-      return undefined;
+      return this.failedDecision(
+        request,
+        planDigest,
+        "the local replay failed before it could verify the recorded workflow",
+      );
+    }
+    if (
+      result.unavailable !== undefined ||
+      (result.verdicts.length === 0 && result.verification === undefined)
+    ) {
+      const reason =
+        result.unavailable ??
+        "the validator returned no verdicts and no whole-plan verification";
+      this.log(`workflow validation: ask '${request.requestId}' replay failed (${reason})`);
+      return this.failedDecision(request, planDigest, reason);
     }
     const verdicts: WorkflowValidationVerdict[] = result.verdicts.map((verdict) => ({
       candidate: {
@@ -584,6 +616,40 @@ export class WorkflowValidationWorker {
     };
   }
 
+  private failedDecision(
+    request: WorkflowValidationRequest,
+    planDigest: string,
+    reason: string,
+  ): WorkflowValidationDecision {
+    const candidates = request.plan.candidates ?? [];
+    return {
+      schemaVersion: WORKFLOW_VALIDATION_SCHEMA_VERSION,
+      requestId: request.requestId,
+      attempt: request.attempt,
+      planDigest,
+      evidenceDigest: request.evidenceDigest,
+      environment: this.environmentIdentity,
+      verdicts: candidates.map((candidate) => ({
+        candidate: {
+          stepId: candidate.stepId,
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+        },
+        confirmed: false,
+        reason,
+      })),
+      verification: {
+        status: "failed",
+        reproduced: [],
+        missed: candidates.map((candidate) => ({ stepId: candidate.stepId, detail: reason })),
+        dropped: candidates.map((candidate) => ({ candidate, reason })),
+      },
+      accepted: [],
+      decidedAt: this.now().toISOString(),
+    };
+  }
+
   private buildValidator(request: WorkflowValidationRequest): WorkflowPlanValidator {
     const create = this.createValidator;
     if (create) return create(request);
@@ -604,6 +670,7 @@ export class WorkflowValidationWorker {
       ...(this.dispatch === undefined ? {} : { dispatch: this.dispatch }),
       ...(this.connections === undefined ? {} : { connections: this.connections }),
       ...(this.openConnection === undefined ? {} : { openConnection: this.openConnection }),
+      ...(this.runtimeAdapters === undefined ? {} : { runtimeAdapters: this.runtimeAdapters }),
       ...(this.environment === undefined ? {} : { environment: this.environment }),
       timeoutMs: this.timeoutMs,
     });

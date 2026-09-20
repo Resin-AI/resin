@@ -80,6 +80,6 @@ Closes #<!-- Issue Number -->
 ## Review & Governance Verification
 
 - [ ] PR targets `main` and is ready for PR-only release gates.
-- [ ] Code owners in `.github/CODEOWNERS` are informational; reviews are optional, and no human review is required to merge.
+- [ ] Human reviews are optional, and no human review is required to merge.
 - [ ] All required status check jobs in `.github/workflows/ci.yml` and `ci-gate` pass.
 - [ ] Required machine verification and automated release qualification gates pass.

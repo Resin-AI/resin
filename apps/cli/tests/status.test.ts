@@ -4,7 +4,9 @@ import * as claudeAdapter from "@resin/adapter-claude-code";
 import * as codexAdapter from "@resin/adapter-codex";
 import * as ompAdapter from "@resin/adapter-omp";
 import { type DaemonHealthReport, IpcClient } from "@resin/observer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { main } from "../src/bin/cli.js";
+import * as statusCommands from "../src/commands/status.js";
 import {
   STATUS_SCHEMA_VERSION,
   collectStatus,
@@ -112,6 +114,16 @@ const SOCKET_FILE = path.join(STATE_DIR, "daemon.sock");
 const LOCK_FILE = path.join(STATE_DIR, "daemon.lock");
 const TOKEN_FILE = path.join(STATE_DIR, "device-token.json");
 const ENV = { RESIN_HOME };
+const PROFILE = {
+  schemaVersion: "1.0.0",
+  accountId: "acc_status_42",
+  userId: "user_status_42",
+  email: "member@example.com",
+  membershipType: "pro",
+};
+const profileFetch = vi.fn<typeof fetch>();
+
+afterEach(() => vi.unstubAllGlobals());
 
 function createMockFsBridge(initialFiles: Record<string, string> = {}, failReads = false) {
   const files = new Map(Object.entries(initialFiles));
@@ -267,6 +279,8 @@ function healthyFiles() {
 }
 
 beforeEach(() => {
+  profileFetch.mockReset().mockImplementation(async () => Response.json(PROFILE));
+  vi.stubGlobal("fetch", profileFetch);
   runtime.service = {
     installed: true,
     active: true,
@@ -299,6 +313,115 @@ beforeEach(() => {
 });
 
 describe("unified status schema", () => {
+  it.each([
+    ["--verbose", "status"],
+    ["status", "-v"],
+  ])("renders detailed status through main(%j)", async (...args) => {
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    const realStatusCommand = statusCommand;
+    const command = vi
+      .spyOn(statusCommands, "statusCommand")
+      .mockImplementation((commandArgs, options) =>
+        realStatusCommand(commandArgs, {
+          ...options,
+          cwd: "/workspace/packages/app",
+          env: ENV,
+          now: () => NOW,
+          fsBridge: createMockFsBridge(healthyFiles()),
+          notificationConsumer: async (active) => active,
+        }),
+      );
+    try {
+      expect(await main([...args, "--home", HOME], { isInitialized: false, env: ENV })).toBe(0);
+      expect(chunks.join("")).toContain("[Service & IPC]");
+      expect(chunks.join("")).toContain("[Tools & MCP Catalog]");
+      expect(chunks.join("")).toContain("/workspace/packages/app");
+    } finally {
+      command.mockRestore();
+      stdout.mockRestore();
+    }
+  });
+
+  it.each([
+    { label: "compact by default", args: [], verbose: undefined, detailed: false },
+    { label: "long flag", args: ["--verbose"], verbose: undefined, detailed: true },
+    { label: "short flag", args: ["-v"], verbose: undefined, detailed: true },
+    { label: "command option", args: [], verbose: true, detailed: true },
+  ])("prints $label through statusCommand", async ({ args, verbose, detailed }) => {
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    try {
+      const exitCode = await statusCommand([...args, "--home", HOME], {
+        verbose,
+        cwd: "/workspace/packages/app",
+        env: ENV,
+        now: () => NOW,
+        fsBridge: createMockFsBridge(healthyFiles()),
+        notificationConsumer: async (active) => active,
+      });
+
+      expect(exitCode).toBe(0);
+      const output = chunks.join("");
+      if (detailed) {
+        expect(output).toContain("[Service & IPC]");
+        expect(output).toContain("[Tools & MCP Catalog]");
+        expect(output).toContain("ws_project_99");
+        expect(output).toContain("/workspace/packages/app");
+      } else {
+        expect(output).toContain("Resin: Running");
+        expect(output).toContain("Details: resin status --verbose");
+        expect(output).not.toContain("[Service & IPC]");
+        expect(output).not.toContain("ws_project_99");
+      }
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
+  it("keeps JSON identical when verbose flags and options are enabled", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance"] });
+    vi.setSystemTime(NOW);
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    const options = {
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(healthyFiles()),
+    };
+    try {
+      expect(await statusCommand(["--json", "--home", HOME], options)).toBe(0);
+      const plainJson = chunks.join("");
+      chunks.length = 0;
+      expect(
+        await statusCommand(["--json", "--verbose", "-v", "--home", HOME], {
+          ...options,
+          verbose: true,
+        }),
+      ).toBe(0);
+      expect(chunks.join("")).toBe(plainJson);
+      expect(JSON.parse(plainJson)).toMatchObject({
+        schemaVersion: STATUS_SCHEMA_VERSION,
+        status: "healthy",
+        workspace: { workspaceId: "ws_project_99" },
+        daemon: { ipcResponsive: true },
+      });
+    } finally {
+      stdout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("collects a healthy workspace, daemon, identity, privacy, harness, recovery, and update snapshot", async () => {
     const summary = await collectStatus({
       home: HOME,
@@ -329,6 +452,7 @@ describe("unified status schema", () => {
       emailOrUser: "user_status_42",
       expired: false,
     });
+    expect(summary.account).toMatchObject({ email: PROFILE.email, membershipType: "pro" });
     expect(summary.privacy).toMatchObject({
       deviceMetadataTelemetryEnabled: true,
       cloudMetadataTelemetryEnabled: true,
@@ -357,6 +481,179 @@ describe("unified status schema", () => {
     });
     expect(summary.harnesses.every((harness) => harness.status === "attached")).toBe(true);
     expect(summary.remediations).toEqual([]);
+  });
+
+  it("keeps healthy foreground status compact without hiding sharing or installed agents", async () => {
+    const summary = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(healthyFiles()),
+    });
+    summary.service = {
+      ...summary.service,
+      installed: false,
+      active: false,
+      status: "externally_managed",
+    };
+    summary.harnesses = summary.harnesses.map((harness) =>
+      harness.id === "omp" ? { ...harness, installed: false } : harness,
+    );
+    summary.safetyGate = {
+      isOpen: false,
+      status: "uninitialized",
+      unsafeOverrideActive: false,
+      unmetRequirementCodes: [],
+    };
+
+    const output = formatStatusForTerminal(summary);
+
+    expect(output).toContain("Resin: Running");
+    expect(output).toMatch(/Daemon\s+Running \(foreground\)/);
+    expect(output).toMatch(/Cloud\s+Signed in/i);
+    expect(output).toMatch(/Email\s+member@example\.com/);
+    expect(output).toMatch(/Membership\s+Pro/);
+    expect(output).toMatch(/Agents\s+.*Claude Code.*Codex CLI/);
+    expect(output).not.toContain("Oh My Pi");
+    expect(output).toMatch(/Sharing\s+metadata on.*raw transcripts on/i);
+    expect(output).toMatch(/Production\s+Not verified/i);
+    expect(output).toContain("Details: resin status --verbose");
+    expect(output.trim().split("\n").length).toBeLessThanOrEqual(12);
+    for (const privateDetail of [
+      "Schema:",
+      "ws_project_99",
+      "ws_cloud_42",
+      "dev_status_42",
+      "acc_status_42",
+      "user_status_42",
+      "/workspace",
+      summary.generatedAt,
+      "[Service & IPC]",
+      "[Recovery]",
+      "[Updates]",
+      "[Production Safety Gate]",
+      "[Tools & MCP Catalog]",
+      "System Tools:",
+      "Custom Tools:",
+    ]) {
+      expect(output).not.toContain(privateDetail);
+    }
+  });
+
+  it.each([
+    ["free", "Free"],
+    ["pro", "Pro"],
+    ["max", "Max"],
+    ["founder", "Founder"],
+  ])(
+    "shows the caller's email and %s membership in each output format",
+    async (membershipType, label) => {
+      profileFetch.mockResolvedValue(Response.json({ ...PROFILE, membershipType }));
+      const summary = await collectStatus({
+        home: HOME,
+        env: ENV,
+        now: () => NOW,
+        fsBridge: createMockFsBridge(healthyFiles()),
+      });
+
+      expect(summary.account).toMatchObject({ email: PROFILE.email, membershipType });
+      for (const verbose of [false, true]) {
+        const output = formatStatusForTerminal(summary, { verbose });
+        expect(output).toContain(PROFILE.email);
+        expect(output).toMatch(new RegExp(`Membership:?\\s+${label}`));
+        expect(output).not.toContain("ACCESS_TOKEN_SECRET");
+      }
+      expect(JSON.parse(JSON.stringify(summary)).account).toMatchObject({
+        email: PROFILE.email,
+        membershipType,
+      });
+    },
+  );
+
+  it.each([401, 403, 404, 503])(
+    "keeps local health and credentials intact when the profile returns %s",
+    async (status) => {
+      profileFetch.mockResolvedValue(Response.json({ error: "unavailable" }, { status }));
+      const fsBridge = createMockFsBridge(healthyFiles());
+      const credentialsBefore = fsBridge.files.get(TOKEN_FILE);
+      const summary = await collectStatus({ home: HOME, env: ENV, now: () => NOW, fsBridge });
+
+      expect(summary.status).toBe("healthy");
+      expect(summary.account).toMatchObject({ status: "valid", email: null, membershipType: null });
+      expect(formatStatusForTerminal(summary)).toMatch(/Email\s+Unavailable/);
+      expect(formatStatusForTerminal(summary)).toMatch(/Membership\s+Unavailable/);
+      expect(fsBridge.files.get(TOKEN_FILE)).toBe(credentialsBefore);
+      expect(profileFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("does not fetch or invent account metadata for missing or expired credentials", async () => {
+    const files = healthyFiles();
+    const credentials = validCredentials();
+    files[TOKEN_FILE] = JSON.stringify({
+      ...credentials,
+      claims: { ...credentials.claims, expiresAt: "2020-01-01T00:00:00.000Z" },
+    });
+    const expired = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+    expect(expired.account).toMatchObject({ status: "expired", email: null, membershipType: null });
+    const fsBridge = createMockFsBridge(healthyFiles());
+    fsBridge.files.delete(TOKEN_FILE);
+    const missing = await collectStatus({ home: HOME, env: ENV, now: () => NOW, fsBridge });
+    expect(missing.account).toMatchObject({ linked: false, email: null, membershipType: null });
+    expect(formatStatusForTerminal(missing)).not.toMatch(/Membership\s+Free/);
+    expect(profileFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "unsafe_override"] as const)(
+    "shows a %s safety gate even when daemon health is otherwise healthy",
+    async (status) => {
+      const summary = await collectStatus({
+        home: HOME,
+        cwd: "/workspace/packages/app",
+        env: ENV,
+        now: () => NOW,
+        fsBridge: createMockFsBridge(healthyFiles()),
+      });
+      summary.safetyGate = {
+        isOpen: status === "unsafe_override",
+        status,
+        unsafeOverrideActive: status === "unsafe_override",
+        unmetRequirementCodes: [],
+      };
+
+      const output = formatStatusForTerminal(summary);
+
+      expect(output).toContain("Resin: Needs attention");
+      expect(output).toMatch(
+        status === "failed" ? /Production\s+Blocked/i : /Production\s+Unsafe override/i,
+      );
+      expect(output).not.toContain("[Production Safety Gate]");
+    },
+  );
+
+  it("distinguishes an offline cloud connection from a stopped local daemon", async () => {
+    const summary = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(healthyFiles()),
+    });
+    summary.account.status = "offline";
+    summary.cloud.status = "offline";
+
+    const output = formatStatusForTerminal(summary);
+
+    expect(output).toContain("Resin: Needs attention");
+    expect(output).toMatch(/Daemon\s+Running/);
+    expect(output).toMatch(/Cloud\s+Offline.*local tools still available/i);
+    expect(output).toMatch(/Agents\s+.*Claude Code/);
   });
 
   it("uses the active CODEX_HOME and does not accept a configured inactive default", async () => {
@@ -417,6 +714,10 @@ describe("unified status schema", () => {
     });
 
     expect(summary.notifications).toEqual([notification]);
+    const output = formatStatusForTerminal(summary);
+    expect(output).toContain(notification.title);
+    expect(output).toContain(notification.remediationCommand);
+    expect(output).toContain("Resin: Needs attention");
   });
 
   it("does not let a status snapshot resolve observer-managed notifications", async () => {
@@ -488,6 +789,19 @@ describe("unified status schema", () => {
     });
   });
 
+  it("shows unknown metadata consent without claiming sharing is enabled", async () => {
+    runtime.health = { ...runtime.health, telemetry: {} };
+    const summary = await collectStatus({
+      home: HOME,
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(healthyFiles()),
+    });
+
+    expect(formatStatusForTerminal(summary)).toMatch(/Sharing\s+metadata unknown/i);
+  });
+
   it("degrades enabled telemetry when required cloud consent is unknown", async () => {
     runtime.health = {
       ...runtime.health,
@@ -538,6 +852,12 @@ describe("unified status schema", () => {
     });
     expect(summary.status).toBe("degraded");
     expect(summary.remediations.map((item) => item.code)).toContain("repair_harnesses");
+    const output = formatStatusForTerminal(summary);
+    expect(output).toMatch(/Agents\s+.*Claude Code.*needs (setup|repair)/i);
+    for (const remediation of summary.remediations) {
+      expect(output).toContain(remediation.message);
+      if (remediation.command) expect(output).toContain(remediation.command);
+    }
   });
 
   it("lets authoritative live health clear stale cached harness drift", async () => {
@@ -734,7 +1054,13 @@ describe("unified status schema", () => {
         "inspect_update",
       ]),
     );
-    expect(output).toContain("[WARN] DEGRADED");
+    expect(output).toContain("Resin: Needs attention");
+    expect(output).toMatch(/Cloud\s+.*expired/i);
+    expect(output).toMatch(/Sharing\s+metadata off.*raw transcripts off/i);
+    for (const remediation of summary.remediations) {
+      expect(output).toContain(remediation.message);
+      if (remediation.command) expect(output).toContain(remediation.command);
+    }
     expect(output).toContain("Run: resin login");
     expect(output).toContain("Run: resin doctor --fix");
     expect(output).toMatch(/^[\x00-\x7f]*$/);
@@ -751,7 +1077,7 @@ describe("unified status schema", () => {
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
     });
-    const terminal = formatStatusForTerminal(summary);
+    const terminal = formatStatusForTerminal(summary, { verbose: true });
     const json = JSON.stringify(summary);
 
     expect(summary.status).toBe("degraded");
@@ -819,7 +1145,15 @@ describe("unified status schema", () => {
         rawTranscriptsAllowed: false,
         sink: "disabled",
       });
-      expect(formatStatusForTerminal(result)).toContain("account unknown");
+      const terminal = formatStatusForTerminal(result);
+      expect(terminal).toContain("Resin: Stopped");
+      expect(terminal).toMatch(/Daemon\s+Stopped/i);
+      expect(terminal).toMatch(/Cloud\s+Not signed in/i);
+      expect(terminal).toMatch(/Sharing\s+metadata unknown.*raw transcripts off/i);
+      for (const remediation of result.remediations) {
+        expect(terminal).toContain(remediation.message);
+        if (remediation.command) expect(terminal).toContain(remediation.command);
+      }
       expect(customFetch).not.toHaveBeenCalled();
     } finally {
       stdout.mockRestore();
@@ -873,7 +1207,7 @@ describe("unified status schema", () => {
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
     });
-    const terminal = formatStatusForTerminal(summary);
+    const terminal = formatStatusForTerminal(summary, { verbose: true });
     const jsonRoundTrip = JSON.parse(JSON.stringify(summary));
     const escapedRoot = "/workspace/\\u001b[31mforged\\u000aline\\u000d\\u0009\\u007f\\u009b";
 
@@ -914,7 +1248,8 @@ describe("unified status schema", () => {
     });
     const json = JSON.stringify(summary);
     const terminal = formatStatusForTerminal(summary);
-    const combined = `${json}\n${terminal}`;
+    const detailed = formatStatusForTerminal(summary, { verbose: true });
+    const combined = `${json}\n${terminal}\n${detailed}`;
 
     for (const secret of [
       "ACCESS_TOKEN_SECRET",

@@ -15,6 +15,7 @@ import {
   resolvePrivateReference,
 } from "../../src/analytics/private-value-store.js";
 import {
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
@@ -104,6 +105,14 @@ function discovery(
 
 function carrierOf(observed: NormalizedSessionEvent) {
   return readWorkflowCallCarrier(observed.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+}
+
+/** The events one execution of a session produced, by the index its carriers name. */
+function executionOf(events: readonly NormalizedSessionEvent[], index: number) {
+  return events.filter((event) => {
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    return carrier?.executionIndex === index;
+  });
 }
 
 /** Drives the recorder exactly as the capture coordinator does, in recorded order. */
@@ -773,13 +782,6 @@ describe("a recording and the demonstrations read beside it", () => {
     ]).events;
   }
 
-  function executionOf(events: readonly NormalizedSessionEvent[], index: number) {
-    return events.filter((event) => {
-      const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
-      return carrier?.executionIndex === index;
-    });
-  }
-
   it("keeps the selected work's own calls and never adds the session's other tasks", () => {
     const events = session();
     const recipe = recordCallsFromEvents("wf_selected", executionOf(events, 0), {
@@ -819,6 +821,142 @@ describe("a recording and the demonstrations read beside it", () => {
       "beta_report",
     ]);
     expect(second!.workflow.heldOut).toBeUndefined();
+  });
+});
+
+describe("what a repeat's own calls proposed", () => {
+  /**
+   * The same work performed twice on different values, with nothing declaring the argument: the
+   * only thing that can propose a caller input is the variation between the two executions, and
+   * the capture mints that proposal on the second one's call — the execution a recording compiled
+   * from the first does not number.
+   */
+  function repeatedOnDifferentDatasets() {
+    return record([
+      discovery([{ name: "vendor.score", provider: "vendor-srv" }]),
+      call(1, "vendor.score", { dataset: "alpha-set", tag: "ops-run" }),
+      result(1, "vendor.score", { scored: { label: "alpha-set:42" } }),
+      userTurn(2),
+      call(3, "vendor.score", { dataset: "bravo-set", tag: "ops-run" }),
+      result(3, "vendor.score", { scored: { label: "bravo-set:84" } }),
+    ]);
+  }
+
+  it("offers the input the repeat varied, against the step it is the same call of", () => {
+    const { events } = repeatedOnDifferentDatasets();
+    const recipe = recordCallsFromEvents("wf_repeat_input", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 1),
+    });
+    const workflow = recipe!.workflow;
+
+    // One execution is the plan: the repeat is evidence, never a second step.
+    expect(workflow.steps).toHaveLength(1);
+    expect(workflow.steps[0]!.callable.name).toBe("vendor.score");
+
+    // The variation the repeat's call showed is offered at the argument the two executions
+    // disagreed about, named for the callable and the argument rather than for a value.
+    expect(workflow.candidates).toContainEqual({
+      stepId: "step0",
+      argument: "dataset",
+      path: [],
+      proposed: { kind: "input", name: "vendor_score_dataset", type: "string" },
+      reason: "varies-across-executions",
+      evidence: { tasks: 2 },
+      missing: expect.any(String),
+    });
+    // A proposal is not a binding: the step still holds what the recorded execution ran.
+    expect(JSON.stringify(workflow)).not.toContain("bravo-set");
+    expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("carries the demonstration that decides it, by reference, at the same step", () => {
+    const { events, store } = repeatedOnDifferentDatasets();
+    const recipe = recordCallsFromEvents("wf_repeat_demo", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 1),
+    });
+    const heldOut = recipe!.workflow.heldOut;
+    expect(heldOut?.inputs.map((entry) => [entry.stepId, entry.argument]).sort()).toEqual([
+      ["step0", "dataset"],
+      ["step0", "tag"],
+    ]);
+    expect(heldOut?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
+    const dataset = heldOut!.inputs.find((entry) => entry.argument === "dataset")!;
+    // The demonstration is the user's own second run, kept where it was performed.
+    expect(dataset.reference.startsWith("private:")).toBe(true);
+    expect(resolvePrivateReference(store, dataset.reference)).toBe("bravo-set");
+    expect(resolvePrivateReference(store, heldOut!.observed[0]!.reference)).toEqual({
+      scored: { label: "bravo-set:84" },
+    });
+  });
+
+  it("maps a nested proposal onto the step the repeat's producing call is", () => {
+    // The earlier execution's first step reported no result, so the recording's own calls propose
+    // nothing about the second step's nested argument. The repeat establishes it: its second call
+    // passed the value its first call returned, at a path inside that argument.
+    const { events } = record([
+      discovery([
+        { name: "alpha_step", provider: "srv" },
+        { name: "alpha_finish", provider: "srv" },
+      ]),
+      call(1, "alpha_step", { seed: "alpha-seed" }),
+      call(2, "alpha_finish", { meta: { note: "alpha-1" } }),
+      result(2, "alpha_finish", { done: true }),
+      userTurn(3),
+      call(4, "alpha_step", { seed: "bravo-seed" }),
+      result(4, "alpha_step", { minted: { id: "alpha-2" } }),
+      call(5, "alpha_finish", { meta: { note: "alpha-2" } }),
+      result(5, "alpha_finish", { done: true }),
+    ]);
+
+    const recipe = recordCallsFromEvents("wf_repeat_nested", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 1),
+    });
+    expect(recipe!.workflow.steps.map((step) => step.callable.name)).toEqual([
+      "alpha_step",
+      "alpha_finish",
+    ]);
+    expect(recipe!.workflow.candidates).toContainEqual({
+      stepId: "step1",
+      argument: "meta",
+      path: ["note"],
+      proposed: { kind: "result", stepId: "step0", path: ["minted", "id"] },
+      reason: "equal-to-earlier-result",
+      evidence: { producers: 1 },
+      missing: expect.any(String),
+    });
+    expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("keeps a varied primitive produced by an earlier call as data flow", () => {
+    const { events } = record([
+      discovery([
+        { name: "measure", provider: "srv" },
+        { name: "render", provider: "srv" },
+      ]),
+      call(1, "measure", { text: "red blue" }),
+      result(1, "measure", { stats: { count: 2 } }),
+      call(2, "render", { count: 2 }),
+      result(2, "render", { text: "Words: 2\n" }),
+      userTurn(3),
+      call(4, "measure", { text: "amber green blue silver white" }),
+      result(4, "measure", { stats: { count: 5 } }),
+      call(5, "render", { count: 5 }),
+      result(5, "render", { text: "Words: 5\n" }),
+    ]);
+
+    const recipe = recordCallsFromEvents("wf_repeat_number", executionOf(events, 0), {
+      supportingEvents: executionOf(events, 1),
+    });
+    const countCandidates = recipe!.workflow.candidates?.filter(
+      (candidate) => candidate.stepId === "step1" && candidate.argument === "count",
+    );
+    expect(countCandidates).toEqual([
+      expect.objectContaining({
+        path: [],
+        proposed: { kind: "result", stepId: "step0", path: ["stats", "count"] },
+        reason: "equal-to-earlier-result",
+      }),
+    ]);
   });
 });
 
@@ -966,7 +1104,7 @@ describe("the connection a callable was reached over", () => {
 
     const carrier = carrierOf(events[1]!);
     expect(carrier!.name).toBe("vendor.fetch");
-    expect(carrier!.runtime).toBe(RESIN_TOOL_PROTOCOL_RUNTIME);
+    expect(carrier!.runtime).toBe(RESIN_HARNESS_TOOL_RUNTIME);
     expect(carrier!.connection).toBeUndefined();
     expect(carrier!.inputSchema).toEqual({ type: "object" });
   });

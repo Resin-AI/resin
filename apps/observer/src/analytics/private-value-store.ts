@@ -1,65 +1,44 @@
-/**
- * The private value store: the local-only record that lets a recorded workflow replay
- * values the privacy layer removed.
- *
- * Redaction replaces a secret with a deterministic placeholder; the recipe replaces a
- * placeholder-bearing leaf with a `private:` reference. Neither the placeholder nor the
- * reference can be executed — only this store can say what they stood for. It therefore
- * lives only on the machine that produced the recording: the workflow that is uploaded
- * carries references, and the executor resolves them here at invocation time.
- *
- * Two key namespaces share one file:
- * - `[REDACTED_...]` placeholder → the original JSON value the placeholder replaced.
- * - `private:<scope>:<n>` reference → the redacted leaf the reference stands for.
- *
- * Resolution substitutes placeholders inside the stored leaf, so a private reference
- * always yields the original value while the store itself never holds a plaintext
- * secret under a `private:` key.
- */
-
-import { createHash } from "node:crypto";
+/** Local-only workflow values. Exact V2 originals never become uploaded event fields. */
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
-/**
- * Where a stored value came from. A `private:` reference is a name, not a capability: the
- * workspace that recorded the value is what an executor checks before resolving it, so a
- * workflow that merely knows another recording's reference string is still refused.
- */
 export interface PrivateValueOrigin {
   workspaceId?: string;
 }
 
+export type PrivateValueRepresentation = "literal" | "redacted";
+
 export interface PrivateValueStore {
   get(key: string): unknown | undefined;
-  set(key: string, value: unknown, origin?: PrivateValueOrigin): void;
-  /** The recorded origin of a key, when the writer stated one. */
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation?: PrivateValueRepresentation,
+  ): void;
   origin?(key: string): PrivateValueOrigin | undefined;
+  representation?(key: string): PrivateValueRepresentation | undefined;
 }
 
 const STORE_FILE = "private-values.json";
 const STORE_DIR = "private-values";
 const MAX_ENTRIES = 4096;
-
 const PLACEHOLDER_PATTERN = /\[REDACTED_[A-Z_]+:[^\]]+\]/g;
 const PLACEHOLDER_TEST = /\[REDACTED_[A-Z_]+:[^\]]+\]/;
 
-/** True when a recorded leaf still carries a redaction placeholder. */
 export function containsRedactionPlaceholder(value: string): boolean {
   return PLACEHOLDER_TEST.test(value);
 }
 
-/**
- * Resolves a `private:` reference to the original value: the stored leaf is the
- * redacted form, so every placeholder inside it is substituted from the same store.
- * A placeholder the store cannot resolve fails honestly rather than replaying a mask.
- */
+/** Legacy masks are resolved locally; exact originals retain their types and literal text. */
 export function resolvePrivateReference(store: PrivateValueStore, reference: string): unknown {
   const stored = store.get(reference);
-  if (stored === undefined) {
+  if (stored === undefined)
     throw new Error(`private reference '${reference}' is not in the local value store`);
-  }
+  if (store.representation?.(reference) === "literal") return stored;
   const substitute = (value: unknown): unknown => {
     if (typeof value === "string") {
       return value.replace(PLACEHOLDER_PATTERN, (placeholder) => {
@@ -87,28 +66,56 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+interface PrivateEntry {
+  value: unknown;
+  at: number;
+  origin?: PrivateValueOrigin;
+  representation?: PrivateValueRepresentation;
+}
+interface ImmutableEntry extends PrivateEntry {
+  key: string;
+}
+
+function assertSameEntry(current: PrivateEntry, next: PrivateEntry, key: string): void {
+  if (
+    !isDeepStrictEqual(current.value, next.value) ||
+    !isDeepStrictEqual(current.origin, next.origin) ||
+    (current.representation ?? "redacted") !== (next.representation ?? "redacted")
+  ) {
+    throw new Error(
+      `private value reference '${key}' already exists with different content or origin (different value or owner)`,
+    );
+  }
+}
+
+function snapshot(
+  value: unknown,
+  origin: PrivateValueOrigin | undefined,
+  representation: PrivateValueRepresentation,
+): PrivateEntry {
+  const result = JSON.parse(
+    JSON.stringify({ value, origin, representation, at: Date.now() }),
+  ) as PrivateEntry;
+  if (!Object.hasOwn(result, "value")) throw new Error("A private reference requires a JSON value");
+  return result;
+}
+
 /**
- * A JSON file under `<dataDir>/private-values/`, written atomically with owner-only
- * permissions. Entries are bounded; the oldest written entries are evicted first.
+ * New references are immutable owner-only files, atomically created without overwriting a winner.
+ * This removes the concurrent shared-JSON read/modify/write race for captured workflow values.
+ * Legacy entries remain readable. The cache is bounded; referenced V2 files are not evicted.
  */
 export class FilePrivateValueStore implements PrivateValueStore {
   private static shared: FilePrivateValueStore | undefined;
-
   private readonly file: string;
-  private entries:
-    | Map<string, { value: unknown; at: number; origin?: PrivateValueOrigin }>
-    | undefined;
+  private entries: Map<string, PrivateEntry> | undefined;
   private loadedMtimeMs = -1;
+  private readonly immutableEntries = new Map<string, ImmutableEntry>();
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
   }
 
-  /**
-   * The default store location: the daemon's data directory under ~/.resin. One shared
-   * instance per process so the redaction hook and the carrier recorder observe the
-   * same entries without a second read of the file.
-   */
   static default(): FilePrivateValueStore {
     FilePrivateValueStore.shared ??= new FilePrivateValueStore(
       path.join(os.homedir(), ".resin", "data"),
@@ -116,20 +123,83 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return FilePrivateValueStore.shared;
   }
 
-  private load(): Map<string, { value: unknown; at: number; origin?: PrivateValueOrigin }> {
-    // Reload only when the file changed on disk: a long-lived executor must see secrets
-    // recorded after its first resolution, not a snapshot cached forever. The mtime gate
-    // keeps the shared instance cheap when nothing was written.
+  private immutablePath(key: string): string {
+    return path.join(
+      path.dirname(this.file),
+      "entries-v2",
+      `${createHash("sha256").update(key).digest("hex")}.json`,
+    );
+  }
+
+  private readImmutable(key: string): ImmutableEntry | undefined {
+    const cached = this.immutableEntries.get(key);
+    if (cached !== undefined) return cached;
+    let text: string;
+    try {
+      text = fs.readFileSync(this.immutablePath(key), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw new Error(`Cannot read local private reference '${key}'`);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new Error(`Corrupt local private reference '${key}'`);
+    }
+    if (
+      !isPlainObject(value) ||
+      value.key !== key ||
+      !Object.hasOwn(value, "value") ||
+      (value.representation !== "literal" && value.representation !== "redacted")
+    ) {
+      throw new Error(`Invalid local private reference '${key}'`);
+    }
+    const entry = value as unknown as ImmutableEntry;
+    this.immutableEntries.set(key, entry);
+    if (this.immutableEntries.size > MAX_ENTRIES) {
+      const oldest = this.immutableEntries.keys().next().value;
+      if (oldest !== undefined) this.immutableEntries.delete(oldest);
+    }
+    return entry;
+  }
+
+  private writeImmutable(key: string, entry: PrivateEntry): void {
+    const current = this.readImmutable(key);
+    if (current !== undefined) {
+      assertSameEntry(current, entry, key);
+      return;
+    }
+    const target = this.immutablePath(key);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify({ ...entry, key }), { flag: "wx", mode: 0o600 });
+      try {
+        // A hard link atomically publishes only if absent. rename would overwrite a concurrent value.
+        fs.linkSync(temporary, target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const winner = this.readImmutable(key);
+        if (winner === undefined) throw new Error(`Missing concurrent private reference '${key}'`);
+        assertSameEntry(winner, entry, key);
+      }
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+  }
+
+  private load(): Map<string, PrivateEntry> {
     let mtimeMs = -1;
     try {
       mtimeMs = fs.statSync(this.file).mtimeMs;
     } catch {
-      // Missing file: fall through and serve whatever is cached (empty on first call).
+      // A missing legacy file starts empty. V2 entries are independent of this file.
     }
     if (this.entries && mtimeMs === this.loadedMtimeMs) return this.entries;
     this.entries = new Map();
     try {
-      const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as unknown;
+      const raw: unknown = JSON.parse(fs.readFileSync(this.file, "utf8"));
       if (isPlainObject(raw)) {
         for (const [key, entry] of Object.entries(raw)) {
           const origin =
@@ -140,73 +210,110 @@ export class FilePrivateValueStore implements PrivateValueStore {
             value: isPlainObject(entry) && "value" in entry ? entry.value : entry,
             at: isPlainObject(entry) && typeof entry.at === "number" ? entry.at : 0,
             ...(origin ? { origin } : {}),
+            ...(isPlainObject(entry) && entry.representation === "literal"
+              ? { representation: "literal" as const }
+              : {}),
           });
         }
       }
       this.loadedMtimeMs = mtimeMs;
     } catch {
-      // A missing or unreadable store is an empty one; resolution fails honestly later.
+      // Existing behavior: unavailable legacy values fail resolution, never become guessed data.
     }
     return this.entries;
   }
 
   get(key: string): unknown | undefined {
-    return this.load().get(key)?.value;
+    return key.startsWith("private:v2:")
+      ? structuredClone(this.readImmutable(key)?.value)
+      : this.load().get(key)?.value;
   }
 
   origin(key: string): PrivateValueOrigin | undefined {
-    return this.load().get(key)?.origin;
+    return key.startsWith("private:v2:")
+      ? structuredClone(this.readImmutable(key)?.origin)
+      : this.load().get(key)?.origin;
   }
 
-  set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
+  representation(key: string): PrivateValueRepresentation | undefined {
+    return key.startsWith("private:v2:")
+      ? this.readImmutable(key)?.representation
+      : this.load().get(key)?.representation;
+  }
+
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation: PrivateValueRepresentation = "redacted",
+  ): void {
+    const entry = snapshot(value, origin, representation);
+    if (key.startsWith("private:v2:")) {
+      this.writeImmutable(key, entry);
+      return;
+    }
+    this.entries = undefined;
+    this.loadedMtimeMs = -1;
     const entries = this.load();
+    const existing = entries.get(key);
+    if (key.startsWith("private:") && existing !== undefined) {
+      assertSameEntry(existing, entry, key);
+      return;
+    }
+    // Legacy placeholder keys are aliases, not unique reference identities.
     entries.delete(key);
-    entries.set(key, { value, at: Date.now(), ...(origin ? { origin } : {}) });
+    entries.set(key, entry);
     while (entries.size > MAX_ENTRIES) {
       const oldest = entries.keys().next().value;
       if (oldest === undefined) break;
       entries.delete(oldest);
     }
-    const dir = path.dirname(this.file);
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const directory = path.dirname(this.file);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     try {
-      fs.chmodSync(dir, 0o700);
+      fs.chmodSync(directory, 0o700);
     } catch {
-      // Best effort on filesystems without POSIX modes.
+      /* Filesystems without POSIX modes. */
     }
-    const body: Record<string, unknown> = {};
-    for (const [k, entry] of entries)
-      body[k] = {
-        value: entry.value,
-        at: entry.at,
-        ...(entry.origin ? { origin: entry.origin } : {}),
-      };
-    const tmp = `${this.file}.${process.pid}.${createHash("sha1").update(String(Date.now())).digest("hex").slice(0, 8)}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(body), { mode: 0o600 });
-    fs.renameSync(tmp, this.file);
+    const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      fs.chmodSync(this.file, 0o600);
-    } catch {
-      // Best effort on filesystems without POSIX modes.
+      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      fs.renameSync(temporary, this.file);
+      try {
+        fs.chmodSync(this.file, 0o600);
+      } catch {
+        /* Filesystems without POSIX modes. */
+      }
+    } finally {
+      fs.rmSync(temporary, { force: true });
     }
-    // loadedMtimeMs is deliberately left stale: the next load() re-stats and re-reads,
-    // which captures this write and any external write with no same-tick miss window.
   }
 }
 
-/** Test and in-process seam: same contract, nothing persisted. */
+/** Same identity/value rules for tests and non-persisting local consumers. */
 export class InMemoryPrivateValueStore implements PrivateValueStore {
-  private readonly entries = new Map<string, { value: unknown; origin?: PrivateValueOrigin }>();
-
+  private readonly entries = new Map<string, PrivateEntry>();
   get(key: string): unknown | undefined {
-    return this.entries.get(key)?.value;
+    return structuredClone(this.entries.get(key)?.value);
   }
-
   origin(key: string): PrivateValueOrigin | undefined {
-    return this.entries.get(key)?.origin;
+    return structuredClone(this.entries.get(key)?.origin);
   }
-
-  set(key: string, value: unknown, origin?: PrivateValueOrigin): void {
-    this.entries.set(key, { value, ...(origin ? { origin } : {}) });
+  representation(key: string): PrivateValueRepresentation | undefined {
+    return this.entries.get(key)?.representation;
+  }
+  set(
+    key: string,
+    value: unknown,
+    origin?: PrivateValueOrigin,
+    representation: PrivateValueRepresentation = "redacted",
+  ): void {
+    const next = snapshot(value, origin, representation);
+    const current = this.entries.get(key);
+    if (key.startsWith("private:") && current !== undefined) assertSameEntry(current, next, key);
+    this.entries.set(key, next);
   }
 }

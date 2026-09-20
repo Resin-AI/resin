@@ -166,7 +166,7 @@ describe("CLI Safety Gate Doctor & Status Diagnostics", () => {
       expect(summary.safetyGate?.isOpen).toBe(false);
       expect(summary.safetyGate?.status).toBe("uninitialized");
 
-      const formatted = formatStatusForTerminal(summary);
+      const formatted = formatStatusForTerminal(summary, { verbose: true });
       expect(formatted).toContain("[Production Safety Gate]");
       expect(formatted).toContain("BLOCKED (fail-closed)");
     });
@@ -181,7 +181,7 @@ describe("CLI Safety Gate Doctor & Status Diagnostics", () => {
       expect(summary.safetyGate?.isOpen).toBe(true);
       expect(summary.safetyGate?.status).toBe("passed");
 
-      const formatted = formatStatusForTerminal(summary);
+      const formatted = formatStatusForTerminal(summary, { verbose: true });
       expect(formatted).toContain("[Production Safety Gate]");
       expect(formatted).toContain("PASS (open)");
     });
@@ -194,7 +194,7 @@ describe("CLI Safety Gate Doctor & Status Diagnostics", () => {
       expect(summary.safetyGate?.isOpen).toBe(true);
       expect(summary.safetyGate?.status).toBe("unsafe_override");
 
-      const formatted = formatStatusForTerminal(summary);
+      const formatted = formatStatusForTerminal(summary, { verbose: true });
       expect(formatted).toContain("OVERRIDE (unsafe dev mode)");
     });
   });

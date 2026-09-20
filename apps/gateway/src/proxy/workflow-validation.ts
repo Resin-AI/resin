@@ -28,6 +28,7 @@ import {
 } from "@resin/observer";
 import {
   type McpToolConnection,
+  type RuntimeAdapter,
   RuntimeAdapterRegistry,
   type ToolProtocolDispatchRequest,
   type WorkflowPlanVerification,
@@ -98,6 +99,8 @@ export interface LocalWorkflowValidatorOptions {
   connections?: Record<string, McpToolConnection>;
   /** Dial a connection on first use, for a host that does not keep them open already. */
   openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  /** Additional host-owned runtime families, built for the replay's disposable workspace. */
+  runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   /** Wall-clock bound for the replay. */
   timeoutMs?: number;
 }
@@ -115,7 +118,6 @@ export function createLocalWorkflowValidator(
 ): (plan: RecordedWorkflow) => Promise<LocalWorkflowValidationResult> {
   return async (plan: RecordedWorkflow): Promise<LocalWorkflowValidationResult> => {
     const candidates = plan.candidates ?? [];
-    if (candidates.length === 0) return { verdicts: [] };
     // Read when the work is replayed, not when the service is built: a grant is in force for a
     // while, not forever, and a recording made while one was is not evidence of a later one.
     if (options.authorization?.() === undefined) {
@@ -169,6 +171,9 @@ export function createLocalWorkflowValidator(
       };
       adapters.register(createProcessAdapter(programOptions));
       adapters.register(createProgramAdapter(programOptions));
+      for (const adapter of options.runtimeAdapters?.(workspaceDir) ?? []) {
+        if (!adapters.has(adapter.runtime)) adapters.register(adapter);
+      }
       adapters.register(
         createToolProtocolAdapter({
           ...(options.dispatch === undefined ? {} : { dispatch: options.dispatch }),
@@ -186,7 +191,12 @@ export function createLocalWorkflowValidator(
         resolvePrivate: resolveOwned,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
-      if (environment === undefined) return { verdicts: [] };
+      if (environment === undefined)
+        return {
+          verdicts: [],
+          unavailable:
+            "the selected workflow has no matching recorded demonstration; no replay or parameter decision was performed",
+        };
       const decided = await validateAndConfirmCandidates({ plan, candidates, environment });
       return {
         verdicts: decided.outcomes.map((outcome) => ({

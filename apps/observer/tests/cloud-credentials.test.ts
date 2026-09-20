@@ -34,6 +34,72 @@ function makeValidClaims(overrides: Partial<AuthClaims> = {}): AuthClaims {
   };
 }
 
+/**
+ * Models the cloud's single-use refresh rotation: the first request for the live refresh token
+ * succeeds and invalidates it, and any later replay of that token is refused as reuse. The
+ * `rotationState` is shared so a test can simulate another client rotating out of band.
+ */
+function createSingleUseRotationServer(options: {
+  rotationState: { activeRefreshToken: string };
+  rotatedRefreshToken: string;
+  rotatedAccessToken: string;
+  rotatedClaims: AuthClaims;
+  onRequest?: (refreshToken: string) => Promise<void> | void;
+  beforeRespond?: () => Promise<void>;
+}): {
+  fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  receivedRefreshTokens: string[];
+  reuseDetections: number;
+} {
+  const server = {
+    receivedRefreshTokens: [] as string[],
+    reuseDetections: 0,
+    async fetchImpl(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { refreshToken?: string };
+      const refreshToken = body.refreshToken ?? "";
+      server.receivedRefreshTokens.push(refreshToken);
+      await options.onRequest?.(refreshToken);
+      if (refreshToken !== options.rotationState.activeRefreshToken) {
+        server.reuseDetections += 1;
+        return new Response(JSON.stringify({ error: "invalid_grant" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      options.rotationState.activeRefreshToken = options.rotatedRefreshToken;
+      await options.beforeRespond?.();
+      return new Response(
+        JSON.stringify({
+          accessToken: options.rotatedAccessToken,
+          tokenType: "Bearer",
+          expiresIn: 3600,
+          refreshToken: options.rotatedRefreshToken,
+          claims: options.rotatedClaims,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  };
+  return server;
+}
+
+async function persistExpiredCredential(
+  store: CloudCredentialStore,
+  refreshToken: string,
+): Promise<void> {
+  const claims = makeValidClaims({
+    expiresAt: new Date(Date.now() - 5_000).toISOString(),
+  });
+  await store.persist({
+    cloudUrl: "https://cloud.resin.dev",
+    accessToken: makeJwt(claims),
+    refreshToken,
+    claims,
+    deviceId: claims.deviceId,
+    workspaceId: claims.workspaceId,
+  });
+}
+
 function createMockContext(homeDir: string, stateDir: string): ModuleContext {
   const config: DaemonConfig = {
     version: "0.1.0",
@@ -425,6 +491,184 @@ describe("CloudCredentialStore", () => {
     expect(loadResult.status).toBe("valid");
     expect(loadResult.credentials?.accessToken).toBe(token);
     expect(loadResult.credentials?.deviceId).toBe(claims.deviceId);
+  });
+
+  it("rotates once when two processes race the same refresh token", async () => {
+    const rotatedClaims = makeValidClaims({
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    const rotatedAccessToken = makeJwt(rotatedClaims);
+    const rotationState = { activeRefreshToken: "original-refresh-token" };
+    const rotationStarted = Promise.withResolvers<void>();
+    const releaseRotation = Promise.withResolvers<void>();
+
+    const server = createSingleUseRotationServer({
+      rotationState,
+      rotatedRefreshToken: "rotated-refresh-token",
+      rotatedAccessToken,
+      rotatedClaims,
+      beforeRespond: async () => {
+        rotationStarted.resolve();
+        await releaseRotation.promise;
+      },
+    });
+
+    // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
+    const fetchImpl = server.fetchImpl as typeof fetch;
+    const processA = new CloudCredentialStore({ tokenFilePath, fetchImpl });
+    const processB = new CloudCredentialStore({ tokenFilePath, fetchImpl });
+    await persistExpiredCredential(processA, "original-refresh-token");
+
+    // Stage the race: process B must have read the stale credential before process A is
+    // allowed to persist its rotation, so both processes contend for the same refresh token.
+    const readCompleted = Promise.withResolvers<void>();
+    const loadCredentials = processB.load.bind(processB);
+    vi.spyOn(processB, "load").mockImplementation(async () => {
+      const result = await loadCredentials();
+      readCompleted.resolve();
+      return result;
+    });
+
+    const firstRefresh = processA.getRequestIdentity({ forceRefresh: true });
+    await rotationStarted.promise;
+
+    // The in-flight rotation owns an owner-only lock file recording its holder.
+    const lockPath = `${tokenFilePath}.lock`;
+    if (process.platform !== "win32") {
+      const lockStat = await fs.stat(lockPath);
+      expect(lockStat.mode & 0o777).toBe(0o600);
+    }
+    const lockPayload = JSON.parse(await fs.readFile(lockPath, "utf8")) as {
+      pid?: number;
+      acquiredAt?: string;
+    };
+    expect(lockPayload.pid).toBe(process.pid);
+    expect(Number.isFinite(new Date(lockPayload.acquiredAt ?? "").getTime())).toBe(true);
+
+    const secondRefresh = processB.getRequestIdentity({ forceRefresh: true });
+    await readCompleted.promise;
+    releaseRotation.resolve();
+
+    const [identityA, identityB] = await Promise.all([firstRefresh, secondRefresh]);
+
+    expect(server.receivedRefreshTokens).toEqual(["original-refresh-token"]);
+    expect(server.reuseDetections).toBe(0);
+    expect(identityA?.accessToken).toBe(rotatedAccessToken);
+    expect(identityB?.accessToken).toBe(rotatedAccessToken);
+    const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+      refreshToken?: string;
+    };
+    expect(onDisk.refreshToken).toBe("rotated-refresh-token");
+    await expect(fs.stat(`${tokenFilePath}.lock`)).rejects.toThrow();
+  });
+
+  it("keeps a newer on-disk credential when a stale token is refused", async () => {
+    const rotatedClaims = makeValidClaims({
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    const rotatedAccessToken = makeJwt(rotatedClaims);
+    const rotationState = { activeRefreshToken: "original-refresh-token" };
+
+    const server = createSingleUseRotationServer({
+      rotationState,
+      rotatedRefreshToken: "rotated-refresh-token",
+      rotatedAccessToken,
+      rotatedClaims,
+      onRequest: async () => {
+        // A client that does not share this process's lock rotated first and persisted its
+        // credential, so this process's in-flight refresh is refused as reuse.
+        rotationState.activeRefreshToken = "rotated-refresh-token";
+        await fs.writeFile(
+          tokenFilePath,
+          JSON.stringify({
+            cloudUrl: "https://cloud.resin.dev",
+            accessToken: rotatedAccessToken,
+            refreshToken: "rotated-refresh-token",
+            claims: rotatedClaims,
+            deviceId: rotatedClaims.deviceId,
+            workspaceId: rotatedClaims.workspaceId,
+            storedAt: new Date().toISOString(),
+          }),
+          "utf8",
+        );
+      },
+    });
+
+    // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
+    const store = new CloudCredentialStore({
+      tokenFilePath,
+      fetchImpl: server.fetchImpl as typeof fetch,
+    });
+    await persistExpiredCredential(store, "original-refresh-token");
+
+    const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+    expect(server.reuseDetections).toBe(1);
+    expect(identity?.accessToken).toBe(rotatedAccessToken);
+    expect(store.getLastRefreshFailure()).toBeNull();
+    const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+      refreshToken?: string;
+    };
+    expect(onDisk.refreshToken).toBe("rotated-refresh-token");
+  });
+
+  it("purges and reports revoked when the rejected token is still on disk", async () => {
+    const refusedFetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    // SAFETY: Mock fetch implementing fetch interface for testing.
+    const store = new CloudCredentialStore({
+      tokenFilePath,
+      fetchImpl: refusedFetch as typeof fetch,
+    });
+    await persistExpiredCredential(store, "revoked-refresh-token");
+
+    const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+    expect(identity).toBeNull();
+    expect(store.getLastRefreshFailure()).toBe("revoked");
+    await expect(fs.stat(tokenFilePath)).rejects.toThrow();
+  });
+
+  it("takes over an abandoned credential lock after its bounded stale age", async () => {
+    const rotatedClaims = makeValidClaims({
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    const rotatedAccessToken = makeJwt(rotatedClaims);
+    const rotationState = { activeRefreshToken: "original-refresh-token" };
+    const server = createSingleUseRotationServer({
+      rotationState,
+      rotatedRefreshToken: "rotated-refresh-token",
+      rotatedAccessToken,
+      rotatedClaims,
+    });
+
+    // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
+    const store = new CloudCredentialStore({
+      tokenFilePath,
+      fetchImpl: server.fetchImpl as typeof fetch,
+    });
+    await persistExpiredCredential(store, "original-refresh-token");
+
+    // A holder that died without releasing: the lock is older than its bounded stale age.
+    await fs.writeFile(
+      `${tokenFilePath}.lock`,
+      JSON.stringify({
+        pid: process.pid,
+        acquiredAt: new Date(Date.now() - 300_000).toISOString(),
+        owner: "abandoned-holder",
+      }),
+      "utf8",
+    );
+
+    const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+    expect(identity?.accessToken).toBe(rotatedAccessToken);
+    await expect(fs.stat(`${tokenFilePath}.lock`)).rejects.toThrow();
   });
 });
 

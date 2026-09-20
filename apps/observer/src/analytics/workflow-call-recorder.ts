@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { createHash } from "node:crypto";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
@@ -26,6 +27,7 @@ import {
   analyzeAgentArguments,
   tokenizeProgram,
 } from "@resin/contracts";
+import { localWorkflowEvent } from "../normalization/local-workflow-payload.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { deriveNativeCalls } from "./native-argument-derivation.js";
@@ -43,10 +45,10 @@ export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
 /** The runtime family every invoke_tool-routed callable belongs to. */
 export const RESIN_INVOKE_TOOL_RUNTIME = "resin-invoke-tool";
 
-/**
- * A callable the harness reached over a tool protocol (an MCP server, a harness builtin surface).
- * The call is re-made by name through the connection discovery recorded for it.
- */
+/** A native builtin owned and executed by the recording harness. */
+export const RESIN_HARNESS_TOOL_RUNTIME = "resin-harness-tool";
+
+/** A callable the harness reached over an external tool protocol such as MCP. */
 export const RESIN_TOOL_PROTOCOL_RUNTIME = "resin-tool-protocol";
 
 /** A callable whose recorded artifact is a process program: a shell command or an exact argv. */
@@ -57,6 +59,7 @@ export const RESIN_PROGRAM_RUNTIME = "resin-program";
 
 /** The runtime families an ordinary native call can belong to, decided by the record, not by name. */
 export const RESIN_NATIVE_RUNTIMES = [
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
@@ -156,10 +159,13 @@ export interface WorkflowCallCandidate {
 interface LocalCall {
   callId: string;
   toolName: string;
+  connection?: string;
   /** Ordinal inside its task, so two tasks can be compared position by position. */
   position: number;
   arguments: Record<string, WorkflowJsonValue>;
+  argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
+  resultReference?: string;
   reads?: string[];
   writes?: string[];
   /** The callable's discovered input schema, when discovery recorded one. */
@@ -293,6 +299,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "varies-across-executions": true,
   "declared-by-the-callable": true,
   "shares-value-with-declared-input": true,
+  "tracks-earlier-result-across-executions": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -486,12 +493,17 @@ export function readWorkflowResultCarrier(
 export interface WorkflowCallRecorderOptions {
   /** The local store private leaves are written to; defaults to the daemon's store. */
   privateValues?: PrivateValueStore;
+  /** Paired cloud workspace that owns captured private values; local session workspace otherwise. */
+  privateValueOwnerWorkspaceId?: string;
 }
 
 export class WorkflowCallRecorder {
   private readonly privateValues: PrivateValueStore;
-  /** The workspace whose session is being observed; stamped on every private entry. */
+  private readonly privateValueOwnerWorkspaceId: string | undefined;
+  /** The workspace owner stamped on every private entry for the current observation. */
   private observeAccess: PrivateValueOrigin | undefined;
+  private privateRepresentation: "literal" | "redacted" = "redacted";
+  private redactedArguments: Record<string, unknown> | undefined;
   /**
    * What each session's discovery events reported about the callables it saw, keyed by the name the
    * harness called them by and then by the connection that reported it. Discovery is per session
@@ -507,17 +519,16 @@ export class WorkflowCallRecorder {
    * conclusions that need them. Bounded per session and by session count.
    */
   private readonly sessions = new Map<string, SessionDerivationState>();
-  private privateCounter = 0;
 
   constructor(options: WorkflowCallRecorderOptions = {}) {
     this.privateValues = options.privateValues ?? FilePrivateValueStore.default();
+    this.privateValueOwnerWorkspaceId = options.privateValueOwnerWorkspaceId;
   }
 
   /** Drops per-session state; the coordinator calls this between sessions. */
   clear(): void {
     this.discovered.clear();
     this.sessions.clear();
-    this.privateCounter = 0;
     this.observeAccess = undefined;
   }
 
@@ -562,8 +573,7 @@ export class WorkflowCallRecorder {
     const byName = this.discovered.get(sessionId)?.get(toolName);
     if (byName === undefined) return undefined;
     if (connection !== undefined) {
-      const exact = byName.get(connection);
-      if (exact !== undefined) return exact;
+      return byName.get(connection);
     }
     let latest: DiscoveredCallable | undefined;
     for (const reported of byName.values()) latest = reported;
@@ -587,12 +597,18 @@ export class WorkflowCallRecorder {
   observe(
     event: NormalizedSessionEvent,
     /**
-     * The workspace the observed session belongs to. Private entries are stamped with it so a
-     * later executor can refuse a workflow that only knows the reference string.
+     * The local workspace the observed session belongs to. Unpaired capture stamps private entries
+     * with it; paired capture uses the recorder's cloud workspace owner instead.
      */
     access?: PrivateValueOrigin,
   ): NormalizedSessionEvent {
-    this.observeAccess = access;
+    this.observeAccess = this.privateValueOwnerWorkspaceId
+      ? { workspaceId: this.privateValueOwnerWorkspaceId }
+      : access;
+    this.redactedArguments = event.type === "tool_call" ? event.parameters : undefined;
+    const original = localWorkflowEvent(event);
+    this.privateRepresentation =
+      original !== undefined || event.redaction?.isRedacted === false ? "literal" : "redacted";
     if (event.type === "tool_discovery") {
       const session = this.discoveryState(event.sessionId);
       for (const tool of event.tools) {
@@ -625,7 +641,10 @@ export class WorkflowCallRecorder {
       return event;
     }
     if (event.type === "tool_call") return this.observeCall(event);
-    if (event.type === "tool_result") return this.observeResult(event);
+    if (event.type === "tool_result") {
+      const observed = this.observeResult(original ?? event, event);
+      return { ...event, metadata: observed.metadata };
+    }
     return event;
   }
 
@@ -634,38 +653,51 @@ export class WorkflowCallRecorder {
    * references, writing the redacted leaf to the local store so the executor can
    * reconstruct the original at invocation time.
    */
-  private sweepOrigin(origin: AgentArgumentOrigin, sessionId: string): AgentArgumentOrigin {
+  private sweepOrigin(
+    origin: AgentArgumentOrigin,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {
+        const expand = (
+          value: WorkflowJsonValue,
+          currentPath: WorkflowValuePath,
+        ): AgentArgumentOrigin => {
           if (typeof value === "string" && containsRedactionPlaceholder(value)) {
-            const reference = `private:${sessionId}:${this.privateCounter++}`;
-            this.privateValues.set(reference, value, this.observeAccess);
-            return { type: "private", reference };
+            return this.storeLocalValue(value, sessionId, callId, currentPath);
           }
           if (Array.isArray(value)) {
-            return { type: "array", items: value.map(expand) };
+            return {
+              type: "array",
+              items: value.map((item, index) => expand(item, [...currentPath, index])),
+            };
           }
           if (isPlainObject(value)) {
             const entries: Record<string, AgentArgumentOrigin> = {};
-            for (const [key, entry] of Object.entries(value)) entries[key] = expand(entry);
+            for (const [key, entry] of Object.entries(value)) {
+              entries[key] = expand(entry, [...currentPath, key]);
+            }
             return { type: "object", entries };
           }
           return { type: "literal", value };
         };
-        return expand(origin.value);
+        return expand(origin.value, path);
       }
       case "object": {
         const entries: Record<string, AgentArgumentOrigin> = {};
         for (const [key, entry] of Object.entries(origin.entries)) {
-          entries[key] = this.sweepOrigin(entry, sessionId);
+          entries[key] = this.sweepOrigin(entry, sessionId, callId, [...path, key]);
         }
         return { type: "object", entries };
       }
       case "array":
         return {
           type: "array",
-          items: origin.items.map((item) => this.sweepOrigin(item, sessionId)),
+          items: origin.items.map((item, index) =>
+            this.sweepOrigin(item, sessionId, callId, [...path, index]),
+          ),
         };
       default:
         return origin;
@@ -683,8 +715,13 @@ export class WorkflowCallRecorder {
    */
   private observeCall(event: NormalizedSessionEvent): NormalizedSessionEvent {
     if (event.type !== "tool_call") return event;
-    if (isInvokeToolCallName(event.toolName)) return this.observeComposedCall(event);
-    return this.observeNativeCall(event);
+    if (isInvokeToolCallName(event.toolName)) {
+      this.privateRepresentation = "redacted";
+      return this.observeComposedCall(event);
+    }
+    const observed = this.observeNativeCall(localWorkflowEvent(event) ?? event);
+    // Only reference-bearing metadata leaves the local raw view.
+    return { ...event, metadata: observed.metadata };
   }
 
   /** Records a call composed through the reference-aware surface, keeping the caller's envelopes. */
@@ -709,7 +746,7 @@ export class WorkflowCallRecorder {
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
-      origins[argument] = this.sweepOrigin(origin, event.sessionId);
+      origins[argument] = this.sweepOrigin(origin, event.sessionId, event.callId, [argument]);
       provenance[argument] = { standing: "recorded", rule: "caller-stated" };
     }
     const carrier: WorkflowCallCarrier = {
@@ -749,17 +786,26 @@ export class WorkflowCallRecorder {
   ): NormalizedSessionEvent {
     const parameters = isPlainObject(event.parameters) ? event.parameters : {};
     const program = this.programOf(event, parameters);
-    const analysis = analyzeAgentArguments(parameters);
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
-    for (const [argument, origin] of Object.entries(analysis.origins)) {
-      origins[argument] = this.launderOrigin(origin, event.sessionId);
+    // Ordinary native JSON is data, not the explicit composition interface.
+    for (const [argument, value] of Object.entries(parameters)) {
+      origins[argument] = this.launderOrigin(
+        { type: "literal", value },
+        event.sessionId,
+        event.callId,
+        [argument],
+      );
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
+    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
+    const connection = event.connection ?? discovered?.provider;
     const carrier: WorkflowCallCarrier = {
       runtime:
         program === undefined
-          ? RESIN_TOOL_PROTOCOL_RUNTIME
+          ? connection === undefined
+            ? RESIN_HARNESS_TOOL_RUNTIME
+            : RESIN_TOOL_PROTOCOL_RUNTIME
           : program.kind === "shell"
             ? RESIN_PROCESS_RUNTIME
             : RESIN_PROGRAM_RUNTIME,
@@ -769,11 +815,6 @@ export class WorkflowCallRecorder {
       provenance,
     };
     if (program !== undefined) carrier.program = program;
-    const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
-    // The connection is the resolution the call itself carries (a device-surface path the adapter
-    // resolved), or what this session's discovery recorded for the callable. Nothing else: not the
-    // harness, never a guess from the name.
-    const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
     if (discovered?.inputSchema !== undefined) carrier.inputSchema = discovered.inputSchema;
 
@@ -795,47 +836,90 @@ export class WorkflowCallRecorder {
    * this machine. A composite keeps its shape — which is what a workflow argument is made of — and
    * each leaf is stored locally, exactly as a private leaf already is.
    */
-  private launderOrigin(origin: AgentArgumentOrigin, sessionId: string): AgentArgumentOrigin {
+  private launderOrigin(
+    origin: AgentArgumentOrigin,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
     switch (origin.type) {
       case "literal": {
-        const expand = (value: WorkflowJsonValue): AgentArgumentOrigin => {
-          if (Array.isArray(value)) return { type: "array", items: value.map(expand) };
+        const expand = (
+          value: WorkflowJsonValue,
+          currentPath: WorkflowValuePath,
+        ): AgentArgumentOrigin => {
+          if (Array.isArray(value)) {
+            return {
+              type: "array",
+              items: value.map((item, index) => expand(item, [...currentPath, index])),
+            };
+          }
           if (isPlainObject(value)) {
             const entries: Record<string, AgentArgumentOrigin> = {};
-            for (const [key, entry] of Object.entries(value)) entries[key] = expand(entry);
+            for (const [key, entry] of Object.entries(value)) {
+              entries[key] = expand(entry, [...currentPath, key]);
+            }
             return { type: "object", entries };
           }
-          return this.storeLocalValue(value, sessionId);
+          return this.storeLocalValue(value, sessionId, callId, currentPath);
         };
-        return expand(origin.value);
+        return expand(origin.value, path);
       }
       case "object": {
         const entries: Record<string, AgentArgumentOrigin> = {};
         for (const [key, entry] of Object.entries(origin.entries)) {
-          entries[key] = this.launderOrigin(entry, sessionId);
+          entries[key] = this.launderOrigin(entry, sessionId, callId, [...path, key]);
         }
         return { type: "object", entries };
       }
       case "array":
         return {
           type: "array",
-          items: origin.items.map((item) => this.launderOrigin(item, sessionId)),
+          items: origin.items.map((item, index) =>
+            this.launderOrigin(item, sessionId, callId, [...path, index]),
+          ),
         };
       default:
         return origin;
     }
   }
 
-  /** Stores one value of a demonstration and returns the reference a replay resolves it by. */
-  private localReference(value: WorkflowJsonValue, executionIndex: number): string {
-    const reference = `private:demonstration:${executionIndex}:${this.privateCounter++}`;
-    this.privateValues.set(reference, value, this.observeAccess);
+  private privateReference(
+    namespace: "value" | "demonstration",
+    parts: readonly unknown[],
+  ): string {
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify([
+          this.observeAccess?.workspaceId ?? null,
+          this.privateRepresentation,
+          ...parts,
+        ]),
+      )
+      .digest("hex");
+    return `private:v2:${namespace}:${digest}`;
+  }
+
+  /** Stores one value of a demonstration and returns the stable reference a replay resolves it by. */
+  private localReference(
+    value: WorkflowJsonValue,
+    sessionId: string,
+    callId: string,
+    slot: string,
+  ): string {
+    const reference = this.privateReference("demonstration", [sessionId, callId, slot]);
+    this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return reference;
   }
 
-  private storeLocalValue(value: WorkflowJsonValue, sessionId: string): AgentArgumentOrigin {
-    const reference = `private:${sessionId}:${this.privateCounter++}`;
-    this.privateValues.set(reference, value, this.observeAccess);
+  private storeLocalValue(
+    value: WorkflowJsonValue,
+    sessionId: string,
+    callId: string,
+    path: WorkflowValuePath,
+  ): AgentArgumentOrigin {
+    const reference = this.privateReference("value", [sessionId, callId, path]);
+    this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return { type: "private", reference };
   }
 
@@ -863,15 +947,24 @@ export class WorkflowCallRecorder {
     const execution = state.executions[state.executions.length - 1]!;
     const flow = declaredFlowOfToolCall(event);
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
-    const heldLocally = Object.entries(parameters)
+    const heldLocally = Object.entries(this.redactedArguments ?? parameters)
       .filter(([, value]) => typeof value === "string" && containsRedactionPlaceholder(value))
       .map(([argument]) => argument);
     const call: LocalCall = {
       callId: event.callId,
       toolName: event.toolName,
+      ...((event.connection ?? discovered?.provider) === undefined
+        ? {}
+        : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
       executionIndex: execution.index,
       arguments: parameters,
+      argumentReferences: Object.fromEntries(
+        Object.entries(parameters).map(([argument, value]) => [
+          argument,
+          this.localReference(value, event.sessionId, event.callId, `argument:${argument}`),
+        ]),
+      ),
       ...(discovered?.inputSchema === undefined ? {} : { inputSchema: discovered.inputSchema }),
       ...(heldLocally.length === 0 ? {} : { privateArguments: heldLocally }),
       // Only a program whose text arrived in a named argument can be read as a program here: with
@@ -914,27 +1007,45 @@ export class WorkflowCallRecorder {
     call: LocalCall,
   ): WorkflowCallHeldOut | undefined {
     const execution = state.executions.find((entry) => entry.index === call.executionIndex);
-    const earlier = state.executions.find((entry) => entry.index < call.executionIndex);
-    if (execution === undefined || earlier === undefined) return undefined;
+    if (execution === undefined) return undefined;
+    const earlier = [...state.executions].reverse().find(
+      (entry) =>
+        entry.index < call.executionIndex &&
+        execution.calls.length <= entry.calls.length &&
+        execution.calls.every((mine, position) => {
+          const theirs = entry.calls[position];
+          return (
+            theirs !== undefined &&
+            mine.toolName === theirs.toolName &&
+            mine.connection === theirs.connection &&
+            mine.program?.kind === theirs.program?.kind &&
+            mine.program?.argument === theirs.program?.argument
+          );
+        }),
+    );
+    if (earlier === undefined) {
+      // A diverging prefix must not leave an old demonstration advertised on later results.
+      execution.accumulatedHeldOut = undefined;
+      return undefined;
+    }
     const inputs: WorkflowCallHeldOut["inputs"] = [];
     const observed: WorkflowCallHeldOut["observed"] = [];
     for (const mine of execution.calls) {
       const theirs = earlier.calls.find((entry) => entry.position === mine.position);
       if (theirs === undefined || mine.toolName !== theirs.toolName) break;
-      for (const [argument, value] of Object.entries(mine.arguments)) {
-        if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-          continue;
-        }
+      for (const [argument, reference] of Object.entries(mine.argumentReferences)) {
+        // Nested arguments are part of an ordinary call too. Keep the complete value by local
+        // reference; validation selects the candidate's nested path without uploading the value.
         inputs.push({
           position: mine.position,
           argument,
-          reference: this.localReference(value, execution.index),
+          reference,
         });
       }
-      if (mine.result !== undefined) {
+      if (mine.resultReference !== undefined) {
         observed.push({
           position: mine.position,
-          reference: this.localReference(mine.result, execution.index),
+          reference: mine.resultReference,
         });
       }
     }
@@ -995,12 +1106,11 @@ export class WorkflowCallRecorder {
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
     );
-    /** Tokens an earlier call of this execution produced; the producer rule offers those already. */
-    const producedTokens = new Set<string>();
+    /** Positions an earlier call produced; the producer rule owns them instead of variation. */
+    const producedPositions = new Set<string>();
     for (const candidate of derivation.candidates) {
-      if (candidate.stepId !== ownStepId) continue;
-      if (candidate.proposed.kind !== "result" || candidate.path[0] !== "tokens") continue;
-      producedTokens.add(`${candidate.argument}|${String(candidate.path[1])}`);
+      if (candidate.stepId !== ownStepId || candidate.proposed.kind !== "result") continue;
+      producedPositions.add(JSON.stringify([candidate.argument, candidate.path]));
     }
 
     // The same argument position, in another task, with a different value.
@@ -1008,7 +1118,7 @@ export class WorkflowCallRecorder {
       if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
         continue;
       }
-      const key = `${call.toolName}|${call.position}|${argument}`;
+      const key = JSON.stringify([call.connection ?? null, call.toolName, call.position, argument]);
       const previous = state.baseline.get(key);
       if (previous === undefined) {
         state.baseline.set(key, value);
@@ -1047,7 +1157,8 @@ export class WorkflowCallRecorder {
               // A token an earlier call of this execution produced is that call's output, and the
               // producer rule already offers it at this position; a second candidate on one token
               // would be decided against the first.
-              if (producedTokens.has(`${argument}|${tokenIndex}`)) continue;
+              if (producedPositions.has(JSON.stringify([argument, ["tokens", tokenIndex]])))
+                continue;
               candidates.push({
                 argument,
                 path: ["tokens", tokenIndex],
@@ -1069,6 +1180,8 @@ export class WorkflowCallRecorder {
         }
         continue;
       }
+      // A changed value that still came from an earlier step is data flow, not a caller input.
+      if (producedPositions.has(JSON.stringify([argument, []]))) continue;
       if (typeof value === "string" && value.length < MIN_INPUT_CANDIDATE_LENGTH) continue;
       candidates.push({
         argument,
@@ -1170,7 +1283,10 @@ export class WorkflowCallRecorder {
     return { ...event, metadata } as NormalizedSessionEvent;
   }
 
-  private observeResult(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  private observeResult(
+    event: NormalizedSessionEvent,
+    publicEvent: NormalizedSessionEvent = event,
+  ): NormalizedSessionEvent {
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -1180,23 +1296,27 @@ export class WorkflowCallRecorder {
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
         call.result = extractResultValueOf(event.result);
+        call.resultReference =
+          call.result === undefined
+            ? undefined
+            : this.localReference(call.result, event.sessionId, call.callId, "result");
         // A repeat's own observations are what its results produced, so the demonstration grows
         // here rather than at a call that was recorded before they happened.
-        if (execution.accumulatedHeldOut !== undefined && call.result !== undefined) {
+        if (execution.accumulatedHeldOut !== undefined && call.resultReference !== undefined) {
           execution.accumulatedHeldOut.observed = [
             ...execution.accumulatedHeldOut.observed.filter(
               (entry) => entry.position !== call.position,
             ),
             {
               position: call.position,
-              reference: this.localReference(call.result, execution.index),
+              reference: call.resultReference,
             },
           ];
         }
         break;
       }
     }
-    const handle = this.resultHandle(event);
+    const handle = this.resultHandle(publicEvent);
     const heldOut =
       event.type === "tool_result"
         ? this.demonstrationCarrier(event.sessionId, event.callId)

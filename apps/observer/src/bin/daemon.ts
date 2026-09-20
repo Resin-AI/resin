@@ -1167,6 +1167,7 @@ async function runForeground(options: {
     getObservationClient: () => cloudRuntimeModule.getObservationClient(),
     cursorManager,
     logger,
+    privateValueOwnerWorkspaceId: deviceCredentials.credentials?.workspaceId,
     telemetryEnabled: deviceTelemetryEnabled && cloudConsent?.metadataTelemetryEnabled === true,
     remoteTelemetryConsent: cloudConsent,
     refreshRemoteTelemetryConsent: refreshCloudConsent,

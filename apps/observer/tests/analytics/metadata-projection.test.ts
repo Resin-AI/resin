@@ -358,6 +358,48 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(file).success).toBe(true);
   });
 
+  it("preserves only explicit root cwd evidence for shell tool calls without exposing raw parameters", () => {
+    const command = "sha256sum ./package.bin && sha512sum ./package.bin";
+    const project = (cwd?: string) =>
+      projectEventToMetadataOnly(
+        {
+          ...createBaseHeaders(7),
+          type: "tool_call",
+          callId: "root_cwd",
+          toolName: "bash",
+          parameters: {
+            command,
+            ...(cwd === undefined ? {} : { cwd }),
+            i: "PRIVATE_COMMAND_INTENT",
+          },
+          isShadow: false,
+        },
+        { homeDir: "/home/PRIVATE_USER", validate: true },
+      );
+
+    for (const cwd of [".", "./"]) {
+      const projected = project(cwd);
+      if (projected.type !== "tool_call") throw new Error("Expected tool_call");
+      expect(projected.parameters).toEqual({
+        command: "sha256sum $PATH && sha512sum $PATH",
+        cwd: ".",
+      });
+      expect(JSON.stringify(projected)).not.toContain("package.bin");
+      expect(JSON.stringify(projected)).not.toContain("PRIVATE_COMMAND_INTENT");
+      const reprojected = projectEventToMetadataOnly(projected);
+      if (reprojected.type !== "tool_call") throw new Error("Expected tool_call");
+      expect(reprojected.parameters.cwd).toBe(".");
+    }
+
+    const missing = project();
+    if (missing.type !== "tool_call") throw new Error("Expected tool_call");
+    expect(missing.parameters).not.toHaveProperty("cwd");
+    const absolute = project("/home/PRIVATE_USER/workspace");
+    if (absolute.type !== "tool_call") throw new Error("Expected tool_call");
+    expect(absolute.parameters.cwd).not.toBe(".");
+    expect(JSON.stringify(absolute)).not.toContain("/home/PRIVATE_USER");
+  });
+
   it("projects file_edit event: strips patch while preserving filePath, operation, hashes, diffStats", () => {
     const original: NormalizedFileEditEvent = {
       ...createBaseHeaders(7),

@@ -1482,7 +1482,12 @@ export default defineTool(async (context: { input: { val: string } }) => {
 
     async function invokeRecordedPlan(
       store: InMemoryPrivateValueStore,
-      options: { executingWorkspaceId?: string; declared?: string[]; uncompiled?: boolean } = {},
+      options: {
+        executingWorkspaceId?: string;
+        privateValueOwnerWorkspaceId?: string;
+        declared?: string[];
+        uncompiled?: boolean;
+      } = {},
     ): Promise<{ isError: boolean | undefined; text: string; seen: unknown }> {
       const manifestInput: TestManifestInput = {
         id: "test-recorded-private-001",
@@ -1516,6 +1521,7 @@ export default defineTool(async (context: { input: { val: string } }) => {
         development: true,
         allowDevKeys: true,
         privateValueStore: store,
+        privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
         stepInvoker: async (request) => {
           seen = request.parameters.token;
           return { content: [{ type: "text" as const, text: JSON.stringify({ pushed: true }) }] };
@@ -1559,6 +1565,15 @@ export default defineTool(async (context: { input: { val: string } }) => {
       expect(attempt.isError).toBeFalsy();
       expect(attempt.seen).toBe(PRIVATE_SECRET);
       expect(JSON.parse(attempt.text).content[0].text).toBe(JSON.stringify({ pushed: true }));
+    });
+
+    it("uses paired tenant ownership independently from the local project UUID", async () => {
+      const attempt = await invokeRecordedPlan(privateStore({ workspaceId: "ws_cloud_owner" }), {
+        executingWorkspaceId: "local-project-uuid",
+        privateValueOwnerWorkspaceId: "ws_cloud_owner",
+      });
+      expect(attempt.isError).toBeFalsy();
+      expect(attempt.seen).toBe(PRIVATE_SECRET);
     });
 
     it("refuses a reference recorded for another workspace", async () => {

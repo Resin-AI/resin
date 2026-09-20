@@ -105,9 +105,7 @@ describe("rendering a bound value back into its token", () => {
     expect(rewritten).toContain(rendered);
     // Re-tokenizing the rewritten program finds exactly one token carrying the value: the quoting
     // was not a place where the value could split into a command.
-    const values = tokenizeProgram("shell", rewritten).filter(
-      (entry) => entry.value !== undefined,
-    );
+    const values = tokenizeProgram("shell", rewritten).filter((entry) => entry.value !== undefined);
     expect(values.filter((entry) => entry.value === hostile)).toHaveLength(1);
     expect(values.some((entry) => entry.value === "rm" || entry.value === "whoami")).toBe(false);
   });
@@ -138,7 +136,9 @@ describe("applyProgramTokenValues", () => {
       [1, "beta-2"],
       [2, "release/beta-2.txt"],
     ]);
-    expect(applyProgramTokenValues(source, tokens, values)).toBe("cp 'beta-2' 'release/beta-2.txt'");
+    expect(applyProgramTokenValues(source, tokens, values)).toBe(
+      "cp 'beta-2' 'release/beta-2.txt'",
+    );
   });
 
   it("refuses a token position the recorded program does not have", () => {

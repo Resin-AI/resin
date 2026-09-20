@@ -43,6 +43,8 @@ export {
   type ParameterShapeOptions,
 } from "./metadata-projection.js";
 
+export { MetadataEventProjector } from "./metadata-event-projector.js";
+
 export {
   type InvocationTelemetryUploaderOptions,
   InvocationTelemetryUploader,
@@ -73,3 +75,5 @@ export {
   projectDeterministicCommandSequenceFromEvent,
   safeParseDeterministicCommandSequence,
 } from "./deterministic-command-sequence.js";
+
+export { compareRecordedEvents } from "./recorded-event-order.js";

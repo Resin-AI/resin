@@ -30,6 +30,7 @@ import {
   NormalizationDeduplicator,
   type NormalizationDeduplicatorOptions,
 } from "./deduplicator.js";
+import { retainLocalWorkflowPayload } from "./local-workflow-payload.js";
 import type { JsonObject, JsonValue } from "./redaction.js";
 import { type RedactionConfig, RedactionEngine } from "./redaction.js";
 
@@ -265,7 +266,17 @@ export class NormalizationPipeline {
       eventId: _e,
       ...payloadFields
     } = intermediateObj;
-    const redactionResult = this.redactionEngine.redact(payloadFields);
+    if (
+      intermediate.type === "command_exec" &&
+      intermediate.cwd === undefined &&
+      typeof intermediate.workingDirectory === "string"
+    ) {
+      Object.assign(payloadFields, { cwd: intermediate.workingDirectory });
+    }
+    const redactionResult = this.redactionEngine.redact(
+      payloadFields,
+      type === "tool_call" ? "parameters.cwd" : type === "command_exec" ? "cwd" : undefined,
+    );
     const redactionMeta: RedactionMeta = {
       isRedacted: redactionResult.isRedacted,
       redactedFields: redactionResult.redactedFields,
@@ -431,6 +442,9 @@ export class NormalizationPipeline {
         isDuplicate: true,
       };
     }
+
+    // Exact payloads remain local and non-serializable; stored events stay redacted.
+    retainLocalWorkflowPayload(validEvent, payloadFields);
 
     // 6. Update session causal tracking state
     sessionMap.set(causalSequence, validEvent.eventId);

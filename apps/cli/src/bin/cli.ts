@@ -7,6 +7,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
+import { authorizeCommand } from "../commands/authorize.js";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
 import { type InitCommandOptions, initCommand } from "../commands/init.js";
@@ -273,6 +274,7 @@ Commands:
   status       Display live status and health of the daemon, tools, and harnesses.
   mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
   privacy      Inspect and manage device and cloud privacy controls.
+  authorize    Grant this workspace's capability envelope to a recorded workflow.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.
   doctor       Diagnose platform, filesystem, service, IPC, database, and harness state.
   repair       Automatically remediate detected issues and restore healthy service state.
@@ -501,7 +503,7 @@ export async function main(
       return loginCommand(args);
 
     case "status":
-      return statusCommand(args);
+      return statusCommand(args, { verbose: isVerbose });
 
     case "privacy":
       return privacyCommand(args, {
@@ -511,6 +513,15 @@ export async function main(
         stdinIsTTY: options.stdin?.isTTY,
         stdout: { write: (chunk) => stdout.write(chunk) },
         stderr: { write: (chunk) => stderr.write(chunk) },
+      });
+
+    case "authorize":
+      return authorizeCommand(args, {
+        home: options.home,
+        env,
+        customFetch: options.customFetch,
+        output: { write: (chunk: string) => stdout.write(chunk) },
+        errorOutput: { write: (chunk: string) => stderr.write(chunk) },
       });
 
     case "control":

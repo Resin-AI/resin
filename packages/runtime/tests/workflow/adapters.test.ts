@@ -19,6 +19,7 @@ import {
   executeRecordedWorkflow,
 } from "../../src/workflow/recorded-workflow.js";
 import {
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
@@ -124,6 +125,10 @@ lines.on("line", (line) => {
   if (message.method === "tools/call") {
     if (message.params.name === "fail") {
       send({ jsonrpc: "2.0", id: message.id, result: { isError: true, content: [{ type: "text", text: "refused by the tool" }] } });
+      return;
+    }
+    if (message.params.name === "raw") {
+      send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "  exact output\\n" }] } });
       return;
     }
     if (message.params.name === "broken") {
@@ -508,6 +513,7 @@ describe("MCP connections", () => {
         called: "echo",
         args: { hello: "world" },
       });
+      expect(await connection.callTool("raw", {})).toBe("  exact output\n");
       await expect(connection.callTool("fail", {})).rejects.toThrow(/refused by the tool/);
       await expect(connection.callTool("broken", {})).rejects.toThrow(
         /the tool blew up \(code -32603\)/,
@@ -579,18 +585,26 @@ describe("MCP connections", () => {
 
 describe("runtime family names", () => {
   it("uses the runtime family names the observer stamps", async ({ skip }) => {
-    expect([RESIN_PROCESS_RUNTIME, RESIN_PROGRAM_RUNTIME, RESIN_TOOL_PROTOCOL_RUNTIME]).toEqual([
+    expect([
+      RESIN_HARNESS_TOOL_RUNTIME,
+      RESIN_PROCESS_RUNTIME,
+      RESIN_PROGRAM_RUNTIME,
+      RESIN_TOOL_PROTOCOL_RUNTIME,
+    ]).toEqual([
+      "resin-harness-tool",
       "resin-process",
       "resin-program",
       "resin-tool-protocol",
     ]);
 
     const names = [
+      "RESIN_HARNESS_TOOL_RUNTIME",
       "RESIN_PROCESS_RUNTIME",
       "RESIN_PROGRAM_RUNTIME",
       "RESIN_TOOL_PROTOCOL_RUNTIME",
     ] as const;
     const expected = [
+      RESIN_HARNESS_TOOL_RUNTIME,
       RESIN_PROCESS_RUNTIME,
       RESIN_PROGRAM_RUNTIME,
       RESIN_TOOL_PROTOCOL_RUNTIME,

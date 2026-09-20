@@ -23,6 +23,7 @@ import {
   TrajectoryCaptureCoordinator,
 } from "./analytics/index.js";
 import { FilePrivateValueStore } from "./analytics/private-value-store.js";
+import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
@@ -64,12 +65,12 @@ const CurrentTelemetryPrivacyCheckpointSchema = z
   })
   .strict();
 
-const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
+export const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
   LegacyTelemetryPrivacyCheckpointSchema,
   CurrentTelemetryPrivacyCheckpointSchema,
 ]);
 
-type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
+export type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
 
 export interface ReconcileRemoteTelemetryConsentResult {
   valid: boolean;
@@ -94,6 +95,16 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
+function captureInactiveOmpSession(session: HarnessSession, startedAt: number): boolean {
+  if (session.harnessId !== "omp" || typeof session.metadata?.fileMtime !== "string") {
+    return false;
+  }
+  // Require actual file activity as well as the coordinator's transcript timestamp boundary.
+  // Neither touching an old transcript nor future-dated content grants historical capture.
+  const modifiedAt = Date.parse(session.metadata.fileMtime);
+  return modifiedAt >= startedAt && modifiedAt <= Date.now();
+}
+
 export interface TrajectoryCaptureRuntimeModuleOptions {
   /**
    * Getter or factory function to resolve the CloudObservationClient dynamically.
@@ -104,6 +115,11 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    * Directly injected CloudObservationClient instance.
    */
   observationClient?: CloudObservationClient;
+
+  /**
+   * Paired cloud workspace that owns private workflow values across local project identities.
+   */
+  privateValueOwnerWorkspaceId?: string;
 
   /**
    * Optional custom ObserverCoordinator.
@@ -318,7 +334,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.adapters = options.adapters ?? [
       new ClaudeHarnessAdapter(),
       new CodexHarnessAdapter(),
-      new OmpHarnessAdapter(),
+      new OmpHarnessAdapter({ activeOnly: false }),
     ];
 
     this.cursorManager =
@@ -337,7 +353,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
-          session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+          session.harnessId === "omp" ? { mode: "all" } : undefined,
+        captureInactiveSessions: captureInactiveOmpSession,
         captureUserSessionsOnly: this.captureUserSessionsOnly,
         logger: this.logger,
       });
@@ -379,6 +396,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
+        workflowCallRecorder: new WorkflowCallRecorder({
+          privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
+        }),
       });
     }
 
@@ -701,7 +721,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
-        session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+        session.harnessId === "omp" ? { mode: "all" } : undefined,
+      captureInactiveSessions: captureInactiveOmpSession,
       captureUserSessionsOnly: this.captureUserSessionsOnly,
       logger: this.logger,
     });
@@ -808,6 +829,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       throw err;
     } finally {
       this.captureCoordinator.clearComputationEvidence();
+      this.captureCoordinator.clearCommandSequenceEvidence();
     }
   }
 

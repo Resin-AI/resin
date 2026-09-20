@@ -174,7 +174,7 @@ describe("reading the servers the harness is configured with", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-device-surface-"));
     const ompHome = path.join(root, "omp-home");
     const workspace = path.join(root, "workspace");
-    fs.mkdirSync(path.join(workspace, ".omp", "agent"), { recursive: true });
+    fs.mkdirSync(path.join(workspace, ".omp"), { recursive: true });
     fs.mkdirSync(path.join(ompHome, "agent"), { recursive: true });
     fs.writeFileSync(
       path.join(ompHome, "agent", "mcp.json"),
@@ -188,7 +188,7 @@ describe("reading the servers the harness is configured with", () => {
       "utf8",
     );
     fs.writeFileSync(
-      path.join(workspace, ".omp", "agent", "mcp.json"),
+      path.join(workspace, ".omp", "mcp.json"),
       JSON.stringify({ mcpServers: { shared: { command: "workspace-shared" } } }),
       "utf8",
     );
@@ -233,6 +233,7 @@ describe("capturing a call made through the device surface", () => {
     expect(discoveries[0]!.tools).toEqual([{ name: "run", provider: "alpha_beta" }]);
     // The result belongs to the call's own identity, not to the transport that carried it.
     expect(results[0]!.toolName).toBe("run");
+    expect(results[0]!.result).toEqual({ rows: [] });
   });
 
   it("keeps the tool's own name whole when it contains underscores", () => {
@@ -260,6 +261,7 @@ describe("capturing a call made through the device surface", () => {
     expect(calls[0]!.parameters).toEqual({});
     expect(discoveries[0]!.tools).toEqual([{ name: "run", provider: "alpha_beta" }]);
     expect(results[0]!.toolName).toBe("run");
+    expect(results[0]!.result).toEqual({ rows: [] });
   });
 
   it("leaves a path no configured server owns opaque, with no connection", () => {
@@ -314,5 +316,15 @@ describe("capturing a call made through the device surface", () => {
     expect(calls[0]!.connection).toBe("alpha");
     expect(discoveries[0]!.tools).toEqual([{ name: "run", provider: "alpha" }]);
     expect(results).toHaveLength(1);
+  });
+
+  it("preserves exact non-JSON text returned by a device-surface tool", () => {
+    const { results } = decodeAll([
+      startMarker("call_text", "xd://mcp__alpha_run"),
+      assistantWrite("call_text", "xd://mcp__alpha_run", "{}"),
+      toolResult("call_text", "  printed text\n"),
+    ]);
+
+    expect(results[0]!.result).toBe("  printed text\n");
   });
 });
