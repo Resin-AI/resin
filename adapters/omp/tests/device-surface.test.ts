@@ -174,7 +174,7 @@ describe("reading the servers the harness is configured with", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-device-surface-"));
     const ompHome = path.join(root, "omp-home");
     const workspace = path.join(root, "workspace");
-    fs.mkdirSync(path.join(workspace, ".omp", "agent"), { recursive: true });
+    fs.mkdirSync(path.join(workspace, ".omp"), { recursive: true });
     fs.mkdirSync(path.join(ompHome, "agent"), { recursive: true });
     fs.writeFileSync(
       path.join(ompHome, "agent", "mcp.json"),
@@ -188,7 +188,7 @@ describe("reading the servers the harness is configured with", () => {
       "utf8",
     );
     fs.writeFileSync(
-      path.join(workspace, ".omp", "agent", "mcp.json"),
+      path.join(workspace, ".omp", "mcp.json"),
       JSON.stringify({ mcpServers: { shared: { command: "workspace-shared" } } }),
       "utf8",
     );
