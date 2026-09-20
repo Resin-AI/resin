@@ -1,0 +1,87 @@
+name: Apply and verify recorded workflow repair
+
+on:
+  push:
+    branches: [gwc2-work]
+    paths: ['.ci/bc-source-repair/**', '.github/workflows/bc-source-repair.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  apply-verified-source:
+    if: github.repository == 'Resin-AI/resin' && github.ref == 'refs/heads/gwc2-work'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact reviewed source patch
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          base = '88b2c0022f28cdcbe449c70f1772128578877394'
+          expected = set('''apps/gateway/src/proxy/validation-worker.ts
+          apps/gateway/src/proxy/workflow-validation.ts
+          apps/gateway/tests/proxy/validation-unavailable.test.ts
+          apps/gateway/tests/proxy/validation-worker.test.ts
+          apps/gateway/tests/proxy/workflow-slice-reuse.test.ts
+          apps/observer/src/analytics/demonstration-evidence.ts
+          apps/observer/src/analytics/index.ts
+          apps/observer/src/analytics/recorded-event-order.ts
+          apps/observer/src/analytics/workflow-recipe.ts
+          apps/observer/src/analytics/workflow-recording.ts
+          apps/observer/tests/analytics/workflow-slice-replay.test.ts'''.split())
+          parts = [pathlib.Path(f'.ci/bc-source-repair/part-{i}.gzpart') for i in range(4)]
+          transport = {str(p) for p in parts} | {'.github/workflows/bc-source-repair.yml'}
+          assert git('rev-parse', 'HEAD') == os.environ['EXPECTED_HEAD']
+          git('merge-base', '--is-ancestor', base, 'HEAD')
+          assert set(git('diff', '--name-only', base, 'HEAD').splitlines()) == transport
+          patch = gzip.decompress(b''.join(p.read_bytes() for p in parts))
+          assert hashlib.sha256(patch).hexdigest() == '24b0637b6c579026481c2bb3d1dd794d8eeb7d6eeca70a63c5c88071a58e19d3'
+          file = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bc-repair.patch'
+          file.write_bytes(patch)
+          git('apply', '--check', '--index', str(file))
+          git('apply', '--index', str(file))
+          assert set(git('diff', '--cached', '--name-only').splitlines()) == expected
+          git('rm', '-r', '.ci/bc-source-repair')
+          git('diff', '--cached', '--check')
+          git('config', 'user.name', 'github-actions[bot]')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit', '-m', 'fix: preserve selected workflow evidence and honest replay')
+          print('Source revision:', git('rev-parse', 'HEAD'))
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+      - name: Install and build exact source
+        run: |
+          umask 022
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm typecheck
+      - name: Exercise capture, replay, privacy and changed-input reuse
+        run: |
+          umask 022
+          pnpm exec vitest run --no-file-parallelism --maxWorkers=1 --minWorkers=1 apps/observer/tests/normalization apps/observer/tests/analytics packages/runtime/tests/workflow apps/gateway/tests/proxy/validation-worker.test.ts apps/gateway/tests/proxy/validation-unavailable.test.ts apps/gateway/tests/proxy/workflow-slice-reuse.test.ts
+          pnpm exec tsc --noEmit --module nodenext --moduleResolution nodenext --target es2022 --skipLibCheck --esModuleInterop --strict apps/observer/tests/analytics/workflow-slice-replay.test.ts apps/gateway/tests/proxy/validation-unavailable.test.ts apps/gateway/tests/proxy/workflow-slice-reuse.test.ts
+      - name: Fast-forward only the unchanged task branch
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git ls-remote origin refs/heads/gwc2-work | cut -f1)"
+          test "$actual" = "$EXPECTED_HEAD"
+          git push origin HEAD:refs/heads/gwc2-work
+          git rev-parse HEAD
