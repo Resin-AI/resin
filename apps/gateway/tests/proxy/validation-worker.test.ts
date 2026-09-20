@@ -336,15 +336,16 @@ describe("WorkflowValidationWorker", () => {
     expect(dispatch).toHaveBeenCalled();
   });
 
-  it("refuses to replay a recording whose references another workspace recorded", async () => {
+  it("records an explicit failed decision when a replay cannot resolve its references", async () => {
     // The same recording, but its values were recorded by a different workspace: a reference is a
-    // name, not a capability, so the replay must not resolve them even though the strings match. A
-    // refusal is not an answer — the ask stays pending, and the reason is reported.
+    // name, not a capability, so the replay must not resolve them even though the strings match.
     const plan = recordedPlan();
     const dispatch = dispatchStub();
     const logs: string[] = [];
     const { calls, fetchImpl } = recordingFetch((url) =>
-      url.includes("/pending") ? jsonResponse({ requests: [requestFor(plan)] }) : jsonResponse({}),
+      url.includes("/pending")
+        ? jsonResponse({ requests: [requestFor(plan)] })
+        : jsonResponse({ status: "recorded" }),
     );
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
@@ -357,11 +358,12 @@ describe("WorkflowValidationWorker", () => {
 
     const summary = await worker.runOnce();
 
-    expect(summary).toMatchObject({ pending: 1, answered: 0, refused: 1 });
-    // Only the listing happened: no decision was posted and the replay never re-made a call.
-    expect(calls).toHaveLength(1);
+    expect(summary).toMatchObject({ pending: 1, answered: 1, refused: 0 });
+    const decision = postedDecision(calls);
+    expect(decision.verification?.status).toBe("failed");
+    expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
     expect(dispatch).not.toHaveBeenCalled();
-    expect(logs.join("\n")).toContain("was not replayed");
+    expect(logs.join("\n")).toContain("replay failed");
   });
 
   it("refuses an ask that names another workspace, without posting anything", async () => {

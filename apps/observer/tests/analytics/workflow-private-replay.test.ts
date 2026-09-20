@@ -27,6 +27,7 @@ async function capture(
   store: FilePrivateValueStore,
   sessionId: string,
   recorder = new WorkflowCallRecorder({ privateValues: store }),
+  access = origin,
 ) {
   const pipeline = new NormalizationPipeline({
     privateValueStore: store,
@@ -76,11 +77,11 @@ async function capture(
         timestamp: "2026-09-19T00:00:00.000Z",
         causalRef: { causalSequence: index + 1, parentId: null },
       },
-      { ...origin, sessionId },
+      { ...access, sessionId },
     );
     if (result.status !== "success") throw new Error(result.errorReason);
     normalized.push(result.event);
-    events.push(projectEventToMetadataOnly(recorder.observe(result.event, origin)));
+    events.push(projectEventToMetadataOnly(recorder.observe(result.event, access)));
   }
   return { events, normalized, parameters, answers };
 }
@@ -112,6 +113,28 @@ describe("exact local values across the real normalization boundary", () => {
     const cwd = firstCarrier.origins.cwd!;
     if (cwd.type !== "private") throw new Error("Expected a local cwd reference");
     expect(resolvePrivateReference(reopened, cwd.reference)).toBe(captured.parameters[0]!.cwd);
+  });
+
+  it("uses one paired cloud owner across different local project workspaces", async () => {
+    const { store } = temporaryStore();
+    const cloudOwner = { workspaceId: "ws-cloud-owner" };
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: cloudOwner.workspaceId,
+    });
+    const first = await capture(store, "session-project-a", recorder, {
+      workspaceId: "project-a",
+    });
+    const second = await capture(store, "session-project-b", recorder, {
+      workspaceId: "project-b",
+    });
+
+    for (const captured of [first, second]) {
+      const carrier = readWorkflowCallCarrier(captured.events[0]!.metadata?.workflowCall)!;
+      const pathOrigin = carrier.origins.path;
+      if (pathOrigin?.type !== "private") throw new Error("Expected a private path reference");
+      expect(store.origin(pathOrigin.reference)).toEqual(cloudOwner);
+    }
   });
 
   it("does not reinterpret original text that merely looks like a redaction marker", async () => {

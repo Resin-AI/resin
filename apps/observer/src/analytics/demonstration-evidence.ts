@@ -62,12 +62,24 @@ export function selectDemonstration(
     selectedPosition.set(position, ordinal);
     previous = position;
   }
-  const matching = new Set<number>();
+  const selectedIdentities = selected.map((call) => call.identity);
+  const positionsByExecution = new Map<number, ReadonlyMap<number, number>>();
   for (const [index, members] of executions) {
-    if (index === first.executionIndex || members.length !== baseline.length) continue;
-    if (members.every((call, ordinal) => call.identity === baseline[ordinal]!.identity)) {
-      matching.add(index);
+    if (index === first.executionIndex || members.length < selectedIdentities.length) continue;
+    const starts: number[] = [];
+    for (let start = 0; start <= members.length - selectedIdentities.length; start++) {
+      if (
+        selectedIdentities.every(
+          (identity, offset) => members[start + offset]!.identity === identity,
+        )
+      )
+        starts.push(start);
     }
+    if (starts.length !== 1) continue;
+    positionsByExecution.set(
+      index,
+      new Map(selectedIdentities.map((_, ordinal) => [starts[0]! + ordinal, ordinal])),
+    );
   }
   let chosen: DemonstrationSnapshot | undefined;
   let observedCount = -1;
@@ -75,11 +87,14 @@ export function selectDemonstration(
   for (const observation of observations) {
     if (observation.sessionId !== first.sessionId) continue;
     const execution = executionByCall.get(observation.callId);
-    if (execution === undefined || !matching.has(execution)) continue;
+    if (execution === undefined) continue;
+    const selectedRepeatPositions = positionsByExecution.get(execution);
+    if (selectedRepeatPositions === undefined) continue;
     const snapshot = observation.snapshot;
     if (snapshot.repeats !== first.executionIndex) continue;
+    const members = executions.get(execution)!;
     const inRange = (position: number): boolean =>
-      Number.isSafeInteger(position) && position >= 0 && position < baseline.length;
+      Number.isSafeInteger(position) && position >= 0 && position < members.length;
     if (
       snapshot.inputs.some((entry) => !inRange(entry.position)) ||
       snapshot.observed.some((entry) => !inRange(entry.position))
@@ -98,19 +113,19 @@ export function selectDemonstration(
     ) {
       continue;
     }
-    // Snapshot positions belong to the full recorded execution, not this workflow's compact
-    // step numbers. Preserve only the selected slice and never mix observations from two runs.
+    // Snapshot positions belong to the repeated execution. Preserve only the uniquely matching
+    // selected slice and compact those positions to workflow step numbers.
     const inputs = snapshot.inputs
-      .filter((entry) => selectedPosition.has(entry.position))
+      .filter((entry) => selectedRepeatPositions.has(entry.position))
       .map((entry) => ({
         ...entry,
-        position: selectedPosition.get(entry.position)!,
+        position: selectedRepeatPositions.get(entry.position)!,
       }));
     const observed = snapshot.observed
-      .filter((entry) => selectedPosition.has(entry.position))
+      .filter((entry) => selectedRepeatPositions.has(entry.position))
       .map((entry) => ({
         ...entry,
-        position: selectedPosition.get(entry.position)!,
+        position: selectedRepeatPositions.get(entry.position)!,
       }));
     if (
       observed.length < observedCount ||

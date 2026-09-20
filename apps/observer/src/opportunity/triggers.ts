@@ -99,6 +99,7 @@ export class TriggerEvaluator {
     const maxEpisodeMetrics = this.getMaxEpisodeMetrics(cluster.episodes);
     const scenarioIds = getClusterScenarioIds(cluster);
     const distinctScenarioCount = getClusterDistinctScenarioCount(cluster);
+    const averageStepCount = Math.max(0, Math.round(cluster.metrics.avgStepCount));
     const isLegacyNoScenario = scenarioIds.length === 0;
     const eventIds =
       Array.isArray(cluster.evidenceEventIds) && cluster.evidenceEventIds.length > 0
@@ -128,7 +129,7 @@ export class TriggerEvaluator {
           tokenCount: cluster.metrics.avgTokens,
           retryCount: cluster.metrics.totalRetries,
           estimatedCostUsd: cluster.metrics.totalCostUsd,
-          stepCount: cluster.metrics.avgStepCount,
+          stepCount: averageStepCount,
         },
       };
     }
@@ -149,7 +150,7 @@ export class TriggerEvaluator {
             tokenCount: cluster.metrics.avgTokens,
             retryCount: cluster.metrics.totalRetries,
             estimatedCostUsd: cluster.metrics.totalCostUsd,
-            stepCount: cluster.metrics.avgStepCount,
+            stepCount: averageStepCount,
           },
         };
       }
@@ -169,7 +170,7 @@ export class TriggerEvaluator {
             tokenCount: cluster.metrics.avgTokens,
             retryCount: cluster.metrics.totalRetries,
             estimatedCostUsd: cluster.metrics.totalCostUsd,
-            stepCount: cluster.metrics.avgStepCount,
+            stepCount: averageStepCount,
           },
         };
       }
@@ -197,7 +198,7 @@ export class TriggerEvaluator {
         tokenCount: cluster.metrics.avgTokens,
         retryCount: cluster.metrics.totalRetries,
         estimatedCostUsd: cluster.metrics.totalCostUsd,
-        stepCount: cluster.metrics.avgStepCount,
+        stepCount: averageStepCount,
       },
     };
   }

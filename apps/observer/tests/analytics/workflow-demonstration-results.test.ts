@@ -7,6 +7,7 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import { selectDemonstration } from "../../src/analytics/demonstration-evidence.js";
 
 function recording(
   sessionId = "session-result-evidence",
@@ -138,5 +139,36 @@ describe("demonstrations reconstructed from stored call and result events", () =
       supportingEvents: [...events, ...events],
     })!;
     expect(repeated.workflow).toEqual(once.workflow);
+  });
+});
+
+describe("demonstration slice selection", () => {
+  it("maps an unambiguous shorter repeat onto a noisier baseline", () => {
+    const calls = [
+      { sessionId: "session", callId: "inspect", executionIndex: 0, identity: "inspect" },
+      { sessionId: "session", callId: "load-original", executionIndex: 0, identity: "load" },
+      { sessionId: "session", callId: "load-repeat", executionIndex: 1, identity: "load" },
+    ];
+    const demonstration = selectDemonstration(
+      [calls[1]!],
+      calls,
+      [
+        {
+          sessionId: "session",
+          callId: "load-repeat",
+          snapshot: {
+            repeats: 0,
+            inputs: [{ position: 0, argument: "path", reference: "private:input" }],
+            observed: [{ position: 0, reference: "private:result" }],
+          },
+        },
+      ],
+    );
+
+    expect(demonstration).toEqual({
+      repeats: 0,
+      inputs: [{ position: 0, argument: "path", reference: "private:input" }],
+      observed: [{ position: 0, reference: "private:result" }],
+    });
   });
 });

@@ -76,8 +76,18 @@ describe("a missing replay is not a completed validation", () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves an unsubstantiated ask pending instead of uploading an empty decision", async () => {
+  it("records an explicit failed decision when the demonstration is unavailable", async () => {
     const plan = recording();
+    plan.candidates = [
+      {
+        stepId: "step0",
+        argument: "value",
+        path: [],
+        proposed: { kind: "input", name: "value", type: "string" },
+        reason: "varies-across-executions",
+        missing: "requires another recorded execution",
+      },
+    ];
     const submitted: WorkflowValidationDecision[] = [];
     const log: string[] = [];
     const worker = new WorkflowValidationWorker({
@@ -104,8 +114,13 @@ describe("a missing replay is not a completed validation", () => {
       },
       log: (message) => log.push(message),
     });
-    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0, refused: 1 });
-    expect(submitted).toEqual([]);
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 1, refused: 0 });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({
+      verdicts: [{ confirmed: false }],
+      verification: { status: "failed" },
+      accepted: [],
+    });
     expect(log.join("\n")).toContain("no matching recorded demonstration");
   });
 });

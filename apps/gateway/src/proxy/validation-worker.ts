@@ -553,23 +553,38 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
+    if (
+      request.authorization === null ||
+      request.authorization === undefined ||
+      request.authorization.workspaceId !== this.workspaceId
+    ) {
+      this.log(
+        `workflow validation: refused ask '${request.requestId}': it has no grant for this identity's workspace`,
+      );
+      return undefined;
+    }
     let result: LocalWorkflowValidationResult;
     try {
       result = await this.buildValidator(request)(request.plan);
     } catch (error) {
       this.log(
-        `workflow validation: ask '${request.requestId}' was not replayed (${describe(error)})`,
+        `workflow validation: ask '${request.requestId}' replay failed (${describe(error)})`,
       );
-      return undefined;
+      return this.failedDecision(
+        request,
+        planDigest,
+        "the local replay failed before it could verify the recorded workflow",
+      );
     }
     if (
       result.unavailable !== undefined ||
       (result.verdicts.length === 0 && result.verification === undefined)
     ) {
-      this.log(
-        `workflow validation: ask '${request.requestId}' was not replayed (${result.unavailable ?? "the validator returned no verdicts and no whole-plan verification"})`,
-      );
-      return undefined;
+      const reason =
+        result.unavailable ??
+        "the validator returned no verdicts and no whole-plan verification";
+      this.log(`workflow validation: ask '${request.requestId}' replay failed (${reason})`);
+      return this.failedDecision(request, planDigest, reason);
     }
     const verdicts: WorkflowValidationVerdict[] = result.verdicts.map((verdict) => ({
       candidate: {
@@ -597,6 +612,40 @@ export class WorkflowValidationWorker {
           argument: verdict.candidate.argument,
           path: verdict.candidate.path,
         })),
+      decidedAt: this.now().toISOString(),
+    };
+  }
+
+  private failedDecision(
+    request: WorkflowValidationRequest,
+    planDigest: string,
+    reason: string,
+  ): WorkflowValidationDecision {
+    const candidates = request.plan.candidates ?? [];
+    return {
+      schemaVersion: WORKFLOW_VALIDATION_SCHEMA_VERSION,
+      requestId: request.requestId,
+      attempt: request.attempt,
+      planDigest,
+      evidenceDigest: request.evidenceDigest,
+      environment: this.environmentIdentity,
+      verdicts: candidates.map((candidate) => ({
+        candidate: {
+          stepId: candidate.stepId,
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+        },
+        confirmed: false,
+        reason,
+      })),
+      verification: {
+        status: "failed",
+        reproduced: [],
+        missed: candidates.map((candidate) => ({ stepId: candidate.stepId, detail: reason })),
+        dropped: candidates.map((candidate) => ({ candidate, reason })),
+      },
+      accepted: [],
       decidedAt: this.now().toISOString(),
     };
   }

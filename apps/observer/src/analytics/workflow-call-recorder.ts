@@ -493,11 +493,14 @@ export function readWorkflowResultCarrier(
 export interface WorkflowCallRecorderOptions {
   /** The local store private leaves are written to; defaults to the daemon's store. */
   privateValues?: PrivateValueStore;
+  /** Paired cloud workspace that owns captured private values; local session workspace otherwise. */
+  privateValueOwnerWorkspaceId?: string;
 }
 
 export class WorkflowCallRecorder {
   private readonly privateValues: PrivateValueStore;
-  /** The workspace whose session is being observed; stamped on every private entry. */
+  private readonly privateValueOwnerWorkspaceId: string | undefined;
+  /** The workspace owner stamped on every private entry for the current observation. */
   private observeAccess: PrivateValueOrigin | undefined;
   private privateRepresentation: "literal" | "redacted" = "redacted";
   private redactedArguments: Record<string, unknown> | undefined;
@@ -519,6 +522,7 @@ export class WorkflowCallRecorder {
 
   constructor(options: WorkflowCallRecorderOptions = {}) {
     this.privateValues = options.privateValues ?? FilePrivateValueStore.default();
+    this.privateValueOwnerWorkspaceId = options.privateValueOwnerWorkspaceId;
   }
 
   /** Drops per-session state; the coordinator calls this between sessions. */
@@ -593,12 +597,14 @@ export class WorkflowCallRecorder {
   observe(
     event: NormalizedSessionEvent,
     /**
-     * The workspace the observed session belongs to. Private entries are stamped with it so a
-     * later executor can refuse a workflow that only knows the reference string.
+     * The local workspace the observed session belongs to. Unpaired capture stamps private entries
+     * with it; paired capture uses the recorder's cloud workspace owner instead.
      */
     access?: PrivateValueOrigin,
   ): NormalizedSessionEvent {
-    this.observeAccess = access;
+    this.observeAccess = this.privateValueOwnerWorkspaceId
+      ? { workspaceId: this.privateValueOwnerWorkspaceId }
+      : access;
     this.redactedArguments = event.type === "tool_call" ? event.parameters : undefined;
     const original = localWorkflowEvent(event);
     this.privateRepresentation =

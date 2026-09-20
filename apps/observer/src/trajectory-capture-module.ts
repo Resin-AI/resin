@@ -23,6 +23,7 @@ import {
   TrajectoryCaptureCoordinator,
 } from "./analytics/index.js";
 import { FilePrivateValueStore } from "./analytics/private-value-store.js";
+import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import type {
   DaemonModule,
@@ -104,6 +105,11 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    * Directly injected CloudObservationClient instance.
    */
   observationClient?: CloudObservationClient;
+
+  /**
+   * Paired cloud workspace that owns private workflow values across local project identities.
+   */
+  privateValueOwnerWorkspaceId?: string;
 
   /**
    * Optional custom ObserverCoordinator.
@@ -379,6 +385,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
+        workflowCallRecorder: new WorkflowCallRecorder({
+          privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
+        }),
       });
     }
 
