@@ -305,6 +305,273 @@ describe("TrajectoryCaptureCoordinator", () => {
   });
 
   describe("missing attribution & generic observation upload", () => {
+    it.each(["synthetic", "explicit"] as const)(
+      "uploads new records after %s generic finalization without replaying acknowledged events",
+      async (termination) => {
+        const submitted: NormalizedSessionEvent[] = [];
+        const sendObservationBatch = vi.fn(
+          async (input: { observations: NormalizedSessionEvent[] }) => {
+            submitted.push(...input.observations);
+            return {
+              batchId: "batch_resumed",
+              status: "accepted" as const,
+              acceptedCount: input.observations.length,
+              rejectedCount: 0,
+              errors: [],
+            };
+          },
+        );
+        const coordinator = new TrajectoryCaptureCoordinator({
+          pipeline: new NormalizationPipeline(),
+          observationClient: createMockObservationClient({ sendObservationBatch }),
+          coalesceDwellMs: 0,
+        });
+        const session = createMockHarnessSession("sess_resumed_generic");
+        const firstTurn = [
+          createPromptRecord(session.sessionId, 1),
+          termination === "explicit"
+            ? createLifecycleRecord(session.sessionId, 2)
+            : createCompletionRecord(session.sessionId, 2),
+        ];
+        await coordinator.handleRecords(session, firstTurn, async () => {});
+        await coordinator.handleRecords({ ...session, status: "completed" }, [], async () => {});
+        expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+        const initialCount = termination === "explicit" ? 2 : 3;
+        expect(submitted).toHaveLength(initialCount);
+
+        const firstEventIds = submitted.map((event) => event.eventId);
+        const resumedTurn = [
+          createPromptRecord(session.sessionId, 3, "Retry the operation"),
+          createCompletionRecord(session.sessionId, 4),
+        ];
+        const ack = vi.fn(async () => {
+          expect(submitted).toHaveLength(initialCount + 2);
+        });
+        await coordinator.handleRecords(session, [...firstTurn, ...resumedTurn], ack);
+
+        expect(submitted).toHaveLength(initialCount + 2);
+        expect(submitted.slice(0, initialCount).map((event) => event.eventId)).toEqual(
+          firstEventIds,
+        );
+        expect(new Set(submitted.map((event) => event.eventId)).size).toBe(initialCount + 2);
+        expect(ack).toHaveBeenCalledTimes(1);
+        expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+        expect(coordinator.hasActiveSession(session.sessionId)).toBe(true);
+
+        await coordinator.handleRecords(session, resumedTurn, async () => {});
+        expect(submitted).toHaveLength(initialCount + 2);
+        coordinator.dispose();
+      },
+    );
+
+    it("keeps capture open when an explicit exit and resumed turn arrive in the same batch", async () => {
+      const submitted: NormalizedSessionEvent[] = [];
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline: new NormalizationPipeline(),
+        observationClient: createMockObservationClient({
+          sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+            submitted.push(...input.observations);
+            return {
+              batchId: "batch_same_delivery",
+              acceptedCount: input.observations.length,
+              rejectedCount: 0,
+            };
+          }),
+        }),
+        coalesceDwellMs: 0,
+      });
+      const session = createMockHarnessSession("sess_same_delivery");
+      await coordinator.handleRecords(
+        session,
+        [
+          createPromptRecord(session.sessionId, 1),
+          createLifecycleRecord(session.sessionId, 2),
+          createPromptRecord(session.sessionId, 3),
+          createCompletionRecord(session.sessionId, 4),
+        ],
+        async () => {},
+      );
+      expect(submitted).toHaveLength(4);
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+      expect(coordinator.hasActiveSession(session.sessionId)).toBe(true);
+      coordinator.dispose();
+    });
+
+    it("retains resumed records until cloud acceptance and retries their original identities", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-20T12:00:00.000Z"));
+        const attempts: Array<{ batchId: string; observations: NormalizedSessionEvent[] }> = [];
+        let failUpload = false;
+        const coordinator = new TrajectoryCaptureCoordinator({
+          pipeline: new NormalizationPipeline(),
+          observationClient: createMockObservationClient({
+            sendObservationBatch: vi.fn(
+              async (input: { batchId: string; observations: NormalizedSessionEvent[] }) => {
+                attempts.push(input);
+                if (failUpload) throw new Error("resumed upload unavailable");
+                return {
+                  batchId: input.batchId,
+                  acceptedCount: input.observations.length,
+                  rejectedCount: 0,
+                };
+              },
+            ),
+          }),
+          coalesceDwellMs: 0,
+        });
+        const session = createMockHarnessSession("sess_resumed_retry");
+        await coordinator.handleRecords(
+          session,
+          [createPromptRecord(session.sessionId, 1), createLifecycleRecord(session.sessionId, 2)],
+          async () => {},
+        );
+        const ack = vi.fn(async () => {});
+        failUpload = true;
+        await expect(
+          coordinator.handleRecords(
+            session,
+            [
+              createPromptRecord(session.sessionId, 3),
+              createCompletionRecord(session.sessionId, 4),
+            ],
+            ack,
+          ),
+        ).rejects.toThrow("resumed upload unavailable");
+        expect(ack).not.toHaveBeenCalled();
+        const failedAttempt = attempts[1];
+
+        failUpload = false;
+        vi.setSystemTime(new Date("2026-09-20T12:01:00.000Z"));
+        await coordinator.flush(session.sessionId);
+        expect(ack).toHaveBeenCalledTimes(1);
+        expect(attempts[2]).toEqual(failedAttempt);
+        expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+        coordinator.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not finalize resumed activity merged into an unaccepted terminal batch", async () => {
+      let failUpload = true;
+      const submitted: NormalizedSessionEvent[] = [];
+      const onSessionEvents = vi.fn(async () => {});
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline: new NormalizationPipeline(),
+        observationClient: createMockObservationClient({
+          sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+            if (failUpload) throw new Error("terminal upload unavailable");
+            submitted.push(...input.observations);
+            return {
+              batchId: "batch_pending_end",
+              acceptedCount: input.observations.length,
+              rejectedCount: 0,
+            };
+          }),
+        }),
+        onSessionEvents,
+        coalesceDwellMs: 0,
+      });
+      const session = createMockHarnessSession("sess_pending_end");
+      const terminalAck = vi.fn(async () => {});
+      await expect(
+        coordinator.handleRecords(
+          session,
+          [createPromptRecord(session.sessionId, 1), createLifecycleRecord(session.sessionId, 2)],
+          terminalAck,
+        ),
+      ).rejects.toThrow("terminal upload unavailable");
+      expect(terminalAck).not.toHaveBeenCalled();
+
+      failUpload = false;
+      const resumedAck = vi.fn(async () => {});
+      await coordinator.handleRecords(
+        session,
+        [createPromptRecord(session.sessionId, 3), createCompletionRecord(session.sessionId, 4)],
+        resumedAck,
+      );
+      expect(submitted).toHaveLength(4);
+      expect(terminalAck).toHaveBeenCalledTimes(1);
+      expect(resumedAck).toHaveBeenCalledTimes(1);
+      expect(coordinator.isSessionFinalized(session.sessionId)).toBe(false);
+      expect(onSessionEvents).toHaveBeenLastCalledWith(session, expect.any(Array), {
+        isTerminal: false,
+        isAttributed: false,
+      });
+      coordinator.dispose();
+    });
+
+    it.each(["disabled", "cutoff", "remote"] as const)(
+      "enforces %s privacy gating before processing resumed records",
+      async (gate) => {
+        vi.useFakeTimers();
+        const now = Date.parse("2026-09-20T12:00:00.000Z");
+        vi.setSystemTime(now);
+        let enabled = true;
+        let authorized = true;
+        const submitted: NormalizedSessionEvent[] = [];
+        const coordinator = new TrajectoryCaptureCoordinator({
+          pipeline: new NormalizationPipeline(),
+          observationClient: createMockObservationClient({
+            sendObservationBatch: vi.fn(
+              async (input: { observations: NormalizedSessionEvent[] }) => {
+                submitted.push(...input.observations);
+                return {
+                  batchId: "batch_privacy_resume",
+                  acceptedCount: input.observations.length,
+                  rejectedCount: 0,
+                };
+              },
+            ),
+          }),
+          isTelemetryEnabled: () => enabled,
+          authorizeTelemetryEmission: async () => authorized,
+          coalesceDwellMs: 0,
+        });
+        try {
+          const session = createMockHarnessSession(`sess_privacy_resume_${gate}`);
+          await coordinator.handleRecords(
+            session,
+            [createPromptRecord(session.sessionId, 1), createLifecycleRecord(session.sessionId, 2)],
+            async () => {},
+          );
+          expect(submitted).toHaveLength(2);
+          vi.setSystemTime(now + 1000);
+          if (gate === "disabled") enabled = false;
+          if (gate === "remote") authorized = false;
+          if (gate === "cutoff") coordinator.setPrivacyCutoff(now + 1000);
+          const deniedAck = vi.fn(async () => {});
+          await coordinator.handleRecords(
+            session,
+            [
+              createPromptRecord(session.sessionId, 3),
+              createCompletionRecord(session.sessionId, 4),
+            ],
+            deniedAck,
+          );
+          expect(deniedAck).toHaveBeenCalledTimes(1);
+          expect(submitted).toHaveLength(2);
+
+          enabled = true;
+          authorized = true;
+          vi.setSystemTime(now + 2000);
+          await coordinator.handleRecords(
+            session,
+            [
+              createPromptRecord(session.sessionId, 5),
+              createCompletionRecord(session.sessionId, 6),
+            ],
+            async () => {},
+          );
+          expect(submitted.map((event) => event.causalRef.causalSequence)).toEqual([1, 2, 5, 6]);
+        } finally {
+          coordinator.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("normalizes and submits observation batch when resolver returns null (generic session)", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: unknown[] = [];
@@ -759,7 +1026,9 @@ describe("TrajectoryCaptureCoordinator", () => {
         // Wire order follows timestamps, while the local sink and causal references
         // retain ingestion order even when session metadata predates its records.
         const causalObservations = [...submittedObservations].sort(
-          (a, b) => a.causalRef.causalSequence - b.causalRef.causalSequence,
+          (a, b) =>
+            a.causalRef.causalSequence - b.causalRef.causalSequence ||
+            (a.causalRef.stepIndex ?? 0) - (b.causalRef.stepIndex ?? 0),
         );
         expect(localObservations.map((event) => event.eventId)).toEqual(
           causalObservations.map((event) => event.eventId),
@@ -777,7 +1046,8 @@ describe("TrajectoryCaptureCoordinator", () => {
           expect(syntheticTerminalEvent.lifecycleType).toBe("end");
           expect(syntheticTerminalEvent.exitReason).toBe("completed");
         }
-        expect(syntheticTerminalEvent.causalRef.causalSequence).toBe(3);
+        expect(syntheticTerminalEvent.causalRef.causalSequence).toBe(2);
+        expect(syntheticTerminalEvent.causalRef.stepIndex).toBe(1);
         expect(syntheticTerminalEvent.causalRef.parentId).toBe(causalObservations[1].eventId);
         expect(syntheticTerminalEvent.timestamp).toBe(terminalTimestamp);
         expect(syntheticTerminalEvent.redaction.isRedacted).toBe(true);
@@ -788,7 +1058,7 @@ describe("TrajectoryCaptureCoordinator", () => {
 
         // Idempotency / repeat guard: subsequent handleRecords call does not re-emit
         const ack2 = vi.fn(async () => {});
-        await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 3)], ack2);
+        await coordinator.handleRecords(session, [promptRec, compRec], ack2);
         expect(ack2).toHaveBeenCalledTimes(1);
         expect(mockObservationClient.sendObservationBatch).toHaveBeenCalledTimes(2);
       },
@@ -969,8 +1239,9 @@ describe("TrajectoryCaptureCoordinator", () => {
         expect(syntheticEvent.lifecycleType).toBe("end");
         expect(syntheticEvent.exitReason).toBe("completed");
       }
-      // Sequences accurately after batch 1's tail
-      expect(syntheticEvent.causalRef.causalSequence).toBe(3);
+      // Completion follows the last step without reserving the next real source row.
+      expect(syntheticEvent.causalRef.causalSequence).toBe(2);
+      expect(syntheticEvent.causalRef.stepIndex).toBe(1);
       expect(syntheticEvent.causalRef.parentId).toBe(lastEventIdBatch1);
       expect(coordinator.isSessionFinalized(completedSession.sessionId)).toBe(true);
     });

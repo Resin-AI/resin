@@ -9593,7 +9593,7 @@ var init_decoder4 = __esm({
 // adapters/omp/dist/discovery.js
 import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify3 } from "node:util";
-var execFileAsync3, ACTIVE_ONLY_TERMINAL_GRACE_MS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES;
+var execFileAsync3, ACTIVE_ONLY_TERMINAL_GRACE_MS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema;
 var init_discovery3 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
@@ -9635,6 +9635,10 @@ var init_discovery3 = __esm({
       }).passthrough()
     ]);
     MAX_CHUNK_BYTES = 64 * 1024;
+    OmpActivityMessageSchema = external_exports.object({
+      role: external_exports.enum(["user", "assistant", "system", "toolResult", "tool_result", "tool"]),
+      content: external_exports.union([external_exports.string(), external_exports.array(external_exports.record(external_exports.unknown()))])
+    });
   }
 });
 

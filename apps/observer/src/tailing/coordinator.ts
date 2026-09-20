@@ -56,8 +56,8 @@ export interface ObserverCoordinatorOptions {
   backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
   defaultMaxInFlightBatches?: number;
   captureUserSessionsOnly?: boolean;
-  /** Opt into terminal catchup during this run; historical sessions are never attached. */
-  captureTerminalSessions?: (session: HarnessSession, startedAt: number) => boolean;
+  /** Opt into idle/terminal catchup during this run; historical sessions are never attached. */
+  captureInactiveSessions?: (session: HarnessSession, startedAt: number) => boolean;
   terminalNotificationTimeoutMs?: number;
   logger?: CoordinatorLogger;
 }
@@ -85,7 +85,7 @@ export class ObserverCoordinator extends EventEmitter {
   ) => BackfillPolicy | undefined;
   private readonly defaultMaxInFlightBatches?: number;
   private readonly captureUserSessionsOnly: boolean;
-  private readonly captureTerminalSessions?: (
+  private readonly captureInactiveSessions?: (
     session: HarnessSession,
     startedAt: number,
   ) => boolean;
@@ -107,7 +107,7 @@ export class ObserverCoordinator extends EventEmitter {
     this.backfillPolicyForSession = options.backfillPolicyForSession;
     this.defaultMaxInFlightBatches = options.defaultMaxInFlightBatches;
     this.captureUserSessionsOnly = options.captureUserSessionsOnly ?? true;
-    this.captureTerminalSessions = options.captureTerminalSessions;
+    this.captureInactiveSessions = options.captureInactiveSessions;
     this.terminalNotificationTimeoutMs = options.terminalNotificationTimeoutMs ?? 5000;
     this.logger = options.logger;
     this.tailer =
@@ -287,18 +287,18 @@ export class ObserverCoordinator extends EventEmitter {
                   session.status === "failed" ||
                   session.status === "interrupted";
                 const activityAt = Date.parse(session.updatedAt);
-                const catchUpTerminal =
-                  isTerminal &&
-                  !previousSession &&
+                const catchUpInactive =
+                  (session.status === "idle" ||
+                    (isTerminal && (!previousSession || previousSession.status === "idle"))) &&
                   this.startedAt !== undefined &&
                   activityAt >= this.startedAt &&
                   activityAt <= Date.now() &&
-                  this.captureTerminalSessions?.(session, this.startedAt) === true;
-                if (isTerminal && !catchUpTerminal && !previousSession) {
+                  this.captureInactiveSessions?.(session, this.startedAt) === true;
+                if (isTerminal && !catchUpInactive && !previousSession) {
                   continue;
                 }
 
-                if (session.status === "active" || catchUpTerminal) {
+                if (session.status === "active" || catchUpInactive) {
                   if (this.captureUserSessionsOnly && session.metadata?.sessionKind === "agent") {
                     if (!this.loggedIgnoredAgentSessions.has(session.sessionId)) {
                       this.loggedIgnoredAgentSessions.add(session.sessionId);
@@ -345,7 +345,11 @@ export class ObserverCoordinator extends EventEmitter {
                 if (isTerminal) {
                   const activeSessions = this.tailer.getActiveSessions();
                   if (activeSessions.includes(session.sessionId)) {
-                    if (previousSession?.status === "active" || !previousSession) {
+                    if (
+                      previousSession?.status === "active" ||
+                      previousSession?.status === "idle" ||
+                      !previousSession
+                    ) {
                       let notification = this.terminalNotifications.get(session.sessionId);
                       if (!notification) {
                         notification = this.tailer
