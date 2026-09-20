@@ -16,7 +16,7 @@ import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
-import { projectEventToMetadataOnly } from "./metadata-projection.js";
+import { MetadataEventProjector } from "./metadata-event-projector.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
@@ -167,15 +167,22 @@ export interface TrajectoryCaptureCoordinatorOptions {
   workflowCallRecorder?: WorkflowCallRecorder;
 }
 
+interface GenericSessionTail {
+  eventId: string;
+  causalSequence: number;
+  stepIndex: number;
+}
+
 interface GenericCoalescingBuffer {
   sessionId: string;
   session: HarnessSession;
   validEvents: NormalizedSessionEvent[];
+  projectedEvents: NormalizedSessionEvent[];
   rawRecords: RawHarnessRecord[];
   acks: Array<() => Promise<void>>;
   timer: NodeJS.Timeout | null;
   telemetryRecordTimestampMs: number[];
-  latestTail?: { eventId: string; causalSequence: number };
+  latestTail?: GenericSessionTail;
   isTerminal: boolean;
 }
 
@@ -198,13 +205,10 @@ export class TrajectoryCaptureCoordinator {
 
   private readonly activeSessions = new Map<string, TrajectoryEmitter>();
   private readonly activeGenericSessions = new Set<string>();
-  private readonly finalizedSessions = new Set<string>();
+  private readonly finalizedSessions = new Map<string, "generic" | "attributed">();
   private readonly genericSessions = new Set<string>();
   private readonly sessionLocks = new Map<string, Promise<void>>();
-  private readonly genericSessionTails = new Map<
-    string,
-    { eventId: string; causalSequence: number }
-  >();
+  private readonly genericSessionTails = new Map<string, GenericSessionTail>();
   private readonly coalesceDwellMs: number;
   private readonly maxBatchSize: number;
   private readonly telemetry?: TelemetryAggregator;
@@ -212,6 +216,7 @@ export class TrajectoryCaptureCoordinator {
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
   private workflowCallRecorder: WorkflowCallRecorder;
+  private readonly metadataEventProjector = new MetadataEventProjector();
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -370,6 +375,7 @@ export class TrajectoryCaptureCoordinator {
     this.clearComputationEvidence();
     this.clearToolLinkEvidence();
     this.clearWorkflowCallEvidence();
+    this.clearCommandSequenceEvidence();
     for (const buf of this.genericCoalescingBuffers.values()) {
       if (buf.timer) clearTimeout(buf.timer);
       this.acknowledgeBufferedAcks(buf.acks);
@@ -398,6 +404,7 @@ export class TrajectoryCaptureCoordinator {
       this.clearComputationEvidence();
       this.clearToolLinkEvidence();
       this.clearWorkflowCallEvidence();
+      this.clearCommandSequenceEvidence();
       for (const buf of this.genericCoalescingBuffers.values()) {
         if (buf.timer) clearTimeout(buf.timer);
         this.acknowledgeBufferedAcks(buf.acks);
@@ -414,6 +421,7 @@ export class TrajectoryCaptureCoordinator {
     sessionId: string,
     ack: () => Promise<void>,
   ): Promise<void> {
+    this.metadataEventProjector.clear(sessionId);
     const buffer = this.genericCoalescingBuffers.get(sessionId);
     if (buffer) {
       if (buffer.timer) clearTimeout(buffer.timer);
@@ -478,8 +486,10 @@ export class TrajectoryCaptureCoordinator {
         return;
       }
 
-      // 1. If this session was already finalized and submitted, acknowledge repeated records without re-submitting
-      if (this.finalizedSessions.has(sessionId)) {
+      // Attributed observations are immutable. Generic conversations, however, can resume;
+      // let their nonempty batches reach event-level deduplication rather than dropping them.
+      const finalizedKind = this.finalizedSessions.get(sessionId);
+      if (finalizedKind === "attributed" || (finalizedKind && telemetryRecords.length === 0)) {
         await ack();
         return;
       }
@@ -489,7 +499,7 @@ export class TrajectoryCaptureCoordinator {
 
       if (this.activeSessions.has(sessionId)) {
         emitter = this.activeSessions.get(sessionId)!;
-      } else if (!this.activeGenericSessions.has(sessionId)) {
+      } else if (!this.activeGenericSessions.has(sessionId) && finalizedKind !== "generic") {
         // Resolve attribution once per session if not yet classified
         let rawContext: TrajectoryAttributionContextInput | null | undefined;
         try {
@@ -561,6 +571,10 @@ export class TrajectoryCaptureCoordinator {
             });
             throw err;
           }
+          if (!this.isTelemetryAllowed(telemetryGeneration)) {
+            await this.acknowledgeWithoutTelemetry(sessionId, ack);
+            return;
+          }
 
           for (const res of pipelineResults) {
             if (res.status === "dead_letter" || (res.status === "success" && res.isDuplicate)) {
@@ -578,7 +592,7 @@ export class TrajectoryCaptureCoordinator {
                   ),
                 );
                 emitter.ingest(observed);
-                ingestedEvents.push(observed);
+                ingestedEvents.push(this.metadataEventProjector.project(observed));
               } catch (err) {
                 if (err instanceof TrajectoryAlreadyFinalizedError) {
                   break;
@@ -589,8 +603,9 @@ export class TrajectoryCaptureCoordinator {
           }
         }
 
-        // Check if session has reached a terminal state
-        if (!emitter.isFinalized()) {
+        // A discovered terminal snapshot may still have unread source batches.
+        // Infer completion from status only on the tailer's drained notification.
+        if (records.length === 0 && !emitter.isFinalized()) {
           if (session.status === "completed") {
             emitter.finalize({ status: "success" });
           } else if (session.status === "failed") {
@@ -600,6 +615,7 @@ export class TrajectoryCaptureCoordinator {
           }
         }
 
+        if (emitter.isFinalized()) this.metadataEventProjector.endSession(sessionId);
         // Local consumers observe the same normalized events regardless of cloud submission outcome.
         await this.notifySessionEvents(session, ingestedEvents, emitter.isFinalized(), true);
 
@@ -659,7 +675,7 @@ export class TrajectoryCaptureCoordinator {
               }
 
               this.trajectoryResourceForbiddenRetries.delete(sessionId);
-              this.finalizedSessions.add(sessionId);
+              this.finalizedSessions.set(sessionId, "attributed");
               this.activeSessions.delete(sessionId);
               await ack();
               return;
@@ -696,7 +712,7 @@ export class TrajectoryCaptureCoordinator {
                 );
               }
 
-              this.finalizedSessions.add(sessionId);
+              this.finalizedSessions.set(sessionId, "attributed");
               this.activeSessions.delete(sessionId);
               await ack();
               return;
@@ -708,7 +724,7 @@ export class TrajectoryCaptureCoordinator {
             );
             throw err;
           }
-          this.finalizedSessions.add(sessionId);
+          this.finalizedSessions.set(sessionId, "attributed");
           this.activeSessions.delete(sessionId);
         }
 
@@ -721,10 +737,10 @@ export class TrajectoryCaptureCoordinator {
       } else {
         // GENERIC SESSION PATH
         const validEvents: NormalizedSessionEvent[] = [];
-        let hasExplicitTerminal = false;
         let latestTail = this.genericSessionTails.get(sessionId);
 
         const existingBuffer = this.genericCoalescingBuffers.get(sessionId);
+        let hasExplicitTerminal = existingBuffer?.isTerminal ?? false;
         if (existingBuffer?.latestTail) {
           if (
             !latestTail ||
@@ -760,15 +776,19 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.status === "success" && res.event) {
               const ev = res.event;
-              if (
-                ev.type === "session_lifecycle" &&
-                (ev.lifecycleType === "end" || ev.lifecycleType === "crash")
-              ) {
-                hasExplicitTerminal = true;
-              }
               const seq = ev.causalRef?.causalSequence ?? 0;
-              if (!latestTail || seq >= latestTail.causalSequence) {
-                latestTail = { eventId: ev.eventId, causalSequence: seq };
+              const stepIndex = ev.causalRef?.stepIndex ?? 0;
+              if (
+                !latestTail ||
+                seq > latestTail.causalSequence ||
+                (seq === latestTail.causalSequence && stepIndex >= latestTail.stepIndex)
+              ) {
+                latestTail = { eventId: ev.eventId, causalSequence: seq, stepIndex };
+                // A later source event can resume a conversation after an explicit end,
+                // including when the old end is redelivered in the same batch.
+                hasExplicitTerminal =
+                  ev.type === "session_lifecycle" &&
+                  (ev.lifecycleType === "end" || ev.lifecycleType === "crash");
               }
               if (!res.isDuplicate) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
@@ -791,29 +811,29 @@ export class TrajectoryCaptureCoordinator {
           await this.acknowledgeWithoutTelemetry(sessionId, ack);
           return;
         }
+        const projectedEvents = validEvents.map((event) =>
+          this.metadataEventProjector.project(event),
+        );
 
         const isTerminalStatus =
-          session.status === "completed" ||
-          session.status === "failed" ||
-          session.status === "interrupted";
+          records.length === 0 &&
+          (session.status === "completed" ||
+            session.status === "failed" ||
+            session.status === "interrupted");
 
         if (isTerminalStatus && !hasExplicitTerminal && latestTail) {
           const syntheticEvent = this.createSyntheticTerminalEvent(session, latestTail);
           validEvents.push(syntheticEvent);
+          projectedEvents.push(this.metadataEventProjector.project(syntheticEvent));
           latestTail = {
             eventId: syntheticEvent.eventId,
             causalSequence: syntheticEvent.causalRef.causalSequence,
+            stepIndex: syntheticEvent.causalRef.stepIndex ?? 0,
           };
         }
 
-        const isTerminal =
-          isTerminalStatus ||
-          hasExplicitTerminal ||
-          validEvents.some(
-            (e) =>
-              e.type === "session_lifecycle" &&
-              (e.lifecycleType === "end" || e.lifecycleType === "crash"),
-          );
+        const isTerminal = isTerminalStatus || hasExplicitTerminal;
+        if (isTerminal) this.metadataEventProjector.endSession(sessionId);
 
         if (validEvents.length === 0 && !existingBuffer) {
           if (!this.isTelemetryAllowed(telemetryGeneration)) {
@@ -821,12 +841,18 @@ export class TrajectoryCaptureCoordinator {
             return;
           }
           if (isTerminal) {
-            this.finalizedSessions.add(sessionId);
+            this.finalizedSessions.set(sessionId, "generic");
             this.activeGenericSessions.delete(sessionId);
             this.genericSessionTails.delete(sessionId);
           }
           await ack();
           return;
+        }
+
+        if (validEvents.length > 0) {
+          this.finalizedSessions.delete(sessionId);
+          this.activeGenericSessions.add(sessionId);
+          this.genericSessions.add(sessionId);
         }
 
         let buffer = existingBuffer;
@@ -835,6 +861,7 @@ export class TrajectoryCaptureCoordinator {
             sessionId,
             session,
             validEvents: [],
+            projectedEvents: [],
             rawRecords: [],
             acks: [],
             timer: null,
@@ -847,14 +874,15 @@ export class TrajectoryCaptureCoordinator {
 
         buffer.session = session;
         buffer.validEvents.push(...validEvents);
+        buffer.projectedEvents.push(...projectedEvents);
         buffer.rawRecords.push(...records);
         buffer.acks.push(ack);
         buffer.telemetryRecordTimestampMs.push(...telemetryRecordTimestampMs);
         if (latestTail) {
           buffer.latestTail = latestTail;
         }
-        if (isTerminal) {
-          buffer.isTerminal = true;
+        if (isTerminal || validEvents.length > 0) {
+          buffer.isTerminal = isTerminal;
         }
 
         const isTurn = this.isTurnBoundary(session, records, validEvents, hasExplicitTerminal);
@@ -902,8 +930,11 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
     try {
-      const projected = events.map((event) => projectEventToMetadataOnly(event));
-      await this.onSessionEvents(session, projected, { isTerminal, isAttributed });
+      await this.onSessionEvents(
+        session,
+        events.map((event) => structuredClone(event)),
+        { isTerminal, isAttributed },
+      );
     } catch (err) {
       // Local consumers must never break capture or cloud submission.
       this.logger?.warn(`Local session event sink failed for session ${session.sessionId}`, {
@@ -1005,6 +1036,7 @@ export class TrajectoryCaptureCoordinator {
 
     const telemetryGeneration = this.telemetryGeneration;
     if (!this.isTelemetryAllowed(telemetryGeneration)) {
+      this.metadataEventProjector.clear(sessionId);
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
@@ -1015,6 +1047,7 @@ export class TrajectoryCaptureCoordinator {
     }
 
     if (!(await this.isTelemetryAuthorized(telemetryGeneration, telemetryRecordTimestampMs))) {
+      this.metadataEventProjector.clear(sessionId);
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);
       this.genericSessions.delete(sessionId);
@@ -1024,15 +1057,28 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
 
-    const projectedEvents = validEvents.map((ev) => projectEventToMetadataOnly(ev));
+    const projectedEvents = [...buffer.projectedEvents];
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by
     // more than 1000ms (CURSOR_ORDERING_ERROR). Transcript records can arrive out of
     // order, and records missing a timestamp fall back to a wall-clock stamp, so sort
     // the wire payload by event time. Local consumers keep ingestion order via
-    // validEvents; only the uploaded batch is reordered.
+    // buffer.projectedEvents; only the uploaded batch is reordered.
     projectedEvents.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
     // Local consumers observe the same normalized events regardless of cloud submission outcome.
-    await this.notifySessionEvents(buffer.session, validEvents, buffer.isTerminal, false);
+    await this.notifySessionEvents(
+      buffer.session,
+      buffer.projectedEvents,
+      buffer.isTerminal,
+      false,
+    );
+    // Local consumers may yield while consent or the cutoff changes. A projected completion
+    // retained by this in-flight flush must not cross that privacy boundary, even after re-enable.
+    if (!this.isTelemetryAllowed(telemetryGeneration)) {
+      for (const ack of acks) {
+        await this.acknowledgeWithoutTelemetry(sessionId, ack);
+      }
+      return;
+    }
     const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
     const batchDigest = createHash("sha256")
       .update(projectedEvents.map((event) => event.eventId).join("\0"))
@@ -1106,7 +1152,7 @@ export class TrajectoryCaptureCoordinator {
         }
 
         if (buffer.isTerminal) {
-          this.finalizedSessions.add(sessionId);
+          this.finalizedSessions.set(sessionId, "generic");
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
         }
@@ -1157,7 +1203,7 @@ export class TrajectoryCaptureCoordinator {
         }
 
         if (buffer.isTerminal) {
-          this.finalizedSessions.add(sessionId);
+          this.finalizedSessions.set(sessionId, "generic");
           this.activeGenericSessions.delete(sessionId);
           this.genericSessionTails.delete(sessionId);
         }
@@ -1185,7 +1231,7 @@ export class TrajectoryCaptureCoordinator {
     }
 
     if (buffer.isTerminal) {
-      this.finalizedSessions.add(sessionId);
+      this.finalizedSessions.set(sessionId, "generic");
       this.activeGenericSessions.delete(sessionId);
       this.genericSessionTails.delete(sessionId);
     }
@@ -1276,6 +1322,11 @@ export class TrajectoryCaptureCoordinator {
     this.toolLinkEvidenceRecorder.clear();
   }
 
+  /** Clears bounded command pairing and retry metadata without detaching the local sink. */
+  public clearCommandSequenceEvidence(): void {
+    this.metadataEventProjector.clear();
+  }
+
   /**
    * Releases bounded observed-source state and the local sink. Terminal disposal keeps the
    * historical teardown behavior: retained source is cleared and session-event subscribers are
@@ -1285,6 +1336,7 @@ export class TrajectoryCaptureCoordinator {
     this.clearComputationEvidence();
     this.clearToolLinkEvidence();
     this.clearWorkflowCallEvidence();
+    this.clearCommandSequenceEvidence();
     this.onSessionEvents = undefined;
   }
 
@@ -1345,9 +1397,11 @@ export class TrajectoryCaptureCoordinator {
   }
   private createSyntheticTerminalEvent(
     session: HarnessSession,
-    tail: { eventId: string; causalSequence: number },
+    tail: GenericSessionTail,
   ): NormalizedSessionEvent {
-    const causalSequence = tail.causalSequence + 1;
+    // Completion is derived from the last observed record, not a new source record.
+    // Reserving the next sequence would collide with a resumed conversation's first row.
+    const causalSequence = tail.causalSequence;
     const parentId = tail.eventId;
 
     const lifecycleType: "end" | "crash" = session.status === "failed" ? "crash" : "end";
@@ -1370,6 +1424,7 @@ export class TrajectoryCaptureCoordinator {
       causalRef: {
         parentId,
         causalSequence,
+        stepIndex: tail.stepIndex + 1,
       },
       redaction: {
         isRedacted: true,

@@ -625,77 +625,87 @@ describe("ObserverCoordinator backfillPolicyForSession Contract", () => {
 });
 
 describe("ObserverCoordinator Terminal State Delivery on Transition", () => {
-  it("delivers zero-record callback with updated terminal session on completed transition before detach", async () => {
-    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
-    const adapter = new FakeHarnessAdapter({ id: "term-adapter-1" });
-    coordinator.registerAdapter(adapter);
+  it.each(["active", "idle"] as const)(
+    "drains an attached %s session before terminal detach",
+    async (previousStatus) => {
+      const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+      const adapter = new FakeHarnessAdapter({ id: "term-adapter-1" });
+      coordinator.registerAdapter(adapter);
 
-    const ws: HarnessWorkspace = {
-      workspaceId: "ws-term-1",
-      harnessId: "term-adapter-1",
-      rootPath: "/tmp/ws-term-1",
-      name: "Terminal Workspace 1",
-    };
-    adapter.addWorkspace(ws);
+      const ws: HarnessWorkspace = {
+        workspaceId: "ws-term-1",
+        harnessId: "term-adapter-1",
+        rootPath: "/tmp/ws-term-1",
+        name: "Terminal Workspace 1",
+      };
+      adapter.addWorkspace(ws);
 
-    const sess: HarnessSession = {
-      sessionId: "session-term-completed",
-      workspaceId: ws.workspaceId,
-      harnessId: "term-adapter-1",
-      transcriptPath: "/tmp/fake-term-1.jsonl",
-      status: "active",
-      startedAt: new Date().toISOString(),
-    };
-    adapter.addSession(sess);
+      const sess: HarnessSession = {
+        sessionId: "session-term-completed",
+        workspaceId: ws.workspaceId,
+        harnessId: "term-adapter-1",
+        transcriptPath: "/tmp/fake-term-1.jsonl",
+        status: "active",
+        startedAt: new Date().toISOString(),
+      };
+      adapter.addSession(sess);
 
-    const tailer = coordinator.getTailer();
-    const callbacks: Array<{
-      status: string;
-      recordCount: number;
-      activeDuringCallback: boolean;
-    }> = [];
+      const tailer = coordinator.getTailer();
+      const callbacks: Array<{
+        status: string;
+        recordCount: number;
+        activeDuringCallback: boolean;
+      }> = [];
 
-    coordinator.onRecords(async (session, records, ack) => {
-      callbacks.push({
-        status: session.status,
-        recordCount: records.length,
-        activeDuringCallback: tailer.getActiveSessions().includes(session.sessionId),
+      coordinator.onRecords(async (session, records, ack) => {
+        callbacks.push({
+          status: session.status,
+          recordCount: records.length,
+          activeDuringCallback: tailer.getActiveSessions().includes(session.sessionId),
+        });
+        await ack();
       });
-      await ack();
-    });
 
-    // Poll 1: session is active, attached to tailer, no terminal callback
-    const summary1 = await coordinator.pollOnce();
-    expect(summary1.sessionsAttached).toBe(1);
-    expect(tailer.getActiveSessions()).toContain(sess.sessionId);
-    expect(callbacks).toHaveLength(0);
+      // Poll 1: session is active, attached to tailer, no terminal callback
+      const summary1 = await coordinator.pollOnce();
+      expect(summary1.sessionsAttached).toBe(1);
+      expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+      expect(callbacks).toHaveLength(0);
 
-    // Transition session to completed
-    const completedSess: HarnessSession = {
-      ...sess,
-      status: "completed",
-    };
-    adapter.addSession(completedSess);
+      if (previousStatus === "idle") {
+        adapter.addSession({ ...sess, status: "idle" });
+        expect((await coordinator.pollOnce()).sessionsDetached).toBe(0);
+        expect(tailer.getActiveSessions()).toContain(sess.sessionId);
+        expect(callbacks).toHaveLength(0);
+      }
 
-    // Poll 2: transition from active -> completed triggers zero-record callback before detach
-    const summary2 = await coordinator.pollOnce();
-    expect(summary2.sessionsDetached).toBe(1);
-    expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
+      // Transition session to completed
+      const completedSess: HarnessSession = {
+        ...sess,
+        status: "completed",
+      };
+      adapter.addSession(completedSess);
 
-    expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]).toEqual({
-      status: "completed",
-      recordCount: 0,
-      activeDuringCallback: true,
-    });
+      // Poll 2: transition from active -> completed triggers zero-record callback before detach
+      const summary2 = await coordinator.pollOnce();
+      expect(summary2.sessionsDetached).toBe(1);
+      expect(tailer.getActiveSessions()).not.toContain(sess.sessionId);
 
-    // Poll 3: session remains completed in adapter, no redundant callback or detachment
-    const summary3 = await coordinator.pollOnce();
-    expect(summary3.sessionsDetached).toBe(0);
-    expect(callbacks).toHaveLength(1);
+      expect(callbacks).toHaveLength(1);
+      expect(callbacks[0]).toEqual({
+        status: "completed",
+        recordCount: 0,
+        activeDuringCallback: true,
+      });
 
-    await coordinator.stop();
-  });
+      // Poll 3: session remains completed in adapter, no redundant callback or detachment
+      const summary3 = await coordinator.pollOnce();
+      expect(summary3.sessionsDetached).toBe(0);
+      expect(callbacks).toHaveLength(1);
+
+      await coordinator.stop();
+    },
+  );
 
   it("delivers zero-record callback with updated terminal session on failed and interrupted transitions before detach", async () => {
     const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
@@ -770,6 +780,166 @@ describe("ObserverCoordinator Terminal State Delivery on Transition", () => {
 
     await coordinator.stop();
   });
+
+  it("captures sessions completed between scans once without importing sessions completed before start", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-19T12:00:00.000Z"));
+    const coordinator = new ObserverCoordinator({
+      captureInactiveSessions: (session: HarnessSession) => session.harnessId === "omp",
+    });
+    const adapter = new FakeHarnessAdapter({ id: "omp" });
+    coordinator.registerAdapter(adapter);
+    const workspace: HarnessWorkspace = {
+      workspaceId: "short-session-workspace",
+      harnessId: "omp",
+      rootPath: "/tmp/short-session-workspace",
+      name: "Short sessions",
+    };
+    adapter.addWorkspace(workspace);
+    const historical: HarnessSession = {
+      sessionId: "completed-before-capture",
+      workspaceId: workspace.workspaceId,
+      harnessId: "omp",
+      transcriptPath: "/tmp/completed-before-capture.jsonl",
+      status: "completed",
+      createdAt: "2026-09-19T11:00:00.000Z",
+      updatedAt: "2026-09-19T11:59:59.999Z",
+      metadata: { sessionKind: "user" },
+    };
+    adapter.addSession(historical);
+    const historicalSource = adapter.getOrCreateEventSource(historical.sessionId);
+    historicalSource.appendRecord({ text: "Historical content must not be captured" });
+    const callbacks: Array<{ sessionId: string; status: string; sequences: number[] }> = [];
+    coordinator.onRecords(async (session, records, ack) => {
+      callbacks.push({
+        sessionId: session.sessionId,
+        status: session.status,
+        sequences: records.map((record) => record.sequenceNumber),
+      });
+      await ack();
+    });
+
+    try {
+      await coordinator.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      const shortSession: HarnessSession = {
+        ...historical,
+        sessionId: "completed-between-scans",
+        transcriptPath: "/tmp/completed-between-scans.jsonl",
+        updatedAt: new Date().toISOString(),
+      };
+      adapter.addSession(shortSession);
+      const source = adapter.getOrCreateEventSource(shortSession.sessionId);
+      // More than one tailer batch ensures completion cannot discard buffered records.
+      for (let index = 0; index < 125; index++) {
+        source.appendRecord({ text: `Record ${index}` }, "transcript_line", "omp");
+      }
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(callbacks.flatMap((callback) => callback.sequences)).toEqual(
+        Array.from({ length: 125 }, (_, index) => index),
+      );
+      expect(callbacks.every((callback) => callback.sessionId === shortSession.sessionId)).toBe(
+        true,
+      );
+      expect(callbacks.every((callback) => callback.status === "completed")).toBe(true);
+      expect(callbacks.at(-1)).toEqual({
+        sessionId: shortSession.sessionId,
+        status: "completed",
+        sequences: [],
+      });
+      expect(callbacks.filter((callback) => callback.sequences.length === 0)).toHaveLength(1);
+      expect(source.isClosed()).toBe(true);
+      expect(historicalSource.getCursor()).toBeNull();
+      expect(coordinator.getTailer().getActiveSessions()).toEqual([]);
+      expect(
+        await coordinator.getTailer().getCursorManager().getCursor(shortSession.sessionId),
+      ).toMatchObject({ sequence: 124 });
+      const callbacksAfterDrain = callbacks.length;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(callbacks).toHaveLength(callbacksAfterDrain);
+      expect(coordinator.getDiagnostics().lastPollSummary).toMatchObject({
+        sessionsAttached: 0,
+        sessionsDetached: 0,
+        errors: [],
+      });
+    } finally {
+      await coordinator.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["completed", "idle"] as const)(
+    "coalesces %s session terminal drain retries without replaying completion",
+    async (initialStatus) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-19T12:00:00.000Z"));
+      const coordinator = new ObserverCoordinator({
+        captureInactiveSessions: () => true,
+        terminalNotificationTimeoutMs: 100,
+      });
+      const adapter = new FakeHarnessAdapter({ id: "omp" });
+      const workspace = {
+        workspaceId: "ws-slow-terminal",
+        harnessId: "omp",
+        rootPath: "/tmp/slow-terminal",
+      };
+      adapter.addWorkspace(workspace);
+      coordinator.registerAdapter(adapter);
+      const gate = Promise.withResolvers<void>();
+      const received: number[] = [];
+      let completions = 0;
+      coordinator.onRecords(async (_session, records, ack) => {
+        if (records.length > 0) {
+          received.push(...records.map((record) => record.sequenceNumber));
+          await gate.promise;
+        } else {
+          completions++;
+        }
+        await ack();
+      });
+      try {
+        await coordinator.start();
+        const session: HarnessSession = {
+          sessionId: "slow-terminal",
+          workspaceId: workspace.workspaceId,
+          harnessId: "omp",
+          status: initialStatus === "idle" ? "active" : "completed",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          metadata: {},
+        };
+        adapter.addSession(session);
+        const source = adapter.getOrCreateEventSource(session.sessionId);
+        // Pull-only delivery keeps the unread terminal backlog in the source.
+        source.onRecords = () => () => {};
+        if (initialStatus === "idle") {
+          await coordinator.pollOnce();
+          adapter.addSession({ ...session, status: "idle" });
+          await coordinator.pollOnce();
+          adapter.addSession({ ...session, status: "completed" });
+        }
+        source.appendRecord({ text: "Must be acknowledged before completion" });
+        const firstPoll = coordinator.pollOnce();
+        await vi.advanceTimersByTimeAsync(100);
+        expect((await firstPoll).errors).toHaveLength(1);
+        expect(completions).toBe(0);
+        expect(source.isClosed()).toBe(false);
+        const retryPoll = coordinator.pollOnce();
+        await vi.advanceTimersByTimeAsync(0);
+        gate.resolve();
+        expect((await retryPoll).errors).toEqual([]);
+        expect(received).toEqual([0]);
+        expect(completions).toBe(1);
+        expect(source.isClosed()).toBe(true);
+        await coordinator.pollOnce();
+        expect(completions).toBe(1);
+      } finally {
+        gate.resolve();
+        await coordinator.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("suppresses terminal callback for historical terminal sessions discovered initially", async () => {
     const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });

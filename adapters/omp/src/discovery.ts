@@ -13,6 +13,7 @@ import type {
   SessionStatus,
 } from "@resin/harness-contracts";
 import { z } from "zod";
+import { getOmpSessionExitReason } from "./decoder.js";
 
 const execFileAsync = promisify(execFile);
 const ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 60_000;
@@ -590,6 +591,11 @@ const OmpWorkspacesRegistrySchema = z.union([
 
 const MAX_CHUNK_BYTES = 64 * 1024; // 64 KiB
 
+const OmpActivityMessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system", "toolResult", "tool_result", "tool"]),
+  content: z.union([z.string(), z.array(z.record(z.unknown()))]),
+});
+
 /**
  * Parsed transcript metadata extracted via bounded inspection.
  */
@@ -682,12 +688,94 @@ export async function inspectTranscriptFile(
     let createdAt = stat.birthtime?.getTime()
       ? stat.birthtime.toISOString()
       : stat.mtime.toISOString();
-    let updatedAt = stat.mtime.toISOString();
+    // Unknown activity sorts before every capture run; file touches cannot authorize catchup.
+    let updatedAt = new Date(0).toISOString();
     let headerSessionId: string | null = null;
     let headerCwd: string | null = null;
     let explicitStatus: SessionStatus | null = null;
     let totalLinesCount = 0;
     let validJsonObjectCount = 0;
+    let hasExplicitLifecycle = false;
+
+    const foldActivity = (parsed: Record<string, unknown>): void => {
+      const eventType = String(parsed.type ?? parsed.event ?? "");
+      const customExitReason = getOmpSessionExitReason(parsed);
+      const isMessage =
+        (eventType === "message" || eventType === "message_end") &&
+        OmpActivityMessageSchema.safeParse(parsed.message ?? parsed).success;
+      const timestamp = parsed.timestamp ?? parsed.time ?? parsed.ts;
+      if (
+        isMessage &&
+        (explicitStatus === "completed" || explicitStatus === "failed") &&
+        !(typeof timestamp === "string" && Date.parse(timestamp) <= now)
+      ) {
+        // A malformed/future message must not turn historical completion into active capture.
+        return;
+      }
+      let lifecycleStatus: SessionStatus | null = null;
+      if (
+        eventType === "session_lifecycle" ||
+        eventType === "lifecycle" ||
+        eventType === "session" ||
+        eventType === "agent_end" ||
+        eventType === "agent_start" ||
+        customExitReason !== undefined
+      ) {
+        const defaultAction =
+          customExitReason !== undefined || eventType === "agent_end"
+            ? "end"
+            : eventType === "agent_start"
+              ? "start"
+              : "";
+        const action = String(
+          parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
+        ).toLowerCase();
+        const exitReason = String(
+          parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
+        ).toLowerCase();
+        const isFailure =
+          action === "crash" ||
+          action === "error" ||
+          action === "fatal" ||
+          action === "failed" ||
+          exitReason === "error" ||
+          exitReason === "crash" ||
+          exitReason === "fatal" ||
+          parsed.error !== undefined ||
+          parsed.isError === true;
+        if (isFailure) {
+          lifecycleStatus = "failed";
+        } else if (
+          action === "end" ||
+          action === "complete" ||
+          action === "completed" ||
+          action === "finish" ||
+          action === "finished" ||
+          action === "closed" ||
+          action === "settle" ||
+          eventType === "agent_end"
+        ) {
+          lifecycleStatus = "completed";
+        } else if (action === "pause" || action === "suspend") {
+          lifecycleStatus = "idle";
+        } else if (action === "start" || action === "resume" || eventType === "agent_start") {
+          lifecycleStatus = "active";
+        }
+      }
+
+      if (lifecycleStatus !== null) {
+        explicitStatus = lifecycleStatus;
+        hasExplicitLifecycle = true;
+      } else if (isMessage) {
+        // Native messages after a real exit resume this same transcript identity.
+        explicitStatus = "active";
+      }
+      if (lifecycleStatus !== null || isMessage || eventType === "session") {
+        if (timestamp !== undefined) {
+          updatedAt = String(timestamp);
+        }
+      }
+    };
 
     if (stat.size <= MAX_CHUNK_BYTES) {
       const lines = prefixText
@@ -716,54 +804,7 @@ export async function inspectTranscriptFile(
                 createdAt = String(parsed.timestamp);
               }
             }
-            if (parsed.timestamp || parsed.time || parsed.ts) {
-              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
-            }
-            const eventType = String(parsed.type ?? parsed.event ?? "");
-            if (
-              eventType === "session_lifecycle" ||
-              eventType === "lifecycle" ||
-              eventType === "session" ||
-              eventType === "agent_end" ||
-              eventType === "agent_start"
-            ) {
-              const defaultAction =
-                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
-              const action = String(
-                parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
-              ).toLowerCase();
-              const exitReason = String(
-                parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
-              ).toLowerCase();
-              const isFailure =
-                action === "crash" ||
-                action === "error" ||
-                action === "fatal" ||
-                action === "failed" ||
-                exitReason === "error" ||
-                exitReason === "crash" ||
-                exitReason === "fatal" ||
-                parsed.error !== undefined ||
-                parsed.isError === true;
-              if (isFailure) {
-                explicitStatus = "failed";
-              } else if (
-                action === "end" ||
-                action === "complete" ||
-                action === "completed" ||
-                action === "finish" ||
-                action === "finished" ||
-                action === "closed" ||
-                action === "settle" ||
-                eventType === "agent_end"
-              ) {
-                explicitStatus = "completed";
-              } else if (action === "pause" || action === "suspend") {
-                explicitStatus = "idle";
-              } else if (action === "start" || action === "resume" || eventType === "agent_start") {
-                explicitStatus = "active";
-              }
-            }
+            foldActivity(parsed);
           }
         } catch {
           // ignore unparseable line
@@ -794,14 +835,17 @@ export async function inspectTranscriptFile(
                 createdAt = String(parsed.timestamp);
               }
             }
-            if (parsed.timestamp || parsed.time || parsed.ts) {
-              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
-            }
+            foldActivity(parsed);
           }
         } catch {
           // ignore unparseable line
         }
       }
+
+      // Only the tail can establish current lifecycle state. Even overlapping byte
+      // windows can omit a whole record that is partial in both samples.
+      explicitStatus = null;
+      hasExplicitLifecycle = false;
 
       const rawTailLines = tailText.split("\n");
       const tailLines = rawTailLines.slice(1);
@@ -812,54 +856,7 @@ export async function inspectTranscriptFile(
           const parsed = JSON.parse(line);
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
             validJsonObjectCount++;
-            if (parsed.timestamp || parsed.time || parsed.ts) {
-              updatedAt = String(parsed.timestamp ?? parsed.time ?? parsed.ts);
-            }
-            const eventType = String(parsed.type ?? parsed.event ?? "");
-            if (
-              eventType === "session_lifecycle" ||
-              eventType === "lifecycle" ||
-              eventType === "session" ||
-              eventType === "agent_end" ||
-              eventType === "agent_start"
-            ) {
-              const defaultAction =
-                eventType === "agent_end" ? "end" : eventType === "agent_start" ? "start" : "";
-              const action = String(
-                parsed.lifecycleType ?? parsed.action ?? parsed.status ?? defaultAction,
-              ).toLowerCase();
-              const exitReason = String(
-                parsed.exitReason ?? parsed.reason ?? parsed.error ?? "",
-              ).toLowerCase();
-              const isFailure =
-                action === "crash" ||
-                action === "error" ||
-                action === "fatal" ||
-                action === "failed" ||
-                exitReason === "error" ||
-                exitReason === "crash" ||
-                exitReason === "fatal" ||
-                parsed.error !== undefined ||
-                parsed.isError === true;
-              if (isFailure) {
-                explicitStatus = "failed";
-              } else if (
-                action === "end" ||
-                action === "complete" ||
-                action === "completed" ||
-                action === "finish" ||
-                action === "finished" ||
-                action === "closed" ||
-                action === "settle" ||
-                eventType === "agent_end"
-              ) {
-                explicitStatus = "completed";
-              } else if (action === "pause" || action === "suspend") {
-                explicitStatus = "idle";
-              } else if (action === "start" || action === "resume" || eventType === "agent_start") {
-                explicitStatus = "active";
-              }
-            }
+            foldActivity(parsed);
           }
         } catch {
           // ignore unparseable line
@@ -872,16 +869,15 @@ export async function inspectTranscriptFile(
       return null;
     }
 
-    const hasExplicitLifecycle = explicitStatus !== null;
     const isStale = ageMs > 60_000;
 
     let status: SessionStatus;
     if (explicitStatus === "completed" || explicitStatus === "failed") {
       status = explicitStatus;
     } else if (explicitStatus === "active" || explicitStatus === "idle") {
-      status = isStale ? "completed" : explicitStatus;
+      status = isStale ? "idle" : explicitStatus;
     } else {
-      status = isStale ? "completed" : "active";
+      status = isStale ? "idle" : "active";
     }
 
     let canonicalCwd: string | null = null;
@@ -1339,6 +1335,7 @@ export async function buildOmpDiscoveryCatalog(
         updatedAt: t.updatedAt,
         metadata: {
           fileSize: t.fileSize,
+          fileMtime: t.fileMtime,
           totalLines: t.totalLines,
           hasExplicitLifecycle: t.hasExplicitLifecycle,
           inspectedBytes: t.inspectedBytes,
@@ -1434,6 +1431,7 @@ export async function buildOmpDiscoveryCatalog(
           updatedAt: t.updatedAt,
           metadata: {
             fileSize: t.fileSize,
+            fileMtime: t.fileMtime,
             totalLines: t.totalLines,
             hasExplicitLifecycle: t.hasExplicitLifecycle,
             inspectedBytes: t.inspectedBytes,

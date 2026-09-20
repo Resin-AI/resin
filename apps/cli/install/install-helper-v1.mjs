@@ -10045,14 +10045,33 @@ var init_dist4 = __esm({
   }
 });
 
+// adapters/omp/dist/device-surface.js
+var init_device_surface = __esm({
+  "adapters/omp/dist/device-surface.js"() {
+    "use strict";
+    init_config_planner3();
+    init_discovery3();
+  }
+});
+
+// adapters/omp/dist/decoder.js
+var init_decoder4 = __esm({
+  "adapters/omp/dist/decoder.js"() {
+    "use strict";
+    init_dist();
+    init_device_surface();
+  }
+});
+
 // adapters/omp/dist/discovery.js
 import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify3 } from "node:util";
-var execFileAsync3, ACTIVE_ONLY_TERMINAL_GRACE_MS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES;
+var execFileAsync3, ACTIVE_ONLY_TERMINAL_GRACE_MS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema;
 var init_discovery3 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
     init_zod();
+    init_decoder4();
     execFileAsync3 = promisify3(execFile3);
     ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 6e4;
     OmpWorkspaceEntrySchema = external_exports.union([
@@ -10089,6 +10108,10 @@ var init_discovery3 = __esm({
       }).passthrough()
     ]);
     MAX_CHUNK_BYTES = 64 * 1024;
+    OmpActivityMessageSchema = external_exports.object({
+      role: external_exports.enum(["user", "assistant", "system", "toolResult", "tool_result", "tool"]),
+      content: external_exports.union([external_exports.string(), external_exports.array(external_exports.record(external_exports.unknown()))])
+    });
   }
 });
 
@@ -10144,21 +10167,10 @@ var init_adapter4 = __esm({
   }
 });
 
-// adapters/omp/dist/device-surface.js
-var init_device_surface = __esm({
-  "adapters/omp/dist/device-surface.js"() {
+// adapters/omp/dist/native-tool-invoker.js
+var init_native_tool_invoker = __esm({
+  "adapters/omp/dist/native-tool-invoker.js"() {
     "use strict";
-    init_config_planner3();
-    init_discovery3();
-  }
-});
-
-// adapters/omp/dist/decoder.js
-var init_decoder4 = __esm({
-  "adapters/omp/dist/decoder.js"() {
-    "use strict";
-    init_dist();
-    init_device_surface();
   }
 });
 
@@ -10173,6 +10185,7 @@ var init_dist5 = __esm({
     init_discovery3();
     init_instructions();
     init_refresh4();
+    init_native_tool_invoker();
     init_source4();
   }
 });
@@ -12913,6 +12926,17 @@ var AccountToolAccessResponseSchema = external_exports.object({
   userId: external_exports.string().min(1),
   toolAccess: external_exports.enum(["allowed", "subscription_inactive"])
 }).strict();
+
+// packages/protocol/dist/account-profile.js
+init_zod();
+var MembershipTypeSchema = external_exports.enum(["free", "pro", "max", "founder"]);
+var AccountProfileResponseSchema = external_exports.object({
+  schemaVersion: external_exports.literal("1.0.0"),
+  accountId: external_exports.string().min(1),
+  userId: external_exports.string().min(1),
+  email: external_exports.string().email().max(254),
+  membershipType: MembershipTypeSchema
+});
 
 // packages/protocol/dist/http.js
 init_dist();

@@ -503,7 +503,7 @@ export async function main(
       return loginCommand(args);
 
     case "status":
-      return statusCommand(args);
+      return statusCommand(args, { verbose: isVerbose });
 
     case "privacy":
       return privacyCommand(args, {

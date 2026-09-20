@@ -1752,6 +1752,12 @@ with patch("subprocess.run", side_effect=publish):
       expect(payload.required_conversation_resolution).toBe(true);
     });
 
+    it("does not automatically request code-owner reviews", () => {
+      for (const location of [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]) {
+        expect(fs.existsSync(path.join(ROOT_DIR, location))).toBe(false);
+      }
+    });
+
     it("retains 5-lane platform qualification coverage in platform-qualification.yml on GitHub-hosted runners", () => {
       const platformJob = platformQualification.doc.jobs["platform-artifacts"];
       expect(platformJob).toBeDefined();

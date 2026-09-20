@@ -795,6 +795,15 @@ export function projectEventToMetadataOnly(
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }
+  const observedCwd =
+    event.type === "command_exec"
+      ? event.cwd
+      : event.type === "tool_call"
+        ? event.parameters.cwd
+        : undefined;
+  if (enrichEvidence && (observedCwd === "." || observedCwd === "./")) {
+    metadata.cwd = ".";
+  }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;
   if (existingEstimate) {

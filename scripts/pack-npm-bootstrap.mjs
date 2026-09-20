@@ -237,19 +237,21 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     ...Object.keys(rootManifest.dependencies ?? {}).map((name) => ({
       name,
       requesterSourceDir: deployDir,
+      requesterPortableDir: portableDir,
       resolutionRoot: deployDir,
     })),
     ...REQUIRED_PORTABLE_RUNTIME_DEPENDENCIES.map((name) => ({
       name,
       requesterSourceDir: repositoryRoot,
+      requesterPortableDir: portableDir,
       resolutionRoot: repositoryRoot,
     })),
   ];
   const copiedVersions = new Map();
+  const copiedLocations = new Set();
   const dependencyVersions = new Map();
-
   while (queue.length > 0) {
-    const { name, requesterSourceDir, resolutionRoot } = queue.shift();
+    const { name, requesterSourceDir, requesterPortableDir, resolutionRoot } = queue.shift();
     const sourceDir = resolveDependencyDirectory(requesterSourceDir, resolutionRoot, name);
     const sourceManifest = readManifest(sourceDir, `Runtime dependency '${name}'`);
     if (sourceManifest.name !== name) {
@@ -265,16 +267,30 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     }
 
     const existingVersion = copiedVersions.get(name);
-    if (existingVersion) {
-      if (existingVersion !== sourceManifest.version) {
+    if (existingVersion === sourceManifest.version) {
+      continue;
+    }
+
+    const installsAtRoot = existingVersion === undefined;
+    const destinationDir = path.join(
+      installsAtRoot ? portableDir : requesterPortableDir,
+      "node_modules",
+      ...name.split("/"),
+    );
+    const destinationKey = path.resolve(destinationDir);
+    if (copiedLocations.has(destinationKey)) {
+      const installedManifest = readManifest(
+        destinationDir,
+        `Materialized dependency '${name}'`,
+      );
+      if (installedManifest.version !== sourceManifest.version) {
         throw new Error(
-          `Portable bootstrap cannot flatten conflicting versions of '${name}': ${existingVersion} vs ${sourceManifest.version}.`,
+          `Portable bootstrap dependency location conflict for '${name}': ${installedManifest.version} vs ${sourceManifest.version}.`,
         );
       }
       continue;
     }
-
-    const destinationDir = path.join(portableDir, "node_modules", ...name.split("/"));
+    copiedLocations.add(destinationKey);
     copyPackageTree(sourceDir, destinationDir);
     const destinationManifest = normalizeInternalPackageEntrypoints(
       name,
@@ -305,13 +321,16 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
       queue.push({
         name: childName,
         requesterSourceDir: sourceDir,
+        requesterPortableDir: destinationDir,
         resolutionRoot,
       });
     }
 
     writeManifest(destinationDir, destinationManifest);
-    copiedVersions.set(name, sourceManifest.version);
-    dependencyVersions.set(name, sourceManifest.version);
+    if (installsAtRoot) {
+      copiedVersions.set(name, sourceManifest.version);
+      dependencyVersions.set(name, sourceManifest.version);
+    }
   }
 
   for (const [dependency, version] of dependencyVersions) {
@@ -350,7 +369,10 @@ function materializePortableTree(deployDir, portableDir, repositoryRoot) {
     if (!fs.existsSync(manifestPath)) {
       throw new Error(`Bundled dependency '${dependency}' is missing package.json.`);
     }
+    const dependencyManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     const hasLicense =
+      (typeof dependencyManifest.license === "string" &&
+        dependencyManifest.license.trim().length > 0) ||
       fs.existsSync(path.join(dependencyPath, "LICENSE")) ||
       fs.existsSync(path.join(dependencyPath, "LICENSE.txt")) ||
       fs.existsSync(path.join(dependencyPath, "LICENSE.md")) ||

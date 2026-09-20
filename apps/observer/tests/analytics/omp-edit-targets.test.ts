@@ -68,7 +68,7 @@ describe("edit target metadata", () => {
     const secret = `sk-proj-${"a".repeat(32)}`;
     const parameters = await projectEdit(`<<<<\nold\n====\nnew\n>>>>\npath: src/${secret}.ts`);
     expect(JSON.stringify(parameters)).not.toContain(secret);
-    expect(JSON.stringify(parameters)).toContain("REDACTED");
+    expect(parameters).toEqual({ targetPaths: ["$PATH"] });
   });
 });
 

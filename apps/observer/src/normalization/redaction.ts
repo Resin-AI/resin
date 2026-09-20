@@ -134,6 +134,7 @@ export class RedactionEngine {
   }>;
   private readonly customSecretReplacements: Array<{ secret: string; fingerprint: string }>;
   private readonly localOnlyFieldsSet: Set<string>;
+  private readonly preserveWorkspaceRootCwd: boolean;
 
   constructor(config: RedactionConfig = {}) {
     this.config = {
@@ -160,6 +161,9 @@ export class RedactionEngine {
       });
 
     this.localOnlyFieldsSet = new Set(this.config.localOnlyFields);
+    this.preserveWorkspaceRootCwd =
+      config.strategy !== "drop" &&
+      !config.localOnlyFields?.some((field) => field === "cwd" || field === "workingDirectory");
 
     // Build ordered path replacements (longest path first to avoid prefix shadowing)
     const rawPathMap: Record<string, string> = {};
@@ -295,7 +299,10 @@ export class RedactionEngine {
   /**
    * Deeply transforms and redacts any value (object, array, string, primitive).
    */
-  redact<T = unknown>(value: T): RedactionResult<T> {
+  redact<T = unknown>(
+    value: T,
+    workspaceRootCwdField?: "cwd" | "parameters.cwd",
+  ): RedactionResult<T> {
     if (!this.config.enabled) {
       return {
         data: value,
@@ -355,7 +362,21 @@ export class RedactionEngine {
           }
 
           // Local-only field check (strip or mask)
-          if (this.localOnlyFieldsSet.has(key)) {
+          if (
+            this.localOnlyFieldsSet.has(key) ||
+            (fieldPath === workspaceRootCwdField && !this.preserveWorkspaceRootCwd)
+          ) {
+            // Only the caller's semantic cwd slot can carry root evidence. Never recover
+            // it from a placeholder or preserve unrelated/nested local-only fields.
+            if (
+              this.preserveWorkspaceRootCwd &&
+              fieldPath === workspaceRootCwdField &&
+              (val === "." || val === "./") &&
+              !this.redactString(val, fieldPath).changed
+            ) {
+              result[key] = ".";
+              continue;
+            }
             redactedFieldsSet.add(fieldPath);
             patternsSet.add(`local_only_field:${key}`);
             if (this.config.strategy === "drop") {

@@ -668,6 +668,8 @@ describe("cloud authentication recovery", () => {
       observationClient: restartedRuntime.getObservationClient(),
     });
     const restartedDegraded = Promise.withResolvers<{ persisted: boolean }>();
+    const recovered = Promise.withResolvers<void>();
+    restartedTailer.once("auth:recovered", () => recovered.resolve());
     const replayed = Promise.withResolvers<void>();
     let restartedHandlerCalls = 0;
     restartedTailer.once("auth:degraded", (event: { persisted: boolean }) =>
@@ -676,6 +678,11 @@ describe("cloud authentication recovery", () => {
     restartedTailer.onRecords(async (handlerSession, records, ack) => {
       restartedHandlerCalls += 1;
       await restartedCaptureCoordinator.handleRecords(handlerSession, records, async () => {
+        if (records.length === 0) {
+          expect(await cursorManager.getCursor(session.sessionId)).toMatchObject({ sequence: 2 });
+          await ack();
+          return;
+        }
         deliveredRecordIds.push(...records.map((record) => record.recordId));
         expect(deliveredRecordIds).toEqual([firstRecord.recordId, secondRecord.recordId]);
         expect(await cursorManager.getCursor(session.sessionId)).toBeNull();
@@ -722,9 +729,13 @@ describe("cloud authentication recovery", () => {
     await replayed.promise;
 
     expect(restartedHandlerCalls).toBe(2);
+    await recovered.promise;
+    await restartedTailer.notifyTerminalState(session);
+    expect(restartedHandlerCalls).toBe(3);
     expect(deliveredRecordIds).toEqual([firstRecord.recordId, secondRecord.recordId]);
-    expect(uploadedSequences).toEqual([1, 2, 3]);
-    expect(attemptedBatchIds).toHaveLength(2);
+    // The synthetic end uses a later step of source row 2, not the next unread source row.
+    expect(uploadedSequences).toEqual([1, 2, 2]);
+    expect(attemptedBatchIds).toHaveLength(3);
     expect(await cursorManager.getCursor(session.sessionId)).toMatchObject({ sequence: 2 });
     expect(restartedSource.getCursor()).toMatchObject({ sequence: 2 });
     expect(restartedTailer.getSessionStatus(session.sessionId)).toMatchObject({

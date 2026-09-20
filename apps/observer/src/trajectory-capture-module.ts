@@ -65,12 +65,12 @@ const CurrentTelemetryPrivacyCheckpointSchema = z
   })
   .strict();
 
-const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
+export const TelemetryPrivacyCheckpointSchema = z.discriminatedUnion("version", [
   LegacyTelemetryPrivacyCheckpointSchema,
   CurrentTelemetryPrivacyCheckpointSchema,
 ]);
 
-type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
+export type TelemetryPrivacyCheckpoint = z.infer<typeof TelemetryPrivacyCheckpointSchema>;
 
 export interface ReconcileRemoteTelemetryConsentResult {
   valid: boolean;
@@ -93,6 +93,16 @@ export function resolveSessionAttribution(
     return undefined;
   }
   return parsed.data;
+}
+
+function captureInactiveOmpSession(session: HarnessSession, startedAt: number): boolean {
+  if (session.harnessId !== "omp" || typeof session.metadata?.fileMtime !== "string") {
+    return false;
+  }
+  // Require actual file activity as well as the coordinator's transcript timestamp boundary.
+  // Neither touching an old transcript nor future-dated content grants historical capture.
+  const modifiedAt = Date.parse(session.metadata.fileMtime);
+  return modifiedAt >= startedAt && modifiedAt <= Date.now();
 }
 
 export interface TrajectoryCaptureRuntimeModuleOptions {
@@ -324,7 +334,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.adapters = options.adapters ?? [
       new ClaudeHarnessAdapter(),
       new CodexHarnessAdapter(),
-      new OmpHarnessAdapter(),
+      new OmpHarnessAdapter({ activeOnly: false }),
     ];
 
     this.cursorManager =
@@ -343,7 +353,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession) =>
-          session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+          session.harnessId === "omp" ? { mode: "all" } : undefined,
+        captureInactiveSessions: captureInactiveOmpSession,
         captureUserSessionsOnly: this.captureUserSessionsOnly,
         logger: this.logger,
       });
@@ -710,7 +721,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession) =>
-        session.harnessId === "omp" && session.status === "active" ? { mode: "all" } : undefined,
+        session.harnessId === "omp" ? { mode: "all" } : undefined,
+      captureInactiveSessions: captureInactiveOmpSession,
       captureUserSessionsOnly: this.captureUserSessionsOnly,
       logger: this.logger,
     });
@@ -817,6 +829,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       throw err;
     } finally {
       this.captureCoordinator.clearComputationEvidence();
+      this.captureCoordinator.clearCommandSequenceEvidence();
     }
   }
 
