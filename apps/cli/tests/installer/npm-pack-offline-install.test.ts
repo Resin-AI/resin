@@ -90,5 +90,5 @@ describe("public npm bootstrap offline installation", () => {
       env,
     });
     expect(version.trim()).toBe("resin v1.0.0");
-  }, 120_000);
+  }, 180_000);
 });

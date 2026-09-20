@@ -11,7 +11,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/platform-qualification.test.mjs --exclude scripts/release-evidence.test.mjs --exclude scripts/standalone-release-artifact.test.mjs",
-    "test:e2e": "vitest run apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
+    "test:e2e": "vitest run --no-file-parallelism apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
     "test:watch": "vitest",
     "lint": "biome check . && oxlint .",
     "lint:fix": "biome check --write . && oxlint --fix .",
