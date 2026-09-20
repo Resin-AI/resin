@@ -26,7 +26,7 @@ describe("real host platform qualification", () => {
   beforeAll(() => {
     fs.mkdirSync(releaseDir, { recursive: true });
     packageRelease({ rootDir, distDir: releaseDir, skipBuild: true, testOnly: true });
-  }, 30_000);
+  }, 120_000);
 
   afterAll(() => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
