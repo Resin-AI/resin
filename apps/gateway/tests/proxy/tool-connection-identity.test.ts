@@ -362,7 +362,6 @@ function requestFor(plan: RecordedWorkflow): WorkflowValidationRequest {
     attempt: ATTEMPT,
     planDigest: workflowValidationPlanDigest(plan),
     evidenceDigest: "evidence-digest-01",
-    authorization: { envelopeId: "env-01", workspaceId: WORKSPACE_ID },
     createdAt: "2026-09-18T11:59:00.000Z",
     plan,
   };

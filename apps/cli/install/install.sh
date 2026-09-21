@@ -3,7 +3,7 @@
 # Portable POSIX sh script for Linux, macOS, and Windows WSL2.
 #
 # Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
-# Pinned SHA-256: 860b44cd56936295fa573606276fdae330957afc1c7dcb257528aebfd6ac2deb
+# Pinned SHA-256: 231c351bb9042e034aa800a04fcca447ed5029129da391c88e987d62d88b49ef
 #
 # Inspect-First Workflow:
 #   sh install.sh --download-only ./install-helper.mjs
@@ -16,7 +16,7 @@ umask 077
 
 # Constants
 PINNED_HELPER_URL="https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
-PINNED_HELPER_SHA256="860b44cd56936295fa573606276fdae330957afc1c7dcb257528aebfd6ac2deb"
+PINNED_HELPER_SHA256="231c351bb9042e034aa800a04fcca447ed5029129da391c88e987d62d88b49ef"
 REQUIRED_NODE_MAJOR=22
 
 # Temporary directory management
@@ -125,7 +125,7 @@ Inspect-First Workflow:
 
   Or manually download and verify using curl:
     curl -fsSL https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs -o install-helper.mjs
-    # Verify SHA-256: 860b44cd56936295fa573606276fdae330957afc1c7dcb257528aebfd6ac2deb
+    # Verify SHA-256: 231c351bb9042e034aa800a04fcca447ed5029129da391c88e987d62d88b49ef
     node ./install-helper.mjs
 
 Options:

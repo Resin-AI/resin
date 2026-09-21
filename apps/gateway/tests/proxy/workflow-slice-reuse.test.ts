@@ -121,7 +121,6 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
     };
     const answer = await createLocalWorkflowValidator({
       workspaceId: owner,
-      authorization: () => ({ workspaceId: owner, envelopeId: "release-grant" }),
       privateValues: store,
       dispatch,
     })(plan);

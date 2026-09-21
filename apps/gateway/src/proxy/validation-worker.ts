@@ -6,8 +6,8 @@
  * them, so deciding whether its proposals hold is a local service (`workflow-validation.ts`). What
  * is missing without this file is the wiring that lets a cloud-issued ask reach that service: a
  * client that speaks to the validation routes on the authenticated connection, and a worker that
- * takes each pending ask, substantiates it against this identity, replays it under the grant the
- * ask itself carries, and posts the decision back.
+ * takes each pending ask, substantiates it against this identity, replays it through the local
+ * execution path, and posts the decision back.
  *
  * Nothing here decides what a proposal means — the replay does. An ask this worker cannot
  * substantiate is left unanswered rather than answered with a guess, and an answer the cloud
@@ -553,16 +553,6 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
-    if (
-      request.authorization === null ||
-      request.authorization === undefined ||
-      request.authorization.workspaceId !== this.workspaceId
-    ) {
-      this.log(
-        `workflow validation: refused ask '${request.requestId}': it has no grant for this identity's workspace`,
-      );
-      return undefined;
-    }
     let result: LocalWorkflowValidationResult;
     try {
       result = await this.buildValidator(request)(request.plan);
@@ -653,15 +643,6 @@ export class WorkflowValidationWorker {
     const create = this.createValidator;
     if (create) return create(request);
     return createLocalWorkflowValidator({
-      // Read when the replay runs, never when the worker is built: a grant is in force for a
-      // while, not forever, and only a grant that names this identity's workspace may run this
-      // replay. An ask that carries none, or one for another workspace, gets no replay at all.
-      authorization: () => {
-        const grant = request.authorization;
-        if (grant === null || grant === undefined) return undefined;
-        if (grant.workspaceId !== this.workspaceId) return undefined;
-        return { envelopeId: grant.envelopeId, workspaceId: grant.workspaceId };
-      },
       // The replay resolves references the way an invocation does: only the ones this identity's
       // workspace recorded.
       workspaceId: this.workspaceId,

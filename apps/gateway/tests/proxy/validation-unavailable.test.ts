@@ -28,7 +28,6 @@ function recording(): RecordedWorkflow {
   };
 }
 const owner = "validation-owner";
-const authorization = () => ({ workspaceId: owner, envelopeId: "envelope-one" });
 
 describe("a missing replay is not a completed validation", () => {
   it("reports the missing demonstration without executing recorded work", async () => {
@@ -45,7 +44,6 @@ describe("a missing replay is not a completed validation", () => {
       },
     ];
     const result = await createLocalWorkflowValidator({
-      authorization,
       workspaceId: owner,
       dispatch,
     })(plan);
@@ -62,7 +60,6 @@ describe("a missing replay is not a completed validation", () => {
     plan.heldOut = { inputs: [], observed: [{ stepId: "step0", reference: "private:observed" }] };
     const dispatch = vi.fn(async (request: ToolProtocolDispatchRequest) => request.arguments.value);
     const result = await createLocalWorkflowValidator({
-      authorization,
       workspaceId: owner,
       privateValues: store,
       dispatch,
@@ -95,14 +92,13 @@ describe("a missing replay is not a completed validation", () => {
       client: {
         listPending: async () => [
           {
-            schemaVersion: 1,
+            schemaVersion: 2,
             requestId: "missing-demo",
             workspaceId: owner,
             deviceId: "device-one",
             attempt: "attempt-one",
             planDigest: workflowValidationPlanDigest(plan),
             evidenceDigest: "evidence-one",
-            authorization: authorization(),
             createdAt: new Date().toISOString(),
             plan,
           },

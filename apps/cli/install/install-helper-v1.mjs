@@ -9276,14 +9276,14 @@ var init_program_tokens = __esm({
 });
 
 // packages/contracts/dist/workflow-validation.js
-var WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ValidationAuthorizationSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
+var WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
 var init_workflow_validation = __esm({
   "packages/contracts/dist/workflow-validation.js"() {
     "use strict";
     init_zod();
     init_canonical();
     init_recorded_workflow();
-    WORKFLOW_VALIDATION_SCHEMA_VERSION = 1;
+    WORKFLOW_VALIDATION_SCHEMA_VERSION = 2;
     NonEmptyString = external_exports.string().min(1);
     WorkflowValuePathSchema = external_exports.array(external_exports.union([external_exports.string(), external_exports.number().int().nonnegative()]));
     ProposedBindingSchema = external_exports.union([
@@ -9298,11 +9298,6 @@ var init_workflow_validation = __esm({
         type: external_exports.enum(["string", "number", "boolean", "object", "array"])
       })
     ]);
-    ValidationAuthorizationSchema = external_exports.object({
-      envelopeId: NonEmptyString,
-      workspaceId: NonEmptyString,
-      digest: external_exports.string().optional()
-    });
     PlanVerificationSchema = external_exports.object({
       status: external_exports.enum(["verified", "incomplete", "failed"]),
       reproduced: external_exports.array(external_exports.string()),
@@ -9327,7 +9322,6 @@ var init_workflow_validation = __esm({
       attempt: NonEmptyString,
       planDigest: NonEmptyString,
       evidenceDigest: NonEmptyString,
-      authorization: ValidationAuthorizationSchema.nullable(),
       createdAt: NonEmptyString,
       expiresAt: NonEmptyString.optional(),
       plan: external_exports.unknown().superRefine((plan, context) => {

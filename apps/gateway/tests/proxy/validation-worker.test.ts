@@ -206,7 +206,6 @@ function requestFor(
     attempt: ATTEMPT,
     planDigest: workflowValidationPlanDigest(plan),
     evidenceDigest: EVIDENCE_DIGEST,
-    authorization: { envelopeId: "env-01", workspaceId: WORKSPACE_ID },
     createdAt: "2026-09-18T11:59:00.000Z",
     plan,
     ...overrides,
@@ -415,59 +414,6 @@ describe("WorkflowValidationWorker", () => {
     expect(validate).not.toHaveBeenCalled();
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
     expect(logs.some((message) => message.includes("digests to"))).toBe(true);
-  });
-
-  it("does not replay under a grant that names another workspace", async () => {
-    const plan = recordedPlan();
-    const dispatch = dispatchStub();
-    const { calls, fetchImpl } = recordingFetch((url) =>
-      url.includes("/pending")
-        ? jsonResponse({
-            requests: [
-              requestFor(plan, {
-                authorization: { envelopeId: "env-other", workspaceId: OTHER_WORKSPACE_ID },
-              }),
-            ],
-          })
-        : jsonResponse({ status: "recorded" }),
-    );
-    const worker = new WorkflowValidationWorker({
-      client: clientOver(fetchImpl),
-      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(),
-      dispatch,
-      now: () => new Date(DECIDED_AT),
-    });
-
-    const summary = await worker.runOnce();
-
-    expect(summary).toMatchObject({ answered: 0, refused: 1 });
-    // A replay under somebody else's grant would have confirmed both proposals here.
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(calls.filter((call) => call.init.method === "POST")).toEqual([]);
-  });
-
-  it("keeps an ungranted ask pending without uploading a decision", async () => {
-    const plan = recordedPlan();
-    const dispatch = dispatchStub();
-    const { calls, fetchImpl } = recordingFetch((url) =>
-      url.includes("/pending")
-        ? jsonResponse({ requests: [requestFor(plan, { authorization: null })] })
-        : jsonResponse({ status: "recorded" }),
-    );
-    const worker = new WorkflowValidationWorker({
-      client: clientOver(fetchImpl),
-      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(),
-      dispatch,
-      now: () => new Date(DECIDED_AT),
-    });
-
-    const summary = await worker.runOnce();
-
-    expect(summary).toMatchObject({ answered: 0, refused: 1 });
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(calls.filter((call) => call.init.method === "POST")).toEqual([]);
   });
 
   it("tolerates a duplicate delivery", async () => {
