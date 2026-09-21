@@ -13973,6 +13973,7 @@ var verifyDaemonReadiness = async (options) => {
   const timeoutMs = Math.max(0, options.timeoutMs ?? 15e3);
   const retryIntervalMs = Math.max(25, options.retryIntervalMs ?? 250);
   const deadline = Date.now() + timeoutMs;
+  const strictReadiness = options.expectedCloudIdentity !== void 0 || options.startedAfter !== void 0;
   let attempts = 0;
   let lastError = "Daemon readiness deadline elapsed";
   let lastHealthStatus;
@@ -14000,12 +14001,22 @@ var verifyDaemonReadiness = async (options) => {
       lastHealthStatus = health.status;
       lastVersion = health.version;
       lastIpcReady = ping.pong === true;
-      const cloudModules = Object.entries(health.modules).filter(
+      const modules = health.modules ?? {};
+      const cloudModules = Object.entries(modules).filter(
         ([moduleId]) => moduleId.includes("cloud")
       );
       lastCloudReady = options.cloudRequired === false || cloudModules.length > 0 && cloudModules.every(([, moduleHealth]) => moduleHealth.status === "ready");
       if (lastIpcReady && lastCloudReady) {
-        if (options.expectedVersion && health.version !== options.expectedVersion) {
+        const startedAfterReady = options.startedAfter === void 0 || Number.isFinite(options.startedAfter) && Number.isFinite(health.startedAt) && health.startedAt >= options.startedAfter;
+        const cloudRuntime = modules["cloud-runtime"];
+        const cloudDetails = cloudRuntime?.details;
+        const expectedIdentity = options.expectedCloudIdentity;
+        const cloudIdentityReady = expectedIdentity === void 0 || cloudRuntime?.status === "ready" && cloudDetails?.paired === true && cloudDetails.status === "valid" && cloudDetails.cloudUrl === expectedIdentity.cloudUrl && cloudDetails.accountId === expectedIdentity.accountId && cloudDetails.workspaceId === expectedIdentity.workspaceId && cloudDetails.deviceId === expectedIdentity.deviceId && (expectedIdentity.userId === void 0 || cloudDetails.userId === expectedIdentity.userId);
+        if (!startedAfterReady) {
+          lastError = "Daemon process predates the requested restart";
+        } else if (!cloudIdentityReady) {
+          lastError = "Cloud runtime identity does not match the requested credentials";
+        } else if (options.expectedVersion && health.version !== options.expectedVersion) {
           lastError = `Daemon version mismatch: expected ${options.expectedVersion}, got ${health.version}`;
         } else {
           return {
@@ -14022,7 +14033,17 @@ var verifyDaemonReadiness = async (options) => {
         lastError = !lastIpcReady ? "Daemon IPC ping did not return pong" : `Cloud runtime is not ready (daemon status: ${health.status})`;
       }
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      if (strictReadiness) {
+        if (error instanceof Error && /not connected/i.test(error.message)) {
+          lastError = "Daemon IPC is not connected";
+        } else if (error instanceof Error && /socket is not available/i.test(error.message)) {
+          lastError = "IPC socket is not available";
+        } else {
+          lastError = "Daemon readiness probe failed";
+        }
+      } else {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
     } finally {
       if (ownsClient && client) {
         await client.close().catch(() => {

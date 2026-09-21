@@ -40,7 +40,9 @@ interface MockIpcPingResult {
 
 interface MockIpcHealthResult {
   status: string;
-  modules?: Record<string, { status: string }>;
+  startedAt?: number;
+  version?: string;
+  modules?: Record<string, { status: string; details?: Record<string, unknown> }>;
 }
 class MockIpcClient {
   constructor(
@@ -76,6 +78,13 @@ class MockIpcClient {
     };
   }
 }
+const expectedCloudIdentity = {
+  cloudUrl: "https://cloud.resin.test",
+  accountId: "account-expected",
+  workspaceId: "workspace-expected",
+  deviceId: "device-expected",
+  userId: "user-expected",
+};
 
 describe("VerificationSuite", () => {
   const homeDir = "/home/testuser";
@@ -343,5 +352,205 @@ describe("onboarding daemon readiness", () => {
       ipcReady: true,
       cloudReady: true,
     });
+  });
+  it("does not treat a local-only daemon with missing credentials as paired readiness", async () => {
+    const ipcClient = new MockIpcClient({
+      getHealth: vi.fn().mockResolvedValue({
+        status: "fully-ready",
+        startedAt: 10_000,
+        modules: {
+          "cloud-runtime": {
+            status: "ready",
+            details: {
+              paired: false,
+              status: "missing",
+              cloudUrl: null,
+            },
+          },
+        },
+      }),
+    }) as IpcClient;
+
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient,
+      cloudRequired: true,
+      expectedCloudIdentity,
+      startedAfter: 9_000,
+      timeoutMs: 0,
+    });
+
+    expect(result).toMatchObject({
+      ready: false,
+      ipcReady: true,
+      cloudReady: true,
+      attempts: 1,
+    });
+    expect(result.error).not.toContain(expectedCloudIdentity.accountId);
+    expect(result.error).not.toContain(expectedCloudIdentity.cloudUrl);
+  });
+
+  it.each([
+    { label: "cloud origin", field: "cloudUrl", value: "https://wrong-origin.resin.test" },
+    { label: "account", field: "accountId", value: "account-wrong" },
+    { label: "workspace", field: "workspaceId", value: "workspace-wrong" },
+    { label: "device", field: "deviceId", value: "device-wrong" },
+    { label: "user", field: "userId", value: "user-wrong" },
+  ])("rejects a daemon reporting the wrong $label", async ({ field, value }) => {
+    const ipcClient = new MockIpcClient({
+      getHealth: vi.fn().mockResolvedValue({
+        status: "fully-ready",
+        startedAt: 10_000,
+        modules: {
+          "cloud-runtime": {
+            status: "ready",
+            details: {
+              paired: true,
+              status: "valid",
+              ...expectedCloudIdentity,
+              [field]: value,
+            },
+          },
+        },
+      }),
+    }) as IpcClient;
+
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient,
+      cloudRequired: true,
+      expectedCloudIdentity,
+      startedAfter: 9_000,
+      timeoutMs: 0,
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.ipcReady).toBe(true);
+    expect(result.cloudReady).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(value);
+  });
+
+  it.each([
+    { label: "old", startedAt: 8_999 },
+    { label: "missing", startedAt: undefined },
+    { label: "non-finite", startedAt: Number.NaN },
+  ])("rejects a daemon with a $label startup timestamp", async ({ startedAt }) => {
+    const ipcClient = new MockIpcClient({
+      getHealth: vi.fn().mockResolvedValue({
+        status: "fully-ready",
+        startedAt,
+        modules: {
+          "cloud-runtime": {
+            status: "ready",
+            details: {
+              paired: true,
+              status: "valid",
+              ...expectedCloudIdentity,
+            },
+          },
+        },
+      }),
+    }) as IpcClient;
+
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient,
+      cloudRequired: true,
+      expectedCloudIdentity,
+      startedAfter: 9_000,
+      timeoutMs: 0,
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.ipcReady).toBe(true);
+    expect(result.cloudReady).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(expectedCloudIdentity.accountId);
+  });
+
+  it("waits for the fresh daemon to report the expected identity", async () => {
+    vi.useFakeTimers();
+    try {
+      let healthCalls = 0;
+      const ipcClient = new MockIpcClient({
+        getHealth: vi.fn().mockImplementation(async () => {
+          healthCalls += 1;
+          return {
+            status: "fully-ready",
+            startedAt: healthCalls === 1 ? 8_999 : 10_001,
+            modules: {
+              "cloud-runtime": {
+                status: "ready",
+                details:
+                  healthCalls === 1
+                    ? { paired: false, status: "missing", cloudUrl: null }
+                    : { paired: true, status: "valid", ...expectedCloudIdentity },
+              },
+            },
+          };
+        }),
+      }) as IpcClient;
+
+      const pending = verifyDaemonReadiness({
+        homeDir: "/home/test",
+        ipcClient,
+        cloudRequired: true,
+        expectedCloudIdentity,
+        startedAfter: 9_000,
+        timeoutMs: 100,
+        retryIntervalMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(25);
+      const result = await pending;
+
+      expect(result).toMatchObject({
+        ready: true,
+        ipcReady: true,
+        cloudReady: true,
+        attempts: 2,
+      });
+      expect(healthCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out while the daemon remains paired to the wrong credentials", async () => {
+    vi.useFakeTimers();
+    try {
+      const ipcClient = new MockIpcClient({
+        getHealth: vi.fn().mockResolvedValue({
+          status: "fully-ready",
+          startedAt: 10_000,
+          modules: {
+            "cloud-runtime": {
+              status: "ready",
+              details: {
+                paired: false,
+                status: "missing",
+                cloudUrl: null,
+              },
+            },
+          },
+        }),
+      }) as IpcClient;
+
+      const pending = verifyDaemonReadiness({
+        homeDir: "/home/test",
+        ipcClient,
+        cloudRequired: true,
+        expectedCloudIdentity,
+        startedAfter: 9_000,
+        timeoutMs: 75,
+        retryIntervalMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(75);
+      const result = await pending;
+
+      expect(result.ready).toBe(false);
+      expect(result.attempts).toBeGreaterThan(1);
+      expect(JSON.stringify(result)).not.toContain(expectedCloudIdentity.accountId);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

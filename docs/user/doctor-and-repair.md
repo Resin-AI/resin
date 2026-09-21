@@ -104,7 +104,7 @@ resin repair
 
 ### Cloud token replaced, daemon still using the old session
 
-`resin init` pairing restarts a running user service. `resin login` reuses valid cached credentials unless `--force`. If the service is already active after a credential change, restart it (or run `resin repair` when it is inactive) so the daemon reloads `~/.resin/state/device-token.json`.
+`resin login` reuses valid cached credentials unless `--force` and automatically restarts an installed, running user service, then verifies responsiveness and the saved cloud identity. A refresh failure exits `1` without deleting successfully saved credentials; JSON distinguishes authentication success with `authenticationSucceeded: true` and reports the failed `daemonRefresh` stage. Follow its remediation and retry login. Login does not install or start absent or inactive services; use `resin repair` when that is intended. With `RESIN_NO_SERVICE=1`, restart the daemon through its external supervisor instead; login does not touch user services or verify external daemon readiness.
 
 ### Logout / revocation
 

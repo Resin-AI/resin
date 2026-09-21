@@ -90,7 +90,7 @@ Cancelled, denied, expired, or failed pairing leaves the previous credential sna
 
 Access and refresh tokens must not appear in logs, harness configuration, `.resin/project.json`, `.resin/resin.lock`, `resin status`, or `resin doctor --json`.
 
-After credential replacement, a running daemon must reload the token file. `resin init` pairing restarts an already-running user service. After `resin login`, restart the service if it is already active (`resin repair` starts an inactive unit).
+Fresh and cached `resin login` automatically restart an installed, running user service and verify that the new daemon responds with the saved cloud origin and account/workspace/device/user identity. No access or refresh token is returned by this health check, and it does not independently check remote revocation. A daemon-refresh failure exits `1` while preserving authenticated credentials and reports authentication success separately. Login leaves absent or inactive services untouched. With `RESIN_NO_SERVICE=1`, restart the daemon through its own supervisor; login does not manipulate user services or claim external daemon readiness.
 
 ---
 

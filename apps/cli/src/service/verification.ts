@@ -89,6 +89,20 @@ export interface DaemonReadinessOptions {
   ipcClient?: IpcClient;
   cloudRequired?: boolean;
   expectedVersion?: string;
+  /**
+   * Cloud identity that the newly started daemon must report before readiness succeeds.
+   * This is intentionally opt-in so local-only and legacy readiness callers retain their
+   * existing behavior.
+   */
+  expectedCloudIdentity?: {
+    cloudUrl: string;
+    accountId: string;
+    workspaceId: string;
+    deviceId: string;
+    userId?: string;
+  };
+  /** Epoch milliseconds recorded immediately before a daemon restart. */
+  startedAfter?: number;
   timeoutMs?: number;
   retryIntervalMs?: number;
 }
@@ -635,6 +649,8 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
   const timeoutMs = Math.max(0, options.timeoutMs ?? 15_000);
   const retryIntervalMs = Math.max(25, options.retryIntervalMs ?? 250);
   const deadline = Date.now() + timeoutMs;
+  const strictReadiness =
+    options.expectedCloudIdentity !== undefined || options.startedAfter !== undefined;
   let attempts = 0;
   let lastError = "Daemon readiness deadline elapsed";
   let lastHealthStatus: string | undefined;
@@ -664,7 +680,8 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
       lastHealthStatus = health.status;
       lastVersion = health.version;
       lastIpcReady = ping.pong === true;
-      const cloudModules = Object.entries(health.modules).filter(([moduleId]) =>
+      const modules = health.modules ?? {};
+      const cloudModules = Object.entries(modules).filter(([moduleId]) =>
         moduleId.includes("cloud"),
       );
       lastCloudReady =
@@ -673,7 +690,31 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
           cloudModules.every(([, moduleHealth]) => moduleHealth.status === "ready"));
 
       if (lastIpcReady && lastCloudReady) {
-        if (options.expectedVersion && health.version !== options.expectedVersion) {
+        const startedAfterReady =
+          options.startedAfter === undefined ||
+          (Number.isFinite(options.startedAfter) &&
+            Number.isFinite(health.startedAt) &&
+            health.startedAt >= options.startedAfter);
+        const cloudRuntime = modules["cloud-runtime"];
+        const cloudDetails = cloudRuntime?.details;
+        const expectedIdentity = options.expectedCloudIdentity;
+        const cloudIdentityReady =
+          expectedIdentity === undefined ||
+          (cloudRuntime?.status === "ready" &&
+            cloudDetails?.paired === true &&
+            cloudDetails.status === "valid" &&
+            cloudDetails.cloudUrl === expectedIdentity.cloudUrl &&
+            cloudDetails.accountId === expectedIdentity.accountId &&
+            cloudDetails.workspaceId === expectedIdentity.workspaceId &&
+            cloudDetails.deviceId === expectedIdentity.deviceId &&
+            (expectedIdentity.userId === undefined ||
+              cloudDetails.userId === expectedIdentity.userId));
+
+        if (!startedAfterReady) {
+          lastError = "Daemon process predates the requested restart";
+        } else if (!cloudIdentityReady) {
+          lastError = "Cloud runtime identity does not match the requested credentials";
+        } else if (options.expectedVersion && health.version !== options.expectedVersion) {
           lastError = `Daemon version mismatch: expected ${options.expectedVersion}, got ${health.version}`;
         } else {
           return {
@@ -692,7 +733,19 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
           : `Cloud runtime is not ready (daemon status: ${health.status})`;
       }
     } catch (error: unknown) {
-      lastError = error instanceof Error ? error.message : String(error);
+      if (strictReadiness) {
+        // IPC errors can contain implementation details or accidental credential echoes.
+        // Strict callers only need a stable, actionable failure category.
+        if (error instanceof Error && /not connected/i.test(error.message)) {
+          lastError = "Daemon IPC is not connected";
+        } else if (error instanceof Error && /socket is not available/i.test(error.message)) {
+          lastError = "IPC socket is not available";
+        } else {
+          lastError = "Daemon readiness probe failed";
+        }
+      } else {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
     } finally {
       if (ownsClient && client) {
         await client.close().catch(() => {});

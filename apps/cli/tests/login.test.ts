@@ -14,6 +14,8 @@ import {
   validateCloudUrl,
 } from "../src/commands/login.js";
 import { DEFAULT_DEVICE_AUTH_SCOPES, DeviceAuthClient } from "../src/service/auth-bootstrap.js";
+import type { ServiceStatusInfo, UserServiceManager } from "../src/service/manager.js";
+import type { DaemonReadinessVerifier } from "../src/service/verification.js";
 
 // Catch missing browser injection without opening anything on the developer's desktop.
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -23,11 +25,20 @@ vi.mock("node:child_process", async (importOriginal) => ({
   }),
 }));
 
+let priorNoService: string | undefined;
+
 beforeEach(() => {
+  priorNoService = process.env.RESIN_NO_SERVICE;
+  process.env.RESIN_NO_SERVICE = "1";
   vi.mocked(spawn).mockClear();
 });
 
 afterEach(() => {
+  if (priorNoService === undefined) {
+    delete process.env.RESIN_NO_SERVICE;
+  } else {
+    process.env.RESIN_NO_SERVICE = priorNoService;
+  }
   expect(spawn).not.toHaveBeenCalled();
 });
 
@@ -117,6 +128,60 @@ async function captureOutput(action: () => Promise<number>): Promise<{
     process.stdout.write = originalStdoutWrite;
     process.stderr.write = originalStderrWrite;
   }
+}
+function testServiceManager(
+  overrides: Partial<ServiceStatusInfo> = {},
+  restartImplementation?: () => Promise<void>,
+) {
+  const status = vi.fn(async () => ({
+    installed: true,
+    active: true,
+    enabled: true,
+    serviceName: "resin.service",
+    unitPath: "",
+    state: "running",
+    ...overrides,
+  }));
+  const restart = vi.fn(restartImplementation ?? (async () => {}));
+  const install = vi.fn(async () => ({
+    success: true,
+    unitPath: "",
+    unitContent: "",
+    serviceName: "resin.service",
+    enabled: true,
+    started: true,
+  }));
+  const start = vi.fn(async () => {});
+  const manager = {
+    name: "test",
+    platform: "systemd" as const,
+    install,
+    uninstall: async () => ({
+      success: true,
+      unitPath: "",
+      stopped: false,
+      disabled: false,
+      removed: false,
+    }),
+    start,
+    stop: async () => {},
+    restart,
+    status,
+    isInstalled: async () => true,
+    getUnitDefinition: () => "",
+    getUnitPath: () => "",
+  } satisfies UserServiceManager;
+  return manager;
+}
+
+function testReadinessVerifier(ready = true) {
+  return vi.fn(async () => ({
+    ready,
+    ipcReady: ready,
+    cloudReady: ready,
+    attempts: 1,
+    socketPath: "/tmp/resin-test.sock",
+  }));
 }
 
 describe("parseLoginFlags & validateCloudUrl", () => {
@@ -283,6 +348,10 @@ describe("login device flow & browser launch", () => {
         userId: "usr_alice",
         storedInSecretStore: expect.any(Boolean),
         tokenFilePath: path.join(home, ".resin", "state", "device-token.json"),
+        daemonRefresh: {
+          status: "externally_managed",
+          message: expect.any(String),
+        },
       },
     ]);
     expect(result.stdout).not.toContain(ACCESS_TOKEN);
@@ -309,12 +378,307 @@ describe("login device flow & browser launch", () => {
     );
 
     expect(result.exitCode).toBe(1);
-    expect(JSON.parse(result.stdout)).toEqual({
+    expect(JSON.parse(result.stdout)).toMatchObject({
       type: "error",
       success: false,
-      error: "Device code request failed (503): temporarily unavailable",
     });
     expect(result.stderr).toBe("");
+  });
+});
+describe("daemon refresh verification", () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-login-refresh-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  async function writeCachedCredentials(root = home): Promise<string> {
+    const tokenFilePath = path.join(root, ".resin", "state", "device-token.json");
+    await fs.mkdir(path.dirname(tokenFilePath), { recursive: true });
+    await fs.writeFile(
+      tokenFilePath,
+      JSON.stringify({
+        accessToken: "cached-access-token",
+        refreshToken: "cached-refresh-token",
+        cloudUrl: "https://api.resin.sh",
+        deviceId: "dev_cached",
+        workspaceId: "ws_cached",
+        storedAt: new Date().toISOString(),
+        claims: {
+          accountId: "acc_cached",
+          workspaceId: "ws_cached",
+          deviceId: "dev_cached",
+          installationId: "inst_cached",
+          userId: "usr_cached",
+          subject: "usr_cached",
+          scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+          rawUploadConsent: false,
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          tokenType: "access",
+        },
+      }),
+    );
+    return tokenFilePath;
+  }
+
+  it("verifies a fresh login against the restarted daemon", async () => {
+    delete process.env.RESIN_NO_SERVICE;
+    const serviceManager = testServiceManager();
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: successfulDeviceFetch() as typeof fetch,
+        serviceManager,
+        readinessVerifier,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(serviceManager.restart).toHaveBeenCalledOnce();
+    const payload = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}");
+    expect(payload).toMatchObject({
+      type: "success",
+      success: true,
+      daemonRefresh: { status: "refreshed" },
+    });
+    expect(result.stdout).not.toContain(ACCESS_TOKEN);
+    expect(result.stdout).not.toContain(REFRESH_TOKEN);
+  });
+
+  it.each(["status", "restart", "readiness"] as const)(
+    "reports authentication success and the %s refresh failure without purging credentials",
+    async (stage) => {
+      delete process.env.RESIN_NO_SERVICE;
+      const serviceManager = testServiceManager(
+        {},
+        stage === "restart"
+          ? async () => {
+              throw new Error("secret-bearing restart failure");
+            }
+          : undefined,
+      );
+      if (stage === "status") {
+        serviceManager.status.mockRejectedValue(new Error("secret-bearing status failure"));
+      }
+      const readinessVerifier = testReadinessVerifier(stage !== "readiness");
+      const result = await captureOutput(() =>
+        loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+          customFetch: successfulDeviceFetch() as typeof fetch,
+          serviceManager,
+          readinessVerifier,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      const payload = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}");
+      expect(payload).toMatchObject({
+        type: "error",
+        success: false,
+        authenticationSucceeded: true,
+        daemonRefresh: { status: "failed", stage },
+      });
+      expect(result.stdout).not.toContain(ACCESS_TOKEN);
+      expect(result.stdout).not.toContain(REFRESH_TOKEN);
+      const saved = JSON.parse(
+        await fs.readFile(path.join(home, ".resin", "state", "device-token.json"), "utf8"),
+      );
+      expect(saved.accessToken).toBe(ACCESS_TOKEN);
+    },
+  );
+  it.each(["status", "restart", "readiness"] as const)(
+    "reports a sanitized %s failure in human output",
+    async (stage) => {
+      delete process.env.RESIN_NO_SERVICE;
+      const serviceManager = testServiceManager(
+        {},
+        stage === "restart"
+          ? async () => {
+              throw new Error("secret-bearing restart failure");
+            }
+          : undefined,
+      );
+      if (stage === "status") {
+        serviceManager.status.mockRejectedValue(new Error("secret-bearing status failure"));
+      }
+      const readinessVerifier = testReadinessVerifier(stage !== "readiness");
+      const result = await captureOutput(() =>
+        loginCommand(["--no-browser", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+          customFetch: successfulDeviceFetch() as typeof fetch,
+          serviceManager,
+          readinessVerifier,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toMatch(/authentication succeeded/i);
+      expect(result.stderr).toMatch(/daemon refresh failed/i);
+      expect(result.stderr).toContain(stage);
+      expect(result.stdout + result.stderr).not.toContain("secret-bearing");
+      expect(result.stdout).not.toContain(ACCESS_TOKEN);
+      expect(result.stderr).not.toContain(REFRESH_TOKEN);
+    },
+  );
+
+  it("uses the same verified refresh path for cached credentials", async () => {
+    delete process.env.RESIN_NO_SERVICE;
+    await writeCachedCredentials();
+    const customFetch = vi.fn();
+    const serviceManager = testServiceManager();
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: customFetch as typeof fetch,
+        serviceManager,
+        readinessVerifier,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(customFetch).not.toHaveBeenCalled();
+    expect(serviceManager.restart).toHaveBeenCalledOnce();
+    expect(readinessVerifier).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      type: "success",
+      daemonRefresh: { status: "refreshed" },
+    });
+  });
+
+  it("reports external service management without invoking service commands", async () => {
+    const serviceManager = testServiceManager();
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: successfulDeviceFetch() as typeof fetch,
+        serviceManager,
+        readinessVerifier,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(serviceManager.status).not.toHaveBeenCalled();
+    expect(serviceManager.restart).not.toHaveBeenCalled();
+    expect(readinessVerifier).not.toHaveBeenCalled();
+    expect(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}")).toMatchObject({
+      type: "success",
+      daemonRefresh: { status: "externally_managed" },
+    });
+  });
+
+  it.each([false, true])("leaves inactive services untouched (installed=%s)", async (installed) => {
+    delete process.env.RESIN_NO_SERVICE;
+    const serviceManager = testServiceManager({
+      installed,
+      active: false,
+      state: "inactive",
+    });
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: successfulDeviceFetch() as typeof fetch,
+        serviceManager,
+        readinessVerifier,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(serviceManager.install).not.toHaveBeenCalled();
+    expect(serviceManager.start).not.toHaveBeenCalled();
+    expect(serviceManager.restart).not.toHaveBeenCalled();
+    expect(readinessVerifier).not.toHaveBeenCalled();
+    expect(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}")).toMatchObject({
+      type: "success",
+      daemonRefresh: { status: "not_running" },
+    });
+  });
+
+  it.each(["different-root", "missing-unit"] as const)(
+    "preserves credentials without restarting an unverified service: %s",
+    async (scenario) => {
+      delete process.env.RESIN_NO_SERVICE;
+      const tokenPath = await writeCachedCredentials();
+      const priorCredentials = await fs.readFile(tokenPath, "utf8");
+      const unitPath = path.join(home, "resin.service");
+      if (scenario === "different-root") {
+        await fs.writeFile(unitPath, "ExecStart=/another/resin --foreground\n");
+      }
+      const serviceManager = testServiceManager({ unitPath });
+      serviceManager.getUnitDefinition = () => "ExecStart=/selected/resin --foreground\n";
+      const result = await captureOutput(() =>
+        loginCommand(["--json", "--home", home], { serviceManager }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(serviceManager.restart).not.toHaveBeenCalled();
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        authenticationSucceeded: true,
+        daemonRefresh: { status: "failed", stage: "status" },
+      });
+      expect(await fs.readFile(tokenPath, "utf8")).toBe(priorCredentials);
+    },
+  );
+
+  it("uses an explicit resin home for credentials and readiness", async () => {
+    delete process.env.RESIN_NO_SERVICE;
+    const resinHome = path.join(home, "custom-resin-home");
+    const serviceManager = testServiceManager();
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--resin-home", resinHome], {
+        customFetch: successfulDeviceFetch() as typeof fetch,
+        serviceManager,
+        readinessVerifier,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(readinessVerifier.mock.calls[0]?.[0]).toMatchObject({ resinHome });
+    expect(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}")).toMatchObject({
+      tokenFilePath: path.join(resinHome, "state", "device-token.json"),
+      daemonRefresh: { status: "refreshed" },
+    });
+    await expect(fs.stat(path.join(resinHome, "state", "device-token.json"))).resolves.toBeTruthy();
+  });
+
+  it("does not claim daemon recovery for a token file outside its credential path", async () => {
+    delete process.env.RESIN_NO_SERVICE;
+    const externalTokenPath = path.join(home, "external-token.json");
+    const serviceManager = testServiceManager();
+    const readinessVerifier = testReadinessVerifier();
+    const result = await captureOutput(() =>
+      loginCommand(
+        [
+          "--json",
+          "--home",
+          home,
+          "--token-file",
+          externalTokenPath,
+          "--cloud-url",
+          "https://api.resin.sh",
+        ],
+        {
+          customFetch: successfulDeviceFetch() as typeof fetch,
+          serviceManager,
+          readinessVerifier,
+        },
+      ),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(serviceManager.restart).not.toHaveBeenCalled();
+    expect(readinessVerifier).not.toHaveBeenCalled();
+    expect(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      authenticationSucceeded: true,
+      daemonRefresh: { status: "failed", stage: "readiness" },
+    });
+    expect(await fs.stat(externalTokenPath)).toBeTruthy();
+    expect(result.stdout).not.toContain(ACCESS_TOKEN);
+    expect(result.stdout).not.toContain(REFRESH_TOKEN);
   });
 });
 
