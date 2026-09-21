@@ -26,15 +26,7 @@ import {
   validateRecordedWorkflow,
 } from "./recorded-workflow.js";
 
-export const WORKFLOW_VALIDATION_SCHEMA_VERSION = 1 as const;
-
-/** The grant a replay runs under, as the cloud that issued it names it. */
-export interface WorkflowValidationAuthorization {
-  envelopeId: string;
-  workspaceId: string;
-  /** Digest of the envelope's authorization binding, when the cloud computed one. */
-  digest?: string;
-}
+export const WORKFLOW_VALIDATION_SCHEMA_VERSION = 2 as const;
 
 /** One pending validation, addressed to the workspace whose recording it came from. */
 export interface WorkflowValidationRequest {
@@ -44,6 +36,8 @@ export interface WorkflowValidationRequest {
   workspaceId: string;
   /** The device the request is addressed to, when the cloud knows which one recorded the work. */
   deviceId?: string;
+  /** The replay is authenticated by this request's identity and its plan, evidence, and attempt
+   * bindings. */
   /**
    * Identity of this validation attempt. A re-ask is a new attempt: an answer for an earlier
    * attempt never decides a later one.
@@ -53,8 +47,6 @@ export interface WorkflowValidationRequest {
   planDigest: string;
   /** Digest of the source evidence the plan was rebuilt from. */
   evidenceDigest: string;
-  /** The grant the replay may run under; null means no grant is in force and nothing may run. */
-  authorization: WorkflowValidationAuthorization | null;
   createdAt: string;
   /** After this instant the ask is stale and must not be answered with a new success. */
   expiresAt?: string;
@@ -151,12 +143,6 @@ const ProposedBindingSchema = z.union([
   }),
 ]);
 
-const ValidationAuthorizationSchema = z.object({
-  envelopeId: NonEmptyString,
-  workspaceId: NonEmptyString,
-  digest: z.string().optional(),
-});
-
 const PlanVerificationSchema = z.object({
   status: z.enum(["verified", "incomplete", "failed"]),
   reproduced: z.array(z.string()),
@@ -189,7 +175,6 @@ export const WorkflowValidationRequestSchema = z.object({
   attempt: NonEmptyString,
   planDigest: NonEmptyString,
   evidenceDigest: NonEmptyString,
-  authorization: ValidationAuthorizationSchema.nullable(),
   createdAt: NonEmptyString,
   expiresAt: NonEmptyString.optional(),
   plan: z.unknown().superRefine((plan, context) => {

@@ -64,14 +64,6 @@ export interface LocalWorkflowValidationResult {
 
 export interface LocalWorkflowValidatorOptions {
   /**
-   * The authorization the replay runs under.
-   *
-   * A replay executes the recording's own programs and re-makes its own calls, so it runs under the
-   * workspace's grant or not at all. Validation is not a way around the capability envelope, and a
-   * caller that has no authorized envelope gets a recording whose proposals stay proposals.
-   */
-  authorization?: () => { envelopeId: string; workspaceId: string } | undefined;
-  /**
    * Environment the replayed programs may see. Nothing else is inherited: a program recorded by
    * somebody else's session must not be able to read this operator's credentials.
    */
@@ -118,15 +110,6 @@ export function createLocalWorkflowValidator(
 ): (plan: RecordedWorkflow) => Promise<LocalWorkflowValidationResult> {
   return async (plan: RecordedWorkflow): Promise<LocalWorkflowValidationResult> => {
     const candidates = plan.candidates ?? [];
-    // Read when the work is replayed, not when the service is built: a grant is in force for a
-    // while, not forever, and a recording made while one was is not evidence of a later one.
-    if (options.authorization?.() === undefined) {
-      return {
-        verdicts: [],
-        unavailable:
-          "the workspace has no authorization in force, so its recorded work was not replayed",
-      };
-    }
     const privateValues = options.privateValues ?? FilePrivateValueStore.default();
     // Read once per replay: the plan's references are resolved through the same ownership rule the
     // executor applies, so a workflow that merely knows another recording's exact reference string
@@ -161,9 +144,9 @@ export function createLocalWorkflowValidator(
       options.workspaceDir ?? mkdtempSync(path.join(os.tmpdir(), "resin-replay-"));
     try {
       const adapters = new RuntimeAdapterRegistry();
-      // The replay's programs run in the disposable directory and see only what this service hands
-      // them. A temporary directory is not a sandbox for an outside process, so what the process may
-      // reach is bounded by its environment and by the grant the work was authorized under.
+      // The replay runs in a disposable directory and sees only what this service hands it. A
+      // temporary directory is not a sandbox for an outside process, so what the process may reach
+      // is bounded by its isolated environment and the host routing used for tool calls.
       const programOptions = {
         cwd: workspaceDir,
         isolateEnvironment: true,
