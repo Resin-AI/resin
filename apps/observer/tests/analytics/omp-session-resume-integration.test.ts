@@ -201,6 +201,14 @@ describe("OMP discovery-to-cloud idle/resume capture", () => {
         expect(uploaded.filter((event) => event.type === "tool_result")).toMatchObject([
           { sessionId, callId: "call-failed", toolName: "bash", isError: true },
         ]);
+        expect(
+          uploaded.some(
+            (event) =>
+              event.type === "message" &&
+              event.role === "assistant" &&
+              event.metadata?.stopReason === "stop",
+          ),
+        ).toBe(true);
 
         // Move wall time without running periodic timers; each discovery poll is explicit.
         vi.setSystemTime(new Date(startedAt.getTime() + 61_000));

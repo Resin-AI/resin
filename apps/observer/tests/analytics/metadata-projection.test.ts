@@ -14,11 +14,11 @@ import {
   type NormalizedToolDiscoveryEvent,
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
+  RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   nowIso,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
-  ALLOWED_PRIMITIVE_KINDS,
   RESIN_PARAMETER_SHAPE_KEY,
   extractParameterShape,
   projectEventToMetadataOnly,
@@ -90,6 +90,41 @@ describe("projectEventToMetadataOnly", () => {
     expect(projected.providerUsage?.totalTokens).toBe(1550);
 
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+  it("preserves only bounded successful assistant stop reasons in metadata", () => {
+    const original: NormalizedMessageEvent = {
+      ...createBaseHeaders(1),
+      type: "message",
+      role: "assistant",
+      content: "PRIVATE_FINAL_ANSWER",
+      metadata: {
+        stopReason: "stop",
+        arbitrarySecret: "MUST_NOT_SHIP",
+      },
+    };
+
+    const projected = projectEventToMetadataOnly(original);
+
+    expect(projected.metadata).toEqual({
+      scenarioId: original.sessionId,
+      [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: "stop",
+    });
+    expect(JSON.stringify(projected)).not.toContain("MUST_NOT_SHIP");
+  });
+
+  it("drops tool-use, unknown and non-assistant stop reasons instead of turning them into completion evidence", () => {
+    const reasons = ["toolUse", "tool_calls", "length", "error", "aborted", "unknown"];
+    for (const [index, stopReason] of reasons.entries()) {
+      const original: NormalizedMessageEvent = {
+        ...createBaseHeaders(index + 1),
+        type: "message",
+        role: index === reasons.length - 1 ? "user" : "assistant",
+        content: "PRIVATE",
+        metadata: { stopReason },
+      };
+      const projected = projectEventToMetadataOnly(original);
+      expect(projected.metadata?.[RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]).toBeUndefined();
+    }
   });
 
   it("projects model_reasoning event: strips reasoningContent and signature while preserving token count and duration", () => {

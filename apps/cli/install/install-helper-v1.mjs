@@ -8915,6 +8915,18 @@ var init_tool_link_evidence = __esm({
   }
 });
 
+// packages/contracts/dist/assistant-stop-reason.js
+var ASSISTANT_STOP_REASONS, AssistantStopReasonSchema, AssistantStopReasonCorrectionSchema;
+var init_assistant_stop_reason = __esm({
+  "packages/contracts/dist/assistant-stop-reason.js"() {
+    "use strict";
+    init_zod();
+    ASSISTANT_STOP_REASONS = ["stop", "end_turn", "completed"];
+    AssistantStopReasonSchema = external_exports.enum(ASSISTANT_STOP_REASONS);
+    AssistantStopReasonCorrectionSchema = external_exports.object({ stopReason: AssistantStopReasonSchema }).strict();
+  }
+});
+
 // packages/contracts/dist/recorded-workflow.js
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -9378,6 +9390,7 @@ var init_dist = __esm({
     init_computation_evidence();
     init_deterministic_command_sequence();
     init_tool_link_evidence();
+    init_assistant_stop_reason();
     init_recorded_workflow();
     init_program_tokens();
     init_workflow_validation();

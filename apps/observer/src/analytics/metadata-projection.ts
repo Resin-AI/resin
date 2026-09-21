@@ -17,6 +17,7 @@ import {
   type NormalizedToolDiscoveryEvent,
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
+  RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
@@ -24,6 +25,7 @@ import {
   TOOL_IO_UTF8_METHOD,
   estimatePayloadTokens,
   nowIso,
+  parseAssistantStopReason,
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
@@ -744,6 +746,17 @@ export function projectEventToMetadataOnly(
   if (recordedReferences) metadata.references = recordedReferences;
   if (sessionKind !== undefined) {
     metadata.sessionKind = sessionKind;
+  }
+  // A source-observed successful assistant stop is bounded completion evidence, not arbitrary
+  // metadata. It survives only on assistant messages and only for the shared allowlist; tool-use,
+  // truncation, errors and unknown values are deliberately omitted.
+  if (event.type === "message" && event.role === "assistant") {
+    const stopReason = parseAssistantStopReason(
+      event.metadata?.[RESIN_ASSISTANT_STOP_REASON_METADATA_KEY],
+    );
+    if (stopReason !== undefined) {
+      metadata[RESIN_ASSISTANT_STOP_REASON_METADATA_KEY] = stopReason;
+    }
   }
 
   // Computation evidence is a strict, self-contained, already-privacy-projected carrier. It is

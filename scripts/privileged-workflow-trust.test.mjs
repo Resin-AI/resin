@@ -42,7 +42,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
     path.join(ROOT_DIR, ".github/workflows/cloud-deploy.yml"),
   );
 
-  describe("Trigger Isolation: Protected Refs & Manual Trusted Dispatch Only", () => {
+  describe("Trigger Isolation: Protected Refs & Trusted Dispatch", () => {
     it("ensures all privileged workflows are loaded and parse as valid YAML documents", () => {
       const expectedList = isCombinedMonorepo
         ? ALL_PRIVILEGED_WORKFLOWS
@@ -85,7 +85,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       }
     });
 
-    it("verifies release, candidate, operational evidence, and security scan are strictly manual trusted dispatch", () => {
+    it("keeps release workflows manual while auto-running the security scan only on protected-main pushes", () => {
       const release = releaseWorkflows[".github/workflows/release.yml"];
       const candidate = releaseWorkflows[".github/workflows/release-candidate.yml"];
       const operational = releaseWorkflows[".github/workflows/production-operational-evidence.yml"];
@@ -96,7 +96,26 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       if (operational) {
         expect(Object.keys(operational.doc.on)).toEqual(["workflow_dispatch"]);
       }
-      expect(Object.keys(securityScan.doc.on)).toEqual(["workflow_dispatch"]);
+      expect(securityScan.doc.on.push).toEqual({ branches: ["main"] });
+      expect(securityScan.doc.on.workflow_dispatch.inputs.commit_sha).toMatchObject({
+        required: true,
+        type: "string",
+      });
+      expect(securityScan.doc.concurrency).toMatchObject({
+        group: "production-security-scan-${{ inputs.commit_sha || github.sha }}",
+        "cancel-in-progress": false,
+      });
+      const securitySteps = securityScan.doc.jobs.scan.steps;
+      expect(securitySteps.find((step) => step.name === "Check out exact candidate").with.ref).toBe(
+        "${{ inputs.commit_sha || github.sha }}",
+      );
+      expect(
+        securitySteps.find((step) => step.name === "Verify checkout identity").env.TARGET_SHA,
+      ).toBe("${{ inputs.commit_sha || github.sha }}");
+      expect(
+        securitySteps.find((step) => step.name === "Generate retained scan evidence").env
+          .RELEASE_SHA,
+      ).toBe("${{ inputs.commit_sha || github.sha }}");
     });
 
     it("keeps the public security scan independent of the private cloud container", () => {

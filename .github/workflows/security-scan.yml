@@ -1,6 +1,8 @@
 name: Production Security Scan
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -12,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-security-scan-${{ inputs.commit_sha }}
+  group: production-security-scan-${{ inputs.commit_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -23,13 +25,13 @@ jobs:
       - name: Check out exact candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ inputs.commit_sha || github.sha }}
           persist-credentials: false
 
       - name: Verify checkout identity
         shell: bash
         env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
+          TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
         run: |
           set -euo pipefail
           test -n "$TARGET_SHA"
@@ -58,7 +60,7 @@ jobs:
 
       - name: Generate retained scan evidence
         env:
-          RELEASE_SHA: ${{ inputs.commit_sha }}
+          RELEASE_SHA: ${{ inputs.commit_sha || github.sha }}
         run: |
           node --input-type=module -e '
             import crypto from "node:crypto";
