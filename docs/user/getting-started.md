@@ -71,7 +71,7 @@ To prevent hanging in automated pipelines or headless environments, the onboardi
 
 Cloud device credentials are written owner-only to `~/.resin/state/device-token.json` (mode `0600`) with an optional ancillary vault copy when a `SecretManager` is configured. They are distinct from the local IPC token (`auth.token` on the daemon socket path). Access and refresh tokens are not written to harness config, project metadata, logs, or support output.
 
-If a user service is already running when pairing replaces credentials, the daemon restarts automatically to reload the token file.
+`resin login` automatically restarts an installed, running user service and verifies that the new daemon responds with the authenticated cloud identity. It does this for fresh and cached credentials; it does not install or start an absent or inactive service.
 ---
 
 ## 2. Flags You Will Actually Use
@@ -143,7 +143,9 @@ resin login
 resin login --force
 ```
 
-`resin login` reuses valid cached same-origin credentials without initiating a new browser flow unless `--force` is supplied. It opens the complete verification URL (unless `--no-browser`) and prints the URL plus code (or emits a structured JSON verification event in `--json` mode). After a replacement while the daemon is already running, restart the user service so it reloads `device-token.json` (`resin repair` starts an inactive service; `resin init` pairing restarts a running service itself).
+`resin login` reuses valid cached same-origin credentials without initiating a new browser flow unless `--force` is supplied. For a new pairing, it opens the complete verification URL (unless `--no-browser`) and prints the URL plus code (or emits a structured JSON verification event in `--json` mode). An installed, running user service is automatically restarted and checked for responsiveness and the saved identity. If status, restart, or readiness verification fails, login exits `1` while preserving credentials; JSON reports `authenticationSucceeded: true` and a failed `daemonRefresh` with its failure stage. Follow the reported remediation and retry login.
+
+Absent or inactive services remain untouched (`resin repair` can install or start a service when wanted). With `RESIN_NO_SERVICE=1`, login reports `daemonRefresh.status: "externally_managed"` and does not manipulate user services or claim daemon readiness. Restart a foreground or externally managed daemon through its own supervisor after login, then check `resin status`. Login's identity check verifies the daemon's loaded credentials; it is not a remote token-revocation check.
 
 Logout revokes the device token remotely when possible, then purges the owner-only file and optional ancillary vault. Local tools, SQLite state, harness MCP config, and the four locked meta-tools remain:
 

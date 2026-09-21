@@ -686,7 +686,7 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
   });
 
   it("never includes tokens or secrets in diagnostics and health check", async () => {
-    const claims = makeValidClaims();
+    const claims = makeValidClaims({ userId: undefined, subject: "usr_subject_test" });
     const token = makeJwt(claims);
     const store = new CloudCredentialStore({ tokenFilePath });
 
@@ -715,7 +715,15 @@ describe("CloudRuntimeModule & CloudObservationClient", () => {
     expect(healthStr).not.toContain(token);
     expect(healthStr).not.toContain("super-secret-refresh-token");
     expect(health.status).toBe("ready");
-
+    expect(health.details).toMatchObject({
+      paired: true,
+      status: "valid",
+      cloudUrl: "https://cloud.resin.dev",
+      accountId: claims.accountId,
+      workspaceId: claims.workspaceId,
+      deviceId: claims.deviceId,
+      userId: claims.userId ?? claims.subject,
+    });
     await module.stop(context);
   });
 

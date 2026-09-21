@@ -2,25 +2,41 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import type { ConfigFsBridge } from "@resin/harness-contracts";
-import type {
-  InstallationPairingSummary,
-  InstallerPairingMutation,
-} from "../installer/installer.js";
+import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import { resolvePaths } from "@resin/observer/client";
+import type { InstallerPairingMutation } from "../installer/installer.js";
 import { isWslEnvironment } from "../platform/platform.js";
 import {
   DEFAULT_CLOUD_URL,
   DeviceAuthClient,
-  type StoredDeviceCredentials,
   isReusableCredentialRecord,
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
-import { createUserServiceManager } from "../service/manager.js";
+import {
+  type ServiceStatusInfo,
+  type UserServiceManager,
+  createUserServiceManager,
+  isStaleSupervisorUnitContent,
+} from "../service/manager.js";
+import {
+  type DaemonReadinessResult,
+  type DaemonReadinessVerifier,
+  verifyDaemonReadiness,
+} from "../service/verification.js";
 
 export { validateCloudUrl, isReusableCredentialRecord } from "../service/auth-bootstrap.js";
 
 export type BrowserLauncher = (url: string) => Promise<boolean> | boolean;
 
+export type DaemonRefreshStatus = "refreshed" | "not_running" | "externally_managed" | "failed";
+
+export type DaemonRefreshFailureStage = "status" | "restart" | "readiness";
+
+export interface DaemonRefreshResult {
+  status: DaemonRefreshStatus;
+  stage?: DaemonRefreshFailureStage;
+  message: string;
+}
 function runBrowserLauncher(command: string, args: string[]): Promise<boolean> {
   const { promise, resolve } = Promise.withResolvers<boolean>();
   try {
@@ -119,17 +135,21 @@ export interface LoginSuccessResult {
   userId?: string;
   storedInSecretStore: boolean;
   tokenFilePath?: string;
+  daemonRefresh: DaemonRefreshResult;
 }
 
 export interface LoginCommandOptions {
   customFetch?: typeof fetch;
   openBrowser?: BrowserLauncher;
   fsBridge?: ConfigFsBridge;
+  serviceManager?: UserServiceManager;
+  readinessVerifier?: DaemonReadinessVerifier;
 }
 
 export interface PerformPairingOptions {
   cloudUrl?: string;
   home?: string;
+  resinHome?: string;
   tokenFilePath?: string;
   accountId?: string;
   workspaceId?: string;
@@ -143,30 +163,185 @@ export interface PerformPairingOptions {
   customFetch?: typeof fetch;
   openBrowser?: BrowserLauncher;
   fsBridge?: ConfigFsBridge;
+  serviceManager?: UserServiceManager;
+  readinessVerifier?: DaemonReadinessVerifier;
   timeoutMs?: number;
   abortSignal?: AbortSignal;
   stdout?: { write(chunk: string): boolean | undefined };
 }
 
-async function restartActiveServiceIfRunning(
-  homeDir?: string,
-  fsBridge?: ConfigFsBridge,
-): Promise<void> {
-  try {
-    const resinHome = homeDir ? path.join(homeDir, ".resin") : undefined;
-    const serviceManager = createUserServiceManager({ homeDir, resinHome, fsBridge });
-    const status = await serviceManager.status();
-    if (status.installed && (status.active || status.state === "running")) {
-      await serviceManager.restart();
-    }
-  } catch {
-    // Best-effort restart
-  }
+interface ResolvedLoginPaths {
+  home: string;
+  resinHome: string;
+  tokenFilePath: string;
+  daemonTokenFilePath: string;
 }
 
+function resolveLoginPaths(options: {
+  home?: string;
+  resinHome?: string;
+  tokenFilePath?: string;
+}): ResolvedLoginPaths {
+  const home = options.home
+    ? path.resolve(options.home)
+    : path.resolve(process.env.HOME ?? process.env.USERPROFILE ?? os.homedir());
+  const paths = resolvePaths({
+    home: options.home ? home : undefined,
+    resinHome: options.resinHome,
+    env: process.env,
+  });
+  const daemonTokenFilePath = path.join(paths.stateDir, "device-token.json");
+  return {
+    home,
+    resinHome: paths.homeDir,
+    tokenFilePath: options.tokenFilePath
+      ? path.resolve(options.tokenFilePath)
+      : daemonTokenFilePath,
+    daemonTokenFilePath,
+  };
+}
+
+function failedDaemonRefresh(
+  stage: DaemonRefreshFailureStage,
+  message: string,
+): DaemonRefreshResult {
+  return { status: "failed", stage, message };
+}
+
+const EXTERNAL_DAEMON_REFRESH_MESSAGE =
+  "Credentials were saved, but daemon service management is external. Restart the foreground daemon through your supervisor, then verify it with `resin status`.";
+
+async function refreshDaemonAfterCredentials(options: {
+  home: string;
+  resinHome: string;
+  tokenFilePath: string;
+  daemonTokenFilePath: string;
+  cloudIdentity: {
+    cloudUrl: string;
+    accountId: string;
+    workspaceId: string;
+    deviceId: string;
+    userId?: string;
+  };
+  fsBridge?: ConfigFsBridge;
+  serviceManager?: UserServiceManager;
+  readinessVerifier?: DaemonReadinessVerifier;
+}): Promise<DaemonRefreshResult> {
+  if (process.env.RESIN_NO_SERVICE === "1") {
+    return { status: "externally_managed", message: EXTERNAL_DAEMON_REFRESH_MESSAGE };
+  }
+
+  let serviceManager: UserServiceManager;
+  try {
+    serviceManager =
+      options.serviceManager ??
+      createUserServiceManager({
+        homeDir: options.home,
+        resinHome: options.resinHome,
+        fsBridge: options.fsBridge,
+      });
+  } catch {
+    return failedDaemonRefresh(
+      "status",
+      "Credentials were saved, but the daemon service could not be inspected. Restart it through your service supervisor, then verify it with `resin status`.",
+    );
+  }
+
+  if (serviceManager.platform === "external") {
+    return { status: "externally_managed", message: EXTERNAL_DAEMON_REFRESH_MESSAGE };
+  }
+
+  let status: ServiceStatusInfo;
+  try {
+    status = await serviceManager.status();
+  } catch {
+    return failedDaemonRefresh(
+      "status",
+      "Credentials were saved, but the daemon service status could not be checked. Restart it through your service supervisor, then verify it with `resin status`.",
+    );
+  }
+
+  if (status.state === "externally_managed") {
+    return { status: "externally_managed", message: EXTERNAL_DAEMON_REFRESH_MESSAGE };
+  }
+
+  if (!status.installed || !(status.active || status.state === "running")) {
+    return {
+      status: "not_running",
+      message:
+        "Credentials were saved, but no installed active Resin daemon service was found. Start the daemon through your service supervisor, then verify it with `resin status`.",
+    };
+  }
+
+  if (path.resolve(options.tokenFilePath) !== path.resolve(options.daemonTokenFilePath)) {
+    return failedDaemonRefresh(
+      "readiness",
+      "Credentials were saved outside the daemon's configured credential path, so daemon refresh was not verified. Configure the daemon to use that credential path, then restart it through your service supervisor.",
+    );
+  }
+  if (status.unitPath) {
+    try {
+      const fsBridge = options.fsBridge ?? defaultFsBridge;
+      const onDiskUnit = await fsBridge.readFile(status.unitPath);
+      const expectedUnit = serviceManager.getUnitDefinition({
+        homeDir: options.home,
+        resinHome: options.resinHome,
+      });
+      if (isStaleSupervisorUnitContent(onDiskUnit, expectedUnit)) {
+        return failedDaemonRefresh(
+          "status",
+          "Credentials were saved, but the installed daemon service configuration does not match this Resin installation. Check the selected Resin home and service configuration before retrying `resin login`.",
+        );
+      }
+    } catch {
+      return failedDaemonRefresh(
+        "status",
+        "Credentials were saved, but the daemon service configuration could not be inspected safely. Check service file permissions and the selected Resin home before retrying `resin login`.",
+      );
+    }
+  }
+
+  const startedAfter = Date.now();
+  try {
+    await serviceManager.restart();
+  } catch {
+    return failedDaemonRefresh(
+      "restart",
+      "Credentials were saved, but the active Resin daemon could not be restarted. Restart it through your service supervisor, then verify it with `resin status`.",
+    );
+  }
+
+  let readiness: DaemonReadinessResult;
+  try {
+    const readinessVerifier = options.readinessVerifier ?? verifyDaemonReadiness;
+    readiness = await readinessVerifier({
+      homeDir: options.home,
+      resinHome: options.resinHome,
+      fsBridge: options.fsBridge,
+      cloudRequired: true,
+      expectedCloudIdentity: options.cloudIdentity,
+      startedAfter,
+    });
+  } catch {
+    return failedDaemonRefresh(
+      "readiness",
+      "The Resin daemon was restarted, but readiness could not be verified with the saved Cloud credentials. Upgrade or restart the daemon, then retry `resin login` and check `resin status`.",
+    );
+  }
+
+  if (!readiness.ready) {
+    return failedDaemonRefresh(
+      "readiness",
+      "The Resin daemon was restarted, but it did not become ready with the saved Cloud credentials. Upgrade or restart the daemon, then retry `resin login` and check `resin status`.",
+    );
+  }
+
+  return {
+    status: "refreshed",
+    message: "The Resin daemon was restarted and verified with the saved Cloud credentials.",
+  };
+}
 /**
- * Reusable install-pairing workflow used by both `resin login` and `resin init`.
- *
  * 1. Checks and reuses valid pre-provisioned credentials if not forcing fresh auth.
  * 2. In non-interactive mode without reusable credentials, fails truthfully.
  * 3. In interactive mode, attempts to open verification URI in browser first,
@@ -175,18 +350,22 @@ async function restartActiveServiceIfRunning(
  */
 export async function performPairing(
   options: PerformPairingOptions = {},
-): Promise<InstallerPairingMutation> {
+): Promise<InstallerPairingMutation & { daemonRefresh?: DaemonRefreshResult }> {
   const cloudUrl = validateCloudUrl(
     options.cloudUrl ?? process.env.RESIN_CLOUD_URL ?? DEFAULT_CLOUD_URL,
   );
-  const home = options.home ? path.resolve(options.home) : os.homedir();
-  const tokenFilePath =
-    options.tokenFilePath ?? path.join(home, ".resin", "state", "device-token.json");
+  const resolvedPaths = resolveLoginPaths({
+    home: options.home,
+    resinHome: options.resinHome,
+    tokenFilePath: options.tokenFilePath,
+  });
+  const { home, resinHome, tokenFilePath, daemonTokenFilePath } = resolvedPaths;
 
   const authClient = new DeviceAuthClient({
     cloudUrl,
     customFetch: options.customFetch,
     home,
+    resinHome,
     tokenFilePath,
   });
 
@@ -278,10 +457,47 @@ export async function performPairing(
   const workspaceId = result.claims.workspaceId;
   const deviceId = result.claims.deviceId;
   const userId = result.claims.userId ?? result.claims.subject;
+  let daemonRefresh: DaemonRefreshResult | undefined;
+  if (options.restartService !== false) {
+    try {
+      daemonRefresh = await refreshDaemonAfterCredentials({
+        home,
+        resinHome,
+        tokenFilePath,
+        daemonTokenFilePath,
+        cloudIdentity: {
+          cloudUrl,
+          accountId,
+          workspaceId,
+          deviceId,
+          userId,
+        },
+        fsBridge: options.fsBridge,
+        serviceManager: options.serviceManager,
+        readinessVerifier: options.readinessVerifier,
+      });
+    } catch {
+      daemonRefresh = failedDaemonRefresh(
+        "status",
+        "Credentials were saved, but daemon refresh could not be completed. Restart it through your service supervisor, then verify it with `resin status`.",
+      );
+    }
 
-  // Externally managed daemons must reload credentials without touching user services.
-  if (options.restartService !== false && process.env.RESIN_NO_SERVICE !== "1") {
-    await restartActiveServiceIfRunning(home, options.fsBridge);
+    if (daemonRefresh.status === "failed") {
+      if (options.json) {
+        writeJson({
+          type: "error",
+          success: false,
+          authenticationSucceeded: true,
+          error: daemonRefresh.message,
+          daemonRefresh,
+        });
+      } else {
+        (options.stdout ?? process.stderr).write(
+          `\nDaemon refresh failed (${daemonRefresh.stage ?? "unknown"}): ${daemonRefresh.message}\n`,
+        );
+      }
+    }
   }
 
   return {
@@ -312,6 +528,7 @@ export async function performPairing(
         await authClient.purgeCredentials();
       }
     },
+    daemonRefresh,
   };
 }
 
@@ -420,13 +637,14 @@ export function printLoginHelp(): void {
     "an account, then review the identity and workspace in the Console before",
     "approving. Approving one identity cannot bind credentials to another.",
     "",
-    "Credentials are written owner-only to ~/.resin/state/device-token.json",
+    "Credentials are written owner-only to the effective Resin home state path",
     "(mode 0600) plus an ancillary vault. They are distinct from the local IPC",
     "token and never appear in harness config or project metadata.",
     "Valid cached credentials are reused unless --force.",
-    "After a credential replacement, restart a running daemon so it reloads",
-    "cloud credentials (`resin repair` starts an inactive user service;",
-    "`resin init` pairing restarts a running service itself).",
+    "After authentication, resin login automatically restarts only an installed",
+    "active daemon service and verifies the new Cloud identity. Inactive or absent",
+    "services are not started or installed. Externally managed daemons (including",
+    "RESIN_NO_SERVICE=1) must be restarted manually through their supervisor.",
     "",
     "Default cloud origin: https://api.resin.sh (override with --cloud-url or",
     "RESIN_CLOUD_URL).",
@@ -454,11 +672,12 @@ export interface LoginVerificationPayload {
   verificationUriComplete?: string;
   expiresIn: number;
 }
-
 export interface LoginErrorPayload {
   type: "error";
   success: false;
   error: string;
+  authenticationSucceeded?: boolean;
+  daemonRefresh?: DaemonRefreshResult;
 }
 
 export type LoginJsonPayload =
@@ -484,6 +703,50 @@ function writeError(message: string, isJson: boolean): void {
     writeJson({ type: "error", success: false, error: message });
   } else {
     process.stderr.write(`\nError: ${message}\n`);
+  }
+}
+function writeAuthenticatedHumanOutput(values: {
+  accountId?: string;
+  workspaceId: string;
+  deviceId: string;
+  userId?: string;
+  tokenFilePath?: string;
+  daemonRefresh: DaemonRefreshResult;
+}): void {
+  process.stdout.write("\nAuthenticated successfully.\n");
+  if (values.accountId) {
+    process.stdout.write(`  Account:      ${values.accountId}\n`);
+  }
+  process.stdout.write(`  Workspace:    ${values.workspaceId}\n`);
+  process.stdout.write(`  Device ID:    ${values.deviceId}\n`);
+  if (values.userId) {
+    process.stdout.write(`  User ID:      ${values.userId}\n`);
+  }
+  if (values.tokenFilePath) {
+    process.stdout.write(`Credentials saved to ${values.tokenFilePath}.\n`);
+  } else {
+    process.stdout.write("Credentials saved to the secure credential store.\n");
+  }
+  process.stdout.write(`Daemon refresh: ${values.daemonRefresh.message}\n`);
+}
+
+function writeAuthenticatedRefreshFailure(
+  isJson: boolean,
+  daemonRefresh: DaemonRefreshResult,
+): void {
+  if (isJson) {
+    writeJson({
+      type: "error",
+      success: false,
+      authenticationSucceeded: true,
+      error: daemonRefresh.message,
+      daemonRefresh,
+    });
+  } else {
+    process.stdout.write("\nAuthentication succeeded and credentials were preserved.\n");
+    process.stderr.write(
+      `\nError: Daemon refresh failed (${daemonRefresh.stage ?? "unknown"}): ${daemonRefresh.message}\n`,
+    );
   }
 }
 
@@ -514,19 +777,46 @@ export async function loginCommand(
     return 1;
   }
 
-  const home = flags.home ? path.resolve(flags.home) : os.homedir();
-  const tokenFilePath = flags.tokenFile
-    ? path.resolve(flags.tokenFile)
-    : path.join(home, ".resin", "state", "device-token.json");
+  const resolvedPaths = resolveLoginPaths({
+    home: flags.home,
+    resinHome: flags.resinHome,
+    tokenFilePath: flags.tokenFile,
+  });
+  const { home, resinHome, tokenFilePath, daemonTokenFilePath } = resolvedPaths;
   const authClient = new DeviceAuthClient({
     cloudUrl,
     customFetch: options.customFetch,
     tokenFilePath,
     home,
-    resinHome: flags.resinHome,
+    resinHome,
   });
 
   const openBrowserFn = options.openBrowser ?? defaultOpenBrowser;
+  const refreshDaemon = async (cloudIdentity: {
+    cloudUrl: string;
+    accountId: string;
+    workspaceId: string;
+    deviceId: string;
+    userId?: string;
+  }): Promise<DaemonRefreshResult> => {
+    try {
+      return await refreshDaemonAfterCredentials({
+        home,
+        resinHome,
+        tokenFilePath,
+        daemonTokenFilePath,
+        cloudIdentity,
+        fsBridge: options.fsBridge,
+        serviceManager: options.serviceManager,
+        readinessVerifier: options.readinessVerifier,
+      });
+    } catch {
+      return failedDaemonRefresh(
+        "status",
+        "Credentials were saved, but daemon refresh could not be completed. Restart it through your service supervisor, then verify it with `resin status`.",
+      );
+    }
+  };
 
   try {
     if (!flags.force) {
@@ -537,8 +827,18 @@ export async function loginCommand(
         const workspaceId = claims.workspaceId;
         const deviceId = claims.deviceId;
         const userId = claims.userId ?? claims.subject;
+        const daemonRefresh = await refreshDaemon({
+          cloudUrl,
+          accountId,
+          workspaceId,
+          deviceId,
+          userId,
+        });
 
-        await restartActiveServiceIfRunning(home, options.fsBridge);
+        if (daemonRefresh.status === "failed") {
+          writeAuthenticatedRefreshFailure(Boolean(flags.json), daemonRefresh);
+          return 1;
+        }
 
         if (flags.json) {
           const successPayload: LoginSuccessResult = {
@@ -550,21 +850,18 @@ export async function loginCommand(
             userId,
             storedInSecretStore: false,
             tokenFilePath,
+            daemonRefresh,
           };
           writeJson(successPayload);
         } else {
-          process.stdout.write("\nAuthenticated successfully.\n");
-          process.stdout.write(`  Account:      ${accountId}\n`);
-          process.stdout.write(`  Workspace:    ${workspaceId}\n`);
-          process.stdout.write(`  Device ID:    ${deviceId}\n`);
-          if (userId) {
-            process.stdout.write(`  User ID:      ${userId}\n`);
-          }
-          if (tokenFilePath) {
-            process.stdout.write(`Credentials saved to ${tokenFilePath}.\n`);
-          } else {
-            process.stdout.write("Credentials saved to the secure credential store.\n");
-          }
+          writeAuthenticatedHumanOutput({
+            accountId,
+            workspaceId,
+            deviceId,
+            userId,
+            tokenFilePath,
+            daemonRefresh,
+          });
         }
         return 0;
       }
@@ -614,33 +911,45 @@ export async function loginCommand(
       throw new Error(result.error ?? "Device authorization failed");
     }
 
-    await restartActiveServiceIfRunning(home, options.fsBridge);
+    const accountId = result.claims.accountId;
+    const workspaceId = result.workspaceId;
+    const deviceId = result.deviceId;
+    const userId = result.claims.userId ?? result.claims.subject;
+    const daemonRefresh = await refreshDaemon({
+      cloudUrl,
+      accountId,
+      workspaceId,
+      deviceId,
+      userId,
+    });
+
+    if (daemonRefresh.status === "failed") {
+      writeAuthenticatedRefreshFailure(Boolean(flags.json), daemonRefresh);
+      return 1;
+    }
 
     if (flags.json) {
       const successPayload: LoginSuccessResult = {
         type: "success",
         success: true,
-        deviceId: result.deviceId,
-        workspaceId: result.workspaceId,
-        accountId: result.claims.accountId,
-        userId: result.claims.userId ?? result.claims.subject,
+        deviceId,
+        workspaceId,
+        accountId,
+        userId,
         storedInSecretStore: result.storedInSecretStore,
         tokenFilePath: result.tokenFilePath,
+        daemonRefresh,
       };
       writeJson(successPayload);
     } else {
-      process.stdout.write("\nAuthenticated successfully.\n");
-      process.stdout.write(`  Account:      ${result.claims.accountId}\n`);
-      process.stdout.write(`  Workspace:    ${result.workspaceId}\n`);
-      process.stdout.write(`  Device ID:    ${result.deviceId}\n`);
-      if (result.claims.userId || result.claims.subject) {
-        process.stdout.write(`  User ID:      ${result.claims.userId ?? result.claims.subject}\n`);
-      }
-      if (result.tokenFilePath) {
-        process.stdout.write(`Credentials saved to ${result.tokenFilePath}.\n`);
-      } else {
-        process.stdout.write("Credentials saved to the secure credential store.\n");
-      }
+      writeAuthenticatedHumanOutput({
+        accountId,
+        workspaceId,
+        deviceId,
+        userId,
+        tokenFilePath: result.tokenFilePath,
+        daemonRefresh,
+      });
     }
     return 0;
   } catch (error: unknown) {

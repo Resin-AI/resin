@@ -74,7 +74,8 @@ resin status
 - `resin login` reuses existing valid credentials by default; use `--force` to initiate a fresh device pairing flow.
 - Interactive login opens the complete verification URL (unless `--no-browser`) and prints the URL + user code (or emits structured JSON in `--json` mode).
 - Non-interactive init requires both an authorization grant (`--auto-approve` or `--capabilities-file`) and a pairing mechanism (valid pre-provisioned `~/.resin/state/device-token.json` or `--local-only`).
-- After `resin login` credential replacement, restart a running daemon so it reloads the token file (`resin init` pairing restarts a running service automatically).
+- Fresh and cached `resin login` automatically restart and verify an installed, running user service. Status/restart/readiness failures exit `1` while preserving credentials; JSON reports `authenticationSucceeded: true` with the failed `daemonRefresh` stage. Follow the remediation and retry login. Absent or inactive services remain untouched.
+- With `RESIN_NO_SERVICE=1`, login reports external management without touching user services. Restart the foreground or externally managed daemon through its own supervisor and check `resin status`; login does not claim external daemon readiness.
 - `resin logout` revokes remotely when possible, then purges the owner-only file and optional ancillary vault. Local MCP continues.
 
 ---
