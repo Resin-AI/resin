@@ -32,6 +32,16 @@
       "types": "./dist/worker/sdk.d.ts",
       "import": "./dist/worker/sdk.js",
       "default": "./dist/worker/sdk.js"
+    },
+    "./bundle/spec": {
+      "types": "./dist/bundle/spec.d.ts",
+      "import": "./dist/bundle/spec.js",
+      "default": "./dist/bundle/spec.js"
+    },
+    "./bundle/builder": {
+      "types": "./dist/bundle/builder.d.ts",
+      "import": "./dist/bundle/builder.js",
+      "default": "./dist/bundle/builder.js"
     }
   },
   "scripts": {

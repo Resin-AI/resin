@@ -31,7 +31,7 @@ describe("@resin/runtime/sdk subpath export and lightweight SDK suite", () => {
   });
 
   describe("package export metadata", () => {
-    it("defines '.' and './sdk' export conditions preserving root barrel and mapping SDK dist files", () => {
+    it("defines lightweight public subpaths alongside the root barrel", () => {
       const pkgJsonPath = path.join(runtimeDir, "package.json");
       const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
 
@@ -47,6 +47,17 @@ describe("@resin/runtime/sdk subpath export and lightweight SDK suite", () => {
         import: "./dist/worker/sdk.js",
         default: "./dist/worker/sdk.js",
       });
+
+      expect(pkgJson.exports["./bundle/spec"]).toEqual({
+        types: "./dist/bundle/spec.d.ts",
+        import: "./dist/bundle/spec.js",
+        default: "./dist/bundle/spec.js",
+      });
+      expect(pkgJson.exports["./bundle/builder"]).toEqual({
+        types: "./dist/bundle/builder.d.ts",
+        import: "./dist/bundle/builder.js",
+        default: "./dist/bundle/builder.js",
+      });
     });
 
     it("verifies target SDK dist files and declarations exist on disk", () => {
@@ -57,6 +68,19 @@ describe("@resin/runtime/sdk subpath export and lightweight SDK suite", () => {
       expect(fs.existsSync(distDts)).toBe(true);
       expect(fs.statSync(distJs).size).toBeGreaterThan(0);
       expect(fs.statSync(distDts).size).toBeGreaterThan(0);
+    });
+  });
+
+  describe("lightweight bundle subpaths", () => {
+    it("resolves bundle schemas and archive utilities without the root barrel", async () => {
+      // Dynamic import intentionally exercises the package export map after build output exists.
+      const spec = await import("@resin/runtime/bundle/spec");
+      const builder = await import("@resin/runtime/bundle/builder");
+
+      expect(spec.BundleSignatureDataSchema).toBeDefined();
+      expect(typeof builder.computeSha256).toBe("function");
+      expect(typeof builder.encodeDeterministicTar).toBe("function");
+      expect(typeof builder.parseTarArchive).toBe("function");
     });
   });
 
