@@ -8703,18 +8703,6 @@ var init_deterministic_command_sequence = __esm({
   }
 });
 
-// packages/contracts/dist/assistant-stop-reason.js
-var ASSISTANT_STOP_REASONS, AssistantStopReasonSchema, AssistantStopReasonCorrectionSchema;
-var init_assistant_stop_reason = __esm({
-  "packages/contracts/dist/assistant-stop-reason.js"() {
-    "use strict";
-    init_zod();
-    ASSISTANT_STOP_REASONS = ["stop", "end_turn", "completed"];
-    AssistantStopReasonSchema = external_exports.enum(ASSISTANT_STOP_REASONS);
-    AssistantStopReasonCorrectionSchema = external_exports.object({ stopReason: AssistantStopReasonSchema }).strict();
-  }
-});
-
 // packages/contracts/dist/tool-link-evidence.js
 function checkCarrierStructure(carrier, ctx) {
   const declared = [...carrier.reads, ...carrier.writes];
@@ -8924,6 +8912,18 @@ var init_tool_link_evidence = __esm({
     }).strict().superRefine((carrier, ctx) => {
       checkCarrierStructure(carrier, ctx);
     });
+  }
+});
+
+// packages/contracts/dist/assistant-stop-reason.js
+var ASSISTANT_STOP_REASONS, AssistantStopReasonSchema, AssistantStopReasonCorrectionSchema;
+var init_assistant_stop_reason = __esm({
+  "packages/contracts/dist/assistant-stop-reason.js"() {
+    "use strict";
+    init_zod();
+    ASSISTANT_STOP_REASONS = ["stop", "end_turn", "completed"];
+    AssistantStopReasonSchema = external_exports.enum(ASSISTANT_STOP_REASONS);
+    AssistantStopReasonCorrectionSchema = external_exports.object({ stopReason: AssistantStopReasonSchema }).strict();
   }
 });
 
@@ -9389,8 +9389,8 @@ var init_dist = __esm({
     init_v1();
     init_computation_evidence();
     init_deterministic_command_sequence();
-    init_assistant_stop_reason();
     init_tool_link_evidence();
+    init_assistant_stop_reason();
     init_recorded_workflow();
     init_program_tokens();
     init_workflow_validation();
