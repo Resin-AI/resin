@@ -170,6 +170,7 @@ export function createLocalWorkflowValidator(
         plan,
         candidates,
         adapters,
+        workspaceId: replayWorkspaceId,
         workspaceDir,
         resolvePrivate: resolveOwned,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),

@@ -17,6 +17,7 @@ import {
   type WorkflowArgument,
   type WorkflowBindingCandidate,
   type WorkflowJsonValue,
+  type WorkflowProgramIdentity,
   type WorkflowStep,
   type WorkflowValuePath,
   type WorkflowValueSource,
@@ -25,6 +26,7 @@ import {
   tokenizeProgram,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
+import { computeWorkflowProgramIdentities } from "./program-identity.js";
 import {
   type RecordedStepOutcome,
   type RecordedWorkflowExecution,
@@ -35,6 +37,8 @@ import {
 
 export interface CandidateValidationEnvironment {
   adapters: RuntimeAdapterRegistry;
+  /** Workspace scope for private-source identity hashing and replay ownership. */
+  workspaceId?: string;
   /** A disposable directory the workflow may write to; it is never the user's project. */
   workspaceDir: string;
   /** Inputs for this replay. */
@@ -70,6 +74,8 @@ export interface WorkflowPlanVerification {
   missed: Array<{ stepId: string; detail: string }>;
   /** Proposals withdrawn because the plan they produced did not reproduce the work. */
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
+  /** Hash-only identities for parameterized programs in the final verified plan. */
+  programIdentities?: WorkflowProgramIdentity[];
 }
 
 export interface CandidateValidationOutcome {
@@ -499,6 +505,7 @@ export async function demonstrationEnvironment(params: {
   plan: RecordedWorkflow;
   candidates: readonly WorkflowBindingCandidate[];
   adapters: RuntimeAdapterRegistry;
+  workspaceId?: string;
   workspaceDir: string;
   resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   timeoutMs?: number;
@@ -556,6 +563,7 @@ export async function demonstrationEnvironment(params: {
   }
   return {
     adapters: params.adapters,
+    workspaceId: params.workspaceId,
     workspaceDir: params.workspaceDir,
     inputs,
     observed,
@@ -686,6 +694,14 @@ export async function confirmPromotedPlan(params: {
     missed: replay.missed,
     dropped,
   };
+  if (verification.status === "verified") {
+    const programIdentities = await computeWorkflowProgramIdentities({
+      plan,
+      workspaceId: params.environment.workspaceId,
+      resolvePrivate: params.environment.resolvePrivate,
+    });
+    if (programIdentities.length > 0) verification.programIdentities = programIdentities;
+  }
   return { accepted, dropped, plan, verification };
 }
 

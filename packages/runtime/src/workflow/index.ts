@@ -11,6 +11,7 @@ export * from "./mcp-connection.js";
 export * from "./tool-protocol-adapter.js";
 export * from "./binding-validation.js";
 export * from "./candidate-promotion.js";
+export * from "./program-identity.js";
 export * from "./compile-recorded-workflow.js";
 export * from "./reference-invocation.js";
 export * from "./agent-tool-session.js";

@@ -26,6 +26,19 @@ import {
   validateRecordedWorkflow,
 } from "./recorded-workflow.js";
 
+/** A privacy-safe identity for one replay-confirmed program template. */
+export interface WorkflowProgramIdentity {
+  stepId: string;
+  argument: string;
+  path: ReadonlyArray<string | number>;
+  /** SHA-256 of the exact applied program template, including its source and holes. */
+  templateDigest: string;
+  /** SHA-256 of the recorded source with confirmed holes replaced by token sentinels. */
+  sourceDigest: string;
+}
+
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
 export const WORKFLOW_VALIDATION_SCHEMA_VERSION = 2 as const;
 
 /** One pending validation, addressed to the workspace whose recording it came from. */
@@ -73,6 +86,8 @@ export interface WorkflowValidationPlanVerification {
   reproduced: string[];
   missed: Array<{ stepId: string; detail: string }>;
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
+  /** Program identities are emitted only when the whole replay was verified. */
+  programIdentities?: WorkflowProgramIdentity[];
 }
 
 /**
@@ -143,11 +158,22 @@ const ProposedBindingSchema = z.union([
   }),
 ]);
 
+const ProgramIdentitySchema = z.object({
+  stepId: NonEmptyString,
+  argument: NonEmptyString,
+  path: WorkflowValuePathSchema,
+  templateDigest: z
+    .string()
+    .regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
+  sourceDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
+});
+
 const PlanVerificationSchema = z.object({
   status: z.enum(["verified", "incomplete", "failed"]),
   reproduced: z.array(z.string()),
   missed: z.array(z.object({ stepId: z.string(), detail: z.string() })),
   dropped: z.array(z.object({ candidate: z.unknown(), reason: z.string() })),
+  programIdentities: z.array(ProgramIdentitySchema).optional(),
 });
 
 const VerdictSchema = z.object({

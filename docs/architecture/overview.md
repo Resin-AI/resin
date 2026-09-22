@@ -130,6 +130,7 @@ The Capability Broker enforces the pre-authorized **Capability Envelope** ([ADR 
 - Mediates all filesystem, network, and subprocess access from tool workers.
 - Restricts filesystem access to authorized workspace roots and prevents access to sensitive files (`.git`, `.env`).
 - Restricts network calls to whitelisted domains and blocks unauthorized shell spawns.
+- After a complete workflow replay verifies, reports hash-only identities for its parameterized programs. Each identity binds the exact applied template and hashes workspace-scoped source with only executable parameter holes substituted; non-parameter code remains significant. Private source is resolved locally and never included in the decision. Missing identities establish no equivalence.
 
 ### 4. Deno Execution Sandbox (`@resin/runtime`)
 Executes tool code in hermetically isolated, pinned Deno worker subprocesses ([ADR 0002](../adr/0002-daemon-and-worker-isolation.md)):
