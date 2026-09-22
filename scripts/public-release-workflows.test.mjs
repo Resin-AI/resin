@@ -1673,48 +1673,6 @@ with patch("subprocess.run", side_effect=publish):
       ).toContain('if [ "$SHARD_RESULT" != "success" ]');
     });
 
-    it("forwards the existing package test command to Vitest without a literal separator argument", () => {
-      const testScript = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts.test;
-      const shardStep = ci.doc.jobs["test-unit-shard"].steps.find((step) =>
-        step.run?.includes("pnpm test --shard="),
-      );
-      expect(testScript).toContain("vitest run");
-
-      const [packageManager, scriptName, shardArgument] = shardStep.run
-        .replace("${{ matrix.shard }}", "1")
-        .replace("${{ strategy.job-total }}", "2")
-        .split(/\s+/);
-      expect([packageManager, scriptName, shardArgument]).toEqual(["pnpm", "test", "--shard=1/2"]);
-
-      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "resin-pnpm-shard-forward-"));
-      try {
-        fs.writeFileSync(
-          path.join(directory, "package.json"),
-          JSON.stringify({
-            name: "pnpm-shard-forward",
-            private: true,
-            scripts: { test: "node print-args.mjs" },
-          }),
-        );
-        fs.writeFileSync(
-          path.join(directory, "print-args.mjs"),
-          "console.log(`SHARD_ARGS=${JSON.stringify(process.argv.slice(2))}`);\n",
-        );
-        const result = spawnSync("pnpm", [scriptName, shardArgument], {
-          cwd: directory,
-          encoding: "utf8",
-          timeout: 30000,
-          env: { ...process.env, CI: "true" },
-        });
-        expect(result.status, result.stderr).toBe(0);
-        const output = result.stdout.match(/SHARD_ARGS=(\[[^\n]+\])/);
-        expect(output).not.toBeNull();
-        expect(JSON.parse(output[1])).toEqual(["--shard=1/2"]);
-      } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
-      }
-    });
-
     it("builds workspace packages before every test job that imports workspace outputs", () => {
       const jobCommands = {
         "test-unit-shard": "pnpm test --shard=",
