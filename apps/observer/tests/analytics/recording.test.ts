@@ -277,7 +277,7 @@ describe("parser-free carried recording", () => {
     expect(carried?.skipped).toMatchObject([{ callId: "malformed-leading" }]);
   });
 
-  it("reports dependencies and binding proposals that point outside the selected graph", () => {
+  it("distinguishes missing recorded dependencies from optional out-of-scope proposals", () => {
     const incomplete: WorkflowCallCarrier = {
       runtime: "resin-tool-protocol",
       name: "incomplete",
@@ -301,6 +301,136 @@ describe("parser-free carried recording", () => {
     expect(carried?.workflow.steps).toHaveLength(1);
     expect(carried?.workflow.steps[0]?.dependsOn).toEqual([]);
     expect(carried?.workflow.candidates).toBeUndefined();
-    expect(carried?.skipped).toMatchObject([{ callId: "incomplete" }, { callId: "incomplete" }]);
+    expect(carried?.skipped).toMatchObject([{ callId: "incomplete" }]);
+    const proposalOnly = recordCarriedCallsFromEvents("proposal-only", [
+      call("incomplete", 1, { ...incomplete, dependsOnCallIds: [] }),
+    ]);
+    expect(proposalOnly?.skipped).toEqual([]);
+    expect(proposalOnly?.workflow.steps[0]?.arguments[0]?.source).toMatchObject({
+      kind: "template",
+      template: { type: "literal", value: "kept" },
+    });
+  });
+  it("preserves nested declared input paths and types in full/carried parity", () => {
+    const nested: WorkflowCallCarrier = {
+      runtime: "resin-invoke-tool",
+      name: "nested",
+      origins: {
+        meta: {
+          type: "object",
+          entries: {
+            tags: {
+              type: "array",
+              items: [
+                { type: "literal", value: "stable" },
+                { type: "input", name: "meta.tags.1" },
+              ],
+            },
+            count: { type: "input", name: "meta.count" },
+          },
+        },
+        ops: {
+          type: "array",
+          items: [
+            {
+              type: "object",
+              entries: { source: { type: "input", name: "ops.0.source" } },
+            },
+          ],
+        },
+      },
+      inputs: [
+        { name: "meta.tags.1", argument: "meta", path: ["tags", 1], type: "string" },
+        { name: "meta.count", argument: "meta", path: ["count"], type: "number" },
+        { name: "ops.0.source", argument: "ops", path: [0, "source"], type: "string" },
+      ],
+      executionIndex: 0,
+    };
+    const events = [call("nested", 1, nested)];
+    const full = recordCallsFromEvents("nested-parity", events);
+    const carried = recordCarriedCallsFromEvents("nested-parity", events);
+
+    expect(carried?.workflow).toEqual(full?.workflow);
+    expect(carried?.workflow.inputs).toEqual([
+      { name: "meta.tags.1", type: "string" },
+      { name: "meta.count", type: "number" },
+      { name: "ops.0.source", type: "string" },
+    ]);
+    const argumentsByName = new Map(
+      carried?.workflow.steps[0]?.arguments.map((argument) => [argument.name, argument]),
+    );
+    expect(argumentsByName.get("meta")?.source).toMatchObject({
+      kind: "template",
+      template: {
+        type: "object",
+        entries: {
+          tags: {
+            type: "array",
+            items: [
+              { type: "literal", value: "stable" },
+              { type: "input", name: "meta.tags.1" },
+            ],
+          },
+          count: { type: "input", name: "meta.count" },
+        },
+      },
+    });
+    expect(argumentsByName.get("ops")?.source).toMatchObject({
+      kind: "template",
+      template: {
+        type: "array",
+        items: [
+          {
+            type: "object",
+            entries: { source: { type: "input", name: "ops.0.source" } },
+          },
+        ],
+      },
+    });
+  });
+
+  it("retargets proposals that exist only on a repeated supporting execution", () => {
+    const { selected, supporting } = recordingEvents();
+    const selectedWithoutProposal = selected.map((event) => {
+      if (event.eventId !== "event-store") return event;
+      const carrier = event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY] as WorkflowCallCarrier;
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          [RESIN_WORKFLOW_CALL_METADATA_KEY]: { ...carrier, candidates: undefined },
+        },
+      };
+    });
+    const carried = recordCarriedCallsFromEvents("repeat-proposal", selectedWithoutProposal, {
+      supportingEvents: supporting,
+    });
+
+    expect(carried?.workflow.candidates).toEqual([
+      {
+        stepId: "step1",
+        argument: "mode",
+        path: [],
+        proposed: { kind: "input", name: "store_mode", type: "string" },
+        reason: "declared-by-the-callable",
+        evidence: { declaredProperties: 1 },
+        missing: "the recording has not replay-confirmed this input",
+      },
+    ]);
+    expect(carried?.skipped).toEqual([]);
+  });
+
+  it("does not let supporting results rewrite selected outcomes or result aliases", () => {
+    const { selected } = recordingEvents();
+    const original = recordCarriedCallsFromEvents("evidence-only", selected);
+    const withSupport = recordCarriedCallsFromEvents("evidence-only", selected, {
+      supportingEvents: [
+        result("store", 99, false, {
+          [RESIN_WORKFLOW_RESULT_METADATA_KEY]: { handle: `ref:${SCOPE}:run` },
+        }),
+      ],
+    });
+    expect(withSupport?.workflow.steps[1]?.observed.outcome).toBe("failed");
+    expect(withSupport?.workflow).toEqual(original?.workflow);
   });
 });

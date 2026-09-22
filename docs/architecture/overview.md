@@ -123,12 +123,14 @@ The Observer passively monitors tool executions, transcript interactions, and pe
 - Generates sanitized observation summaries for the evolution engine.
 - Continuously tracks each session's workflow episodes locally, running the deterministic opportunity engine over metadata-projected events to attest recurring patterns. Proven patterns are queued in a local outbox, deduplicated by structural hash, and dispatched only when projected savings exceed the configured synthesis cost; the evolution kill switch halts detection.
 - Exposes `@resin/observer/recording` for parser-free reconstruction from frozen workflow carriers. `recordCarriedCallsFromEvents` preserves recorded programs, private references, and binding proposals without deriving native source from raw transcripts. Missing carriers are reported as skipped, unknown reference scopes remain unresolved, and proposed bindings are not executable facts.
+- Binding proposals referring outside the selected execution are not retained as parameterization candidates. They do not mark recorded calls as skipped: the original argument remains unchanged. Missing recorded dependencies, unlike optional proposals, still make the capture incomplete.
 
 ### 3. Capability Broker (`@resin/runtime`)
 The Capability Broker enforces the pre-authorized **Capability Envelope** ([ADR 0007](../adr/0007-capability-envelope-and-security.md)):
 - Mediates all filesystem, network, and subprocess access from tool workers.
 - Restricts filesystem access to authorized workspace roots and prevents access to sensitive files (`.git`, `.env`).
 - Restricts network calls to whitelisted domains and blocks unauthorized shell spawns.
+- After a complete workflow replay verifies, reports hash-only identities for its parameterized programs. Each identity binds the exact applied template and hashes workspace-scoped source with only executable parameter holes substituted; non-parameter code remains significant. Private source is resolved locally and never included in the decision. Missing identities establish no equivalence.
 
 ### 4. Deno Execution Sandbox (`@resin/runtime`)
 Executes tool code in hermetically isolated, pinned Deno worker subprocesses ([ADR 0002](../adr/0002-daemon-and-worker-isolation.md)):

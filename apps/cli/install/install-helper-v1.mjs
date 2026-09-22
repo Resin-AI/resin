@@ -9288,13 +9288,14 @@ var init_program_tokens = __esm({
 });
 
 // packages/contracts/dist/workflow-validation.js
-var WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
+var SHA256_HEX, WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ProgramIdentitySchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
 var init_workflow_validation = __esm({
   "packages/contracts/dist/workflow-validation.js"() {
     "use strict";
     init_zod();
     init_canonical();
     init_recorded_workflow();
+    SHA256_HEX = /^[a-f0-9]{64}$/;
     WORKFLOW_VALIDATION_SCHEMA_VERSION = 2;
     NonEmptyString = external_exports.string().min(1);
     WorkflowValuePathSchema = external_exports.array(external_exports.union([external_exports.string(), external_exports.number().int().nonnegative()]));
@@ -9310,11 +9311,19 @@ var init_workflow_validation = __esm({
         type: external_exports.enum(["string", "number", "boolean", "object", "array"])
       })
     ]);
+    ProgramIdentitySchema = external_exports.object({
+      stepId: NonEmptyString,
+      argument: NonEmptyString,
+      path: WorkflowValuePathSchema,
+      templateDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
+      sourceDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters")
+    });
     PlanVerificationSchema = external_exports.object({
       status: external_exports.enum(["verified", "incomplete", "failed"]),
       reproduced: external_exports.array(external_exports.string()),
       missed: external_exports.array(external_exports.object({ stepId: external_exports.string(), detail: external_exports.string() })),
-      dropped: external_exports.array(external_exports.object({ candidate: external_exports.unknown(), reason: external_exports.string() }))
+      dropped: external_exports.array(external_exports.object({ candidate: external_exports.unknown(), reason: external_exports.string() })),
+      programIdentities: external_exports.array(ProgramIdentitySchema).optional()
     });
     VerdictSchema = external_exports.object({
       candidate: external_exports.object({
