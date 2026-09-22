@@ -11,7 +11,7 @@ import {
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
-} from "./workflow-call-recorder.js";
+} from "./workflow-carrier.js";
 import {
   type RecordableEvent,
   type RecordedRecipe,

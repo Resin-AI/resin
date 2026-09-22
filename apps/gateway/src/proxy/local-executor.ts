@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { isBuiltin } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +42,7 @@ import {
   WorkerProcess,
   createInvocationGrant,
   encodeDeterministicTar,
+  inspectArtifactImports,
   instantiateRecordedWorkflow,
   validateBundleEntryPath,
   verifyBundleSignature,
@@ -149,6 +149,14 @@ function checkExecutable(filePath: string): boolean {
   }
 }
 
+function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
+  try {
+    return fs.lstatSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function resolveDenoExecutable(options?: {
   denoExecutable?: string;
   resinHome?: string;
@@ -203,88 +211,193 @@ function findDenoBinary(
   return resolveDenoExecutable(opts) ?? opts?.denoExecutable ?? "deno";
 }
 
-function scanArtifactForBareImports(
+function inspectArtifactSourceGraph(
   entrypointPath: string,
   artifactDir: string,
-): { bareImports: string[]; errors: string[] } {
-  const visitedFiles = new Set<string>();
-  const filesToScan: string[] = [path.resolve(entrypointPath)];
-  const bareImports = new Set<string>();
-  const errors: string[] = [];
+): { passed: boolean; errors: string[] } {
+  const errors = new Set<string>();
+  const rootPath = path.resolve(artifactDir);
+  let rootRealPath: string;
 
-  const resolvedArtifactDir = path.resolve(artifactDir);
-
-  const patterns = [
-    /\b(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?from\s+)['"]([^'"]+)['"]/g,
-    /\bimport\s+['"]([^'"]+)['"]/g,
-    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-  ];
-
-  while (filesToScan.length > 0) {
-    const currentFile = filesToScan.pop()!;
-    if (visitedFiles.has(currentFile)) continue;
-    visitedFiles.add(currentFile);
-
-    if (!fs.existsSync(currentFile)) {
-      continue;
+  try {
+    const rootStat = fs.lstatSync(rootPath);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      return {
+        passed: false,
+        errors: ["Artifact root must be a regular directory; symbolic-link roots are unsupported."],
+      };
     }
-
-    let source = "";
-    try {
-      source = fs.readFileSync(currentFile, "utf8");
-    } catch (err) {
-      errors.push(
-        `Failed to read file '${currentFile}': ${err instanceof Error ? err.message : String(err)}`,
-      );
-      continue;
-    }
-
-    const specifiers = new Set<string>();
-    for (const pat of patterns) {
-      pat.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = pat.exec(source)) !== null) {
-        if (match[1]) {
-          specifiers.add(match[1]);
-        }
-      }
-    }
-
-    for (const spec of specifiers) {
-      const isRelative = spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/");
-      if (isRelative) {
-        const currentDir = path.dirname(currentFile);
-        const resolvedTarget = path.resolve(currentDir, spec);
-        if (
-          resolvedTarget === resolvedArtifactDir ||
-          resolvedTarget.startsWith(resolvedArtifactDir + path.sep)
-        ) {
-          const candidates = [
-            resolvedTarget,
-            `${resolvedTarget}.ts`,
-            `${resolvedTarget}.js`,
-            path.join(resolvedTarget, "index.ts"),
-            path.join(resolvedTarget, "index.js"),
-          ];
-          for (const cand of candidates) {
-            if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
-              if (!visitedFiles.has(cand)) {
-                filesToScan.push(cand);
-              }
-              break;
-            }
-          }
-        }
-      } else {
-        bareImports.add(spec);
-      }
-    }
+    rootRealPath = fs.realpathSync(rootPath);
+  } catch (error) {
+    return {
+      passed: false,
+      errors: [
+        `Failed to inspect artifact root '${rootPath}': ${error instanceof Error ? error.message : String(error)}`,
+      ],
+    };
   }
 
-  return {
-    bareImports: Array.from(bareImports),
-    errors,
+  const isWithinRoot = (candidate: string, root: string): boolean =>
+    candidate === root || candidate.startsWith(`${root}${path.sep}`);
+  const absoluteEntrypoint = path.resolve(entrypointPath);
+  const relativeEntrypoint = path.relative(rootPath, absoluteEntrypoint);
+  if (
+    !relativeEntrypoint ||
+    path.isAbsolute(relativeEntrypoint) ||
+    relativeEntrypoint === ".." ||
+    relativeEntrypoint.startsWith(`..${path.sep}`)
+  ) {
+    return {
+      passed: false,
+      errors: [`Artifact entrypoint '${entrypointPath}' escapes the artifact root.`],
+    };
+  }
+
+  const entrypoint = relativeEntrypoint.split(path.sep).join("/");
+  const files = new Map<string, string>();
+  const maxFiles = DEFAULT_BUNDLE_LIMITS.maxFileCount ?? 1_000;
+  const maxBytes = DEFAULT_BUNDLE_LIMITS.maxBundleSizeBytes ?? 50 * 1024 * 1024;
+  const maxSingleFileBytes = DEFAULT_BUNDLE_LIMITS.maxFileSizeBytes ?? 10 * 1024 * 1024;
+  const maxEntries = Math.max(maxFiles * 2, 1_024);
+  const maxDirectoryDepth = 64;
+  let totalBytes = 0;
+  let entryCount = 0;
+  let traversalLimitError: string | undefined;
+
+  const collectFiles = (currentDir: string, relativeBase: string, depth: number): void => {
+    if (traversalLimitError) return;
+    if (depth > maxDirectoryDepth) {
+      traversalLimitError = `Artifact directory depth exceeds the maximum of ${maxDirectoryDepth}.`;
+      errors.add(traversalLimitError);
+      return;
+    }
+
+    let directory: fs.Dir;
+    try {
+      directory = fs.opendirSync(currentDir);
+    } catch (error) {
+      errors.add(
+        `Failed to read artifact directory '${relativeBase || "."}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+
+    try {
+      while (!traversalLimitError) {
+        const dirent = directory.readSync();
+        if (dirent === null) break;
+        entryCount += 1;
+        if (entryCount > maxEntries) {
+          traversalLimitError = `Artifact directory entries exceed the maximum of ${maxEntries}.`;
+          errors.add(traversalLimitError);
+          break;
+        }
+
+        const fullPath = path.join(currentDir, dirent.name);
+        const relativePath = relativeBase ? `${relativeBase}/${dirent.name}` : dirent.name;
+        try {
+          validateBundleEntryPath(relativePath);
+        } catch (error) {
+          errors.add(
+            `Artifact file '${relativePath}' is not a valid bundle path: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          continue;
+        }
+
+        let stat: fs.Stats;
+        try {
+          stat = fs.lstatSync(fullPath);
+        } catch (error) {
+          errors.add(
+            `Failed to inspect artifact file '${relativePath}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          continue;
+        }
+
+        if (stat.isSymbolicLink()) {
+          errors.add(
+            `Artifact file '${relativePath}' is a symbolic link and cannot be inspected safely.`,
+          );
+          continue;
+        }
+        if (stat.isDirectory()) {
+          let realDirectory: string;
+          try {
+            realDirectory = fs.realpathSync(fullPath);
+          } catch (error) {
+            errors.add(
+              `Failed to resolve artifact directory '${relativePath}': ${error instanceof Error ? error.message : String(error)}`,
+            );
+            continue;
+          }
+          if (!isWithinRoot(realDirectory, rootRealPath)) {
+            errors.add(`Artifact directory '${relativePath}' resolves outside the artifact root.`);
+            continue;
+          }
+          collectFiles(fullPath, relativePath, depth + 1);
+          continue;
+        }
+        if (!stat.isFile()) {
+          errors.add(`Artifact file '${relativePath}' is not a regular file.`);
+          continue;
+        }
+        if (relativePath === ".extracted") continue;
+        if (files.size >= maxFiles) {
+          traversalLimitError = `Artifact contains more than the maximum of ${maxFiles} files.`;
+          errors.add(traversalLimitError);
+          break;
+        }
+        if (stat.size > maxSingleFileBytes || totalBytes + stat.size > maxBytes) {
+          traversalLimitError = "Artifact source files exceed the configured bundle size limits.";
+          errors.add(traversalLimitError);
+          break;
+        }
+
+        let realPath: string;
+        try {
+          realPath = fs.realpathSync(fullPath);
+        } catch (error) {
+          errors.add(
+            `Failed to resolve artifact file '${relativePath}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          continue;
+        }
+        if (!isWithinRoot(realPath, rootRealPath)) {
+          errors.add(`Artifact file '${relativePath}' resolves outside the artifact root.`);
+          continue;
+        }
+
+        try {
+          files.set(relativePath, fs.readFileSync(fullPath, "utf8"));
+        } catch (error) {
+          errors.add(
+            `Failed to read artifact file '${relativePath}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          continue;
+        }
+        totalBytes += stat.size;
+      }
+    } catch (error) {
+      errors.add(
+        `Failed to read artifact directory '${relativeBase || "."}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      try {
+        directory.closeSync();
+      } catch {
+        // Best effort: the original read error is more actionable.
+      }
+    }
   };
+
+  collectFiles(rootPath, "", 0);
+
+  if (errors.size > 0) {
+    return { passed: false, errors: [...errors].sort() };
+  }
+
+  const inspection = inspectArtifactImports({ entrypoint, files });
+  return inspection;
 }
 
 /**
@@ -746,9 +859,9 @@ export class LocalArtifactExecutor {
     // 4. Resolve entrypoint file
     const entrypointTs = path.join(artifactDir, BUNDLE_FILE_ENTRYPOINT_TS);
     const entrypointJs = path.join(artifactDir, BUNDLE_FILE_ENTRYPOINT_JS);
-    const entrypointPath = fs.existsSync(entrypointTs)
+    const entrypointPath = isRegularFileWithoutFollowingSymlink(entrypointTs)
       ? entrypointTs
-      : fs.existsSync(entrypointJs)
+      : isRegularFileWithoutFollowingSymlink(entrypointJs)
         ? entrypointJs
         : undefined;
 
@@ -865,33 +978,15 @@ export class LocalArtifactExecutor {
       }),
     );
 
-    // 7. Validate artifact imports
-    // Fail closed before spawning Deno if the artifact's entry (src/index.ts and any relative imports
-    // under the artifact directory) contains a bare import other than "@resin/runtime".
-    const { bareImports, errors: scanErrors } = scanArtifactForBareImports(
-      entrypointPath,
-      artifactDir,
-    );
-    if (scanErrors.length > 0) {
+    // 7. Validate the complete reachable artifact graph before constructing a worker.
+    const importInspection = inspectArtifactSourceGraph(entrypointPath, artifactDir);
+    if (!importInspection.passed) {
       return {
         isError: true,
         content: [
           {
             type: "text",
-            text: `Failed to inspect artifact imports: ${scanErrors.join("; ")}`,
-          },
-        ],
-      };
-    }
-
-    const offendingImports = bareImports.filter((spec) => spec !== "@resin/runtime");
-    if (offendingImports.length > 0) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Artifact contains unsupported bare import(s): ${offendingImports.join(", ")}. Only '@resin/runtime' is supported.`,
+            text: `Failed to inspect artifact imports: ${importInspection.errors.join("; ")}`,
           },
         ],
       };

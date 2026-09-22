@@ -122,6 +122,7 @@ The Observer passively monitors tool executions, transcript interactions, and pe
 - Runs a multi-stage local redaction pipeline to scrub credentials, private paths, and PII.
 - Generates sanitized observation summaries for the evolution engine.
 - Continuously tracks each session's workflow episodes locally, running the deterministic opportunity engine over metadata-projected events to attest recurring patterns. Proven patterns are queued in a local outbox, deduplicated by structural hash, and dispatched only when projected savings exceed the configured synthesis cost; the evolution kill switch halts detection.
+- Exposes `@resin/observer/recording` for parser-free reconstruction from frozen workflow carriers. `recordCarriedCallsFromEvents` preserves recorded programs, private references, and binding proposals without deriving native source from raw transcripts. Missing carriers are reported as skipped, unknown reference scopes remain unresolved, and proposed bindings are not executable facts.
 
 ### 3. Capability Broker (`@resin/runtime`)
 The Capability Broker enforces the pre-authorized **Capability Envelope** ([ADR 0007](../adr/0007-capability-envelope-and-security.md)):

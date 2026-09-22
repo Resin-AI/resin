@@ -37,6 +37,19 @@ This document specifies the supported scope, platform matrix, resource boundarie
 | **Max Evolution Candidates**| 20 / day | 100 / day | Daily quota for autonomous tool synthesis |
 | **File Read Size** | 10 MB | 50 MB | Maximum single file size a tool may read |
 
+### Generated code imports
+
+Sandboxed code artifacts may import only `@resin/runtime` and bundled relative
+TypeScript/JavaScript modules. Relative imports must name an exact file with its
+extension and remain inside the artifact; extensionless/index fallback resolution,
+symlinks, asset imports, and non-literal dynamic imports are not supported.
+Node built-ins (including `node:crypto`), arbitrary packages, and remote modules
+are rejected before worker execution. Use standard Web Crypto for hashing and
+the capability brokers for host operations; an import-policy failure is not a
+reason to widen sandbox permissions or rewrite a signed artifact.
+CommonJS artifacts (`.cjs` or `package.json` with `"type": "commonjs"`) are
+unsupported; code artifacts must use ES modules.
+
 ---
 
 ## 4. Explicit Non-Goals for V1
