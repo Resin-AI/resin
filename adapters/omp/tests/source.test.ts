@@ -4,7 +4,41 @@ import * as path from "node:path";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { OmpRecordDecoder } from "../src/decoder.js";
-import { OmpSessionEventSource } from "../src/source.js";
+import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.js";
+
+function nativePythonResultPayload(
+  callId: string,
+  output: string | undefined,
+  meta?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "eval",
+      isError: false,
+      details: {
+        cells: [{ language: "python", status: "complete", exitCode: 0, output }],
+        ...(meta === undefined ? {} : { meta }),
+      },
+    },
+  };
+}
+
+function sourceTestSession(transcriptPath: string, sessionId: string): HarnessSession {
+  const timestamp = "2026-09-22T00:00:00.000Z";
+  return {
+    sessionId,
+    workspaceId: "ws-source-tests",
+    harnessId: "omp",
+    transcriptPath,
+    status: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    metadata: {},
+  };
+}
 
 describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
   it("reads batches incrementally and advances cursor accurately", async () => {
@@ -284,6 +318,120 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       expect(records).toHaveLength(2);
       expect(records[0].recordType).toBe("tool_call");
       expect(records[1].recordType).toBe("tool_result");
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers authoritative native Python output while preserving raw record identity", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-python-artifact-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const artifactRoot = path.join(tmpDir, "session");
+      const fullOutput = "authoritative fixture output\n";
+      await fsp.mkdir(artifactRoot);
+      await fsp.writeFile(path.join(artifactRoot, "9517.eval.log"), fullOutput, "utf8");
+      const payload = nativePythonResultPayload("call-native|full", "clipped fixture", {
+        limits: { columnTruncated: { artifactId: "9517" } },
+      });
+      const line = JSON.stringify(payload);
+      await fsp.writeFile(transcriptPath, `${line}\n`, "utf8");
+
+      const source = new OmpSessionEventSource(
+        sourceTestSession(transcriptPath, "source-artifact"),
+      );
+      const initialCursor = source.getCursor();
+      const records = await source.readNext();
+      const record = records[0]!;
+      await source.checkpoint(initialCursor);
+      const replayed = await source.readNext();
+      await source.close();
+
+      expect(records).toHaveLength(1);
+      expect(replayed).toHaveLength(1);
+      expect(replayed[0]).not.toBe(record);
+      expect(record.rawPayload).toBe(line);
+      expect(record.metadata).not.toHaveProperty("result");
+      expect(getOmpProgramObservation(record)).toEqual({
+        callId: "call-native_full",
+        result: fullOutput,
+      });
+      expect(getOmpProgramObservation(replayed[0]!)).toEqual({
+        callId: "call-native_full",
+        result: fullOutput,
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains an untruncated native Python cell as an explicit text-trim observation", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-python-short-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const output = "short fixture output  \n\n";
+      const payload = nativePythonResultPayload("call-native-short", output);
+      await fsp.writeFile(transcriptPath, `${JSON.stringify(payload)}\n`, "utf8");
+
+      const source = new OmpSessionEventSource(sourceTestSession(transcriptPath, "source-short"));
+      const records = await source.readNext();
+      await source.close();
+
+      expect(records).toHaveLength(1);
+      expect(getOmpProgramObservation(records[0]!)).toEqual({
+        callId: "call-native-short",
+        result: output,
+        comparison: "text-trim",
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for missing, hostile, and linked native Python artifact evidence", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-python-hostile-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const artifactRoot = path.join(tmpDir, "session");
+      const outsidePath = path.join(tmpDir, "outside.eval.log");
+      await fsp.mkdir(artifactRoot);
+      await fsp.writeFile(outsidePath, "outside fixture output\n", "utf8");
+      try {
+        await fsp.symlink(outsidePath, path.join(artifactRoot, "1.eval.log"));
+      } catch {
+        // A missing file exercises the same fail-closed branch on platforms without symlinks.
+      }
+      const payloads = [
+        nativePythonResultPayload("call-invalid-ref", "clipped fixture", {
+          limits: { columnTruncated: { artifactId: "../outside" } },
+        }),
+        nativePythonResultPayload("call-linked", "clipped fixture", {
+          limits: { columnTruncated: { artifactId: "1" } },
+        }),
+        nativePythonResultPayload("call-missing", "clipped fixture", {
+          limits: { columnTruncated: { artifactId: "2" } },
+        }),
+        nativePythonResultPayload("call-unknown-trunc", "clipped fixture", {
+          truncation: { artifactId: "1" },
+        }),
+      ];
+      await fsp.writeFile(
+        transcriptPath,
+        `${payloads.map((payload) => JSON.stringify(payload)).join("\n")}\n`,
+        "utf8",
+      );
+
+      const source = new OmpSessionEventSource(sourceTestSession(transcriptPath, "source-hostile"));
+      const records = await source.readNext();
+      await source.close();
+
+      expect(records).toHaveLength(4);
+      expect(records.map((record) => getOmpProgramObservation(record))).toEqual([
+        { callId: "call-invalid-ref", unavailable: true },
+        { callId: "call-linked", unavailable: true },
+        { callId: "call-missing", unavailable: true },
+        { callId: "call-unknown-trunc", unavailable: true },
+      ]);
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

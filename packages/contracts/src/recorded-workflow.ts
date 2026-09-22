@@ -11,6 +11,12 @@
  */
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
+/** Maximum setup cells a captured Python closure may require before it fails closed. */
+export const MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
+/** Maximum UTF-8 bytes for one captured Python source cell. */
+export const MAX_WORKFLOW_PYTHON_SOURCE_BYTES = 262_144;
+/** Maximum UTF-8 bytes for the complete fresh-process Python replay source. */
+export const MAX_WORKFLOW_PYTHON_REPLAY_BYTES = 1_048_576;
 
 /** Values the schema validator accepts without importing a JSON library. */
 export type WorkflowJsonValue =
@@ -68,6 +74,33 @@ export type WorkflowValueSource =
   | { kind: "template"; template: WorkflowValueTemplate };
 
 /**
+ * A successful Python cell captured in the same persistent kernel interval as a target program.
+ *
+ * The source itself never crosses the recording boundary: `reference` is resolved by the owning
+ * workspace at replay time. Event identifiers are structural identities used to reject replaying a
+ * workflow call twice; they are not source names or executable metadata.
+ */
+export type WorkflowPythonStateSetup = {
+  callId: string;
+  sourceEventId: string;
+  resultEventId: string;
+  reference: string;
+};
+
+/**
+ * The bounded closure facts needed to replay a Python program in a fresh disposable process.
+ *
+ * `unresolved` is retained in the wire vocabulary so an observer can explain why a candidate was
+ * not closed; executable consumers reject it rather than guessing ambient session state.
+ */
+export type WorkflowPythonState = {
+  schemaVersion: 1;
+  status: "closed" | "unresolved";
+  unresolvedReadCount: number;
+  setup: WorkflowPythonStateSetup[];
+};
+
+/**
  * A program the recording actually executed, preserved verbatim.
  *
  * The program is the executable artifact: it is never split, re-parsed, re-quoted or reduced to a
@@ -86,6 +119,11 @@ export type WorkflowRecordedProgram = {
   argument?: string;
   /** Working directory the program ran in, when the record identifies one. */
   cwd?: string;
+  /**
+   * Private closure metadata for Python programs captured from a persistent kernel interval.
+   * It contains only local reference identities; setup source is resolved at replay time.
+   */
+  pythonState?: WorkflowPythonState;
 };
 
 /** How a step is called again: the original callable and the connection it was reached through. */
@@ -190,6 +228,9 @@ export type WorkflowStepFailurePolicy = {
   policy: "recorded" | "default";
 };
 
+/** What an observed demonstration result may project before comparison. */
+export type WorkflowObservedComparison = "text-trim";
+
 /** What the recording observed about this step's execution, for diagnostics only. */
 export type WorkflowStepObservation = {
   outcome: "succeeded" | "failed" | "unknown";
@@ -223,7 +264,12 @@ export type WorkflowHeldOutDemonstration = {
   /** The inputs the demonstration used, at the argument each one landed in. */
   inputs: Array<{ stepId: string; argument: string; reference: string }>;
   /** What each step of the demonstration produced. */
-  observed: Array<{ stepId: string; reference: string }>;
+  observed: Array<{
+    stepId: string;
+    reference: string;
+    /** An explicit projection for textual output whose trailing whitespace is incidental. */
+    comparison?: WorkflowObservedComparison;
+  }>;
 };
 
 export type RecordedWorkflow = {
@@ -245,6 +291,12 @@ export type RecordedWorkflow = {
    */
   candidates?: WorkflowBindingCandidate[];
   /**
+   * The original execution's inputs and outputs, retained locally for a zero-candidate baseline
+   * replay. It is separate from `heldOut`: this record can prove the captured plan ran in a fresh
+   * process without becoming evidence for promoting any candidate.
+   */
+  baseline?: WorkflowHeldOutDemonstration;
+  /**
    * A second execution of the same work, kept locally by reference. It is what makes a candidate
    * decidable without anyone supplying inputs or expectations by hand: the replay runs the plan on
    * the demonstration's inputs and compares each step with what that execution actually produced.
@@ -262,6 +314,237 @@ function isJsonValue(value: unknown): value is WorkflowJsonValue {
   if (Array.isArray(value)) return value.every(isJsonValue);
   if (isPlainObject(value)) return Object.values(value).every(isJsonValue);
   return false;
+}
+const PYTHON_STATE_KEYS = ["schemaVersion", "status", "unresolvedReadCount", "setup"] as const;
+const PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "reference"] as const;
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+export function validateWorkflowPythonState(
+  program: { kind?: unknown; pythonState?: unknown },
+  stepId: string,
+  targetCallId: string | undefined,
+  workflowCallIds: ReadonlySet<string>,
+  declaredPrivates: ReadonlySet<string> | undefined,
+  errors: string[],
+): void {
+  const state = program.pythonState;
+  if (state === undefined) return;
+  if (program.kind !== "python") {
+    errors.push(`step ${stepId} has pythonState on a non-Python program`);
+    return;
+  }
+  if (!isPlainObject(state)) {
+    errors.push(`step ${stepId} pythonState must be an object`);
+    return;
+  }
+  if (!hasOnlyKeys(state, PYTHON_STATE_KEYS)) {
+    errors.push(`step ${stepId} pythonState contains unsupported metadata`);
+  }
+  if (state.schemaVersion !== 1) {
+    errors.push(`step ${stepId} pythonState has an unsupported schemaVersion`);
+  }
+  if (state.status !== "closed" && state.status !== "unresolved") {
+    errors.push(`step ${stepId} pythonState needs a closed or unresolved status`);
+  }
+  if (
+    typeof state.unresolvedReadCount !== "number" ||
+    !Number.isInteger(state.unresolvedReadCount) ||
+    state.unresolvedReadCount < 0
+  ) {
+    errors.push(`step ${stepId} pythonState.unresolvedReadCount must be a non-negative integer`);
+  } else if (state.status === "closed" && state.unresolvedReadCount !== 0) {
+    errors.push(`step ${stepId} closed pythonState cannot have unresolved reads`);
+  }
+  if (state.status === "unresolved") {
+    errors.push(`step ${stepId} pythonState is unresolved`);
+  }
+  if (!Array.isArray(state.setup)) {
+    errors.push(`step ${stepId} pythonState.setup must be an array`);
+    return;
+  }
+  if (state.setup.length > MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
+    errors.push(
+      `step ${stepId} pythonState.setup exceeds ${MAX_WORKFLOW_PYTHON_SETUP_CELLS} cells`,
+    );
+  }
+  const callIds = new Set<string>();
+  const sourceEventIds = new Set<string>();
+  const resultEventIds = new Set<string>();
+  const descriptorIds = new Set<string>();
+  const references = new Set<string>();
+  for (const [index, descriptor] of state.setup.entries()) {
+    const where = `step ${stepId} pythonState.setup[${index}]`;
+    if (!isPlainObject(descriptor)) {
+      errors.push(`${where} must be an object`);
+      continue;
+    }
+    if (!hasOnlyKeys(descriptor, PYTHON_SETUP_KEYS)) {
+      errors.push(`${where} contains unsupported metadata`);
+    }
+    const fields: Array<keyof WorkflowPythonStateSetup> = [
+      "callId",
+      "sourceEventId",
+      "resultEventId",
+      "reference",
+    ];
+    for (const field of fields) {
+      if (typeof descriptor[field] !== "string" || descriptor[field].length === 0) {
+        errors.push(`${where}.${field} must be a non-empty string`);
+      }
+    }
+    const callId = typeof descriptor.callId === "string" ? descriptor.callId : undefined;
+    const sourceEventId =
+      typeof descriptor.sourceEventId === "string" ? descriptor.sourceEventId : undefined;
+    const resultEventId =
+      typeof descriptor.resultEventId === "string" ? descriptor.resultEventId : undefined;
+    for (const id of [callId, sourceEventId, resultEventId]) {
+      if (id === undefined) continue;
+      if (descriptorIds.has(id)) errors.push(`${where} duplicates descriptor identity ${id}`);
+      descriptorIds.add(id);
+      if (targetCallId !== undefined && id === targetCallId) {
+        errors.push(`${where} references its target callId ${id}`);
+      }
+    }
+    const reference = typeof descriptor.reference === "string" ? descriptor.reference : undefined;
+    if (callId !== undefined) {
+      if (callIds.has(callId)) errors.push(`${where} duplicates callId ${callId}`);
+      callIds.add(callId);
+      if (workflowCallIds.has(callId)) {
+        errors.push(`${where} overlaps workflow callId ${callId}`);
+      }
+    }
+    if (sourceEventId !== undefined) {
+      if (sourceEventIds.has(sourceEventId)) {
+        errors.push(`${where} duplicates sourceEventId ${sourceEventId}`);
+      }
+      sourceEventIds.add(sourceEventId);
+    }
+    if (resultEventId !== undefined) {
+      if (resultEventIds.has(resultEventId)) {
+        errors.push(`${where} duplicates resultEventId ${resultEventId}`);
+      }
+      resultEventIds.add(resultEventId);
+    }
+    if (
+      callId !== undefined &&
+      ((sourceEventId !== undefined && callId === sourceEventId) ||
+        (resultEventId !== undefined && callId === resultEventId))
+    ) {
+      errors.push(`${where} self-references its own call event`);
+    }
+    if (
+      sourceEventId !== undefined &&
+      resultEventId !== undefined &&
+      sourceEventId === resultEventId
+    ) {
+      errors.push(`${where} uses the same source and result event`);
+    }
+    if (reference !== undefined) {
+      if (references.has(reference)) errors.push(`${where} duplicates reference ${reference}`);
+      references.add(reference);
+      if (declaredPrivates !== undefined && !declaredPrivates.has(reference)) {
+        errors.push(`${where} reads undeclared private reference '${reference}'`);
+      }
+    }
+  }
+}
+
+function validateDemonstration(
+  label: "heldOut" | "baseline",
+  demonstration: unknown,
+  order: ReadonlyMap<string, number>,
+  declaredPrivates: ReadonlySet<string>,
+  errors: string[],
+): void {
+  if (!isPlainObject(demonstration)) {
+    errors.push(`${label} must be an object when present`);
+    return;
+  }
+  const entries: ReadonlyArray<readonly [string, unknown]> = [
+    ["inputs", demonstration.inputs],
+    ["observed", demonstration.observed],
+  ];
+  for (const [entryLabel, list] of entries) {
+    if (!Array.isArray(list)) {
+      errors.push(`${label}.${entryLabel} must be an array`);
+      continue;
+    }
+    for (const entry of list) {
+      if (!isPlainObject(entry)) {
+        errors.push(`every ${label}.${entryLabel} entry must be an object`);
+        continue;
+      }
+      if (
+        entryLabel === "observed" &&
+        entry.comparison !== undefined &&
+        entry.comparison !== "text-trim"
+      ) {
+        errors.push(
+          `${label}.observed entry for step ${String(entry.stepId)} has unsupported comparison ${String(entry.comparison)}`,
+        );
+      }
+      if (!order.has(String(entry.stepId))) {
+        errors.push(
+          `every ${label}.${entryLabel} entry names unknown step ${String(entry.stepId)}`,
+        );
+      }
+      if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
+        errors.push(
+          `${label}.${entryLabel} reads undeclared local reference ${String(entry.reference)}`,
+        );
+      }
+      if (entryLabel === "inputs" && typeof entry.argument !== "string") {
+        errors.push(`every ${label}.inputs entry needs the argument it was supplied for`);
+      }
+    }
+  }
+}
+
+/**
+ * Collects all local references an executable workflow may resolve.
+ *
+ * The result is metadata only: it contains opaque reference identities, never resolved values or
+ * Python source. Keeping this traversal in the shared contract prevents compiler/runtime callers
+ * from forgetting closure setup or baseline evidence when calculating required private resources.
+ */
+export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): string[] {
+  const references = new Set<string>(workflow.privateReferences ?? []);
+  const walkTemplate = (template: WorkflowValueTemplate): void => {
+    switch (template.type) {
+      case "private":
+        references.add(template.reference);
+        return;
+      case "object":
+        for (const entry of Object.values(template.entries)) walkTemplate(entry);
+        return;
+      case "array":
+        for (const entry of template.items) walkTemplate(entry);
+        return;
+      case "program":
+        walkTemplate(template.source);
+        for (const hole of template.holes) walkTemplate(hole.binding);
+        return;
+      default:
+        return;
+    }
+  };
+  for (const step of workflow.steps) {
+    for (const argument of step.arguments) {
+      if (argument.source.kind === "private") references.add(argument.source.reference);
+      if (argument.source.kind === "template") walkTemplate(argument.source.template);
+    }
+    const state = step.callable.program?.pythonState;
+    for (const descriptor of state?.setup ?? []) references.add(descriptor.reference);
+  }
+  for (const demonstration of [workflow.baseline, workflow.heldOut]) {
+    if (demonstration === undefined) continue;
+    for (const entry of demonstration.inputs) references.add(entry.reference);
+    for (const entry of demonstration.observed) references.add(entry.reference);
+  }
+  return [...references];
 }
 
 /**
@@ -323,6 +606,12 @@ export function validateRecordedWorkflow(value: unknown): {
   }
   const steps = Array.isArray(value.steps) ? value.steps : null;
   if (!steps || steps.length === 0) errors.push("steps must be a non-empty array");
+  const workflowCallIds = new Set<string>();
+  for (const step of steps ?? []) {
+    if (isPlainObject(step) && typeof step.callId === "string" && step.callId.length > 0) {
+      workflowCallIds.add(step.callId);
+    }
+  }
   const stepIds = new Set<string>();
   for (const step of steps ?? []) {
     if (!isPlainObject(step) || typeof step.id !== "string" || step.id.length === 0) {
@@ -578,6 +867,15 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`,
         );
+      } else {
+        validateWorkflowPythonState(
+          program,
+          step.id,
+          typeof step.callId === "string" ? step.callId : undefined,
+          workflowCallIds,
+          declaredPrivates,
+          errors,
+        );
       }
     }
   }
@@ -649,40 +947,12 @@ export function validateRecordedWorkflow(value: unknown): {
       }
     }
   }
-  // The demonstration addresses real steps, and every value in it is a declared local reference.
-  const heldOut = value.heldOut;
-  if (heldOut !== undefined) {
-    if (!isPlainObject(heldOut)) {
-      errors.push("heldOut must be an object when present");
-    } else {
-      const entries: ReadonlyArray<readonly [string, unknown]> = [
-        ["inputs", heldOut.inputs],
-        ["observed", heldOut.observed],
-      ];
-      for (const [label, list] of entries) {
-        if (!Array.isArray(list)) {
-          errors.push(`heldOut.${label} must be an array`);
-          continue;
-        }
-        for (const entry of list) {
-          if (!isPlainObject(entry)) {
-            errors.push(`every heldOut.${label} entry must be an object`);
-            continue;
-          }
-          if (!order.has(String(entry.stepId))) {
-            errors.push(`heldOut.${label} names unknown step ${String(entry.stepId)}`);
-          }
-          if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
-            errors.push(
-              `heldOut.${label} reads undeclared local reference ${String(entry.reference)}`,
-            );
-          }
-          if (label === "inputs" && typeof entry.argument !== "string") {
-            errors.push("every heldOut.inputs entry needs the argument it was supplied for");
-          }
-        }
-      }
-    }
+  // Demonstration references and baseline references are local only; neither carries values.
+  if (value.baseline !== undefined) {
+    validateDemonstration("baseline", value.baseline, order, declaredPrivates, errors);
+  }
+  if (value.heldOut !== undefined) {
+    validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
   }
   return { valid: errors.length === 0, errors };
 }

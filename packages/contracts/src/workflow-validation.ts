@@ -80,6 +80,13 @@ export interface WorkflowValidationVerdict {
   reason?: string;
 }
 
+/** Proof that a plan was replayed once in a fresh disposable process. */
+export interface WorkflowValidationReplayProof {
+  kind: "fresh-process";
+  /** The exact plan digest that the replay executed. */
+  planDigest: string;
+}
+
 /** What replaying the plan as a whole concluded, as the runtime that ran it reported it. */
 export interface WorkflowValidationPlanVerification {
   status: "verified" | "incomplete" | "failed";
@@ -88,6 +95,8 @@ export interface WorkflowValidationPlanVerification {
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   /** Program identities are emitted only when the whole replay was verified. */
   programIdentities?: WorkflowProgramIdentity[];
+  /** Fresh-process proof is optional for old decisions and required by cloud publication gates. */
+  replay?: WorkflowValidationReplayProof;
 }
 
 /**
@@ -168,12 +177,18 @@ const ProgramIdentitySchema = z.object({
   sourceDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
 });
 
+const ReplayProofSchema = z.object({
+  kind: z.literal("fresh-process"),
+  planDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
+});
+
 const PlanVerificationSchema = z.object({
   status: z.enum(["verified", "incomplete", "failed"]),
   reproduced: z.array(z.string()),
   missed: z.array(z.object({ stepId: z.string(), detail: z.string() })),
   dropped: z.array(z.object({ candidate: z.unknown(), reason: z.string() })),
   programIdentities: z.array(ProgramIdentitySchema).optional(),
+  replay: ReplayProofSchema.optional(),
 });
 
 const VerdictSchema = z.object({

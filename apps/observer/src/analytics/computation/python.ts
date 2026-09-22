@@ -119,6 +119,24 @@ const PY_EXPRESSION_NAMES: Readonly<Record<string, true>> = {
   YieldExpression: true,
 };
 
+/** Methods whose receiver mutation cannot be replayed from a name-only closure safely. */
+const PYTHON_MUTATING_METHODS: Readonly<Record<string, true>> = {
+  add: true,
+  append: true,
+  clear: true,
+  discard: true,
+  difference_update: true,
+  extend: true,
+  insert: true,
+  pop: true,
+  remove: true,
+  reverse: true,
+  setdefault: true,
+  sort: true,
+  symmetric_difference_update: true,
+  update: true,
+};
+
 function pyChildren(node: PyNode): PyNode[] {
   const children: PyNode[] = [];
   for (let child = node.firstChild; child !== null; child = child.nextSibling) {
@@ -304,6 +322,7 @@ class PythonFrameAnalyzer {
   private readonly helperDefinitions = new Map<string, PendingDefinition>();
   private readonly helperTargetStack: { name: string; definition: PendingDefinition }[] = [];
   private readonly importBindings = new Map<string, PyImportBinding>();
+  private readonly authoredImportNames = new Set<string>();
   private readonly shadowFrames: Map<string, DraftSymbol>[] = [];
   private readonly definitionStack: PendingDefinition[] = [];
   private readonly authoredReads = new Set<DraftSymbol>();
@@ -314,7 +333,12 @@ class PythonFrameAnalyzer {
   private readonly localImports: { names: string[]; source: string }[] = [];
   private readonly referencedNames: string[] = [];
   private readonly referencedNameSet = new Set<string>();
+  /** Private names needed to replay this frame's module-level closure. */
+  private readonly requiredNames: string[] = [];
+  private readonly requiredNameSet = new Set<string>();
   private readonly writtenNames: string[] = [];
+  /** Module-level writes emitted in source order, used to distinguish prior reads from declarations. */
+  private readonly emittedModuleWrites = new Set<string>();
   private readonly writtenNameSet = new Set<string>();
   private readonly outputs: PyOutput[] = [];
 
@@ -448,6 +472,7 @@ class PythonFrameAnalyzer {
         imports: this.localImports,
         invalidatesState: this.invalidatesState,
         referencedNames: this.referencedNames,
+        requiredNames: this.requiredNames,
         writtenNames: this.writtenNames,
       },
       program: built.program,
@@ -500,6 +525,7 @@ class PythonFrameAnalyzer {
         imports: [],
         invalidatesState: true,
         referencedNames: [],
+        requiredNames: [],
         writtenNames: [],
       },
       program: built.program,
@@ -646,6 +672,13 @@ class PythonFrameAnalyzer {
 
   private collectAuthoredReports(): void {
     for (const statement of pyChildren(this.tree.topNode)) {
+      if (statement.name === "ImportStatement") {
+        const parsed = parsePythonImportText(this.text(statement));
+        if (parsed !== undefined) {
+          for (const name of parsed.names) this.authoredImportNames.add(name);
+        }
+        continue;
+      }
       if (statement.name !== "FunctionDefinition") {
         continue;
       }
@@ -1009,23 +1042,85 @@ class PythonFrameAnalyzer {
     }
     return false;
   }
-
+  private isReadOnlyOpenCall(node: PyNode): boolean {
+    const children = pyChildren(node);
+    const callee = children[0];
+    if (callee?.name !== "VariableName" || this.text(callee) !== "open") {
+      return false;
+    }
+    const argList = children.find((child) => child.name === "ArgList");
+    return argList !== undefined && this.openModeIsReadOnly(argList);
+  }
   private detectStateMutation(): void {
-    const visit = (node: PyNode): void => {
+    const writesSeen = new Set<string>();
+    const baseNameOf = (node: PyNode): string | undefined => {
+      if (node.name === "VariableName") return this.text(node);
+      return pyChildren(node)
+        .map((child) => baseNameOf(child))
+        .find((name): name is string => name !== undefined);
+    };
+    const visit = (node: PyNode, functionDepth: number): void => {
       if (node.name === "DeleteStatement" || node.name === "ScopeStatement") {
         this.invalidatesState = true;
       }
-      if (node.name === "CallExpression") {
-        const callee = pyChildren(node)[0];
-        if (callee?.name === "VariableName" && isPythonNamespaceMutatorName(this.text(callee))) {
-          this.invalidatesState = true;
+      if (
+        functionDepth === 0 &&
+        (node.name === "AssignStatement" || node.name === "UpdateStatement")
+      ) {
+        // A member/subscript write mutates an object whose complete prior state is not represented
+        // by this cell. A write to a name introduced earlier in this cell is local state instead.
+        for (const target of this.assignmentTargetsOf(node)) {
+          if (target.name === "VariableName") {
+            const name = this.text(target);
+            if (node.name === "UpdateStatement" && !writesSeen.has(name)) {
+              this.invalidatesState = true;
+            }
+            writesSeen.add(name);
+            continue;
+          }
+          if (target.name !== "MemberExpression" || !writesSeen.has(baseNameOf(target) ?? "")) {
+            this.invalidatesState = true;
+          }
         }
       }
+      if (node.name === "CallExpression") {
+        const children = pyChildren(node);
+        const callee = children[0];
+        if (functionDepth === 0 && callee?.name === "VariableName") {
+          const name = this.text(callee);
+          if (isPythonNamespaceMutatorName(name)) {
+            this.invalidatesState = true;
+          } else if (
+            !isPythonReflectionName(name) &&
+            pythonBuiltinApi(name) === undefined &&
+            pythonConstructorApi(name) === undefined &&
+            !this.isReadOnlyOpenCall(node) &&
+            !this.importBindings.has(name) &&
+            !this.authoredImportNames.has(name) &&
+            !this.moduleScope.defs.has(name) &&
+            !(this.context?.definitions ?? []).some((entry) => entry.name === name)
+          ) {
+            // A dynamically resolved callable may mutate interpreter state. It is not enough to
+            // keep the surrounding source: without a qualified observed definition this cell cannot
+            // safely seed future setup.
+            this.invalidatesState = true;
+          }
+        }
+        if (functionDepth === 0 && callee?.name === "MemberExpression") {
+          const property = pyChildren(callee).find((child) => child.name === "PropertyName");
+          if (property !== undefined && PYTHON_MUTATING_METHODS[this.text(property)] === true) {
+            this.invalidatesState = true;
+          }
+        }
+      }
+      const childFunctionDepth =
+        functionDepth +
+        (node.name === "FunctionDefinition" || node.name === "LambdaExpression" ? 1 : 0);
       for (const child of pyChildren(node)) {
-        visit(child);
+        visit(child, childFunctionDepth);
       }
     };
-    visit(this.tree.topNode);
+    visit(this.tree.topNode, 0);
   }
 
   // --------------------------------------------------------------------------
@@ -1237,6 +1332,7 @@ class PythonFrameAnalyzer {
     if (definition === undefined) {
       return this.unsupported("unsupported_construct");
     }
+    this.noteModuleWrite(definition.name, scope);
     const innerScope: PyScope =
       definition.scopeRef ??
       ({
@@ -1387,6 +1483,7 @@ class PythonFrameAnalyzer {
     }
     if (!forceTupleTarget && targets.length === 1 && targets[0].name === "VariableName") {
       const name = this.text(targets[0]);
+      this.noteModuleWrite(name, scope);
       const existing = this.lookupLocal(name, scope);
       if (existing !== undefined) {
         this.updatePathBinding(existing, value);
@@ -1428,6 +1525,7 @@ class PythonFrameAnalyzer {
   private emitDestructuringTarget(target: PyNode, scope: PyScope): DraftNode {
     if (target.name === "VariableName") {
       const name = this.text(target);
+      this.noteModuleWrite(name, scope);
       const symbol = scope.locals.get(name) ?? this.createLocal(name, scope);
       return this.node("declare", [], { declKind: "local", symbol });
     }
@@ -1465,7 +1563,18 @@ class PythonFrameAnalyzer {
       return this.unsupported("unsupported_operator");
     }
     const target = children[0];
+    if (
+      target?.name === "VariableName" &&
+      this.frameId === 0 &&
+      scope.kind === "module" &&
+      !this.emittedModuleWrites.has(this.text(target))
+    ) {
+      this.recordRequiredName(this.text(target));
+    }
     const value = this.emitExpressionList(children.slice(operatorIndex + 1), scope);
+    if (target?.name === "VariableName") {
+      this.noteModuleWrite(this.text(target), scope);
+    }
     const targetDraft =
       target.name === "VariableName"
         ? this.identifier(
@@ -1697,6 +1806,7 @@ class PythonFrameAnalyzer {
     const iterables = header
       .slice(inIndex + 1)
       .filter((child) => PY_STRUCTURAL_TOKENS[child.name] !== true && child.name !== "*");
+    const iterableNode = this.emitExpressionList(iterables, scope);
     const target =
       targets.length === 1
         ? this.emitLoopTarget(targets[0], scope)
@@ -1708,16 +1818,13 @@ class PythonFrameAnalyzer {
     if (header.some((child) => child.name === "async")) {
       fields.async = true;
     }
-    return this.node(
-      "for",
-      [target, this.emitExpressionList(iterables, scope), this.emitBody(body, scope)],
-      fields,
-    );
+    return this.node("for", [target, iterableNode, this.emitBody(body, scope)], fields);
   }
 
   private emitLoopTarget(target: PyNode, scope: PyScope): DraftNode {
     if (target.name === "VariableName") {
       const name = this.text(target);
+      this.noteModuleWrite(name, scope);
       return this.identifier(this.lookupLocal(name, scope) ?? this.createLocal(name, scope));
     }
     return this.emitDestructuringTarget(target, scope);
@@ -1809,18 +1916,21 @@ class PythonFrameAnalyzer {
       item.resource = child;
     }
     items.push(item);
-    let bodyDraft = this.emitBody(body, scope);
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const entry = items[index];
+    const resources: DraftNode[] = [];
+    for (const entry of items) {
       if (entry.resource === undefined) {
         continue;
       }
       const resource = this.emitExpression(entry.resource, scope);
-      const resourceDraft =
+      resources.push(
         entry.target?.name === "VariableName"
           ? this.bindWithTarget(entry.target, resource, scope)
-          : resource;
-      bodyDraft = this.node("with", [resourceDraft, bodyDraft], {
+          : resource,
+      );
+    }
+    let bodyDraft = this.emitBody(body, scope);
+    for (let index = resources.length - 1; index >= 0; index -= 1) {
+      bodyDraft = this.node("with", [resources[index]!, bodyDraft], {
         withKind: isAsync ? "async_with" : "with",
       });
     }
@@ -1836,6 +1946,7 @@ class PythonFrameAnalyzer {
   private bindWithTarget(target: PyNode, resource: DraftNode, scope: PyScope): DraftNode {
     const name = this.text(target);
     const symbol = this.lookupLocal(name, scope) ?? this.createLocal(name, scope);
+    this.noteModuleWrite(name, scope);
     this.pathValues.delete(symbol);
     if (resource.kind === "call" && resource.fields?.api === "fs.open_read") {
       this.fileHandles.add(symbol);
@@ -1871,6 +1982,7 @@ class PythonFrameAnalyzer {
       const bound = alias ?? dotted.split(".")[0];
       const module = alias === undefined ? dotted.split(".")[0] : dotted;
       this.importBindings.set(bound, { kind: "module", member: module, module });
+      this.noteModuleWrite(bound, this.moduleScope);
       if (this.frameId === 0) {
         this.localImports.push({ names: [bound], source: this.text(statement) });
       }
@@ -1904,6 +2016,7 @@ class PythonFrameAnalyzer {
       const bound = aliasNode?.name === "VariableName" ? this.text(aliasNode) : member;
       names.push(bound);
       this.importBindings.set(bound, { kind: "member", member, module: modulePath });
+      this.noteModuleWrite(bound, this.moduleScope);
     }
     if (this.frameId === 0 && names.length > 0) {
       this.localImports.push({ names, source: this.text(statement) });
@@ -2647,8 +2760,8 @@ class PythonFrameAnalyzer {
     }
     const imported = this.importBindings.get(name);
     if (imported !== undefined) {
-      if (imported.kind === "module") {
-        return { reason: "unsupported_api" };
+      if (!(this.frameId === 0 && scope.kind === "module" && this.emittedModuleWrites.has(name))) {
+        this.recordRequiredName(name);
       }
       if (imported.module === "pathlib" && imported.member === "Path") {
         return { api: "construct.path", construct: true };
@@ -2665,6 +2778,7 @@ class PythonFrameAnalyzer {
     }
     const helper = this.materializeHelperDefinition(name);
     if (helper !== undefined) {
+      this.recordRequiredName(name);
       return { symbol: helper.nameSymbol };
     }
     const constructionApi = pythonConstructorApi(name);
@@ -2675,6 +2789,7 @@ class PythonFrameAnalyzer {
     if (builtin !== undefined) {
       return { api: builtin };
     }
+    this.recordRequiredName(name);
     // An unresolved callable is hidden state: never a guessed API and never a data slot.
     return { reason: "unsupported_hidden_state" };
   }
@@ -2753,6 +2868,9 @@ class PythonFrameAnalyzer {
       if (alias === undefined || alias.kind !== "module") {
         return undefined;
       }
+      if (!(this.frameId === 0 && scope.kind === "module" && this.emittedModuleWrites.has(name))) {
+        this.recordRequiredName(name);
+      }
       return alias.member ?? alias.module;
     }
     if (node.name === "MemberExpression") {
@@ -2767,18 +2885,63 @@ class PythonFrameAnalyzer {
     }
     return undefined;
   }
+  private recordRequiredName(name: string): void {
+    if (
+      name === "__name__" ||
+      name === "__file__" ||
+      Object.hasOwn(PYTHON_TYPE_CONSTANTS, name) ||
+      name === "open" ||
+      pythonBuiltinApi(name) !== undefined ||
+      pythonConstructorApi(name) !== undefined ||
+      isPythonReflectionName(name) ||
+      this.requiredNameSet.has(name)
+    ) {
+      return;
+    }
+    this.requiredNameSet.add(name);
+    this.requiredNames.push(name);
+  }
+
+  private noteModuleWrite(name: string, scope: PyScope): void {
+    if (this.frameId === 0 && scope.kind === "module") {
+      this.emittedModuleWrites.add(name);
+    }
+  }
 
   private emitNameRead(node: PyNode, scope: PyScope): DraftNode {
     const name = this.text(node);
     const bound = this.resolveBoundName(name, scope);
+    const shadowBound =
+      bound !== undefined && this.shadowFrames.some((frame) => frame.get(name) === bound);
+    const imported = this.importBindings.get(name);
+    if (
+      bound === undefined &&
+      imported !== undefined &&
+      this.frameId === 0 &&
+      scope.kind === "module" &&
+      this.emittedModuleWrites.has(name)
+    ) {
+      const local = this.lookupLocal(name, scope) ?? this.createLocal(name, scope);
+      return this.identifier(local);
+    }
     if (bound !== undefined) {
+      if (
+        this.frameId === 0 &&
+        scope.kind === "module" &&
+        !shadowBound &&
+        !this.emittedModuleWrites.has(name)
+      ) {
+        this.recordRequiredName(name);
+      }
       return this.identifier(bound);
     }
+    // Keep the raw spelling only in private bookkeeping. The recorder uses this ordered list to
+    // choose observed setup cells; the canonical program receives an anonymous free-variable slot.
+    this.recordRequiredName(name);
     const helper = this.materializeHelperDefinition(name);
     if (helper !== undefined) {
       return this.identifier(helper.nameSymbol);
     }
-    const imported = this.importBindings.get(name);
     if (imported !== undefined || isPythonReflectionName(name)) {
       return this.unsupported("unsupported_api");
     }

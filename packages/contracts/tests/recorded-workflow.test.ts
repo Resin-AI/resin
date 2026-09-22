@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type RecordedWorkflow, validateRecordedWorkflow } from "../src/recorded-workflow.js";
+import {
+  type RecordedWorkflow,
+  type WorkflowRecordedProgram,
+  collectWorkflowPrivateReferences,
+  validateRecordedWorkflow,
+} from "../src/recorded-workflow.js";
 
 /** fetch -> calculate -> write -> upload: four calls, values flowing through results. */
 function fourCallWorkflow(): RecordedWorkflow {
@@ -252,5 +257,147 @@ describe("recorded workflow validation", () => {
     });
     expect(brokenTemplate.valid).toBe(false);
     expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
+  });
+  it("validates Python closure descriptors and collects baseline references without source metadata", () => {
+    const workflow = fourCallWorkflow();
+    const program: WorkflowRecordedProgram = {
+      kind: "python",
+      source: "print(bump(5))",
+      pythonState: {
+        schemaVersion: 1,
+        status: "closed",
+        unresolvedReadCount: 0,
+        setup: [
+          {
+            callId: "python-setup-call",
+            sourceEventId: "python-setup-source",
+            resultEventId: "python-setup-result",
+            reference: "private:python-setup",
+          },
+        ],
+      },
+    };
+    const closed: RecordedWorkflow = {
+      ...workflow,
+      privateReferences: [
+        ...(workflow.privateReferences ?? []),
+        "private:python-setup",
+        "private:baseline",
+      ],
+      steps: [
+        { ...workflow.steps[0]!, callable: { ...workflow.steps[0]!.callable, program } },
+        ...workflow.steps.slice(1),
+      ],
+      baseline: {
+        inputs: [{ stepId: "fetch", argument: "source", reference: "private:baseline" }],
+        observed: [{ stepId: "fetch", reference: "private:baseline" }],
+      },
+    };
+    expect(validateRecordedWorkflow(closed)).toMatchObject({ valid: true, errors: [] });
+    expect(collectWorkflowPrivateReferences(closed)).toEqual([
+      "secret:storage_token",
+      "private:python-setup",
+      "private:baseline",
+    ]);
+    expect(JSON.stringify(program.pythonState)).not.toContain("bump");
+
+    const unresolved = validateRecordedWorkflow({
+      ...closed,
+      steps: [
+        {
+          ...closed.steps[0]!,
+          callable: {
+            ...closed.steps[0]!.callable,
+            program: {
+              ...program,
+              pythonState: { ...program.pythonState!, status: "unresolved" },
+            },
+          },
+        },
+        ...closed.steps.slice(1),
+      ],
+    });
+    expect(unresolved.valid).toBe(false);
+    expect(unresolved.errors.join("\n")).toContain("unresolved");
+
+    const overlapping = validateRecordedWorkflow({
+      ...closed,
+      steps: [
+        {
+          ...closed.steps[0]!,
+          callable: {
+            ...closed.steps[0]!.callable,
+            program: {
+              ...program,
+              pythonState: {
+                ...program.pythonState!,
+                setup: [{ ...program.pythonState!.setup[0]!, callId: "call_2" }],
+              },
+            },
+          },
+        },
+        ...closed.steps.slice(1),
+      ],
+    });
+    expect(overlapping.valid).toBe(false);
+    expect(overlapping.errors.join("\n")).toContain("overlaps workflow callId");
+
+    const duplicate = validateRecordedWorkflow({
+      ...closed,
+      steps: [
+        {
+          ...closed.steps[0]!,
+          callable: {
+            ...closed.steps[0]!.callable,
+            program: {
+              ...program,
+              pythonState: {
+                ...program.pythonState!,
+                setup: [
+                  ...program.pythonState!.setup,
+                  { ...program.pythonState!.setup[0]!, reference: "private:other" },
+                ],
+              },
+            },
+          },
+        },
+        ...closed.steps.slice(1),
+      ],
+    });
+    expect(duplicate.valid).toBe(false);
+    expect(duplicate.errors.join("\n")).toContain("duplicates callId");
+  });
+  it("accepts explicit observed comparison modes on baseline and held-out evidence", () => {
+    const workflow = fourCallWorkflow();
+    const withComparison: RecordedWorkflow = {
+      ...workflow,
+      privateReferences: [...(workflow.privateReferences ?? []), "private:observed"],
+      baseline: {
+        inputs: [],
+        observed: [{ stepId: "fetch", reference: "private:observed", comparison: "text-trim" }],
+      },
+      heldOut: {
+        inputs: [],
+        observed: [{ stepId: "fetch", reference: "private:observed", comparison: "text-trim" }],
+      },
+    };
+    for (const label of ["baseline", "heldOut"] as const) {
+      const invalid = validateRecordedWorkflow({
+        ...withComparison,
+        [label]: {
+          inputs: [],
+          observed: [
+            {
+              stepId: "fetch",
+              reference: "private:observed",
+              comparison: "unknown-mode",
+            },
+          ],
+        },
+      });
+      expect(invalid.valid).toBe(false);
+      expect(invalid.errors.join("\n")).toContain(`${label}.observed`);
+      expect(invalid.errors.join("\n")).toContain("unsupported comparison");
+    }
   });
 });

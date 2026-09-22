@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { getOmpProgramObservation } from "@resin/adapter-omp";
 import {
   type DeadLetterRecord,
   DeadLetterRecordSchema,
@@ -444,7 +445,22 @@ export class NormalizationPipeline {
     }
 
     // Exact payloads remain local and non-serializable; stored events stay redacted.
-    retainLocalWorkflowPayload(validEvent, payloadFields);
+    let localPayloadOptions:
+      | {
+          resultObservation?: { result: string; comparison?: "text-trim" };
+          suppressResult?: boolean;
+        }
+      | undefined;
+    if (validEvent.type === "tool_result" && originalRawRecord !== undefined) {
+      const nativeObservation = getOmpProgramObservation(originalRawRecord);
+      if (nativeObservation?.callId === validEvent.callId) {
+        localPayloadOptions =
+          "result" in nativeObservation
+            ? { resultObservation: nativeObservation }
+            : { suppressResult: true };
+      }
+    }
+    retainLocalWorkflowPayload(validEvent, payloadFields, localPayloadOptions);
 
     // 6. Update session causal tracking state
     sessionMap.set(causalSequence, validEvent.eventId);

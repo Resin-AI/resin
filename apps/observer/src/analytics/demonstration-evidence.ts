@@ -2,7 +2,11 @@
 export interface DemonstrationSnapshot {
   repeats: number;
   inputs: Array<{ position: number; argument: string; reference: string }>;
-  observed: Array<{ position: number; reference: string }>;
+  observed: Array<{
+    position: number;
+    reference: string;
+    comparison?: "text-trim";
+  }>;
 }
 
 export interface DemonstrationCall {

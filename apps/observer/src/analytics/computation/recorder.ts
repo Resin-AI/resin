@@ -8,17 +8,20 @@ import {
   type ComputationObservationV1,
   type ComputationOriginKind,
   type ComputationProgramV1,
+  MAX_WORKFLOW_PYTHON_SETUP_CELLS,
   type NormalizedCommandExecEvent,
   type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
   type NormalizedToolResultEvent,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   type ResinComputationEvidenceV1,
+  type WorkflowPythonState,
   computeComputationEvidenceDigest,
   computeComputationProgramDigest,
   hashCanonicalContent,
   readComputationEvidence,
 } from "@resin/contracts";
+import { RESIN_WORKFLOW_CALL_METADATA_KEY, readWorkflowCallCarrier } from "../workflow-carrier.js";
 import { parseJavaScriptComputation } from "./javascript.js";
 import { parsePythonComputation } from "./python.js";
 import { extractComputationSourceFrames } from "./source-frames.js";
@@ -44,6 +47,18 @@ function withoutLocalNativeArguments(event: NormalizedSessionEvent): NormalizedS
   const metadata = { ...event.metadata };
   delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
   return { ...event, metadata } as NormalizedSessionEvent;
+}
+function pythonSourceReferenceOf(event: NormalizedSessionEvent): string | undefined {
+  if (event.type !== "tool_call") {
+    return undefined;
+  }
+  const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+  const program = carrier?.program;
+  if (program?.kind !== "python" || program.argument === undefined) {
+    return undefined;
+  }
+  const origin = carrier?.origins[program.argument];
+  return origin?.type === "private" ? origin.reference : undefined;
 }
 
 /**
@@ -86,7 +101,6 @@ const MAX_CONSUMED_CALLS = 4096;
 const MAX_REPLAY_EVENTS = 512;
 /** Dependency/correction entries emitted per carrier (the pinned envelope limits). */
 const MAX_EMITTED_ENTRIES = COMPUTATION_IR_LIMITS.dependencies;
-
 interface CachedDefinition {
   name: string;
   /** Private source text, required to re-resolve this helper for a later cell. */
@@ -95,6 +109,12 @@ interface CachedDefinition {
   references: string[];
   writtenNames: string[];
   sourceEventId: string;
+  /** The original native call that authored this helper, kept private for Python setup closure. */
+  callId?: string;
+  /** Matching successful result event, kept private for Python setup closure. */
+  resultEventId?: string;
+  /** Existing local immutable source reference, never raw source. */
+  sourceReference?: string;
   /** Digest of the evidence program in which this version was observed. */
   programDigest: string;
   bytes: number;
@@ -111,12 +131,33 @@ interface Supersession {
   replacingDigest: string;
 }
 
+/** One successful persistent Python cell, retained only as private closure bookkeeping. */
+interface PythonCell {
+  callId: string;
+  sourceEventId: string;
+  resultEventId: string;
+  sourceReference: string;
+  requiredNames: string[];
+  writtenNames: string[];
+  order: number;
+}
+
+interface PythonKernelState {
+  /** Incremented on reset/uncertain mutation; cells never cross an epoch. */
+  epoch: number;
+  cells: Map<string, PythonCell>;
+  /** Latest successful cell that established each module-level name. */
+  bindings: Map<string, PythonCell>;
+}
+
 interface KernelState {
   /** Current version per helper name; a correction replaces rather than appends. */
   definitions: Map<string, CachedDefinition>;
   /** Recognized imports authored in this kernel, keyed by their normalized source text. */
   imports: Map<string, LocalComputationImport>;
   supersessions: Supersession[];
+  /** Python-only replay bookkeeping; absent for JavaScript/TypeScript kernels. */
+  python?: PythonKernelState;
 }
 
 interface PendingCall {
@@ -132,6 +173,8 @@ interface PendingCall {
   prepared?: PreparedFrame;
   /** Retained frame source bytes this pending call contributes to the session budget. */
   retainedBytes: number;
+  /** Existing local immutable source reference for a Python program argument. */
+  pythonSourceReference?: string;
 }
 
 interface PreparedFrame {
@@ -395,6 +438,10 @@ export class ComputationEvidenceRecorder {
       callSequence: event.causalRef.causalSequence,
       order: this.nextOrder++,
       ...(frame.executionScope === "persistent" ? { language: frame.language } : {}),
+      ...(frame.language === "python" &&
+      (frame.executionScope === "persistent" || frame.executionScope === "isolated")
+        ? { pythonSourceReference: pythonSourceReferenceOf(event) }
+        : {}),
       // The frame source is retained while the call is unresolved; released on settlement.
       retainedBytes: 0,
     };
@@ -430,7 +477,7 @@ export class ComputationEvidenceRecorder {
     if (
       pending === undefined ||
       pending.toolName !== event.toolName ||
-      event.causalRef.causalSequence <= pending.callSequence ||
+      event.causalRef.causalSequence < pending.callSequence ||
       event.eventId === pending.callEventId
     ) {
       return event;
@@ -482,7 +529,13 @@ export class ComputationEvidenceRecorder {
       );
     }
 
-    this.commitFrame(session, prepared, event.eventId);
+    this.commitFrame(
+      session,
+      prepared,
+      event.eventId,
+      pending.callId,
+      pending.pythonSourceReference,
+    );
     return this.attach(
       event,
       prepared,
@@ -499,13 +552,28 @@ export class ComputationEvidenceRecorder {
     dependencies: readonly ComputationDependencyV1[] = [],
     corrections: readonly ComputationCorrectionV1[] = [],
   ): NormalizedSessionEvent {
-    const evidence = this.buildEvidence(prepared, observation, dependencies, corrections);
-    if (evidence === undefined) {
-      return event;
-    }
     const metadata: Record<string, unknown> = { ...(event.metadata ?? {}) };
-    metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = evidence;
-    return { ...event, metadata } as NormalizedSessionEvent;
+    let changed = false;
+    if (event.type === "tool_call" && pythonSourceReferenceOf(event) !== undefined) {
+      const carrier = readWorkflowCallCarrier(metadata[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+      if (carrier?.program?.kind === "python") {
+        const session = this.sessions.get(event.sessionId);
+        if (session !== undefined) {
+          const pythonState = this.pythonStateFor(session, prepared);
+          if (pythonState !== undefined) {
+            carrier.program.pythonState = pythonState;
+            metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = carrier;
+            changed = true;
+          }
+        }
+      }
+    }
+    const evidence = this.buildEvidence(prepared, observation, dependencies, corrections);
+    if (evidence !== undefined) {
+      metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = evidence;
+      changed = true;
+    }
+    return changed ? ({ ...event, metadata } as NormalizedSessionEvent) : event;
   }
 
   // ==========================================================================
@@ -552,7 +620,14 @@ export class ComputationEvidenceRecorder {
   private kernel(session: RecordedSession, language: ComputationLanguage): KernelState {
     let kernel = session.kernels.get(language);
     if (kernel === undefined) {
-      kernel = { definitions: new Map(), imports: new Map(), supersessions: [] };
+      kernel = {
+        definitions: new Map(),
+        imports: new Map(),
+        supersessions: [],
+        ...(language === "python"
+          ? { python: { epoch: 0, cells: new Map(), bindings: new Map() } }
+          : {}),
+      };
       session.kernels.set(language, kernel);
     }
     return kernel;
@@ -836,10 +911,17 @@ export class ComputationEvidenceRecorder {
       return undefined;
     }
     const program = parsed.program;
-    if (program.nodes.length === 0 || program.roots.length === 0) {
+    const local = parsed.local;
+    // Python imports/definitions are lexical kernel state even when the computation visitor emits no
+    // executable IR nodes for the cell. Keep those successful frames so later cells can close over
+    // their bindings; ordinary empty frames remain non-substantive.
+    const lexicalPythonCell =
+      frame.language === "python" &&
+      frame.executionScope === "persistent" &&
+      (local.imports.length > 0 || local.definitions.length > 0 || local.writtenNames.length > 0);
+    if (!lexicalPythonCell && (program.nodes.length === 0 || program.roots.length === 0)) {
       return undefined;
     }
-    const local = parsed.local;
     const observationKind: ComputationObservationKind =
       frame.executionScope === "file_observation" || !local.hasInvocation
         ? "definition"
@@ -878,6 +960,8 @@ export class ComputationEvidenceRecorder {
     session: RecordedSession,
     prepared: PreparedFrame,
     resultEventId: string,
+    callId?: string,
+    sourceReference?: string,
   ): void {
     if (prepared.executionScope === "file_observation") {
       // A written or read body is retained only as an observed file the recorder may later resolve.
@@ -890,24 +974,45 @@ export class ComputationEvidenceRecorder {
       // The interpreter process is gone; its definitions must never be revived later.
       return;
     }
-    this.commitDefinitions(session, prepared, resultEventId);
+    const committed = this.commitDefinitions(
+      session,
+      prepared,
+      resultEventId,
+      callId,
+      sourceReference,
+    );
+    if (
+      committed &&
+      prepared.language === "python" &&
+      callId !== undefined &&
+      sourceReference !== undefined
+    ) {
+      this.commitPythonCell(session, prepared, callId, resultEventId, sourceReference);
+    } else if (prepared.language === "python") {
+      // A source without a private resolver reference cannot safely seed later setup.
+      this.clearPythonState(session, prepared.language);
+    }
   }
 
   private commitDefinitions(
     session: RecordedSession,
     prepared: PreparedFrame,
     sourceEventId: string,
-  ): void {
+    callId?: string,
+    sourceReference?: string,
+  ): boolean {
     const local = prepared.local;
+    const kernel = this.kernel(session, prepared.language);
     if (
       local.invalidatesState ||
-      (prepared.observationKind === "invocation" && !prepared.program.complete)
+      (prepared.language !== "python" &&
+        prepared.observationKind === "invocation" &&
+        !prepared.program.complete)
     ) {
       // Unknown mutation may have changed any binding, even if some definitions were parsed.
       this.resetKernel(session, prepared.language);
-      return;
+      return false;
     }
-    const kernel = this.kernel(session, prepared.language);
     const authored = new Set(local.definitions.map((definition) => definition.name));
     const written = new Set([
       ...local.writtenNames,
@@ -961,6 +1066,9 @@ export class ComputationEvidenceRecorder {
         references: definition.references.map(detachedPrivateText),
         writtenNames: definition.writtenNames.map(detachedPrivateText),
         sourceEventId,
+        ...(callId === undefined ? {} : { callId }),
+        ...(sourceEventId === undefined ? {} : { resultEventId: sourceEventId }),
+        ...(sourceReference === undefined ? {} : { sourceReference }),
         programDigest: digest,
         bytes: 0,
       };
@@ -992,6 +1100,7 @@ export class ComputationEvidenceRecorder {
         if (oldest === undefined) {
           break;
         }
+        this.clearPythonStateForKernel(session, kernel);
         this.dropImport(session, kernel, oldest);
       }
     }
@@ -1000,9 +1109,157 @@ export class ComputationEvidenceRecorder {
       if (oldest === undefined) {
         break;
       }
+      this.clearPythonStateForKernel(session, kernel);
       this.dropDefinition(session, kernel, oldest);
     }
     this.enforceRetention(session);
+    return true;
+  }
+
+  private clearPythonState(session: RecordedSession, language: ComputationLanguage): void {
+    if (language !== "python") return;
+    const kernel = session.kernels.get(language);
+    const python = kernel?.python;
+    if (python === undefined) return;
+    python.epoch += 1;
+    python.cells.clear();
+    python.bindings.clear();
+  }
+  private clearPythonStateForKernel(session: RecordedSession, kernel: KernelState): void {
+    if (session.kernels.get("python") === kernel) {
+      this.clearPythonState(session, "python");
+    }
+  }
+
+  /** Commit one successful, causally matched persistent Python cell to the private state graph. */
+  private commitPythonCell(
+    session: RecordedSession,
+    prepared: PreparedFrame,
+    callId: string,
+    resultEventId: string,
+    sourceReference: string,
+  ): void {
+    if (prepared.language !== "python" || prepared.executionScope !== "persistent") {
+      return;
+    }
+    const kernel = this.kernel(session, "python");
+    const python = kernel.python;
+    if (python === undefined) return;
+    const written = new Set([
+      ...prepared.local.writtenNames,
+      ...prepared.local.imports.flatMap((entry) => entry.names),
+      ...prepared.local.definitions.map((entry) => entry.name),
+    ]);
+    const required =
+      prepared.local.requiredNames === undefined
+        ? prepared.local.referencedNames.filter((name) => !written.has(name))
+        : prepared.local.requiredNames;
+    const cell: PythonCell = {
+      callId,
+      sourceEventId: prepared.sourceEventId,
+      resultEventId,
+      sourceReference,
+      requiredNames: required.map(detachedPrivateText),
+      writtenNames: [...written].map(detachedPrivateText),
+      order: this.nextOrder++,
+    };
+    if (python.cells.size >= MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
+      // Do not leave a partially remembered closure after eviction: old setup cannot be trusted.
+      this.clearPythonState(session, "python");
+    }
+    python.cells.set(callId, cell);
+    for (const name of written) {
+      python.bindings.set(name, cell);
+    }
+  }
+
+  /**
+   * Derive the smallest successful setup closure for one Python frame. This follows parser-reported
+   * scope-aware required names and the latest successful binding for each name; it never replays every
+   * prior cell and never treats a value/result equality as a definition.
+   */
+  private pythonStateFor(
+    session: RecordedSession,
+    prepared: PreparedFrame,
+  ): WorkflowPythonState | undefined {
+    if (prepared.language !== "python" || prepared.executionScope === "file_observation") {
+      return undefined;
+    }
+    const written = new Set([
+      ...prepared.local.writtenNames,
+      ...prepared.local.imports.flatMap((entry) => entry.names),
+      ...prepared.local.definitions.map((entry) => entry.name),
+    ]);
+    const required =
+      prepared.local.requiredNames === undefined
+        ? prepared.local.referencedNames.filter((name) => !written.has(name))
+        : prepared.local.requiredNames;
+    const unresolved = new Set<string>();
+    const selected = new Map<string, PythonCell>();
+    const visiting = new Set<string>();
+    const python =
+      prepared.executionScope === "persistent" ? session.kernels.get("python")?.python : undefined;
+
+    const visitCell = (cell: PythonCell): void => {
+      if (selected.has(cell.callId)) return;
+      if (visiting.has(cell.callId)) {
+        unresolved.add(cell.callId);
+        return;
+      }
+      visiting.add(cell.callId);
+      for (const name of cell.requiredNames) {
+        const dependency = python?.bindings.get(name);
+        if (dependency === undefined) {
+          unresolved.add(name);
+        } else {
+          visitCell(dependency);
+        }
+      }
+      visiting.delete(cell.callId);
+      selected.set(cell.callId, cell);
+    };
+
+    if (prepared.local.invalidatesState) {
+      unresolved.add("opaque_state");
+    } else {
+      for (const name of required) {
+        const cell = python?.bindings.get(name);
+        if (cell === undefined) {
+          unresolved.add(name);
+        } else {
+          visitCell(cell);
+        }
+      }
+    }
+    if (unresolved.size > 0) {
+      return {
+        schemaVersion: 1,
+        status: "unresolved",
+        unresolvedReadCount: unresolved.size,
+        setup: [],
+      };
+    }
+    const selectedCells = [...selected.values()].sort((left, right) => left.order - right.order);
+    if (selectedCells.length > MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
+      return {
+        schemaVersion: 1,
+        status: "unresolved",
+        unresolvedReadCount: 1,
+        setup: [],
+      };
+    }
+    const setup = selectedCells.map((cell) => ({
+      callId: cell.callId,
+      sourceEventId: cell.sourceEventId,
+      resultEventId: cell.resultEventId,
+      reference: cell.sourceReference,
+    }));
+    return {
+      schemaVersion: 1,
+      status: "closed",
+      unresolvedReadCount: 0,
+      setup,
+    };
   }
 
   private dropImport(session: RecordedSession, kernel: KernelState, source: string): void {
@@ -1140,6 +1397,7 @@ export class ComputationEvidenceRecorder {
       }
       const definition = this.oldestDefinition(oldest);
       if (definition !== undefined) {
+        this.clearPythonStateForKernel(oldest, definition.kernel);
         this.dropDefinition(oldest, definition.kernel, definition.name);
         continue;
       }
@@ -1147,6 +1405,7 @@ export class ComputationEvidenceRecorder {
       for (const kernel of oldest.kernels.values()) {
         const source = kernel.imports.keys().next().value;
         if (source !== undefined) {
+          this.clearPythonStateForKernel(oldest, kernel);
           this.dropImport(oldest, kernel, source);
           dropped = true;
           break;

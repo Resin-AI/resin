@@ -27,7 +27,10 @@ import {
   analyzeAgentArguments,
   tokenizeProgram,
 } from "@resin/contracts";
-import { localWorkflowEvent } from "../normalization/local-workflow-payload.js";
+import {
+  localWorkflowEvent,
+  localWorkflowResultObservation,
+} from "../normalization/local-workflow-payload.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { deriveNativeCalls } from "./native-argument-derivation.js";
@@ -82,12 +85,12 @@ interface LocalCall {
   callId: string;
   toolName: string;
   connection?: string;
-  /** Ordinal inside its task, so two tasks can be compared position by position. */
   position: number;
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
   resultReference?: string;
+  resultComparison?: "text-trim";
   reads?: string[];
   writes?: string[];
   /** The callable's discovered input schema, when discovery recorded one. */
@@ -309,7 +312,11 @@ export class WorkflowCallRecorder {
     }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
-      const observed = this.observeResult(original ?? event, event);
+      const observed = this.observeResult(
+        original ?? event,
+        event,
+        localWorkflowResultObservation(event),
+      );
       return { ...event, metadata: observed.metadata };
     }
     return event;
@@ -953,7 +960,10 @@ export class WorkflowCallRecorder {
   private observeResult(
     event: NormalizedSessionEvent,
     publicEvent: NormalizedSessionEvent = event,
+    localResultObservation?: { result: string; comparison?: "text-trim" },
   ): NormalizedSessionEvent {
+    let baselineReference: string | undefined;
+    let baselineComparison: "text-trim" | undefined;
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -962,11 +972,23 @@ export class WorkflowCallRecorder {
         const execution = state.executions[e]!;
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
-        call.result = extractResultValueOf(event.result);
+        call.result = extractResultValueOf(localResultObservation?.result ?? event.result);
+        call.resultComparison = localResultObservation?.comparison;
         call.resultReference =
           call.result === undefined
             ? undefined
-            : this.localReference(call.result, event.sessionId, call.callId, "result");
+            : this.localReference(
+                call.result,
+                event.sessionId,
+                call.callId,
+                localResultObservation === undefined
+                  ? "result"
+                  : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
+              );
+        if (event.isError === false) {
+          baselineReference = call.resultReference;
+          baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
+        }
         // A repeat's own observations are what its results produced, so the demonstration grows
         // here rather than at a call that was recorded before they happened.
         if (execution.accumulatedHeldOut !== undefined && call.resultReference !== undefined) {
@@ -977,6 +999,7 @@ export class WorkflowCallRecorder {
             {
               position: call.position,
               reference: call.resultReference,
+              ...(call.resultComparison === undefined ? {} : { comparison: call.resultComparison }),
             },
           ];
         }
@@ -988,11 +1011,20 @@ export class WorkflowCallRecorder {
       event.type === "tool_result"
         ? this.demonstrationCarrier(event.sessionId, event.callId)
         : undefined;
-    if (handle === undefined && heldOut === undefined) return event;
+    if (
+      handle === undefined &&
+      heldOut === undefined &&
+      baselineReference === undefined &&
+      baselineComparison === undefined
+    ) {
+      return event;
+    }
     const metadata: Record<string, unknown> = { ...(event.metadata ?? {}) };
     metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = {
       ...(handle === undefined ? {} : { handle }),
       ...(heldOut === undefined ? {} : { heldOut }),
+      ...(baselineReference === undefined ? {} : { baselineReference }),
+      ...(baselineComparison === undefined ? {} : { baselineComparison }),
     };
     return { ...event, metadata } as NormalizedSessionEvent;
   }

@@ -2,12 +2,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  RecordedWorkflow,
-  WorkflowArgument,
-  WorkflowJsonValue,
-  WorkflowRecordedProgram,
-  WorkflowStep,
+import {
+  MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
+  MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
+  type RecordedWorkflow,
+  type WorkflowArgument,
+  type WorkflowJsonValue,
+  type WorkflowRecordedProgram,
+  type WorkflowStep,
 } from "@resin/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { type McpToolConnection, connectMcpServer } from "../../src/workflow/mcp-connection.js";
@@ -208,6 +210,280 @@ describe("recorded program adapters", () => {
     // The tool the caller ran answered with text; a replay that returned an object would answer
     // differently from the recording, and would do so only for programs that happen to print JSON.
     expect(value).toBe('{"count": 3, "label": "ok"}\n');
+  });
+
+  it("replays private Python setup cells once in a fresh process and suppresses setup output", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProgramAdapter({ cwd: workspace, isolateEnvironment: true });
+    const sources: Record<string, string> = {
+      "private:python:setup-1":
+        "print('setup-noise')\ncounter = globals().get('counter', 0) + 1\nbase = 7\nexec = 'shadowed-exec'\ncompile = 'shadowed-compile'\nglobals = 'shadowed-globals'",
+      "private:python:setup-2": "def bump(value):\n    return value + base",
+    };
+    const resolved: Array<{ reference: string; workspaceId?: string }> = [];
+    const value = await adapter.call({
+      step: recordedStep({
+        id: "python-closure",
+        runtime: RESIN_PROGRAM_RUNTIME,
+        name: "python-eval",
+        program: {
+          kind: "python",
+          source: "print(counter, bump(5), exec, compile, globals)",
+          pythonState: {
+            schemaVersion: 1,
+            status: "closed",
+            unresolvedReadCount: 0,
+            setup: [
+              {
+                callId: "setup-call-1",
+                sourceEventId: "setup-source-1",
+                resultEventId: "setup-result-1",
+                reference: "private:python:setup-1",
+              },
+              {
+                callId: "setup-call-2",
+                sourceEventId: "setup-source-2",
+                resultEventId: "setup-result-2",
+                reference: "private:python:setup-2",
+              },
+            ],
+          },
+        },
+      }),
+      arguments: {},
+      resolvePrivate: (reference, access) => {
+        resolved.push({
+          reference,
+          ...(access?.workspaceId ? { workspaceId: access.workspaceId } : {}),
+        });
+        return sources[reference]!;
+      },
+      access: { workspaceId: "workspace-python" },
+    });
+
+    expect(value).toBe("1 12 shadowed-exec shadowed-compile shadowed-globals\n");
+    expect(resolved).toEqual([
+      { reference: "private:python:setup-1", workspaceId: "workspace-python" },
+      { reference: "private:python:setup-2", workspaceId: "workspace-python" },
+    ]);
+  });
+
+  it("rejects a closed Python replay when its private setup context is unavailable", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProgramAdapter({ cwd: workspace });
+    await expect(
+      adapter.call({
+        step: recordedStep({
+          id: "python-missing-context",
+          runtime: RESIN_PROGRAM_RUNTIME,
+          name: "python-eval",
+          program: {
+            kind: "python",
+            source: "print(answer)",
+            pythonState: {
+              schemaVersion: 1,
+              status: "closed",
+              unresolvedReadCount: 0,
+              setup: [
+                {
+                  callId: "setup-call",
+                  sourceEventId: "setup-source",
+                  resultEventId: "setup-result",
+                  reference: "private:python:missing",
+                },
+              ],
+            },
+          },
+        }),
+        arguments: {},
+      }),
+    ).rejects.toThrow(/private source resolver/);
+  });
+
+  it("keeps Python setup exceptions and time bounds fail-closed", async () => {
+    const workspace = await makeWorkspace();
+    const setup = {
+      schemaVersion: 1 as const,
+      status: "closed" as const,
+      unresolvedReadCount: 0,
+      setup: [
+        {
+          callId: "setup-call",
+          sourceEventId: "setup-source",
+          resultEventId: "setup-result",
+          reference: "private:python:setup",
+        },
+      ],
+    };
+    const resolve = () => "raise ValueError('setup boom')";
+    const exceptionRun = await runRecordedProgram(
+      { kind: "python", source: "print('never')", pythonState: setup },
+      { cwd: workspace, resolvePrivate: resolve },
+    );
+    expect(exceptionRun.exitCode).not.toBe(0);
+    expect(exceptionRun.stderr).toContain("ValueError");
+
+    await expect(
+      runRecordedProgram(
+        { kind: "python", source: "print('never')", pythonState: setup },
+        { cwd: workspace, timeoutMs: 200, resolvePrivate: () => "while True: pass" },
+      ),
+    ).rejects.toThrow(/200ms/);
+  });
+
+  it("bounds only final Python output after setup output is suppressed", async () => {
+    const workspace = await makeWorkspace();
+    const setup = {
+      schemaVersion: 1 as const,
+      status: "closed" as const,
+      unresolvedReadCount: 0,
+      setup: [
+        {
+          callId: "setup-call-output",
+          sourceEventId: "setup-source-output",
+          resultEventId: "setup-result-output",
+          reference: "private:python:output",
+        },
+      ],
+    };
+    const run = await runRecordedProgram(
+      { kind: "python", source: "print('x' * 30, end='')", pythonState: setup },
+      {
+        cwd: workspace,
+        maxOutputBytes: 12,
+        resolvePrivate: () => "for _ in range(100000): print('setup-noise')",
+      },
+    );
+    expect(run.stdout).toBe("xxxxxx" + "xxxxxx");
+    expect(run.stderr).toContain("stdout truncated");
+  });
+
+  it("transports a large composite Python replay over stdin instead of argv", async () => {
+    const workspace = await makeWorkspace();
+    const setup = {
+      schemaVersion: 1 as const,
+      status: "closed" as const,
+      unresolvedReadCount: 0,
+      setup: [
+        {
+          callId: "setup-call-large",
+          sourceEventId: "setup-source-large",
+          resultEventId: "setup-result-large",
+          reference: "private:python:large",
+        },
+      ],
+    };
+    const literal = "x".repeat(150_000);
+    const setupSource = `payload = ${JSON.stringify(literal)}`;
+    expect(Buffer.byteLength(setupSource, "utf8")).toBeGreaterThan(128 * 1024);
+    expect(Buffer.byteLength(setupSource, "utf8")).toBeLessThan(MAX_WORKFLOW_PYTHON_SOURCE_BYTES);
+    const run = await runRecordedProgram(
+      { kind: "python", source: "print(len(payload))", pythonState: setup },
+      { cwd: workspace, resolvePrivate: () => setupSource },
+    );
+    expect(run.value).toBe("150000\n");
+  });
+
+  it("rejects an oversized Python replay before composing or starting a child", async () => {
+    const workspace = await makeWorkspace();
+    const setupSource = `payload = ${JSON.stringify("x".repeat(200_000))}`;
+    const setup = Array.from({ length: 6 }, (_, index) => ({
+      callId: `setup-call-${index}`,
+      sourceEventId: `setup-source-${index}`,
+      resultEventId: `setup-result-${index}`,
+      reference: `private:python:oversize-${index}`,
+    }));
+    const resolved: string[] = [];
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "python",
+          source: "print('never')",
+          pythonState: {
+            schemaVersion: 1 as const,
+            status: "closed" as const,
+            unresolvedReadCount: 0,
+            setup,
+          },
+        },
+        {
+          cwd: workspace,
+          resolvePrivate: (reference) => {
+            resolved.push(reference);
+            return setupSource;
+          },
+        },
+      ),
+    ).rejects.toThrow();
+    expect(resolved).toHaveLength(6);
+    expect(Buffer.byteLength(setupSource, "utf8")).toBeLessThan(MAX_WORKFLOW_PYTHON_SOURCE_BYTES);
+    expect(Buffer.byteLength(setupSource, "utf8") * setup.length).toBeGreaterThan(
+      MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
+    );
+  });
+
+  it("rejects Python setup closures beyond the shared cell bound", async () => {
+    const workspace = await makeWorkspace();
+    const setup = Array.from({ length: 33 }, (_, index) => ({
+      callId: `setup-call-${index}`,
+      sourceEventId: `setup-source-${index}`,
+      resultEventId: `setup-result-${index}`,
+      reference: `private:python:bound-${index}`,
+    }));
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "python",
+          source: "print('never')",
+          pythonState: {
+            schemaVersion: 1 as const,
+            status: "closed" as const,
+            unresolvedReadCount: 0,
+            setup,
+          },
+        },
+        { cwd: workspace, resolvePrivate: () => "pass" },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("passes workspace scope to private Python setup resolution", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProgramAdapter({ cwd: workspace });
+    await expect(
+      adapter.call({
+        step: recordedStep({
+          id: "python-private-scope",
+          runtime: RESIN_PROGRAM_RUNTIME,
+          name: "python-eval",
+          program: {
+            kind: "python",
+            source: "print(value)",
+            pythonState: {
+              schemaVersion: 1,
+              status: "closed",
+              unresolvedReadCount: 0,
+              setup: [
+                {
+                  callId: "setup-call",
+                  sourceEventId: "setup-source",
+                  resultEventId: "setup-result",
+                  reference: "private:python:authorized",
+                },
+              ],
+            },
+          },
+        }),
+        arguments: {},
+        access: { workspaceId: "workspace-other" },
+        resolvePrivate: (_reference, access) => {
+          if (access?.workspaceId !== "workspace-authorized") {
+            throw new Error("WORKSPACE_MISMATCH");
+          }
+          return "value = 'authorized'";
+        },
+      }),
+    ).rejects.toThrow(/WORKSPACE_MISMATCH/);
   });
 
   it("keeps numeric-looking, boolean-looking and whitespace-bearing answers as the text they are", async () => {

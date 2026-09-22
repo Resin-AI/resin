@@ -719,3 +719,82 @@ describe("Python visitor over the ownership fixture frames", () => {
     expect(serialized(program)).not.toContain("fs.open_read");
   });
 });
+
+describe("Python persistent closure bookkeeping", () => {
+  it("records imported callable names without treating unsupported IR as state invalidation", () => {
+    const result = parse(
+      [
+        "package_path = Path('fixtures/package.json')",
+        "lock_data = yaml.safe_load(package_path.read_text())",
+      ].join("\n"),
+      {
+        imports: [
+          { names: ["Path"], source: "from pathlib import Path" },
+          { names: ["yaml"], source: "import yaml" },
+        ],
+      },
+    );
+    expect(new Set(result.local.requiredNames)).toEqual(new Set(["Path", "yaml"]));
+    expect(result.local.invalidatesState).toBe(false);
+    expect(result.program.complete).toBe(false);
+  });
+
+  it("invalidates closure replay for mutable receiver calls", () => {
+    const result = parse("rows.append(1)");
+    expect(result.local.requiredNames).toEqual(["rows"]);
+    expect(result.local.invalidatesState).toBe(true);
+  });
+
+  it("keeps read-before-write augmented assignments dependent on the prior binding", () => {
+    const result = parse("rows += [1]");
+    expect(result.local.requiredNames).toContain("rows");
+    expect(result.local.writtenNames).toContain("rows");
+  });
+
+  it("keeps an import-and-file audit cell closed under local reads", () => {
+    const setup = parse(
+      [
+        "import json",
+        "from pathlib import Path",
+        "import yaml",
+        'package_path = Path("/tmp/audit-fixtures/package.json")',
+        'lock_path = Path("/tmp/audit-fixtures/lock.yaml")',
+        "with open(package_path) as f:",
+        "    package_data = json.load(f)",
+        "with open(lock_path) as f:",
+        "    lock_data = yaml.safe_load(f)",
+        'print("Lock keys:", list(lock_data.keys()))',
+        'print("Lock overrides:", lock_data.get("overrides", {}))',
+        "",
+      ].join("\n"),
+    );
+    expect(setup.local.invalidatesState).toBe(false);
+    expect(setup.local.requiredNames).toEqual([]);
+    expect(setup.local.writtenNames).toEqual(
+      expect.arrayContaining(["package_path", "lock_path", "package_data", "lock_data"]),
+    );
+
+    const target = parse(
+      [
+        "selected_packages = {}",
+        "for package_key, package_info in lock_data.get('packages', {}).items():",
+        "    if 'target' in package_key:",
+        "        selected_packages[package_key] = package_info",
+        'print("Selected packages:", len(selected_packages))',
+        "for package_key in sorted(selected_packages.keys()):",
+        '    print(package_key, "->", selected_packages[package_key].get("resolution", {}))',
+        'print("\\nImporter dependencies:")',
+        "for importer_name, importer_info in lock_data.get('importers', {}).items():",
+        "    dependencies = importer_info.get('dependencies', {})",
+        "    dev_dependencies = importer_info.get('devDependencies', {})",
+        "    all_dependencies = {**dependencies, **dev_dependencies}",
+        "    target_dependencies = {k: v for k, v in all_dependencies.items() if 'target' in k}",
+        "    if target_dependencies:",
+        '        print(f"Importer {importer_name}: {target_dependencies}")',
+        "",
+      ].join("\n"),
+    );
+    expect(target.local.requiredNames).toEqual(["lock_data"]);
+    expect(target.local.invalidatesState).toBe(false);
+  });
+});

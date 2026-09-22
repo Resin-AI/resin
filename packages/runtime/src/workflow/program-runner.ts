@@ -3,16 +3,23 @@
  *
  * A recorded program is evidence about one execution: the text that ran and the way it was handed
  * to the system. Reuse therefore means running that text again the same way — a shell program keeps
- * its operators, pipes, redirections and exit status, a language program goes to its interpreter
- * through a single `-c`/`-e` argument — and never re-quoting, tokenizing or otherwise
- * reconstructing it. The recorded `argv` stays evidence and is never executed.
+ * its operators, pipes, redirections and exit status, a language program reaches its interpreter
+ * through the recorded transport (argv for ordinary runs, stdin for bounded Python composites) —
+ * and never re-quoting, tokenizing or otherwise reconstructing it. The recorded `argv` stays evidence
+ * and is never executed.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { delimiter, join } from "node:path";
 import process from "node:process";
-import type { WorkflowJsonValue, WorkflowRecordedProgram } from "@resin/contracts";
+import {
+  MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
+  MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
+  type WorkflowJsonValue,
+  type WorkflowRecordedProgram,
+  validateWorkflowPythonState,
+} from "@resin/contracts";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
 
@@ -42,6 +49,13 @@ export interface ProgramRunnerOptions {
    * program text naming an interpreter needs one to be found.
    */
   isolateEnvironment?: boolean;
+  /** Resolves private Python setup-cell source in the owning workspace. */
+  resolvePrivate?: (
+    reference: string,
+    access?: { workspaceId?: string },
+  ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+  /** Workspace scope forwarded to the private setup resolver. */
+  access?: { workspaceId?: string };
   /** Overridable for tests. */
   platform?: NodeJS.Platform;
 }
@@ -53,10 +67,13 @@ const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 const HEAD_SHARE = 0.5;
 /** Bounded PATH probe: enough directories for a normal host, never an unbounded filesystem walk. */
 const MAX_PATH_ENTRIES = 256;
-
+/** Fixed Python transport driver; composite replay source travels over stdin, not argv. */
+const PYTHON_STDIN_DRIVER =
+  "import sys\nexec(compile(sys.stdin.read(), '<resin-python>', 'exec'), {'__name__': '__main__'})";
 interface ChildInvocation {
   command: string;
   args: string[];
+  input?: string;
 }
 
 interface CapturedRun {
@@ -150,6 +167,7 @@ function invocationFor(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions,
   env: NodeJS.ProcessEnv,
+  input?: string,
 ): ChildInvocation {
   const platform = options.platform ?? process.platform;
   const source = program.source;
@@ -165,7 +183,9 @@ function invocationFor(
       if (!interpreter) {
         throw new Error("no python interpreter is resolvable on PATH (looked for python3, python)");
       }
-      return { command: interpreter, args: ["-c", source] };
+      return input === undefined
+        ? { command: interpreter, args: ["-c", source] }
+        : { command: interpreter, args: ["-c", PYTHON_STDIN_DRIVER], input };
     }
     case "javascript":
     case "typescript":
@@ -194,6 +214,118 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
       "the record carries neither a program source nor an argv, so there is nothing to run",
     );
   }
+}
+
+/**
+ * Rejects Python closure metadata before any child is started. The structural contract validator
+ * catches these records during compilation; the runner repeats the safety boundary for direct
+ * adapter callers so malformed state can never fall back to ambient interpreter state.
+ */
+function assertPythonState(program: WorkflowRecordedProgram, targetCallId?: string): void {
+  if (program.pythonState === undefined) return;
+  if (program.kind !== "python") {
+    throw new Error("pythonState is only valid for Python programs");
+  }
+  const errors: string[] = [];
+  validateWorkflowPythonState(
+    program,
+    "recorded Python pythonState",
+    targetCallId,
+    new Set<string>(),
+    undefined,
+    errors,
+  );
+  if (errors.length > 0) throw new Error(errors[0]);
+  if (program.pythonState.status !== "closed") {
+    throw new Error("recorded Python pythonState is unresolved");
+  }
+  if (program.pythonState.unresolvedReadCount !== 0) {
+    throw new Error("recorded Python pythonState has unresolved reads");
+  }
+}
+
+function composePythonReplaySource(setupSources: readonly string[], target: string): string {
+  if (setupSources.length === 0) return target;
+  const setup = setupSources
+    .map(
+      (source, index) =>
+        `        __resin_exec(__resin_compile(${JSON.stringify(source)}, ${JSON.stringify(`<resin-python-setup-${index}>`)}, "exec"), __resin_namespace, __resin_namespace)`,
+    )
+    .join("\n");
+  const targetExecution = `    __resin_exec(__resin_compile(${JSON.stringify(target)}, "<resin-python-target>", "exec"), __resin_namespace, __resin_namespace)`;
+  return [
+    "def __resin_run():",
+    '    __resin_builtins = __import__("builtins")',
+    '    __resin_contextlib = __import__("contextlib")',
+    "    __resin_exec = __resin_builtins.exec",
+    "    __resin_compile = __resin_builtins.compile",
+    "    __resin_len = __resin_builtins.len",
+    "    __resin_discard_type = __resin_builtins.type",
+    "    __resin_namespace = {'__name__': '__main__', '__builtins__': __resin_builtins.__dict__}",
+    "    __resin_discard = __resin_discard_type(",
+    '        "_ResinDiscard",',
+    "        (),",
+    "        {",
+    '            "write": lambda _self, data: __resin_len(data),',
+    '            "flush": lambda _self: None,',
+    "        },",
+    "    )",
+    "    with __resin_contextlib.redirect_stdout(__resin_discard()), __resin_contextlib.redirect_stderr(__resin_discard()):",
+    setup,
+    targetExecution,
+    "__resin_run()",
+  ].join("\n");
+}
+
+async function preparePythonReplaySource(
+  program: WorkflowRecordedProgram,
+  options: ProgramRunnerOptions,
+  targetCallId?: string,
+): Promise<string> {
+  assertPythonState(program, targetCallId);
+  const state = program.pythonState;
+  if (state === undefined) return program.source;
+  const targetBytes = Buffer.byteLength(program.source, "utf8");
+  if (targetBytes > MAX_WORKFLOW_PYTHON_SOURCE_BYTES) {
+    throw new Error(
+      `recorded Python target source exceeds ${MAX_WORKFLOW_PYTHON_SOURCE_BYTES} bytes`,
+    );
+  }
+  if (state.setup.length === 0) return program.source;
+  let rawBytes = targetBytes;
+  if (options.resolvePrivate === undefined) {
+    throw new Error("recorded Python setup requires a private source resolver");
+  }
+  const setupSources: string[] = [];
+  for (const descriptor of state.setup) {
+    const source = await options.resolvePrivate(descriptor.reference, options.access);
+    if (typeof source !== "string") {
+      throw new Error(
+        `recorded Python setup reference '${descriptor.reference}' did not resolve to source text`,
+      );
+    }
+    const sourceBytes = Buffer.byteLength(source, "utf8");
+    if (sourceBytes > MAX_WORKFLOW_PYTHON_SOURCE_BYTES) {
+      throw new Error(
+        `recorded Python setup source '${descriptor.reference}' exceeds ${MAX_WORKFLOW_PYTHON_SOURCE_BYTES} bytes`,
+      );
+    }
+    rawBytes += sourceBytes;
+    if (rawBytes > MAX_WORKFLOW_PYTHON_REPLAY_BYTES) {
+      throw new Error(
+        `recorded Python replay sources exceed ${MAX_WORKFLOW_PYTHON_REPLAY_BYTES} bytes before composition`,
+      );
+    }
+    setupSources.push(source);
+  }
+  const composed = composePythonReplaySource(setupSources, program.source);
+  const composedBytes = Buffer.byteLength(composed, "utf8");
+  if (composedBytes > MAX_WORKFLOW_PYTHON_REPLAY_BYTES) {
+    throw new Error(
+      `composed Python replay source exceeds ${MAX_WORKFLOW_PYTHON_REPLAY_BYTES} bytes`,
+    );
+  }
+  return composed;
 }
 
 function killProcessTree(child: ChildProcess): void {
@@ -230,15 +362,13 @@ function runChild(
     const child = spawn(invocation.command, invocation.args, {
       cwd,
       env,
-      // No stdin: a program waiting for input would otherwise hang until the time budget expires.
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [invocation.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       // Own process group on POSIX, so the time budget can end the whole tree, not just the shell.
       detached: process.platform !== "win32",
     });
     let settled = false;
     const timer = setTimeout(() => {
-      if (settled) return;
       settled = true;
       killProcessTree(child);
       reject(new Error(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`));
@@ -267,6 +397,15 @@ function runChild(
         ),
       );
     });
+    if (invocation.input !== undefined && child.stdin !== null) {
+      // The interpreter may exit before consuming all source; EPIPE is a normal transport race.
+      child.stdin.on("error", () => {});
+      try {
+        child.stdin.end(invocation.input, "utf8");
+      } catch {
+        // The close/error handlers below report the child outcome.
+      }
+    }
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       const diagnostics: string[] = [];
       if (stdout.truncated) diagnostics.push(`[stdout truncated: ${stdout.omitted} bytes omitted]`);
@@ -282,13 +421,10 @@ function runChild(
 /**
  * The value a recorded program's result has.
  *
- * A program's result is what the interface that ran it produced, and for a process that is its
- * standard output as text — the same bytes, unchanged. Trimming it would lose meaningful
- * whitespace, and parsing it would turn a program that printed `2` into a number the recorded call
- * never returned; both would make the replay disagree with the recording it is checked against, and
- * neither is what the tool the user ran actually received. A result that is structured is
- * structured because the interface that returned it says so, which is the tool-protocol adapter's
- * business rather than this one's.
+ * Process output is returned as text with its bytes unchanged. Parsing would turn printed `2`
+ * into a number; trimming would discard meaningful whitespace. Interface-specific observation
+ * projections belong to replay comparison, not execution: an OMP text-trim observation does not
+ * authorize changing the output returned to callers.
  */
 function resultValue(stdout: string): WorkflowJsonValue {
   return stdout;
@@ -296,19 +432,24 @@ function resultValue(stdout: string): WorkflowJsonValue {
 
 /**
  * Runs a recorded program exactly once, through the family its record names. Shell programs keep
- * shell semantics; language programs reach their interpreter as a single argument. A non-zero exit
- * code is reported in the result and is left for the caller to refuse: this function never invents
- * a value for a program that failed.
+ * shell semantics. Python state replay sends composed source through stdin; other language
+ * programs receive source as a single argument. A non-zero exit code is left for the caller to
+ * refuse: this function never invents a value for a program that failed.
  */
 export async function runRecordedProgram(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions = {},
+  targetCallId?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
+  const source = await preparePythonReplaySource(program, options, targetCallId);
+  const runnable = source === program.source ? program : { ...program, source };
   const env: NodeJS.ProcessEnv = options.isolateEnvironment
     ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
     : { ...process.env, ...options.env };
-  const invocation = invocationFor(program, options, env);
+  const replayInput =
+    runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
+  const invocation = invocationFor(runnable, options, env, replayInput);
   const captured = await runChild(invocation, options, env);
   return {
     exitCode: captured.exitCode,
@@ -365,7 +506,14 @@ export async function runRecordedCall(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
-  const run = await runRecordedProgram({ ...program, source }, options);
+  const replayOptions: ProgramRunnerOptions = {
+    ...options,
+    ...(options.resolvePrivate === undefined && request.resolvePrivate
+      ? { resolvePrivate: request.resolvePrivate }
+      : {}),
+    ...(options.access === undefined && request.access ? { access: request.access } : {}),
+  };
+  const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {
     const tail = stderrTail(run.stderr);
     const detail = tail.length > 0 ? `: ${tail}` : " (no stderr)";

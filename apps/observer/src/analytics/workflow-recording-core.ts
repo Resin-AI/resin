@@ -17,10 +17,13 @@ import type {
   WorkflowBindingCandidate,
   WorkflowJsonValue,
   WorkflowValuePath,
-  WorkflowValueSource,
   WorkflowValueTemplate,
 } from "@resin/contracts";
-import { RESIN_TOOL_LINK_EVIDENCE_KEY, readToolLinkEvidence } from "@resin/contracts";
+import {
+  RESIN_TOOL_LINK_EVIDENCE_KEY,
+  collectWorkflowPrivateReferences,
+  readToolLinkEvidence,
+} from "@resin/contracts";
 import type { deriveNativeCalls } from "./native-argument-derivation.js";
 import { containsRedactionPlaceholder } from "./private-value-store.js";
 import { compareRecordedEvents } from "./recorded-event-order.js";
@@ -202,7 +205,12 @@ export function reconstructWorkflowFromEvents(
 
   const resultsByCallId = new Map<
     string,
-    { value: WorkflowJsonValue | undefined; isError: boolean | undefined }
+    {
+      value: WorkflowJsonValue | undefined;
+      isError: boolean | undefined;
+      baselineReference?: string;
+      baselineComparison?: "text-trim";
+    }
   >();
   /**
    * The handle a composed call returned for its result, keyed by scope: it maps the
@@ -215,13 +223,20 @@ export function reconstructWorkflowFromEvents(
     const callId = event.callId ?? event.toolCallId;
     if (!callId) continue;
     const eventKey = scopedKey(event.sessionId, callId);
+    const resultCarrier = readWorkflowResultCarrier(
+      event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+    );
     resultsByCallId.set(eventKey, {
       value: event.result ?? extractResultValue(event.content),
       isError: event.isError,
+      ...(resultCarrier?.baselineReference === undefined
+        ? {}
+        : { baselineReference: resultCarrier.baselineReference }),
+      ...(resultCarrier?.baselineComparison === undefined
+        ? {}
+        : { baselineComparison: resultCarrier.baselineComparison }),
     });
-    const handle = readWorkflowResultCarrier(
-      event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
-    )?.handle;
+    const handle = resultCarrier?.handle;
     if (handle === undefined) continue;
     const parts = handle.split(":");
     if (parts.length < 3 || parts[0] !== "ref") continue;
@@ -439,6 +454,12 @@ export function reconstructWorkflowFromEvents(
               .map((dependency) => stepIdByCallId.get(scopedKey(event.sessionId, dependency)))
               .filter((dependency): dependency is string => dependency !== undefined),
           }),
+      ...(recordedResult?.baselineReference === undefined
+        ? {}
+        : { baselineReference: recordedResult.baselineReference }),
+      ...(recordedResult?.baselineComparison === undefined
+        ? {}
+        : { baselineComparison: recordedResult.baselineComparison }),
       ...(declaredFlow === undefined ? {} : { flow: declaredFlow }),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(isPrivateValue ? { isPrivateValue } : {}),
@@ -623,25 +644,9 @@ export function reconstructWorkflowFromEvents(
   if (carrierCandidates.length > 0) {
     recipe.workflow.candidates = [...(recipe.workflow.candidates ?? []), ...carrierCandidates];
   }
-  // Every local reference the plan can resolve must be declared, because a private reference is a
-  // name the executor checks against the plan rather than a capability the plan implies.
-  const declaredPrivateReferences = new Set(recipe.workflow.privateReferences ?? []);
-  for (const step of recipe.workflow.steps) {
-    for (const argument of step.arguments) {
-      collectPrivateReferences(argument.source, declaredPrivateReferences);
-    }
-  }
-  // The demonstration is kept the same way its leaves are: the plan names it, and the host resolves
-  // it locally, so a recording never carries the user's own second run as data.
-  for (const entry of recipe.workflow.heldOut?.inputs ?? []) {
-    declaredPrivateReferences.add(entry.reference);
-  }
-  for (const entry of recipe.workflow.heldOut?.observed ?? []) {
-    declaredPrivateReferences.add(entry.reference);
-  }
-  if (declaredPrivateReferences.size > 0) {
-    recipe.workflow.privateReferences = [...declaredPrivateReferences];
-  }
+  const privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
+  if (privateReferences.length > 0) recipe.workflow.privateReferences = privateReferences;
+  else delete recipe.workflow.privateReferences;
   const declared = new Map(recipe.workflow.inputs.map((input) => [input.name, input]));
   for (const [name, type] of recordedInputTypes) {
     const inputType = inputTypeOf(type);
@@ -684,9 +689,12 @@ function demonstrationOf(
   if (target === undefined) return undefined;
   let demonstration: WorkflowCallHeldOut | undefined;
   for (const event of events) {
-    if (event.type !== "tool_call") continue;
-    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
-    const candidate = carrier?.heldOut;
+    const candidate =
+      event.type === "tool_call"
+        ? readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])?.heldOut
+        : event.type === "tool_result"
+          ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
+          : undefined;
     if (candidate === undefined || candidate.repeats !== target) continue;
     if (
       demonstration === undefined ||
@@ -715,46 +723,14 @@ function demonstratedWorkflow(
   for (const entry of demonstration.observed) {
     const stepId = stepIdByPosition.get(entry.position);
     if (stepId === undefined) continue;
-    observed.push({ stepId, reference: entry.reference });
+    observed.push({
+      stepId,
+      reference: entry.reference,
+      ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
+    });
   }
   if (inputs.length === 0 && observed.length === 0) return undefined;
   return { inputs, observed };
-}
-
-/** Collects every local reference a value source can resolve, so the plan can declare them. */
-function collectPrivateReferences(source: WorkflowValueSource, into: Set<string>): void {
-  switch (source.kind) {
-    case "private":
-      into.add(source.reference);
-      return;
-    case "template":
-      collectTemplateReferences(source.template, into);
-      return;
-    default:
-      return;
-  }
-}
-
-function collectTemplateReferences(template: WorkflowValueTemplate, into: Set<string>): void {
-  switch (template.type) {
-    case "private":
-      into.add(template.reference);
-      return;
-    case "object":
-      for (const entry of Object.values(template.entries)) collectTemplateReferences(entry, into);
-      return;
-    case "array":
-      for (const entry of template.items) collectTemplateReferences(entry, into);
-      return;
-    // A program resolves its text like any other leaf — usually a private reference — and each hole
-    // resolves the binding rendered into its token.
-    case "program":
-      collectTemplateReferences(template.source, into);
-      for (const hole of template.holes) collectTemplateReferences(hole.binding, into);
-      return;
-    default:
-      return;
-  }
 }
 
 /**

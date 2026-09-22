@@ -631,7 +631,7 @@ export class WorkflowValidationWorker {
       verification: {
         status: "failed",
         reproduced: [],
-        missed: candidates.map((candidate) => ({ stepId: candidate.stepId, detail: reason })),
+        missed: request.plan.steps.map((step) => ({ stepId: step.id, detail: reason })),
         dropped: candidates.map((candidate) => ({ candidate, reason })),
       },
       accepted: [],

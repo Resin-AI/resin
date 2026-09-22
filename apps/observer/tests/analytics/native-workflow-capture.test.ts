@@ -7,6 +7,7 @@ import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { NormalizedSessionEventSchema, validateRecordedWorkflow } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import { deriveNativeCalls } from "../../src/analytics/native-argument-derivation.js";
 import {
@@ -109,9 +110,21 @@ function carrierOf(observed: NormalizedSessionEvent) {
 
 /** The events one execution of a session produced, by the index its carriers name. */
 function executionOf(events: readonly NormalizedSessionEvent[], index: number) {
+  const callIds = new Set(
+    events
+      .filter((event) => {
+        const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+        return carrier?.executionIndex === index;
+      })
+      .map((event) => event.callId ?? event.toolCallId)
+      .filter((callId): callId is string => callId !== undefined),
+  );
   return events.filter((event) => {
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
-    return carrier?.executionIndex === index;
+    return (
+      carrier?.executionIndex === index ||
+      (event.type === "tool_result" && event.callId !== undefined && callIds.has(event.callId))
+    );
   });
 }
 
@@ -195,6 +208,49 @@ describe("native capture of ordinary calls", () => {
     const carrier = carrierOf(events[1]!);
     expect(carrier!.runtime).toBe(RESIN_PROGRAM_RUNTIME);
     expect(carrier!.program).toEqual({ kind: "python", source: "", argument: "code" });
+  });
+
+  it("captures a closed Python setup chain and successful baseline references", () => {
+    const store = new InMemoryPrivateValueStore();
+    const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = [
+      call(1, "eval", { language: "python", code: "import json" }),
+      result(1, "eval", "setup-ok"),
+      call(2, "eval", { language: "python", code: "print(json.dumps({'ok': True}))" }),
+      result(2, "eval", "target-ok"),
+    ].map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+
+    const recipe = recordCallsFromEvents("wf_python_state", observed);
+    const targetCarrier = carrierOf(observed[2]!);
+    expect(targetCarrier?.program?.pythonState?.status).toBe("closed");
+    expect(targetCarrier?.program?.pythonState?.setup).toEqual([
+      expect.objectContaining({ callId: "call_1", reference: expect.stringContaining("private:") }),
+    ]);
+
+    expect(recipe?.workflow.steps).toHaveLength(1);
+    expect(recipe?.workflow.baseline?.inputs).toEqual([]);
+    expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
+    expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
+  });
+  it("marks a successful Python target unresolved when its predecessor was not captured", () => {
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = [
+      call(11, "eval", { language: "python", code: "print(json.dumps({'ok': True}))" }),
+      result(11, "eval", "target-ok"),
+    ].map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+    expect(carrierOf(observed[0]!)?.program?.pythonState).toMatchObject({
+      status: "unresolved",
+      unresolvedReadCount: expect.any(Number),
+      setup: [],
+    });
   });
 });
 
@@ -419,8 +475,15 @@ describe("the recording an ordinary session produces", () => {
     const storedArgument = workflow.steps[1]!.arguments.find((entry) => entry.name === "token")!;
     expect(storedArgument.source.kind).toBe("template");
 
+    expect(workflow.baseline?.inputs).toEqual([]);
+    expect(workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0", "step1"]);
+    expect(
+      workflow.baseline?.observed.every((entry) =>
+        workflow.privateReferences?.includes(entry.reference),
+      ),
+    ).toBe(true);
     // Every local reference the plan resolves is declared, so the plan is structurally sound.
-    expect(workflow.privateReferences?.length).toBeGreaterThanOrEqual(2);
+    expect(workflow.privateReferences?.length).toBeGreaterThanOrEqual(4);
     expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
   });
 
@@ -806,6 +869,11 @@ describe("a recording and the demonstrations read beside it", () => {
       "token",
     ]);
     expect(recipe!.workflow.heldOut?.observed.map((entry) => entry.stepId).sort()).toEqual([
+      "step0",
+      "step1",
+    ]);
+    expect(recipe!.workflow.baseline?.inputs).toEqual([]);
+    expect(recipe!.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual([
       "step0",
       "step1",
     ]);

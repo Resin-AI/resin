@@ -119,6 +119,54 @@ describe("demonstration evidence is interpreted at the actual argument position"
       missed: [],
     });
   });
+  it("replays an existing workflow input with no candidate proposals", async () => {
+    const recording: RecordedWorkflow = {
+      schemaVersion: 1,
+      workflowId: "existing-input",
+      inputs: [{ name: "source", type: "string" }],
+      steps: [
+        {
+          id: "step0",
+          callId: "call-existing-input",
+          callable: { name: "echo", runtime: "test-existing-input" },
+          arguments: [{ name: "value", source: { kind: "input", name: "source" } }],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+      heldOut: {
+        inputs: [{ stepId: "step0", argument: "value", reference: "private:source" }],
+        observed: [{ stepId: "step0", reference: "private:source" }],
+      },
+      privateReferences: ["private:source"],
+    };
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      runtime: "test-existing-input",
+      async call(request) {
+        return request.arguments.value ?? null;
+      },
+    });
+    const environment = await demonstrationEnvironment({
+      plan: recording,
+      candidates: [],
+      adapters: registry,
+      workspaceDir: await directory(),
+      resolvePrivate: () => "held-out-source",
+    });
+    expect(environment?.inputs).toEqual({ source: "held-out-source" });
+    const decision = await validateAndConfirmCandidates({
+      plan: recording,
+      candidates: [],
+      environment: environment!,
+    });
+    expect(decision.verification).toMatchObject({
+      status: "verified",
+      reproduced: ["step0"],
+      missed: [],
+    });
+  });
 
   it("does not silently choose one of two conflicting values assigned the same input name", async () => {
     const recording = plan();

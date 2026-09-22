@@ -222,6 +222,11 @@ export interface ComputationParseLocal {
   definitions: LocalComputationDefinition[];
   imports: LocalComputationImport[];
   referencedNames: string[];
+  /**
+   * Names read from the persistent module closure, including names resolved through an observed
+   * helper/import. This is private parser bookkeeping; raw names never enter the wire program.
+   */
+  requiredNames?: string[];
   writtenNames: string[];
   hasInvocation: boolean;
   /** True when the source mutates state the parser could not represent (reset/invalidations). */

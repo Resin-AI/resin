@@ -210,7 +210,7 @@ function observeEval(options: {
 }
 
 describe("ComputationEvidenceRecorder invariants", () => {
-  it("requires distinct result identity and strictly later causality before pairing", () => {
+  it("requires distinct result identity and non-regressing native causality before pairing", () => {
     const variant = variantOf("record-join-lineage", "corrected-helper");
     const recorder = createComputationEvidenceRecorder();
     const sessionId = variant.sessionId;
@@ -223,7 +223,7 @@ describe("ComputationEvidenceRecorder invariants", () => {
         callId,
         toolName,
         parameters: argsOf(variant, callId),
-        sequence: 1,
+        sequence: 2,
       }),
     );
     expect(readOf(call)?.observation.status).toBe("pending");
@@ -233,25 +233,32 @@ describe("ComputationEvidenceRecorder invariants", () => {
         sessionId,
         callId,
         toolName,
-        sequence: 2,
+        sequence: 3,
         eventId: call.eventId,
       }),
     );
     expect(evidenceOf(sameEventIdResult)).toBeUndefined();
 
-    const equalSequenceResult = recorder.observe(
+    const earlierSequenceResult = recorder.observe(
       toolResult({
         sessionId,
         callId,
         toolName,
-        sequence: 3,
+        sequence: 4,
         causalSequence: 1,
       }),
     );
-    expect(evidenceOf(equalSequenceResult)).toBeUndefined();
+    expect(evidenceOf(earlierSequenceResult)).toBeUndefined();
 
     const matched = recorder.observe(
-      toolResult({ sessionId, callId, toolName, sequence: 4, result: "" }),
+      toolResult({
+        sessionId,
+        callId,
+        toolName,
+        sequence: 5,
+        causalSequence: 2,
+        result: "",
+      }),
     );
     const matchedEvidence = readOf(matched);
     expect(matchedEvidence?.observation.status).toBe("success");
@@ -259,7 +266,7 @@ describe("ComputationEvidenceRecorder invariants", () => {
     expect(matchedEvidence?.observation.resultEventId).toBe(matched.eventId);
 
     const replayedResult = recorder.observe(
-      toolResult({ sessionId, callId, toolName, sequence: 5, result: "" }),
+      toolResult({ sessionId, callId, toolName, sequence: 6, result: "" }),
     );
     expect(evidenceOf(replayedResult)).toBeUndefined();
   });

@@ -4,6 +4,7 @@ import type {
   AgentArgumentOrigin,
   WorkflowArgumentProvenance,
   WorkflowJsonValue,
+  WorkflowPythonState,
   WorkflowRecordedProgram,
   WorkflowValuePath,
 } from "@resin/contracts";
@@ -94,7 +95,11 @@ export interface WorkflowCallHeldOut {
   /** The earlier execution this one repeats: the one a recording is compiled from. */
   repeats: number;
   inputs: Array<{ position: number; argument: string; reference: string }>;
-  observed: Array<{ position: number; reference: string }>;
+  observed: Array<{
+    position: number;
+    reference: string;
+    comparison?: "text-trim";
+  }>;
 }
 
 /**
@@ -161,6 +166,47 @@ function isJsonValue(value: unknown): value is WorkflowJsonValue {
   if (isPlainObject(value)) return Object.values(value).every(isJsonValue);
   return false;
 }
+function readPythonState(value: unknown): WorkflowPythonState | undefined {
+  if (!isPlainObject(value)) return undefined;
+  if (value.schemaVersion !== 1) return undefined;
+  if (value.status !== "closed" && value.status !== "unresolved") return undefined;
+  if (
+    typeof value.unresolvedReadCount !== "number" ||
+    !Number.isInteger(value.unresolvedReadCount) ||
+    value.unresolvedReadCount < 0 ||
+    !Array.isArray(value.setup)
+  ) {
+    return undefined;
+  }
+  const setup: WorkflowPythonState["setup"] = [];
+  for (const entry of value.setup) {
+    if (!isPlainObject(entry)) return undefined;
+    if (
+      typeof entry.callId !== "string" ||
+      entry.callId.length === 0 ||
+      typeof entry.sourceEventId !== "string" ||
+      entry.sourceEventId.length === 0 ||
+      typeof entry.resultEventId !== "string" ||
+      entry.resultEventId.length === 0 ||
+      typeof entry.reference !== "string" ||
+      entry.reference.length === 0
+    ) {
+      return undefined;
+    }
+    setup.push({
+      callId: entry.callId,
+      sourceEventId: entry.sourceEventId,
+      resultEventId: entry.resultEventId,
+      reference: entry.reference,
+    });
+  }
+  return {
+    schemaVersion: 1,
+    status: value.status,
+    unresolvedReadCount: value.unresolvedReadCount,
+    setup,
+  };
+}
 
 /** Reads a recorded program back through the frozen vocabulary, dropping anything else. */
 function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
@@ -185,6 +231,11 @@ function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
   if (value.cwd !== undefined) {
     if (typeof value.cwd !== "string") return undefined;
     program.cwd = value.cwd;
+  }
+  if (value.pythonState !== undefined) {
+    const pythonState = readPythonState(value.pythonState);
+    if (pythonState === undefined) return undefined;
+    program.pythonState = pythonState;
   }
   return program;
 }
@@ -313,27 +364,45 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
 function readHeldOut(value: unknown): WorkflowCallHeldOut | undefined {
   if (!isPlainObject(value)) return undefined;
   if (!Number.isInteger(value.repeats)) return undefined;
-  const readList = (
-    raw: unknown,
-    withArgument: boolean,
-  ): Array<{ position: number; argument: string; reference: string }> | undefined => {
-    if (!Array.isArray(raw)) return undefined;
-    const out: Array<{ position: number; argument: string; reference: string }> = [];
-    for (const entry of raw) {
-      if (!isPlainObject(entry) || !Number.isInteger(entry.position)) return undefined;
-      if (typeof entry.reference !== "string" || entry.reference.length === 0) return undefined;
-      if (withArgument && typeof entry.argument !== "string") return undefined;
-      out.push({
-        position: entry.position as number,
-        argument: withArgument ? (entry.argument as string) : "",
-        reference: entry.reference,
-      });
+  if (!Array.isArray(value.inputs) || !Array.isArray(value.observed)) return undefined;
+
+  const inputs: WorkflowCallHeldOut["inputs"] = [];
+  for (const entry of value.inputs) {
+    if (
+      !isPlainObject(entry) ||
+      !Number.isInteger(entry.position) ||
+      typeof entry.argument !== "string" ||
+      typeof entry.reference !== "string" ||
+      entry.reference.length === 0
+    ) {
+      return undefined;
     }
-    return out;
-  };
-  const inputs = readList(value.inputs, true);
-  const observed = readList(value.observed, false);
-  if (inputs === undefined || observed === undefined) return undefined;
+    inputs.push({
+      position: entry.position as number,
+      argument: entry.argument,
+      reference: entry.reference,
+    });
+  }
+
+  const observed: WorkflowCallHeldOut["observed"] = [];
+  for (const entry of value.observed) {
+    if (
+      !isPlainObject(entry) ||
+      !Number.isInteger(entry.position) ||
+      typeof entry.reference !== "string" ||
+      entry.reference.length === 0
+    ) {
+      return undefined;
+    }
+    if (entry.comparison !== undefined && entry.comparison !== "text-trim") {
+      return undefined;
+    }
+    observed.push({
+      position: entry.position as number,
+      reference: entry.reference,
+      ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
+    });
+  }
   return { repeats: value.repeats as number, inputs, observed };
 }
 
@@ -381,16 +450,35 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
   return carrier;
 }
 
+export interface WorkflowResultCarrier {
+  handle?: string;
+  heldOut?: WorkflowCallHeldOut;
+  /** Private reference to the original successful result for baseline replay. */
+  baselineReference?: string;
+  /** How the original baseline result may be projected before comparison. */
+  baselineComparison?: "text-trim";
+}
+
 /** Re-reads a result carrier for projection. */
-export function readWorkflowResultCarrier(
-  value: unknown,
-): { handle?: string; heldOut?: WorkflowCallHeldOut } | undefined {
+export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier | undefined {
   if (!isPlainObject(value)) return undefined;
-  const carrier: { handle?: string; heldOut?: WorkflowCallHeldOut } = {};
+  const carrier: WorkflowResultCarrier = {};
   if (typeof value.handle === "string" && value.handle.length > 0) carrier.handle = value.handle;
   if (value.heldOut !== undefined) {
     const heldOut = readHeldOut(value.heldOut);
     if (heldOut !== undefined) carrier.heldOut = heldOut;
   }
-  return carrier.handle === undefined && carrier.heldOut === undefined ? undefined : carrier;
+  if (typeof value.baselineReference === "string" && value.baselineReference.length > 0) {
+    carrier.baselineReference = value.baselineReference;
+  }
+  if (value.baselineComparison !== undefined) {
+    if (value.baselineComparison !== "text-trim") return undefined;
+    carrier.baselineComparison = value.baselineComparison;
+  }
+  return carrier.handle === undefined &&
+    carrier.heldOut === undefined &&
+    carrier.baselineReference === undefined &&
+    carrier.baselineComparison === undefined
+    ? undefined
+    : carrier;
 }

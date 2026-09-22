@@ -58,3 +58,21 @@ it("binds program identity proofs into the existing decision digest", () => {
     workflowValidationDecisionDigest(decision(undefined)),
   );
 });
+
+it("preserves an optional fresh-process replay proof and validates its plan digest", () => {
+  const verified = decision(undefined);
+  verified.verification = {
+    ...verified.verification!,
+    replay: { kind: "fresh-process", planDigest: "c".repeat(64) },
+  };
+  expect(WorkflowValidationDecisionSchema.safeParse(verified).success).toBe(true);
+  expect(
+    WorkflowValidationDecisionSchema.safeParse({
+      ...verified,
+      verification: {
+        ...verified.verification,
+        replay: { kind: "fresh-process", planDigest: "not-a-digest" },
+      },
+    }).success,
+  ).toBe(false);
+});
