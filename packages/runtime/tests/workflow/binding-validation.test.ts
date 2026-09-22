@@ -5,6 +5,7 @@ import {
   type RecordedWorkflow,
   type WorkflowBindingCandidate,
   type WorkflowJsonValue,
+  type WorkflowObservedComparison,
   type WorkflowValueTemplate,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -46,6 +47,30 @@ function transformAdapters(): RuntimeAdapterRegistry {
           return { token: `tok(${String(args.seed ?? "")})` };
         case "consume":
           return { echoed: args.text ?? null };
+        default:
+          throw new Error(`unexpected callable '${step.callable.name}'`);
+      }
+    },
+  });
+  return registry;
+}
+function projectedTransformAdapters(
+  projection: "trailing" | "significant" | "nonstring",
+): RuntimeAdapterRegistry {
+  const registry = new RuntimeAdapterRegistry();
+  registry.register({
+    runtime: TEST_RUNTIME,
+    async call(request) {
+      const { arguments: args, step } = request;
+      switch (step.callable.name) {
+        case "derive":
+          return { token: `tok(${String(args.seed ?? "")})` };
+        case "consume": {
+          const text = String(args.text ?? "");
+          if (projection === "trailing") return ` \t${text}\t\n`;
+          if (projection === "significant") return `${text}\nextra`;
+          return { text };
+        }
         default:
           throw new Error(`unexpected callable '${step.callable.name}'`);
       }
@@ -102,6 +127,7 @@ function tracksEarlierResult(): WorkflowBindingCandidate {
 async function environmentOf(options: {
   inputs: Record<string, WorkflowJsonValue>;
   observed: Record<string, WorkflowJsonValue>;
+  observedComparisons?: Record<string, WorkflowObservedComparison>;
   adapters?: RuntimeAdapterRegistry;
 }): Promise<CandidateValidationEnvironment> {
   const workspaceDir = await mkdtemp(join(tmpdir(), "resin-replay-"));
@@ -111,6 +137,9 @@ async function environmentOf(options: {
     workspaceDir,
     inputs: options.inputs,
     observed: options.observed,
+    ...(options.observedComparisons === undefined
+      ? {}
+      : { observedComparisons: options.observedComparisons }),
     timeoutMs: 10_000,
   };
 }
@@ -246,6 +275,70 @@ describe("binding candidate validation by replay", () => {
     expect(unknownArgument.reason).toContain("no argument 'absent'");
     expect(unobserved.reason).toContain("observed no result for step 'unobserved'");
   });
+  it("keeps exact results by default and limits whitespace projection to strings", async () => {
+    const candidate = tracksEarlierResult();
+    const plan = recordedPlan({ type: "literal", value: "frozen" });
+    const observed = { consume: "tok(replay-seed)" };
+
+    const exact = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("trailing"),
+        inputs: { seed: "replay-seed" },
+        observed,
+      }),
+    });
+    expect(exact[0]?.accepted).toBe(false);
+
+    const projected = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("trailing"),
+        inputs: { seed: "replay-seed" },
+        observed,
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(projected[0]?.accepted).toBe(true);
+
+    const significant = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("significant"),
+        inputs: { seed: "replay-seed" },
+        observed,
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(significant[0]?.accepted).toBe(false);
+
+    const nonstring = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("nonstring"),
+        inputs: { seed: "replay-seed" },
+        observed: { consume: { text: "tok(replay-seed)" } },
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(nonstring[0]?.accepted).toBe(false);
+
+    const expectedTrailing = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("trailing"),
+        inputs: { seed: "replay-seed" },
+        observed: { consume: "tok(replay-seed) " },
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(expectedTrailing[0]?.accepted).toBe(false);
+  });
 });
 
 describe("the plan that results from accepting proposals", () => {
@@ -326,6 +419,43 @@ describe("the plan that results from accepting proposals", () => {
   });
 });
 
+describe("selected demonstration comparison projections", () => {
+  it("uses the held-out result projection during whole-plan replay", async () => {
+    const plan: RecordedWorkflow = {
+      ...recordedPlan({ type: "literal", value: "tok(replay-seed)" }),
+      privateReferences: ["private:derive-observed", "private:consume-observed"],
+      heldOut: {
+        inputs: [],
+        observed: [
+          { stepId: "derive", reference: "private:derive-observed" },
+          {
+            stepId: "consume",
+            reference: "private:consume-observed",
+            comparison: "text-trim",
+          },
+        ],
+      },
+    };
+    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-heldout-projection-"));
+    workspaces.push(workspaceDir);
+    const environment = await demonstrationEnvironment({
+      plan,
+      candidates: [],
+      adapters: projectedTransformAdapters("trailing"),
+      workspaceDir,
+      resolvePrivate: (reference) => {
+        if (reference === "private:derive-observed") return { token: "tok(replay-seed)" };
+        if (reference === "private:consume-observed") return "tok(replay-seed)";
+        throw new Error(`unexpected reference '${reference}'`);
+      },
+    });
+    if (environment === undefined) throw new Error("missing replay environment");
+    environment.inputs.seed = "replay-seed";
+    const confirmed = await confirmPromotedPlan({ plan, accepted: [], environment });
+    expect(confirmed.verification.status).toBe("verified");
+    expect(confirmed.verification.reproduced).toEqual(["derive", "consume"]);
+  });
+});
 describe("a plan is run once per attempt, as the work it is", () => {
   /** Every step invocation, in order, so a run can be told from a step. */
   function countingAdapters(invocations: string[]): RuntimeAdapterRegistry {

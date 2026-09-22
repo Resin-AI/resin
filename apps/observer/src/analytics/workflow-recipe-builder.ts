@@ -48,6 +48,10 @@ export interface RecordedCallObservation {
   /** Steps the record established this call must follow, from the calls' own declared resource use. */
   establishedDependsOn?: readonly string[];
   result?: WorkflowJsonValue;
+  /** Private reference to this original call's successful result for baseline replay. */
+  baselineReference?: string;
+  /** Optional projection used only when comparing a textual baseline result. */
+  baselineComparison?: "text-trim";
   /**
    * Whether this value is private, decided by the privacy layer. It may match a whole value or a
    * substring of one, which is how a secret inside a larger string is caught.
@@ -100,14 +104,32 @@ function recordWorkflowRecipeInternal(
   observations: readonly RecordedCallObservation[],
   candidates?: readonly WorkflowBindingCandidate[],
 ): RecordedRecipe | undefined {
-  const ordered = [...observations].sort(
+  const sortedObservations = [...observations].sort(
     (left, right) =>
       (left.causalSequence ?? Number.MAX_SAFE_INTEGER) -
       (right.causalSequence ?? Number.MAX_SAFE_INTEGER),
   );
+  // A closed Python target is a self-contained replay unit: its successful setup cells are carried
+  // by private source references and must not also remain workflow steps, or the runtime would run
+  // them twice and the contract would reject the overlap.
+  const pythonSetupCallIds = new Set<string>();
+  for (const observation of sortedObservations) {
+    if (observation.callable.program?.pythonState?.status !== "closed") continue;
+    for (const setup of observation.callable.program.pythonState.setup) {
+      pythonSetupCallIds.add(setup.callId);
+    }
+  }
+  const ordered = sortedObservations.filter(
+    (observation) => !pythonSetupCallIds.has(observation.callId),
+  );
   const privateValues = new Map<string, WorkflowJsonValue>();
   const skipped: Array<{ callId: string; reason: string }> = [];
   const steps: WorkflowStep[] = [];
+  const baselineObserved: Array<{
+    stepId: string;
+    reference: string;
+    comparison?: "text-trim";
+  }> = [];
   const inputTypes = new Map<string, "string" | "number" | "boolean" | "object" | "array">();
   // A value may be classified private only after a later call is processed, so the union of every
   // predicate seen is applied to the finished workflow as well.
@@ -280,6 +302,15 @@ function recordWorkflowRecipeInternal(
       observed: { outcome: observation.observed ?? "unknown" },
       ...(observation.permissions === undefined ? {} : { permissions: observation.permissions }),
     });
+    if (observation.baselineReference !== undefined) {
+      baselineObserved.push({
+        stepId,
+        reference: observation.baselineReference,
+        ...(observation.baselineComparison === undefined
+          ? {}
+          : { comparison: observation.baselineComparison }),
+      });
+    }
   }
 
   if (steps.length === 0) return undefined;
@@ -340,12 +371,17 @@ function recordWorkflowRecipeInternal(
     );
   }
 
+  const privateReferences = new Set(privateValues.keys());
+  for (const entry of baselineObserved) privateReferences.add(entry.reference);
   const workflow: RecordedWorkflow = {
     schemaVersion: 1,
     workflowId,
     inputs: [...inputTypes.entries()].map(([name, type]) => ({ name, type })),
     steps,
-    ...(privateValues.size > 0 ? { privateReferences: [...privateValues.keys()] } : {}),
+    ...(baselineObserved.length === steps.length
+      ? { baseline: { inputs: [], observed: baselineObserved } }
+      : {}),
+    ...(privateReferences.size > 0 ? { privateReferences: [...privateReferences] } : {}),
     // Candidates are reported, never executed: the steps above keep the values the record shows
     // until a replay confirms a suggestion on inputs the recording never contained.
     ...(candidates === undefined || candidates.length === 0 ? {} : { candidates: [...candidates] }),

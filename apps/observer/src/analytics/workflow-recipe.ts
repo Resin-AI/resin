@@ -1,5 +1,5 @@
 /** Shared live/import reconstruction, with executable selection separate from learning evidence. */
-import type { WorkflowValueSource, WorkflowValueTemplate } from "@resin/contracts";
+import { collectWorkflowPrivateReferences } from "@resin/contracts";
 import {
   type DemonstrationCall,
   type DemonstrationObservation,
@@ -120,32 +120,11 @@ export function recordCallsFromEvents(
       observed: demonstration.observed.map((entry) => ({
         stepId: recipe.workflow.steps[entry.position]!.id,
         reference: entry.reference,
+        ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
       })),
     };
   }
-  // Only references used by the actual arguments and the selected demonstration are authorized.
-  const references = new Set<string>();
-  const collectTemplate = (template: WorkflowValueTemplate): void => {
-    if (template.type === "private") references.add(template.reference);
-    else if (template.type === "object") {
-      for (const entry of Object.values(template.entries)) collectTemplate(entry);
-    } else if (template.type === "array") {
-      for (const item of template.items) collectTemplate(item);
-    } else if (template.type === "program") {
-      collectTemplate(template.source);
-      for (const hole of template.holes) collectTemplate(hole.binding);
-    }
-  };
-  const collect = (source: WorkflowValueSource): void => {
-    if (source.kind === "private") references.add(source.reference);
-    else if (source.kind === "template") collectTemplate(source.template);
-  };
-  for (const step of recipe.workflow.steps) {
-    for (const argument of step.arguments) collect(argument.source);
-  }
-  for (const entry of recipe.workflow.heldOut?.inputs ?? []) references.add(entry.reference);
-  for (const entry of recipe.workflow.heldOut?.observed ?? []) references.add(entry.reference);
-  if (references.size > 0) recipe.workflow.privateReferences = [...references];
-  else delete recipe.workflow.privateReferences;
+  recipe.workflow.privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
+  if (recipe.workflow.privateReferences.length === 0) delete recipe.workflow.privateReferences;
   return recipe;
 }

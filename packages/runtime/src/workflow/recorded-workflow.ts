@@ -21,6 +21,13 @@ import type {
 export interface RecordedCallRequest {
   step: WorkflowStep;
   arguments: Record<string, WorkflowJsonValue>;
+  /** Local private-reference resolver used by composite Python setup cells. */
+  resolvePrivate?: (
+    reference: string,
+    access?: { workspaceId?: string },
+  ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+  /** Workspace scope forwarded to the private resolver. */
+  access?: { workspaceId?: string };
 }
 
 /**
@@ -348,7 +355,12 @@ export async function executeRecordedWorkflow(
     }
 
     try {
-      const result = await adapter.call({ step, arguments: args });
+      const result = await adapter.call({
+        step,
+        arguments: args,
+        ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
+        ...(options.access ? { access: options.access } : {}),
+      });
       results.set(step.id, result);
       state.set(step.id, "completed");
       outcomes.push({ stepId: step.id, status: "completed", result });

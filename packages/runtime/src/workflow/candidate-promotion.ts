@@ -14,6 +14,7 @@ import {
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   bindProgramToken,
+  hashCanonical,
 } from "@resin/contracts";
 
 /** The template a recorded source resolves through, so a binding can be placed inside it. */
@@ -43,6 +44,16 @@ function templateOf(
   const step = plan.steps.find((entry) => entry.id === stepId);
   const argument = step?.arguments.find((entry) => entry.name === argumentName);
   return argument?.source.kind === "template" ? argument.source.template : undefined;
+}
+
+/** Canonical identity for a candidate, excluding its diagnostic reason and evidence. */
+function candidateIdentity(candidate: WorkflowBindingCandidate): string {
+  return hashCanonical({
+    stepId: candidate.stepId,
+    argument: candidate.argument,
+    path: candidate.path,
+    proposed: candidate.proposed,
+  });
 }
 
 /** Replaces the template at `path`, rebuilding the spine so nothing else in the plan is touched. */
@@ -85,6 +96,7 @@ export function applyAcceptedBindings(
   if (accepted.length === 0) return plan;
   const next = JSON.parse(JSON.stringify(plan)) as RecordedWorkflow;
   const inputs = new Map(next.inputs.map((input) => [input.name, input]));
+  const appliedCandidateIdentities = new Set<string>();
   for (const candidate of accepted) {
     const step = next.steps.find((entry) => entry.id === candidate.stepId);
     const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
@@ -111,10 +123,6 @@ export function applyAcceptedBindings(
       leaf = { type: "result", stepId: candidate.proposed.stepId, path: candidate.proposed.path };
     } else {
       leaf = { type: "input", name: candidate.proposed.name };
-      inputs.set(candidate.proposed.name, {
-        name: candidate.proposed.name,
-        type: candidate.proposed.type,
-      });
     }
     let replaced: WorkflowValueTemplate | undefined;
     if (isTokenBinding) {
@@ -132,7 +140,20 @@ export function applyAcceptedBindings(
     }
     if (replaced === undefined) continue;
     argument.source = { kind: "template", template: replaced };
+    argument.provenance = { standing: "derived", rule: "replay-confirmed" };
+    appliedCandidateIdentities.add(candidateIdentity(candidate));
+    if (candidate.proposed.kind === "input") {
+      inputs.set(candidate.proposed.name, {
+        name: candidate.proposed.name,
+        type: candidate.proposed.type,
+      });
+    }
   }
   next.inputs = [...inputs.values()];
+  if (next.candidates !== undefined) {
+    next.candidates = next.candidates.filter(
+      (candidate) => !appliedCandidateIdentities.has(candidateIdentity(candidate)),
+    );
+  }
   return next;
 }

@@ -16,10 +16,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type {
-  RecordedWorkflow,
-  WorkflowBindingCandidate,
-  WorkflowJsonValue,
+import {
+  type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  type WorkflowJsonValue,
+  workflowValidationPlanDigest,
 } from "@resin/contracts";
 import {
   FilePrivateValueStore,
@@ -28,6 +29,8 @@ import {
 } from "@resin/observer";
 import {
   type McpToolConnection,
+  RESIN_PROCESS_RUNTIME,
+  RESIN_PROGRAM_RUNTIME,
   type RuntimeAdapter,
   RuntimeAdapterRegistry,
   type ToolProtocolDispatchRequest,
@@ -100,10 +103,9 @@ export interface LocalWorkflowValidatorOptions {
 /**
  * The validator the local half of the product runs.
  *
- * It takes no inputs and no expectations from its caller: the demonstration inside the recording
- * supplies both, and nothing else is consulted. A recording that carries no demonstration is
- * reported as having no verification rather than as verified, and a caller that receives no
- * verification must not treat the plan as established.
+ * Candidate promotion uses only a held-out demonstration. Program execution may instead be checked
+ * against the original baseline, without promoting any candidate. Neither replay can borrow the
+ * original interpreter's namespace: each program runs in a fresh process.
  */
 export function createLocalWorkflowValidator(
   options: LocalWorkflowValidatorOptions = {},
@@ -151,6 +153,7 @@ export function createLocalWorkflowValidator(
         cwd: workspaceDir,
         isolateEnvironment: true,
         ...(options.environment === undefined ? {} : { env: options.environment }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       };
       adapters.register(createProcessAdapter(programOptions));
       adapters.register(createProgramAdapter(programOptions));
@@ -166,9 +169,17 @@ export function createLocalWorkflowValidator(
             : { openConnection: options.openConnection }),
         }),
       );
+      const hasRecordedProgram = plan.steps.some(
+        (step) =>
+          step.callable.program !== undefined &&
+          (step.callable.runtime === RESIN_PROGRAM_RUNTIME ||
+            step.callable.runtime === RESIN_PROCESS_RUNTIME),
+      );
+      const baselineOnly =
+        plan.heldOut === undefined && hasRecordedProgram && plan.baseline !== undefined;
       const environment = await demonstrationEnvironment({
-        plan,
-        candidates,
+        plan: baselineOnly ? { ...plan, heldOut: plan.baseline } : plan,
+        candidates: baselineOnly ? [] : candidates,
         adapters,
         workspaceId: replayWorkspaceId,
         workspaceDir,
@@ -181,9 +192,38 @@ export function createLocalWorkflowValidator(
           unavailable:
             "the selected workflow has no matching recorded demonstration; no replay or parameter decision was performed",
         };
-      const decided = await validateAndConfirmCandidates({ plan, candidates, environment });
+      const decided = await validateAndConfirmCandidates({
+        plan,
+        candidates: baselineOnly ? [] : candidates,
+        environment,
+      });
+      if (hasRecordedProgram && decided.verification?.status === "verified") {
+        decided.verification.replay = {
+          kind: "fresh-process",
+          planDigest: workflowValidationPlanDigest(decided.plan),
+        };
+      }
+      if (hasRecordedProgram && decided.verification !== undefined) {
+        // Interpreter errors may contain private source or values. Only the failed step identity
+        // and the replay verdict cross the local/cloud boundary.
+        decided.verification.missed = decided.verification.missed.map(({ stepId }) => ({
+          stepId,
+          detail: "the fresh-process replay did not reproduce this recorded step",
+        }));
+        decided.verification.dropped = decided.verification.dropped.map(({ candidate }) => ({
+          candidate,
+          reason: "the binding was not confirmed by fresh-process replay",
+        }));
+      }
       return {
-        verdicts: decided.outcomes.map((outcome) => ({
+        verdicts: (baselineOnly
+          ? candidates.map((candidate) => ({
+              candidate,
+              accepted: false,
+              reason: "the original baseline cannot establish a binding on different inputs",
+            }))
+          : decided.outcomes
+        ).map((outcome) => ({
           candidate: {
             stepId: outcome.candidate.stepId,
             argument: outcome.candidate.argument,
@@ -191,7 +231,13 @@ export function createLocalWorkflowValidator(
             proposed: outcome.candidate.proposed,
           },
           confirmed: outcome.accepted,
-          ...(outcome.accepted ? {} : { reason: outcome.reason }),
+          ...(outcome.accepted
+            ? {}
+            : {
+                reason: hasRecordedProgram
+                  ? "the binding was not confirmed by fresh-process replay"
+                  : outcome.reason,
+              }),
         })),
         ...(decided.verification === undefined ? {} : { verification: decided.verification }),
       };

@@ -8942,6 +8942,154 @@ function isJsonValue(value) {
     return Object.values(value).every(isJsonValue);
   return false;
 }
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+function validateWorkflowPythonState(program, stepId, targetCallId, workflowCallIds, declaredPrivates, errors) {
+  const state = program.pythonState;
+  if (state === void 0)
+    return;
+  if (program.kind !== "python") {
+    errors.push(`step ${stepId} has pythonState on a non-Python program`);
+    return;
+  }
+  if (!isPlainObject(state)) {
+    errors.push(`step ${stepId} pythonState must be an object`);
+    return;
+  }
+  if (!hasOnlyKeys(state, PYTHON_STATE_KEYS)) {
+    errors.push(`step ${stepId} pythonState contains unsupported metadata`);
+  }
+  if (state.schemaVersion !== 1) {
+    errors.push(`step ${stepId} pythonState has an unsupported schemaVersion`);
+  }
+  if (state.status !== "closed" && state.status !== "unresolved") {
+    errors.push(`step ${stepId} pythonState needs a closed or unresolved status`);
+  }
+  if (typeof state.unresolvedReadCount !== "number" || !Number.isInteger(state.unresolvedReadCount) || state.unresolvedReadCount < 0) {
+    errors.push(`step ${stepId} pythonState.unresolvedReadCount must be a non-negative integer`);
+  } else if (state.status === "closed" && state.unresolvedReadCount !== 0) {
+    errors.push(`step ${stepId} closed pythonState cannot have unresolved reads`);
+  }
+  if (state.status === "unresolved") {
+    errors.push(`step ${stepId} pythonState is unresolved`);
+  }
+  if (!Array.isArray(state.setup)) {
+    errors.push(`step ${stepId} pythonState.setup must be an array`);
+    return;
+  }
+  if (state.setup.length > MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
+    errors.push(`step ${stepId} pythonState.setup exceeds ${MAX_WORKFLOW_PYTHON_SETUP_CELLS} cells`);
+  }
+  const callIds = /* @__PURE__ */ new Set();
+  const sourceEventIds = /* @__PURE__ */ new Set();
+  const resultEventIds = /* @__PURE__ */ new Set();
+  const descriptorIds = /* @__PURE__ */ new Set();
+  const references = /* @__PURE__ */ new Set();
+  for (const [index, descriptor] of state.setup.entries()) {
+    const where = `step ${stepId} pythonState.setup[${index}]`;
+    if (!isPlainObject(descriptor)) {
+      errors.push(`${where} must be an object`);
+      continue;
+    }
+    if (!hasOnlyKeys(descriptor, PYTHON_SETUP_KEYS)) {
+      errors.push(`${where} contains unsupported metadata`);
+    }
+    const fields = [
+      "callId",
+      "sourceEventId",
+      "resultEventId",
+      "reference"
+    ];
+    for (const field of fields) {
+      if (typeof descriptor[field] !== "string" || descriptor[field].length === 0) {
+        errors.push(`${where}.${field} must be a non-empty string`);
+      }
+    }
+    const callId = typeof descriptor.callId === "string" ? descriptor.callId : void 0;
+    const sourceEventId = typeof descriptor.sourceEventId === "string" ? descriptor.sourceEventId : void 0;
+    const resultEventId = typeof descriptor.resultEventId === "string" ? descriptor.resultEventId : void 0;
+    for (const id of [callId, sourceEventId, resultEventId]) {
+      if (id === void 0)
+        continue;
+      if (descriptorIds.has(id))
+        errors.push(`${where} duplicates descriptor identity ${id}`);
+      descriptorIds.add(id);
+      if (targetCallId !== void 0 && id === targetCallId) {
+        errors.push(`${where} references its target callId ${id}`);
+      }
+    }
+    const reference = typeof descriptor.reference === "string" ? descriptor.reference : void 0;
+    if (callId !== void 0) {
+      if (callIds.has(callId))
+        errors.push(`${where} duplicates callId ${callId}`);
+      callIds.add(callId);
+      if (workflowCallIds.has(callId)) {
+        errors.push(`${where} overlaps workflow callId ${callId}`);
+      }
+    }
+    if (sourceEventId !== void 0) {
+      if (sourceEventIds.has(sourceEventId)) {
+        errors.push(`${where} duplicates sourceEventId ${sourceEventId}`);
+      }
+      sourceEventIds.add(sourceEventId);
+    }
+    if (resultEventId !== void 0) {
+      if (resultEventIds.has(resultEventId)) {
+        errors.push(`${where} duplicates resultEventId ${resultEventId}`);
+      }
+      resultEventIds.add(resultEventId);
+    }
+    if (callId !== void 0 && (sourceEventId !== void 0 && callId === sourceEventId || resultEventId !== void 0 && callId === resultEventId)) {
+      errors.push(`${where} self-references its own call event`);
+    }
+    if (sourceEventId !== void 0 && resultEventId !== void 0 && sourceEventId === resultEventId) {
+      errors.push(`${where} uses the same source and result event`);
+    }
+    if (reference !== void 0) {
+      if (references.has(reference))
+        errors.push(`${where} duplicates reference ${reference}`);
+      references.add(reference);
+      if (declaredPrivates !== void 0 && !declaredPrivates.has(reference)) {
+        errors.push(`${where} reads undeclared private reference '${reference}'`);
+      }
+    }
+  }
+}
+function validateDemonstration(label, demonstration, order, declaredPrivates, errors) {
+  if (!isPlainObject(demonstration)) {
+    errors.push(`${label} must be an object when present`);
+    return;
+  }
+  const entries = [
+    ["inputs", demonstration.inputs],
+    ["observed", demonstration.observed]
+  ];
+  for (const [entryLabel, list] of entries) {
+    if (!Array.isArray(list)) {
+      errors.push(`${label}.${entryLabel} must be an array`);
+      continue;
+    }
+    for (const entry of list) {
+      if (!isPlainObject(entry)) {
+        errors.push(`every ${label}.${entryLabel} entry must be an object`);
+        continue;
+      }
+      if (entryLabel === "observed" && entry.comparison !== void 0 && entry.comparison !== "text-trim") {
+        errors.push(`${label}.observed entry for step ${String(entry.stepId)} has unsupported comparison ${String(entry.comparison)}`);
+      }
+      if (!order.has(String(entry.stepId))) {
+        errors.push(`every ${label}.${entryLabel} entry names unknown step ${String(entry.stepId)}`);
+      }
+      if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
+        errors.push(`${label}.${entryLabel} reads undeclared local reference ${String(entry.reference)}`);
+      }
+      if (entryLabel === "inputs" && typeof entry.argument !== "string") {
+        errors.push(`every ${label}.inputs entry needs the argument it was supplied for`);
+      }
+    }
+  }
+}
 function validateRecordedWorkflow(value) {
   const errors = [];
   if (!isPlainObject(value))
@@ -8989,6 +9137,12 @@ function validateRecordedWorkflow(value) {
   const steps = Array.isArray(value.steps) ? value.steps : null;
   if (!steps || steps.length === 0)
     errors.push("steps must be a non-empty array");
+  const workflowCallIds = /* @__PURE__ */ new Set();
+  for (const step of steps ?? []) {
+    if (isPlainObject(step) && typeof step.callId === "string" && step.callId.length > 0) {
+      workflowCallIds.add(step.callId);
+    }
+  }
   const stepIds = /* @__PURE__ */ new Set();
   for (const step of steps ?? []) {
     if (!isPlainObject(step) || typeof step.id !== "string" || step.id.length === 0) {
@@ -9180,6 +9334,8 @@ function validateRecordedWorkflow(value) {
         errors.push(`step ${step.id} has an invalid recorded program`);
       } else if (program.source.length === 0 && (!Array.isArray(program.argv) || program.argv.length === 0) && typeof program.argument !== "string") {
         errors.push(`step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`);
+      } else {
+        validateWorkflowPythonState(program, step.id, typeof step.callId === "string" ? step.callId : void 0, workflowCallIds, declaredPrivates, errors);
       }
     }
   }
@@ -9238,45 +9394,22 @@ function validateRecordedWorkflow(value) {
       }
     }
   }
-  const heldOut = value.heldOut;
-  if (heldOut !== void 0) {
-    if (!isPlainObject(heldOut)) {
-      errors.push("heldOut must be an object when present");
-    } else {
-      const entries = [
-        ["inputs", heldOut.inputs],
-        ["observed", heldOut.observed]
-      ];
-      for (const [label, list] of entries) {
-        if (!Array.isArray(list)) {
-          errors.push(`heldOut.${label} must be an array`);
-          continue;
-        }
-        for (const entry of list) {
-          if (!isPlainObject(entry)) {
-            errors.push(`every heldOut.${label} entry must be an object`);
-            continue;
-          }
-          if (!order.has(String(entry.stepId))) {
-            errors.push(`heldOut.${label} names unknown step ${String(entry.stepId)}`);
-          }
-          if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
-            errors.push(`heldOut.${label} reads undeclared local reference ${String(entry.reference)}`);
-          }
-          if (label === "inputs" && typeof entry.argument !== "string") {
-            errors.push("every heldOut.inputs entry needs the argument it was supplied for");
-          }
-        }
-      }
-    }
+  if (value.baseline !== void 0) {
+    validateDemonstration("baseline", value.baseline, order, declaredPrivates, errors);
+  }
+  if (value.heldOut !== void 0) {
+    validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
   }
   return { valid: errors.length === 0, errors };
 }
-var RECORDED_WORKFLOW_SCHEMA_VERSION;
+var RECORDED_WORKFLOW_SCHEMA_VERSION, MAX_WORKFLOW_PYTHON_SETUP_CELLS, PYTHON_STATE_KEYS, PYTHON_SETUP_KEYS;
 var init_recorded_workflow = __esm({
   "packages/contracts/dist/recorded-workflow.js"() {
     "use strict";
     RECORDED_WORKFLOW_SCHEMA_VERSION = 1;
+    MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
+    PYTHON_STATE_KEYS = ["schemaVersion", "status", "unresolvedReadCount", "setup"];
+    PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "reference"];
   }
 });
 
@@ -9288,7 +9421,7 @@ var init_program_tokens = __esm({
 });
 
 // packages/contracts/dist/workflow-validation.js
-var SHA256_HEX, WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ProgramIdentitySchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
+var SHA256_HEX, WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ProgramIdentitySchema, ReplayProofSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
 var init_workflow_validation = __esm({
   "packages/contracts/dist/workflow-validation.js"() {
     "use strict";
@@ -9318,12 +9451,17 @@ var init_workflow_validation = __esm({
       templateDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
       sourceDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters")
     });
+    ReplayProofSchema = external_exports.object({
+      kind: external_exports.literal("fresh-process"),
+      planDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters")
+    });
     PlanVerificationSchema = external_exports.object({
       status: external_exports.enum(["verified", "incomplete", "failed"]),
       reproduced: external_exports.array(external_exports.string()),
       missed: external_exports.array(external_exports.object({ stepId: external_exports.string(), detail: external_exports.string() })),
       dropped: external_exports.array(external_exports.object({ candidate: external_exports.unknown(), reason: external_exports.string() })),
-      programIdentities: external_exports.array(ProgramIdentitySchema).optional()
+      programIdentities: external_exports.array(ProgramIdentitySchema).optional(),
+      replay: ReplayProofSchema.optional()
     });
     VerdictSchema = external_exports.object({
       candidate: external_exports.object({
@@ -10165,9 +10303,11 @@ var init_refresh4 = __esm({
 });
 
 // adapters/omp/dist/source.js
+var MAX_OMP_PROGRAM_ARTIFACT_BYTES;
 var init_source4 = __esm({
   "adapters/omp/dist/source.js"() {
     "use strict";
+    MAX_OMP_PROGRAM_ARTIFACT_BYTES = 1 * 1024 * 1024;
   }
 });
 

@@ -17,8 +17,10 @@ import {
   type WorkflowArgument,
   type WorkflowBindingCandidate,
   type WorkflowJsonValue,
+  type WorkflowObservedComparison,
   type WorkflowProgramIdentity,
   type WorkflowStep,
+  type WorkflowValidationReplayProof,
   type WorkflowValuePath,
   type WorkflowValueSource,
   type WorkflowValueTemplate,
@@ -43,8 +45,13 @@ export interface CandidateValidationEnvironment {
   workspaceDir: string;
   /** Inputs for this replay. */
   inputs: Record<string, WorkflowJsonValue>;
-  /** What the held-out demonstration observed: stepId -> the value it produced. */
+  /** What the selected demonstration observed: stepId -> the value it produced. */
   observed: Record<string, WorkflowJsonValue>;
+  /**
+   * Explicit projections declared by the selected demonstration, keyed by observed step.
+   * Absence keeps the existing exact structural comparison.
+   */
+  observedComparisons?: Record<string, WorkflowObservedComparison>;
   /**
    * Resolves the plan's local references for the replay.
    *
@@ -76,6 +83,8 @@ export interface WorkflowPlanVerification {
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   /** Hash-only identities for parameterized programs in the final verified plan. */
   programIdentities?: WorkflowProgramIdentity[];
+  /** Fresh-process proof attached only after a real replay. */
+  replay?: WorkflowValidationReplayProof;
 }
 
 export interface CandidateValidationOutcome {
@@ -106,6 +115,20 @@ function deepEqual(left: unknown, right: unknown): boolean {
     );
   }
   return false;
+}
+
+/**
+ * Compares one replay result with its selected demonstration. The only non-exact mode is the
+ * explicitly declared textual whitespace projection; expected text is never normalized.
+ */
+function matchesObservedResult(
+  actual: WorkflowJsonValue,
+  expected: WorkflowJsonValue,
+  comparison: WorkflowObservedComparison | undefined,
+): boolean {
+  if (comparison === undefined) return deepEqual(actual, expected);
+  if (comparison !== "text-trim") return false;
+  return typeof actual === "string" && typeof expected === "string" && actual.trim() === expected;
 }
 
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */
@@ -356,7 +379,11 @@ async function replayStep(
   if (outcome.status !== "completed") {
     return { reproduced: false, detail: describeOutcome(execution, outcome) };
   }
-  const reproduced = deepEqual(outcome.result, observed);
+  const reproduced = matchesObservedResult(
+    outcome.result,
+    observed,
+    environment.observedComparisons?.[stepId],
+  );
   return {
     reproduced,
     detail: reproduced
@@ -525,6 +552,20 @@ export async function demonstrationEnvironment(params: {
     }
     return value;
   };
+  for (const entry of demonstration.inputs) {
+    const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
+    const argument = step?.arguments.find((candidate) => candidate.name === entry.argument);
+    if (step === undefined || argument === undefined) return undefined;
+    const source = argument.source;
+    if (source.kind !== "input") continue;
+    const input = params.plan.inputs.find((candidate) => candidate.name === source.name);
+    if (input === undefined) return undefined;
+    const value = await resolveOnce(entry.reference);
+    if (!matchesDemonstratedType(value, input.type)) return undefined;
+    const name = input.name;
+    if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) return undefined;
+    inputs[name] = value;
+  }
   for (const candidate of params.candidates) {
     if (candidate.proposed.kind !== "input") continue;
     const entry = demonstration.inputs.find(
@@ -558,8 +599,12 @@ export async function demonstrationEnvironment(params: {
     inputs[name] = value;
   }
   const observed: Record<string, WorkflowJsonValue> = {};
+  const observedComparisons: Record<string, WorkflowObservedComparison> = {};
   for (const entry of demonstration.observed) {
     observed[entry.stepId] = await resolveOnce(entry.reference);
+    if (entry.comparison !== undefined) {
+      observedComparisons[entry.stepId] = entry.comparison;
+    }
   }
   return {
     adapters: params.adapters,
@@ -567,6 +612,7 @@ export async function demonstrationEnvironment(params: {
     workspaceDir: params.workspaceDir,
     inputs,
     observed,
+    ...(Object.keys(observedComparisons).length === 0 ? {} : { observedComparisons }),
     resolvePrivate: resolve,
     ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
   };
@@ -624,8 +670,11 @@ async function replayPlanOnce(
       missed.push({ stepId, detail: describeOutcome(execution, outcome) });
       continue;
     }
-    if (deepEqual(outcome.result, observed)) reproduced.push(stepId);
-    else missed.push({ stepId, detail: describeOutcome(execution, outcome) });
+    if (
+      matchesObservedResult(outcome.result, observed, environment.observedComparisons?.[stepId])
+    ) {
+      reproduced.push(stepId);
+    } else missed.push({ stepId, detail: describeOutcome(execution, outcome) });
   }
   return { reproduced, missed };
 }

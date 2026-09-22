@@ -11,6 +11,7 @@ import {
   type RecordedWorkflow,
   type WorkflowJsonValue,
   type WorkflowValueTemplate,
+  collectWorkflowPrivateReferences,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import {
@@ -185,7 +186,7 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
     },
     outputContract: { fromStep: last.id, callable: last.callable.name },
     requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
-    requiredPrivateReferences: [...(plan.privateReferences ?? [])],
+    requiredPrivateReferences: collectWorkflowPrivateReferences(plan),
     permissions: plan.steps
       .filter((step) => step.permissions !== undefined)
       .map((step) => ({ stepId: step.id, permissions: step.permissions as WorkflowJsonValue })),

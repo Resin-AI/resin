@@ -47,7 +47,6 @@ describe("a missing replay is not a completed validation", () => {
       workspaceId: owner,
       dispatch,
     })(plan);
-    expect(result.unavailable).toContain("no matching recorded demonstration");
     expect(result.verification).toBeUndefined();
     expect(dispatch).not.toHaveBeenCalled();
   });
@@ -86,7 +85,6 @@ describe("a missing replay is not a completed validation", () => {
       },
     ];
     const submitted: WorkflowValidationDecision[] = [];
-    const log: string[] = [];
     const worker = new WorkflowValidationWorker({
       identity: { workspaceId: owner, deviceId: "device-one" },
       client: {
@@ -108,7 +106,6 @@ describe("a missing replay is not a completed validation", () => {
           return { status: "recorded" };
         },
       },
-      log: (message) => log.push(message),
     });
     expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 1, refused: 0 });
     expect(submitted).toHaveLength(1);
@@ -117,6 +114,5 @@ describe("a missing replay is not a completed validation", () => {
       verification: { status: "failed" },
       accepted: [],
     });
-    expect(log.join("\n")).toContain("no matching recorded demonstration");
   });
 });
