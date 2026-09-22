@@ -10,12 +10,13 @@ import {
   type GeneratedKeyPair,
   InMemoryKeyStore,
   type KeyStore,
+  WorkerProcess,
   compileRecordedWorkflow,
   encodeDeterministicTar,
   generateBundleKeyPair,
   signBundlePayload,
 } from "@resin/runtime";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalArtifactExecutor, resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
@@ -1349,6 +1350,7 @@ export default defineTool(async (context: { input: { val: string } }) => {
       sourceCode,
     );
 
+    const workerExecute = vi.spyOn(WorkerProcess.prototype, "execute");
     const executor = new LocalArtifactExecutor({
       cache,
       workspaceRoot: workspaceDir,
@@ -1369,9 +1371,114 @@ export default defineTool(async (context: { input: { val: string } }) => {
       parameters: { val: "test" },
       context: ws,
     });
-
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("zod");
+    expect(workerExecute).not.toHaveBeenCalled();
+    workerExecute.mockRestore();
+  });
+  it("rejects unsupported imports reached through a local helper before spawning", async () => {
+    const toolId = "test-transitive-import-tool-008";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "transitive_import_tool",
+      version: "1.0.0",
+      description: "Attempts to import an unsupported module through a helper",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+      manifestBase,
+      `export { value } from "./helper.ts";`,
+    );
+    fs.writeFileSync(
+      path.join(cache.getArtifactPath(artifactDigest), "src/helper.ts"),
+      `import crypto from "node:crypto"; export const value = crypto;`,
+      "utf8",
+    );
+
+    const workerExecute = vi.spyOn(WorkerProcess.prototype, "execute");
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "transitive_import_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest,
+      },
+      manifest,
+      parameters: {},
+      context: resolveWorkspaceContext({ cwd: workspaceDir }),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("node:crypto");
+    expect(workerExecute).not.toHaveBeenCalled();
+    workerExecute.mockRestore();
+  });
+
+  it("does not follow source symlinks outside the artifact root", async () => {
+    const toolId = "test-symlink-import-tool-009";
+    const manifestBase: TestManifestInput = {
+      id: toolId,
+      name: "symlink_import_tool",
+      version: "1.0.0",
+      description: "Contains a source symlink",
+      parameters: { type: "object", properties: {} },
+      runtime: {
+        runtime: "deno",
+        entrypoint: "src/index.ts",
+        memoryLimitMb: 128,
+        timeoutMs: 5000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 1048576,
+      },
+    };
+    const { artifactDigest, manifestDigest, manifest } = await installBundleToCache(
+      manifestBase,
+      `export default async () => ({ status: "ok" });`,
+    );
+    const symlinkPath = path.join(cache.getArtifactPath(artifactDigest), "src/outside.ts");
+    try {
+      fs.symlinkSync("/etc/passwd", symlinkPath);
+    } catch {
+      return;
+    }
+
+    const workerExecute = vi.spyOn(WorkerProcess.prototype, "execute");
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      allowDevKeys: true,
+    });
+    const result = await executor.execute({
+      entry: {
+        toolId,
+        name: "symlink_import_tool",
+        version: "1.0.0",
+        artifactDigest,
+        manifestDigest,
+      },
+      manifest,
+      parameters: {},
+      context: resolveWorkspaceContext({ cwd: workspaceDir }),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("symbolic link");
+    expect(workerExecute).not.toHaveBeenCalled();
+    workerExecute.mockRestore();
   });
 
   it.skipIf(!hasDeno)(

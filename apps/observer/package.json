@@ -30,6 +30,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./recording": {
+      "types": "./dist/recording.d.ts",
+      "import": "./dist/recording.js",
+      "default": "./dist/recording.js"
+    },
     "./client": {
       "types": "./dist/client-api.d.ts",
       "import": "./dist/client-api.js",

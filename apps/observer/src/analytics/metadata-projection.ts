@@ -41,7 +41,7 @@ import {
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
-} from "./workflow-call-recorder.js";
+} from "./workflow-carrier.js";
 const DEFAULT_HOME_DIR = homedir();
 
 export type ParameterPrimitiveKind =

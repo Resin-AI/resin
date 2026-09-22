@@ -7,6 +7,7 @@ import {
   type ToolManifest,
 } from "@resin/contracts";
 import ts from "typescript";
+import { SUPPORTED_ARTIFACT_IMPORTS } from "./artifact-imports.js";
 import type {
   StaticAnalysisFinding,
   StaticAnalysisResult,
@@ -14,20 +15,11 @@ import type {
 } from "./types.js";
 
 /**
- * Standard allowlist of import module specifiers.
+ * Standard allowlist of import module specifiers shared with artifact execution.
  */
-const DEFAULT_ALLOWED_IMPORT_SPECIFIERS = {
-  "@resin/runtime": true,
-  zod: true,
-  "node:path": true,
-  path: true,
-  "node:crypto": true,
-  crypto: true,
-  "node:util": true,
-  util: true,
-  "node:buffer": true,
-  buffer: true,
-} as const;
+const DEFAULT_ALLOWED_IMPORT_SPECIFIERS: Readonly<Record<string, boolean>> = Object.fromEntries(
+  SUPPORTED_ARTIFACT_IMPORTS.map((specifier) => [specifier, true]),
+);
 
 /**
  * Patterns for forbidden imports.
