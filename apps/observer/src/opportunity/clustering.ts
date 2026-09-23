@@ -735,7 +735,7 @@ export class StructuralClusterer {
     };
 
     const structuralHash = representativeSignature.structuralHash;
-    const clusterId = `cluster_${workspaceId.replace(/[^a-zA-Z0-9_-]/g, "")}_${structuralHash.slice(0, 16)}`;
+    const clusterId = `cluster_${hashCanonicalContent({ workspaceId, structuralHash })}`;
     const scenarioIds = Array.from(scenarioIdsSet).sort();
     const distinctScenarioCount = scenarioIds.length > 0 ? scenarioIds.length : undefined;
     const isCrossScenario = (distinctScenarioCount ?? 0) >= 2;
