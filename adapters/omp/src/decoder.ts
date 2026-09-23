@@ -1053,20 +1053,28 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const targetPaths = editTargetPaths(parameters);
     return targetPaths.length > 0 ? { ...parameters, targetPaths } : parameters;
   }
-  private withPythonEvalSourceInterface(
+  private withEvalSourceInterface(
     toolName: string,
     parameters: DecoderMetadataRecord,
     metadata: OmpTranscriptPayload,
   ): OmpTranscriptPayload {
+    const cleanMetadata = Object.hasOwn(metadata, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)
+      ? { ...metadata }
+      : metadata;
+    if (cleanMetadata !== metadata) delete cleanMetadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+
     const language = asString(parameters.language)?.trim().toLowerCase();
-    if (
-      toolName !== "eval" ||
-      (language !== "py" && language !== "python") ||
-      typeof parameters.code !== "string"
-    ) {
-      return metadata;
-    }
-    return { ...metadata, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "python-eval" };
+    const sourceInterface =
+      toolName !== "eval" || typeof parameters.code !== "string"
+        ? undefined
+        : language === "py" || language === "python"
+          ? "python-eval"
+          : language === "js" || language === "javascript"
+            ? "javascript-eval"
+            : undefined;
+    return sourceInterface === undefined
+      ? cleanMetadata
+      : { ...cleanMetadata, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: sourceInterface };
   }
 
   /**
@@ -1103,7 +1111,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         timestamp,
         schemaVersion: "1.0.0",
         causalRef: { ...causalRef, stepIndex },
-        metadata: this.withPythonEvalSourceInterface(toolName, recordedParameters, metadata),
+        metadata: this.withEvalSourceInterface(toolName, recordedParameters, metadata),
         type: "tool_call",
         toolName,
         callId,
@@ -1960,7 +1968,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       timestamp,
       schemaVersion: "1.0.0",
       causalRef,
-      metadata: this.withPythonEvalSourceInterface(toolName, parameters, metadata),
+      metadata: this.withEvalSourceInterface(toolName, parameters, metadata),
       type: "tool_call",
       toolName,
       callId,

@@ -198,11 +198,14 @@ async function readOmpProgramArtifact(
   }
 }
 
+type NativeEvalLanguage = "python" | "javascript";
+
 function nativeEvalPayload(value: unknown):
   | {
       callId: string;
       cell: OmpRecordObject;
       details: OmpRecordObject;
+      language: NativeEvalLanguage;
     }
   | undefined {
   const outer = asRecord(value);
@@ -241,10 +244,17 @@ function nativeEvalPayload(value: unknown):
   const details = asRecord(payload.details) ?? asRecord(outer.details);
   if (!details || !Array.isArray(details.cells) || details.cells.length !== 1) return undefined;
   const cell = asRecord(details.cells[0]);
-  if (!cell || cell.language !== "python" || cell.status !== "complete" || cell.exitCode !== 0) {
+  const rawLanguage = typeof cell?.language === "string" ? cell.language.trim().toLowerCase() : "";
+  const language =
+    rawLanguage === "python"
+      ? "python"
+      : rawLanguage === "js" || rawLanguage === "javascript"
+        ? "javascript"
+        : undefined;
+  if (!cell || language === undefined || cell.status !== "complete" || cell.exitCode !== 0) {
     return undefined;
   }
-  return { callId: normalizeOmpCallId(rawCallId), cell, details };
+  return { callId: normalizeOmpCallId(rawCallId), cell, details, language };
 }
 
 async function populateOmpProgramObservation(
@@ -322,11 +332,12 @@ async function populateOmpProgramObservation(
     ompProgramObservations.set(record, { callId: native.callId, unavailable: true });
     return;
   }
-  ompProgramObservations.set(record, {
-    callId: native.callId,
-    result: native.cell.output,
-    comparison: "text-trim",
-  });
+  const observation = { callId: native.callId, result: native.cell.output };
+  if (native.language === "python") {
+    ompProgramObservations.set(record, { ...observation, comparison: "text-trim" });
+    return;
+  }
+  ompProgramObservations.set(record, observation);
 }
 
 /**

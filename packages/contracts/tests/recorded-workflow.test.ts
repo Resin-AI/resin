@@ -258,7 +258,7 @@ describe("recorded workflow validation", () => {
     expect(brokenTemplate.valid).toBe(false);
     expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
   });
-  it("admits explicit Python Eval semantics but rejects unknown or mismatched interfaces", () => {
+  it("admits explicit language-specific Eval semantics and rejects mismatched interfaces", () => {
     const workflow = fourCallWorkflow();
     const withProgram = (program: unknown) => ({
       ...workflow,
@@ -266,20 +266,38 @@ describe("recorded workflow validation", () => {
         index === 1 ? { ...step, callable: { ...step.callable, program } } : step,
       ),
     });
-    const program: WorkflowRecordedProgram = {
+    const pythonProgram: WorkflowRecordedProgram = {
       kind: "python",
       source: "1 + 2",
       sourceInterface: "python-eval",
     };
-    expect(validateRecordedWorkflow(withProgram(program))).toMatchObject({
+    expect(validateRecordedWorkflow(withProgram(pythonProgram))).toMatchObject({
       valid: true,
       errors: [],
     });
-    const mismatched = validateRecordedWorkflow(withProgram({ ...program, kind: "shell" }));
-    expect(mismatched.valid).toBe(false);
-    expect(mismatched.errors.join("\n")).toContain("non-Python");
+    const mismatchedPython = validateRecordedWorkflow(
+      withProgram({ ...pythonProgram, kind: "shell" }),
+    );
+    expect(mismatchedPython.valid).toBe(false);
+    expect(mismatchedPython.errors.join("\n")).toContain("non-Python");
+
+    const javascriptProgram: WorkflowRecordedProgram = {
+      kind: "javascript",
+      source: "1 + 2",
+      sourceInterface: "javascript-eval",
+    };
+    expect(validateRecordedWorkflow(withProgram(javascriptProgram))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    const mismatchedJavaScript = validateRecordedWorkflow(
+      withProgram({ ...javascriptProgram, kind: "typescript" }),
+    );
+    expect(mismatchedJavaScript.valid).toBe(false);
+    expect(mismatchedJavaScript.errors.join("\n")).toContain("non-JavaScript");
+
     const unknown = validateRecordedWorkflow(
-      withProgram({ ...program, sourceInterface: "unknown-eval" }),
+      withProgram({ ...javascriptProgram, sourceInterface: "unknown-eval" }),
     );
     expect(unknown.valid).toBe(false);
     expect(unknown.errors.join("\n")).toContain("unsupported program sourceInterface");

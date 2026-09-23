@@ -2199,10 +2199,19 @@ class JavaScriptFrameAnalyzer {
       if (base.text === "process" && name === "argv") {
         return this.literal("free:process.argv", "array", "free_variable");
       }
-      if (this.importBindings.has(base.text) || isKnownGlobalNamespace(base.text)) {
-        // A recognized namespace attribute read that is not a finite API call is data from outside
-        // the captured program, never a module or namespace name on the wire.
-        return this.unsupported("unsupported_api");
+      const imported = this.importBindings.get(base.text);
+      if (imported !== undefined) {
+        const api =
+          imported.kind === "module" ? builtinModuleMemberApi(imported.module, name) : undefined;
+        return api === undefined
+          ? this.unsupported("unsupported_api")
+          : this.node("api_reference", [], { api });
+      }
+      if (isKnownGlobalNamespace(base.text)) {
+        const api = staticCallApi(`${base.text}.${name}`);
+        return api === undefined
+          ? this.unsupported("unsupported_api")
+          : this.node("api_reference", [], { api });
       }
     }
     if (ts.isCallExpression(base)) {
@@ -2374,8 +2383,15 @@ class JavaScriptFrameAnalyzer {
     if (bound !== undefined) {
       return this.identifier(this.immutableAliases.get(bound) ?? bound);
     }
-    if (this.importBindings.has(name)) {
-      return this.unsupported("unsupported_api");
+    const imported = this.importBindings.get(name);
+    if (imported !== undefined) {
+      const api =
+        imported.kind === "member"
+          ? builtinModuleMemberApi(imported.module, imported.member ?? name)
+          : undefined;
+      return api === undefined
+        ? this.unsupported("unsupported_api")
+        : this.node("api_reference", [], { api });
     }
     if (name === "undefined") {
       const observedHelper = this.materializeHelperDefinition(name);
@@ -2386,11 +2402,11 @@ class JavaScriptFrameAnalyzer {
     if (REFLECTION_NAMES[name] === true) {
       return this.unsupported("unsupported_reflection");
     }
-    if (
-      isKnownGlobalNamespace(name) ||
-      globalFunctionApi(name) !== undefined ||
-      constructorApi(name) !== undefined
-    ) {
+    const builtin = globalFunctionApi(name);
+    if (builtin !== undefined) {
+      return this.node("api_reference", [], { api: builtin });
+    }
+    if (isKnownGlobalNamespace(name) || constructorApi(name) !== undefined) {
       return this.unsupported("unsupported_api");
     }
     if (this.isOpaqueName(name, scope)) {
@@ -2883,6 +2899,9 @@ class JavaScriptFrameAnalyzer {
       case "boolean":
       case "compare":
         return "boolean";
+      case "call":
+        // Infer from the canonical operation, not the source spelling (e.g. JSON.stringify).
+        return node.fields?.api === "json.serialize" ? "string" : "unknown";
       case "conditional": {
         const alternate = node.children[node.children.length - 1];
         return alternate === undefined ? "unknown" : this.shapeOf(alternate);

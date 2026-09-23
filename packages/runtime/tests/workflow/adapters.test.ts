@@ -246,6 +246,272 @@ describe("recorded program adapters", () => {
     expect(whitespace.value).toBe("output");
   });
 
+  it("replays native JavaScript Eval completion values and structured display text", async () => {
+    const workspace = await makeWorkspace();
+    const branch = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'if (true) { "branch"; }',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const retained = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: '"discarded"; var fidelityProbeLocal = 1;',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const serialized = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "console.log('line'); JSON.stringify({ answer: 42 })",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const object = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "({ answer: 42 })",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const none = await runRecordedProgram(
+      { kind: "javascript", source: "undefined", sourceInterface: "javascript-eval" },
+      { cwd: workspace },
+    );
+    const scopeCollision = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'const __resin_payload = "user value"; __resin_payload;',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+
+    expect(branch.value).toBe("branch");
+    expect(retained.value).toBe("discarded");
+    expect(serialized.stdout).toBe("line\n");
+    expect(serialized.value).toBe('line\n{"answer":42}');
+    expect(object.value).toBe('display[1]:\n{\n  "answer": 42\n}');
+    expect(none.value).toBe("");
+    expect(scopeCollision.value).toBe("user value");
+  });
+
+  it("matches JavaScript Eval text trimming and structured-clone fallback rules", async () => {
+    const workspace = await makeWorkspace();
+    const consoleOnly = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'console.log("only");',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const whitespaceString = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: '"  result  ";',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const consoleAndEmpty = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'console.log("line"); "";',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const uncloneable = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "({ answer: 42, fn: () => 1 });",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const cloneableButNotSerializable = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "const cycle = {}; cycle.self = cycle; cycle;",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+
+    expect(consoleOnly.value).toBe("only");
+    expect(whitespaceString.value).toBe("result");
+    expect(consoleAndEmpty.value).toBe("line");
+    expect(uncloneable.value).toBe("[object Object]");
+    expect(cloneableButNotSerializable.value).toBe("display[1]:\n[object Object]");
+  });
+
+  it("replays static JavaScript imports and their original bindings", async () => {
+    const workspace = await makeWorkspace();
+    const namedAlias = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'import { basename as base } from "node:path"; base("/tmp/file.txt");',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const defaultImport = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'import path from "node:path"; path.basename("/tmp/file.txt");',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const namespaceImport = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'import * as path from "node:path"; path.extname("/tmp/file.txt");',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const combinedDefaultAndNamespace = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          'import path, * as pathNamespace from "node:path"; path.basename("/tmp/file.txt") + pathNamespace.extname("/tmp/file.txt");',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const sideEffectImport = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'import "node:path"; "imported";',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const importWithBlockCompletion = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          'import { basename } from "node:path"; if (basename("/tmp/file.txt") === "file.txt") { "discarded"; }',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+
+    expect(namedAlias.value).toBe("file.txt");
+    expect(defaultImport.value).toBe("file.txt");
+    expect(namespaceImport.value).toBe(".txt");
+    expect(combinedDefaultAndNamespace.value).toBe("file.txt.txt");
+    expect(sideEffectImport.value).toBe("imported");
+    expect(importWithBlockCompletion.value).toBe("");
+  });
+
+  it("rejects unsupported JavaScript module syntax instead of replaying it differently", async () => {
+    const workspace = await makeWorkspace();
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "javascript",
+          source: "export const result = 1;",
+          sourceInterface: "javascript-eval",
+        },
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow(/static exports/);
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "javascript",
+          source: 'import value from "node:path" with { type: "json" }; value;',
+          sourceInterface: "javascript-eval",
+        },
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("preserves JavaScript Eval console ordering and independent process streams", async () => {
+    const workspace = await makeWorkspace();
+    const run = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          "console.log('value %s %d', 'word', 7); console.error('failure'); console.warn('caution'); 'result';",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("value %s %d word 7\n");
+    expect(run.stderr).toBe("failure\ncaution\n");
+    expect(run.value).toBe("value %s %d word 7\n[error] failure\n[warn] caution\nresult");
+  });
+
+  it("preserves top-level JavaScript Eval async completions and ordinary Node semantics", async () => {
+    const workspace = await makeWorkspace();
+    const awaited = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "await Promise.resolve('awaited');",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const returned = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'return "returned";',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const noAsyncCompletion = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'await Promise.resolve(); if (true) { "discarded"; } var trailing = 1;',
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const parenthesizedObject = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "await Promise.resolve(); ({ answer: 42 });",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+    const ordinary = await runRecordedProgram(
+      { kind: "javascript", source: "console.log('value %s', 'word'); 'discarded';" },
+      { cwd: workspace },
+    );
+    const failed = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: "throw new Error('eval failure')",
+        sourceInterface: "javascript-eval",
+      },
+      { cwd: workspace },
+    );
+
+    expect(awaited.value).toBe("awaited");
+    expect(returned.value).toBe("returned");
+    expect(noAsyncCompletion.value).toBe("");
+    expect(parenthesizedObject.value).toBe('display[1]:\n{\n  "answer": 42\n}');
+    expect(ordinary.stdout).toBe("value word\n");
+    expect(ordinary.value).toBe("value word\n");
+    expect(failed.exitCode).not.toBe(0);
+    expect(failed.stderr).toContain("eval failure");
+  });
+
   it("preserves Eval display ordering without moving raw unterminated stdout", async () => {
     const workspace = await makeWorkspace();
     const run = await runRecordedProgram(

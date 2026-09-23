@@ -4,7 +4,8 @@
  * A recorded program is evidence about one execution: the text that ran and the way it was handed
  * to the system. Reuse therefore means running that text again the same way — a shell program keeps
  * its operators, pipes, redirections and exit status, a language program reaches its interpreter
- * through the recorded transport (argv for ordinary runs, stdin for bounded Python composites) —
+ * through the recorded transport (argv for ordinary runs; stdin for bounded Python composites and
+ * JavaScript Eval) —
  * and never re-quoting, tokenizing or otherwise reconstructing it. The recorded `argv` stays evidence
  * and is never executed.
  */
@@ -15,6 +16,7 @@ import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import process from "node:process";
+import { parse } from "@babel/parser";
 import {
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
@@ -30,7 +32,7 @@ export interface RecordedProgramRun {
   exitCode: number;
   stdout: string;
   stderr: string;
-  /** Raw stdout for ordinary programs; rendered result text for the explicit Python Eval interface. */
+  /** Raw stdout for ordinary programs; rendered result text for explicit Eval interfaces. */
   value: WorkflowJsonValue;
 }
 
@@ -73,10 +75,308 @@ const MAX_PATH_ENTRIES = 256;
 /** Fixed Python transport driver; composite replay source travels over stdin, not argv. */
 const PYTHON_STDIN_DRIVER =
   "import sys\nexec(compile(sys.stdin.read(), '<resin-python>', 'exec'), {'__name__': '__main__'})";
+
+/** JavaScript Eval result and observed console output travel over stdin and inherited fd 3. */
+const JAVASCRIPT_EVAL_STDIN_DRIVER = [
+  "const __resin_fs = require('node:fs');",
+  "const __resin_util = require('node:util');",
+  "const __resin_payload = JSON.parse(__resin_fs.readFileSync(0, 'utf8'));",
+  "const __resin_write = __resin_fs.writeSync.bind(__resin_fs);",
+  "let __resin_channelBytes = 0;",
+  "let __resin_outputBytes = 0;",
+  "let __resin_stderrKind = 'e';",
+  "function __resin_emit(event) {",
+  "  const frame = JSON.stringify(event) + '\\n';",
+  "  const bytes = Buffer.byteLength(frame, 'utf8');",
+  "  if (__resin_channelBytes + bytes > __resin_payload.maxEventBytes) {",
+  "    throw new Error('JavaScript Eval replay result channel exceeded its byte bound');",
+  "  }",
+  "  __resin_write(3, frame, __resin_channelBytes, 'utf8');",
+  "  __resin_channelBytes += bytes;",
+  "}",
+  "function __resin_recordWrite(kind, chunk, encoding) {",
+  "  const data = Buffer.isBuffer(chunk)",
+  "    ? chunk",
+  "    : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');",
+  "  if (data.length === 0) return;",
+  "  const prefixBytes = kind === 'e' ? 8 : kind === 'w' ? 7 : 0;",
+  "  __resin_outputBytes += prefixBytes + data.length;",
+  "  if (__resin_outputBytes > __resin_payload.maxOutputBytes) {",
+  "    throw new Error('JavaScript Eval replay output exceeded its byte bound');",
+  "  }",
+  "  __resin_emit({ k: kind, v: data.toString('utf8') });",
+  "}",
+  "const __resin_stdoutWrite = process.stdout.write.bind(process.stdout);",
+  "const __resin_stderrWrite = process.stderr.write.bind(process.stderr);",
+  "process.stdout.write = function(chunk, encoding, callback) {",
+  "  __resin_recordWrite('o', chunk, encoding);",
+  "  return __resin_stdoutWrite(chunk, encoding, callback);",
+  "};",
+  "process.stderr.write = function(chunk, encoding, callback) {",
+  "  __resin_recordWrite(__resin_stderrKind, chunk, encoding);",
+  "  return __resin_stderrWrite(chunk, encoding, callback);",
+  "};",
+  "function __resin_consoleText(args) {",
+  "  return args.map((value) => typeof value === 'string'",
+  "    ? value",
+  "    : __resin_util.inspect(value, { depth: 6, colors: false, breakLength: 120 })).join(' ');",
+  "}",
+  "function __resin_consoleWrite(stream, kind, args) {",
+  "  let text = __resin_consoleText(args);",
+  "  if (!text.endsWith('\\n')) text += '\\n';",
+  "  if (stream === 'o') {",
+  "    process.stdout.write(text);",
+  "    return;",
+  "  }",
+  "  const previousKind = __resin_stderrKind;",
+  "  __resin_stderrKind = kind;",
+  "  try {",
+  "    process.stderr.write(text);",
+  "  } finally {",
+  "    __resin_stderrKind = previousKind;",
+  "  }",
+  "}",
+  "globalThis.console.log = (...args) => { __resin_consoleWrite('o', 'o', args); };",
+  "globalThis.console.info = (...args) => { __resin_consoleWrite('o', 'o', args); };",
+  "globalThis.console.debug = (...args) => { __resin_consoleWrite('o', 'o', args); };",
+  "globalThis.console.error = (...args) => { __resin_consoleWrite('e', 'e', args); };",
+  "globalThis.console.warn = (...args) => { __resin_consoleWrite('e', 'w', args); };",
+  "function __resin_display(value) {",
+  "  if (value === undefined) return { h: false, v: '' };",
+  "  if (value === null || typeof value !== 'object') {",
+  "    return { h: true, v: String(value) };",
+  "  }",
+  "  let cloned;",
+  "  try {",
+  "    cloned = structuredClone(value);",
+  "  } catch {",
+  "    return { h: true, v: Object.prototype.toString.call(value) };",
+  "  }",
+  "  let rendered;",
+  "  try {",
+  "    rendered = JSON.stringify(cloned, null, 2);",
+  "  } catch {",
+  "    rendered = String(cloned);",
+  "  }",
+  "  if (typeof rendered !== 'string') rendered = String(cloned);",
+  "  return { h: true, v: 'display[1]:\\n' + rendered };",
+  "}",
+  "(async function() {",
+  "  let completion;",
+  "  if (__resin_payload.mode === 'async') {",
+  "    const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;",
+  "    completion = await new AsyncFunction(__resin_payload.source)();",
+  "  } else {",
+  "    completion = await (0, eval)(__resin_payload.source);",
+  "  }",
+  "  const display = __resin_display(completion);",
+  "  __resin_outputBytes += Buffer.byteLength(display.v, 'utf8');",
+  "  if (__resin_outputBytes > __resin_payload.maxOutputBytes) {",
+  "    throw new Error('JavaScript Eval replay output exceeded its byte bound');",
+  "  }",
+  "  __resin_emit({ d: true, h: display.h, v: display.v });",
+  "})();",
+].join("\n");
 interface ChildInvocation {
   command: string;
   args: string[];
   input?: string;
+  privateResultFd?: number;
+}
+
+interface PreparedJavaScriptEval {
+  source: string;
+  mode: "sync" | "async";
+}
+
+interface JavaScriptEvalOutputBounds {
+  output: number;
+  events: number;
+}
+
+const JAVASCRIPT_FUNCTION_NODES: Readonly<Record<string, true>> = {
+  ArrowFunctionExpression: true,
+  ClassMethod: true,
+  ClassPrivateMethod: true,
+  FunctionDeclaration: true,
+  FunctionExpression: true,
+  ObjectMethod: true,
+};
+
+function hasTopLevelJavaScriptAsyncControl(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasTopLevelJavaScriptAsyncControl);
+  if (typeof node !== "object" || node === null) return false;
+  const record = node as Record<string, unknown>;
+  if (typeof record.type !== "string" || JAVASCRIPT_FUNCTION_NODES[record.type] === true) {
+    return false;
+  }
+  if (
+    record.type === "ReturnStatement" ||
+    record.type === "AwaitExpression" ||
+    (record.type === "ForOfStatement" && record.await === true)
+  ) {
+    return true;
+  }
+  return Object.values(record).some(hasTopLevelJavaScriptAsyncControl);
+}
+
+interface JavaScriptSourceEdit {
+  start: number;
+  end: number;
+  replacement: string;
+}
+
+function applyJavaScriptSourceEdits(source: string, edits: JavaScriptSourceEdit[]): string {
+  edits.sort((left, right) => left.start - right.start);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const edit of edits) {
+    if (edit.start < cursor || edit.end < edit.start || edit.end > source.length) {
+      throw new Error("recorded JavaScript Eval replay found overlapping source edits");
+    }
+    parts.push(source.slice(cursor, edit.start), edit.replacement);
+    cursor = edit.end;
+  }
+  parts.push(source.slice(cursor));
+  return parts.join("");
+}
+
+function lowerJavaScriptImport(declaration: {
+  source: { value: unknown };
+  specifiers: readonly {
+    type: string;
+    local: { name: string };
+    imported?: { type: string; name?: string; value?: string };
+  }[];
+}): string {
+  const metadata = declaration as typeof declaration & {
+    attributes?: unknown;
+    assertions?: unknown;
+    importKind?: unknown;
+  };
+  if (
+    (typeof metadata.importKind === "string" && metadata.importKind !== "value") ||
+    (Array.isArray(metadata.attributes) && metadata.attributes.length > 0) ||
+    (Array.isArray(metadata.assertions) && metadata.assertions.length > 0)
+  ) {
+    throw new Error(
+      "recorded JavaScript Eval replay does not support import attributes or type imports",
+    );
+  }
+  if (typeof declaration.source.value !== "string") {
+    throw new Error("recorded JavaScript Eval replay requires a string import specifier");
+  }
+  // The recorded module specifier is only known at replay time, so static imports cannot represent it.
+  const moduleExpression = `await import(${JSON.stringify(declaration.source.value)})`;
+  const namespaceSpecifier = declaration.specifiers.find(
+    (specifier) => specifier.type === "ImportNamespaceSpecifier",
+  );
+  const defaultSpecifier = declaration.specifiers.find(
+    (specifier) => specifier.type === "ImportDefaultSpecifier",
+  );
+  const namedSpecifiers = declaration.specifiers.filter(
+    (specifier) => specifier.type === "ImportSpecifier",
+  );
+  const supportedSpecifierCount =
+    namedSpecifiers.length +
+    (namespaceSpecifier === undefined ? 0 : 1) +
+    (defaultSpecifier === undefined ? 0 : 1);
+  if (supportedSpecifierCount !== declaration.specifiers.length) {
+    throw new Error("recorded JavaScript Eval replay encountered an unsupported import binding");
+  }
+  const propertyBindings = namedSpecifiers.map((specifier) => {
+    const imported = specifier.imported;
+    const name =
+      imported?.type === "Identifier"
+        ? imported.name
+        : imported?.type === "StringLiteral"
+          ? imported.value
+          : undefined;
+    if (typeof name !== "string") {
+      throw new Error("recorded JavaScript Eval replay encountered an unsupported import binding");
+    }
+    return `${JSON.stringify(name)}: ${specifier.local.name}`;
+  });
+  if (namespaceSpecifier !== undefined) {
+    const bindings = [`const ${namespaceSpecifier.local.name} = ${moduleExpression};`];
+    if (defaultSpecifier !== undefined) {
+      bindings.push(
+        `const ${defaultSpecifier.local.name} = ${namespaceSpecifier.local.name}.default;`,
+      );
+    }
+    if (propertyBindings.length > 0) {
+      bindings.push(`const { ${propertyBindings.join(", ")} } = ${namespaceSpecifier.local.name};`);
+    }
+    return bindings.join("\n");
+  }
+  if (defaultSpecifier !== undefined) {
+    propertyBindings.unshift(`"default": ${defaultSpecifier.local.name}`);
+  }
+  if (propertyBindings.length === 0) return `${moduleExpression};`;
+  return `const { ${propertyBindings.join(", ")} } = ${moduleExpression};`;
+}
+
+function prepareJavaScriptEval(source: string): PreparedJavaScriptEval {
+  const syntax = parse(source, {
+    sourceType: "unambiguous",
+    allowAwaitOutsideFunction: true,
+    allowReturnOutsideFunction: true,
+  });
+  const body = syntax.program.body;
+  if (body.some((statement) => statement.type.startsWith("Export"))) {
+    throw new Error("recorded JavaScript Eval replay does not support static exports");
+  }
+  const imports = body.filter(
+    (statement): statement is Extract<(typeof body)[number], { type: "ImportDeclaration" }> =>
+      statement.type === "ImportDeclaration",
+  );
+  const isAsync = imports.length > 0 || hasTopLevelJavaScriptAsyncControl(syntax.program);
+  if (!isAsync) return { source, mode: "sync" };
+  const edits: JavaScriptSourceEdit[] = [];
+  for (const declaration of imports) {
+    if (typeof declaration.start !== "number" || typeof declaration.end !== "number") {
+      throw new Error("recorded JavaScript Eval replay could not locate an import declaration");
+    }
+    edits.push({
+      start: declaration.start,
+      end: declaration.end,
+      replacement: lowerJavaScriptImport(declaration),
+    });
+  }
+
+  let finalStatementIndex = body.length - 1;
+  while (finalStatementIndex >= 0 && body[finalStatementIndex]?.type === "EmptyStatement") {
+    finalStatementIndex -= 1;
+  }
+  const finalStatement = body[finalStatementIndex];
+  if (finalStatement?.type === "ExpressionStatement") {
+    const expression = finalStatement.expression;
+    if (
+      typeof expression.start !== "number" ||
+      typeof expression.end !== "number" ||
+      typeof finalStatement.start !== "number" ||
+      typeof finalStatement.end !== "number"
+    ) {
+      throw new Error("recorded JavaScript Eval replay could not locate its final expression");
+    }
+    edits.push({
+      start: finalStatement.start,
+      end: finalStatement.end,
+      replacement: `return (${source.slice(expression.start, expression.end)});`,
+    });
+  }
+  return { source: applyJavaScriptSourceEdits(source, edits), mode: "async" };
+}
+
+function javascriptEvalOutputBounds(maxOutputBytes: number): JavaScriptEvalOutputBounds {
+  const output = Math.floor(maxOutputBytes);
+  const events = output * 24 + 128;
+  if (!Number.isSafeInteger(output) || output < 0 || !Number.isSafeInteger(events)) {
+    throw new Error(
+      "JavaScript Eval replay output limit must be a finite non-negative safe integer",
+    );
+  }
+  return { output, events };
 }
 
 interface CapturedRun {
@@ -171,6 +471,7 @@ function invocationFor(
   options: ProgramRunnerOptions,
   env: NodeJS.ProcessEnv,
   input?: string,
+  privateResultFd?: number,
 ): ChildInvocation {
   const platform = options.platform ?? process.platform;
   const source = program.source;
@@ -199,8 +500,18 @@ function invocationFor(
     }
     case "javascript":
     case "typescript":
-      // A `typescript` record is the text the runtime actually accepted and ran: the recording
-      // shows a JavaScript execution, so it is re-run as one rather than re-typed.
+      if (program.sourceInterface === "javascript-eval") {
+        if (input === undefined || privateResultFd === undefined) {
+          throw new Error("JavaScript Eval replay result channel was not prepared");
+        }
+        return {
+          command: process.execPath,
+          args: ["-e", JAVASCRIPT_EVAL_STDIN_DRIVER],
+          input,
+          privateResultFd,
+        };
+      }
+      // Ordinary programs and TypeScript records retain their existing process semantics.
       return { command: process.execPath, args: ["-e", source] };
     default: {
       const exhaustive: never = program.kind;
@@ -220,7 +531,7 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
     throw new Error(`recorded ${program.kind} program source is not text`);
   }
   const interfaceErrors: string[] = [];
-  validateWorkflowProgramSourceInterface(program, "recorded Python program", interfaceErrors);
+  validateWorkflowProgramSourceInterface(program, "recorded program", interfaceErrors);
   if (interfaceErrors.length > 0) throw new Error(interfaceErrors[0]);
   if (program.source.length === 0 && (program.argv?.length ?? 0) === 0) {
     throw new Error(
@@ -577,11 +888,15 @@ function runChild(
   const cwd = options.cwd ?? process.cwd();
 
   return new Promise<CapturedRun>((resolve, reject) => {
-    const stdio: SpawnOptions["stdio"] = [
-      invocation.input === undefined ? "ignore" : "pipe",
-      "pipe",
-      "pipe",
-    ];
+    const stdio: SpawnOptions["stdio"] =
+      invocation.privateResultFd === undefined
+        ? [invocation.input === undefined ? "ignore" : "pipe", "pipe", "pipe"]
+        : [
+            invocation.input === undefined ? "ignore" : "pipe",
+            "pipe",
+            "pipe",
+            invocation.privateResultFd,
+          ];
     const child = spawn(invocation.command, invocation.args, {
       cwd,
       env,
@@ -695,9 +1010,70 @@ function pythonEvalResultValue(output: string): WorkflowJsonValue {
 }
 
 /**
+ * Validates the bounded private event stream produced by the JavaScript Eval driver and projects
+ * its stdout, console diagnostics, and final completion into the replay value.
+ */
+function javascriptEvalResultValue(output: string, maxOutputBytes: number): WorkflowJsonValue {
+  const resultParts: string[] = [];
+  let outputBytes = 0;
+  let complete = false;
+  const append = (text: string): void => {
+    outputBytes += Buffer.byteLength(text, "utf8");
+    if (outputBytes > maxOutputBytes) {
+      throw new Error("recorded JavaScript Eval replay exceeded its output byte bound");
+    }
+    resultParts.push(text);
+  };
+
+  for (const line of output.split("\n")) {
+    if (line.length === 0) continue;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      throw new Error("recorded JavaScript Eval replay produced an invalid output event");
+    }
+    if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
+      throw new Error("recorded JavaScript Eval replay produced an invalid output event");
+    }
+    const event = frame as Record<string, unknown>;
+    if (complete) {
+      throw new Error("recorded JavaScript Eval replay produced data after its completion event");
+    }
+    if (
+      Object.keys(event).length === 2 &&
+      typeof event.k === "string" &&
+      typeof event.v === "string" &&
+      (event.k === "o" || event.k === "e" || event.k === "w")
+    ) {
+      append(
+        event.k === "e" ? `[error] ${event.v}` : event.k === "w" ? `[warn] ${event.v}` : event.v,
+      );
+      continue;
+    }
+    if (
+      Object.keys(event).length !== 3 ||
+      event.d !== true ||
+      typeof event.h !== "boolean" ||
+      typeof event.v !== "string" ||
+      (!event.h && event.v !== "")
+    ) {
+      throw new Error("recorded JavaScript Eval replay produced an invalid completion event");
+    }
+    complete = true;
+    append(event.v);
+  }
+  if (!complete) {
+    throw new Error("recorded JavaScript Eval replay did not complete its output");
+  }
+  return resultParts.join("").trim();
+}
+
+/**
  * Runs a recorded program exactly once, through the family its record names. Shell programs keep
- * shell semantics. Python state replay sends composed source through stdin; other language
- * programs receive source as a single argument. A non-zero exit code is left for the caller to
+ * shell semantics. Python state replay sends composed source through stdin; JavaScript Eval sends
+ * its bounded driver payload through stdin and a private output channel. Ordinary programs receive
+ * their source as an argument. A non-zero exit code is left for the caller to
  * refuse: this function never invents a value for a program that failed.
  */
 export async function runRecordedProgram(
@@ -707,25 +1083,53 @@ export async function runRecordedProgram(
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
   const isPythonEval = program.sourceInterface === "python-eval";
+  const isJavaScriptEval = program.sourceInterface === "javascript-eval";
+  const javascriptEval = isJavaScriptEval ? prepareJavaScriptEval(program.source) : undefined;
   let outputDirectory: string | undefined;
   let outputFile: FileHandle | undefined;
   try {
     let outputPath: string | undefined;
-    let outputBounds: PythonEvalOutputBounds | undefined;
+    let outputBounds: PythonEvalOutputBounds | JavaScriptEvalOutputBounds | undefined;
     if (isPythonEval) {
       outputBounds = pythonEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
       outputDirectory = await mkdtemp(join(tmpdir(), "resin-python-eval-"));
       outputPath = join(outputDirectory, "events.jsonl");
       outputFile = await open(outputPath, "wx+", 0o600);
+    } else if (isJavaScriptEval) {
+      outputBounds = javascriptEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+      outputDirectory = await mkdtemp(join(tmpdir(), "resin-javascript-eval-"));
+      outputPath = join(outputDirectory, "events.jsonl");
+      outputFile = await open(outputPath, "wx+", 0o600);
     }
-    const source = await preparePythonReplaySource(program, options, targetCallId, outputPath);
+    const source =
+      program.kind === "python"
+        ? await preparePythonReplaySource(program, options, targetCallId, outputPath)
+        : program.source;
     const runnable = source === program.source ? program : { ...program, source };
     const env: NodeJS.ProcessEnv = options.isolateEnvironment
       ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
       : { ...process.env, ...options.env };
-    const replayInput =
+    const pythonReplayInput =
       runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
-    const invocation = invocationFor(runnable, options, env, replayInput);
+    const javascriptReplayInput =
+      javascriptEval === undefined || outputBounds === undefined
+        ? undefined
+        : JSON.stringify({
+            source: javascriptEval.source,
+            mode: javascriptEval.mode,
+            maxOutputBytes: outputBounds.output,
+            maxEventBytes: outputBounds.events,
+          });
+    if (isJavaScriptEval && (javascriptReplayInput === undefined || outputFile === undefined)) {
+      throw new Error("recorded JavaScript Eval replay result channel was not prepared");
+    }
+    const invocation = invocationFor(
+      runnable,
+      options,
+      env,
+      isJavaScriptEval ? javascriptReplayInput : pythonReplayInput,
+      isJavaScriptEval ? outputFile?.fd : undefined,
+    );
     const captured = await runChild(invocation, options, env);
     let value: WorkflowJsonValue = captured.stdout;
     if (isPythonEval && captured.exitCode === 0) {
@@ -737,6 +1141,19 @@ export async function runRecordedProgram(
         throw new Error("recorded Python Eval replay exceeded its output event bound");
       }
       value = pythonEvalResultValue(await outputFile.readFile({ encoding: "utf8" }));
+    }
+    if (isJavaScriptEval && captured.exitCode === 0) {
+      if (outputPath === undefined || outputBounds === undefined || outputFile === undefined) {
+        throw new Error("recorded JavaScript Eval replay did not preserve its complete output");
+      }
+      const outputStat = await outputFile.stat();
+      if (outputStat.size > outputBounds.events) {
+        throw new Error("recorded JavaScript Eval replay exceeded its output event bound");
+      }
+      value = javascriptEvalResultValue(
+        await outputFile.readFile({ encoding: "utf8" }),
+        outputBounds.output,
+      );
     }
     return {
       exitCode: captured.exitCode,

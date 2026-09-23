@@ -8955,11 +8955,19 @@ function hasOnlyKeys(value, allowed) {
 function validateWorkflowProgramSourceInterface(program, stepId, errors) {
   if (program.sourceInterface === void 0)
     return;
-  if (program.sourceInterface !== "python-eval") {
-    errors.push(`step ${stepId} has an unsupported program sourceInterface`);
-  } else if (program.kind !== "python") {
-    errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+  if (program.sourceInterface === "python-eval") {
+    if (program.kind !== "python") {
+      errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+    }
+    return;
   }
+  if (program.sourceInterface === "javascript-eval") {
+    if (program.kind !== "javascript") {
+      errors.push(`step ${stepId} has a JavaScript Eval sourceInterface on a non-JavaScript program`);
+    }
+    return;
+  }
+  errors.push(`step ${stepId} has an unsupported program sourceInterface`);
 }
 function validateWorkflowPythonState(program, stepId, targetCallId, workflowCallIds, declaredPrivates, errors) {
   const state = program.pythonState;
