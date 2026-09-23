@@ -331,6 +331,9 @@ class PythonFrameAnalyzer {
   private readonly shadowFrames: Map<string, DraftSymbol>[] = [];
   private readonly definitionStack: PendingDefinition[] = [];
   private readonly authoredReads = new Set<DraftSymbol>();
+  /** Functions called at module scope and the direct calls authored by each function. */
+  private readonly moduleReachableDefinitions = new Set<PendingDefinition>();
+  private readonly definitionCallEdges = new Map<PendingDefinition, Set<PendingDefinition>>();
   private readonly fileHandles = new Set<DraftSymbol>();
   private readonly pathValues = new Set<DraftSymbol>();
   private ambiguousPathDepth = 0;
@@ -584,21 +587,40 @@ class PythonFrameAnalyzer {
    * expression. The builder enforces the shared bounded output count.
    */
   private selectOutputs(outputs: readonly PyOutput[]): readonly PyOutput[] {
+    const moduleReachableDefinitionKeys = new Set<string>();
+    const pendingDefinitions = [...this.moduleReachableDefinitions];
+    while (pendingDefinitions.length > 0) {
+      const definition = pendingDefinitions.pop();
+      if (definition === undefined || moduleReachableDefinitionKeys.has(definition.key)) {
+        continue;
+      }
+      moduleReachableDefinitionKeys.add(definition.key);
+      for (const called of this.definitionCallEdges.get(definition) ?? []) {
+        pendingDefinitions.push(called);
+      }
+    }
+
     const selected: PyOutput[] = [];
     const seen = new Set<DraftNode>();
     for (const output of outputs) {
+      const selectedOutput: PyOutput =
+        output.source === "stdout" &&
+        output.definitionKey !== undefined &&
+        moduleReachableDefinitionKeys.has(output.definitionKey)
+          ? { node: output.node, shape: output.shape, source: output.source }
+          : output;
       if (
-        output.source !== "stdout" &&
-        output.source !== "definition" &&
-        output !== this.finalModuleOutput
+        selectedOutput.source !== "stdout" &&
+        selectedOutput.source !== "definition" &&
+        selectedOutput !== this.finalModuleOutput
       ) {
         continue;
       }
-      if (seen.has(output.node)) {
+      if (seen.has(selectedOutput.node)) {
         continue;
       }
-      seen.add(output.node);
-      selected.push(output);
+      seen.add(selectedOutput.node);
+      selected.push(selectedOutput);
     }
     return selected;
   }
@@ -2796,6 +2818,22 @@ class PythonFrameAnalyzer {
       ]);
     }
     if (resolution.symbol !== undefined) {
+      if (this.frameId === 0) {
+        const calledDefinition = this.pendingBySymbol.get(resolution.symbol);
+        if (calledDefinition !== undefined) {
+          const caller = this.definitionStack[this.definitionStack.length - 1];
+          if (caller === undefined) {
+            this.moduleReachableDefinitions.add(calledDefinition);
+          } else {
+            let calledDefinitions = this.definitionCallEdges.get(caller);
+            if (calledDefinitions === undefined) {
+              calledDefinitions = new Set<PendingDefinition>();
+              this.definitionCallEdges.set(caller, calledDefinitions);
+            }
+            calledDefinitions.add(calledDefinition);
+          }
+        }
+      }
       this.useDefinition(resolution.symbol);
       return this.node("call", args.positional, {
         symbol: resolution.symbol,

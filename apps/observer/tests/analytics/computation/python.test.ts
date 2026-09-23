@@ -690,6 +690,11 @@ describe("Python visitor over the ownership fixture frames", () => {
     expect(result.local.hasInvocation).toBe(true);
     expect(result.local.invalidatesState).toBe(false);
     expect(program.complete).toBe(true);
+    expect(
+      program.outputs.some(
+        (output) => output.definitionId === undefined && output.shape === "string",
+      ),
+    ).toBe(true);
 
     const apis = program.nodes
       .filter((node) => node.kind === "call")
@@ -707,6 +712,31 @@ describe("Python visitor over the ownership fixture frames", () => {
     for (const name of ["attribute_owners", "sys", "argv", "json", "handle", "snapshot"]) {
       expect(text).not.toContain(JSON.stringify(name));
     }
+  });
+
+  it("promotes stdout from called helpers but keeps uncalled helper output definition-scoped", () => {
+    const result = parse(
+      [
+        "def unused():",
+        '    print("not executed")',
+        "def emit_from_helper():",
+        '    print("visible")',
+        "def main():",
+        "    emit_from_helper()",
+        'if __name__ == "__main__":',
+        "    main()",
+        "",
+      ].join("\n"),
+    );
+    const program = expectStrictProgram(result);
+
+    expect(result.local.hasInvocation).toBe(true);
+    expect(program.outputs.filter((output) => output.definitionId === undefined)).toEqual([
+      expect.objectContaining({ shape: "string" }),
+    ]);
+    expect(program.outputs.filter((output) => output.definitionId !== undefined)).toEqual([
+      expect.objectContaining({ shape: "string" }),
+    ]);
   });
 
   it("never claims a write-mode open as a read-only resource", () => {
