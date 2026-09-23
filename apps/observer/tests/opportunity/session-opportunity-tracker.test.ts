@@ -177,6 +177,33 @@ describe("SessionOpportunityTracker", () => {
     expect(tracker.getDiagnostics().patternsProven).toBe(1);
   });
 
+  it.each([103, 104, 128])(
+    "dispatches schema-valid patterns for a %i-character workspace identifier",
+    async (length) => {
+      const workspaceId = "w".repeat(length);
+      const sessionId = `sess_workspace_length_${length}`;
+      const events = buildWorkflowEvents(sessionId, 1, Date.parse("2026-01-05T10:00:00Z")).map(
+        (event) => ({
+          ...event,
+          metadata: { ...event.metadata, workspaceId },
+        }),
+      );
+
+      await tracker.handleSessionEvents(
+        { ...buildHarnessSession(sessionId), workspaceId },
+        events,
+        { isTerminal: true, isAttributed: true },
+      );
+
+      const pending = await store.opportunities.listPendingPatterns();
+      expect(pending).toHaveLength(1);
+      const payload = ProvenPatternDtoSchema.parse(pending[0]?.payload);
+      expect(payload.workspaceId).toBe(workspaceId);
+      expect(payload.cluster.clusterId.length).toBeLessThanOrEqual(128);
+      expect(tracker.getDiagnostics().patternsProven).toBe(1);
+    },
+  );
+
   it("keeps dispatching when the predicted savings estimate is unknown", async () => {
     const unknownSavings = new SessionOpportunityTracker({ opportunities: store.opportunities });
     const baseMs = Date.parse("2026-01-05T11:00:00.000Z");
