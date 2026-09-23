@@ -14,6 +14,7 @@ import {
   CloudCredentialStore,
   type CloudCredentialStoreOptions,
   type CloudRequestIdentity,
+  createRecordedWorkflowWorkspaceResolver,
   resolvePaths,
 } from "@resin/observer";
 import {
@@ -46,6 +47,10 @@ import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
 import { loadLocalArtifactTrust } from "./local-artifact-trust.js";
 import { LocalArtifactExecutor } from "./local-executor.js";
+import {
+  type WorkspaceSnapshotSource,
+  createWorkspaceSnapshotValidator,
+} from "./replay-workspace-snapshot.js";
 import { CloudInvocationRouter } from "./router.js";
 import {
   type ArtifactBytesDownloader,
@@ -54,7 +59,11 @@ import {
   type LockedSyncIdentity,
 } from "./sync.js";
 import { ManagedToolAccess } from "./tool-access.js";
-import { WorkflowValidationClient, WorkflowValidationWorker } from "./validation-worker.js";
+import {
+  DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
+  WorkflowValidationClient,
+  WorkflowValidationWorker,
+} from "./validation-worker.js";
 
 export interface ProductionProxyRuntimeOptions {
   credentialStore?: CloudCredentialStore;
@@ -160,6 +169,15 @@ function memoizedConnections(
     opening.set(name, attempt);
     return await attempt;
   };
+}
+
+function workspaceRootFromContext(workspace: WorkspaceContext | undefined): string | undefined {
+  return (
+    workspace?.projectRoot ??
+    workspace?.canonicalRoot ??
+    (workspace?.lockPath ? path.dirname(path.dirname(workspace.lockPath)) : undefined) ??
+    workspace?.roots?.[0]?.path
+  );
 }
 
 /**
@@ -355,67 +373,102 @@ export async function createProductionProxyRuntime(
       ...(resolveConnection === undefined ? {} : { connectionResolver: resolveConnection }),
     });
     routerBox.current.setManagedToolAccess(managedToolAccess);
-    // The validation worker answers the cloud's asks where the recording's values are: the plan's
-    // private references resolve from the same store the executor resolves them from, and a step
-    // that calls a tool goes back through this host's own routing — the same entry the original
-    // call used — while the recorded programs run in the validator's own disposable directory.
+    // The validation worker resolves private references from the executor's store and routes tool
+    // calls through the host. Recorded programs receive only a disposable snapshot of safe project
+    // inputs from the latest trusted workspace context.
     const readyWorkspace: { current?: WorkspaceContext } = {};
+    const validationDispatch = async (
+      request: ToolProtocolDispatchRequest,
+    ): Promise<WorkflowJsonValue> => {
+      const router = routerBox.current;
+      if (router === undefined) throw new Error("Step dispatcher is not ready");
+      const workspace = readyWorkspace.current;
+      if (workspace === undefined) {
+        throw new Error(
+          "the workspace is not ready, so a recorded tool step cannot be routed through this host",
+        );
+      }
+      const result = await router.invoke({
+        toolId: request.name,
+        name: request.name,
+        version: "",
+        ...(request.connection ? { connection: request.connection } : {}),
+        parameters: request.arguments as JsonRpcParams,
+        context: workspace,
+      });
+      if (result.isError) {
+        const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+        throw new Error(text ?? `callable '${request.name}' answered with an error`);
+      }
+      return composedResultValue(result);
+    };
+    const validationRuntimeAdapters:
+      | ((workspaceDir: string) => readonly RuntimeAdapter[])
+      | undefined =
+      options.recordedHarnessToolInvoker === undefined
+        ? undefined
+        : (workspaceDir) => [
+            {
+              runtime: RESIN_HARNESS_TOOL_RUNTIME,
+              call: async (request) => {
+                const result = await options.recordedHarnessToolInvoker!({
+                  name: request.step.callable.name,
+                  parameters: request.arguments as Record<string, unknown>,
+                  cwd: workspaceDir,
+                });
+                if (result.isError) {
+                  throw new Error(
+                    result.content[0]?.text ??
+                      `harness tool '${request.step.callable.name}' answered with an error`,
+                  );
+                }
+                return composedResultValue(result);
+              },
+            },
+          ];
+    const resolveRecordedWorkspace = createRecordedWorkflowWorkspaceResolver({
+      workspaceId: identity.workspaceId,
+      privateValues: executor.getPrivateValueStore(),
+    });
     const validationWorker = new WorkflowValidationWorker({
       client: new WorkflowValidationClient({
         identityProvider,
         fetchImpl: fetchWithLifecycle,
       }),
       identity: { workspaceId: identity.workspaceId, deviceId: identity.deviceId },
-      privateValues: executor.getPrivateValueStore(),
-      dispatch: async (request: ToolProtocolDispatchRequest): Promise<WorkflowJsonValue> => {
-        const router = routerBox.current;
-        if (router === undefined) throw new Error("Step dispatcher is not ready");
-        const workspace = readyWorkspace.current;
-        if (workspace === undefined) {
-          throw new Error(
-            "the workspace is not ready, so a recorded tool step cannot be routed through this host",
-          );
-        }
-        const result = await router.invoke({
-          toolId: request.name,
-          name: request.name,
-          version: "",
-          ...(request.connection ? { connection: request.connection } : {}),
-          parameters: request.arguments as JsonRpcParams,
-          context: workspace,
-        });
-        if (result.isError) {
-          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
-          throw new Error(text ?? `callable '${request.name}' answered with an error`);
-        }
-        return composedResultValue(result);
-      },
-      ...(options.recordedHarnessToolInvoker === undefined
-        ? {}
-        : {
-            runtimeAdapters: (workspaceDir: string) => [
-              {
-                runtime: RESIN_HARNESS_TOOL_RUNTIME,
-                call: async (request) => {
-                  const result = await options.recordedHarnessToolInvoker!({
-                    name: request.step.callable.name,
-                    parameters: request.arguments as Record<string, unknown>,
-                    cwd: workspaceDir,
-                  });
-                  if (result.isError) {
-                    throw new Error(
-                      result.content[0]?.text ??
-                        `harness tool '${request.step.callable.name}' answered with an error`,
-                    );
-                  }
-                  return composedResultValue(result);
-                },
-              },
-            ],
-          }),
-      ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
+      createValidator: () =>
+        createWorkspaceSnapshotValidator(
+          async (plan): Promise<WorkspaceSnapshotSource> => {
+            const workspace = readyWorkspace.current;
+            if (workspace === undefined) return { ready: false };
+            if (!plan.steps.some((step) => step.callable.program !== undefined)) {
+              return { ready: true };
+            }
+            const root = await resolveRecordedWorkspace(plan);
+            if (root === undefined) return { ready: false };
+            // A mixed replay still dispatches tool-protocol calls through this host's project.
+            if (plan.steps.some((step) => step.callable.program === undefined)) {
+              const hostRoot = workspaceRootFromContext(workspace);
+              if (hostRoot === undefined || path.resolve(hostRoot) !== path.resolve(root)) {
+                return { ready: false };
+              }
+            }
+            return { ready: true, root };
+          },
+          {
+            workspaceId: identity.workspaceId,
+            privateValues: executor.getPrivateValueStore(),
+            dispatch: validationDispatch,
+            ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
+            ...(validationRuntimeAdapters === undefined
+              ? {}
+              : { runtimeAdapters: validationRuntimeAdapters }),
+            timeoutMs: DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
+          },
+        ),
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });
+
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -464,11 +517,7 @@ export async function createProductionProxyRuntime(
       lockManager: options.lockManager,
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
         readyWorkspace.current = workspace;
-        const workspaceRoot =
-          workspace.projectRoot ??
-          workspace.canonicalRoot ??
-          (workspace.lockPath ? path.dirname(path.dirname(workspace.lockPath)) : undefined) ??
-          workspace.roots?.[0]?.path;
+        const workspaceRoot = workspaceRootFromContext(workspace);
         if (workspaceRoot) {
           executor.setWorkspaceRoot(workspaceRoot);
         }
@@ -638,11 +687,7 @@ export async function createProductionProxyRuntime(
     executor: localExecutor,
 
     async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
-      const workspaceRoot =
-        workspace.projectRoot ??
-        workspace.canonicalRoot ??
-        (workspace.lockPath ? path.dirname(path.dirname(workspace.lockPath)) : undefined) ??
-        workspace.roots?.[0]?.path;
+      const workspaceRoot = workspaceRootFromContext(workspace);
       if (workspaceRoot) {
         localExecutor.setWorkspaceRoot(workspaceRoot);
       }

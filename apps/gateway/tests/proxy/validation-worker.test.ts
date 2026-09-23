@@ -26,6 +26,7 @@ import {
 import { PROTOCOL_VERSION } from "@resin/protocol";
 import { RESIN_TOOL_PROTOCOL_RUNTIME, type ToolProtocolDispatchRequest } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
+import { ReplayWorkspaceUnavailableError } from "../../src/proxy/replay-workspace-snapshot.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,
@@ -241,6 +242,7 @@ describe("WorkflowValidationClient", () => {
     expect(headerOf(call, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(call, "x-installation-id")).toBe(INSTALLATION_ID);
     expect(headerOf(call, "x-protocol-version")).toBe(PROTOCOL_VERSION);
+    expect(headerOf(call, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
     // An entry that is not a well-formed ask cannot be replayed; it is left out, not guessed at.
     expect(requests).toHaveLength(1);
     expect(requests[0]?.requestId).toBe("req-01");
@@ -317,6 +319,8 @@ describe("WorkflowValidationWorker", () => {
     expect(headerOf(post, "x-workspace-id")).toBe(WORKSPACE_ID);
     expect(headerOf(post, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(post, "x-protocol-version")).toBe(PROTOCOL_VERSION);
+    expect(headerOf(post, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
+    expect(headerOf(post, "content-type")).toBe("application/json");
 
     const decision = postedDecision(calls);
     expect(decision.requestId).toBe("req-01");
@@ -363,6 +367,28 @@ describe("WorkflowValidationWorker", () => {
     expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
     expect(dispatch).not.toHaveBeenCalled();
     expect(logs.join("\n")).toContain("replay failed");
+  });
+
+  it("does not submit a decision before its trusted workspace is ready", async () => {
+    const plan = recordedPlan();
+    const { calls, fetchImpl } = recordingFetch(() =>
+      jsonResponse({ requests: [requestFor(plan)] }),
+    );
+    const logs: string[] = [];
+    const worker = new WorkflowValidationWorker({
+      client: clientOver(fetchImpl),
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      createValidator: () => async () => {
+        throw new ReplayWorkspaceUnavailableError();
+      },
+      log: (message) => logs.push(message),
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ pending: 1, answered: 0, refused: 1 });
+    expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+    expect(logs.join(" ")).toContain("deferred because trusted replay inputs are unavailable");
   });
 
   it("refuses an ask that names another workspace, without posting anything", async () => {

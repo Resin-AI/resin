@@ -77,3 +77,4 @@ export {
 } from "./deterministic-command-sequence.js";
 
 export { compareRecordedEvents } from "./recorded-event-order.js";
+export { createRecordedWorkflowWorkspaceResolver } from "./recorded-workflow-workspace-resolver.js";

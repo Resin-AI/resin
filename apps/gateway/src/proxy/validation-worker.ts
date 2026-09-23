@@ -33,6 +33,7 @@ import type {
   ToolProtocolDispatchRequest,
 } from "@resin/runtime";
 import { z } from "zod";
+import { ReplayWorkspaceUnavailableError } from "./replay-workspace-snapshot.js";
 import {
   type LocalWorkflowValidationResult,
   createLocalWorkflowValidator,
@@ -42,6 +43,8 @@ import {
 const PENDING_ROUTE = "/v1/evolution/workflow-validation/pending";
 const DECISIONS_ROUTE = "/v1/evolution/workflow-validation/decisions";
 const MAX_RESPONSE_BYTES = 512 * 1024;
+const WORKFLOW_VALIDATION_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
+const WORKSPACE_INPUTS_CAPABILITY = "workspace-inputs-v1";
 
 /** The time between passes when the caller does not name one. */
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS = 15_000;
@@ -199,6 +202,7 @@ export class WorkflowValidationClient implements WorkflowValidationTransport {
         "x-device-id": identity.deviceId,
         "x-installation-id": identity.installationId,
         "x-protocol-version": PROTOCOL_VERSION,
+        [WORKFLOW_VALIDATION_CAPABILITIES_HEADER]: WORKSPACE_INPUTS_CAPABILITY,
         ...init.headers,
       },
     });
@@ -288,8 +292,9 @@ export interface WorkflowValidationPassSummary {
   pending: number;
   /** Decisions the cloud recorded, or recognized as an identical re-delivery. */
   answered: number;
-  /** Asks this worker would not answer: another workspace, a mismatched plan, or no replay. */
+  /** Asks the worker will not answer yet: another workspace, a mismatched plan, or no ready replay. */
   refused: number;
+
   /** Decisions the cloud declined (conflict, stale, mismatched); reported, never retried here. */
   rejected: number;
   /** Asks left for the next pass because a transport call failed. */
@@ -557,6 +562,12 @@ export class WorkflowValidationWorker {
     try {
       result = await this.buildValidator(request)(request.plan);
     } catch (error) {
+      if (error instanceof ReplayWorkspaceUnavailableError) {
+        this.log(
+          `workflow validation: ask '${request.requestId}' deferred because trusted replay inputs are unavailable`,
+        );
+        return undefined;
+      }
       this.log(
         `workflow validation: ask '${request.requestId}' replay failed (${describe(error)})`,
       );
