@@ -37,6 +37,30 @@ This document specifies the supported scope, platform matrix, resource boundarie
 | **Max Evolution Candidates**| 20 / day | 100 / day | Daily quota for autonomous tool synthesis |
 | **File Read Size** | 10 MB | 50 MB | Maximum single file size a tool may read |
 
+### Recorded-workflow replay inputs
+
+The gateway runs recorded programs with a disposable working directory, never the live project as
+their current directory. Local validation binds private recording references to host-discovered
+sessions and their project roots before copying current safe, non-hidden project files into that
+directory while preserving relative paths. It never chooses a root supplied by a cloud plan or
+substitutes the polling MCP process's unrelated project.
+It does not reuse an old snapshot. Hidden entries, paths excluded by Resin's sensitive-path policy,
+and `node_modules`, `dist`, `build`, `coverage`, `__pycache__`, and `venv` directories are omitted.
+Symlinks and non-regular files are not copied or followed.
+
+Each snapshot is limited to 128 MiB total, 10 MiB per file, 10,000 copied regular files, and 20,000
+enumerated filesystem entries. Reaching a limit exactly is allowed. Exceeding a bound or encountering
+an unsafe, inaccessible, or changing source fails snapshot preparation; the partial copy is removed
+and no validation decision is submitted, so the ask can be retried later. Missing, ambiguous, or
+conflicting local recording-to-project bindings likewise remain pending. Mixed program/tool-protocol
+replays additionally require the polling host to be in the recorded project before dispatching its
+tools. Before the trusted workspace context is ready, validation remains pending.
+
+Snapshotting supplies current file bytes; it does not relax verification. Recorded outputs are still
+compared with the plan's expected observations, so changed inputs that produce different results do
+not verify. The temporary working directory is not a filesystem sandbox: a child process still runs
+with the daemon user's filesystem permissions and may access files by absolute path.
+
 ### Generated code imports
 
 Sandboxed code artifacts may import only `@resin/runtime` and bundled relative

@@ -7,10 +7,12 @@
  * bytes, but it cannot run one.
  *
  * This is the service that does run one. It builds the same runtime families the artifact executor
- * builds, points them at a disposable directory rather than the user's project, resolves the plan's
- * local references from the private store that recorded them, and replays the plan against the
- * demonstration the recording's own repeat supplied. It returns the per-proposal verdicts and the
- * verdict on the plan as a whole, in the shape the generation path consumes.
+ * builds, points them at a disposable directory rather than the user's live project, resolves the
+ * plan's local references from the private store that recorded them, and replays the plan against
+ * the demonstration the recording's own repeat supplied. Production validation may seed that
+ * directory from a bounded copy of safe inputs in its trusted ready workspace. It returns the
+ * per-proposal verdicts and the verdict on the plan as a whole, in the shape the generation path
+ * consumes.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -82,7 +84,10 @@ export interface LocalWorkflowValidatorOptions {
   workspaceId?: string;
   /** Store the plan's local references resolve from; defaults to the daemon's store. */
   privateValues?: PrivateValueStore;
-  /** Directory the replay's programs run in. Defaults to a fresh disposable directory. */
+  /**
+   * Replay cwd; defaults to a fresh disposable directory. Explicitly supplied paths remain
+   * caller-owned.
+   */
   workspaceDir?: string;
   /** Dispatches a tool-protocol step through the host's own routing. */
   dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;

@@ -15,7 +15,6 @@
  * stay in the local value store.
  */
 
-import { createHash } from "node:crypto";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
@@ -41,6 +40,7 @@ import {
   containsRedactionPlaceholder,
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
+import { workflowPrivateReference } from "./workflow-private-reference.js";
 
 import {
   type DiscoveredCallable,
@@ -558,22 +558,6 @@ export class WorkflowCallRecorder {
     }
   }
 
-  private privateReference(
-    namespace: "value" | "demonstration",
-    parts: readonly unknown[],
-  ): string {
-    const digest = createHash("sha256")
-      .update(
-        JSON.stringify([
-          this.observeAccess?.workspaceId ?? null,
-          this.privateRepresentation,
-          ...parts,
-        ]),
-      )
-      .digest("hex");
-    return `private:v2:${namespace}:${digest}`;
-  }
-
   /** Stores one value of a demonstration and returns the stable reference a replay resolves it by. */
   private localReference(
     value: WorkflowJsonValue,
@@ -581,7 +565,12 @@ export class WorkflowCallRecorder {
     callId: string,
     slot: string,
   ): string {
-    const reference = this.privateReference("demonstration", [sessionId, callId, slot]);
+    const reference = workflowPrivateReference(
+      "demonstration",
+      this.observeAccess?.workspaceId,
+      this.privateRepresentation,
+      [sessionId, callId, slot],
+    );
     this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return reference;
   }
@@ -592,7 +581,12 @@ export class WorkflowCallRecorder {
     callId: string,
     path: WorkflowValuePath,
   ): AgentArgumentOrigin {
-    const reference = this.privateReference("value", [sessionId, callId, path]);
+    const reference = workflowPrivateReference(
+      "value",
+      this.observeAccess?.workspaceId,
+      this.privateRepresentation,
+      [sessionId, callId, path],
+    );
     this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return { type: "private", reference };
   }
