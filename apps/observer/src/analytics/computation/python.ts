@@ -9,11 +9,13 @@ import {
 import { buildComputationProgramWithKeyMap, draftField, draftNode } from "./builder.js";
 import {
   type PythonApiName,
+  isPythonBuiltinType,
   isPythonNamespaceMutatorName,
   isPythonReadOnlyOpenMode,
   isPythonReflectionName,
   parsePythonImportText,
   pythonBuiltinApi,
+  pythonBuiltinMemberApi,
   pythonConstructorApi,
   pythonFileHandleApi,
   pythonMethodApi,
@@ -247,6 +249,7 @@ interface PendingDefinition {
 interface PyOutput {
   readonly node: DraftNode;
   readonly shape: ComputationOutputShape;
+  readonly source: "definition" | "display" | "stdout";
   readonly definitionKey?: string;
 }
 
@@ -323,9 +326,14 @@ class PythonFrameAnalyzer {
   private readonly helperTargetStack: { name: string; definition: PendingDefinition }[] = [];
   private readonly importBindings = new Map<string, PyImportBinding>();
   private readonly authoredImportNames = new Set<string>();
+  /** Top-level imports authored in this frame and already emitted in source order. */
+  private readonly emittedAuthoredImports = new Set<string>();
   private readonly shadowFrames: Map<string, DraftSymbol>[] = [];
   private readonly definitionStack: PendingDefinition[] = [];
   private readonly authoredReads = new Set<DraftSymbol>();
+  /** Functions called at module scope and the direct calls authored by each function. */
+  private readonly moduleReachableDefinitions = new Set<PendingDefinition>();
+  private readonly definitionCallEdges = new Map<PendingDefinition, Set<PendingDefinition>>();
   private readonly fileHandles = new Set<DraftSymbol>();
   private readonly pathValues = new Set<DraftSymbol>();
   private ambiguousPathDepth = 0;
@@ -341,6 +349,8 @@ class PythonFrameAnalyzer {
   private readonly emittedModuleWrites = new Set<string>();
   private readonly writtenNameSet = new Set<string>();
   private readonly outputs: PyOutput[] = [];
+  private statementBodyDepth = 0;
+  private finalModuleOutput: PyOutput | null = null;
 
   private hasInvocation = false;
   private invalidatesState = false;
@@ -489,6 +499,7 @@ class PythonFrameAnalyzer {
     roots: readonly DraftNode[],
     definitions: readonly PendingDefinition[],
     unsupportedReasons: readonly ComputationUnsupportedReason[] = [],
+    outputs: readonly PyOutput[] = this.outputs,
   ): { program: ComputationParseResult["program"]; definitionKeys: readonly string[] } {
     const built = buildComputationProgramWithKeyMap({
       definitions: definitions.map((definition) => ({
@@ -503,7 +514,7 @@ class PythonFrameAnalyzer {
         unsupportedReasons: definition.unsupportedReasons,
       })),
       language: "python",
-      outputs: this.selectOutputs(definitions.length),
+      outputs: this.selectOutputs(outputs),
       roots: [...roots],
       unsupportedReasons: [...unsupportedReasons],
     });
@@ -516,6 +527,7 @@ class PythonFrameAnalyzer {
       [this.node("unsupported", [], { unsupportedReason: reason })],
       [],
       [reason],
+      [],
     );
     return {
       local: {
@@ -571,26 +583,44 @@ class PythonFrameAnalyzer {
   }
 
   /**
-   * Output records are a bounded summary (at most `definitions + 1`): the authored frame's emitted
-   * value first, then one return per definition. Selecting fewer records never changes structure.
+   * Preserve explicit stdout emissions and definition results, plus only the final direct module
+   * expression. The builder enforces the shared bounded output count.
    */
-  private selectOutputs(definitionCount: number): readonly PyOutput[] {
-    const limit = definitionCount + 1;
-    const moduleLevel = this.outputs.filter((output) => output.definitionKey === undefined);
-    const perDefinition = new Map<string, PyOutput>();
-    for (const output of this.outputs) {
-      if (output.definitionKey !== undefined && !perDefinition.has(output.definitionKey)) {
-        perDefinition.set(output.definitionKey, output);
-      }
-    }
-    const selected: PyOutput[] = [];
-    const seen = new Set<DraftNode>();
-    for (const output of [...moduleLevel.slice(0, 1), ...perDefinition.values()]) {
-      if (selected.length >= limit || seen.has(output.node)) {
+  private selectOutputs(outputs: readonly PyOutput[]): readonly PyOutput[] {
+    const moduleReachableDefinitionKeys = new Set<string>();
+    const pendingDefinitions = [...this.moduleReachableDefinitions];
+    while (pendingDefinitions.length > 0) {
+      const definition = pendingDefinitions.pop();
+      if (definition === undefined || moduleReachableDefinitionKeys.has(definition.key)) {
         continue;
       }
-      seen.add(output.node);
-      selected.push(output);
+      moduleReachableDefinitionKeys.add(definition.key);
+      for (const called of this.definitionCallEdges.get(definition) ?? []) {
+        pendingDefinitions.push(called);
+      }
+    }
+
+    const selected: PyOutput[] = [];
+    const seen = new Set<DraftNode>();
+    for (const output of outputs) {
+      const selectedOutput: PyOutput =
+        output.source === "stdout" &&
+        output.definitionKey !== undefined &&
+        moduleReachableDefinitionKeys.has(output.definitionKey)
+          ? { node: output.node, shape: output.shape, source: output.source }
+          : output;
+      if (
+        selectedOutput.source !== "stdout" &&
+        selectedOutput.source !== "definition" &&
+        selectedOutput !== this.finalModuleOutput
+      ) {
+        continue;
+      }
+      if (seen.has(selectedOutput.node)) {
+        continue;
+      }
+      seen.add(selectedOutput.node);
+      selected.push(selectedOutput);
     }
     return selected;
   }
@@ -598,7 +628,6 @@ class PythonFrameAnalyzer {
   /**
    * Materialize only the closure this frame reaches: authored definitions plus the transitively read
    * observed helpers. An unused cached helper never joins the program, so it can neither inflate the
-   * evidence nor make an unrelated invocation look substantive.
    */
   private selectDefinitions(): Set<PendingDefinition> {
     const kept = new Set<PendingDefinition>();
@@ -671,7 +700,7 @@ class PythonFrameAnalyzer {
   }
 
   private collectAuthoredReports(): void {
-    for (const statement of pyChildren(this.tree.topNode)) {
+    for (const statement of this.statementsIn(this.tree.topNode)) {
       if (statement.name === "ImportStatement") {
         const parsed = parsePythonImportText(this.text(statement));
         if (parsed !== undefined) {
@@ -890,16 +919,7 @@ class PythonFrameAnalyzer {
   }
 
   private preScanContainer(container: PyNode, scope: PyScope): void {
-    if (container.name === "Body") {
-      for (const statement of this.bodyStatements(container)) {
-        this.preScanStatement(statement, scope);
-      }
-      return;
-    }
-    for (const statement of pyChildren(container)) {
-      if (PY_STRUCTURAL_TOKENS[statement.name] === true || statement.name === "Comment") {
-        continue;
-      }
+    for (const statement of this.statementsIn(container)) {
       this.preScanStatement(statement, scope);
     }
   }
@@ -1006,7 +1026,7 @@ class PythonFrameAnalyzer {
   // --------------------------------------------------------------------------
 
   private detectInvocation(): boolean {
-    for (const statement of pyChildren(this.tree.topNode)) {
+    for (const statement of this.statementsIn(this.tree.topNode)) {
       if (this.statementExecutesCall(statement)) {
         return true;
       }
@@ -1052,14 +1072,113 @@ class PythonFrameAnalyzer {
     return argList !== undefined && this.openModeIsReadOnly(argList);
   }
   private detectStateMutation(): void {
-    const writesSeen = new Set<string>();
-    const baseNameOf = (node: PyNode): string | undefined => {
-      if (node.name === "VariableName") return this.text(node);
-      return pyChildren(node)
-        .map((child) => baseNameOf(child))
-        .find((name): name is string => name !== undefined);
+    const locallyConstructedMutableNames = new Set<string>();
+    const locallySafeUpdateNames = new Set<string>();
+    const isFreshMutableValue = (node: PyNode): boolean => {
+      if (node.name === "ParenthesizedExpression") {
+        const inner = pyContentChildren(node);
+        return inner.length === 1 && isFreshMutableValue(inner[0]!);
+      }
+      if (
+        node.name === "ArrayExpression" ||
+        node.name === "ArrayComprehensionExpression" ||
+        node.name === "DictionaryExpression" ||
+        node.name === "DictionaryComprehensionExpression" ||
+        node.name === "SetExpression" ||
+        node.name === "SetComprehensionExpression"
+      ) {
+        return true;
+      }
+      if (node.name !== "CallExpression") return false;
+      const callee = pyChildren(node)[0];
+      if (callee?.name !== "VariableName") return false;
+      const name = this.text(callee);
+      return (
+        (name === "list" || name === "dict" || name === "set") &&
+        this.resolveBoundName(name, this.moduleScope) === undefined &&
+        !this.importBindings.has(name) &&
+        !this.authoredImportNames.has(name) &&
+        !this.moduleScope.defs.has(name) &&
+        !(this.context?.definitions ?? []).some((entry) => entry.name === name)
+      );
     };
-    const visit = (node: PyNode, functionDepth: number): void => {
+    const isKnownLocallyConstructedMutableValue = (node: PyNode): boolean => {
+      if (node.name === "ParenthesizedExpression") {
+        const inner = pyContentChildren(node);
+        return inner.length === 1 && isKnownLocallyConstructedMutableValue(inner[0]!);
+      }
+      return (
+        isFreshMutableValue(node) ||
+        (node.name === "VariableName" && locallyConstructedMutableNames.has(this.text(node)))
+      );
+    };
+    const isKnownImmutableUpdateValue = (node: PyNode): boolean => {
+      if (node.name === "ParenthesizedExpression") {
+        const inner = pyContentChildren(node);
+        return inner.length === 1 && isKnownImmutableUpdateValue(inner[0]!);
+      }
+      if (
+        node.name === "Number" ||
+        node.name === "String" ||
+        node.name === "Boolean" ||
+        node.name === "None" ||
+        node.name === "TupleExpression"
+      ) {
+        return true;
+      }
+      if (node.name === "VariableName") {
+        return locallySafeUpdateNames.has(this.text(node));
+      }
+      if (node.name !== "CallExpression") return false;
+      const callee = pyChildren(node)[0];
+      if (callee?.name !== "VariableName") return false;
+      const name = this.text(callee);
+      return (
+        (name === "int" || name === "float" || name === "str") &&
+        this.resolveBoundName(name, this.moduleScope) === undefined &&
+        !this.importBindings.has(name) &&
+        !this.authoredImportNames.has(name)
+      );
+    };
+    const updateLocalBindings = (statement: PyNode, inBody: boolean): void => {
+      const children = pyChildren(statement);
+      const equalIndexes = children.flatMap((child, index) =>
+        child.name === "AssignOp" ? [index] : [],
+      );
+      if (equalIndexes.length === 0) return;
+      const valueNodes = children
+        .slice(equalIndexes[equalIndexes.length - 1]! + 1)
+        .filter(
+          (child) =>
+            PY_STRUCTURAL_TOKENS[child.name] !== true &&
+            child.name !== "Comment" &&
+            child.name !== "AssignOp",
+        );
+      const value = valueNodes.length === 1 ? valueNodes[0] : undefined;
+      const isMutable = value !== undefined && isKnownLocallyConstructedMutableValue(value);
+      const isSafeUpdate = value !== undefined && !isMutable && isKnownImmutableUpdateValue(value);
+      let start = 0;
+      for (const equalIndex of equalIndexes) {
+        const targets = this.assignmentTargetElements(children.slice(start, equalIndex));
+        const directTarget =
+          !inBody &&
+          equalIndexes.length === 1 &&
+          targets.length === 1 &&
+          targets[0]?.name === "VariableName";
+        for (const target of targets) {
+          for (const name of this.namesInTarget(target)) {
+            locallyConstructedMutableNames.delete(name);
+            locallySafeUpdateNames.delete(name);
+            if (directTarget && target.name === "VariableName") {
+              if (isMutable) locallyConstructedMutableNames.add(name);
+              else if (isSafeUpdate) locallySafeUpdateNames.add(name);
+            }
+          }
+        }
+        start = equalIndex + 1;
+      }
+    };
+    const visit = (node: PyNode, functionDepth: number, bodyDepth: number): void => {
       if (node.name === "DeleteStatement" || node.name === "ScopeStatement") {
         this.invalidatesState = true;
       }
@@ -1067,19 +1186,39 @@ class PythonFrameAnalyzer {
         functionDepth === 0 &&
         (node.name === "AssignStatement" || node.name === "UpdateStatement")
       ) {
-        // A member/subscript write mutates an object whose complete prior state is not represented
-        // by this cell. A write to a name introduced earlier in this cell is local state instead.
+        if (node.name === "AssignStatement") {
+          updateLocalBindings(node, bodyDepth > 0);
+        }
+        // An augmented assignment is read-before-write. It is safe only when this source proves a
+        // local mutable container or immutable builtin value, not just a prior name assignment.
         for (const target of this.assignmentTargetsOf(node)) {
           if (target.name === "VariableName") {
             const name = this.text(target);
-            if (node.name === "UpdateStatement" && !writesSeen.has(name)) {
+            if (
+              node.name === "UpdateStatement" &&
+              !locallyConstructedMutableNames.has(name) &&
+              !locallySafeUpdateNames.has(name)
+            ) {
               this.invalidatesState = true;
             }
-            writesSeen.add(name);
             continue;
           }
-          if (target.name !== "MemberExpression" || !writesSeen.has(baseNameOf(target) ?? "")) {
+          const receiver = target.name === "MemberExpression" ? pyChildren(target)[0] : undefined;
+          if (
+            receiver?.name !== "VariableName" ||
+            !locallyConstructedMutableNames.has(this.text(receiver))
+          ) {
             this.invalidatesState = true;
+          }
+        }
+      }
+      if (node.name === "ForStatement") {
+        const children = pyChildren(node);
+        const inIndex = children.findIndex((child) => child.name === "in");
+        for (const target of this.assignmentTargetElements(children.slice(0, inIndex))) {
+          for (const name of this.namesInTarget(target)) {
+            locallyConstructedMutableNames.delete(name);
+            locallySafeUpdateNames.delete(name);
           }
         }
       }
@@ -1094,6 +1233,7 @@ class PythonFrameAnalyzer {
             !isPythonReflectionName(name) &&
             pythonBuiltinApi(name) === undefined &&
             pythonConstructorApi(name) === undefined &&
+            !isPythonBuiltinType(name) &&
             !this.isReadOnlyOpenCall(node) &&
             !this.importBindings.has(name) &&
             !this.authoredImportNames.has(name) &&
@@ -1107,8 +1247,15 @@ class PythonFrameAnalyzer {
           }
         }
         if (functionDepth === 0 && callee?.name === "MemberExpression") {
-          const property = pyChildren(callee).find((child) => child.name === "PropertyName");
-          if (property !== undefined && PYTHON_MUTATING_METHODS[this.text(property)] === true) {
+          const calleeChildren = pyChildren(callee);
+          const receiver = calleeChildren[0];
+          const property = calleeChildren.find((child) => child.name === "PropertyName");
+          const receiverName = receiver?.name === "VariableName" ? this.text(receiver) : undefined;
+          if (
+            property !== undefined &&
+            PYTHON_MUTATING_METHODS[this.text(property)] === true &&
+            (receiverName === undefined || !locallyConstructedMutableNames.has(receiverName))
+          ) {
             this.invalidatesState = true;
           }
         }
@@ -1116,18 +1263,19 @@ class PythonFrameAnalyzer {
       const childFunctionDepth =
         functionDepth +
         (node.name === "FunctionDefinition" || node.name === "LambdaExpression" ? 1 : 0);
+      const childBodyDepth = bodyDepth + (node.name === "Body" ? 1 : 0);
       for (const child of pyChildren(node)) {
-        visit(child, childFunctionDepth);
+        visit(child, childFunctionDepth, childBodyDepth);
       }
     };
-    visit(this.tree.topNode, 0);
+    visit(this.tree.topNode, 0, 0);
   }
 
   // --------------------------------------------------------------------------
   // Statements
   // --------------------------------------------------------------------------
 
-  private bodyStatements(body: PyNode): PyNode[] {
+  private statementsIn(container: PyNode): PyNode[] {
     const statements: PyNode[] = [];
     const collect = (node: PyNode): void => {
       for (const child of pyChildren(node)) {
@@ -1145,18 +1293,26 @@ class PythonFrameAnalyzer {
         statements.push(child);
       }
     };
-    collect(body);
+    collect(container);
     return statements;
   }
 
   private emitStatementsInto(container: PyNode, scope: PyScope, into: DraftNode[]): void {
-    const statements =
-      container.name === "Body" ? this.bodyStatements(container) : pyChildren(container);
-    for (const statement of statements) {
-      if (PY_STRUCTURAL_TOKENS[statement.name] === true || statement.name === "Comment") {
-        continue;
-      }
+    const moduleRoot =
+      container === this.tree.topNode && scope.kind === "module" && this.frameId === 0;
+    for (const statement of this.statementsIn(container)) {
+      const outputStart = this.outputs.length;
       const emitted = this.emitStatement(statement, scope);
+      if (moduleRoot) {
+        this.finalModuleOutput =
+          statement.name === "ExpressionStatement"
+            ? (this.outputs
+                .slice(outputStart)
+                .find(
+                  (output) => output.source === "display" && output.definitionKey === undefined,
+                ) ?? null)
+            : null;
+      }
       if (emitted !== null) {
         into.push(emitted);
       }
@@ -1169,11 +1325,16 @@ class PythonFrameAnalyzer {
       return this.node("block", []);
     }
     const emitted: DraftNode[] = [];
-    for (const statement of this.bodyStatements(body)) {
-      const node = this.emitStatement(statement, scope);
-      if (node !== null) {
-        emitted.push(node);
+    this.statementBodyDepth += 1;
+    try {
+      for (const statement of this.statementsIn(body)) {
+        const node = this.emitStatement(statement, scope);
+        if (node !== null) {
+          emitted.push(node);
+        }
       }
+    } finally {
+      this.statementBodyDepth -= 1;
     }
     return emitted.length === 1 ? emitted[0] : this.node("block", emitted);
   }
@@ -1197,7 +1358,7 @@ class PythonFrameAnalyzer {
         case "PassStatement":
           return null;
         case "ImportStatement":
-          this.recordImport(statement);
+          this.recordImport(statement, scope);
           return null;
         case "IfStatement": {
           const targets = this.assignmentTargetsInTree(statement);
@@ -1267,7 +1428,16 @@ class PythonFrameAnalyzer {
         case "YieldStatement": {
           const yielded = pyChild(statement, "YieldExpression");
           if (yielded === undefined) {
-            return this.node("yield", []);
+            const yieldNode = this.node("yield", []);
+            if (scope.owner !== null) {
+              this.outputs.push({
+                definitionKey: scope.owner.key,
+                node: yieldNode,
+                shape: "null",
+                source: "definition",
+              });
+            }
+            return yieldNode;
           }
           const value = this.emitExpression(yielded, scope);
           const yieldNode = this.node("yield", [value]);
@@ -1276,6 +1446,7 @@ class PythonFrameAnalyzer {
               definitionKey: scope.owner.key,
               node: yieldNode,
               shape: this.shapeOf(value),
+              source: "definition",
             });
           }
           return yieldNode;
@@ -1641,11 +1812,36 @@ class PythonFrameAnalyzer {
             "tuple",
             values.map((value) => this.emitExpression(value, scope)),
           );
-    if (this.frameId > 0) {
+    const isPrintCall = expression.kind === "call" && expression.fields?.api === "core.print";
+    if (isPrintCall) {
+      const wrapped = this.node("expression", [expression]);
+      const keywordArgs = expression.fields?.keywordArgs as
+        | readonly { name: string; value: DraftNode }[]
+        | undefined;
+      const fileArgument = keywordArgs?.find((argument) => argument.name === "file");
+      const writesStdout =
+        fileArgument === undefined ||
+        (fileArgument.value.kind === "literal" && fileArgument.value.fields?.constant === "null");
+      if (writesStdout) {
+        const helperTarget = this.helperTargetStack[this.helperTargetStack.length - 1];
+        const definition = scope.owner ?? helperTarget?.definition;
+        this.outputs.push({
+          ...(definition === undefined ? {} : { definitionKey: definition.key }),
+          node: wrapped,
+          shape: "string",
+          source: "stdout",
+        });
+      }
+      return wrapped;
+    }
+    if (this.frameId > 0 || this.statementBodyDepth > 0) {
       return expression;
     }
     const wrapped = this.node("expression", [expression]);
-    this.outputs.push({ node: wrapped, shape: this.shapeOf(expression) });
+    const isNone = expression.kind === "literal" && expression.fields?.constant === "null";
+    if (!isNone) {
+      this.outputs.push({ node: wrapped, shape: this.shapeOf(expression), source: "display" });
+    }
     return wrapped;
   }
 
@@ -1654,7 +1850,16 @@ class PythonFrameAnalyzer {
       (child) => PY_EXPRESSION_NAMES[child.name] === true,
     );
     if (values.length === 0) {
-      return this.node("return", []);
+      const returnNode = this.node("return", []);
+      if (scope.owner !== null) {
+        this.outputs.push({
+          definitionKey: scope.owner.key,
+          node: returnNode,
+          shape: "null",
+          source: "definition",
+        });
+      }
+      return returnNode;
     }
     const value = this.emitExpressionList(values, scope);
     const returnNode = this.node("return", [value]);
@@ -1663,6 +1868,7 @@ class PythonFrameAnalyzer {
         definitionKey: scope.owner.key,
         node: returnNode,
         shape: this.shapeOf(value),
+        source: "definition",
       });
     }
     return returnNode;
@@ -1962,10 +2168,10 @@ class PythonFrameAnalyzer {
    * member under its local name. Only the resolver table and the private import report see these
    * names; a module path never becomes a wire node.
    */
-  private recordImport(statement: PyNode): void {
+  private recordImport(statement: PyNode, scope: PyScope): void {
     const children = pyChildren(statement);
     if (children[0]?.name === "from") {
-      this.recordFromImport(statement, children);
+      this.recordFromImport(statement, children, scope);
       return;
     }
     for (const group of this.splitGroups(children.slice(1))) {
@@ -1982,14 +2188,15 @@ class PythonFrameAnalyzer {
       const bound = alias ?? dotted.split(".")[0];
       const module = alias === undefined ? dotted.split(".")[0] : dotted;
       this.importBindings.set(bound, { kind: "module", member: module, module });
-      this.noteModuleWrite(bound, this.moduleScope);
-      if (this.frameId === 0) {
+      this.noteModuleWrite(bound, scope);
+      if (this.frameId === 0 && scope.kind === "module") {
+        this.emittedAuthoredImports.add(bound);
         this.localImports.push({ names: [bound], source: this.text(statement) });
       }
     }
   }
 
-  private recordFromImport(statement: PyNode, children: readonly PyNode[]): void {
+  private recordFromImport(statement: PyNode, children: readonly PyNode[], scope: PyScope): void {
     const importIndex = children.findIndex((child) => child.name === "import");
     if (importIndex < 1) {
       return;
@@ -2016,9 +2223,12 @@ class PythonFrameAnalyzer {
       const bound = aliasNode?.name === "VariableName" ? this.text(aliasNode) : member;
       names.push(bound);
       this.importBindings.set(bound, { kind: "member", member, module: modulePath });
-      this.noteModuleWrite(bound, this.moduleScope);
+      this.noteModuleWrite(bound, scope);
     }
-    if (this.frameId === 0 && names.length > 0) {
+    if (this.frameId === 0 && scope.kind === "module" && names.length > 0) {
+      for (const name of names) {
+        this.emittedAuthoredImports.add(name);
+      }
       this.localImports.push({ names, source: this.text(statement) });
     }
   }
@@ -2483,11 +2693,26 @@ class PythonFrameAnalyzer {
       return this.unsupported("unsupported_construct");
     }
     const propertyName = this.text(property);
+    const builtinTypeName = this.builtinTypeNameOf(base, scope);
+    const builtinTypeApi =
+      builtinTypeName === undefined
+        ? undefined
+        : pythonBuiltinMemberApi(builtinTypeName, propertyName);
+    if (builtinTypeApi !== undefined) {
+      return this.node("api_reference", [], { api: builtinTypeApi });
+    }
     const alias =
       base.name === "VariableName" ? this.importBindings.get(this.text(base)) : undefined;
     if (alias !== undefined && alias.kind === "module") {
-      // A recognized standard-library attribute read that is not a finite API call is data from
-      // outside the captured program: an anonymous free variable, never a module name on the wire.
+      const moduleApi =
+        pythonModuleApi(alias.module, propertyName) ??
+        (alias.module === "builtins"
+          ? (pythonConstructorApi(propertyName) ?? pythonBuiltinApi(propertyName))
+          : undefined);
+      if (moduleApi !== undefined) {
+        return this.node("api_reference", [], { api: moduleApi });
+      }
+      // A recognized standard-library attribute read without a finite API is external state.
       if (alias.module === "sys" && propertyName === "argv") {
         return this.literal("free:sys.argv", "array", "free_variable");
       }
@@ -2565,15 +2790,15 @@ class PythonFrameAnalyzer {
     if (callee === undefined || argList === undefined) {
       return this.unsupported("unsupported_construct");
     }
-    const args = this.emitArguments(argList, scope);
-    if (args.keywordRejected) {
-      return this.unsupported("unsupported_dynamic_key", [
-        ...args.positional,
-        ...args.keywordArgs.map((entry) => entry.value),
-      ]);
-    }
     const calleeName = callee.name === "VariableName" ? this.text(callee) : undefined;
     if (calleeName === "open") {
+      const args = this.emitArguments(argList, scope);
+      if (args.keywordRejected) {
+        return this.unsupported("unsupported_dynamic_key", [
+          ...args.positional,
+          ...args.keywordArgs.map((entry) => entry.value),
+        ]);
+      }
       if (!this.openModeIsReadOnly(argList)) {
         // Never claim an arbitrary open mode is a read-only resource.
         return this.unsupported("unsupported_api", args.positional);
@@ -2581,7 +2806,34 @@ class PythonFrameAnalyzer {
       return this.node("call", args.positional, { api: "fs.open_read" });
     }
     const resolution = this.resolveCallee(callee, scope);
+    const args = this.emitArguments(
+      argList,
+      scope,
+      resolution.api === "type.is_instance" ? 1 : undefined,
+    );
+    if (args.keywordRejected) {
+      return this.unsupported("unsupported_dynamic_key", [
+        ...args.positional,
+        ...args.keywordArgs.map((entry) => entry.value),
+      ]);
+    }
     if (resolution.symbol !== undefined) {
+      if (this.frameId === 0) {
+        const calledDefinition = this.pendingBySymbol.get(resolution.symbol);
+        if (calledDefinition !== undefined) {
+          const caller = this.definitionStack[this.definitionStack.length - 1];
+          if (caller === undefined) {
+            this.moduleReachableDefinitions.add(calledDefinition);
+          } else {
+            let calledDefinitions = this.definitionCallEdges.get(caller);
+            if (calledDefinitions === undefined) {
+              calledDefinitions = new Set<PendingDefinition>();
+              this.definitionCallEdges.set(caller, calledDefinitions);
+            }
+            calledDefinitions.add(calledDefinition);
+          }
+        }
+      }
       this.useDefinition(resolution.symbol);
       return this.node("call", args.positional, {
         symbol: resolution.symbol,
@@ -2630,12 +2882,17 @@ class PythonFrameAnalyzer {
   }
 
   private argumentGroups(argList: PyNode): PyNode[][] {
+    const children = pyChildren(argList).filter(
+      (child) => child.name !== "(" && child.name !== ")" && child.name !== "Comment",
+    );
+    if (children.some((child) => child.name === "for" || child.name === "async")) {
+      // In an unparenthesized generator argument, commas after `for` belong to its tuple target.
+      // Valid Python syntax cannot combine this form with sibling call arguments.
+      return [children];
+    }
     const groups: PyNode[][] = [];
     let group: PyNode[] = [];
-    for (const child of pyChildren(argList)) {
-      if (child.name === "(" || child.name === ")" || child.name === "Comment") {
-        continue;
-      }
+    for (const child of children) {
       if (child.name === ",") {
         if (group.length > 0) {
           groups.push(group);
@@ -2651,9 +2908,38 @@ class PythonFrameAnalyzer {
     return groups;
   }
 
+  private emitTypeExpression(node: PyNode, scope: PyScope): DraftNode {
+    if (node.name === "ParenthesizedExpression") {
+      const inner = pyContentChildren(node);
+      return inner.length === 1
+        ? this.emitTypeExpression(inner[0]!, scope)
+        : this.unsupported("unsupported_construct");
+    }
+    if (node.name === "TupleExpression") {
+      return this.node(
+        "tuple",
+        pyContentChildren(node).map((child) => this.emitTypeExpression(child, scope)),
+      );
+    }
+    if (node.name === "VariableName") {
+      const name = this.text(node);
+      if (
+        Object.hasOwn(PYTHON_TYPE_CONSTANTS, name) &&
+        this.resolveBoundName(name, scope) === undefined &&
+        this.importBindings.get(name) === undefined &&
+        !this.authoredImportNames.has(name) &&
+        this.materializeHelperDefinition(name) === undefined
+      ) {
+        return pyConstant(PYTHON_TYPE_CONSTANTS[name]);
+      }
+    }
+    return this.emitExpression(node, scope);
+  }
+
   private emitArguments(
     argList: PyNode,
     scope: PyScope,
+    typeArgumentIndex?: number,
   ): {
     keywordArgs: { name: string; value: DraftNode }[];
     keywordRejected: boolean;
@@ -2662,6 +2948,13 @@ class PythonFrameAnalyzer {
     const positional: DraftNode[] = [];
     const keywordArgs: { name: string; value: DraftNode }[] = [];
     let keywordRejected = false;
+    let positionalIndex = 0;
+    const emitPositional = (node: PyNode): DraftNode => {
+      const currentIndex = positionalIndex++;
+      return currentIndex === typeArgumentIndex
+        ? this.emitTypeExpression(node, scope)
+        : this.emitExpression(node, scope);
+    };
     for (const entry of this.argumentGroups(argList)) {
       const first = entry[0];
       if (first === undefined) {
@@ -2673,6 +2966,7 @@ class PythonFrameAnalyzer {
             spreadKind: first.name === "*" ? "iterable" : "mapping",
           }),
         );
+        positionalIndex += 1;
         continue;
       }
       const isKeyword =
@@ -2710,12 +3004,13 @@ class PythonFrameAnalyzer {
               },
             ),
           );
+          positionalIndex += 1;
         } finally {
           this.shadowFrames.pop();
         }
         continue;
       }
-      positional.push(this.emitExpression(first, scope));
+      positional.push(emitPositional(first));
     }
     return { keywordArgs, keywordRejected, positional };
   }
@@ -2760,11 +3055,20 @@ class PythonFrameAnalyzer {
     }
     const imported = this.importBindings.get(name);
     if (imported !== undefined) {
-      if (!(this.frameId === 0 && scope.kind === "module" && this.emittedModuleWrites.has(name))) {
+      if (!this.emittedAuthoredImports.has(name)) {
         this.recordRequiredName(name);
       }
       if (imported.module === "pathlib" && imported.member === "Path") {
         return { api: "construct.path", construct: true };
+      }
+      if (imported.module === "builtins") {
+        const constructorApi = pythonConstructorApi(imported.member ?? name);
+        if (constructorApi !== undefined) {
+          return { api: constructorApi, construct: true };
+        }
+        if (isPythonBuiltinType(imported.member ?? name)) {
+          return { reason: "unsupported_api" };
+        }
       }
       const api = pythonModuleApi(imported.module, imported.member ?? name);
       if (api !== undefined) {
@@ -2789,6 +3093,9 @@ class PythonFrameAnalyzer {
     if (builtin !== undefined) {
       return { api: builtin };
     }
+    if (isPythonBuiltinType(name)) {
+      return { reason: "unsupported_api" };
+    }
     this.recordRequiredName(name);
     // An unresolved callable is hidden state: never a guessed API and never a data slot.
     return { reason: "unsupported_hidden_state" };
@@ -2811,6 +3118,12 @@ class PythonFrameAnalyzer {
       return { reason: "unsupported_construct" };
     }
     const member = this.text(property);
+    const builtinTypeName = this.builtinTypeNameOf(base, scope);
+    const builtinTypeApi =
+      builtinTypeName === undefined ? undefined : pythonBuiltinMemberApi(builtinTypeName, member);
+    if (builtinTypeApi !== undefined) {
+      return { api: builtinTypeApi };
+    }
     const modulePath = this.dottedModuleName(base, scope);
     if (modulePath !== undefined) {
       const direct = pythonModuleApi(modulePath, member);
@@ -2868,7 +3181,7 @@ class PythonFrameAnalyzer {
       if (alias === undefined || alias.kind !== "module") {
         return undefined;
       }
-      if (!(this.frameId === 0 && scope.kind === "module" && this.emittedModuleWrites.has(name))) {
+      if (!this.emittedAuthoredImports.has(name)) {
         this.recordRequiredName(name);
       }
       return alias.member ?? alias.module;
@@ -2885,10 +3198,32 @@ class PythonFrameAnalyzer {
     }
     return undefined;
   }
+  private builtinTypeNameOf(node: PyNode, scope: PyScope): string | undefined {
+    const modulePath = this.dottedModuleName(node, scope);
+    if (modulePath?.startsWith("builtins.")) {
+      const typeName = modulePath.slice("builtins.".length);
+      if (isPythonBuiltinType(typeName)) return typeName;
+    }
+    if (node.name !== "VariableName") return undefined;
+    const name = this.text(node);
+    if (this.resolveBoundName(name, scope) !== undefined) return undefined;
+    const imported = this.importBindings.get(name);
+    if (imported !== undefined) {
+      return imported.kind === "member" &&
+        imported.module === "builtins" &&
+        isPythonBuiltinType(imported.member ?? name)
+        ? (imported.member ?? name)
+        : undefined;
+    }
+    if (this.authoredImportNames.has(name) || !isPythonBuiltinType(name)) return undefined;
+    return this.materializeHelperDefinition(name) === undefined ? name : undefined;
+  }
+
   private recordRequiredName(name: string): void {
     if (
       name === "__name__" ||
       name === "__file__" ||
+      isPythonBuiltinType(name) ||
       Object.hasOwn(PYTHON_TYPE_CONSTANTS, name) ||
       name === "open" ||
       pythonBuiltinApi(name) !== undefined ||
@@ -2935,27 +3270,39 @@ class PythonFrameAnalyzer {
       }
       return this.identifier(bound);
     }
-    // Keep the raw spelling only in private bookkeeping. The recorder uses this ordered list to
-    // choose observed setup cells; the canonical program receives an anonymous free-variable slot.
-    this.recordRequiredName(name);
+    if (!this.emittedAuthoredImports.has(name)) {
+      this.recordRequiredName(name);
+    }
     const helper = this.materializeHelperDefinition(name);
     if (helper !== undefined) {
       return this.identifier(helper.nameSymbol);
     }
-    if (imported !== undefined || isPythonReflectionName(name)) {
+    if (imported !== undefined) {
+      const importedName = imported.member ?? name;
+      const importedApi =
+        pythonModuleApi(imported.module, importedName) ??
+        (imported.module === "builtins"
+          ? (pythonConstructorApi(importedName) ?? pythonBuiltinApi(importedName))
+          : undefined);
+      if (importedApi !== undefined) {
+        return this.node("api_reference", [], { api: importedApi });
+      }
+      return this.unsupported("unsupported_api");
+    }
+    if (isPythonReflectionName(name)) {
       return this.unsupported("unsupported_api");
     }
     if (name === "__name__" || name === "__file__") {
       return this.literal(`free:${name}`, "string", "free_variable");
     }
-    if (Object.hasOwn(PYTHON_TYPE_CONSTANTS, name)) {
-      return pyConstant(PYTHON_TYPE_CONSTANTS[name]);
+    if (isPythonBuiltinType(name)) {
+      return this.unsupported("unsupported_api");
     }
-    if (
-      name === "open" ||
-      pythonBuiltinApi(name) !== undefined ||
-      pythonConstructorApi(name) !== undefined
-    ) {
+    const builtinApi = pythonBuiltinApi(name) ?? pythonConstructorApi(name);
+    if (builtinApi !== undefined) {
+      return this.node("api_reference", [], { api: builtinApi });
+    }
+    if (Object.hasOwn(PYTHON_TYPE_CONSTANTS, name) || name === "open") {
       return this.unsupported("unsupported_api");
     }
     if (this.frameId === 0 && !this.referencedNameSet.has(name)) {
@@ -3381,6 +3728,17 @@ class PythonFrameAnalyzer {
     scope: PyScope,
     shadow: Map<string, DraftSymbol>,
   ): void {
+    if (target.name === "ParenthesizedExpression") {
+      const contents = pyContentChildren(target);
+      if (contents.length === 1) {
+        this.predeclareComprehensionTarget(contents[0]!, scope, shadow);
+      } else {
+        for (const element of contents) {
+          this.predeclareComprehensionTarget(element, scope, shadow);
+        }
+      }
+      return;
+    }
     if (target.name === "TupleExpression" || target.name === "ArrayExpression") {
       for (const element of pyContentChildren(target)) {
         this.predeclareComprehensionTarget(element, scope, shadow);
@@ -3509,6 +3867,16 @@ class PythonFrameAnalyzer {
         pyContentChildren(target).map((element) =>
           this.emitComprehensionTarget(element, scope, shadow),
         ),
+      );
+    }
+    if (target.name === "ParenthesizedExpression") {
+      const contents = pyContentChildren(target);
+      if (contents.length === 1) {
+        return this.emitComprehensionTarget(contents[0]!, scope, shadow);
+      }
+      return this.node(
+        "tuple",
+        contents.map((element) => this.emitComprehensionTarget(element, scope, shadow)),
       );
     }
     if (target.name !== "VariableName") {

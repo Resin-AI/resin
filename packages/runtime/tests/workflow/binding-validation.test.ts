@@ -19,7 +19,9 @@ import {
   demonstrationEnvironment,
   validateAndConfirmCandidates,
 } from "../../src/workflow/binding-validation.js";
+import { createProgramAdapter } from "../../src/workflow/program-adapter.js";
 import { RuntimeAdapterRegistry } from "../../src/workflow/recorded-workflow.js";
+import { RESIN_PROGRAM_RUNTIME } from "../../src/workflow/runtime-families.js";
 
 const TEST_RUNTIME = "test-transform";
 
@@ -456,6 +458,52 @@ describe("selected demonstration comparison projections", () => {
     expect(confirmed.verification.reproduced).toEqual(["derive", "consume"]);
   });
 });
+
+describe("Python Eval baseline replay comparison", () => {
+  it("reproduces the exact Eval text without loosening baseline comparison", async () => {
+    const plan: RecordedWorkflow = {
+      schemaVersion: 1,
+      workflowId: "wf-python-eval-baseline",
+      inputs: [],
+      steps: [
+        {
+          id: "eval",
+          callId: "call-eval",
+          callable: {
+            runtime: RESIN_PROGRAM_RUNTIME,
+            name: "eval",
+            program: {
+              kind: "python",
+              source: "{'count': 2}",
+              sourceInterface: "python-eval",
+            },
+          },
+          arguments: [],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    };
+    const environment = await environmentOf({
+      inputs: {},
+      observed: { eval: "{'count': 2}" },
+    });
+    environment.adapters.register(createProgramAdapter({ cwd: environment.workspaceDir }));
+
+    const exact = await confirmPromotedPlan({ plan, accepted: [], environment });
+    const different = await confirmPromotedPlan({
+      plan,
+      accepted: [],
+      environment: { ...environment, observed: { eval: "{'count': 2}\n" } },
+    });
+
+    expect(exact.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
+    expect(different.verification.status).toBe("incomplete");
+    expect(different.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
+  });
+});
+
 describe("a plan is run once per attempt, as the work it is", () => {
   /** Every step invocation, in order, so a run can be told from a step. */
   function countingAdapters(invocations: string[]): RuntimeAdapterRegistry {

@@ -906,6 +906,33 @@ function mutualRecursionSpec(): ProgramSpec {
 
 describe("computation evidence contracts", () => {
   describe("ordered algorithm preservation", () => {
+    it("distinguishes canonical callable references from other callbacks and invocations", () => {
+      const mapped = (api: string, kind: "api_reference" | "call" = "api_reference") =>
+        buildProgram({
+          roots: [
+            {
+              kind: "expression",
+              output: { shape: "array" },
+              children: [
+                {
+                  kind: "call",
+                  api: "collection.map",
+                  children: [
+                    { kind, api },
+                    { kind: "array", children: [{ kind: "literal", constant: "one" }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      const reference = mapped("number.abs");
+      expectCanonicalProgram(reference);
+      const digest = computeComputationProgramDigest(reference);
+      expect(digest).not.toBe(computeComputationProgramDigest(mapped("number.round")));
+      expect(digest).not.toBe(computeComputationProgramDigest(mapped("number.abs", "call")));
+    });
+
     it("distinguishes arithmetic operators and bound operand order", () => {
       const combine = (operator: string, swap = false): ProgramSpec => ({
         definitions: [
@@ -2026,6 +2053,23 @@ describe("computation evidence contracts", () => {
   });
 
   describe("privacy boundaries and injection resistance", () => {
+    it("rejects raw callable names and invocation arguments on API references", () => {
+      const reference = buildProgram({
+        roots: [{ kind: "api_reference", api: "number.abs" }],
+      });
+      const rawName = clone(reference);
+      Object.assign(rawName.nodes[0]!, { api: "private_callback" });
+      expect(ComputationProgramV1Schema.safeParse(rawName).success).toBe(false);
+
+      const invocation = clone(reference);
+      Object.assign(invocation.nodes[0]!, { children: ["n0"] });
+      expect(ComputationProgramV1Schema.safeParse(invocation).success).toBe(false);
+
+      const hiddenSource = clone(reference);
+      Object.assign(hiddenSource.nodes[0]!, { source: "private callback implementation" });
+      expect(ComputationProgramV1Schema.safeParse(hiddenSource).success).toBe(false);
+    });
+
     it("rejects arbitrary, dynamic and generic-eval APIs and unknown node properties", () => {
       for (const api of ["eval", "subprocess.run", "child_process.exec", "os.system", "fetch"]) {
         const program = clone(buildProgram(pipelineSpec()));
@@ -2217,6 +2261,20 @@ describe("computation evidence contracts", () => {
   });
 
   describe("observations and substantiveness", () => {
+    it("does not mistake a callable reference for an observed computation", () => {
+      const reference = buildEvidence({
+        roots: [
+          {
+            kind: "expression",
+            output: { shape: "unknown" },
+            children: [{ kind: "api_reference", api: "number.abs" }],
+          },
+        ],
+      });
+      expect(ResinComputationEvidenceV1Schema.safeParse(reference).success).toBe(true);
+      expect(isSubstantiveComputationEvidence(reference)).toBe(false);
+    });
+
     it("requires a successful observed invocation with a meaningful computation", () => {
       expect(isSubstantiveComputationEvidence(buildEvidence(pipelineSpec()))).toBe(true);
       expect(isSubstantiveComputationEvidence(buildEvidence(validationSpec()))).toBe(true);

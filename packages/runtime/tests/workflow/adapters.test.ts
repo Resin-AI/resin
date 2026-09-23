@@ -212,6 +212,142 @@ describe("recorded program adapters", () => {
     expect(value).toBe('{"count": 3, "label": "ok"}\n');
   });
 
+  it("replays only the final expression for the explicit Python Eval interface", async () => {
+    const workspace = await makeWorkspace();
+    const bare = await runRecordedProgram(
+      { kind: "python", source: "{'count': 2}", sourceInterface: "python-eval" },
+      { cwd: workspace },
+    );
+    const semicolon = await runRecordedProgram(
+      { kind: "python", source: "42;", sourceInterface: "python-eval" },
+      { cwd: workspace },
+    );
+    const printed = await runRecordedProgram(
+      { kind: "python", source: "print('prefix')\n42;", sourceInterface: "python-eval" },
+      { cwd: workspace },
+    );
+    const none = await runRecordedProgram(
+      { kind: "python", source: "None", sourceInterface: "python-eval" },
+      { cwd: workspace },
+    );
+
+    const whitespace = await runRecordedProgram(
+      { kind: "python", source: "print('  output  ')", sourceInterface: "python-eval" },
+      { cwd: workspace },
+    );
+    expect(bare.exitCode).toBe(0);
+    expect(bare.stdout).toBe("");
+    expect(bare.value).toBe("{'count': 2}");
+    expect(semicolon.value).toBe("42");
+    expect(printed.stdout).toBe("prefix\n");
+    expect(printed.value).toBe("prefix\n42");
+    expect(none.value).toBe("");
+    expect(whitespace.stdout).toBe("  output  \n");
+    expect(whitespace.value).toBe("output");
+  });
+
+  it("preserves Eval display ordering without moving raw unterminated stdout", async () => {
+    const workspace = await makeWorkspace();
+    const run = await runRecordedProgram(
+      {
+        kind: "python",
+        source: "print('prefix')\nprint('partial', end='')\n42",
+        sourceInterface: "python-eval",
+      },
+      { cwd: workspace },
+    );
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("prefix\npartial");
+    expect(run.value).toBe("prefix\n42\npartial");
+  });
+
+  it("bounds unterminated Eval output without rejecting the exact byte limit", async () => {
+    const workspace = await makeWorkspace();
+    const exact = await runRecordedProgram(
+      { kind: "python", source: "print('x' * 8, end='')", sourceInterface: "python-eval" },
+      { cwd: workspace, maxOutputBytes: 8 },
+    );
+    expect(exact.exitCode).toBe(0);
+    expect(exact.value).toBe("xxxxxxxx");
+    const overflow = await runRecordedProgram(
+      { kind: "python", source: "print('x' * 9, end='')", sourceInterface: "python-eval" },
+      { cwd: workspace, maxOutputBytes: 8 },
+    );
+    expect(overflow.exitCode).not.toBe(0);
+  });
+
+  it("keeps ordinary Python on byte-for-byte process stdout semantics", async () => {
+    const workspace = await makeWorkspace();
+    const ordinary = await runRecordedProgram({ kind: "python", source: "42" }, { cwd: workspace });
+    const printed = await runRecordedProgram(
+      { kind: "python", source: "print('  exact  ')" },
+      { cwd: workspace },
+    );
+
+    expect(ordinary.value).toBe("");
+    expect(printed.stdout).toBe("  exact  \n");
+    expect(printed.value).toBe("  exact  \n");
+  });
+
+  it("replays a marked Eval expression over its closed Python setup", async () => {
+    const workspace = await makeWorkspace();
+    const run = await runRecordedProgram(
+      {
+        kind: "python",
+        source: "answer + 1",
+        sourceInterface: "python-eval",
+        pythonState: {
+          schemaVersion: 1,
+          status: "closed",
+          unresolvedReadCount: 0,
+          setup: [
+            {
+              callId: "setup-call-eval",
+              sourceEventId: "setup-source-eval",
+              resultEventId: "setup-result-eval",
+              reference: "private:python:eval-setup",
+            },
+          ],
+        },
+      },
+      {
+        cwd: workspace,
+        isolateEnvironment: true,
+        resolvePrivate: () => "print('setup-noise')\nanswer = 41",
+      },
+    );
+
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("");
+    expect(run.value).toBe("42");
+  });
+
+  it("retains Python Eval exceptions and rejects interface-language mismatches", async () => {
+    const workspace = await makeWorkspace();
+    const failed = await runRecordedProgram(
+      {
+        kind: "python",
+        source: "raise ValueError('eval failure')",
+        sourceInterface: "python-eval",
+      },
+      { cwd: workspace },
+    );
+    expect(failed.exitCode).not.toBe(0);
+    expect(failed.stderr).toContain("ValueError");
+    expect(failed.stderr).toContain("eval failure");
+
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "shell",
+          source: "echo not-run",
+          sourceInterface: "python-eval",
+        } as unknown as WorkflowRecordedProgram,
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow(/Python Eval sourceInterface on a non-Python program/);
+  });
+
   it("replays private Python setup cells once in a fresh process and suppresses setup output", async () => {
     const workspace = await makeWorkspace();
     const adapter = createProgramAdapter({ cwd: workspace, isolateEnvironment: true });

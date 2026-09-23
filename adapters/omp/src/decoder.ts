@@ -39,6 +39,8 @@ export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
 /** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
 export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
+/** Local-only proof of OMP eval output semantics; only this decoder may create it. */
+export const RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY = "__resinLocalOmpSourceInterfaceV1";
 
 function boundedNativeArguments(
   args: OmpTranscriptPayload | undefined,
@@ -1051,6 +1053,21 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const targetPaths = editTargetPaths(parameters);
     return targetPaths.length > 0 ? { ...parameters, targetPaths } : parameters;
   }
+  private withPythonEvalSourceInterface(
+    toolName: string,
+    parameters: DecoderMetadataRecord,
+    metadata: OmpTranscriptPayload,
+  ): OmpTranscriptPayload {
+    const language = asString(parameters.language)?.trim().toLowerCase();
+    if (
+      toolName !== "eval" ||
+      (language !== "py" && language !== "python") ||
+      typeof parameters.code !== "string"
+    ) {
+      return metadata;
+    }
+    return { ...metadata, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "python-eval" };
+  }
 
   /**
    * Emits genuinely requested assistant-embedded tool calls exactly once per session-scoped call
@@ -1086,7 +1103,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         timestamp,
         schemaVersion: "1.0.0",
         causalRef: { ...causalRef, stepIndex },
-        metadata: { ...metadata },
+        metadata: this.withPythonEvalSourceInterface(toolName, recordedParameters, metadata),
         type: "tool_call",
         toolName,
         callId,
@@ -1164,6 +1181,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const metadata = { ...(asObject(rawMeta) ?? {}) };
     // Only the decoder's own argument cache may create this private handoff.
     delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
+    delete metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
 
     const rawRole = asString(obj.role)?.toLowerCase();
     const rawType = String(
@@ -1942,7 +1960,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       timestamp,
       schemaVersion: "1.0.0",
       causalRef,
-      metadata,
+      metadata: this.withPythonEvalSourceInterface(toolName, parameters, metadata),
       type: "tool_call",
       toolName,
       callId,

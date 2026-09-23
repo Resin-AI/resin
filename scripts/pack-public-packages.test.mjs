@@ -295,7 +295,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
         artifactBaseUrl: testBaseUrl,
         outputDir,
       });
-    });
+    }, 120_000);
 
     it("produces exactly 13 audited public tarballs", () => {
       expect(packResult.success).toBe(true);

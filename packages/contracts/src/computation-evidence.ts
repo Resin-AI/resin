@@ -136,6 +136,7 @@ export const COMPUTATION_NODE_KINDS = [
   "assign",
   "declare",
   "identifier",
+  "api_reference",
   "literal",
   "member",
   "index",
@@ -429,6 +430,7 @@ export const COMPUTATION_UNSUPPORTED_REASONS = [
   "limit_depth",
   "limit_dependencies",
   "limit_nodes",
+  "limit_outputs",
   "limit_serialized_bytes",
   "limit_slots",
   "limit_symbols",
@@ -452,6 +454,7 @@ export type ComputationUnsupportedReason = (typeof COMPUTATION_UNSUPPORTED_REASO
  * Sorted alphabetically for review; the sort order carries no semantics.
  */
 export const COMPUTATION_APIS = [
+  "bytes.from_hex",
   "clock.iso_format",
   "clock.monotonic",
   "clock.now",
@@ -859,6 +862,7 @@ export const COMPUTATION_NODE_CHILD_SEMANTICS: Record<ComputationNodeKind, strin
   assign: "[target, value] — multiple targets use a tuple target",
   declare: "[initializer?]",
   identifier: "no children",
+  api_reference: "no children — a finite canonical callable value, never an invocation",
   literal: "no children",
   member: "[object] — property name is `field` or `fieldSlot`",
   index: "[target, index...]",
@@ -959,6 +963,7 @@ export const COMPUTATION_NODE_FIELDS = {
     keywordArgs: false,
   },
   identifier: { required: ["symbol"], optional: [], nodeFields: [], keywordArgs: false },
+  api_reference: { required: ["api"], optional: [], nodeFields: [], keywordArgs: false },
   literal: {
     required: [],
     optional: ["constant", "slot"],
@@ -1127,6 +1132,10 @@ export const ComputationIdentifierNodeSchema = nodeOf("identifier", childrenOf(0
   symbol: ComputationSymbolIdSchema,
 });
 
+export const ComputationApiReferenceNodeSchema = nodeOf("api_reference", childrenOf(0, 0), {
+  api: z.enum(COMPUTATION_APIS),
+});
+
 export const ComputationLiteralNodeSchema = nodeOf("literal", childrenOf(0, 0), {
   constant: z.enum(COMPUTATION_CONSTANTS).optional(),
   slot: ComputationSlotIdSchema.optional(),
@@ -1267,6 +1276,7 @@ export const ComputationNodeSchema = z.discriminatedUnion("kind", [
   ComputationAssignNodeSchema,
   ComputationDeclareNodeSchema,
   ComputationIdentifierNodeSchema,
+  ComputationApiReferenceNodeSchema,
   ComputationLiteralNodeSchema,
   ComputationMemberNodeSchema,
   ComputationIndexNodeSchema,

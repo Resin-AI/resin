@@ -1,5 +1,6 @@
 /** Frozen workflow carrier vocabulary shared by live capture, projection, and import reconstruction. */
 
+import { validateWorkflowProgramSourceInterface } from "@resin/contracts";
 import type {
   AgentArgumentOrigin,
   WorkflowArgumentProvenance,
@@ -218,6 +219,16 @@ function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
     kind: kind as WorkflowRecordedProgram["kind"],
     source: value.source,
   };
+  if (value.sourceInterface !== undefined) {
+    const errors: string[] = [];
+    validateWorkflowProgramSourceInterface(
+      { kind: program.kind, sourceInterface: value.sourceInterface },
+      "carrier",
+      errors,
+    );
+    if (errors.length > 0 || value.sourceInterface !== "python-eval") return undefined;
+    program.sourceInterface = value.sourceInterface;
+  }
   if (value.argv !== undefined) {
     if (!Array.isArray(value.argv) || !value.argv.every((entry) => typeof entry === "string")) {
       return undefined;

@@ -188,6 +188,7 @@ const CHILD_ARITY: Readonly<Record<ComputationNodeKind, readonly [number, number
   declare: [0, 1],
   identifier: [0, 0],
   literal: [0, 0],
+  api_reference: [0, 0],
   member: [1, 1],
   index: [2, NODE_LIMIT],
   call: [0, NODE_LIMIT],
@@ -884,6 +885,15 @@ function applyFields(node: PlanNode, draft: DraftNode): ComputationUnsupportedRe
       };
       return undefined;
     }
+    case "api_reference": {
+      const fieldKeys =
+        typeof fields === "object" && fields !== null ? Reflect.ownKeys(fields) : [];
+      if (fieldKeys.length !== 1 || fieldKeys[0] !== "api" || !has(API_LOOKUP, fields.api)) {
+        return "unsupported_api";
+      }
+      node.api = fields.api;
+      return undefined;
+    }
     case "call": {
       const hasApi = fields.api !== undefined;
       const hasSymbol = fields.symbol !== undefined;
@@ -1421,6 +1431,8 @@ function buildWireNode(node: PlanNode): ComputationNodeV1 {
         : { id, kind: "pair", children: [first], field: node.fieldName };
     case "index":
       return { id, kind: "index", children: childIds };
+    case "api_reference":
+      return { id, kind: "api_reference", children: [], api: node.api! };
     case "call":
       return node.api === undefined
         ? {
@@ -1913,9 +1925,6 @@ function build(input: ComputationProgramBuildInput): ComputationProgramDraft {
   });
   const outputs: ComputationOutputV1[] = [];
   for (const output of input.outputs ?? []) {
-    if (outputs.length >= OUTPUT_LIMIT) {
-      break;
-    }
     if (output === undefined || !isDraftNodeShape(output.node)) {
       continue;
     }
@@ -1938,6 +1947,10 @@ function build(input: ComputationProgramBuildInput): ComputationProgramDraft {
       shape !== "unknown"
     ) {
       continue;
+    }
+    if (outputs.length >= OUTPUT_LIMIT) {
+      addReason(reasons, "limit_outputs");
+      break;
     }
     const record: ComputationOutputV1 = { node: target.emittedId, shape };
     if (output.definitionKey !== undefined) {

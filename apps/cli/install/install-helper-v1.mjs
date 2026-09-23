@@ -7497,7 +7497,7 @@ function computeComputationEvidenceDigest(body) {
   }
   return hashCanonicalContent(body);
 }
-var COMPUTATION_IR_VERSION, COMPUTATION_IR_LIMITS, HARD_LIMIT_FACTOR, COMPUTATION_VALIDATION_CODES, COMPUTATION_LANGUAGES, COMPUTATION_TRANSFORM_NODE_KINDS, SYMBOL_FIELD_BINDING_NODE_KINDS, TRANSFORM_NODE_KINDS, COMPUTATION_BINARY_OPERATORS, COMPUTATION_UNARY_OPERATORS, COMPUTATION_COMPARE_OPERATORS, COMPUTATION_BOOLEAN_OPERATORS, COMPUTATION_ASSIGN_OPERATORS, COMPUTATION_CONSTANTS, COMPUTATION_DECLARE_KINDS, COMPUTATION_PARAMETER_KINDS, COMPUTATION_DEFINITION_KINDS, COMPUTATION_COMPREHENSION_KINDS, COMPUTATION_SPREAD_KINDS, COMPUTATION_TEMPLATE_KINDS, COMPUTATION_WITH_KINDS, COMPUTATION_SLICE_PARTS, COMPUTATION_SYMBOL_KINDS, COMPUTATION_SLOT_KINDS, COMPUTATION_SLOT_ROLES, COMPUTATION_ORIGIN_KINDS, COMPUTATION_OBSERVATION_KINDS, COMPUTATION_OBSERVATION_STATUSES, COMPUTATION_OUTPUT_SHAPES, COMPUTATION_UNSUPPORTED_REASONS, COMPUTATION_APIS, COMPUTATION_TRANSFORM_APIS, TRANSFORM_APIS, COMPUTATION_CONSTRUCT_APIS, CONSTRUCT_APIS, COMPUTATION_UNSAFE_FIELD_KEYS, UNSAFE_FIELD_KEY_LOOKUP, UNSAFE_FIELD_SEGMENTS, UNSAFE_FIELD_PREFIX_SEGMENTS, ComputationNodeIdSchema, ComputationSymbolIdSchema, ComputationSlotIdSchema, ComputationDefinitionIdSchema, ComputationScopeIdSchema, ComputationDigestSchema, ComputationFieldKeySchema, ComputationPathPatternSchema, DIGEST_ABSTRACTED_FIELDS, COMPUTATION_NODE_FIELDS, NodeIdList, KeywordArgNameSchema, KeywordArgSchema, UNBOUNDED, KeywordArgsSchema, ComputationProgramNodeSchema, ComputationBlockNodeSchema, ComputationFunctionNodeSchema, ComputationParametersNodeSchema, ComputationParameterNodeSchema, ComputationReturnNodeSchema, ComputationAssignNodeSchema, ComputationDeclareNodeSchema, ComputationIdentifierNodeSchema, ComputationLiteralNodeSchema, ComputationMemberNodeSchema, ComputationIndexNodeSchema, ComputationCallNodeSchema, ComputationNewNodeSchema, ComputationArrayNodeSchema, ComputationTupleNodeSchema, ComputationObjectNodeSchema, ComputationPairNodeSchema, ComputationLambdaNodeSchema, ComputationBinaryNodeSchema, ComputationUnaryNodeSchema, ComputationCompareNodeSchema, ComputationBooleanNodeSchema, ComputationConditionalNodeSchema, ComputationIfNodeSchema, ComputationForNodeSchema, ComputationWhileNodeSchema, ComputationTryNodeSchema, ComputationCatchNodeSchema, ComputationFinallyNodeSchema, ComputationThrowNodeSchema, ComputationAssertNodeSchema, ComputationImportNodeSchema, ComputationAwaitNodeSchema, ComputationBreakNodeSchema, ComputationContinueNodeSchema, ComputationExpressionNodeSchema, ComputationComprehensionNodeSchema, ComputationForClauseNodeSchema, ComputationIfClauseNodeSchema, ComputationSliceNodeSchema, ComputationSpreadNodeSchema, ComputationTemplateNodeSchema, ComputationWithNodeSchema, ComputationYieldNodeSchema, ComputationUnsupportedNodeSchema, ComputationNodeSchema, ComputationSymbolSchema, ComputationSlotSchema, ComputationDefinitionSchema, ComputationOutputSchema, ProgramBodyShape, ComputationProgramV1Schema, ComputationOriginSchema, ComputationObservationSchema, ComputationDependencySchema, ComputationCorrectionSchema, ComputationMetricsSchema, EnvelopeBodyShape, METRIC_COUNT_FIELDS, ResinComputationEvidenceV1Schema;
+var COMPUTATION_IR_VERSION, COMPUTATION_IR_LIMITS, HARD_LIMIT_FACTOR, COMPUTATION_VALIDATION_CODES, COMPUTATION_LANGUAGES, COMPUTATION_TRANSFORM_NODE_KINDS, SYMBOL_FIELD_BINDING_NODE_KINDS, TRANSFORM_NODE_KINDS, COMPUTATION_BINARY_OPERATORS, COMPUTATION_UNARY_OPERATORS, COMPUTATION_COMPARE_OPERATORS, COMPUTATION_BOOLEAN_OPERATORS, COMPUTATION_ASSIGN_OPERATORS, COMPUTATION_CONSTANTS, COMPUTATION_DECLARE_KINDS, COMPUTATION_PARAMETER_KINDS, COMPUTATION_DEFINITION_KINDS, COMPUTATION_COMPREHENSION_KINDS, COMPUTATION_SPREAD_KINDS, COMPUTATION_TEMPLATE_KINDS, COMPUTATION_WITH_KINDS, COMPUTATION_SLICE_PARTS, COMPUTATION_SYMBOL_KINDS, COMPUTATION_SLOT_KINDS, COMPUTATION_SLOT_ROLES, COMPUTATION_ORIGIN_KINDS, COMPUTATION_OBSERVATION_KINDS, COMPUTATION_OBSERVATION_STATUSES, COMPUTATION_OUTPUT_SHAPES, COMPUTATION_UNSUPPORTED_REASONS, COMPUTATION_APIS, COMPUTATION_TRANSFORM_APIS, TRANSFORM_APIS, COMPUTATION_CONSTRUCT_APIS, CONSTRUCT_APIS, COMPUTATION_UNSAFE_FIELD_KEYS, UNSAFE_FIELD_KEY_LOOKUP, UNSAFE_FIELD_SEGMENTS, UNSAFE_FIELD_PREFIX_SEGMENTS, ComputationNodeIdSchema, ComputationSymbolIdSchema, ComputationSlotIdSchema, ComputationDefinitionIdSchema, ComputationScopeIdSchema, ComputationDigestSchema, ComputationFieldKeySchema, ComputationPathPatternSchema, DIGEST_ABSTRACTED_FIELDS, COMPUTATION_NODE_FIELDS, NodeIdList, KeywordArgNameSchema, KeywordArgSchema, UNBOUNDED, KeywordArgsSchema, ComputationProgramNodeSchema, ComputationBlockNodeSchema, ComputationFunctionNodeSchema, ComputationParametersNodeSchema, ComputationParameterNodeSchema, ComputationReturnNodeSchema, ComputationAssignNodeSchema, ComputationDeclareNodeSchema, ComputationIdentifierNodeSchema, ComputationApiReferenceNodeSchema, ComputationLiteralNodeSchema, ComputationMemberNodeSchema, ComputationIndexNodeSchema, ComputationCallNodeSchema, ComputationNewNodeSchema, ComputationArrayNodeSchema, ComputationTupleNodeSchema, ComputationObjectNodeSchema, ComputationPairNodeSchema, ComputationLambdaNodeSchema, ComputationBinaryNodeSchema, ComputationUnaryNodeSchema, ComputationCompareNodeSchema, ComputationBooleanNodeSchema, ComputationConditionalNodeSchema, ComputationIfNodeSchema, ComputationForNodeSchema, ComputationWhileNodeSchema, ComputationTryNodeSchema, ComputationCatchNodeSchema, ComputationFinallyNodeSchema, ComputationThrowNodeSchema, ComputationAssertNodeSchema, ComputationImportNodeSchema, ComputationAwaitNodeSchema, ComputationBreakNodeSchema, ComputationContinueNodeSchema, ComputationExpressionNodeSchema, ComputationComprehensionNodeSchema, ComputationForClauseNodeSchema, ComputationIfClauseNodeSchema, ComputationSliceNodeSchema, ComputationSpreadNodeSchema, ComputationTemplateNodeSchema, ComputationWithNodeSchema, ComputationYieldNodeSchema, ComputationUnsupportedNodeSchema, ComputationNodeSchema, ComputationSymbolSchema, ComputationSlotSchema, ComputationDefinitionSchema, ComputationOutputSchema, ProgramBodyShape, ComputationProgramV1Schema, ComputationOriginSchema, ComputationObservationSchema, ComputationDependencySchema, ComputationCorrectionSchema, ComputationMetricsSchema, EnvelopeBodyShape, METRIC_COUNT_FIELDS, ResinComputationEvidenceV1Schema;
 var init_computation_evidence = __esm({
   "packages/contracts/dist/computation-evidence.js"() {
     "use strict";
@@ -7716,6 +7716,7 @@ var init_computation_evidence = __esm({
       "limit_depth",
       "limit_dependencies",
       "limit_nodes",
+      "limit_outputs",
       "limit_serialized_bytes",
       "limit_slots",
       "limit_symbols",
@@ -7730,6 +7731,7 @@ var init_computation_evidence = __esm({
       "unsupported_reflection"
     ];
     COMPUTATION_APIS = [
+      "bytes.from_hex",
       "clock.iso_format",
       "clock.monotonic",
       "clock.now",
@@ -8005,6 +8007,7 @@ var init_computation_evidence = __esm({
         keywordArgs: false
       },
       identifier: { required: ["symbol"], optional: [], nodeFields: [], keywordArgs: false },
+      api_reference: { required: ["api"], optional: [], nodeFields: [], keywordArgs: false },
       literal: {
         required: [],
         optional: ["constant", "slot"],
@@ -8108,6 +8111,9 @@ var init_computation_evidence = __esm({
     ComputationIdentifierNodeSchema = nodeOf("identifier", childrenOf(0, 0), {
       symbol: ComputationSymbolIdSchema
     });
+    ComputationApiReferenceNodeSchema = nodeOf("api_reference", childrenOf(0, 0), {
+      api: external_exports.enum(COMPUTATION_APIS)
+    });
     ComputationLiteralNodeSchema = nodeOf("literal", childrenOf(0, 0), {
       constant: external_exports.enum(COMPUTATION_CONSTANTS).optional(),
       slot: ComputationSlotIdSchema.optional()
@@ -8204,6 +8210,7 @@ var init_computation_evidence = __esm({
       ComputationAssignNodeSchema,
       ComputationDeclareNodeSchema,
       ComputationIdentifierNodeSchema,
+      ComputationApiReferenceNodeSchema,
       ComputationLiteralNodeSchema,
       ComputationMemberNodeSchema,
       ComputationIndexNodeSchema,
@@ -8945,6 +8952,15 @@ function isJsonValue(value) {
 function hasOnlyKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
+function validateWorkflowProgramSourceInterface(program, stepId, errors) {
+  if (program.sourceInterface === void 0)
+    return;
+  if (program.sourceInterface !== "python-eval") {
+    errors.push(`step ${stepId} has an unsupported program sourceInterface`);
+  } else if (program.kind !== "python") {
+    errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+  }
+}
 function validateWorkflowPythonState(program, stepId, targetCallId, workflowCallIds, declaredPrivates, errors) {
   const state = program.pythonState;
   if (state === void 0)
@@ -9335,6 +9351,7 @@ function validateRecordedWorkflow(value) {
       } else if (program.source.length === 0 && (!Array.isArray(program.argv) || program.argv.length === 0) && typeof program.argument !== "string") {
         errors.push(`step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`);
       } else {
+        validateWorkflowProgramSourceInterface(program, step.id, errors);
         validateWorkflowPythonState(program, step.id, typeof step.callId === "string" ? step.callId : void 0, workflowCallIds, declaredPrivates, errors);
       }
     }

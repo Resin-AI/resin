@@ -3,9 +3,10 @@
  * compiler consumes, without the caller changing anything about how it calls.
  */
 
-import { OmpRecordDecoder } from "@resin/adapter-omp";
+import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { NormalizedSessionEventSchema, validateRecordedWorkflow } from "@resin/contracts";
+import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
@@ -251,6 +252,72 @@ describe("native capture of ordinary calls", () => {
       unresolvedReadCount: expect.any(Number),
       setup: [],
     });
+  });
+  it("carries only decoder-proven OMP Python Eval semantics into the recorded program", async () => {
+    const sessionId = "session-native-python-eval-interface";
+    const pipeline = new NormalizationPipeline();
+    pipeline.registerDecoder(new OmpRecordDecoder());
+    const record: RawHarnessRecord = {
+      recordId: "rec-native-python-eval-interface",
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: 1,
+      recordType: "transcript_line",
+      timestamp: "2026-09-18T10:00:00.000Z",
+      cursor: {
+        offset: 10,
+        line: 1,
+        sequence: 1,
+        timestamp: "2026-09-18T10:00:00.000Z",
+      },
+      rawPayload: JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call-native-python-eval-interface",
+              name: "eval",
+              arguments: { language: "py", code: "import json; print(json.dumps({'ok': True}))" },
+            },
+          ],
+        },
+      }),
+      metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" },
+    };
+    const results = await pipeline.processRecord(record, {
+      sessionId,
+      harnessId: "omp",
+      workspaceId: "ws_native",
+    });
+    const decoded = results.find(
+      (entry) => entry.status === "success" && entry.event.type === "tool_call",
+    );
+    if (
+      decoded === undefined ||
+      decoded.status !== "success" ||
+      decoded.event.type !== "tool_call"
+    ) {
+      throw new Error("expected normalized Python Eval tool call");
+    }
+
+    expect(decoded.event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("python-eval");
+
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const observed = workflowRecorder.observe(decoded.event, { workspaceId: "ws_native" });
+    expect(observed.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(carrierOf(observed)?.program).toMatchObject({
+      kind: "python",
+      argument: "code",
+      sourceInterface: "python-eval",
+    });
+
+    const computationObserved = createComputationEvidenceRecorder().observe(observed);
+    expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("python-eval");
   });
 });
 

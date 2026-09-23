@@ -113,6 +113,11 @@ export type WorkflowRecordedProgram = {
   kind: "shell" | "python" | "javascript" | "typescript";
   /** The complete program text exactly as recorded. Empty when the record carries only an argv. */
   source: string;
+  /**
+   * Adapter-established execution semantics. Python Eval renders the final expression as well as
+   * captured output; absent means ordinary process stdout, never inferred from a callable name.
+   */
+  sourceInterface?: "python-eval";
   /** The exact argument vector, when the record has one and it is not a shell wrapper. */
   argv?: string[];
   /** The argument the program arrived in, when it came as a tool argument rather than an event. */
@@ -320,6 +325,20 @@ const PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "referenc
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+/** Rejects interface/language mismatches rather than silently replaying under different semantics. */
+export function validateWorkflowProgramSourceInterface(
+  program: { kind?: unknown; sourceInterface?: unknown },
+  stepId: string,
+  errors: string[],
+): void {
+  if (program.sourceInterface === undefined) return;
+  if (program.sourceInterface !== "python-eval") {
+    errors.push(`step ${stepId} has an unsupported program sourceInterface`);
+  } else if (program.kind !== "python") {
+    errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+  }
 }
 
 export function validateWorkflowPythonState(
@@ -868,6 +887,7 @@ export function validateRecordedWorkflow(value: unknown): {
           `step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`,
         );
       } else {
+        validateWorkflowProgramSourceInterface(program, step.id, errors);
         validateWorkflowPythonState(
           program,
           step.id,

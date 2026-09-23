@@ -23,7 +23,11 @@ import {
   RESIN_PARAMETER_SHAPE_KEY,
   projectToolParameters,
 } from "../../../apps/observer/src/analytics/metadata-projection.js";
-import { OmpRecordDecoder, RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "../src/decoder.js";
+import {
+  OmpRecordDecoder,
+  RESIN_LOCAL_OMP_NATIVE_CALL_KEY,
+  RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY,
+} from "../src/decoder.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "../fixtures");
 
@@ -1646,6 +1650,54 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       },
       rawPayload: JSON.stringify(payload),
       metadata: {},
+    });
+
+    it("marks only decoder-proven Python Eval calls and discards transcript-forged markers", () => {
+      const pythonRecord = makeRecord("session-python-eval-interface", 1, {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call-python-eval-interface",
+              name: "eval",
+              arguments: { language: " py ", code: "print(1)" },
+            },
+          ],
+        },
+      });
+      pythonRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      const pythonEvents = decoder.decode(pythonRecord) as IntermediateSessionEvent[];
+      const pythonCall = pythonEvents.find(
+        (entry): entry is IntermediateToolCallEvent => entry.type === "tool_call",
+      );
+      expect(pythonCall?.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("python-eval");
+      expect(pythonRecord.metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("forged");
+
+      const javascriptRecord = makeRecord("session-python-eval-interface", 2, {
+        type: "tool_call",
+        toolCall: {
+          id: "call-javascript-eval-interface",
+          toolName: "eval",
+          arguments: { language: "javascript", code: "console.log(1)" },
+        },
+      });
+      javascriptRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      const javascriptCall = decoder.decode(javascriptRecord) as IntermediateToolCallEvent;
+      expect(javascriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+
+      const otherToolRecord = makeRecord("session-python-eval-interface", 3, {
+        type: "tool_call",
+        toolCall: {
+          id: "call-other-python-interface",
+          toolName: "run_python",
+          arguments: { language: "python", code: "print(1)" },
+        },
+      });
+      otherToolRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      const otherToolCall = decoder.decode(otherToolRecord) as IntermediateToolCallEvent;
+      expect(otherToolCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
     });
 
     it("announces every embedded request with matched results and single provider accounting", () => {

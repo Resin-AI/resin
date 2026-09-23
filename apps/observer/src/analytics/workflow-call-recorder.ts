@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
@@ -80,6 +81,13 @@ import {
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
 
+function withoutLocalOmpSourceInterface(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (!Object.hasOwn(event.metadata ?? {}, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)) return event;
+  const metadata = { ...event.metadata };
+  delete metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+  return { ...event, metadata };
+}
+
 /** One observed call kept locally: its real values never leave this machine. */
 interface LocalCall {
   callId: string;
@@ -102,7 +110,11 @@ interface LocalCall {
    * holds it. Kept so the derivation can read the text as the program it is rather than as one
    * opaque argument.
    */
-  program?: { kind: ProgramLanguage; argument: string };
+  program?: {
+    kind: ProgramLanguage;
+    argument: string;
+    sourceInterface?: "python-eval";
+  };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
 }
@@ -502,7 +514,7 @@ export class WorkflowCallRecorder {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
     if (relationships.candidates.length > 0) carrier.candidates = relationships.candidates;
-    return this.withCallCarrier(event, carrier);
+    return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
   }
 
   /**
@@ -640,7 +652,15 @@ export class WorkflowCallRecorder {
       // token positions to address.
       ...(program?.argument === undefined
         ? {}
-        : { program: { kind: program.kind, argument: program.argument } }),
+        : {
+            program: {
+              kind: program.kind,
+              argument: program.argument,
+              ...(program.sourceInterface === undefined
+                ? {}
+                : { sourceInterface: program.sourceInterface }),
+            },
+          }),
       ...(flow === undefined
         ? {}
         : {
@@ -687,7 +707,8 @@ export class WorkflowCallRecorder {
             mine.toolName === theirs.toolName &&
             mine.connection === theirs.connection &&
             mine.program?.kind === theirs.program?.kind &&
-            mine.program?.argument === theirs.program?.argument
+            mine.program?.argument === theirs.program?.argument &&
+            mine.program?.sourceInterface === theirs.program?.sourceInterface
           );
         }),
     );
@@ -919,11 +940,23 @@ export class WorkflowCallRecorder {
       if (argument !== undefined) program.argument = argument;
       return program;
     }
+    const sourceInterfaceObserved =
+      event.toolName === "eval" &&
+      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "python-eval" &&
+      typeof parameters.language === "string" &&
+      ["py", "python"].includes(parameters.language.trim().toLowerCase()) &&
+      typeof parameters.code === "string";
     for (const frame of extractComputationSourceFrames(event)) {
       if (frame.rejectionReason !== undefined) continue;
+      const pythonEval =
+        sourceInterfaceObserved &&
+        frame.language === "python" &&
+        frame.executionScope === "persistent" &&
+        frame.source === parameters.code;
       const program: WorkflowRecordedProgram = { kind: frame.language, source: "" };
-      const argument = this.argumentHolding(parameters, frame.source);
+      const argument = pythonEval ? "code" : this.argumentHolding(parameters, frame.source);
       if (argument !== undefined) program.argument = argument;
+      if (pythonEval) program.sourceInterface = "python-eval";
       return program;
     }
     return undefined;
