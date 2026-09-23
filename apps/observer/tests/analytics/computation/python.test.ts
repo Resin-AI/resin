@@ -797,4 +797,190 @@ describe("Python persistent closure bookkeeping", () => {
     expect(target.local.requiredNames).toEqual(["lock_data"]);
     expect(target.local.invalidatesState).toBe(false);
   });
+  it("keeps explicit stdout alongside only the final direct expression result", () => {
+    const result = parse(
+      "first = 1; second = 2; total = first + second; print(total); 42; 'final';",
+    );
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(program.unsupportedReasons).toEqual([]);
+    expect(result.local.hasInvocation).toBe(true);
+    expect(result.local.requiredNames).toEqual([]);
+    expect(result.local.writtenNames).toEqual(expect.arrayContaining(["first", "second", "total"]));
+    expect(program.outputs.map((output) => output.shape)).toEqual(["string", "string"]);
+    expect(countNodes(program, (node) => node.kind === "call" && node.api === "core.print")).toBe(
+      1,
+    );
+  });
+
+  it("reports stdout rather than a prior implicit value for a final print", () => {
+    const program = expectStrictProgram(parse("41; print('done')"));
+
+    expect(program.complete).toBe(true);
+    expect(program.outputs.map((output) => output.shape)).toEqual(["string"]);
+    expect(countNodes(program, (node) => node.kind === "call" && node.api === "core.print")).toBe(
+      1,
+    );
+  });
+
+  it("retains every semicolon print across later assignment and None statements", () => {
+    const program = expectStrictProgram(parse("print('first'); print(2); value = 3; None"));
+
+    expect(program.complete).toBe(true);
+    expect(program.outputs.map((output) => output.shape)).toEqual(["string", "string"]);
+    expect(countNodes(program, (node) => node.kind === "call" && node.api === "core.print")).toBe(
+      2,
+    );
+  });
+
+  it("records loop, branch, and definition print sites with all explicit returns", () => {
+    const program = expectStrictProgram(
+      parse(
+        [
+          "for value in _VALUES:",
+          "    print(value)",
+          "if _FLAG:",
+          "    print('branch')",
+          "def announce(item):",
+          "    print(item)",
+          "    if item:",
+          "        return",
+          "    return item",
+        ].join("\n"),
+      ),
+    );
+
+    expect(program.complete).toBe(true);
+    expect(program.outputs.map((output) => output.shape)).toEqual([
+      "string",
+      "string",
+      "string",
+      "null",
+      "unknown",
+    ]);
+    expect(program.outputs.filter((output) => output.definitionId !== undefined)).toHaveLength(3);
+    expect(countNodes(program, (node) => node.kind === "call" && node.api === "core.print")).toBe(
+      3,
+    );
+  });
+
+  it("does not report redirected print calls as stdout emissions", () => {
+    const result = parse("print('redirected', file=_STREAM); print('visible', file=None)");
+    const program = expectStrictProgram(result);
+
+    expect(result.local.requiredNames).toEqual(["_STREAM"]);
+    expect(program.outputs.map((output) => output.shape)).toEqual(["string"]);
+    expect(countNodes(program, (node) => node.kind === "call" && node.api === "core.print")).toBe(
+      2,
+    );
+  });
+
+  it("keeps mutations of a locally constructed container within the frame", () => {
+    const result = parse("rows = []; rows.append(1); print(rows)");
+
+    expect(result.local.requiredNames).toEqual([]);
+    expect(result.local.writtenNames).toContain("rows");
+    expect(result.local.invalidatesState).toBe(false);
+    expect(result.program.complete).toBe(true);
+  });
+
+  it("still invalidates a mutation of an externally sourced container", () => {
+    const result = parse("rows = _ROWS; rows.append(1)");
+
+    expect(result.local.requiredNames).toEqual(["_ROWS"]);
+    expect(result.local.invalidatesState).toBe(true);
+  });
+
+  it("keeps imported Fraction aliases and builtin bytes out of false external slots", () => {
+    const setup = parse("from fractions import Fraction as F");
+    const target = parse("p = F(1, 2); print(bytes(p))", { imports: setup.local.imports });
+
+    expect(target.local.requiredNames).toEqual(["F"]);
+    expect(target.local.writtenNames).toContain("p");
+    expect(target.local.invalidatesState).toBe(false);
+    expect(target.program.complete).toBe(false);
+    expect(unsupportedCodes(target.program)).toContain("unsupported_api");
+  });
+
+  it("distinguishes current-frame imports from inherited and not-yet-executed imports", () => {
+    const authored = parse(
+      "from fractions import Fraction as F\ndef make():\n    return F(1)\nprint(make())",
+    );
+    const setup = parse("from fractions import Fraction as F");
+    const inherited = parse("def make():\n    return F(1)\nprint(make())", {
+      imports: setup.local.imports,
+    });
+    const notYetExecuted = parse(
+      "def make():\n    return F(1)\nprint(make())\nfrom fractions import Fraction as F",
+    );
+
+    expect(authored.local.requiredNames).toEqual([]);
+    expect(inherited.local.requiredNames).toEqual(["F"]);
+    expect(notYetExecuted.local.requiredNames).toContain("F");
+    expect(authored.program.complete).toBe(false);
+    expect(unsupportedCodes(authored.program)).toContain("unsupported_api");
+  });
+  it("captures bytes.fromhex as a finite builtin conversion without an external bytes name", () => {
+    const result = parse("decoded = bytes.fromhex('00ff'); print(decoded)");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(result.local.requiredNames).toEqual([]);
+    expect(
+      program.nodes
+        .filter((node) => node.kind === "call")
+        .map((node) => (node.kind === "call" ? node.api : undefined)),
+    ).toContain("bytes.from_hex");
+    expect(unsupportedCodes(program)).toEqual([]);
+  });
+
+  it("represents canonical Python builtins as values in higher-order calls", () => {
+    const result = parse("print(sum(map(abs, _VALUES)))");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(result.local.requiredNames).toEqual(["_VALUES"]);
+    expect(
+      program.nodes
+        .filter((node) => node.kind === "api_reference")
+        .map((node) => (node.kind === "api_reference" ? node.api : undefined)),
+    ).toEqual(["number.abs"]);
+    expect(unsupportedCodes(program)).toEqual([]);
+  });
+
+  it("binds unparenthesized tuple targets inside generator call arguments", () => {
+    const result = parse(
+      "total = sum(abs(left - right) for left, right in zip(_VALUES, _VALUES[1:]))",
+    );
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(result.local.requiredNames).toEqual(["_VALUES"]);
+    expect(unsupportedCodes(program)).toEqual([]);
+    expect(
+      countNodes(program, (node) => node.kind === "comprehension" && node.compKind === "generator"),
+    ).toBe(1);
+  });
+  it("preserves builtin callable values through local aliases and respects lexical shadowing", () => {
+    const aliasResult = parse("transform = abs; print(sum(map(transform, _VALUES)))");
+    const aliasProgram = expectStrictProgram(aliasResult);
+    const shadowResult = parse(
+      "def summarize(abs, values):\n    return sum(map(abs, values))\nprint(summarize(_ABS, _VALUES))",
+    );
+    const shadowProgram = expectStrictProgram(shadowResult);
+
+    expect(aliasProgram.complete).toBe(true);
+    expect(
+      aliasProgram.nodes.some((node) => node.kind === "api_reference" && node.api === "number.abs"),
+    ).toBe(true);
+    expect(aliasResult.local.requiredNames).toEqual(["_VALUES"]);
+    expect(shadowProgram.complete).toBe(true);
+    expect(
+      shadowProgram.nodes.some(
+        (node) => node.kind === "api_reference" && node.api === "number.abs",
+      ),
+    ).toBe(false);
+    expect(shadowResult.local.requiredNames).toEqual(["_ABS", "_VALUES"]);
+  });
 });

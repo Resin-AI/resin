@@ -478,6 +478,76 @@ describe("buildComputationProgram", () => {
     expect(program.unsupportedReasons).toContain("unsupported_api");
   });
 
+  it("preserves distinct canonical API callback references", () => {
+    const buildWithCallback = (callbackApi: "bytes.from_hex" | "number.abs" | "number.round") => {
+      const program = buildComputationProgram({
+        language: "python",
+        roots: [
+          draftNode("expression", [
+            draftNode(
+              "call",
+              [draftNode("array", []), draftNode("api_reference", [], { api: callbackApi })],
+              { api: "collection.map" },
+            ),
+          ]),
+        ],
+      });
+      expectValid(program);
+      expect(program.complete).toBe(true);
+      return program;
+    };
+
+    const hexCallback = buildWithCallback("bytes.from_hex");
+    const absoluteCallback = buildWithCallback("number.abs");
+    const roundedCallback = buildWithCallback("number.round");
+    expect(hexCallback.nodes.find((node) => node.kind === "api_reference")).toMatchObject({
+      kind: "api_reference",
+      children: [],
+      api: "bytes.from_hex",
+    });
+    expect(absoluteCallback.nodes.find((node) => node.kind === "api_reference")).toMatchObject({
+      kind: "api_reference",
+      children: [],
+      api: "number.abs",
+    });
+    expect(roundedCallback.nodes.find((node) => node.kind === "api_reference")).toMatchObject({
+      kind: "api_reference",
+      children: [],
+      api: "number.round",
+    });
+    for (const program of [hexCallback, absoluteCallback, roundedCallback]) {
+      expect(program.nodes.filter((node) => node.kind === "call")).toHaveLength(1);
+    }
+    expect(
+      new Set([hexCallback, absoluteCallback, roundedCallback].map(computeComputationProgramDigest))
+        .size,
+    ).toBe(3);
+  });
+
+  it("rejects non-canonical API and raw callback/source fields without retaining payloads", () => {
+    const rawApi = "CANARY_RAW_API_REFERENCE_8a47";
+    const rawCallback = "CANARY_RAW_CALLBACK_765e";
+    for (const fields of [
+      { api: "totally.unknown" },
+      { api: rawApi },
+      { api: "number.abs", callback: rawCallback },
+      { api: "number.abs", source: rawApi },
+      { api: { name: "number.abs", source: rawApi } },
+    ]) {
+      const program = buildComputationProgram({
+        language: "python",
+        roots: [draftNode("api_reference", [], fields)],
+      });
+      expectValid(program);
+      expect(program.complete).toBe(false);
+      expect(program.unsupportedReasons).toContain("unsupported_api");
+      expect(program.nodes.some((node) => node.kind === "api_reference")).toBe(false);
+      const serialized = JSON.stringify(program);
+      expect(serialized).not.toContain(rawApi);
+      expect(serialized).not.toContain(rawCallback);
+    }
+  });
+
   it("bounds a shared draft node rather than emitting a shared wire node", () => {
     const shared = draftNode("block", [draftLiteral(1, "one")]);
     const program = buildComputationProgram({
@@ -729,5 +799,30 @@ describe("buildComputationProgram", () => {
     expect(program.outputs[0]?.definitionId).toBe("def0");
     const emitted = program.nodes.find((node) => node.id === program.outputs[0]?.node);
     expect(emitted?.kind).toBe("return");
+  });
+
+  it("fails closed when valid output sites exceed the retained output limit", () => {
+    const buildWithOutputCount = (count: number): ComputationProgramV1 => {
+      const returnNodes = Array.from({ length: count }, (_unused, index) =>
+        draftNode("return", [draftLiteral(index, `output-${index}`)]),
+      );
+      return buildComputationProgram({
+        language: "python",
+        roots: [draftNode("block", returnNodes)],
+        outputs: returnNodes.map((node) => ({ node, shape: "number" })),
+      });
+    };
+
+    const atLimit = buildWithOutputCount(33);
+    expectValid(atLimit);
+    expect(atLimit.complete).toBe(true);
+    expect(atLimit.outputs).toHaveLength(33);
+    expect(atLimit.unsupportedReasons).toEqual([]);
+
+    const overLimit = buildWithOutputCount(34);
+    expectValid(overLimit);
+    expect(overLimit.complete).toBe(false);
+    expect(overLimit.outputs).toHaveLength(33);
+    expect(overLimit.unsupportedReasons).toContain("limit_outputs");
   });
 });

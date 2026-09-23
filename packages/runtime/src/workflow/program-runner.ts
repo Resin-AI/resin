@@ -9,8 +9,10 @@
  * and is never executed.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
+import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import process from "node:process";
 import {
@@ -18,6 +20,7 @@ import {
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
+  validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
@@ -27,7 +30,7 @@ export interface RecordedProgramRun {
   exitCode: number;
   stdout: string;
   stderr: string;
-  /** The program's standard output, byte for byte: a process's result is the text it printed. */
+  /** Raw stdout for ordinary programs; rendered result text for the explicit Python Eval interface. */
   value: WorkflowJsonValue;
 }
 
@@ -183,6 +186,13 @@ function invocationFor(
       if (!interpreter) {
         throw new Error("no python interpreter is resolvable on PATH (looked for python3, python)");
       }
+      if (program.sourceInterface === "python-eval") {
+        return {
+          command: interpreter,
+          args: ["-c", PYTHON_STDIN_DRIVER],
+          input: source,
+        };
+      }
       return input === undefined
         ? { command: interpreter, args: ["-c", source] }
         : { command: interpreter, args: ["-c", PYTHON_STDIN_DRIVER], input };
@@ -209,6 +219,9 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
   if (typeof program.source !== "string") {
     throw new Error(`recorded ${program.kind} program source is not text`);
   }
+  const interfaceErrors: string[] = [];
+  validateWorkflowProgramSourceInterface(program, "recorded Python program", interfaceErrors);
+  if (interfaceErrors.length > 0) throw new Error(interfaceErrors[0]);
   if (program.source.length === 0 && (program.argv?.length ?? 0) === 0) {
     throw new Error(
       "the record carries neither a program source nor an argv, so there is nothing to run",
@@ -277,21 +290,224 @@ function composePythonReplaySource(setupSources: readonly string[], target: stri
   ].join("\n");
 }
 
+/**
+ * Replays OMP's Python Eval source interface through the same interpreter, with a bounded,
+ * private result file separating rendered output events from the child's real stdout/stderr.
+ */
+function composePythonEvalReplaySource(
+  setupSources: readonly string[],
+  target: string,
+  outputPath: string,
+  maxOutputBytes: number,
+  maxEventBytes: number,
+): string {
+  const serializedSources = JSON.stringify(JSON.stringify([...setupSources, target]));
+  return [
+    "import ast as __resin_ast",
+    "import builtins as __resin_builtins",
+    "import contextlib as __resin_contextlib",
+    "import __future__ as __resin_future",
+    "import json as __resin_json",
+    "import sys as __resin_sys",
+    "",
+    "def __resin_run():",
+    `    __resin_sources = __resin_json.loads(${serializedSources})`,
+    "    __resin_namespace = {'__name__': '__main__', '__builtins__': __resin_builtins.__dict__}",
+    "    __resin_exec = __resin_builtins.exec",
+    "    __resin_compile = __resin_builtins.compile",
+    "    __resin_eval = __resin_builtins.eval",
+    "    __resin_future_mask = 0",
+    "    for __resin_feature in __resin_future.all_feature_names:",
+    "        __resin_future_mask |= getattr(__resin_future, __resin_feature).compiler_flag",
+    "    __resin_open = __resin_builtins.open",
+    `    _resin_output_limit = ${String(maxOutputBytes)}`,
+    `    _resin_event_limit = ${String(maxEventBytes)}`,
+    "    _resin_output_bytes = 0",
+    "    _resin_event_bytes = 0",
+    "    __resin_original_stdout = __resin_sys.stdout",
+    `    __resin_event_file = __resin_open(${JSON.stringify(outputPath)}, 'ab', buffering=0)`,
+    "",
+    "    def _resin_write_all(data):",
+    "        view = memoryview(data)",
+    "        while view:",
+    "            written = __resin_event_file.write(view)",
+    "            if written is None or written <= 0:",
+    "                raise OSError('short write to private Python Eval result file')",
+    "            view = view[written:]",
+    "",
+    "    def _resin_emit(kind, text):",
+    "        nonlocal _resin_output_bytes, _resin_event_bytes",
+    "        if kind == 'r':",
+    "            _resin_output_bytes += len(text.encode('utf-8'))",
+    "            if _resin_output_bytes > _resin_output_limit:",
+    "                raise ValueError('Python Eval result exceeds the replay output bound')",
+    "        frame = __resin_json.dumps({'k': kind, 'v': text}, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\\n'",
+    "        _resin_event_bytes += len(frame)",
+    "        if _resin_event_bytes > _resin_event_limit:",
+    "            raise ValueError('Python Eval result events exceed the replay output bound')",
+    "        _resin_write_all(frame)",
+    "",
+    "    def __resin_emit_done():",
+    "        nonlocal _resin_event_bytes",
+    "        frame = b'{\"d\":true}\\n'",
+    "        _resin_event_bytes += len(frame)",
+    "        if _resin_event_bytes > _resin_event_limit:",
+    "            raise ValueError('Python Eval result events exceed the replay output bound')",
+    "        _resin_write_all(frame)",
+    "",
+    "    class __ResinDiscard:",
+    "        def write(self, _text):",
+    "            return len(_text)",
+    "        def flush(self):",
+    "            return None",
+    "",
+    "    class _ResinBinaryOutput:",
+    "        def __init__(self, owner):",
+    "            self.owner = owner",
+    "        def write(self, data):",
+    "            written = self.owner.target.buffer.write(data)",
+    "            self.owner.record(data.decode(self.owner.encoding, errors='replace'))",
+    "            return written",
+    "        def flush(self):",
+    "            return self.owner.flush()",
+    "",
+    "    class _ResinStdout:",
+    "        def __init__(self, target):",
+    "            self.target = target",
+    "            self.encoding = target.encoding",
+    "            self.errors = target.errors",
+    "            self.pending = bytearray()",
+    "            self.buffer = _ResinBinaryOutput(self)",
+    "        def record(self, text):",
+    "            nonlocal _resin_output_bytes",
+    "            if len(text) + _resin_output_bytes > _resin_output_limit:",
+    "                raise ValueError('Python Eval output exceeds the replay output bound')",
+    "            data = text.encode('utf-8')",
+    "            if len(data) + _resin_output_bytes > _resin_output_limit:",
+    "                raise ValueError('Python Eval output exceeds the replay output bound')",
+    "            _resin_output_bytes += len(data)",
+    "            start = 0",
+    "            while start < len(data):",
+    "                end = data.find(b'\\n', start)",
+    "                stop = len(data) if end < 0 else end + 1",
+    "                piece = data[start:stop]",
+    "                if len(self.pending) + len(piece) > _resin_output_limit:",
+    "                    raise ValueError('Python Eval output line exceeds the replay output bound')",
+    "                self.pending.extend(piece)",
+    "                if end >= 0:",
+    "                    _resin_emit('s', self.pending.decode('utf-8'))",
+    "                    self.pending.clear()",
+    "                start = stop",
+    "        def write(self, text):",
+    "            written = self.target.write(text)",
+    "            self.record(text)",
+    "            return written",
+    "        def flush(self):",
+    "            if self.pending:",
+    "                _resin_emit('s', self.pending.decode('utf-8'))",
+    "                self.pending.clear()",
+    "            return self.target.flush()",
+    "        def isatty(self):",
+    "            return self.target.isatty()",
+    "        def fileno(self):",
+    "            return self.target.fileno()",
+    "        def writable(self):",
+    "            return self.target.writable()",
+    "",
+    "    __resin_discard = __ResinDiscard()",
+    "    for __resin_index, __resin_source in enumerate(__resin_sources[:-1]):",
+    "        with __resin_contextlib.redirect_stdout(__resin_discard), __resin_contextlib.redirect_stderr(__resin_discard):",
+    "            __resin_exec(__resin_compile(__resin_source, '<resin-python-setup-' + str(__resin_index) + '>', 'exec'), __resin_namespace, __resin_namespace)",
+    "",
+    "    __resin_tree = __resin_ast.parse(__resin_sources[-1], '<resin-python-target>', 'exec')",
+    "    __resin_body = __resin_tree.body",
+    "    __resin_has_result = bool(__resin_body and isinstance(__resin_body[-1], __resin_ast.Expr))",
+    "    __resin_expression = __resin_body[-1] if __resin_has_result else None",
+    "    if __resin_has_result:",
+    "        __resin_tree.body = __resin_body[:-1]",
+    "    __resin_ast.fix_missing_locations(__resin_tree)",
+    "    __resin_prefix_code = __resin_compile(__resin_tree, '<resin-python-target>', 'exec', dont_inherit=True)",
+    "    __resin_stdout = _ResinStdout(__resin_original_stdout)",
+    "    try:",
+    "        with __resin_contextlib.redirect_stdout(__resin_stdout):",
+    "            __resin_exec(__resin_prefix_code, __resin_namespace, __resin_namespace)",
+    "            if __resin_has_result:",
+    "                __resin_expression_tree = __resin_ast.Expression(body=__resin_expression.value)",
+    "                __resin_ast.fix_missing_locations(__resin_expression_tree)",
+    "                __resin_future_flags = __resin_prefix_code.co_flags & __resin_future_mask",
+    "                __resin_expression_code = __resin_compile(__resin_expression_tree, '<resin-python-result>', 'eval', flags=__resin_future_flags, dont_inherit=True)",
+    "                __resin_result = __resin_eval(__resin_expression_code, __resin_namespace, __resin_namespace)",
+    "                if __resin_result is not None:",
+    "                    _resin_emit('r', repr(__resin_result) + '\\n')",
+    "            __resin_stdout.flush()",
+    "    finally:",
+    "        try:",
+    "            __resin_emit_done()",
+    "        finally:",
+    "            __resin_event_file.close()",
+    "",
+    "__resin_run()",
+  ].join("\n");
+}
+
+interface PythonEvalOutputBounds {
+  output: number;
+  events: number;
+}
+
+function pythonEvalOutputBounds(maxOutputBytes: number): PythonEvalOutputBounds {
+  const output = Math.floor(maxOutputBytes);
+  const events = output * 24 + 64;
+  if (!Number.isSafeInteger(output) || output < 0 || !Number.isSafeInteger(events)) {
+    throw new Error("Python Eval replay output limit must be a finite non-negative safe integer");
+  }
+  return { output, events };
+}
+
 async function preparePythonReplaySource(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions,
   targetCallId?: string,
+  pythonEvalOutputPath?: string,
 ): Promise<string> {
   assertPythonState(program, targetCallId);
   const state = program.pythonState;
-  if (state === undefined) return program.source;
+  const pythonEval = program.sourceInterface === "python-eval";
+  const composeEval = (setupSources: readonly string[]): string => {
+    if (pythonEvalOutputPath === undefined) {
+      throw new Error("Python Eval replay result file was not prepared");
+    }
+    const bounds = pythonEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+    return composePythonEvalReplaySource(
+      setupSources,
+      program.source,
+      pythonEvalOutputPath,
+      bounds.output,
+      bounds.events,
+    );
+  };
+  if (state === undefined || state.setup.length === 0) {
+    if (!pythonEval) return program.source;
+    const targetBytes = Buffer.byteLength(program.source, "utf8");
+    if (targetBytes > MAX_WORKFLOW_PYTHON_SOURCE_BYTES) {
+      throw new Error(
+        `recorded Python target source exceeds ${MAX_WORKFLOW_PYTHON_SOURCE_BYTES} bytes`,
+      );
+    }
+    const composed = composeEval([]);
+    if (Buffer.byteLength(composed, "utf8") > MAX_WORKFLOW_PYTHON_REPLAY_BYTES) {
+      throw new Error(
+        `composed Python replay source exceeds ${MAX_WORKFLOW_PYTHON_REPLAY_BYTES} bytes`,
+      );
+    }
+    return composed;
+  }
   const targetBytes = Buffer.byteLength(program.source, "utf8");
   if (targetBytes > MAX_WORKFLOW_PYTHON_SOURCE_BYTES) {
     throw new Error(
       `recorded Python target source exceeds ${MAX_WORKFLOW_PYTHON_SOURCE_BYTES} bytes`,
     );
   }
-  if (state.setup.length === 0) return program.source;
   let rawBytes = targetBytes;
   if (options.resolvePrivate === undefined) {
     throw new Error("recorded Python setup requires a private source resolver");
@@ -318,7 +534,9 @@ async function preparePythonReplaySource(
     }
     setupSources.push(source);
   }
-  const composed = composePythonReplaySource(setupSources, program.source);
+  const composed = pythonEval
+    ? composeEval(setupSources)
+    : composePythonReplaySource(setupSources, program.source);
   const composedBytes = Buffer.byteLength(composed, "utf8");
   if (composedBytes > MAX_WORKFLOW_PYTHON_REPLAY_BYTES) {
     throw new Error(
@@ -359,10 +577,15 @@ function runChild(
   const cwd = options.cwd ?? process.cwd();
 
   return new Promise<CapturedRun>((resolve, reject) => {
+    const stdio: SpawnOptions["stdio"] = [
+      invocation.input === undefined ? "ignore" : "pipe",
+      "pipe",
+      "pipe",
+    ];
     const child = spawn(invocation.command, invocation.args, {
       cwd,
       env,
-      stdio: [invocation.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      stdio,
       windowsHide: true,
       // Own process group on POSIX, so the time budget can end the whole tree, not just the shell.
       detached: process.platform !== "win32",
@@ -413,21 +636,62 @@ function runChild(
       if (signal) diagnostics.push(`[terminated by signal ${signal}]`);
       const stderrText =
         stderr.text() + (diagnostics.length > 0 ? `\n${diagnostics.join("\n")}\n` : "");
-      finish({ exitCode: code ?? 1, stdout: stdout.text(), stderr: stderrText });
+      finish({
+        exitCode: code ?? 1,
+        stdout: stdout.text(),
+        stderr: stderrText,
+      });
     });
   });
 }
 
 /**
- * The value a recorded program's result has.
- *
- * Process output is returned as text with its bytes unchanged. Parsing would turn printed `2`
- * into a number; trimming would discard meaningful whitespace. Interface-specific observation
- * projections belong to replay comparison, not execution: an OMP text-trim observation does not
- * authorize changing the output returned to callers.
+ * Validates the bounded private event stream produced by the Python Eval wrapper, then applies the
+ * result text projection used by that source interface.
  */
-function resultValue(stdout: string): WorkflowJsonValue {
-  return stdout;
+function pythonEvalResultValue(output: string): WorkflowJsonValue {
+  const resultEvents: string[] = [];
+  let complete = false;
+  let hasResult = false;
+  for (const line of output.split("\n")) {
+    if (line.length === 0) continue;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      throw new Error("recorded Python Eval replay produced an invalid output event");
+    }
+    if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
+      throw new Error("recorded Python Eval replay produced an invalid output event");
+    }
+    const event = frame as Record<string, unknown>;
+    if (complete) {
+      throw new Error("recorded Python Eval replay produced data after its completion event");
+    }
+    if (Object.keys(event).length === 1 && event.d === true) {
+      complete = true;
+      continue;
+    }
+    if (
+      Object.keys(event).length !== 2 ||
+      typeof event.k !== "string" ||
+      typeof event.v !== "string" ||
+      (event.k !== "s" && event.k !== "r")
+    ) {
+      throw new Error("recorded Python Eval replay produced an invalid output text event");
+    }
+    if (event.k === "r") {
+      if (hasResult) {
+        throw new Error("recorded Python Eval replay produced multiple result events");
+      }
+      hasResult = true;
+    }
+    resultEvents.push(event.v);
+  }
+  if (!complete) {
+    throw new Error("recorded Python Eval replay did not complete its output");
+  }
+  return resultEvents.join("").trim();
 }
 
 /**
@@ -442,21 +706,53 @@ export async function runRecordedProgram(
   targetCallId?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
-  const source = await preparePythonReplaySource(program, options, targetCallId);
-  const runnable = source === program.source ? program : { ...program, source };
-  const env: NodeJS.ProcessEnv = options.isolateEnvironment
-    ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
-    : { ...process.env, ...options.env };
-  const replayInput =
-    runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
-  const invocation = invocationFor(runnable, options, env, replayInput);
-  const captured = await runChild(invocation, options, env);
-  return {
-    exitCode: captured.exitCode,
-    stdout: captured.stdout,
-    stderr: captured.stderr,
-    value: resultValue(captured.stdout),
-  };
+  const isPythonEval = program.sourceInterface === "python-eval";
+  let outputDirectory: string | undefined;
+  let outputFile: FileHandle | undefined;
+  try {
+    let outputPath: string | undefined;
+    let outputBounds: PythonEvalOutputBounds | undefined;
+    if (isPythonEval) {
+      outputBounds = pythonEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+      outputDirectory = await mkdtemp(join(tmpdir(), "resin-python-eval-"));
+      outputPath = join(outputDirectory, "events.jsonl");
+      outputFile = await open(outputPath, "wx+", 0o600);
+    }
+    const source = await preparePythonReplaySource(program, options, targetCallId, outputPath);
+    const runnable = source === program.source ? program : { ...program, source };
+    const env: NodeJS.ProcessEnv = options.isolateEnvironment
+      ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
+      : { ...process.env, ...options.env };
+    const replayInput =
+      runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
+    const invocation = invocationFor(runnable, options, env, replayInput);
+    const captured = await runChild(invocation, options, env);
+    let value: WorkflowJsonValue = captured.stdout;
+    if (isPythonEval && captured.exitCode === 0) {
+      if (outputFile === undefined || outputBounds === undefined) {
+        throw new Error("recorded Python Eval replay did not preserve its complete output");
+      }
+      const outputStat = await outputFile.stat();
+      if (outputStat.size > outputBounds.events) {
+        throw new Error("recorded Python Eval replay exceeded its output event bound");
+      }
+      value = pythonEvalResultValue(await outputFile.readFile({ encoding: "utf8" }));
+    }
+    return {
+      exitCode: captured.exitCode,
+      stdout: captured.stdout,
+      stderr: captured.stderr,
+      value,
+    };
+  } finally {
+    try {
+      await outputFile?.close();
+    } finally {
+      if (outputDirectory !== undefined) {
+        await rm(outputDirectory, { recursive: true, force: true });
+      }
+    }
+  }
 }
 
 /** The tail of a failure message, bounded so a noisy program cannot flood a step's error. */

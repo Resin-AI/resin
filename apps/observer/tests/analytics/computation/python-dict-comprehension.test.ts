@@ -284,4 +284,25 @@ describe("Python dict comprehension capture", () => {
     expect(unresolvedProgram.unsupportedReasons).toContain("unsupported_hidden_state");
     expect(serialized(unresolvedProgram)).not.toContain("compute_key");
   });
+  it("binds a parenthesized tuple comprehension target in the element scope", () => {
+    const program = expectStrictProgram(
+      parsePythonComputation(
+        "def pair_sums(pairs):\n    return [left + right for (left, right) in pairs]\n\nprint(pair_sums(_PAIRS))",
+      ),
+    );
+    const comprehension = firstComprehension(program, "list");
+    const element = childNode(program, comprehension, 0);
+    const clause = childNode(program, comprehension, 1);
+    const target = childNode(program, clause, 0);
+    const iterable = childNode(program, clause, 1);
+    const targetSymbols = descendantSymbols(program, target.id);
+    const elementSymbols = descendantSymbols(program, element.id);
+    const iterableSymbols = descendantSymbols(program, iterable.id);
+
+    expect(program.complete).toBe(true);
+    expect(targetSymbols).toHaveLength(2);
+    expect(elementSymbols).toEqual(expect.arrayContaining(targetSymbols));
+    expect(iterableSymbols).toContain(requiredSymbol(iterable));
+    expect(iterableSymbols).not.toEqual(expect.arrayContaining(targetSymbols));
+  });
 });

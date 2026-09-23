@@ -1,4 +1,7 @@
-import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
+import {
+  RESIN_LOCAL_OMP_NATIVE_CALL_KEY,
+  RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY,
+} from "@resin/adapter-omp";
 import {
   COMPUTATION_IR_LIMITS,
   type ComputationCorrectionV1,
@@ -38,15 +41,18 @@ import type {
   LocalComputationModule,
 } from "./types.js";
 
-function withoutLocalNativeArguments(event: NormalizedSessionEvent): NormalizedSessionEvent {
+function withoutLocalNativeMetadata(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  const metadata = event.metadata ?? {};
   if (
-    !Object.prototype.hasOwnProperty.call(event.metadata ?? {}, RESIN_LOCAL_OMP_NATIVE_CALL_KEY)
+    !Object.prototype.hasOwnProperty.call(metadata, RESIN_LOCAL_OMP_NATIVE_CALL_KEY) &&
+    !Object.prototype.hasOwnProperty.call(metadata, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)
   ) {
     return event;
   }
-  const metadata = { ...event.metadata };
-  delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
-  return { ...event, metadata } as NormalizedSessionEvent;
+  const sanitized = { ...metadata };
+  delete sanitized[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
+  delete sanitized[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+  return { ...event, metadata: sanitized } as NormalizedSessionEvent;
 }
 function pythonSourceReferenceOf(event: NormalizedSessionEvent): string | undefined {
   if (event.type !== "tool_call") {
@@ -259,11 +265,11 @@ export class ComputationEvidenceRecorder {
       const replayKey = `${event.sessionId}\u0000${event.eventId}`;
       const replayed = this.replayed.get(replayKey);
       if (replayed !== undefined) {
-        return withoutLocalNativeArguments(
+        return withoutLocalNativeMetadata(
           replayed.event.deref() === event ? (replayed.observed.deref() ?? event) : event,
         );
       }
-      const observed = withoutLocalNativeArguments(this.observeEvent(event));
+      const observed = withoutLocalNativeMetadata(this.observeEvent(event));
       if (this.replayIds.size >= MAX_REPLAY_EVENTS) {
         const oldest = this.replayIds.values().next().value;
         if (oldest !== undefined) {
@@ -279,7 +285,7 @@ export class ComputationEvidenceRecorder {
       });
       return observed;
     } catch {
-      return withoutLocalNativeArguments(event);
+      return withoutLocalNativeMetadata(event);
     }
   }
 

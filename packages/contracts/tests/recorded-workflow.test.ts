@@ -258,6 +258,33 @@ describe("recorded workflow validation", () => {
     expect(brokenTemplate.valid).toBe(false);
     expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
   });
+  it("admits explicit Python Eval semantics but rejects unknown or mismatched interfaces", () => {
+    const workflow = fourCallWorkflow();
+    const withProgram = (program: unknown) => ({
+      ...workflow,
+      steps: workflow.steps.map((step, index) =>
+        index === 1 ? { ...step, callable: { ...step.callable, program } } : step,
+      ),
+    });
+    const program: WorkflowRecordedProgram = {
+      kind: "python",
+      source: "1 + 2",
+      sourceInterface: "python-eval",
+    };
+    expect(validateRecordedWorkflow(withProgram(program))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    const mismatched = validateRecordedWorkflow(withProgram({ ...program, kind: "shell" }));
+    expect(mismatched.valid).toBe(false);
+    expect(mismatched.errors.join("\n")).toContain("non-Python");
+    const unknown = validateRecordedWorkflow(
+      withProgram({ ...program, sourceInterface: "unknown-eval" }),
+    );
+    expect(unknown.valid).toBe(false);
+    expect(unknown.errors.join("\n")).toContain("unsupported program sourceInterface");
+  });
+
   it("validates Python closure descriptors and collects baseline references without source metadata", () => {
     const workflow = fourCallWorkflow();
     const program: WorkflowRecordedProgram = {

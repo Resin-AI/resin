@@ -110,6 +110,28 @@ const PYTHON_FILE_HANDLE_APIS: Readonly<Record<string, PythonApiName>> = {
   readlines: "fs.read_lines",
 };
 
+/** Canonical static methods on builtin types, emitted only when builtin identity is unshadowed. */
+const PYTHON_BUILTIN_MEMBER_APIS: Readonly<
+  Record<string, Readonly<Record<string, PythonApiName>>>
+> = {
+  bytes: {
+    fromhex: "bytes.from_hex",
+  },
+};
+
+/** A finite static method on a known builtin type, or `undefined` if none is cataloged. */
+export function pythonBuiltinMemberApi(
+  typeName: string,
+  member: string,
+): PythonApiName | undefined {
+  return PYTHON_BUILTIN_MEMBER_APIS[typeName]?.[member];
+}
+
+/** True when the builtin type has statically modeled methods. */
+export function isPythonBuiltinType(name: string): boolean {
+  return Object.hasOwn(PYTHON_BUILTIN_MEMBER_APIS, name);
+}
+
 /**
  * Members of recognized standard-library modules whose meaning is exactly one canonical API.
  * Only these modules are recognized at all; an unrecognized module never contributes a wire node,

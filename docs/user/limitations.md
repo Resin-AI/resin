@@ -61,6 +61,14 @@ compared with the plan's expected observations, so changed inputs that produce d
 not verify. The temporary working directory is not a filesystem sandbox: a child process still runs
 with the daemon user's filesystem permissions and may access files by absolute path.
 
+Python Eval recordings retain their adapter-established result semantics: explicit stdout and the
+final expression's representation contribute to the observed result, with Eval's edge-whitespace
+projection. A trailing semicolon does not suppress that expression. Ordinary Python process
+recordings still return stdout unchanged; callable names alone never select Eval behavior.
+Replay uses a fresh process and the recorded, closed setup sequence, not the live kernel. Unsupported
+host-prelude operations and unresolved state do not become supported merely because the recording
+carries an Eval marker. Output comparison remains unchanged.
+
 ### Generated code imports
 
 Sandboxed code artifacts may import only `@resin/runtime` and bundled relative
