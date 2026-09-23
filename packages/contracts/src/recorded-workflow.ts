@@ -115,9 +115,10 @@ export type WorkflowRecordedProgram = {
   source: string;
   /**
    * Adapter-established execution semantics. Python Eval renders the final expression as well as
-   * captured output; absent means ordinary process stdout, never inferred from a callable name.
+   * captured output; JavaScript Eval preserves the native completion and captured output. Absent
+   * means ordinary process stdout, never inferred from a callable name.
    */
-  sourceInterface?: "python-eval";
+  sourceInterface?: "python-eval" | "javascript-eval";
   /** The exact argument vector, when the record has one and it is not a shell wrapper. */
   argv?: string[];
   /** The argument the program arrived in, when it came as a tool argument rather than an event. */
@@ -334,11 +335,21 @@ export function validateWorkflowProgramSourceInterface(
   errors: string[],
 ): void {
   if (program.sourceInterface === undefined) return;
-  if (program.sourceInterface !== "python-eval") {
-    errors.push(`step ${stepId} has an unsupported program sourceInterface`);
-  } else if (program.kind !== "python") {
-    errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+  if (program.sourceInterface === "python-eval") {
+    if (program.kind !== "python") {
+      errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
+    }
+    return;
   }
+  if (program.sourceInterface === "javascript-eval") {
+    if (program.kind !== "javascript") {
+      errors.push(
+        `step ${stepId} has a JavaScript Eval sourceInterface on a non-JavaScript program`,
+      );
+    }
+    return;
+  }
+  errors.push(`step ${stepId} has an unsupported program sourceInterface`);
 }
 
 export function validateWorkflowPythonState(

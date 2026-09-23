@@ -319,6 +319,76 @@ describe("native capture of ordinary calls", () => {
     expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("python-eval");
   });
+
+  it("carries only decoder-proven OMP JavaScript Eval semantics into the recorded program", async () => {
+    const sessionId = "session-native-javascript-eval-interface";
+    const pipeline = new NormalizationPipeline();
+    pipeline.registerDecoder(new OmpRecordDecoder());
+    const record: RawHarnessRecord = {
+      recordId: "rec-native-javascript-eval-interface",
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: 1,
+      recordType: "transcript_line",
+      timestamp: "2026-09-18T10:00:00.000Z",
+      cursor: {
+        offset: 10,
+        line: 1,
+        sequence: 1,
+        timestamp: "2026-09-18T10:00:00.000Z",
+      },
+      rawPayload: JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call-native-javascript-eval-interface",
+              name: "eval",
+              arguments: {
+                language: "js",
+                code: "const value = 40; JSON.stringify({ value: value + 2 });",
+              },
+            },
+          ],
+        },
+      }),
+      metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" },
+    };
+    const results = await pipeline.processRecord(record, {
+      sessionId,
+      harnessId: "omp",
+      workspaceId: "ws_native",
+    });
+    const decoded = results.find(
+      (entry) => entry.status === "success" && entry.event.type === "tool_call",
+    );
+    if (
+      decoded === undefined ||
+      decoded.status !== "success" ||
+      decoded.event.type !== "tool_call"
+    ) {
+      throw new Error("expected normalized JavaScript Eval tool call");
+    }
+
+    expect(decoded.event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
+
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const observed = workflowRecorder.observe(decoded.event, { workspaceId: "ws_native" });
+    expect(observed.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(carrierOf(observed)?.program).toMatchObject({
+      kind: "javascript",
+      argument: "code",
+      sourceInterface: "javascript-eval",
+    });
+
+    const computationObserved = createComputationEvidenceRecorder().observe(observed);
+    expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("javascript-eval");
+  });
 });
 
 describe("what the derivation offers, and what it refuses to offer", () => {

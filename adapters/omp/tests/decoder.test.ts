@@ -1652,7 +1652,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       metadata: {},
     });
 
-    it("marks only decoder-proven Python Eval calls and discards transcript-forged markers", () => {
+    it("marks only decoder-proven native Eval interfaces and strips transcript-forged markers", () => {
       const pythonRecord = makeRecord("session-python-eval-interface", 1, {
         type: "message_end",
         message: {
@@ -1680,14 +1680,40 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         toolCall: {
           id: "call-javascript-eval-interface",
           toolName: "eval",
-          arguments: { language: "javascript", code: "console.log(1)" },
+          arguments: { language: " javascript ", code: "console.log(1)" },
         },
       });
       javascriptRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
       const javascriptCall = decoder.decode(javascriptRecord) as IntermediateToolCallEvent;
-      expect(javascriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+      expect(javascriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe(
+        "javascript-eval",
+      );
+      expect(javascriptRecord.metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("forged");
 
-      const otherToolRecord = makeRecord("session-python-eval-interface", 3, {
+      const jsAliasRecord = makeRecord("session-python-eval-interface", 3, {
+        type: "tool_call",
+        toolCall: {
+          id: "call-js-alias-interface",
+          toolName: "eval",
+          arguments: { language: "js", code: "1" },
+        },
+      });
+      const jsAliasCall = decoder.decode(jsAliasRecord) as IntermediateToolCallEvent;
+      expect(jsAliasCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
+
+      const typescriptRecord = makeRecord("session-python-eval-interface", 4, {
+        type: "tool_call",
+        toolCall: {
+          id: "call-typescript-eval-interface",
+          toolName: "eval",
+          arguments: { language: "typescript", code: "const value: number = 1" },
+        },
+      });
+      typescriptRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      const typescriptCall = decoder.decode(typescriptRecord) as IntermediateToolCallEvent;
+      expect(typescriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+
+      const otherToolRecord = makeRecord("session-python-eval-interface", 5, {
         type: "tool_call",
         toolCall: {
           id: "call-other-python-interface",

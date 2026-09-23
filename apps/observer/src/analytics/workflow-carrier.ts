@@ -226,7 +226,12 @@ function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
       "carrier",
       errors,
     );
-    if (errors.length > 0 || value.sourceInterface !== "python-eval") return undefined;
+    if (
+      errors.length > 0 ||
+      (value.sourceInterface !== "python-eval" && value.sourceInterface !== "javascript-eval")
+    ) {
+      return undefined;
+    }
     program.sourceInterface = value.sourceInterface;
   }
   if (value.argv !== undefined) {

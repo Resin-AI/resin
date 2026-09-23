@@ -69,6 +69,15 @@ Replay uses a fresh process and the recorded, closed setup sequence, not the liv
 host-prelude operations and unresolved state do not become supported merely because the recording
 carries an Eval marker. Output comparison remains unchanged.
 
+JavaScript Eval recordings likewise retain an adapter-established result interface. Replay preserves
+console output and synchronous script completion values; top-level `await`, `return`, and static
+imports use asynchronous evaluation with a final-expression result. Scalars render as text and
+cloneable objects use Eval's numbered display representation, followed by edge-whitespace projection.
+Static named, default, namespace, and side-effect imports are supported; export declarations and
+import attributes are not. Ordinary JavaScript process recordings still return stdout unchanged.
+This interface does not capture a live JavaScript kernel or make unresolved state and host-prelude
+operations replayable. Qualification still requires the replayed result to match the recording.
+
 ### Generated code imports
 
 Sandboxed code artifacts may import only `@resin/runtime` and bundled relative

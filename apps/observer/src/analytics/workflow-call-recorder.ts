@@ -113,7 +113,7 @@ interface LocalCall {
   program?: {
     kind: ProgramLanguage;
     argument: string;
-    sourceInterface?: "python-eval";
+    sourceInterface?: "python-eval" | "javascript-eval";
   };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
@@ -940,23 +940,34 @@ export class WorkflowCallRecorder {
       if (argument !== undefined) program.argument = argument;
       return program;
     }
-    const sourceInterfaceObserved =
-      event.toolName === "eval" &&
-      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "python-eval" &&
-      typeof parameters.language === "string" &&
-      ["py", "python"].includes(parameters.language.trim().toLowerCase()) &&
-      typeof parameters.code === "string";
+    const language =
+      typeof parameters.language === "string" ? parameters.language.trim().toLowerCase() : "";
+    const sourceInterface =
+      event.toolName === "eval" && typeof parameters.code === "string"
+        ? event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "python-eval" &&
+          (language === "py" || language === "python")
+          ? "python-eval"
+          : event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "javascript-eval" &&
+              (language === "js" || language === "javascript")
+            ? "javascript-eval"
+            : undefined
+        : undefined;
     for (const frame of extractComputationSourceFrames(event)) {
       if (frame.rejectionReason !== undefined) continue;
-      const pythonEval =
-        sourceInterfaceObserved &&
-        frame.language === "python" &&
+      const interfaceMatchesFrame =
+        sourceInterface !== undefined &&
         frame.executionScope === "persistent" &&
-        frame.source === parameters.code;
+        frame.source === parameters.code &&
+        ((sourceInterface === "python-eval" && frame.language === "python") ||
+          (sourceInterface === "javascript-eval" && frame.language === "javascript"));
       const program: WorkflowRecordedProgram = { kind: frame.language, source: "" };
-      const argument = pythonEval ? "code" : this.argumentHolding(parameters, frame.source);
-      if (argument !== undefined) program.argument = argument;
-      if (pythonEval) program.sourceInterface = "python-eval";
+      if (interfaceMatchesFrame && sourceInterface !== undefined) {
+        program.argument = "code";
+        program.sourceInterface = sourceInterface;
+      } else {
+        const argument = this.argumentHolding(parameters, frame.source);
+        if (argument !== undefined) program.argument = argument;
+      }
       return program;
     }
     return undefined;

@@ -320,6 +320,68 @@ describe("JavaScript visitor over the record-schema-order fixture frames", () =>
   });
 });
 
+describe("JavaScript callable API references", () => {
+  it("resolves unshadowed builtin and imported aliases in higher-order positions", () => {
+    const result = parseJs(
+      [
+        'import { basename as fileName } from "node:path";',
+        "const magnitudes = values.map(Math.abs);",
+        "const names = paths.map(fileName);",
+      ].join("\n"),
+    );
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(program.unsupportedReasons).toEqual([]);
+    expect(
+      nodesOfKind(program, "api_reference")
+        .map((node) => node.api)
+        .sort(),
+    ).toEqual(["number.abs", "path.basename"]);
+    expect(apiCalls(program).sort()).toEqual(["collection.map", "collection.map"]);
+  });
+
+  it("preserves lexical shadowing instead of resolving a local namespace as an intrinsic", () => {
+    const result = parseJs("const Math = {};\nconst values = [1].map(Math.abs);");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(nodesOfKind(program, "api_reference").map((node) => node.api)).not.toContain(
+      "number.abs",
+    );
+    expect(nodesOfKind(program, "member").map((node) => node.field)).toContain("abs");
+  });
+
+  it("does not detach receiver-dependent methods into standalone API references", () => {
+    const result = parseJs("const mapper = values.map;");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(nodesOfKind(program, "api_reference").map((node) => node.api)).not.toContain(
+      "collection.map",
+    );
+    expect(nodesOfKind(program, "member").map((node) => node.field)).toContain("map");
+  });
+
+  it("keeps a standalone builtin reference non-invoking and non-substantive", () => {
+    const result = parseJs("Math.abs;");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(result.local.hasInvocation).toBe(false);
+    expect(nodesOfKind(program, "api_reference").map((node) => node.api)).toEqual(["number.abs"]);
+    expect(nodesOfKind(program, "call")).toEqual([]);
+  });
+
+  it("infers serialization output shape from the canonical API", () => {
+    const result = parseJs("JSON.stringify({ value: 1 });");
+    const program = expectStrictProgram(result);
+
+    expect(program.complete).toBe(true);
+    expect(program.outputs.map((output) => output.shape)).toEqual(["string"]);
+  });
+});
+
 describe("JavaScript visitor fail-closed boundaries", () => {
   it("keeps an aliased helper materialized while refusing to guess the dispatch", () => {
     const definitions = helperDefinitions(SHARED_RECORD_IO_HELPER_SOURCE);

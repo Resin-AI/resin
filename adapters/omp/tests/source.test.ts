@@ -26,6 +26,31 @@ function nativePythonResultPayload(
   };
 }
 
+function nativeJavaScriptResultPayload(
+  callId: string,
+  output: string | undefined,
+  options: { isError?: boolean; cellCount?: number; status?: string } = {},
+): Record<string, unknown> {
+  const isError = options.isError ?? false;
+  const cells = Array.from({ length: options.cellCount ?? 1 }, (_, index) => ({
+    index,
+    language: "js",
+    status: options.status ?? "complete",
+    exitCode: isError ? 1 : 0,
+    output,
+  }));
+  return {
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "eval",
+      isError,
+      details: { cells },
+    },
+  };
+}
+
 function sourceTestSession(transcriptPath: string, sessionId: string): HarnessSession {
   const timestamp = "2026-09-22T00:00:00.000Z";
   return {
@@ -383,6 +408,39 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
         result: output,
         comparison: "text-trim",
       });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains exact output only for a successful single-cell native JavaScript Eval", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-javascript-eval-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const output = "line\nvalue";
+      const payloads = [
+        nativeJavaScriptResultPayload("call-native-js", output),
+        nativeJavaScriptResultPayload("call-native-js-multi", "ignored", { cellCount: 2 }),
+        nativeJavaScriptResultPayload("call-native-js-error", "ignored", { isError: true }),
+        nativeJavaScriptResultPayload("call-native-js-partial", "ignored", { status: "failed" }),
+      ];
+      await fsp.writeFile(
+        transcriptPath,
+        `${payloads.map((payload) => JSON.stringify(payload)).join("\n")}\n`,
+        "utf8",
+      );
+
+      const source = new OmpSessionEventSource(sourceTestSession(transcriptPath, "source-js-eval"));
+      const records = await source.readNext();
+      await source.close();
+
+      expect(records).toHaveLength(4);
+      expect(records.map((record) => getOmpProgramObservation(record))).toEqual([
+        { callId: "call-native-js", result: output },
+        undefined,
+        undefined,
+        undefined,
+      ]);
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }
