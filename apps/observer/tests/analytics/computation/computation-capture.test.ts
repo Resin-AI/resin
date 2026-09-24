@@ -18,6 +18,11 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { projectEventToMetadataOnly } from "../../../src/analytics/metadata-projection.js";
 import {
+  RESIN_HARNESS_TOOL_RUNTIME,
+  RESIN_WORKFLOW_CALL_METADATA_KEY,
+  readWorkflowCallCarrier,
+} from "../../../src/analytics/workflow-call-recorder.js";
+import {
   CloudObservationClient,
   NormalizationPipeline,
   TrajectoryCaptureCoordinator,
@@ -740,6 +745,16 @@ describe("Computation capture integration (native fixtures through the real pipe
       );
     }
     await environment.coordinator.waitForIdle();
+
+    const writes = environment.localEvents.filter(
+      (event) => event.type === "tool_call" && event.callId === "call-write-body",
+    );
+    expect(writes).toHaveLength(1);
+    const workflowCall = readWorkflowCallCarrier(
+      writes[0]?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+    );
+    expect(workflowCall).toMatchObject({ runtime: RESIN_HARNESS_TOOL_RUNTIME, name: "write" });
+    expect(workflowCall?.program).toBeUndefined();
 
     const carriers = environment.localEvents.filter(
       (event) =>

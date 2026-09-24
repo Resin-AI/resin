@@ -1287,6 +1287,8 @@ export async function buildOmpDiscoveryCatalog(
   }
 
   const allWorkspaces = Array.from(workspacesMap.values());
+  // Labels are lossy (project-a and project/a collide), and normalized roots can
+  // alias unknown relative roots. Cache only the exact root-and-identity pair.
   const sessionsByWorkspaceKey = new Map<string, HarnessSession[]>();
   const globalSeenSessionIds = new Set<string>();
   const allDeduplicatedSessions: HarnessSession[] = [];
@@ -1360,10 +1362,8 @@ export async function buildOmpDiscoveryCatalog(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
 
-    sessionsByWorkspaceKey.set(workspace.workspaceId, sortedSessions);
-    sessionsByWorkspaceKey.set(realWsRoot, sortedSessions);
-    sessionsByWorkspaceKey.set(path.resolve(workspace.rootPath), sortedSessions);
-    sessionsByWorkspaceKey.set(workspace.rootPath, sortedSessions);
+    const workspaceKey = JSON.stringify([workspace.rootPath, workspace.workspaceId]);
+    sessionsByWorkspaceKey.set(workspaceKey, sortedSessions);
 
     for (const s of sortedSessions) {
       if (!globalSeenSessionIds.has(s.sessionId)) {
@@ -1379,17 +1379,14 @@ export async function buildOmpDiscoveryCatalog(
     workspaces: allWorkspaces,
     inspectedFilePaths,
     getSessionsForWorkspace(workspace: HarnessWorkspace): HarnessSession[] {
-      const realRoot = path.resolve(workspace.rootPath);
-      const cached =
-        sessionsByWorkspaceKey.get(workspace.workspaceId) ??
-        sessionsByWorkspaceKey.get(realRoot) ??
-        sessionsByWorkspaceKey.get(workspace.rootPath);
+      const workspaceKey = JSON.stringify([workspace.rootPath, workspace.workspaceId]);
+      const cached = sessionsByWorkspaceKey.get(workspaceKey);
       if (cached !== undefined) {
         return cached;
       }
 
       // Dynamic fallback matching for workspaces not pre-registered in workspacesMap
-      const realWsRoot = realRoot;
+      const realWsRoot = path.resolve(workspace.rootPath);
       const matchingTranscripts = inspectedTranscripts.filter((t) => {
         if (t.canonicalCwd || t.headerCwd) {
           const tCwd = t.canonicalCwd ?? (t.headerCwd ? path.resolve(t.headerCwd) : null);
@@ -1439,17 +1436,21 @@ export async function buildOmpDiscoveryCatalog(
             sessionKind,
           },
         };
-        sessionMap.set(effectiveSessionId, session);
+        const existing = sessionMap.get(effectiveSessionId);
+        if (
+          !existing ||
+          (existing.status !== "active" && session.status === "active") ||
+          new Date(session.updatedAt).getTime() > new Date(existing.updatedAt).getTime()
+        ) {
+          sessionMap.set(effectiveSessionId, session);
+        }
       }
 
       const sortedSessions = Array.from(sessionMap.values()).sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
       );
 
-      sessionsByWorkspaceKey.set(workspace.workspaceId, sortedSessions);
-      sessionsByWorkspaceKey.set(realWsRoot, sortedSessions);
-      sessionsByWorkspaceKey.set(path.resolve(workspace.rootPath), sortedSessions);
-      sessionsByWorkspaceKey.set(workspace.rootPath, sortedSessions);
+      sessionsByWorkspaceKey.set(workspaceKey, sortedSessions);
 
       return sortedSessions;
     },

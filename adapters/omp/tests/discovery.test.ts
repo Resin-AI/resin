@@ -934,6 +934,79 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
+  it("does not share cached sessions between roots with the same workspace label", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-root-cache-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "project-a");
+      await fsp.mkdir(wsPath, { recursive: true });
+      const sessionsDir = path.join(
+        ompHome,
+        "agent",
+        "sessions",
+        `--${createWorkspaceIdFromPath(wsPath)}--`,
+      );
+      await fsp.mkdir(sessionsDir, { recursive: true });
+      const currentTimestamp = "2026-08-31T09:00:00.000Z";
+      for (const recording of [
+        { file: "a-current.jsonl", timestamp: currentTimestamp },
+        { file: "z-old.jsonl", timestamp: "2026-08-30T09:00:00.000Z" },
+      ]) {
+        const transcriptPath = path.join(sessionsDir, recording.file);
+        await fsp.writeFile(
+          transcriptPath,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "root-owned-session",
+            cwd: wsPath,
+            timestamp: recording.timestamp,
+          })}\n`,
+        );
+        const modifiedAt = new Date(recording.timestamp);
+        await fsp.utimes(transcriptPath, modifiedAt, modifiedAt);
+      }
+      const catalog = await buildOmpDiscoveryCatalog({
+        ompHome,
+        cwd: tmpDir,
+        activeOnly: false,
+        now: new Date(currentTimestamp),
+      });
+      const realRoot = await fsp.realpath(wsPath);
+      const target = catalog.workspaces.find((workspace) => workspace.rootPath === realRoot)!;
+      expect(target).toBeDefined();
+      const fallback = catalog.workspaces.find(
+        (workspace) =>
+          workspace.rootPath !== realRoot && workspace.workspaceId === target.workspaceId,
+      )!;
+      expect(fallback).toBeDefined();
+      expect(catalog.getSessionsForWorkspace(fallback)).toEqual([]);
+      expect(catalog.getSessionsForWorkspace(target).map((session) => session.sessionId)).toEqual([
+        "root-owned-session",
+      ]);
+      const currentRecording = {
+        transcriptPath: path.join(sessionsDir, "a-current.jsonl"),
+        status: "active",
+        updatedAt: currentTimestamp,
+      };
+      expect(catalog.getSessionsForWorkspace(target)).toMatchObject([currentRecording]);
+      // A different identity at the same root must use the same duplicate-selection policy.
+      const alternateIdentity = { ...target, workspaceId: "alternate-workspace-label" };
+      expect(catalog.getSessionsForWorkspace(alternateIdentity)).toMatchObject([
+        { ...currentRecording, workspaceId: alternateIdentity.workspaceId },
+      ]);
+      // An uncached root cannot borrow sessions by presenting the same label, either.
+      expect(
+        catalog.getSessionsForWorkspace({ ...target, rootPath: path.join(tmpDir, "unrelated") }),
+      ).toEqual([]);
+      expect(catalog.getSessionsForWorkspace(target)).toMatchObject([
+        { ...currentRecording, workspaceId: target.workspaceId },
+      ]);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("builds and reuses OmpDiscoveryCatalog scanning OMP home in a single pass", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-catalog-scan-"));
     try {
