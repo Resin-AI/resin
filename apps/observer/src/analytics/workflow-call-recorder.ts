@@ -28,8 +28,10 @@ import {
   tokenizeProgram,
 } from "@resin/contracts";
 import {
+  isLocalWorkflowResultSuppressed,
   localWorkflowEvent,
   localWorkflowResultObservation,
+  retainLocalWorkflowPayload,
 } from "../normalization/local-workflow-payload.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
@@ -288,6 +290,9 @@ export class WorkflowCallRecorder {
       ? { workspaceId: this.privateValueOwnerWorkspaceId }
       : access;
     this.redactedArguments = event.type === "tool_call" ? event.parameters : undefined;
+    if (event.type === "tool_result" && isLocalWorkflowResultSuppressed(event)) {
+      retainLocalWorkflowPayload(event, { result: event.result }, { suppressResult: true });
+    }
     const original = localWorkflowEvent(event);
     this.privateRepresentation =
       original !== undefined || event.redaction?.isRedacted === false ? "literal" : "redacted";
@@ -324,12 +329,15 @@ export class WorkflowCallRecorder {
     }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
-      const observed = this.observeResult(
-        original ?? event,
-        event,
-        localWorkflowResultObservation(event),
-      );
-      return { ...event, metadata: observed.metadata };
+      const resultObservation = localWorkflowResultObservation(event);
+      const observed = this.observeResult(original ?? event, event, resultObservation);
+      const resultEvent = { ...event, metadata: observed.metadata };
+      if (resultObservation !== undefined) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
+      } else if (isLocalWorkflowResultSuppressed(event)) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
+      }
+      return resultEvent;
     }
     return event;
   }

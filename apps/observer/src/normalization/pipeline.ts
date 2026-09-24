@@ -31,7 +31,10 @@ import {
   NormalizationDeduplicator,
   type NormalizationDeduplicatorOptions,
 } from "./deduplicator.js";
-import { retainLocalWorkflowPayload } from "./local-workflow-payload.js";
+import {
+  isLocalWorkflowResultSuppressed,
+  retainLocalWorkflowPayload,
+} from "./local-workflow-payload.js";
 import type { JsonObject, JsonValue } from "./redaction.js";
 import { type RedactionConfig, RedactionEngine } from "./redaction.js";
 
@@ -458,6 +461,12 @@ export class NormalizationPipeline {
           "result" in nativeObservation
             ? { resultObservation: nativeObservation }
             : { suppressResult: true };
+      } else if (
+        originalRawRecord.harnessId === "codex-cli" &&
+        isLocalWorkflowResultSuppressed(validEvent)
+      ) {
+        // An unfinished or unclassified rollout result cannot establish a replay baseline.
+        localPayloadOptions = { suppressResult: true };
       }
     }
     retainLocalWorkflowPayload(validEvent, payloadFields, localPayloadOptions);

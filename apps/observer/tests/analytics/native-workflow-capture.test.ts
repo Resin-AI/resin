@@ -3,17 +3,20 @@
  * compiler consumes, without the caller changing anything about how it calls.
  */
 
+import { CodexRecordDecoder } from "@resin/adapter-codex";
 import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import {
   NormalizedSessionEventSchema,
   RESIN_COMPUTATION_EVIDENCE_KEY,
+  isSubstantiveComputationEvidence,
   readComputationEvidence,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
+import { extractComputationSourceFrames } from "../../src/analytics/computation/source-frames.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import { deriveNativeCalls } from "../../src/analytics/native-argument-derivation.js";
 import {
@@ -31,6 +34,10 @@ import {
   readWorkflowCallCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import {
+  RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY,
+  isLocalWorkflowResultSuppressed,
+} from "../../src/normalization/local-workflow-payload.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
 const SESSION = "session-native-capture";
@@ -1457,3 +1464,427 @@ function referenceOf(origin: { type: string; reference?: string }): string {
   }
   return origin.reference;
 }
+
+async function captureCodexNativeCall(
+  sessionId: string,
+  callId: string,
+  toolName: string,
+  parameters: Record<string, unknown>,
+  nativeOutput: unknown,
+  nativeOutputStatus?: string,
+): Promise<{ events: NormalizedSessionEvent[]; store: InMemoryPrivateValueStore }> {
+  const timestamp = "2026-09-23T12:00:00.000Z";
+  const pipeline = new NormalizationPipeline();
+  pipeline.registerDecoder(new CodexRecordDecoder());
+  const store = new InMemoryPrivateValueStore();
+  const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+  const computationRecorder = createComputationEvidenceRecorder();
+  const events = [
+    computationRecorder.observe(
+      workflowRecorder.observe(
+        event({
+          eventId: `evt_${callId}_user`,
+          sessionId,
+          type: "message",
+          role: "user",
+          content: "run this process and capture its output",
+          causalRef: { causalSequence: 1, parentId: null },
+        }),
+        { workspaceId: "ws_codex_native" },
+      ),
+    ),
+  ];
+  const nativeRecords = [
+    {
+      type: "session_meta",
+      payload: {
+        session_id: `native_session_${callId}`,
+        id: `native_root_${callId}`,
+        cwd: "/workspace/demo",
+      },
+    },
+    {
+      type: "turn_context",
+      payload: {
+        turn_id: `turn_${callId}`,
+        cwd: "/workspace/demo",
+        model: "gpt-6-luna",
+      },
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        id: `item_${callId}`,
+        call_id: callId,
+        name: toolName,
+        arguments: JSON.stringify(parameters),
+      },
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: callId,
+        output: nativeOutput,
+        ...(nativeOutputStatus === undefined ? {} : { status: nativeOutputStatus }),
+      },
+    },
+  ] as const;
+
+  for (const [index, native] of nativeRecords.entries()) {
+    const ordinal = index + 1;
+    const record: RawHarnessRecord = {
+      recordId: `rec_${sessionId}_${ordinal}`,
+      sessionId,
+      harnessId: "codex-cli",
+      sequenceNumber: ordinal,
+      recordType: "transcript_line",
+      timestamp,
+      rawPayload: JSON.stringify({ timestamp, ordinal, ...native }),
+      cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+      metadata: {},
+    };
+    const normalized = await pipeline.processRecord(record, {
+      sessionId,
+      harnessId: "codex-cli",
+      workspaceId: "ws_codex_native",
+    });
+    for (const result of normalized) {
+      if (result.status !== "success" || result.isDuplicate) continue;
+      events.push(
+        computationRecorder.observe(
+          workflowRecorder.observe(result.event, { workspaceId: "ws_codex_native" }),
+        ),
+      );
+    }
+  }
+  return { events, store };
+}
+
+describe("native Codex rollout workflow and computation capture", () => {
+  it("records generic and Codex shell calls through normalization with honest output and outcomes", async () => {
+    const command = "python3 -c 'print(6)'";
+    const stdout = "6\n";
+    const display = `Chunk ID: smoke\nWall time: 0.01s\nProcess exited with code 0\nFinal output:\n${stdout}`;
+    const completedCalls = [
+      {
+        sessionId: "codex-exec-command-capture",
+        callId: "codex_exec_command",
+        toolName: "exec_command",
+        parameters: { cmd: command },
+      },
+    ];
+
+    for (const turn of completedCalls) {
+      const captured = await captureCodexNativeCall(
+        turn.sessionId,
+        turn.callId,
+        turn.toolName,
+        turn.parameters,
+        display,
+      );
+      const callEvent = captured.events.find((entry) => entry.type === "tool_call");
+      const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+      if (callEvent?.type !== "tool_call" || resultEvent?.type !== "tool_result") {
+        throw new Error("Codex rollout did not produce a matched tool call and result");
+      }
+      expect(callEvent.sessionId).toBe(turn.sessionId);
+      expect(callEvent.timestamp).toBe("2026-09-23T12:00:00.000Z");
+      expect(callEvent.callId).toBe(turn.callId);
+      expect(callEvent.toolName).toBe(turn.toolName);
+      expect(callEvent.parameters).toEqual(turn.parameters);
+      expect((callEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.cwd).toBe(
+        "/workspace/demo",
+      );
+      expect(resultEvent.sessionId).toBe(turn.sessionId);
+      expect(resultEvent.timestamp).toBe("2026-09-23T12:00:00.000Z");
+      expect(resultEvent.callId).toBe(callEvent.callId);
+      expect(resultEvent.toolName).toBe(callEvent.toolName);
+      expect(resultEvent.result).toBe(stdout);
+      expect(resultEvent.isError).toBe(false);
+      expect(
+        (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+      ).toBe("completed");
+
+      const carrier = carrierOf(callEvent);
+      expect(carrier?.program).toMatchObject({ kind: "shell" });
+      expect(carrier?.program?.argument).toBe(Object.keys(turn.parameters)[0]);
+      const evidence = readComputationEvidence(
+        resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+      );
+      expect(evidence?.observation).toMatchObject({
+        callId: turn.callId,
+        status: "success",
+        resultEventId: resultEvent.eventId,
+      });
+      // Print-only source is captured successfully but is not substantive computation.
+      expect(isSubstantiveComputationEvidence(evidence)).toBe(false);
+
+      const recipe = recordCallsFromEvents(turn.sessionId, captured.events);
+      expect(recipe?.workflow.baseline?.observed).toHaveLength(1);
+      expect(
+        resolvePrivateReference(captured.store, recipe!.workflow.baseline!.observed[0]!.reference),
+      ).toBe(stdout);
+      const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+      const metadataOnlyResult = projected.find((entry) => entry.type === "tool_result");
+      expect(
+        metadataOnlyResult?.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY],
+      ).toBeUndefined();
+      const projectedRecipe = recordCallsFromEvents(turn.sessionId, projected);
+      expect(projectedRecipe?.workflow.baseline?.observed).toHaveLength(1);
+      expect(
+        resolvePrivateReference(
+          captured.store,
+          projectedRecipe!.workflow.baseline!.observed[0]!.reference,
+        ),
+      ).toBe(stdout);
+    }
+
+    const genericSession = "codex-generic-command-capture";
+    const generic = await captureCodexNativeCall(
+      genericSession,
+      "codex_generic_command",
+      "custom_process_runner",
+      { commandLine: command },
+      "unframed generic process output",
+    );
+    const genericCall = generic.events.find((entry) => entry.type === "tool_call");
+    const genericResult = generic.events.find((entry) => entry.type === "tool_result");
+    if (genericCall?.type !== "tool_call" || genericResult?.type !== "tool_result") {
+      throw new Error("Generic native command did not produce a matched call and result");
+    }
+    expect(genericCall.parameters).toEqual({ commandLine: command });
+    expect(carrierOf(genericCall)?.program).toMatchObject({
+      kind: "shell",
+      argument: "commandLine",
+    });
+    const genericEvidence = readComputationEvidence(
+      genericCall.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+    );
+    expect(genericEvidence?.observation).toMatchObject({
+      callId: "codex_generic_command",
+      kind: "invocation",
+      status: "pending",
+    });
+    expect(genericEvidence?.program.complete).toBe(true);
+    expect(isSubstantiveComputationEvidence(genericEvidence)).toBe(false);
+    expect(genericResult.isError).toBe(false);
+    expect(genericResult.result).toBe("unframed generic process output");
+    expect(
+      (genericResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("completed");
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(genericResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    const genericRecipe = recordCallsFromEvents(genericSession, generic.events);
+    expect(genericRecipe?.workflow.baseline?.observed).toHaveLength(1);
+    expect(
+      resolvePrivateReference(
+        generic.store,
+        genericRecipe!.workflow.baseline!.observed[0]!.reference,
+      ),
+    ).toBe("unframed generic process output");
+
+    for (const [suffix, nativeOutput, expectedOutcome, expectedPublicResult] of [
+      [
+        "unknown",
+        "volatile execution display without a terminal status",
+        "unknown",
+        "volatile execution display without a terminal status",
+      ],
+      [
+        "running",
+        "Chunk ID: smoke\nWall time: 0.01s\nProcess running with session ID 123\n",
+        "running",
+        "",
+      ],
+    ] as const) {
+      const sessionId = `codex-${suffix}-capture`;
+      const captured = await captureCodexNativeCall(
+        sessionId,
+        `codex_${suffix}_call`,
+        "exec_command",
+        { cmd: command },
+        nativeOutput,
+      );
+      const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+      if (resultEvent?.type !== "tool_result") {
+        throw new Error("Codex rollout did not produce its terminal result");
+      }
+      expect(resultEvent.isError).toBe(false);
+      expect(resultEvent.result).toBe(expectedPublicResult);
+      expect(
+        (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+      ).toBe(expectedOutcome);
+      expect(
+        isSubstantiveComputationEvidence(
+          readComputationEvidence(resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+        ),
+      ).toBe(false);
+      expect(recordCallsFromEvents(sessionId, captured.events)?.workflow.baseline).toBeUndefined();
+
+      const replayRecorder = new WorkflowCallRecorder({
+        privateValues: new InMemoryPrivateValueStore(),
+      });
+      const replayed = structuredClone(captured.events).map((entry) =>
+        replayRecorder.observe(entry, { workspaceId: "ws_codex_native" }),
+      );
+      expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+
+      const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+      const projectedResult = projected.find((entry) => entry.type === "tool_result");
+      expect(projectedResult?.type === "tool_result" ? projectedResult.result : undefined).toBe(
+        undefined,
+      );
+      expect(
+        isSubstantiveComputationEvidence(
+          projectedResult?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+        ),
+      ).toBe(false);
+      expect(recordCallsFromEvents(sessionId, projected)?.workflow.baseline).toBeUndefined();
+    }
+
+    const failed = await captureCodexNativeCall(
+      "codex-nonzero-capture",
+      "codex_nonzero_call",
+      "exec_command",
+      { cmd: command },
+      "Chunk ID: smoke\nWall time: 0.01s\nProcess exited with code 7\nFinal output:\nprogram error\n",
+    );
+    const failedResult = failed.events.find((entry) => entry.type === "tool_result");
+    if (failedResult?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its failed result");
+    }
+    expect(failedResult.isError).toBe(true);
+    expect(failedResult.result).toBe("program error\n");
+    expect(
+      (failedResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("failed");
+    expect(
+      readComputationEvidence(failedResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])?.observation
+        .status,
+    ).toBe("error");
+    expect(
+      recordCallsFromEvents("codex-nonzero-capture", failed.events)?.workflow.baseline,
+    ).toBeUndefined();
+    const projectedFailure = projectEventToMetadataOnly(failedResult);
+    if (projectedFailure.type !== "tool_result") {
+      throw new Error("Projected Codex result lost its tool-result identity");
+    }
+    expect(projectedFailure.isError).toBe(true);
+    expect(
+      projectedFailure.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY],
+    ).toBeUndefined();
+    expect(
+      readComputationEvidence(projectedFailure.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])
+        ?.observation.status,
+    ).toBe("error");
+
+    for (const [suffix, parameters] of [
+      ["ambiguous-aliases", { command: "python3 -c 'print(1)'", cmd: "python3 -c 'print(2)'" }],
+      ["structured-argv", { args: ["python3", "-c", "print(1 + 1)"] }],
+    ] as const) {
+      const sessionId = `codex-${suffix}-capture`;
+      const captured = await captureCodexNativeCall(
+        sessionId,
+        `codex_${suffix}_call`,
+        "custom_process_runner",
+        parameters,
+        "result without command evidence",
+      );
+      const callEvent = captured.events.find((entry) => entry.type === "tool_call");
+      if (callEvent?.type !== "tool_call") {
+        throw new Error("Codex rollout did not produce its native tool call");
+      }
+      expect(carrierOf(callEvent)?.program).toBeUndefined();
+      expect(extractComputationSourceFrames(callEvent)).toEqual([]);
+    }
+  });
+
+  it("suppresses an explicit structured truncated-result status flag", async () => {
+    const sessionId = "codex-explicit-truncated-flag-capture";
+    const captured = await captureCodexNativeCall(
+      sessionId,
+      "codex_explicit_truncated_flag_call",
+      "exec_command",
+      { cmd: "python3 -c 'print(1)'" },
+      "partial stdout",
+      "truncated",
+    );
+    const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+    if (resultEvent?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its structured truncated result");
+    }
+    expect(resultEvent.result).toBe("partial stdout");
+    expect(resultEvent.isError).toBe(false);
+    expect(
+      (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("truncated");
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    expect(recordCallsFromEvents(sessionId, captured.events)?.workflow.baseline).toBeUndefined();
+
+    const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+    expect(recordCallsFromEvents(sessionId, projected)?.workflow.baseline).toBeUndefined();
+  });
+
+  it("keeps unknown native-result suppression through metadata projection and JSON reload", async () => {
+    const sessionId = "codex-unknown-projection-capture";
+    const captured = await captureCodexNativeCall(
+      sessionId,
+      "codex_unknown_projection_call",
+      "exec_command",
+      { cmd: "python3 -c 'print(1)'" },
+      "unclassified rollout result display",
+    );
+    const sourceResult = captured.events.find((entry) => entry.type === "tool_result");
+    if (sourceResult?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its unknown result");
+    }
+    expect(
+      (sourceResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("unknown");
+
+    const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+    const serialized = JSON.stringify(projected);
+    expect(serialized).not.toContain("codexNative");
+    expect(serialized).not.toContain("unclassified rollout result display");
+    const reloaded = JSON.parse(serialized) as NormalizedSessionEvent[];
+    const reloadedResult = reloaded.find((entry) => entry.type === "tool_result");
+    if (reloadedResult?.type !== "tool_result") {
+      throw new Error("Metadata-only reload lost the unknown result event");
+    }
+    expect(reloadedResult.result).toBeUndefined();
+    expect(reloadedResult.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY]).toBe(
+      true,
+    );
+    expect(isLocalWorkflowResultSuppressed(reloadedResult)).toBe(true);
+
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const replayed = reloaded.map((entry) =>
+      workflowRecorder.observe(computationRecorder.observe(entry), {
+        workspaceId: "ws_codex_native",
+      }),
+    );
+    const replayedResult = replayed.find((entry) => entry.type === "tool_result");
+    if (replayedResult?.type !== "tool_result") {
+      throw new Error("Fresh recorders did not preserve the unknown result event");
+    }
+    expect(isLocalWorkflowResultSuppressed(replayedResult)).toBe(true);
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(replayedResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+  });
+});

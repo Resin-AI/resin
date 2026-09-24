@@ -10110,11 +10110,15 @@ var init_dist3 = __esm({
 // adapters/codex-cli/dist/discovery.js
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-var execFileAsync2;
+var execFileAsync2, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
 var init_discovery2 = __esm({
   "adapters/codex-cli/dist/discovery.js"() {
     "use strict";
     execFileAsync2 = promisify2(execFile2);
+    CODEX_HEADER_MAX_BYTES = 1024 * 1024;
+    CODEX_TAIL_BYTES = 16 * 1024;
+    CODEX_READ_CHUNK_BYTES = 64 * 1024;
+    CODEX_ACTIVE_GRACE_MS = 5 * 60 * 1e3;
   }
 });
 
@@ -10143,10 +10147,14 @@ var init_refresh3 = __esm({
 });
 
 // adapters/codex-cli/dist/source.js
+var CODEX_READ_CHUNK_BYTES2, CODEX_READ_QUANTUM_BYTES, CODEX_MAX_PENDING_RECORD_BYTES;
 var init_source3 = __esm({
   "adapters/codex-cli/dist/source.js"() {
     "use strict";
     init_discovery2();
+    CODEX_READ_CHUNK_BYTES2 = 64 * 1024;
+    CODEX_READ_QUANTUM_BYTES = 1024 * 1024;
+    CODEX_MAX_PENDING_RECORD_BYTES = 8 * 1024 * 1024;
   }
 });
 

@@ -2,6 +2,10 @@ import type { NormalizedSessionEvent } from "@resin/contracts";
 
 export type LocalWorkflowResultComparison = "text-trim";
 
+/** Value-free persisted signal that a result cannot establish workflow/computation success. */
+export const RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY =
+  "__resinLocalWorkflowResultSuppressedV1";
+
 export interface LocalWorkflowResultObservation {
   result: string;
   comparison?: LocalWorkflowResultComparison;
@@ -18,6 +22,7 @@ interface LocalWorkflowPayload {
   parameters?: unknown;
   result?: unknown;
   resultComparison?: LocalWorkflowResultComparison;
+  resultSuppressed?: true;
 }
 
 /** Exact payloads stay beside an event in this process, never in serialized metadata or storage. */
@@ -47,6 +52,7 @@ export function retainLocalWorkflowPayload(
     }
   } else if (suppressResult) {
     payload.result = undefined;
+    payload.resultSuppressed = true;
   }
   payloads.set(event, payload);
 }
@@ -70,4 +76,23 @@ export function localWorkflowResultObservation(
   return payload.resultComparison === undefined
     ? { result: payload.result }
     : { result: payload.result, comparison: payload.resultComparison };
+}
+
+/** True when a result is unavailable for local evidence, including after metadata-only reload. */
+export function isLocalWorkflowResultSuppressed(event: NormalizedSessionEvent): boolean {
+  if (event.type !== "tool_result") return false;
+  if (
+    event.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY] === true ||
+    payloads.get(event)?.resultSuppressed === true
+  ) {
+    return true;
+  }
+  if (event.isError) return false;
+  const codexNative = event.metadata?.codexNative;
+  return (
+    typeof codexNative === "object" &&
+    codexNative !== null &&
+    !Array.isArray(codexNative) &&
+    (codexNative as Record<string, unknown>).outcome !== "completed"
+  );
 }

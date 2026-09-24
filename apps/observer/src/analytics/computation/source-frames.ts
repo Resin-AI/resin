@@ -1,5 +1,6 @@
 import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent, NormalizedToolCallEvent } from "@resin/contracts";
+import { extractRawCommandStringFromEvent } from "../deterministic-command-sequence.js";
 import {
   COMPUTATION_EVAL_TOOL_NAMES,
   COMPUTATION_TRUNCATION_MARKER,
@@ -76,15 +77,6 @@ const EVAL_TOOLS = table([
   "run_python",
   "run_js",
   "repl",
-]);
-const SHELL_TOOLS = table([
-  "bash",
-  "shell",
-  "sh",
-  "exec",
-  "terminal",
-  "run_command",
-  "execute_command",
 ]);
 const WRITE_TOOLS = table([
   "write",
@@ -665,12 +657,12 @@ function framesFromToolCall(
   const tool = normalizeToolName(call.toolName);
   const parameters = parametersOf(call);
 
+  const command = extractRawCommandStringFromEvent(event);
+  if (command !== null) {
+    return framesFromCommand(event, command, knownFiles);
+  }
   if (has(EVAL_TOOLS, tool) || tool.endsWith("_eval")) {
     return framesFromEvalCall(event, parameters);
-  }
-  if (has(SHELL_TOOLS, tool)) {
-    const command = firstString(parameters.command) ?? firstString(parameters.cmd);
-    return command === undefined ? [] : framesFromCommand(event, command, knownFiles);
   }
   if (has(WRITE_TOOLS, tool)) {
     return framesFromWriteCall(event, parameters);

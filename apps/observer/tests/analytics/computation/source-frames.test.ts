@@ -221,6 +221,39 @@ describe("extractComputationSourceFrames", () => {
     });
   });
 
+  it("frames command-bearing calls structurally without a shell-tool name list", () => {
+    for (const call of [
+      toolCall(80, "exec_command", { cmd: "python3 -c 'print(1 + 1)'" }),
+      toolCall(81, "shell_command", { command: "python3 -c 'print(1 + 1)'" }),
+      toolCall(82, "custom_process_runner", {
+        commandLine: "python3 -c 'print(1 + 1)'",
+      }),
+    ]) {
+      expect(extractComputationSourceFrames(call)[0]).toMatchObject({
+        source: "print(1 + 1)",
+        language: "python",
+        originKind: "inline",
+        executionScope: "isolated",
+      });
+    }
+
+    expect(
+      extractComputationSourceFrames(
+        toolCall(83, "custom_process_runner", {
+          command: "python3 -c 'print(1)'",
+          cmd: "python3 -c 'print(2)'",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      extractComputationSourceFrames(
+        toolCall(84, "custom_process_runner", {
+          args: ["python3", "-c", "print(1 + 1)"],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   it("fails closed on shell framing it cannot delimit", () => {
     const piped = extractComputationSourceFrames(
       shellCall(8, "python3 -c 'print(1)' | tee out.log"),

@@ -95,8 +95,22 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
-function captureInactiveOmpSession(session: HarnessSession, startedAt: number): boolean {
-  if (session.harnessId !== "omp" || typeof session.metadata?.fileMtime !== "string") {
+function sessionStartedDuringObservation(
+  session: HarnessSession,
+  startedAt: number | undefined,
+): boolean {
+  if (startedAt === undefined || !Number.isFinite(startedAt)) return false;
+  const createdAt = Date.parse(session.createdAt);
+  const updatedAt = Date.parse(session.updatedAt);
+  const now = Date.now();
+  return createdAt >= startedAt && createdAt <= updatedAt && updatedAt <= now;
+}
+
+function captureInactiveSession(session: HarnessSession, startedAt: number): boolean {
+  if (session.harnessId !== "omp") {
+    return sessionStartedDuringObservation(session, startedAt);
+  }
+  if (typeof session.metadata?.fileMtime !== "string") {
     return false;
   }
   // Require actual file activity as well as the coordinator's transcript timestamp boundary.
@@ -352,9 +366,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         cursorManager: this.cursorManager,
         defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
-        backfillPolicyForSession: (session: HarnessSession) =>
-          session.harnessId === "omp" ? { mode: "all" } : undefined,
-        captureInactiveSessions: captureInactiveOmpSession,
+        backfillPolicyForSession: (session: HarnessSession, startedAt?: number) =>
+          session.harnessId === "omp" || sessionStartedDuringObservation(session, startedAt)
+            ? { mode: "all" }
+            : undefined,
+        captureInactiveSessions: captureInactiveSession,
         captureUserSessionsOnly: this.captureUserSessionsOnly,
         logger: this.logger,
       });
@@ -720,9 +736,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       cursorManager: this.cursorManager,
       defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
-      backfillPolicyForSession: (session: HarnessSession) =>
-        session.harnessId === "omp" ? { mode: "all" } : undefined,
-      captureInactiveSessions: captureInactiveOmpSession,
+      backfillPolicyForSession: (session: HarnessSession, startedAt?: number) =>
+        session.harnessId === "omp" || sessionStartedDuringObservation(session, startedAt)
+          ? { mode: "all" }
+          : undefined,
+      captureInactiveSessions: captureInactiveSession,
       captureUserSessionsOnly: this.captureUserSessionsOnly,
       logger: this.logger,
     });
