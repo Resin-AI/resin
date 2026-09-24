@@ -583,7 +583,10 @@ export class CodexSessionDecoder {
   };
   private currentMetadata?: CodexTranscriptPayload;
   private currentModel?: string;
-  private nativeCommands = new Map<string, { command: string; args: string[]; cwd?: string }>();
+  private nativeCommands = new Map<
+    string,
+    { command: string; args: string[]; cwd?: string; completed?: boolean }
+  >();
   private nativeUsageSeen = new Set<string>();
 
   constructor(options: CodexDecoderOptions = {}) {
@@ -792,7 +795,7 @@ export class CodexSessionDecoder {
         });
         const callId = asString(native.call_id);
         const command = callId && this.nativeCommands.get(callId);
-        if (command) {
+        if (command && !command.completed) {
           const output = asString(result);
           const bodyStart = output?.indexOf("\nFinal output:") ?? -1;
           const status =
@@ -812,7 +815,7 @@ export class CodexSessionDecoder {
                 output,
               }),
             );
-            this.nativeCommands.delete(callId);
+            command.completed = true;
           }
         }
         return resultEvents;
@@ -822,6 +825,7 @@ export class CodexSessionDecoder {
     if (native && asString(p.type) === "event_msg") {
       if (nativeType === "task_started") return [];
       if (nativeType === "task_complete") {
+        this.nativeCommands.clear();
         return this.normalizePayload({ type: "session_end", timestamp: p.timestamp });
       }
       if (nativeType === "token_count") {
@@ -846,19 +850,41 @@ export class CodexSessionDecoder {
           },
         ];
       }
-      if (nativeType === "exec_command_end") {
-        const exitCode = asNumber(native.exit_code);
-        const command = asArray(native.command);
-        if (exitCode === undefined || !command?.length) return this.nativeUnknown(p);
+      if (nativeType === "exec_command_end" || nativeType === "item_completed") {
+        const item = nativeType === "item_completed" ? asObject(native.item) : native;
+        if (nativeType === "item_completed" && item?.type !== "CommandExecution")
+          return this.nativeUnknown(p);
+        const exitCode = asNumber(item?.exit_code);
+        const command = asArray(item?.command);
+        if (
+          nativeType === "item_completed" &&
+          item?.status !== "completed" &&
+          item?.status !== "failed"
+        )
+          return this.nativeUnknown(p);
+        if (exitCode === undefined || !command?.length || asString(command[0]) === undefined)
+          return this.nativeUnknown(p);
+        const cwd = asString(item?.cwd);
+        const callId = asString(item?.id) ?? asString(item?.call_id);
+        const tracked = callId ? this.nativeCommands.get(callId) : undefined;
+        if (tracked?.completed) return [];
+        if (tracked) tracked.completed = true;
+        const duration = asObject(item?.duration);
+        const seconds = asNumber(duration?.secs);
+        const nanoseconds = asNumber(duration?.nanos);
         return this.normalizePayload({
           type: "command_exec",
           timestamp: p.timestamp,
-          command: asString(command[0]),
+          command: command[0],
           args: command.slice(1),
-          cwd: native.cwd,
+          cwd,
           exit_code: exitCode,
-          stdout: native.stdout,
-          stderr: native.stderr,
+          stdout: item?.stdout,
+          stderr: item?.stderr,
+          duration_ms:
+            seconds !== undefined && nanoseconds !== undefined
+              ? seconds * 1000 + nanoseconds / 1_000_000
+              : undefined,
         });
       }
       return this.nativeUnknown(p);
