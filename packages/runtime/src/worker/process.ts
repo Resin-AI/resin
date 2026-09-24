@@ -28,7 +28,6 @@ import {
   createHeartbeatMessage,
   createInitializeMessage,
   createInvokeMessage,
-  createShutdownMessage,
   withResolvers,
 } from "./protocol.js";
 import type { BrokerRequestHandlerFn } from "./sdk.js";
@@ -240,6 +239,22 @@ export class WorkerProcess {
       this.cleanup();
       resolve(result);
     };
+
+    // Keep this listener through stream closure: destroying stdin during disposal
+    // can emit an asynchronous EPIPE after the execution result has settled.
+    this.childProcess.stdin?.on("error", (err) => {
+      finalize({
+        status: "error",
+        error: {
+          type: "write_error",
+          message: `Failed to write to worker stdin: ${err.message}`,
+          stack: err.stack,
+        },
+        durationMs: Date.now() - startTime,
+        logs: this.logs,
+        progress: this.progress,
+      });
+    });
 
     // 3. Set up timeout timer
     this.timeoutTimer = setTimeout(() => {
@@ -592,21 +607,12 @@ export class WorkerProcess {
   }
 
   private writeMessage(msg: WorkerMessage): void {
-    if (!this.childProcess || !this.childProcess.stdin || this.childProcess.stdin.destroyed) {
-      if (this.isDisposed) {
-        return;
-      }
+    if (this.isDisposed) return;
+    const stdin = this.childProcess?.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) {
       throw new Error("Worker process stdin is not writable");
     }
-    try {
-      const line = WorkerFrameEncoder.encodeNDJSON(msg);
-      this.childProcess.stdin.write(line);
-    } catch (err) {
-      if (this.isDisposed) {
-        return;
-      }
-      throw err;
-    }
+    stdin.write(WorkerFrameEncoder.encodeNDJSON(msg));
   }
 
   /**
@@ -668,14 +674,8 @@ export class WorkerProcess {
       this.timeoutTimer = null;
     }
 
-    if (this.childProcess && !this.childProcess.killed) {
-      try {
-        this.writeMessage(createShutdownMessage({ graceful: true }));
-        this.terminateProcessTree("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
+    this.childProcess?.stdin?.destroy();
+    this.terminateProcessTree("SIGTERM");
 
     if (this.scratchDir && fs.existsSync(this.scratchDir)) {
       try {

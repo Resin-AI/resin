@@ -80,6 +80,76 @@ describe("WorkerProcess", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "returns write_error when a live child closes its stdin pipe",
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-closed-stdin-"));
+      try {
+        const executable = path.join(dir, "worker.cjs");
+        fs.writeFileSync(
+          executable,
+          `#!/usr/bin/env node
+const fs = require("node:fs");
+const net = require("node:net");
+fs.closeSync(0);
+process.stdout.write(JSON.stringify({
+  id: "progress-1", type: "progress", timestamp: Date.now(),
+  version: "1.0.0", invocationId: "inv-pipe", percentage: 10,
+}) + "\\n");
+net.createServer().listen(0);
+`,
+        );
+        fs.chmodSync(executable, 0o755);
+        const worker = new WorkerProcess({
+          manifest: { id: "pipe", name: "pipe", version: "1.0.0" },
+          bundleEntrypoint: executable,
+          denoExecutable: executable,
+          timeoutMs: 5000,
+          onProgress: () => worker.sendHeartbeat(),
+        });
+        const result = await worker.execute("inv-pipe", {});
+        expect(result.status).toBe("error");
+        expect(result.error?.type).toBe("write_error");
+        expect(result.error?.message).toMatch(/EPIPE|broken pipe/i);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "retains output limit after closing the child's stdin",
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "worker-output-limit-"));
+      try {
+        const executable = path.join(dir, "worker.cjs");
+        fs.writeFileSync(
+          executable,
+          `#!/usr/bin/env node
+const net = require("node:net");
+process.stdout.write("x".repeat(8192));
+net.createServer().listen(0);
+`,
+        );
+        fs.chmodSync(executable, 0o755);
+        const worker = new WorkerProcess({
+          manifest: { id: "limit", name: "limit", version: "1.0.0" },
+          bundleEntrypoint: executable,
+          denoExecutable: executable,
+          maxOutputSizeBytes: 1024,
+          timeoutMs: 5000,
+        });
+        const result = await worker.execute("inv-limit", {});
+        expect(result.status).toBe("error");
+        expect(result.error?.type).toBe("resource_limit");
+        expect(result.error?.message).toContain("OUTPUT_LIMIT_EXCEEDED");
+        expect(() => worker.sendHeartbeat()).not.toThrow();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(!hasDeno)(
     "executes entry importing bare specifier via importMap pointing at temp ESM file",
     async () => {

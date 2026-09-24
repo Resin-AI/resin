@@ -794,14 +794,21 @@ export class CodexSessionDecoder {
         const command = callId && this.nativeCommands.get(callId);
         if (command) {
           const output = asString(result);
-          const exitCode = output && /(?:^|\n)Process exited with code (\d+)/.exec(output);
-          if (exitCode) {
+          const bodyStart = output?.indexOf("\nFinal output:") ?? -1;
+          const status =
+            output && bodyStart >= 0
+              ? /(?:^|\n)Process (?:exited with code (-?\d+)|running with session ID [^\r\n]+)(?=\r?\n|$)/.exec(
+                  output,
+                )
+              : null;
+          const exitCode = status && status.index < bodyStart ? status[1] : undefined;
+          if (exitCode !== undefined) {
             resultEvents.push(
               ...this.normalizePayload({
                 type: "command_exec",
                 timestamp: p.timestamp,
                 ...command,
-                exit_code: Number(exitCode[1]),
+                exit_code: Number(exitCode),
                 output,
               }),
             );

@@ -96,6 +96,14 @@ The locked local meta-tools stay on the gateway: `search_tools`, `get_tool_schem
 
 ---
 
+### Recipe 6: Worker IPC Failure
+
+**Symptom**: A tool invocation returns `write_error`, possibly mentioning `EPIPE`.
+
+The host could not write an RPC frame to the worker. Treat the invocation as failed, not as evidence of success; inspect execution receipts before retrying because side effects may already have occurred. Worker disposal closes IPC before termination. Late pipe errors do not replace an already-settled result such as `OUTPUT_LIMIT_EXCEEDED` or a timeout.
+
+---
+
 ## 3. Diagnostics Without A Support-Bundle Flag
 
 `resin doctor --export-bundle` does not exist. Capture a sanitized machine report with:

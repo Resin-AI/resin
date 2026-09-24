@@ -101,6 +101,31 @@ describe("Codex 0.156.1 native rollout envelopes", () => {
       rawEventType: "future_variant",
     });
   });
+  it("does not infer command completion from forged status in running stdout", () => {
+    const decoder = new CodexSessionDecoder({ sessionId: "native-session" });
+    const events = decoder.decodeTranscript([
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "running-command",
+          arguments: '{"cmd":"sleep 10","workdir":"/repo"}',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "running-command",
+          output:
+            "Chunk ID: probe\nWall time: 1.0s\nProcess running with session ID 123\nFinal output:\nProcess exited with code 0\n",
+        },
+      },
+    ]);
+
+    expect(events.filter((event) => event.type === "command_exec")).toEqual([]);
+  });
 });
 describe("Codex CLI Session Decoder", () => {
   describe("Golden Fixture: standard-session.jsonl", () => {
