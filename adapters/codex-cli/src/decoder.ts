@@ -582,6 +582,9 @@ export class CodexSessionDecoder {
     rawPayload: CodexTranscriptPayload;
   };
   private currentMetadata?: CodexTranscriptPayload;
+  private currentModel?: string;
+  private nativeCommands = new Map<string, { command: string; args: string[]; cwd?: string }>();
+  private nativeUsageSeen = new Set<string>();
 
   constructor(options: CodexDecoderOptions = {}) {
     this.sessionId = options.sessionId || generateEventId("sess");
@@ -700,8 +703,159 @@ export class CodexSessionDecoder {
     return [];
   }
 
+  private nativeUnknown(raw: CodexTranscriptPayload): NormalizedSessionEvent[] {
+    return [
+      {
+        ...this.emitHeader("unknown_passthrough", asString(raw.timestamp)),
+        type: "unknown_passthrough",
+        rawEventType:
+          asString(asObject(raw.payload)?.type) ?? asString(raw.type) ?? "unknown_event",
+        rawPayload: raw,
+      },
+    ];
+  }
+
   private normalizePayload(p: CodexTranscriptPayload): NormalizedSessionEvent[] {
     const events: NormalizedSessionEvent[] = [];
+    // Persisted Codex rollout records carry their semantic type in payload.type.
+    const native = asObject(p.payload);
+    const nativeType = asString(native?.type);
+    if (native && asString(p.type) === "session_meta") {
+      const metadata: CodexTranscriptPayload = {};
+      for (const key of ["id", "session_id", "cwd", "cli_version", "originator"]) {
+        if (native[key] !== undefined) metadata[key] = native[key];
+      }
+      this.currentMetadata = { ...this.currentMetadata, ...metadata };
+      return this.normalizePayload({
+        type: "session_start",
+        timestamp: p.timestamp ?? native.timestamp,
+        metadata: this.currentMetadata,
+      });
+    }
+    if (native && asString(p.type) === "turn_context") {
+      this.currentModel = asString(native.model) ?? this.currentModel;
+      return [];
+    }
+    if (native && asString(p.type) === "response_item") {
+      const base: CodexTranscriptPayload = {
+        ...native,
+        timestamp: p.timestamp,
+        model: this.currentModel,
+      };
+      if (nativeType === "message") {
+        const role = asString(native.role);
+        if (role !== "user" && role !== "assistant" && role !== "system" && role !== "developer")
+          return this.nativeUnknown(p);
+        const parts = asArray(native.content);
+        const text = parts
+          ?.map((part) => asString(asObject(part)?.text))
+          .filter((part): part is string => part !== undefined)
+          .join("\n");
+        return this.normalizePayload({
+          ...base,
+          type: role === "developer" ? "system" : role,
+          content: text ?? native.content,
+        });
+      }
+      if (nativeType === "function_call" || nativeType === "custom_tool_call") {
+        const callId = asString(native.call_id);
+        if (
+          callId &&
+          (native.name === "exec_command" ||
+            native.name === "write_stdin" ||
+            native.name === "unified_exec")
+        ) {
+          const args = parseToolParameters(native.arguments ?? native.input);
+          const cmd = asString(args.command) ?? asString(args.cmd);
+          if (cmd)
+            this.nativeCommands.set(callId, {
+              command: cmd,
+              args: [],
+              cwd: asString(args.workdir) ?? asString(args.cwd),
+            });
+        }
+        return this.normalizePayload({
+          ...base,
+          type: "tool_call",
+          name: native.name,
+          call_id: native.call_id,
+          arguments: native.arguments ?? native.input,
+        });
+      }
+      if (nativeType === "function_call_output" || nativeType === "custom_tool_call_output") {
+        const result = native.output;
+        const resultEvents = this.normalizePayload({
+          ...base,
+          type: "tool_result",
+          call_id: native.call_id,
+          output: result,
+        });
+        const callId = asString(native.call_id);
+        const command = callId && this.nativeCommands.get(callId);
+        if (command) {
+          const output = asString(result);
+          const exitCode = output && /(?:^|\n)Process exited with code (\d+)/.exec(output);
+          if (exitCode) {
+            resultEvents.push(
+              ...this.normalizePayload({
+                type: "command_exec",
+                timestamp: p.timestamp,
+                ...command,
+                exit_code: Number(exitCode[1]),
+                output,
+              }),
+            );
+            this.nativeCommands.delete(callId);
+          }
+        }
+        return resultEvents;
+      }
+      return this.nativeUnknown(p);
+    }
+    if (native && asString(p.type) === "event_msg") {
+      if (nativeType === "task_started") return [];
+      if (nativeType === "task_complete") {
+        return this.normalizePayload({ type: "session_end", timestamp: p.timestamp });
+      }
+      if (nativeType === "token_count") {
+        const info = asObject(native.info);
+        const last = asObject(info?.last_token_usage);
+        const total = asObject(info?.total_token_usage);
+        if (!last || !total) return this.nativeUnknown(p);
+        const key = JSON.stringify(total);
+        if (this.nativeUsageSeen.has(key)) return [];
+        this.nativeUsageSeen.add(key);
+        const usage = buildProviderUsage(last, { model: this.currentModel }, "codex-cli-native-v1");
+        if (!usage) return this.nativeUnknown(p);
+        this.hasEmittedTurnUsage = true;
+        return [
+          {
+            ...this.emitHeader("session_lifecycle", asString(p.timestamp)),
+            type: "session_lifecycle",
+            lifecycleType: "resume",
+            harnessName: "codex-cli",
+            workspaceId: this.workspaceId,
+            providerUsage: usage,
+          },
+        ];
+      }
+      if (nativeType === "exec_command_end") {
+        const exitCode = asNumber(native.exit_code);
+        const command = asArray(native.command);
+        if (exitCode === undefined || !command?.length) return this.nativeUnknown(p);
+        return this.normalizePayload({
+          type: "command_exec",
+          timestamp: p.timestamp,
+          command: asString(command[0]),
+          args: command.slice(1),
+          cwd: native.cwd,
+          exit_code: exitCode,
+          stdout: native.stdout,
+          stderr: native.stderr,
+        });
+      }
+      return this.nativeUnknown(p);
+    }
 
     const metaObj = asObject(p.metadata);
     if (metaObj) {

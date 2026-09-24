@@ -20,6 +20,88 @@ import {
   decodeCodexRecord,
   decodeCodexTranscript,
 } from "../src/decoder.js";
+
+describe("Codex 0.156.1 native rollout envelopes", () => {
+  it("decodes session, model, correlated tools and evidenced nonzero command completion", () => {
+    const decoder = new CodexSessionDecoder({ sessionId: "native-session" });
+    const records = [
+      {
+        type: "session_meta",
+        timestamp: "2026-09-24T00:00:00Z",
+        payload: { id: "native-session", cwd: "/repo", cli_version: "0.156.1" },
+      },
+      { type: "turn_context", payload: { model: "gpt-5.3-codex" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "check status" }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "c1",
+          arguments: '{"cmd":"false","workdir":"/repo"}',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "c1",
+          output: "Process exited with code 1\nFinal output:\n",
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+            total_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+            total_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+          },
+        },
+      },
+      { type: "event_msg", payload: { type: "task_complete" } },
+      { type: "response_item", payload: { type: "future_variant", value: 42 } },
+    ];
+    const events = decoder.decodeTranscript(records);
+    expect(events.every((event) => NormalizedSessionEventSchema.safeParse(event).success)).toBe(
+      true,
+    );
+    expect(events.filter((event) => event.type === "tool_call")).toMatchObject([
+      { callId: "c1", toolName: "exec_command" },
+    ]);
+    expect(events.filter((event) => event.type === "tool_result")).toMatchObject([
+      { callId: "c1", toolName: "exec_command" },
+    ]);
+    expect(events.filter((event) => event.type === "command_exec")).toMatchObject([
+      { command: "false", exitCode: 1, cwd: "/repo" },
+    ]);
+    expect(events.filter((event) => event.providerUsage)).toHaveLength(1);
+    expect(events.find((event) => event.type === "message" && event.role === "user")).toMatchObject(
+      { content: "check status", model: "gpt-5.3-codex" },
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "unknown_passthrough",
+      rawEventType: "future_variant",
+    });
+  });
+});
 describe("Codex CLI Session Decoder", () => {
   describe("Golden Fixture: standard-session.jsonl", () => {
     it("decodes all event types and passes strict schema validation", async () => {
