@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  type CapabilityEnvelope,
-  type DeploymentRecord,
-  type InvocationRecord,
-  type NormalizedSessionEvent,
-  type ToolManifest,
-  hashCanonicalContent,
-  normalizeSha256,
+import type {
+  CapabilityEnvelope,
+  DeploymentRecord,
+  InvocationRecord,
+  NormalizedSessionEvent,
+  ToolManifest,
 } from "@resin/contracts";
+import { hashCanonicalContent } from "@resin/contracts/canonical";
+import { normalizeSha256 } from "@resin/contracts/common";
 import type {
   AuthClaims,
   AuthScope,

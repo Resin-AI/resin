@@ -1,4 +1,4 @@
-import type { Dirent } from "node:fs";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -30,13 +30,82 @@ import {
 import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
+  type CodexTranscriptInspection,
   type CommandExecutor,
   type PathLookupFn,
+  discoverCodexTranscripts,
   probeCodexInstallation,
   resolveCodexPaths,
 } from "./discovery.js";
 import { CODEX_DEFAULT_REFRESH_CAPABILITY, handleCodexCatalogRefresh } from "./refresh.js";
 import { CodexSessionEventSource } from "./source.js";
+
+interface CodexSessionCatalog {
+  sessionRoot: string;
+  workspaces: HarnessWorkspace[];
+  sessionsByWorkspaceId: Map<string, HarnessSession[]>;
+  sessionsByRoot: Map<string, HarnessSession[]>;
+  unboundRoot: string;
+}
+
+function workspaceIdForCodexRoot(rootPath: string): string {
+  const slug = rootPath
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(-72);
+  const digest = createHash("sha256").update(rootPath).digest("hex").slice(0, 12);
+  return `ws_codex_${slug || "root"}_${digest}`;
+}
+
+function sessionForCodexTranscript(
+  inspection: CodexTranscriptInspection,
+  workspaceId: string,
+): HarnessSession {
+  const baseName = path.basename(inspection.fileName, path.extname(inspection.fileName));
+  const metadata: Record<string, unknown> = {
+    fileSizeBytes: inspection.fileSizeBytes,
+    fileName: inspection.fileName,
+    inspectedBytes: inspection.inspectedBytes,
+  };
+  if (inspection.cwd !== null) metadata.cwd = inspection.cwd;
+  if (inspection.nativeSessionId) metadata.nativeSessionId = inspection.nativeSessionId;
+  if (inspection.threadId) metadata.threadId = inspection.threadId;
+  if (inspection.rootId) metadata.rootId = inspection.rootId;
+
+  return {
+    sessionId: baseName.startsWith("sess_") ? baseName : `sess_${baseName}`,
+    workspaceId,
+    harnessId: CODEX_HARNESS_ID,
+    transcriptPath: inspection.filePath,
+    status: inspection.status,
+    createdAt: inspection.createdAt,
+    updatedAt: inspection.updatedAt,
+    metadata,
+  };
+}
+
+function createCodexWorkspace(
+  rootPath: string,
+  configPath: string,
+  configFormat: "toml" | "json",
+  sessionRoot: string,
+  unbound: boolean,
+): HarnessWorkspace {
+  return {
+    workspaceId: unbound ? "ws_codex_unbound" : workspaceIdForCodexRoot(rootPath),
+    harnessId: CODEX_HARNESS_ID,
+    name: unbound ? "Unbound Codex Sessions" : path.basename(rootPath) || rootPath,
+    rootPath,
+    configPath,
+    mcpConfigPath: configPath,
+    metadata: {
+      sessionRoot,
+      configFormat,
+      ...(unbound ? { unbound: true, source: "unbound" } : { source: "session_meta.cwd" }),
+    },
+  };
+}
 
 /**
  * Standard observation fidelity profile for Codex CLI.
@@ -99,6 +168,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   private readonly executor?: CommandExecutor;
   private readonly pathLookup?: PathLookupFn;
   private readonly capabilities: AdapterCapabilities;
+  private cachedCatalog?: CodexSessionCatalog;
 
   constructor(options?: CodexHarnessAdapterOptions) {
     this.fsBridge = options?.fsBridge ?? defaultFsBridge;
@@ -136,110 +206,93 @@ export class CodexHarnessAdapter implements HarnessAdapter {
     });
   }
 
-  /**
-   * Discovers available Codex workspaces.
-   */
-  async listWorkspaces(): Promise<HarnessWorkspace[]> {
+  private async discoverSessionCatalog(sessionRootOverride?: string): Promise<CodexSessionCatalog> {
     const resolved = await resolveCodexPaths({
       customConfigPath: this.customConfigPath,
       customSessionRoot: this.customSessionRoot,
     });
+    const sessionRoot = path.resolve(sessionRootOverride ?? resolved.sessionRoot);
+    const inspections = await discoverCodexTranscripts(sessionRoot);
+    const workspacesByRoot = new Map<string, HarnessWorkspace>();
+    const sessionsByWorkspaceId = new Map<string, HarnessSession[]>();
+    const sessionsByRoot = new Map<string, HarnessSession[]>();
+    const unknownRoot = "codex-unbound";
 
-    const defaultWorkspace: HarnessWorkspace = {
-      workspaceId: "ws_codex_default",
-      harnessId: CODEX_HARNESS_ID,
-      name: "Codex Default Workspace",
-      rootPath: resolved.homeDir,
-      configPath: resolved.configPath,
-      mcpConfigPath: resolved.configPath,
-      metadata: {
-        sessionRoot: resolved.sessionRoot,
-        configFormat: resolved.configFormat,
-      },
+    const getWorkspace = (rootPath: string, unbound: boolean): HarnessWorkspace => {
+      let workspace = workspacesByRoot.get(rootPath);
+      if (!workspace) {
+        workspace = createCodexWorkspace(
+          rootPath,
+          resolved.configPath,
+          resolved.configFormat,
+          sessionRoot,
+          unbound,
+        );
+        workspacesByRoot.set(rootPath, workspace);
+      }
+      return workspace;
     };
 
-    return [defaultWorkspace];
+    for (const inspection of inspections) {
+      const isUnbound = inspection.canonicalCwd === null;
+      const rootPath = inspection.canonicalCwd ?? unknownRoot;
+      const workspace = getWorkspace(rootPath, isUnbound);
+      const session = sessionForCodexTranscript(inspection, workspace.workspaceId);
+      const workspaceSessions = sessionsByWorkspaceId.get(workspace.workspaceId) ?? [];
+      workspaceSessions.push(session);
+      sessionsByWorkspaceId.set(workspace.workspaceId, workspaceSessions);
+      const rootSessions = sessionsByRoot.get(workspace.rootPath) ?? [];
+      rootSessions.push(session);
+      sessionsByRoot.set(workspace.rootPath, rootSessions);
+    }
+
+    if (workspacesByRoot.size === 0) getWorkspace(unknownRoot, true);
+    const workspaces = [...workspacesByRoot.values()].sort((left, right) => {
+      const leftUnbound = left.metadata?.unbound === true;
+      const rightUnbound = right.metadata?.unbound === true;
+      if (leftUnbound !== rightUnbound) return leftUnbound ? 1 : -1;
+      return left.rootPath.localeCompare(right.rootPath);
+    });
+    const catalog = {
+      sessionRoot,
+      workspaces,
+      sessionsByWorkspaceId,
+      sessionsByRoot,
+      unboundRoot: unknownRoot,
+    };
+    this.cachedCatalog = catalog;
+    return catalog;
+  }
+
+  /**
+   * Discovers available Codex workspaces.
+   */
+  async listWorkspaces(): Promise<HarnessWorkspace[]> {
+    const catalog = await this.discoverSessionCatalog();
+    return [...catalog.workspaces];
   }
 
   /**
    * Lists all sessions found in the workspace's session root directory.
    */
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
-    const sessions: HarnessSession[] = [];
     const metadataRoot = z.string().safeParse(workspace.metadata?.sessionRoot);
-    const sessionDir =
-      (metadataRoot.success ? metadataRoot.data : null) ??
-      path.join(workspace.rootPath, "sessions");
-    try {
-      const maxDepth = 6;
-      const collectFiles = async (dir: string, depth: number): Promise<string[]> => {
-        if (depth > maxDepth) return [];
-        let dirents: Dirent[];
-        try {
-          dirents = await fs.readdir(dir, { withFileTypes: true });
-        } catch {
-          return [];
-        }
-        const files: string[] = [];
-        for (const dirent of dirents) {
-          if (dirent.isSymbolicLink()) {
-            continue;
-          }
-          const fullPath = path.join(dir, dirent.name);
-          if (dirent.isDirectory()) {
-            const nested = await collectFiles(fullPath, depth + 1);
-            files.push(...nested);
-          } else if (
-            dirent.isFile() &&
-            (dirent.name.endsWith(".jsonl") || dirent.name.endsWith(".json"))
-          ) {
-            files.push(fullPath);
-          }
-        }
-        return files;
-      };
-
-      const transcriptFiles = await collectFiles(sessionDir, 0);
-
-      for (const filePath of transcriptFiles) {
-        try {
-          const stat = await fs.stat(filePath);
-          if (!stat.isFile()) continue;
-
-          const fileName = path.basename(filePath);
-          const baseName = path.basename(fileName, path.extname(fileName));
-          const sessionId = baseName.startsWith("sess_") ? baseName : `sess_${baseName}`;
-
-          const now = Date.now();
-          const isRecent = now - stat.mtimeMs < 5 * 60 * 1000; // 5 minutes
-
-          sessions.push({
-            sessionId,
-            workspaceId: workspace.workspaceId,
-            harnessId: CODEX_HARNESS_ID,
-            transcriptPath: filePath,
-            status: isRecent ? "active" : "completed",
-            createdAt: stat.birthtime.toISOString(),
-            updatedAt: stat.mtime.toISOString(),
-            metadata: {
-              fileSizeBytes: stat.size,
-              fileName,
-            },
-          });
-        } catch {
-          // Skip unreadable files
-        }
-      }
-    } catch {
-      // If root directory doesn't exist, return empty list
-      return [];
+    const requestedSessionRoot = metadataRoot.success ? path.resolve(metadataRoot.data) : null;
+    let catalog = this.cachedCatalog;
+    if (!catalog || (requestedSessionRoot && requestedSessionRoot !== catalog.sessionRoot)) {
+      catalog = await this.discoverSessionCatalog(requestedSessionRoot ?? undefined);
     }
 
-    return sessions.sort((a, b) => {
-      const timeDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-      if (timeDiff !== 0) return timeDiff;
-      return a.transcriptPath.localeCompare(b.transcriptPath);
-    });
+    const byWorkspaceId = catalog.sessionsByWorkspaceId.get(workspace.workspaceId);
+    if (byWorkspaceId) return [...byWorkspaceId];
+    if (workspace.metadata?.unbound === true) {
+      return [...(catalog.sessionsByRoot.get(catalog.unboundRoot) ?? [])];
+    }
+
+    const resolvedRoot = await fs
+      .realpath(workspace.rootPath)
+      .catch(() => path.resolve(workspace.rootPath));
+    return [...(catalog.sessionsByRoot.get(resolvedRoot) ?? [])];
   }
 
   /**
@@ -248,13 +301,13 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   async getActiveSession(workspace: HarnessWorkspace): Promise<HarnessSession | null> {
     const sessions = await this.listSessions(workspace);
     const active = sessions.find((s) => s.status === "active");
-    return active ?? (sessions.length > 0 ? (sessions[0] ?? null) : null);
+    return active ?? null;
   }
 
   /**
    * Creates an event source to tail and stream raw records from a Codex session.
    */
-  async createEventSource(
+  async openEventSource(
     session: HarnessSession,
     cursor?: SourceCursor,
   ): Promise<SessionEventSource> {

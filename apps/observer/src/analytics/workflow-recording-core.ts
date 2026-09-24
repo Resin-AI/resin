@@ -12,7 +12,6 @@
  */
 
 import type {
-  AgentArgumentOrigin,
   RecordedWorkflow,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
@@ -87,7 +86,7 @@ const inputTypeOf = (
  * names nothing stays unresolved rather than being guessed from a matching value.
  */
 function bindCarrierOrigin(
-  origin: AgentArgumentOrigin,
+  origin: WorkflowCallCarrier["origins"][string],
   aliasByScopeCall: Map<string, string>,
   stepIdByCallId: Map<string, string>,
   eventSessionId: string,
@@ -139,7 +138,7 @@ function bindCarrierOrigin(
         ),
       };
     default:
-      // literal / input / private carry through verbatim.
+      // Literal/input/private leaves and native program projections carry through verbatim.
       return origin;
   }
 }
@@ -149,7 +148,7 @@ function bindCarrierOrigin(
  * inputs, references and private leaves have no uploadable value, so they read as null.
  * The executable template comes from the origin itself, never from this value.
  */
-function carrierArgumentValue(origin: AgentArgumentOrigin): WorkflowJsonValue {
+function carrierArgumentValue(origin: WorkflowCallCarrier["origins"][string]): WorkflowJsonValue {
   switch (origin.type) {
     case "literal":
       return origin.value;

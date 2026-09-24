@@ -11,12 +11,10 @@ import { reconstructWorkflowFromEvents } from "./workflow-recording-core.js";
 
 export {
   acceptInputProposals,
-  proposeInputsFromVariation,
   recordWorkflowRecipe,
 } from "./workflow-recipe-builder.js";
 export type {
   InputProposal,
-  InputProposalSet,
   RecordedArgumentOrigin,
   RecordedCallObservation,
   RecordedRecipe,

@@ -297,6 +297,25 @@ export class RedactionEngine {
   }
 
   /**
+   * Produces a source view eligible for projection, never an executable replacement for the
+   * locally retained original. Disabled scanning or truncation cannot authorize source sharing.
+   */
+  redactProgramSource(source: string): RedactedStringResult | undefined {
+    if (
+      !this.config.enabled ||
+      !this.config.scanContent ||
+      !this.config.redactHighEntropy ||
+      this.config.strategy === "none"
+    ) {
+      return undefined;
+    }
+    const result = this.redactString(source, "program");
+    return result.patterns.some((pattern) => pattern.startsWith("truncation:"))
+      ? undefined
+      : result;
+  }
+
+  /**
    * Deeply transforms and redacts any value (object, array, string, primitive).
    */
   redact<T = unknown>(

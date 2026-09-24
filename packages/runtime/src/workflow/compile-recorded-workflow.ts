@@ -171,7 +171,10 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
   };
   const properties: Record<string, unknown> = {};
   for (const input of plan.inputs) {
-    properties[input.name] = { type: JSON_SCHEMA_TYPES[input.type] ?? "string" };
+    properties[input.name] = {
+      type: JSON_SCHEMA_TYPES[input.type] ?? "string",
+      ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
+    };
   }
 
   return {
@@ -181,7 +184,9 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
     inputSchema: {
       type: "object",
       properties,
-      required: plan.inputs.map((input) => input.name),
+      required: plan.inputs
+        .filter((input) => !Object.hasOwn(input, "default"))
+        .map((input) => input.name),
       additionalProperties: false,
     },
     outputContract: { fromStep: last.id, callable: last.callable.name },

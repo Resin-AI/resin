@@ -20,16 +20,23 @@ import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
   type ProgramLanguage,
+  ProgramSourceProjectionError,
+  ProgramTokenizationError,
   type WorkflowArgumentProvenance,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
   type WorkflowValuePath,
   analyzeAgentArguments,
+  analyzeProgramSourceProjection,
+  applyProgramTokenValues,
   tokenizeProgram,
 } from "@resin/contracts";
 import {
+  isLocalWorkflowResultSuppressed,
   localWorkflowEvent,
   localWorkflowResultObservation,
+  redactLocalWorkflowProgramSource,
+  retainLocalWorkflowPayload,
 } from "../normalization/local-workflow-payload.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
@@ -101,10 +108,6 @@ interface LocalCall {
   resultComparison?: "text-trim";
   reads?: string[];
   writes?: string[];
-  /** The callable's discovered input schema, when discovery recorded one. */
-  inputSchema?: WorkflowJsonValue;
-  /** Arguments this call kept as local resources rather than as caller values. */
-  privateArguments?: string[];
   /**
    * The program this call ran: the language its record established and the argument whose text
    * holds it. Kept so the derivation can read the text as the program it is rather than as one
@@ -113,7 +116,7 @@ interface LocalCall {
   program?: {
     kind: ProgramLanguage;
     argument: string;
-    sourceInterface?: "python-eval" | "javascript-eval";
+    sourceInterface?: "python-eval" | "javascript-eval" | "codex-exec";
   };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
@@ -141,8 +144,6 @@ interface SessionDerivationState {
   position: number;
   /** The current execution, which is the last one seen. */
   executions: LocalExecution[];
-  /** The first value each argument position took, for comparing later tasks against it. */
-  baseline: Map<string, WorkflowJsonValue>;
   /**
    * A new instruction arrived, so the next call begins a new piece of work. A task boundary is what
    * a person means by "and then I asked for it again"; it is the only boundary a harness reports
@@ -155,8 +156,6 @@ interface SessionDerivationState {
 const MAX_LOCAL_CALLS = 64;
 /** Sessions retained before the least recently used is dropped. */
 const MAX_SESSIONS = 16;
-/** Shortest string offered as a caller-input candidate, for the same reason as a binding. */
-const MIN_INPUT_CANDIDATE_LENGTH = 4;
 
 function isPlainObject(value: unknown): value is Record<string, WorkflowJsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -185,7 +184,6 @@ export class WorkflowCallRecorder {
   /** The workspace owner stamped on every private entry for the current observation. */
   private observeAccess: PrivateValueOrigin | undefined;
   private privateRepresentation: "literal" | "redacted" = "redacted";
-  private redactedArguments: Record<string, unknown> | undefined;
   /**
    * What each session's discovery events reported about the callables it saw, keyed by the name the
    * harness called them by and then by the connection that reported it. Discovery is per session
@@ -227,7 +225,6 @@ export class WorkflowCallRecorder {
       turnKey: "",
       position: 0,
       executions: [],
-      baseline: new Map(),
       newExecutionPending: false,
     };
     this.sessions.set(sessionId, created);
@@ -287,7 +284,9 @@ export class WorkflowCallRecorder {
     this.observeAccess = this.privateValueOwnerWorkspaceId
       ? { workspaceId: this.privateValueOwnerWorkspaceId }
       : access;
-    this.redactedArguments = event.type === "tool_call" ? event.parameters : undefined;
+    if (event.type === "tool_result" && isLocalWorkflowResultSuppressed(event)) {
+      retainLocalWorkflowPayload(event, { result: event.result }, { suppressResult: true });
+    }
     const original = localWorkflowEvent(event);
     this.privateRepresentation =
       original !== undefined || event.redaction?.isRedacted === false ? "literal" : "redacted";
@@ -324,12 +323,15 @@ export class WorkflowCallRecorder {
     }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
-      const observed = this.observeResult(
-        original ?? event,
-        event,
-        localWorkflowResultObservation(event),
-      );
-      return { ...event, metadata: observed.metadata };
+      const resultObservation = localWorkflowResultObservation(event);
+      const observed = this.observeResult(original ?? event, event, resultObservation);
+      const resultEvent = { ...event, metadata: observed.metadata };
+      if (resultObservation !== undefined) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
+      } else if (isLocalWorkflowResultSuppressed(event)) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
+      }
+      return resultEvent;
     }
     return event;
   }
@@ -405,8 +407,8 @@ export class WorkflowCallRecorder {
       this.privateRepresentation = "redacted";
       return this.observeComposedCall(event);
     }
-    const observed = this.observeNativeCall(localWorkflowEvent(event) ?? event);
-    // Only reference-bearing metadata leaves the local raw view.
+    const observed = this.observeNativeCall(localWorkflowEvent(event) ?? event, event);
+    // Originals remain local; only references and an engine-scrubbed source view can leave.
     return { ...event, metadata: observed.metadata };
   }
 
@@ -458,10 +460,9 @@ export class WorkflowCallRecorder {
   /**
    * Records a call the model made with an ordinary tool.
    *
-   * The values and the program of an ordinary call are the user's own work, and they stay on this
-   * machine: every argument leaf, and the program text itself, is replaced by a local reference the
-   * executor resolves at invocation time. What travels is the structure — which callable, over which
-   * connection, with which argument names — plus the conclusions the record supports.
+   * Ordinary argument values and the complete executable program stay on this machine behind
+   * local references. A program may additionally expose a parser-aligned, secret-redacted source
+   * view produced by the normalization engine; that view is never the executable source.
    *
    * Those conclusions need the values, so they are reached here, on the pre-privacy record, and
    * travel as conclusions: the calls this one must follow because of declared resource use, and the
@@ -469,10 +470,11 @@ export class WorkflowCallRecorder {
    */
   private observeNativeCall(
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    normalizedEvent: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
   ): NormalizedSessionEvent {
     const parameters = isPlainObject(event.parameters) ? event.parameters : {};
     const program = this.programOf(event, parameters);
-    const origins: Record<string, AgentArgumentOrigin> = {};
+    const origins: WorkflowCallCarrier["origins"] = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     // Ordinary native JSON is data, not the explicit composition interface.
     for (const [argument, value] of Object.entries(parameters)) {
@@ -483,6 +485,9 @@ export class WorkflowCallRecorder {
         [argument],
       );
       provenance[argument] = { standing: "derived", rule: "single-observation" };
+    }
+    if (program !== undefined) {
+      this.projectProgramSource(normalizedEvent, parameters, program, origins);
     }
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
     const connection = event.connection ?? discovered?.provider;
@@ -513,7 +518,22 @@ export class WorkflowCallRecorder {
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
-    if (relationships.candidates.length > 0) carrier.candidates = relationships.candidates;
+    if (relationships.candidates.length > 0) {
+      const projected = program?.argument === undefined ? undefined : origins[program.argument];
+      const protectedTokens = projected?.type === "program" ? projected.protectedTokens : undefined;
+      const candidates =
+        protectedTokens === undefined || protectedTokens.length === 0
+          ? relationships.candidates
+          : relationships.candidates.filter(
+              (candidate) =>
+                candidate.argument !== program?.argument ||
+                candidate.path.length !== 2 ||
+                candidate.path[0] !== "tokens" ||
+                typeof candidate.path[1] !== "number" ||
+                !protectedTokens.includes(candidate.path[1]),
+            );
+      if (candidates.length > 0) carrier.candidates = candidates;
+    }
     return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
   }
 
@@ -627,9 +647,6 @@ export class WorkflowCallRecorder {
     const execution = state.executions[state.executions.length - 1]!;
     const flow = declaredFlowOfToolCall(event);
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
-    const heldLocally = Object.entries(this.redactedArguments ?? parameters)
-      .filter(([, value]) => typeof value === "string" && containsRedactionPlaceholder(value))
-      .map(([argument]) => argument);
     const call: LocalCall = {
       callId: event.callId,
       toolName: event.toolName,
@@ -645,8 +662,6 @@ export class WorkflowCallRecorder {
           this.localReference(value, event.sessionId, event.callId, `argument:${argument}`),
         ]),
       ),
-      ...(discovered?.inputSchema === undefined ? {} : { inputSchema: discovered.inputSchema }),
-      ...(heldLocally.length === 0 ? {} : { privateArguments: heldLocally }),
       // Only a program whose text arrived in a named argument can be read as a program here: with
       // no argument there is no text to tokenize, and a program that only arrived as an argv has no
       // token positions to address.
@@ -750,11 +765,8 @@ export class WorkflowCallRecorder {
    * A suggestion is never a binding. The only value offered as a result binding is one that first
    * appeared in an earlier call's result — a value the record already contained before that call
    * produced it is not evidence of anything, and offering it would turn a coincidence into a
-   * dependency. An argument that took a different value in another task is offered as a caller
-   * input: evidence that the value is not a constant of the work, not proof that a caller supplies
-   * it. A program argument is never offered whole, because replacing it would replace the work:
-   * a program that ran with one token's text changed is offered token by token, and only when the
-   * two texts read as the same program. Both are reported, neither executes.
+   * dependency. A program argument is never offered whole, because replacing it would replace the
+   * work: a result-derived value embedded in a program is offered at its token position.
    */
   private relateLocalCall(
     state: SessionDerivationState,
@@ -776,8 +788,7 @@ export class WorkflowCallRecorder {
       }
     }
 
-    // What the calls of this execution establish about their own arguments, reached before the
-    // variation rule below because it is what owns a token an earlier call produced.
+    // What the calls of this execution establish about their own arguments.
     const index = calls.indexOf(call);
     const ownStepId = index < 0 ? undefined : `local${index}`;
     const derivation = deriveNativeCalls(
@@ -788,120 +799,13 @@ export class WorkflowCallRecorder {
         runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
         arguments: entry.arguments,
         ...(entry.result === undefined ? {} : { result: entry.result }),
-        ...(entry.inputSchema === undefined ? {} : { inputSchema: entry.inputSchema }),
-        ...(entry.privateArguments === undefined
-          ? {}
-          : { privateArguments: entry.privateArguments }),
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
     );
-    /** Positions an earlier call produced; the producer rule owns them instead of variation. */
-    const producedPositions = new Set<string>();
-    for (const candidate of derivation.candidates) {
-      if (candidate.stepId !== ownStepId || candidate.proposed.kind !== "result") continue;
-      producedPositions.add(JSON.stringify([candidate.argument, candidate.path]));
-    }
-
-    // The same argument position, in another task, with a different value.
-    for (const [argument, value] of Object.entries(call.arguments)) {
-      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-        continue;
-      }
-      const key = JSON.stringify([call.connection ?? null, call.toolName, call.position, argument]);
-      const previous = state.baseline.get(key);
-      if (previous === undefined) {
-        state.baseline.set(key, value);
-        continue;
-      }
-      if (JSON.stringify(previous) === JSON.stringify(value)) continue;
-      if (typeof previous !== typeof value) continue;
-      // A program argument is the work: replacing the whole of it would replace what the tool does,
-      // so it is offered only token by token — and only when the two texts read as the same program
-      // with the text of some of its tokens changed. Anything else is a different program, and a
-      // position inside one program is not a position inside another.
-      if (call.program?.argument === argument) {
-        if (typeof value === "string" && typeof previous === "string") {
-          const tokens = tokenizeProgram(call.program.kind, value);
-          const earlierTokens = tokenizeProgram(call.program.kind, previous);
-          const changed: number[] = [];
-          let aligned = tokens.length === earlierTokens.length;
-          if (aligned) {
-            for (const [tokenIndex, token] of tokens.entries()) {
-              const earlierToken = earlierTokens[tokenIndex]!;
-              // A kind that changed, or an operator whose text changed, is a change in the program
-              // itself: an operator denotes no value, so it is never a position offered here.
-              if (token.kind !== earlierToken.kind) {
-                aligned = false;
-                break;
-              }
-              if (token.kind === "operator" && token.raw !== earlierToken.raw) {
-                aligned = false;
-                break;
-              }
-              if (token.raw !== earlierToken.raw) changed.push(tokenIndex);
-            }
-          }
-          if (aligned) {
-            for (const tokenIndex of changed) {
-              // A token an earlier call of this execution produced is that call's output, and the
-              // producer rule already offers it at this position; a second candidate on one token
-              // would be decided against the first.
-              if (producedPositions.has(JSON.stringify([argument, ["tokens", tokenIndex]])))
-                continue;
-              candidates.push({
-                argument,
-                path: ["tokens", tokenIndex],
-                proposed: {
-                  kind: "input",
-                  name: `${call.toolName}_${argument}_${tokenIndex}`.replace(
-                    /[^A-Za-z0-9_]+/g,
-                    "_",
-                  ),
-                  type: "string",
-                },
-                reason: "varies-across-executions",
-                evidence: { tasks: 2, tokens: tokens.length, token: tokenIndex },
-                missing:
-                  "this token took a different text in another task, but no task used a value the record had never seen, so the record does not establish that a caller supplies it",
-              });
-            }
-          }
-        }
-        continue;
-      }
-      // A changed value that still came from an earlier step is data flow, not a caller input.
-      if (producedPositions.has(JSON.stringify([argument, []]))) continue;
-      if (typeof value === "string" && value.length < MIN_INPUT_CANDIDATE_LENGTH) continue;
-      candidates.push({
-        argument,
-        path: [],
-        proposed: {
-          kind: "input",
-          name: `${call.toolName}_${argument}`.replace(/[^A-Za-z0-9_]+/g, "_"),
-          type:
-            typeof value === "string" ? "string" : typeof value === "number" ? "number" : "boolean",
-        },
-        reason: "varies-across-executions",
-        evidence: { tasks: 2 },
-        missing:
-          "this argument took a different value in an earlier task, but no task used a value the record had never seen, so the record does not establish that a caller supplies it",
-      });
-    }
-
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
       if (candidate.stepId !== ownStepId) continue;
-      if (candidate.proposed.kind === "input") {
-        candidates.push({
-          argument: candidate.argument,
-          path: candidate.path,
-          proposed: candidate.proposed,
-          reason: candidate.reason,
-          ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
-          missing: candidate.missing,
-        });
-        continue;
-      }
+      if (candidate.proposed.kind !== "result") continue;
       const producingIndex = Number.parseInt(candidate.proposed.stepId.slice("local".length), 10);
       const producingCall = calls[producingIndex];
       if (producingCall === undefined) continue;
@@ -925,9 +829,9 @@ export class WorkflowCallRecorder {
    * read or write is not execution. Neither is decided by a list of tool names, and a plain shell
    * chain is preserved whole — its operators, pipes, redirections and exit status are part of it.
    *
-   * The program text is not carried: it is the user's own work, so it stays in the local value store
-   * behind the argument it arrived in, and the host resolves it before running. What travels is that
-   * this call WAS a program, which language it was, and which argument holds it.
+   * A program starts with opaque source authority behind its named argument. Only the later
+   * trusted normalization projection can expose a scrubbed view; runtime still resolves the
+   * complete original locally before applying any approved token bindings.
    */
   private programOf(
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
@@ -956,14 +860,23 @@ export class WorkflowCallRecorder {
       if (frame.rejectionReason !== undefined || frame.executionScope === "file_observation") {
         continue;
       }
-      const interfaceMatchesFrame =
+      const codexExecFrameMatches =
+        frame.sourceInterface === "codex-exec" &&
+        frame.executionScope === "isolated" &&
+        frame.language === "javascript" &&
+        typeof parameters.raw === "string" &&
+        frame.source === parameters.raw;
+      const evalInterfaceMatchesFrame =
         sourceInterface !== undefined &&
         frame.executionScope === "persistent" &&
         frame.source === parameters.code &&
         ((sourceInterface === "python-eval" && frame.language === "python") ||
           (sourceInterface === "javascript-eval" && frame.language === "javascript"));
       const program: WorkflowRecordedProgram = { kind: frame.language, source: "" };
-      if (interfaceMatchesFrame && sourceInterface !== undefined) {
+      if (codexExecFrameMatches) {
+        program.argument = "raw";
+        program.sourceInterface = "codex-exec";
+      } else if (evalInterfaceMatchesFrame && sourceInterface !== undefined) {
         program.argument = "code";
         program.sourceInterface = sourceInterface;
       } else {
@@ -973,6 +886,66 @@ export class WorkflowCallRecorder {
       return program;
     }
     return undefined;
+  }
+
+  /** Exposes a source view only when the real redactor and canonical parser both accept it. */
+  private projectProgramSource(
+    event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    parameters: Record<string, WorkflowJsonValue>,
+    program: WorkflowRecordedProgram,
+    origins: WorkflowCallCarrier["origins"],
+  ): void {
+    // The shell tokenizer is a conservative lexer, not a syntax parser. It cannot attest to a
+    // parseable source projection; retain its existing private-source representation.
+    if (program.argument === undefined || program.kind === "shell") return;
+    const original = parameters[program.argument];
+    const origin = origins[program.argument];
+    if (typeof original !== "string" || origin?.type !== "private") return;
+    const scrubbed = redactLocalWorkflowProgramSource(event, original);
+    if (scrubbed === undefined) return;
+
+    try {
+      const sourceTokens = tokenizeProgram(program.kind, scrubbed.redactedText);
+      let replacements: Map<number, string> | undefined;
+      for (const [index, token] of sourceTokens.entries()) {
+        if (token.kind !== "string" || typeof token.value !== "string") continue;
+        // Scan decoded static literals too, so escaping a credential does not bypass the same
+        // engine that already inspected the complete source and its assignment context.
+        const decoded = redactLocalWorkflowProgramSource(event, token.value);
+        if (decoded === undefined) return;
+        if (!decoded.changed) continue;
+        if (!token.bindable) return;
+        replacements ??= new Map();
+        replacements.set(index, decoded.redactedText);
+      }
+      const source =
+        replacements === undefined
+          ? scrubbed.redactedText
+          : applyProgramTokenValues(
+              scrubbed.redactedText,
+              sourceTokens,
+              replacements,
+              program.kind,
+            );
+      const projection = analyzeProgramSourceProjection(program.kind, original, source);
+      origins[program.argument] = {
+        type: "program",
+        language: program.kind,
+        source: { type: "literal", value: source },
+        sourceReference: origin.reference,
+        protectedTokens: projection.protectedTokens,
+        holes: [],
+      };
+      program.source = source;
+    } catch (error) {
+      if (
+        error instanceof ProgramTokenizationError ||
+        error instanceof ProgramSourceProjectionError
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 
   /** The top-level argument that carries this program text, so a host can resolve it before running. */
@@ -1025,7 +998,7 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (event.isError === false) {
+        if (event.isError === false && !isLocalWorkflowResultSuppressed(publicEvent)) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
         }

@@ -7,9 +7,9 @@ import {
   type CommandCapability,
   type FsCapability,
   type NetCapability,
-  RedactionStrategySchema,
   type SecretCapability,
-} from "@resin/contracts";
+} from "@resin/contracts/capabilities";
+import { RedactionStrategySchema } from "@resin/contracts/common";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";

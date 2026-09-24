@@ -3,7 +3,6 @@ import { projectEventToMetadataOnly } from "../../src/analytics/metadata-project
 import {
   type RecordedCallObservation,
   acceptInputProposals,
-  proposeInputsFromVariation,
   recordCallsFromEvents,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
@@ -378,89 +377,85 @@ describe("workflow recipe recording", () => {
     expect(validateRecordedWorkflow(recipe.workflow)).toEqual({ valid: true, errors: [] });
   });
 
-  it("proposes inputs from variation without changing the executable workflow", () => {
-    const demonstration = (source: string, retries: number): RecordedCallObservation[] => [
+  it("applies explicitly authored proposals without changing the recorded workflow", () => {
+    const recipe = recordWorkflowRecipe("wf_explicit", [
       {
-        callId: `call_${source}`,
-        causalSequence: 1,
+        callId: "call_fetch",
         callable: { runtime: "unfamiliar-protocol", name: "vendor.fetch" },
-        arguments: { source, retries, mode: "full" },
+        arguments: { source: "alpha", retries: 1, mode: "full" },
         argumentOrigins: {
-          source: { type: "literal", value: source },
-          retries: { type: "literal", value: retries },
+          source: { type: "literal", value: "alpha" },
+          retries: { type: "literal", value: 1 },
           mode: { type: "literal", value: "full" },
         },
-        result: { body: { text: `text-${source}` } },
+        result: { body: "text-alpha" },
         observed: "succeeded",
       },
+    ])!;
+    const proposals = [
+      { name: "source", from: "step0.source", type: "string" as const, seenValues: ["alpha"] },
+      { name: "retries", from: "step0.retries", type: "number" as const, seenValues: [1] },
     ];
+    const accepted = acceptInputProposals(recipe.workflow, proposals);
 
-    const first = recordWorkflowRecipe("wf_variation", demonstration("alpha", 1))!;
-    const second = recordWorkflowRecipe("wf_variation", demonstration("beta", 5))!;
-    const proposalSet = proposeInputsFromVariation([first, second])!;
-
-    // The workflow is exactly as recorded until a proposal is accepted.
-    expect(proposalSet.workflow.inputs).toEqual([]);
-    expect(leaf(proposalSet.workflow.steps[0]!.arguments[0]!.source)).toEqual({
+    expect(recipe.workflow.inputs).toEqual([]);
+    expect(leaf(recipe.workflow.steps[0]!.arguments[0]!.source)).toEqual({
       type: "literal",
       value: "alpha",
     });
-    expect(proposalSet.proposals).toEqual([
-      { name: "step0_source", from: "step0.source", type: "string", seenValues: ["alpha", "beta"] },
-      { name: "step0_retries", from: "step0.retries", type: "number", seenValues: [1, 5] },
+    expect(accepted.inputs).toEqual([
+      { name: "source", type: "string" },
+      { name: "retries", type: "number" },
     ]);
-
-    // Accepting is deliberate and is the only step that changes the executable workflow.
-    const accepted = acceptInputProposals(proposalSet.workflow, proposalSet.proposals);
     expect(leaf(accepted.steps[0]!.arguments[0]!.source)).toEqual({
       type: "input",
-      name: "step0_source",
+      name: "source",
     });
-    expect(accepted.inputs).toEqual([
-      { name: "step0_source", type: "string" },
-      { name: "step0_retries", type: "number" },
-    ]);
-    // A constant that never varied is not proposed.
-    expect(proposalSet.proposals.map((proposal) => proposal.name)).not.toContain("step0_mode");
+    expect(leaf(accepted.steps[0]!.arguments[1]!.source)).toEqual({
+      type: "input",
+      name: "retries",
+    });
+    expect(leaf(accepted.steps[0]!.arguments[2]!.source)).toEqual({
+      type: "literal",
+      value: "full",
+    });
+    expect(validateRecordedWorkflow(accepted)).toEqual({ valid: true, errors: [] });
   });
-
-  it("never proposes replacing an established binding", () => {
-    const demonstration = (source: string): RecordedCallObservation[] => [
+  it("preserves recorded result bindings when an explicit proposal targets another argument", () => {
+    const recipe = recordWorkflowRecipe("wf_binding", [
       {
-        callId: `call_source_${source}`,
+        callId: "call_source",
         causalSequence: 1,
         callable: { runtime: "unfamiliar-program", name: "local-read" },
-        arguments: { path: source },
-        argumentOrigins: { path: { type: "literal", value: source } },
-        result: { id: `row-${source}` },
+        arguments: { path: "alpha" },
+        argumentOrigins: { path: { type: "literal", value: "alpha" } },
+        result: { id: "row-alpha" },
         observed: "succeeded",
       },
       {
-        callId: `call_use_${source}`,
+        callId: "call_use",
         causalSequence: 2,
         callable: { runtime: "unfamiliar-program", name: "local-send" },
-        arguments: { id: `row-${source}` },
+        arguments: { id: "row-alpha" },
         argumentOrigins: { id: { type: "result", stepId: "step0", path: ["id"] } },
         result: { ok: true },
         observed: "succeeded",
       },
-    ];
-
-    const proposalSet = proposeInputsFromVariation([
-      recordWorkflowRecipe("wf_binding", demonstration("alpha"))!,
-      recordWorkflowRecipe("wf_binding", demonstration("beta"))!,
     ])!;
-
-    // The changing intermediate stays a dependency: nothing about it is proposed.
-    expect(proposalSet.proposals.map((proposal) => proposal.from)).toEqual(["step0.path"]);
-    const accepted = acceptInputProposals(proposalSet.workflow, proposalSet.proposals);
+    const accepted = acceptInputProposals(recipe.workflow, [
+      { name: "path", from: "step0.path", type: "string", seenValues: ["alpha"] },
+    ]);
+    expect(leaf(accepted.steps[0]!.arguments[0]!.source)).toEqual({
+      type: "input",
+      name: "path",
+    });
     expect(leaf(accepted.steps[1]!.arguments[0]!.source)).toEqual({
       type: "result",
       stepId: "step0",
       path: ["id"],
     });
+    expect(validateRecordedWorkflow(accepted)).toEqual({ valid: true, errors: [] });
   });
-
   it("records a workflow from captured events, pairing results by call identity", () => {
     const events = [
       {

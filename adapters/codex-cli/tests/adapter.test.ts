@@ -5,6 +5,15 @@ import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { CodexCliAdapter, CodexHarnessAdapter } from "../src/adapter.js";
 
+function rolloutRecord(
+  type: string,
+  payload: Record<string, unknown>,
+  ordinal: number,
+  timestamp = "2026-09-23T12:00:00.000Z",
+): string {
+  return `${JSON.stringify({ timestamp, ordinal, type, payload })}\n`;
+}
+
 describe("CodexHarnessAdapter", () => {
   it("initializes with correct id, name, and version", () => {
     const adapter = new CodexHarnessAdapter();
@@ -67,16 +76,219 @@ describe("CodexHarnessAdapter", () => {
     expect(sessions).toHaveLength(2);
 
     const activeSession = await adapter.getActiveSession(ws);
-    expect(activeSession).toBeDefined();
     expect(["sess_01", "sess_02"]).toContain(activeSession?.sessionId);
 
     // Create event source from session
-    const source = await adapter.createEventSource(activeSession!);
-    expect(source).toBeDefined();
+    const source = await adapter.openEventSource(activeSession!);
     const records = await source.readNext();
-    expect(records.length).toBeGreaterThanOrEqual(1);
+    expect(records.map((record) => record.rawPayload)).toEqual([
+      {
+        type: "user_message",
+        content: activeSession?.sessionId === "sess_01" ? "Hi" : "Hello",
+      },
+    ]);
 
     await source.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("groups sessions by recorded cwd and isolates sessions without a usable cwd", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-project-attribution-test-"));
+    const sessionsDir = path.join(tempDir, "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sessionsDir, "project-a.jsonl"),
+      rolloutRecord(
+        "session_meta",
+        {
+          session_id: "native-session-a",
+          id: "native-thread-a",
+          root_thread_id: "native-root-a",
+          cwd: "/recorded/project-a",
+        },
+        0,
+        "2020-01-02T03:04:05.000Z",
+      ) + rolloutRecord("event_msg", { type: "task_complete" }, 1),
+    );
+    await fs.utimes(path.join(sessionsDir, "project-a.jsonl"), new Date(), new Date());
+    await fs.writeFile(
+      path.join(sessionsDir, "project-b.jsonl"),
+      rolloutRecord(
+        "session_meta",
+        { session_id: "native-session-b", id: "native-thread-b", cwd: "/recorded/project-b" },
+        0,
+      ) + rolloutRecord("event_msg", { type: "task_started" }, 1),
+    );
+    await fs.writeFile(
+      path.join(sessionsDir, "unknown.jsonl"),
+      rolloutRecord(
+        "session_meta",
+        {
+          session_id: "native-session-unknown",
+          id: "native-thread-unknown",
+        },
+        0,
+      ),
+    );
+
+    const adapter = new CodexHarnessAdapter({ customSessionRoot: sessionsDir });
+    const workspaces = await adapter.listWorkspaces();
+    const workspaceA = workspaces.find((workspace) => workspace.rootPath === "/recorded/project-a");
+    const workspaceB = workspaces.find((workspace) => workspace.rootPath === "/recorded/project-b");
+    const unboundWorkspace = workspaces.find((workspace) => workspace.metadata?.unbound === true);
+
+    expect(workspaceA).toBeDefined();
+    expect(workspaceB).toBeDefined();
+    expect(unboundWorkspace?.rootPath).toBe("codex-unbound");
+    expect(path.isAbsolute(unboundWorkspace!.rootPath)).toBe(false);
+    expect(
+      workspaces.some((workspace) => workspace.rootPath === path.join(os.homedir(), ".codex")),
+    ).toBe(false);
+
+    const sessionsA = await adapter.listSessions(workspaceA!);
+    const sessionsB = await adapter.listSessions(workspaceB!);
+    const unboundSessions = await adapter.listSessions(unboundWorkspace!);
+    expect(sessionsA.map((session) => session.sessionId)).toEqual(["sess_project-a"]);
+    expect(sessionsB.map((session) => session.sessionId)).toEqual(["sess_project-b"]);
+    expect(unboundSessions.map((session) => session.sessionId)).toEqual(["sess_unknown"]);
+    expect(sessionsA[0]?.status).toBe("completed");
+    expect(sessionsB[0]?.status).toBe("active");
+    expect(await adapter.getActiveSession(workspaceA!)).toBeNull();
+    expect((await adapter.getActiveSession(workspaceB!))?.sessionId).toBe("sess_project-b");
+    expect(sessionsA[0]?.metadata).toMatchObject({
+      cwd: "/recorded/project-a",
+      nativeSessionId: "native-session-a",
+      threadId: "native-thread-a",
+      rootId: "native-root-a",
+    });
+    expect(sessionsA[0]?.createdAt).toBe("2020-01-02T03:04:05.000Z");
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("derives completed, resumed, interrupted, and failed states from native events", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-native-lifecycle-test-"));
+    const sessionsDir = path.join(tempDir, "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const projectCwd = "/recorded/lifecycle-project";
+    const sessionMeta = rolloutRecord(
+      "session_meta",
+      {
+        session_id: "native-id",
+        id: "native-thread",
+        cwd: projectCwd,
+        base_instructions: "Preserve the project's recorded execution context.\n".repeat(900),
+      },
+      0,
+    );
+    const writeSession = (name: string, events: string) =>
+      fs.writeFile(path.join(sessionsDir, name), sessionMeta + events);
+
+    await writeSession("completed.jsonl", rolloutRecord("event_msg", { type: "task_complete" }, 1));
+    await writeSession(
+      "reopened.jsonl",
+      rolloutRecord("event_msg", { type: "task_complete" }, 1) +
+        rolloutRecord("event_msg", { type: "task_started" }, 2),
+    );
+    await writeSession(
+      "interrupted.jsonl",
+      rolloutRecord("event_msg", { type: "task_complete" }, 1) +
+        rolloutRecord("event_msg", { type: "turn_aborted" }, 2),
+    );
+    await writeSession(
+      "failed.jsonl",
+      rolloutRecord("event_msg", { type: "task_complete", error: "command failed" }, 1),
+    );
+    const largeEvents =
+      Array.from({ length: 40 }, (_, index) =>
+        rolloutRecord("response_item", { type: "message", text: "x".repeat(1024) }, index + 1),
+      ).join("") + rolloutRecord("event_msg", { type: "task_complete" }, 41);
+    await writeSession("bounded.jsonl", largeEvents);
+
+    const adapter = new CodexHarnessAdapter({ customSessionRoot: sessionsDir });
+    const workspace = (await adapter.listWorkspaces()).find(
+      (candidate) => candidate.rootPath === projectCwd,
+    )!;
+    const sessions = await adapter.listSessions(workspace);
+    const statuses = Object.fromEntries(
+      sessions.map((session) => [session.sessionId, session.status]),
+    );
+    expect(statuses).toEqual({
+      sess_completed: "completed",
+      sess_reopened: "active",
+      sess_interrupted: "interrupted",
+      sess_failed: "failed",
+      sess_bounded: "completed",
+    });
+    const boundedSession = sessions.find((session) => session.sessionId === "sess_bounded");
+    expect(boundedSession?.metadata.cwd).toBe(projectCwd);
+    expect(Number(boundedSession?.metadata.inspectedBytes)).toBeLessThanOrEqual(
+      1024 * 1024 + 16 * 1024 + 1,
+    );
+    expect(Number(boundedSession?.metadata.fileSizeBytes)).toBeGreaterThan(
+      Number(boundedSession?.metadata.inspectedBytes),
+    );
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("keeps incomplete and invalid headers unbound, then discovers a completed growing header", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-growing-header-test-"));
+    const sessionsDir = path.join(tempDir, "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const partialPath = path.join(sessionsDir, "partial-header.jsonl");
+    const header = JSON.stringify({
+      timestamp: "2026-09-23T12:00:00.000Z",
+      ordinal: 0,
+      type: "session_meta",
+      payload: { session_id: "native-partial", id: "thread-partial", cwd: "/recorded/growing" },
+    });
+    await fs.writeFile(partialPath, header.slice(0, -1));
+    await fs.writeFile(
+      path.join(sessionsDir, "invalid-header.jsonl"),
+      '{"type":"session_meta","payload":{"cwd":42}}\n',
+    );
+
+    const overCapTranscript =
+      rolloutRecord(
+        "session_meta",
+        {
+          session_id: "over-cap-session",
+          id: "over-cap-thread",
+          cwd: "/recorded/over-cap",
+          base_instructions: "x".repeat(1024 * 1024 + 20 * 1024),
+        },
+        0,
+      ) + rolloutRecord("event_msg", { type: "task_complete" }, 1);
+    await fs.writeFile(path.join(sessionsDir, "over-cap.jsonl"), overCapTranscript);
+
+    const adapter = new CodexHarnessAdapter({ customSessionRoot: sessionsDir });
+    const beforeAppend = await adapter.listWorkspaces();
+    const unbound = beforeAppend.find((workspace) => workspace.metadata?.unbound === true)!;
+    const sessionsBeforeAppend = await adapter.listSessions(unbound);
+    expect(sessionsBeforeAppend.map((session) => session.sessionId).sort()).toEqual([
+      "sess_invalid-header",
+      "sess_over-cap",
+      "sess_partial-header",
+    ]);
+    expect(
+      sessionsBeforeAppend.find((session) => session.sessionId === "sess_partial-header")?.status,
+    ).toBe("unknown");
+    expect(
+      sessionsBeforeAppend.find((session) => session.sessionId === "sess_over-cap")?.status,
+    ).toBe("unknown");
+
+    await fs.appendFile(partialPath, "}\n");
+    const afterAppend = await adapter.listWorkspaces();
+    const bound = afterAppend.find((workspace) => workspace.rootPath === "/recorded/growing")!;
+    expect((await adapter.listSessions(bound)).map((session) => session.sessionId)).toEqual([
+      "sess_partial-header",
+    ]);
+    expect((await adapter.listSessions(unbound)).map((session) => session.sessionId)).toEqual([
+      "sess_invalid-header",
+      "sess_over-cap",
+    ]);
+
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 

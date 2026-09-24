@@ -84,8 +84,8 @@ interface CaptureEnvironment {
   cloudRows: NormalizedSessionEvent[];
 }
 
-function createCaptureEnvironment(): CaptureEnvironment {
-  const pipeline = new NormalizationPipeline();
+function createCaptureEnvironment(customSecrets: string[]): CaptureEnvironment {
+  const pipeline = new NormalizationPipeline({ redactionConfig: { customSecrets } });
   pipeline.registerDecoder(new OmpRecordDecoder());
   const localEvents: NormalizedSessionEvent[] = [];
   const cloudRows: NormalizedSessionEvent[] = [];
@@ -122,8 +122,12 @@ function createCaptureEnvironment(): CaptureEnvironment {
 }
 
 /** Replays one variant's own transcript records, one appended line per batch, in causal order. */
-async function capture(variant: ComputationFixtureVariant): Promise<CaptureEnvironment> {
-  const environment = createCaptureEnvironment();
+async function capture(
+  family: ComputationFixtureFamily,
+  variant: ComputationFixtureVariant,
+): Promise<CaptureEnvironment> {
+  // Planted fixture values are configured private; ordinary source literals remain visible.
+  const environment = createCaptureEnvironment(canaryValues(family, variant));
   const session = sessionFor(variant.sessionId);
   for (const [index, record] of variant.records.entries()) {
     await environment.coordinator.handleRecords(
@@ -329,7 +333,7 @@ describe("Computation fixture capture (every family variant through the real pip
     for (const family of families) {
       for (const variant of family.variants) {
         const label = `${family.familyId}/${variant.variantId}`;
-        const environment = await capture(variant);
+        const environment = await capture(family, variant);
         const carriers = carriersFor(environment, variant);
         const parsed = carriers.map((carrier) => ({
           carrier,
@@ -538,7 +542,7 @@ describe("Computation fixture capture (every family variant through the real pip
     const variant = family.variants[0]!;
     expect(variant.kind).toBe("corrected-helper");
 
-    const environment = await capture(variant);
+    const environment = await capture(family, variant);
     const parsed = carriersFor(environment, variant).map((carrier) => ({
       carrier,
       evidence: strictEvidence(

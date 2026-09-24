@@ -1,5 +1,6 @@
 import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent, NormalizedToolCallEvent } from "@resin/contracts";
+import { extractRawCommandStringFromEvent } from "../deterministic-command-sequence.js";
 import {
   COMPUTATION_EVAL_TOOL_NAMES,
   COMPUTATION_TRUNCATION_MARKER,
@@ -76,15 +77,6 @@ const EVAL_TOOLS = table([
   "run_python",
   "run_js",
   "repl",
-]);
-const SHELL_TOOLS = table([
-  "bash",
-  "shell",
-  "sh",
-  "exec",
-  "terminal",
-  "run_command",
-  "execute_command",
 ]);
 const WRITE_TOOLS = table([
   "write",
@@ -259,6 +251,7 @@ interface Candidate {
   readonly language: ComputationLanguage;
   readonly originKind: ComputationSourceFrame["originKind"];
   readonly executionScope: ComputationSourceFrame["executionScope"];
+  readonly sourceInterface?: "codex-exec";
   readonly path?: string;
   readonly fileAction?: ComputationFileAction;
   /** Text the source was recovered from; truncation evidence on it rejects the frame too. */
@@ -280,6 +273,9 @@ function frameOf(event: NormalizedSessionEvent, candidate: Candidate): Computati
     executionScope: candidate.executionScope,
     sourceEventId: event.eventId,
   };
+  if (candidate.sourceInterface !== undefined) {
+    frame.sourceInterface = candidate.sourceInterface;
+  }
   if (candidate.path !== undefined) {
     frame.path = candidate.path;
   }
@@ -296,7 +292,10 @@ function rejectionFrame(
   event: NormalizedSessionEvent,
   reason: RejectionReason,
   language: ComputationLanguage,
-  shape: Pick<Candidate, "originKind" | "executionScope" | "path" | "fileAction" | "reset"> = {
+  shape: Pick<
+    Candidate,
+    "originKind" | "executionScope" | "sourceInterface" | "path" | "fileAction" | "reset"
+  > = {
     originKind: "inline",
     executionScope: "isolated",
   },
@@ -309,6 +308,9 @@ function rejectionFrame(
     sourceEventId: event.eventId,
     rejectionReason: reason,
   };
+  if (shape.sourceInterface !== undefined) {
+    frame.sourceInterface = shape.sourceInterface;
+  }
   if (shape.path !== undefined) {
     frame.path = shape.path;
   }
@@ -330,6 +332,9 @@ function usableFrame(event: NormalizedSessionEvent, candidate: Candidate): Compu
     ...(candidate.path === undefined ? {} : { path: candidate.path }),
     ...(candidate.fileAction === undefined ? {} : { fileAction: candidate.fileAction }),
     ...(candidate.reset === true ? { reset: true } : {}),
+    ...(candidate.sourceInterface === undefined
+      ? {}
+      : { sourceInterface: candidate.sourceInterface }),
   };
   const truncated =
     hasComputationTruncationEvidence(event.redaction?.scrubbedPatterns) ||
@@ -353,6 +358,47 @@ function parametersOf(call: NormalizedToolCallEvent): Readonly<Record<string, un
   return typeof parameters === "object" && parameters !== null
     ? (parameters as Readonly<Record<string, unknown>>)
     : {};
+}
+
+function framesFromCodexExecCall(
+  event: NormalizedSessionEvent,
+  call: NormalizedToolCallEvent,
+  parameters: Readonly<Record<string, unknown>>,
+): readonly ComputationSourceFrame[] | undefined {
+  const native = event.metadata?.codexNative;
+  if (
+    call.toolName !== "exec" ||
+    typeof native !== "object" ||
+    native === null ||
+    Array.isArray(native)
+  ) {
+    return undefined;
+  }
+  const metadata = native as Record<string, unknown>;
+  if (
+    metadata.type !== "response_item" ||
+    metadata.itemType !== "custom_tool_call" ||
+    metadata.sourceInterface !== "codex-exec" ||
+    call.connection !== undefined ||
+    event.metadata?.connection !== undefined ||
+    metadata.connection !== undefined ||
+    (metadata.namespace !== undefined && metadata.namespace !== "default") ||
+    Object.keys(parameters).length !== 1 ||
+    !Object.hasOwn(parameters, "raw") ||
+    typeof parameters.raw !== "string" ||
+    parameters.raw.trim().length === 0
+  ) {
+    return undefined;
+  }
+  return [
+    usableFrame(event, {
+      source: parameters.raw,
+      language: "javascript",
+      originKind: "inline",
+      executionScope: "isolated",
+      sourceInterface: "codex-exec",
+    }),
+  ];
 }
 
 function framesFromEvalCall(
@@ -665,12 +711,16 @@ function framesFromToolCall(
   const tool = normalizeToolName(call.toolName);
   const parameters = parametersOf(call);
 
+  const codexExec = framesFromCodexExecCall(event, call, parameters);
+  if (codexExec !== undefined) {
+    return codexExec;
+  }
+  const command = extractRawCommandStringFromEvent(event);
+  if (command !== null) {
+    return framesFromCommand(event, command, knownFiles);
+  }
   if (has(EVAL_TOOLS, tool) || tool.endsWith("_eval")) {
     return framesFromEvalCall(event, parameters);
-  }
-  if (has(SHELL_TOOLS, tool)) {
-    const command = firstString(parameters.command) ?? firstString(parameters.cmd);
-    return command === undefined ? [] : framesFromCommand(event, command, knownFiles);
   }
   if (has(WRITE_TOOLS, tool)) {
     return framesFromWriteCall(event, parameters);

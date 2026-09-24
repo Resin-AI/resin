@@ -108,7 +108,6 @@ describe("exact local values across the real normalization boundary", () => {
     expect(resolvePrivateReference(reopened, input.reference)).toBe(captured.parameters[1]!.path);
     expect(resolvePrivateReference(reopened, observation.reference)).toBe(captured.answers[1]);
     expect(reopened.origin(input.reference)).toEqual(origin);
-    expect(recipe.workflow.candidates?.some((entry) => entry.argument === "path")).toBe(true);
     const firstCarrier = readWorkflowCallCarrier(captured.events[0]!.metadata?.workflowCall)!;
     const cwd = firstCarrier.origins.cwd!;
     if (cwd.type !== "private") throw new Error("Expected a local cwd reference");

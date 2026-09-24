@@ -4164,90 +4164,445 @@ var init_common = __esm({
   }
 });
 
-// packages/contracts/dist/canonical.js
-import { createHash } from "node:crypto";
-function canonicalJsonStringify(value) {
-  const seen = /* @__PURE__ */ new WeakSet();
-  function serialize(val) {
-    if (val === null) {
-      return "null";
-    }
-    const valTag = Object.prototype.toString.call(val);
-    if (val === void 0 || valTag === "[object Symbol]" || valTag === "[object Function]") {
-      return void 0;
-    }
-    if (valTag === "[object Boolean]") {
-      return val ? "true" : "false";
-    }
-    if (valTag === "[object Number]") {
-      if (!Number.isFinite(Number(val))) {
-        throw new TypeError(`Cannot canonically serialize non-finite number: ${String(val)}`);
-      }
-      return String(val);
-    }
-    if (valTag === "[object BigInt]") {
-      throw new TypeError("Cannot canonically serialize BigInt value");
-    }
-    if (valTag === "[object String]") {
-      return JSON.stringify(val);
-    }
-    if (Array.isArray(val)) {
-      if (seen.has(val)) {
-        throw new TypeError("Cannot canonically serialize cyclic structure");
-      }
-      seen.add(val);
-      try {
-        const elements = val.map((item) => serialize(item) ?? "null");
-        return `[${elements.join(",")}]`;
-      } finally {
-        seen.delete(val);
-      }
-    }
-    if (valTag === "[object Object]" && val !== null) {
-      const obj = val;
-      if ("toJSON" in obj) {
-        const toJSONFn = obj.toJSON;
-        if (Object.prototype.toString.call(toJSONFn) === "[object Function]") {
-          const normalized = toJSONFn.call(obj);
-          if (Object.prototype.toString.call(normalized) !== "[object Object]") {
-            return serialize(normalized);
-          }
-        }
-      }
-      if (seen.has(obj)) {
-        throw new TypeError("Cannot canonically serialize cyclic structure");
-      }
-      seen.add(obj);
-      try {
-        const entries = Object.entries(obj);
-        entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
-        const serializedMembers = [];
-        for (const [k, v] of entries) {
-          const memberVal = serialize(v);
-          if (memberVal !== void 0) {
-            serializedMembers.push(`${JSON.stringify(k)}:${memberVal}`);
-          }
-        }
-        return `{${serializedMembers.join(",")}}`;
-      } finally {
-        seen.delete(obj);
-      }
-    }
-    return JSON.stringify(val);
-  }
-  const result = serialize(value);
-  return result === void 0 ? "undefined" : result;
-}
-function hashCanonicalContent(value, options = {}) {
-  const serialized = canonicalJsonStringify(value);
-  const hashHex = createHash("sha256").update(serialized, "utf8").digest("hex");
-  return options.prefix ? `sha256:${hashHex}` : hashHex;
-}
-var hashCanonical;
-var init_canonical = __esm({
-  "packages/contracts/dist/canonical.js"() {
+// packages/harness-contracts/dist/types.js
+var InstallationStatusSchema, HarnessInstallationSchema, HarnessWorkspaceSchema, SessionStatusSchema, HarnessSessionSchema, SourceCursorSchema, RecordTypeSchema, RawHarnessRecordSchema, DiagnosticSeveritySchema, AdapterDiagnosticSchema, ConfigMutationPlanSchema, ConfigBackupSchema, RefreshCapabilitySchema, TranscriptAvailabilitySchema, VisibilityLevelSchema, SubagentVisibilitySchema, McpListChangeSupportSchema, ContextNudgeSupportSchema, ObservationFidelitySchema, AdapterCapabilitiesSchema, CatalogChangeSummarySchema;
+var init_types2 = __esm({
+  "packages/harness-contracts/dist/types.js"() {
     "use strict";
-    hashCanonical = hashCanonicalContent;
+    init_common();
+    init_zod();
+    InstallationStatusSchema = external_exports.enum([
+      "ready",
+      "unsupported_version",
+      "missing_executable",
+      "config_error",
+      "corrupt",
+      "unknown"
+    ]);
+    HarnessInstallationSchema = external_exports.object({
+      harnessId: IdentifierSchema,
+      displayName: external_exports.string().min(1),
+      version: SchemaVersionSchema,
+      executablePath: external_exports.string().optional(),
+      configPath: external_exports.string().optional(),
+      homePath: external_exports.string().optional(),
+      isInstalled: external_exports.boolean(),
+      status: InstallationStatusSchema,
+      detectedAt: ISOTimestampSchema,
+      metadata: external_exports.record(external_exports.unknown()).default({})
+    });
+    HarnessWorkspaceSchema = external_exports.object({
+      workspaceId: IdentifierSchema,
+      rootPath: external_exports.string().min(1),
+      name: external_exports.string().min(1),
+      harnessId: IdentifierSchema,
+      configPath: external_exports.string().min(1),
+      mcpConfigPath: external_exports.string().optional(),
+      activeSessionId: IdentifierSchema.optional(),
+      metadata: external_exports.record(external_exports.unknown()).default({})
+    });
+    SessionStatusSchema = external_exports.enum([
+      "active",
+      "idle",
+      "completed",
+      "interrupted",
+      "failed",
+      "unknown"
+    ]);
+    HarnessSessionSchema = external_exports.object({
+      sessionId: IdentifierSchema,
+      workspaceId: IdentifierSchema,
+      harnessId: IdentifierSchema,
+      transcriptPath: external_exports.string().min(1),
+      status: SessionStatusSchema,
+      createdAt: ISOTimestampSchema,
+      updatedAt: ISOTimestampSchema,
+      metadata: external_exports.record(external_exports.unknown()).default({})
+    });
+    SourceCursorSchema = external_exports.object({
+      offset: external_exports.number().int().nonnegative(),
+      line: external_exports.number().int().positive(),
+      sequence: external_exports.number().int().nonnegative(),
+      checkpoint: Sha256DigestSchema.optional(),
+      timestamp: ISOTimestampSchema
+    });
+    RecordTypeSchema = external_exports.enum([
+      "transcript_line",
+      "tool_call",
+      "tool_result",
+      "prompt",
+      "completion",
+      "system",
+      "custom"
+    ]);
+    RawHarnessRecordSchema = external_exports.object({
+      recordId: IdentifierSchema,
+      sessionId: IdentifierSchema,
+      harnessId: IdentifierSchema,
+      sequenceNumber: external_exports.number().int().nonnegative(),
+      timestamp: ISOTimestampSchema,
+      recordType: RecordTypeSchema,
+      rawPayload: external_exports.unknown(),
+      cursor: SourceCursorSchema,
+      metadata: external_exports.record(external_exports.unknown()).default({})
+    });
+    DiagnosticSeveritySchema = external_exports.enum(["info", "warning", "error"]);
+    AdapterDiagnosticSchema = external_exports.object({
+      code: external_exports.string().min(1),
+      severity: DiagnosticSeveritySchema,
+      message: external_exports.string().min(1),
+      path: external_exports.string().optional(),
+      timestamp: ISOTimestampSchema,
+      details: external_exports.record(external_exports.unknown()).optional()
+    });
+    ConfigMutationPlanSchema = external_exports.object({
+      planId: IdentifierSchema,
+      harnessId: IdentifierSchema,
+      targetPath: external_exports.string().min(1),
+      preconditionHash: external_exports.string(),
+      plannedContent: external_exports.string(),
+      backupPath: external_exports.string().optional(),
+      description: external_exports.string().min(1),
+      diffSummary: external_exports.string().optional(),
+      createdAt: ISOTimestampSchema,
+      metadata: external_exports.record(external_exports.unknown()).default({})
+    });
+    ConfigBackupSchema = external_exports.object({
+      backupId: IdentifierSchema,
+      targetPath: external_exports.string().min(1),
+      backupPath: external_exports.string().min(1),
+      contentHash: Sha256DigestSchema,
+      originalContent: external_exports.string(),
+      createdAt: ISOTimestampSchema,
+      restored: external_exports.boolean().default(false),
+      restoredAt: ISOTimestampSchema.optional()
+    });
+    RefreshCapabilitySchema = external_exports.object({
+      supportsNativeListChange: external_exports.boolean(),
+      supportsContextNudge: external_exports.boolean(),
+      requiresSessionRestart: external_exports.boolean(),
+      description: external_exports.string().optional()
+    });
+    TranscriptAvailabilitySchema = external_exports.enum([
+      "none",
+      "polling",
+      "file_tail",
+      "stream",
+      "websocket"
+    ]);
+    VisibilityLevelSchema = external_exports.enum(["none", "partial", "full", "sanitized"]);
+    SubagentVisibilitySchema = external_exports.enum(["none", "shallow", "full"]);
+    McpListChangeSupportSchema = external_exports.enum(["supported", "unsupported", "requires_restart"]);
+    ContextNudgeSupportSchema = external_exports.enum([
+      "supported",
+      "unsupported",
+      "via_file",
+      "via_prompt"
+    ]);
+    ObservationFidelitySchema = external_exports.object({
+      transcriptAvailability: TranscriptAvailabilitySchema,
+      toolCallVisibility: VisibilityLevelSchema,
+      toolResultVisibility: VisibilityLevelSchema,
+      subagentVisibility: SubagentVisibilitySchema,
+      mcpListChange: McpListChangeSupportSchema,
+      contextNudge: ContextNudgeSupportSchema,
+      overallScore: external_exports.number().min(0).max(100),
+      notes: external_exports.string().optional()
+    });
+    AdapterCapabilitiesSchema = external_exports.object({
+      refresh: RefreshCapabilitySchema,
+      fidelity: ObservationFidelitySchema,
+      supportedTransports: external_exports.array(external_exports.enum(["stdio", "sse", "websocket", "http"])).default(["stdio"]),
+      supportsMultiWorkspace: external_exports.boolean().default(true),
+      supportsConcurrentSessions: external_exports.boolean().default(true),
+      features: external_exports.record(external_exports.boolean()).default({})
+    });
+    CatalogChangeSummarySchema = external_exports.object({
+      addedToolIds: external_exports.array(IdentifierSchema).default([]),
+      updatedToolIds: external_exports.array(IdentifierSchema).default([]),
+      removedToolIds: external_exports.array(IdentifierSchema).default([]),
+      catalogVersion: SchemaVersionSchema,
+      timestamp: ISOTimestampSchema,
+      /** Rendered catalog instructions markdown for harnesses that inject prompts. */
+      instructionsMarkdown: external_exports.string().optional(),
+      /** Evolved tool names for per-tool invocation snippets. */
+      evolvedToolNames: external_exports.array(external_exports.string()).optional()
+    });
+  }
+});
+
+// packages/harness-contracts/dist/adapter.js
+var init_adapter = __esm({
+  "packages/harness-contracts/dist/adapter.js"() {
+    "use strict";
+  }
+});
+
+// packages/harness-contracts/dist/source.js
+var init_source = __esm({
+  "packages/harness-contracts/dist/source.js"() {
+    "use strict";
+  }
+});
+
+// packages/harness-contracts/dist/errors.js
+var HarnessErrorCode, HarnessError, HarnessPermissionError;
+var init_errors2 = __esm({
+  "packages/harness-contracts/dist/errors.js"() {
+    "use strict";
+    HarnessErrorCode = {
+      MISSING_HARNESS: "MISSING_HARNESS",
+      UNSUPPORTED_VERSION: "UNSUPPORTED_VERSION",
+      INACCESSIBLE_TRANSCRIPT: "INACCESSIBLE_TRANSCRIPT",
+      MALFORMED_RECORD: "MALFORMED_RECORD",
+      AMBIGUOUS_ACTIVE_SESSION: "AMBIGUOUS_ACTIVE_SESSION",
+      PERMISSION_ERROR: "PERMISSION_ERROR",
+      CONCURRENT_CONFIG_MUTATION: "CONCURRENT_CONFIG_MUTATION",
+      CONFIG_PRECONDITION_FAILED: "CONFIG_PRECONDITION_FAILED",
+      TRANSCRIPT_ROTATED: "TRANSCRIPT_ROTATED",
+      REFRESH_FAILED: "REFRESH_FAILED",
+      INTERNAL_ERROR: "INTERNAL_ERROR"
+    };
+    HarnessError = class extends Error {
+      code;
+      harnessId;
+      details;
+      isHarnessError = true;
+      constructor(code, message, options) {
+        super(message, { cause: options?.cause });
+        this.name = this.constructor.name;
+        this.code = code;
+        this.harnessId = options?.harnessId;
+        this.details = options?.details;
+        Object.setPrototypeOf(this, new.target.prototype);
+      }
+    };
+    HarnessPermissionError = class extends HarnessError {
+      targetPath;
+      constructor(message, options) {
+        super(HarnessErrorCode.PERMISSION_ERROR, message, {
+          ...options,
+          details: { ...options?.details, targetPath: options?.targetPath }
+        });
+        this.targetPath = options?.targetPath;
+      }
+    };
+  }
+});
+
+// packages/harness-contracts/dist/config.js
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+var NodeConfigFsBridge, defaultFsBridge;
+var init_config = __esm({
+  "packages/harness-contracts/dist/config.js"() {
+    "use strict";
+    init_errors2();
+    NodeConfigFsBridge = class {
+      async readFile(filePath) {
+        try {
+          return await fs.readFile(filePath, "utf8");
+        } catch (err) {
+          if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+            return null;
+          }
+          if (err instanceof Error && "code" in err && err.code === "EACCES") {
+            throw new HarnessPermissionError(`Permission denied reading ${filePath}`, {
+              targetPath: filePath,
+              cause: err
+            });
+          }
+          throw err;
+        }
+      }
+      async writeFile(filePath, content) {
+        try {
+          const dir = path.dirname(filePath);
+          await fs.mkdir(dir, { recursive: true });
+          await fs.writeFile(filePath, content, "utf8");
+        } catch (err) {
+          if (err instanceof Error && "code" in err && err.code === "EACCES") {
+            throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
+              targetPath: filePath,
+              cause: err
+            });
+          }
+          throw err;
+        }
+      }
+      async exists(filePath) {
+        try {
+          await fs.access(filePath);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      async mkdirp(dirPath) {
+        await fs.mkdir(dirPath, { recursive: true });
+      }
+      async copyFile(srcPath, destPath) {
+        await this.mkdirp(path.dirname(destPath));
+        await fs.copyFile(srcPath, destPath);
+      }
+      async unlink(filePath) {
+        try {
+          await fs.unlink(filePath);
+        } catch (err) {
+          if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+            return;
+          }
+          throw err;
+        }
+      }
+    };
+    defaultFsBridge = new NodeConfigFsBridge();
+  }
+});
+
+// packages/harness-contracts/dist/refresh.js
+var RefreshOutcomeSchema, RefreshResultSchema;
+var init_refresh = __esm({
+  "packages/harness-contracts/dist/refresh.js"() {
+    "use strict";
+    init_common();
+    init_zod();
+    RefreshOutcomeSchema = external_exports.enum([
+      "native_list_change",
+      "context_nudge",
+      "next_session_required",
+      "unsupported",
+      "failed"
+    ]);
+    RefreshResultSchema = external_exports.object({
+      outcome: RefreshOutcomeSchema,
+      appliedAt: ISOTimestampSchema,
+      message: external_exports.string().min(1),
+      catalogVersion: SchemaVersionSchema,
+      affectedToolCount: external_exports.number().int().nonnegative().default(0),
+      requiresRestart: external_exports.boolean().default(false),
+      details: external_exports.record(external_exports.unknown()).default({})
+    });
+  }
+});
+
+// packages/harness-contracts/dist/fidelity.js
+function calculateFidelityScore(components) {
+  const transcriptScore = FIDELITY_WEIGHTS.transcriptAvailability[components.transcriptAvailability] ?? 0;
+  const callScore = FIDELITY_WEIGHTS.toolCallVisibility[components.toolCallVisibility] ?? 0;
+  const resultScore = FIDELITY_WEIGHTS.toolResultVisibility[components.toolResultVisibility] ?? 0;
+  const subagentScore = FIDELITY_WEIGHTS.subagentVisibility[components.subagentVisibility] ?? 0;
+  const listChangeScore = FIDELITY_WEIGHTS.mcpListChange[components.mcpListChange] ?? 0;
+  const nudgeScore = FIDELITY_WEIGHTS.contextNudge[components.contextNudge] ?? 0;
+  const total = transcriptScore + callScore + resultScore + subagentScore + listChangeScore + nudgeScore;
+  return Math.min(100, Math.max(0, total));
+}
+function createObservationFidelity(components) {
+  const computedScore = components.overallScore ?? calculateFidelityScore(components);
+  return {
+    transcriptAvailability: components.transcriptAvailability,
+    toolCallVisibility: components.toolCallVisibility,
+    toolResultVisibility: components.toolResultVisibility,
+    subagentVisibility: components.subagentVisibility,
+    mcpListChange: components.mcpListChange,
+    contextNudge: components.contextNudge,
+    overallScore: computedScore,
+    notes: components.notes
+  };
+}
+var FIDELITY_WEIGHTS, TIER1_HIGH_FIDELITY, TIER2_MEDIUM_FIDELITY, TIER3_LOW_FIDELITY;
+var init_fidelity = __esm({
+  "packages/harness-contracts/dist/fidelity.js"() {
+    "use strict";
+    FIDELITY_WEIGHTS = {
+      transcriptAvailability: {
+        none: 0,
+        polling: 10,
+        file_tail: 20,
+        stream: 25,
+        websocket: 25
+      },
+      toolCallVisibility: {
+        none: 0,
+        partial: 10,
+        sanitized: 15,
+        full: 20
+      },
+      toolResultVisibility: {
+        none: 0,
+        partial: 10,
+        sanitized: 15,
+        full: 20
+      },
+      subagentVisibility: {
+        none: 0,
+        shallow: 10,
+        full: 15
+      },
+      mcpListChange: {
+        unsupported: 0,
+        requires_restart: 5,
+        supported: 10
+      },
+      contextNudge: {
+        unsupported: 0,
+        via_file: 5,
+        via_prompt: 8,
+        supported: 10
+      }
+    };
+    TIER1_HIGH_FIDELITY = Object.freeze({
+      transcriptAvailability: "stream",
+      toolCallVisibility: "full",
+      toolResultVisibility: "full",
+      subagentVisibility: "full",
+      mcpListChange: "supported",
+      contextNudge: "supported",
+      overallScore: 100,
+      notes: "Full real-time streaming, bi-directional tool invocation inspection, subagent visibility, dynamic catalog reload."
+    });
+    TIER2_MEDIUM_FIDELITY = Object.freeze({
+      transcriptAvailability: "file_tail",
+      toolCallVisibility: "full",
+      toolResultVisibility: "full",
+      subagentVisibility: "shallow",
+      mcpListChange: "unsupported",
+      contextNudge: "via_prompt",
+      overallScore: 78,
+      notes: "Session log file tailing, full tool call capture, shallow subagent visibility, prompt-based context injection."
+    });
+    TIER3_LOW_FIDELITY = Object.freeze({
+      transcriptAvailability: "polling",
+      toolCallVisibility: "partial",
+      toolResultVisibility: "partial",
+      subagentVisibility: "none",
+      mcpListChange: "requires_restart",
+      contextNudge: "unsupported",
+      overallScore: 35,
+      notes: "Periodic polling, partial tool visibility, session restart required for catalog updates."
+    });
+  }
+});
+
+// packages/harness-contracts/dist/decoder.js
+var init_decoder = __esm({
+  "packages/harness-contracts/dist/decoder.js"() {
+    "use strict";
+  }
+});
+
+// packages/harness-contracts/dist/index.js
+var init_dist = __esm({
+  "packages/harness-contracts/dist/index.js"() {
+    "use strict";
+    init_types2();
+    init_adapter();
+    init_source();
+    init_config();
+    init_refresh();
+    init_fidelity();
+    init_errors2();
+    init_decoder();
   }
 });
 
@@ -4613,262 +4968,6 @@ var init_tools = __esm({
   }
 });
 
-// packages/contracts/dist/components.js
-function validateFixtureJson(root, path10, state) {
-  const stack = [[root, 0, path10]];
-  while (stack.length > 0) {
-    const [val, depth, currentPath] = stack.pop();
-    state.totalNodes++;
-    if (state.totalNodes > MAX_FIXTURE_NODES) {
-      throw new Error(`Fixture payload exceeds node count limit of ${MAX_FIXTURE_NODES} at ${currentPath}`);
-    }
-    if (depth > MAX_FIXTURE_DEPTH) {
-      throw new Error(`Fixture payload exceeds maximum nesting depth of ${MAX_FIXTURE_DEPTH} at ${currentPath}`);
-    }
-    if (val === null || typeof val === "boolean") {
-      state.totalBytes += 4;
-    } else if (typeof val === "number") {
-      if (!Number.isFinite(val)) {
-        throw new Error(`Fixture payload contains non-finite number at ${currentPath}`);
-      }
-      state.totalBytes += 8;
-    } else if (typeof val === "string") {
-      if (val.length > 65536) {
-        throw new Error(`Fixture string exceeds maximum length of 65536 at ${currentPath}`);
-      }
-      state.totalBytes += val.length * 2;
-    } else if (typeof val === "object") {
-      if (state.seen.has(val)) {
-        throw new Error(`Fixture payload contains cyclic structure at ${currentPath}`);
-      }
-      state.seen.add(val);
-      if (Array.isArray(val)) {
-        if (val.length > 256) {
-          throw new Error(`Fixture array exceeds maximum item limit of 256 at ${currentPath}`);
-        }
-        for (let i = val.length - 1; i >= 0; i--) {
-          stack.push([val[i], depth + 1, `${currentPath}[${i}]`]);
-        }
-      } else {
-        const proto = Object.getPrototypeOf(val);
-        if (proto !== null && proto !== Object.prototype) {
-          throw new Error(`Fixture payload contains non-plain object instance at ${currentPath}`);
-        }
-        const entries = Object.entries(val);
-        if (entries.length > 256) {
-          throw new Error(`Fixture object exceeds property count limit of 256 at ${currentPath}`);
-        }
-        for (const [k, child] of entries) {
-          if (["__proto__", "prototype", "constructor"].includes(k)) {
-            throw new Error(`Dangerous property identifier '${k}' rejected at ${currentPath}`);
-          }
-          if (k.length > 256) {
-            throw new Error(`Fixture object key exceeds length limit of 256 at ${currentPath}.${k}`);
-          }
-          state.totalBytes += k.length * 2;
-          stack.push([child, depth + 1, `${currentPath}.${k}`]);
-        }
-      }
-    } else {
-      throw new Error(`Fixture payload contains non-JSON value (${typeof val}) at ${currentPath}`);
-    }
-    if (state.totalBytes > MAX_FIXTURE_BYTES) {
-      throw new Error(`Fixture payload exceeds aggregate size limit of ${MAX_FIXTURE_BYTES} bytes`);
-    }
-  }
-}
-var NameSchema, JsonSchema, MAX_FIXTURE_DEPTH, MAX_FIXTURE_NODES, MAX_FIXTURE_BYTES, MethodIdentifierSchema, ComponentBrokerCallSchema, ComponentTestFixtureSchema, ComponentTestCaseSchema, ComponentContractSchema, ComponentReferenceSchema, ComponentBindingSchema, ComponentCompositionSchema;
-var init_components = __esm({
-  "packages/contracts/dist/components.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    init_capabilities();
-    init_common();
-    NameSchema = external_exports.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/).refine((name) => !["__proto__", "prototype", "constructor"].includes(name));
-    JsonSchema = external_exports.record(external_exports.unknown());
-    MAX_FIXTURE_DEPTH = 16;
-    MAX_FIXTURE_NODES = 4096;
-    MAX_FIXTURE_BYTES = 512 * 1024;
-    MethodIdentifierSchema = external_exports.string().min(1, "Method identifier cannot be empty").max(128, "Method identifier exceeds maximum length of 128 characters").regex(/^[A-Za-z][A-Za-z0-9_]*$/, "Method identifier must start with a letter and contain only alphanumeric characters and underscores").refine((name) => !["__proto__", "prototype", "constructor"].includes(name), "Prototype and constructor identifiers are rejected as method names");
-    ComponentBrokerCallSchema = external_exports.object({
-      service: external_exports.enum(["fs", "cmd", "net", "secrets"]),
-      method: MethodIdentifierSchema,
-      args: external_exports.array(external_exports.unknown()).max(256),
-      result: external_exports.unknown().optional(),
-      error: external_exports.string().max(4096).optional()
-    }).strict().superRefine((call, ctx) => {
-      if (call.result !== void 0 && call.error !== void 0) {
-        ctx.addIssue({
-          code: "custom",
-          message: "result and error are mutually exclusive; a broker call may specify result or error, not both",
-          path: ["error"]
-        });
-      }
-      const state = { totalBytes: 0, totalNodes: 0, seen: /* @__PURE__ */ new Set() };
-      try {
-        validateFixtureJson(call.args, "args", state);
-        if (call.result !== void 0) {
-          validateFixtureJson(call.result, "result", state);
-        }
-      } catch (err) {
-        ctx.addIssue({
-          code: "custom",
-          message: err instanceof Error ? err.message : String(err)
-        });
-      }
-    });
-    ComponentTestFixtureSchema = external_exports.object({
-      brokerCalls: external_exports.array(ComponentBrokerCallSchema).max(64)
-    }).strict().superRefine((fixture, ctx) => {
-      const state = { totalBytes: 0, totalNodes: 0, seen: /* @__PURE__ */ new Set() };
-      try {
-        for (const [index, call] of fixture.brokerCalls.entries()) {
-          validateFixtureJson(call.args, `brokerCalls[${index}].args`, state);
-          if (call.result !== void 0) {
-            validateFixtureJson(call.result, `brokerCalls[${index}].result`, state);
-          }
-          if (call.error !== void 0) {
-            state.totalBytes += call.error.length * 2;
-          }
-          state.totalBytes += call.method.length * 2 + call.service.length * 2;
-          if (state.totalBytes > MAX_FIXTURE_BYTES) {
-            throw new Error(`Fixture payload exceeds aggregate size limit of ${MAX_FIXTURE_BYTES} bytes`);
-          }
-        }
-      } catch (err) {
-        ctx.addIssue({
-          code: "custom",
-          message: err instanceof Error ? err.message : String(err)
-        });
-      }
-    });
-    ComponentTestCaseSchema = external_exports.object({
-      name: external_exports.string().min(1),
-      input: external_exports.record(external_exports.unknown()),
-      expectedOutput: external_exports.unknown().optional(),
-      expectFailure: external_exports.boolean().optional(),
-      fixture: ComponentTestFixtureSchema.optional()
-    }).strict();
-    ComponentContractSchema = external_exports.object({
-      schemaVersion: external_exports.literal("1.0.0"),
-      name: NameSchema,
-      version: external_exports.string().regex(/^\d+\.\d+\.\d+$/),
-      description: external_exports.string().min(1).max(4096),
-      inputSchema: JsonSchema,
-      outputSchema: JsonSchema,
-      capabilities: CapabilityManifestSchema,
-      effects: external_exports.array(external_exports.enum(["read", "write", "network", "command", "secret"])),
-      runtime: external_exports.literal("deno"),
-      tests: external_exports.array(ComponentTestCaseSchema).min(1)
-    }).strict();
-    ComponentReferenceSchema = external_exports.object({
-      contractDigest: Sha256DigestSchema,
-      sourceDigest: Sha256DigestSchema
-    }).strict();
-    ComponentBindingSchema = external_exports.discriminatedUnion("from", [
-      external_exports.object({ from: external_exports.literal("literal"), value: external_exports.unknown() }).strict(),
-      external_exports.object({ from: external_exports.literal("input"), path: external_exports.array(NameSchema).max(16) }).strict(),
-      external_exports.object({ from: external_exports.literal("step"), step: NameSchema, path: external_exports.array(NameSchema).max(16) }).strict()
-    ]);
-    ComponentCompositionSchema = external_exports.object({
-      schemaVersion: external_exports.literal("1.0.0"),
-      inputSchema: JsonSchema,
-      outputSchema: JsonSchema,
-      steps: external_exports.array(external_exports.object({
-        id: NameSchema,
-        component: ComponentReferenceSchema,
-        inputs: external_exports.record(NameSchema, ComponentBindingSchema)
-      }).strict()).min(1).max(64),
-      outputs: external_exports.record(NameSchema, ComponentBindingSchema)
-    }).strict().superRefine((composition, ctx) => {
-      const available = /* @__PURE__ */ new Set();
-      for (const [index, step] of composition.steps.entries()) {
-        if (available.has(step.id))
-          ctx.addIssue({
-            code: "custom",
-            path: ["steps", index, "id"],
-            message: "Duplicate step id"
-          });
-        for (const binding of Object.values(step.inputs)) {
-          if (binding.from === "step" && !available.has(binding.step))
-            ctx.addIssue({
-              code: "custom",
-              path: ["steps", index, "inputs"],
-              message: "Binding requires a preceding step"
-            });
-        }
-        available.add(step.id);
-      }
-      for (const binding of Object.values(composition.outputs)) {
-        if (binding.from === "step" && !available.has(binding.step))
-          ctx.addIssue({ code: "custom", path: ["outputs"], message: "Unknown output step" });
-      }
-    });
-  }
-});
-
-// packages/contracts/dist/secrets.js
-var SecretMediationModeSchema, SecretReferenceSchema, SecretMediationRequestSchema, SecretMediationResultSchema;
-var init_secrets = __esm({
-  "packages/contracts/dist/secrets.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    SecretMediationModeSchema = external_exports.enum([
-      "header_template",
-      "bearer_token",
-      "query_template",
-      "command_stdin",
-      "command_env"
-    ]);
-    SecretReferenceSchema = external_exports.object({
-      kind: external_exports.literal("secret_reference").default("secret_reference"),
-      /** Secret alias/name in the store (e.g. "GITHUB_TOKEN", "DATABASE_KEY") */
-      name: external_exports.string().min(1),
-      /** Opaque reference identifier / handle */
-      ref: external_exports.string().min(1),
-      /** Workspace boundary where this reference is valid */
-      workspaceId: external_exports.string().min(1).default("default"),
-      /** Permitted mediation modes for this reference */
-      permittedModes: external_exports.array(SecretMediationModeSchema).default(["header_template", "bearer_token", "query_template", "command_stdin", "command_env"]),
-      /** Optional tool ID bound to this reference */
-      toolId: external_exports.string().optional(),
-      /** Optional account ID bound to this reference */
-      accountId: external_exports.string().optional(),
-      /** Optional installation ID bound to this reference */
-      installationId: external_exports.string().optional(),
-      /** Optional grant ID bound to this reference */
-      grantId: external_exports.string().optional(),
-      /** Optional expiration timestamp (ISO 8601) */
-      expiresAt: ISOTimestampSchema.optional(),
-      /** Non-sensitive metadata (never contains secret values) */
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    SecretMediationRequestSchema = external_exports.object({
-      reference: external_exports.union([SecretReferenceSchema, external_exports.string().min(1)]),
-      mode: SecretMediationModeSchema,
-      template: external_exports.string().optional(),
-      targetKey: external_exports.string().optional(),
-      context: external_exports.object({
-        workspaceId: external_exports.string().min(1).optional(),
-        toolId: external_exports.string().optional(),
-        invocationId: external_exports.string().optional(),
-        accountId: external_exports.string().optional(),
-        installationId: external_exports.string().optional(),
-        grantId: external_exports.string().optional()
-      }).optional()
-    });
-    SecretMediationResultSchema = external_exports.object({
-      success: external_exports.boolean(),
-      mode: SecretMediationModeSchema,
-      secretName: external_exports.string(),
-      referenceId: external_exports.string().optional(),
-      appliedTo: external_exports.string().optional()
-    });
-  }
-});
-
 // packages/contracts/dist/versions.js
 var BundleReferenceSchema, ToolArtifactSchema, ProvenanceBaseSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
 var init_versions = __esm({
@@ -5028,7 +5127,6 @@ var init_records = __esm({
   "packages/contracts/dist/records.js"() {
     "use strict";
     init_zod();
-    init_canonical();
     init_capabilities();
     init_common();
     init_tools();
@@ -5277,1353 +5375,12 @@ var init_records = __esm({
   }
 });
 
-// packages/contracts/dist/opportunity.js
-var OptionalCostUsdSchema, TriggerTypeSchema, CoverageStatusSchema, OpportunityHashOutcomeSchema, WorkflowClusterMetricsSchema, EstimatedSavedWorkSchema, EpisodeSignatureSchema, WorkflowClusterSummarySchema, TriggerMetricsSchema, TriggerResultSchema, SuppressionResultSchema, CoverageResultSchema, LocalVerdictsSchema, ProvenPatternDtoSchema, OpportunityHashCacheEntrySchema;
-var init_opportunity = __esm({
-  "packages/contracts/dist/opportunity.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    OptionalCostUsdSchema = external_exports.number().nonnegative().nullable().optional();
-    TriggerTypeSchema = external_exports.enum(["normal_frequency", "exceptional_waste", "none"]);
-    CoverageStatusSchema = external_exports.enum(["net_new", "update_candidate", "covered", "duplicate"]);
-    OpportunityHashOutcomeSchema = external_exports.enum([
-      "published",
-      "in_progress",
-      "rejected_on_merit",
-      "failed_infra",
-      "not_dispatched"
-    ]);
-    WorkflowClusterMetricsSchema = external_exports.object({
-      totalTokens: external_exports.number().int().nonnegative(),
-      totalCostUsd: external_exports.number().nonnegative().nullable(),
-      avgDurationMs: external_exports.number().nonnegative(),
-      avgTokens: external_exports.number().nonnegative(),
-      totalRetries: external_exports.number().int().nonnegative(),
-      avgStepCount: external_exports.number().nonnegative()
-    });
-    EstimatedSavedWorkSchema = external_exports.object({
-      estimatedDurationSavedMs: external_exports.number().nonnegative(),
-      estimatedTokensSaved: external_exports.number().int().nonnegative(),
-      estimatedStepsSaved: external_exports.number().nonnegative(),
-      savedDurationMs: external_exports.number().nonnegative(),
-      savedTokens: external_exports.number().int().nonnegative(),
-      estimatedCostSavedUsd: OptionalCostUsdSchema,
-      savedCostUsd: OptionalCostUsdSchema,
-      savedToolCalls: external_exports.number().int().nonnegative(),
-      confidence: external_exports.number().min(0).max(1)
-    });
-    EpisodeSignatureSchema = external_exports.object({
-      signatureId: IdentifierSchema,
-      structuralHash: external_exports.string().min(1),
-      operations: external_exports.array(external_exports.string()),
-      toolClasses: external_exports.array(external_exports.string()),
-      commandPatterns: external_exports.array(external_exports.string()),
-      normalizedPaths: external_exports.array(external_exports.string()),
-      argumentSchemaHashes: external_exports.array(external_exports.string()),
-      semanticOperations: external_exports.array(external_exports.unknown()).optional(),
-      stepCount: external_exports.number().int().nonnegative(),
-      durationMs: external_exports.number().nonnegative(),
-      tokenCount: external_exports.number().int().nonnegative(),
-      retryCount: external_exports.number().int().nonnegative(),
-      estimatedCostUsd: OptionalCostUsdSchema
-    });
-    WorkflowClusterSummarySchema = external_exports.object({
-      clusterId: IdentifierSchema,
-      structuralHash: external_exports.string().min(1),
-      episodeCount: external_exports.number().int().nonnegative(),
-      distinctSessionIds: external_exports.array(IdentifierSchema),
-      scenarioIds: external_exports.array(IdentifierSchema),
-      distinctScenarioCount: external_exports.number().int().nonnegative(),
-      completedOccurrences: external_exports.number().int().nonnegative(),
-      firstSeenAt: ISOTimestampSchema,
-      lastSeenAt: ISOTimestampSchema,
-      evidenceEventIds: external_exports.array(IdentifierSchema),
-      metrics: WorkflowClusterMetricsSchema
-    });
-    TriggerMetricsSchema = external_exports.object({
-      occurrenceCount: external_exports.number().int().nonnegative(),
-      durationMs: external_exports.number().nonnegative(),
-      tokenCount: external_exports.number().int().nonnegative(),
-      retryCount: external_exports.number().int().nonnegative(),
-      estimatedCostUsd: OptionalCostUsdSchema,
-      stepCount: external_exports.number().int().nonnegative().optional()
-    });
-    TriggerResultSchema = external_exports.object({
-      triggered: external_exports.boolean(),
-      triggerType: TriggerTypeSchema,
-      reason: external_exports.string(),
-      description: external_exports.string(),
-      evidenceEventIds: external_exports.array(IdentifierSchema),
-      metrics: TriggerMetricsSchema
-    });
-    SuppressionResultSchema = external_exports.object({
-      suppressed: external_exports.boolean(),
-      reason: external_exports.string(),
-      details: external_exports.string(),
-      excludedOperationIds: external_exports.array(IdentifierSchema).optional(),
-      excludedEventIds: external_exports.array(IdentifierSchema).optional(),
-      matchedPattern: external_exports.string().optional()
-    });
-    CoverageResultSchema = external_exports.object({
-      status: CoverageStatusSchema,
-      matchingToolId: IdentifierSchema.optional(),
-      matchingToolName: external_exports.string().optional(),
-      similarityScore: external_exports.number().min(0).max(1),
-      overlapRatio: external_exports.number().min(0).max(1),
-      reason: external_exports.string(),
-      suggestedActions: external_exports.array(external_exports.string()).optional()
-    });
-    LocalVerdictsSchema = external_exports.object({
-      trigger: TriggerResultSchema,
-      suppression: SuppressionResultSchema,
-      coverage: CoverageResultSchema,
-      estimatedSavedWork: EstimatedSavedWorkSchema
-    });
-    ProvenPatternDtoSchema = external_exports.object({
-      schemaVersion: SchemaVersionSchema,
-      patternId: IdentifierSchema,
-      idempotencyKey: IdentifierSchema,
-      accountId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      engineVersion: SchemaVersionSchema,
-      signature: EpisodeSignatureSchema,
-      cluster: WorkflowClusterSummarySchema,
-      localVerdicts: LocalVerdictsSchema,
-      evidenceEventIds: external_exports.array(IdentifierSchema),
-      recurrence: external_exports.unknown().optional()
-    });
-    OpportunityHashCacheEntrySchema = external_exports.object({
-      structuralHash: external_exports.string().min(1),
-      outcome: OpportunityHashOutcomeSchema,
-      lastSeenAt: ISOTimestampSchema,
-      attempts: external_exports.number().int().nonnegative(),
-      syncedAt: ISOTimestampSchema.nullable(),
-      expiresAt: ISOTimestampSchema
-    });
-  }
-});
-
-// packages/contracts/dist/safety-gate.js
-var CURRENT_SAFETY_GATE_VERSION, SafetyAttestationRecordSchema, UnmetRequirementSchema, ProductionSafetyGateStatusSchema, SafetyGateRefusalSchema;
-var init_safety_gate = __esm({
-  "packages/contracts/dist/safety-gate.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    init_versions();
-    CURRENT_SAFETY_GATE_VERSION = "1.0.0";
-    SafetyAttestationRecordSchema = external_exports.object({
-      attestationId: IdentifierSchema,
-      schemaVersion: SchemaVersionSchema.default(CURRENT_SAFETY_GATE_VERSION),
-      issuedAt: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema,
-      environment: external_exports.enum(["production", "staging", "development", "test"]).default("production"),
-      compatibility: external_exports.object({
-        runtimeVersion: SchemaVersionSchema,
-        brokerProtocolVersion: SchemaVersionSchema,
-        bundleVerifierVersion: SchemaVersionSchema,
-        policyVersion: SchemaVersionSchema
-      }),
-      checks: external_exports.record(external_exports.boolean()),
-      metadata: external_exports.record(external_exports.unknown()).optional(),
-      signature: SignatureMetadataSchema.optional()
-    });
-    UnmetRequirementSchema = external_exports.object({
-      code: external_exports.string().min(1),
-      message: external_exports.string().min(1),
-      remediation: external_exports.string().min(1)
-    });
-    ProductionSafetyGateStatusSchema = external_exports.object({
-      isOpen: external_exports.boolean(),
-      status: external_exports.enum(["passed", "failed", "unsafe_override", "uninitialized"]),
-      evaluatedAt: ISOTimestampSchema,
-      versions: external_exports.object({
-        runtimeVersion: SchemaVersionSchema,
-        brokerProtocolVersion: SchemaVersionSchema,
-        bundleVerifierVersion: SchemaVersionSchema,
-        policyVersion: SchemaVersionSchema
-      }),
-      reasons: external_exports.array(external_exports.string()),
-      unmetRequirements: external_exports.array(UnmetRequirementSchema),
-      attestation: SafetyAttestationRecordSchema.optional(),
-      unsafeOverrideActive: external_exports.boolean().default(false)
-    });
-    SafetyGateRefusalSchema = external_exports.object({
-      isError: external_exports.literal(true),
-      refusalCode: external_exports.string().min(1),
-      refusalReason: external_exports.string().min(1),
-      remediation: external_exports.string().min(1),
-      unmetGates: external_exports.array(external_exports.string()),
-      evaluatedAt: ISOTimestampSchema,
-      content: external_exports.array(external_exports.object({
-        type: external_exports.literal("text"),
-        text: external_exports.string()
-      })),
-      details: external_exports.record(external_exports.unknown()).optional()
-    });
-  }
-});
-
-// packages/contracts/dist/qualification.js
-function computeFrozenIntentDigest(intent, options = {}) {
-  const { intentDigest: _, ...projection } = intent;
-  return hashCanonical({
-    domain: "resin/frozen-intent/v1",
-    constraints: projection.constraints,
-    createdAt: projection.createdAt,
-    createdBy: projection.createdBy,
-    goal: projection.goal,
-    inputSchemaDigest: normalizeSha256(projection.inputSchemaDigest, false),
-    intentId: projection.intentId,
-    schemaVersion: projection.schemaVersion,
-    successCriteria: projection.successCriteria
-  }, options);
-}
-function computeObservedEffectProfileDigest(profile, options = {}) {
-  const { profileDigest: _, ...projection } = profile;
-  return hashCanonical({
-    domain: "resin/observed-effect-profile/v1",
-    ...projection
-  }, options);
-}
-function computeQualificationRunDigest(run, options = {}) {
-  const { recordDigest: _, ...projection } = run;
-  return hashCanonical({
-    domain: "resin/qualification-run-record/v1",
-    afterStateDigest: normalizeSha256(projection.afterStateDigest, false),
-    beforeStateDigest: normalizeSha256(projection.beforeStateDigest, false),
-    candidateId: projection.candidateId,
-    checkDigest: normalizeSha256(projection.checkDigest, false),
-    completedAt: projection.completedAt,
-    costs: projection.costs,
-    dependencyDigest: normalizeSha256(projection.dependencyDigest, false),
-    effectDigest: normalizeSha256(projection.effectDigest, false),
-    environment: projection.environment,
-    environmentDigest: normalizeSha256(projection.environmentDigest, false),
-    inputDigest: normalizeSha256(projection.inputDigest, false),
-    intentDigest: normalizeSha256(projection.intentDigest, false),
-    logsUri: projection.logsUri,
-    observedEffectProfile: projection.observedEffectProfile,
-    outputDigest: normalizeSha256(projection.outputDigest, false),
-    previousRecordDigest: projection.previousRecordDigest ? normalizeSha256(projection.previousRecordDigest, false) : null,
-    runId: projection.runId,
-    sequence: projection.sequence,
-    sourceDigest: normalizeSha256(projection.sourceDigest, false),
-    startedAt: projection.startedAt,
-    status: projection.status,
-    structuredChecks: projection.structuredChecks,
-    traceDigest: normalizeSha256(projection.traceDigest, false)
-  }, options);
-}
-function computeReviewerVerdictDigest(verdict, options = {}) {
-  const { recordDigest: _, ...projection } = verdict;
-  return hashCanonical({
-    domain: "resin/reviewer-verdict/v1",
-    comments: projection.comments,
-    dependencyDigest: normalizeSha256(projection.dependencyDigest, false),
-    findings: projection.findings,
-    intentDigest: normalizeSha256(projection.intentDigest, false),
-    noGeneratorHistory: projection.noGeneratorHistory,
-    previousRecordDigest: projection.previousRecordDigest ? normalizeSha256(projection.previousRecordDigest, false) : null,
-    rawEvidenceDigest: normalizeSha256(projection.rawEvidenceDigest, false),
-    reviewedAt: projection.reviewedAt,
-    reviewerId: projection.reviewerId,
-    reviewerRole: projection.reviewerRole,
-    sequence: projection.sequence,
-    sessionId: projection.sessionId,
-    sourceDigest: normalizeSha256(projection.sourceDigest, false),
-    verdict: projection.verdict,
-    verdictId: projection.verdictId
-  }, options);
-}
-function computeIndependentReplayDigest(replay, options = {}) {
-  const { recordDigest: _, ...projection } = replay;
-  return hashCanonical({
-    domain: "resin/independent-replay-record/v1",
-    candidateId: projection.candidateId,
-    checkDigest: normalizeSha256(projection.checkDigest, false),
-    completedAt: projection.completedAt,
-    dependencyDigest: normalizeSha256(projection.dependencyDigest, false),
-    durationMs: projection.durationMs,
-    intentDigest: normalizeSha256(projection.intentDigest, false),
-    outputDigest: normalizeSha256(projection.outputDigest, false),
-    rawEvidenceDigest: normalizeSha256(projection.rawEvidenceDigest, false),
-    replayEnvironment: projection.replayEnvironment,
-    replayId: projection.replayId,
-    sourceDigest: normalizeSha256(projection.sourceDigest, false),
-    status: projection.status,
-    targetRunId: projection.targetRunId
-  }, options);
-}
-function computeApprovalDigest(approval, options = {}) {
-  const { approvalDigest: _, signature: __, ...projection } = approval;
-  return hashCanonical({
-    domain: "resin/qualification-approval/v1",
-    approvalId: projection.approvalId,
-    approverId: projection.approverId,
-    artifactBundleDigest: normalizeSha256(projection.artifactBundleDigest, false),
-    comments: projection.comments,
-    decision: projection.decision,
-    dependencyDigest: normalizeSha256(projection.dependencyDigest, false),
-    intentDigest: normalizeSha256(projection.intentDigest, false),
-    rawEvidenceDigest: normalizeSha256(projection.rawEvidenceDigest, false),
-    signedAt: projection.signedAt,
-    sourceDigest: normalizeSha256(projection.sourceDigest, false)
-  }, options);
-}
-function computeApprovalSigningPayload(artifactBundleDigest, approvalDigest) {
-  return canonicalJsonStringify({
-    domain: "resin/qualification-approval-signature/v1",
-    approvalDigest: normalizeSha256(approvalDigest, false),
-    artifactBundleDigest: normalizeSha256(artifactBundleDigest, false)
-  });
-}
-function computeRawEvidenceDigest(bundle, options = {}) {
-  const payload = {
-    domain: "resin/raw-evidence/v1",
-    candidateId: bundle.candidateId,
-    frozenIntent: bundle.frozenIntent,
-    runs: bundle.runs,
-    schemaVersion: bundle.schemaVersion
-  };
-  if (bundle.rawBundle) {
-    payload.rawBundle = bundle.rawBundle;
-  }
-  return hashCanonical(payload, options);
-}
-function computeQualificationBundleDigest(bundle, options = {}) {
-  const { approval: _, ...unsignedBundle } = bundle;
-  return hashCanonical({
-    domain: "resin/qualification-bundle/v1",
-    bundleId: unsignedBundle.bundleId,
-    candidateId: unsignedBundle.candidateId,
-    createdAt: unsignedBundle.createdAt,
-    frozenIntent: unsignedBundle.frozenIntent,
-    metadata: unsignedBundle.metadata,
-    previousBundleDigest: unsignedBundle.previousBundleDigest ? normalizeSha256(unsignedBundle.previousBundleDigest, false) : null,
-    rawBundle: unsignedBundle.rawBundle,
-    rawEvidenceDigest: normalizeSha256(unsignedBundle.rawEvidenceDigest, false),
-    replay: unsignedBundle.replay,
-    reviewers: unsignedBundle.reviewers,
-    runs: unsignedBundle.runs,
-    schemaVersion: unsignedBundle.schemaVersion
-  }, options);
-}
-function checkQualificationBundleInvariants(bundle, options) {
-  const issues = [];
-  if (bundle.schemaVersion !== CURRENT_QUALIFICATION_VERSION) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Bundle schemaVersion '${bundle.schemaVersion}' does not match expected '${CURRENT_QUALIFICATION_VERSION}'`,
-      path: ["schemaVersion"]
-    });
-  }
-  if (bundle.frozenIntent.schemaVersion !== CURRENT_QUALIFICATION_VERSION) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Frozen intent schemaVersion '${bundle.frozenIntent.schemaVersion}' does not match expected '${CURRENT_QUALIFICATION_VERSION}'`,
-      path: ["frozenIntent", "schemaVersion"]
-    });
-  }
-  bundle.runs.forEach((run, index) => {
-    if (run.candidateId !== bundle.candidateId) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Run[${index}] candidateId '${run.candidateId}' does not match bundle candidateId '${bundle.candidateId}'`,
-        path: ["runs", index.toString(), "candidateId"]
-      });
-    }
-  });
-  if (bundle.replay.candidateId !== bundle.candidateId) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Replay candidateId '${bundle.replay.candidateId}' does not match bundle candidateId '${bundle.candidateId}'`,
-      path: ["replay", "candidateId"]
-    });
-  }
-  const computedIntentDigest = computeFrozenIntentDigest(bundle.frozenIntent);
-  if (normalizeSha256(bundle.frozenIntent.intentDigest, false) !== computedIntentDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Frozen intent digest '${bundle.frozenIntent.intentDigest}' does not match computed digest '${computedIntentDigest}'`,
-      path: ["frozenIntent", "intentDigest"]
-    });
-  }
-  const expectedIntent = normalizeSha256(bundle.frozenIntent.intentDigest, false);
-  const expectedSource = bundle.runs.length > 0 ? normalizeSha256(bundle.runs[0].sourceDigest, false) : "";
-  const expectedDep = bundle.runs.length > 0 ? normalizeSha256(bundle.runs[0].dependencyDigest, false) : "";
-  bundle.runs.forEach((run, index) => {
-    if (normalizeSha256(run.sourceDigest, false) !== expectedSource) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Run[${index}] sourceDigest '${run.sourceDigest}' does not match expected '${expectedSource}'`,
-        path: ["runs", index.toString(), "sourceDigest"]
-      });
-    }
-    if (normalizeSha256(run.dependencyDigest, false) !== expectedDep) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Run[${index}] dependencyDigest '${run.dependencyDigest}' does not match expected '${expectedDep}'`,
-        path: ["runs", index.toString(), "dependencyDigest"]
-      });
-    }
-    if (normalizeSha256(run.intentDigest, false) !== expectedIntent) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Run[${index}] intentDigest '${run.intentDigest}' does not match frozen intent '${expectedIntent}'`,
-        path: ["runs", index.toString(), "intentDigest"]
-      });
-    }
-  });
-  bundle.reviewers.forEach((reviewer, index) => {
-    if (normalizeSha256(reviewer.sourceDigest, false) !== expectedSource) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Reviewer[${index}] sourceDigest '${reviewer.sourceDigest}' does not match expected '${expectedSource}'`,
-        path: ["reviewers", index.toString(), "sourceDigest"]
-      });
-    }
-    if (normalizeSha256(reviewer.dependencyDigest, false) !== expectedDep) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Reviewer[${index}] dependencyDigest '${reviewer.dependencyDigest}' does not match expected '${expectedDep}'`,
-        path: ["reviewers", index.toString(), "dependencyDigest"]
-      });
-    }
-    if (normalizeSha256(reviewer.intentDigest, false) !== expectedIntent) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-        message: `Reviewer[${index}] intentDigest '${reviewer.intentDigest}' does not match frozen intent '${expectedIntent}'`,
-        path: ["reviewers", index.toString(), "intentDigest"]
-      });
-    }
-  });
-  if (normalizeSha256(bundle.replay.sourceDigest, false) !== expectedSource) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Replay sourceDigest '${bundle.replay.sourceDigest}' does not match expected '${expectedSource}'`,
-      path: ["replay", "sourceDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.replay.dependencyDigest, false) !== expectedDep) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Replay dependencyDigest '${bundle.replay.dependencyDigest}' does not match expected '${expectedDep}'`,
-      path: ["replay", "dependencyDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.replay.intentDigest, false) !== expectedIntent) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Replay intentDigest '${bundle.replay.intentDigest}' does not match frozen intent '${expectedIntent}'`,
-      path: ["replay", "intentDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.approval.sourceDigest, false) !== expectedSource) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Approval sourceDigest '${bundle.approval.sourceDigest}' does not match expected '${expectedSource}'`,
-      path: ["approval", "sourceDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.approval.dependencyDigest, false) !== expectedDep) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Approval dependencyDigest '${bundle.approval.dependencyDigest}' does not match expected '${expectedDep}'`,
-      path: ["approval", "dependencyDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.approval.intentDigest, false) !== expectedIntent) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MIXED_REVISIONS,
-      message: `Approval intentDigest '${bundle.approval.intentDigest}' does not match frozen intent '${expectedIntent}'`,
-      path: ["approval", "intentDigest"]
-    });
-  }
-  const computedRawEvidenceDigest = computeRawEvidenceDigest(bundle);
-  const expectedRawEvidence = normalizeSha256(bundle.rawEvidenceDigest, false);
-  if (expectedRawEvidence !== computedRawEvidenceDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Bundle rawEvidenceDigest '${expectedRawEvidence}' does not match computed raw evidence digest '${computedRawEvidenceDigest}'`,
-      path: ["rawEvidenceDigest"]
-    });
-  }
-  bundle.reviewers.forEach((reviewer, index) => {
-    if (normalizeSha256(reviewer.rawEvidenceDigest, false) !== expectedRawEvidence) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Reviewer[${index}] rawEvidenceDigest '${reviewer.rawEvidenceDigest}' does not match expected '${expectedRawEvidence}'`,
-        path: ["reviewers", index.toString(), "rawEvidenceDigest"]
-      });
-    }
-  });
-  if (normalizeSha256(bundle.replay.rawEvidenceDigest, false) !== expectedRawEvidence) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Replay rawEvidenceDigest '${bundle.replay.rawEvidenceDigest}' does not match expected '${expectedRawEvidence}'`,
-      path: ["replay", "rawEvidenceDigest"]
-    });
-  }
-  if (normalizeSha256(bundle.approval.rawEvidenceDigest, false) !== expectedRawEvidence) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Approval rawEvidenceDigest '${bundle.approval.rawEvidenceDigest}' does not match expected '${expectedRawEvidence}'`,
-      path: ["approval", "rawEvidenceDigest"]
-    });
-  }
-  const seenRunIds = /* @__PURE__ */ new Set();
-  bundle.runs.forEach((run, index) => {
-    if (seenRunIds.has(run.runId)) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Duplicate runId '${run.runId}' found at index ${index}`,
-        path: ["runs", index.toString(), "runId"]
-      });
-    }
-    seenRunIds.add(run.runId);
-    if (run.sequence !== index) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Run[${index}] sequence '${run.sequence}' must be '${index}'`,
-        path: ["runs", index.toString(), "sequence"]
-      });
-    }
-    const computedRunDigest = computeQualificationRunDigest(run);
-    if (normalizeSha256(run.recordDigest, false) !== computedRunDigest) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Run[${index}] recordDigest '${run.recordDigest}' does not match computed digest '${computedRunDigest}'`,
-        path: ["runs", index.toString(), "recordDigest"]
-      });
-    }
-    const expectedPrevDigest = index === 0 ? null : normalizeSha256(bundle.runs[index - 1].recordDigest, false);
-    const actualPrevDigest = run.previousRecordDigest ? normalizeSha256(run.previousRecordDigest, false) : null;
-    if (actualPrevDigest !== expectedPrevDigest) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Run[${index}] previousRecordDigest '${actualPrevDigest}' does not match prior run digest '${expectedPrevDigest}'`,
-        path: ["runs", index.toString(), "previousRecordDigest"]
-      });
-    }
-    const computedProfileDigest = computeObservedEffectProfileDigest(run.observedEffectProfile);
-    if (run.observedEffectProfile.profileDigest) {
-      if (normalizeSha256(run.observedEffectProfile.profileDigest, false) !== computedProfileDigest) {
-        issues.push({
-          code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-          message: `Run[${index}] observedEffectProfile.profileDigest '${run.observedEffectProfile.profileDigest}' does not match computed digest '${computedProfileDigest}'`,
-          path: ["runs", index.toString(), "observedEffectProfile", "profileDigest"]
-        });
-      }
-    }
-    const expectedEffectDigest = run.observedEffectProfile.profileDigest ? normalizeSha256(run.observedEffectProfile.profileDigest, false) : computedProfileDigest;
-    if (normalizeSha256(run.effectDigest, false) !== expectedEffectDigest) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Run[${index}] effectDigest '${run.effectDigest}' does not match observedEffectProfile.profileDigest '${run.observedEffectProfile.profileDigest ?? computedProfileDigest}'`,
-        path: ["runs", index.toString(), "effectDigest"]
-      });
-    }
-    if (run.status === "passed") {
-      const axes = [
-        "filesRead",
-        "filesCreated",
-        "filesModified",
-        "filesDeleted",
-        "processTree",
-        "network",
-        "environmentVariables",
-        "credentials",
-        "dependencyChanges",
-        "artifacts",
-        "validationChecks",
-        "resourceEnvelope",
-        "consequentialActions"
-      ];
-      for (const axis of axes) {
-        const section = run.observedEffectProfile[axis];
-        if (section && section.observation !== "complete") {
-          issues.push({
-            code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-            message: `Run[${index}] has status 'passed' but observedEffectProfile axis '${axis}' observation is '${section.observation}' (must be 'complete')`,
-            path: ["runs", index.toString(), "observedEffectProfile", axis, "observation"]
-          });
-        }
-      }
-      if (run.observedEffectProfile.validationChecks && run.observedEffectProfile.validationChecks.checks) {
-        run.observedEffectProfile.validationChecks.checks.forEach((check, checkIdx) => {
-          if (!check.passed) {
-            issues.push({
-              code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-              message: `Run[${index}] has status 'passed' but validationCheck[${checkIdx}] '${check.checkId}' has passed=false`,
-              path: [
-                "runs",
-                index.toString(),
-                "observedEffectProfile",
-                "validationChecks",
-                "checks",
-                checkIdx.toString(),
-                "passed"
-              ]
-            });
-          }
-        });
-      }
-      if (run.costs.modelUsageObservation === "unknown") {
-        issues.push({
-          code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-          message: `Run[${index}] has status 'passed' but costs.modelUsageObservation is 'unknown'`,
-          path: ["runs", index.toString(), "costs", "modelUsageObservation"]
-        });
-      }
-      if (run.structuredChecks.length === 0) {
-        issues.push({
-          code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-          message: `Run[${index}] has status 'passed' but contains no structured checks`,
-          path: ["runs", index.toString(), "structuredChecks"]
-        });
-      }
-      run.structuredChecks.forEach((check, checkIdx) => {
-        if (check.status !== "passed") {
-          issues.push({
-            code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-            message: `Run[${index}] has status 'passed' but structuredCheck[${checkIdx}] '${check.checkId}' has status '${check.status}'`,
-            path: ["runs", index.toString(), "structuredChecks", checkIdx.toString(), "status"]
-          });
-        }
-        if (check.actualDigest !== void 0 && check.expectedDigest !== void 0 && normalizeSha256(check.actualDigest, false) !== normalizeSha256(check.expectedDigest, false)) {
-          issues.push({
-            code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-            message: `Run[${index}] structuredCheck[${checkIdx}] '${check.checkId}' actualDigest '${check.actualDigest}' does not match expectedDigest '${check.expectedDigest}'`,
-            path: [
-              "runs",
-              index.toString(),
-              "structuredChecks",
-              checkIdx.toString(),
-              "actualDigest"
-            ]
-          });
-        }
-      });
-      if (run.observedEffectProfile.consequentialActions && run.observedEffectProfile.consequentialActions.actions) {
-        run.observedEffectProfile.consequentialActions.actions.forEach((action, actionIdx) => {
-          if (!action.authorizationEvidence || action.authorizationEvidence.trim() === "") {
-            issues.push({
-              code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-              message: `Run[${index}] has status 'passed' but contains unauthorized consequential action '${action.actionType}' on '${action.target}' (missing authorizationEvidence)`,
-              path: [
-                "runs",
-                index.toString(),
-                "observedEffectProfile",
-                "consequentialActions",
-                "actions",
-                actionIdx.toString(),
-                "authorizationEvidence"
-              ]
-            });
-          }
-        });
-      }
-    }
-  });
-  const passedRuns = bundle.runs.filter((r) => r.status === "passed");
-  if (passedRuns.length < 2) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.INSUFFICIENT_ENVIRONMENTS,
-      message: `Qualification requires at least 2 passed runs, found ${passedRuns.length}`,
-      path: ["runs"]
-    });
-  }
-  const distinctEnvs = new Set(passedRuns.map((r) => r.environment));
-  if (distinctEnvs.size < 2) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.INSUFFICIENT_ENVIRONMENTS,
-      message: `Qualification requires at least 2 distinct passed environments, found ${distinctEnvs.size} (${Array.from(distinctEnvs).join(", ")})`,
-      path: ["runs"]
-    });
-  }
-  const seenVerdictIds = /* @__PURE__ */ new Set();
-  const seenSessionIds = /* @__PURE__ */ new Set();
-  const creatorId = bundle.frozenIntent.createdBy;
-  bundle.reviewers.forEach((reviewer, index) => {
-    if (seenVerdictIds.has(reviewer.verdictId)) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Duplicate verdictId '${reviewer.verdictId}' found at index ${index}`,
-        path: ["reviewers", index.toString(), "verdictId"]
-      });
-    }
-    seenVerdictIds.add(reviewer.verdictId);
-    if (seenSessionIds.has(reviewer.sessionId)) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.HISTORY_LEAKAGE,
-        message: `Reviewer sessionId '${reviewer.sessionId}' is reused at index ${index}; reviewer sessions must be globally unique`,
-        path: ["reviewers", index.toString(), "sessionId"]
-      });
-    }
-    seenSessionIds.add(reviewer.sessionId);
-    if (reviewer.sequence !== index) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Reviewer[${index}] sequence '${reviewer.sequence}' must be '${index}'`,
-        path: ["reviewers", index.toString(), "sequence"]
-      });
-    }
-    const computedVerdictDigest = computeReviewerVerdictDigest(reviewer);
-    if (normalizeSha256(reviewer.recordDigest, false) !== computedVerdictDigest) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Reviewer[${index}] recordDigest '${reviewer.recordDigest}' does not match computed digest '${computedVerdictDigest}'`,
-        path: ["reviewers", index.toString(), "recordDigest"]
-      });
-    }
-    const expectedPrevDigest = index === 0 ? null : normalizeSha256(bundle.reviewers[index - 1].recordDigest, false);
-    const actualPrevDigest = reviewer.previousRecordDigest ? normalizeSha256(reviewer.previousRecordDigest, false) : null;
-    if (actualPrevDigest !== expectedPrevDigest) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-        message: `Reviewer[${index}] previousRecordDigest '${actualPrevDigest}' does not match prior reviewer digest '${expectedPrevDigest}'`,
-        path: ["reviewers", index.toString(), "previousRecordDigest"]
-      });
-    }
-    if (reviewer.reviewerId === creatorId) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.HISTORY_LEAKAGE,
-        message: `Reviewer[${index}] reviewerId '${reviewer.reviewerId}' cannot equal frozenIntent createdBy '${creatorId}'`,
-        path: ["reviewers", index.toString(), "reviewerId"]
-      });
-    }
-    if (reviewer.noGeneratorHistory !== true) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.HISTORY_LEAKAGE,
-        message: `Reviewer[${index}] must explicitly declare noGeneratorHistory: true`,
-        path: ["reviewers", index.toString(), "noGeneratorHistory"]
-      });
-    }
-  });
-  const correctnessReviews = bundle.reviewers.filter((r) => r.reviewerRole === "correctness-usefulness");
-  if (correctnessReviews.length === 0) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MISSING_REVIEWERS,
-      message: "Qualification requires at least one correctness-usefulness reviewer verdict",
-      path: ["reviewers"]
-    });
-  } else {
-    const passedCorrectness = correctnessReviews.some((r) => r.verdict === "approved");
-    if (!passedCorrectness) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REVIEWER_VERDICT_FAILED,
-        message: "correctness-usefulness reviewer verdict must be approved",
-        path: ["reviewers"]
-      });
-    }
-  }
-  const adversarialReviews = bundle.reviewers.filter((r) => r.reviewerRole === "adversarial-safety");
-  if (adversarialReviews.length === 0) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.MISSING_REVIEWERS,
-      message: "Qualification requires at least one adversarial-safety reviewer verdict",
-      path: ["reviewers"]
-    });
-  } else {
-    const passedAdversarial = adversarialReviews.some((r) => r.verdict === "approved");
-    if (!passedAdversarial) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REVIEWER_VERDICT_FAILED,
-        message: "adversarial-safety reviewer verdict must be approved",
-        path: ["reviewers"]
-      });
-    }
-  }
-  if (correctnessReviews.length > 0 && adversarialReviews.length > 0) {
-    const correctnessReviewerIds = new Set(correctnessReviews.map((r) => r.reviewerId));
-    const adversarialReviewerIds = new Set(adversarialReviews.map((r) => r.reviewerId));
-    const reviewerIntersection = [...correctnessReviewerIds].filter((id) => adversarialReviewerIds.has(id));
-    if (reviewerIntersection.length > 0) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.HISTORY_LEAKAGE,
-        message: `Reviewer identity '${reviewerIntersection.join(", ")}' cannot serve as both correctness-usefulness and adversarial-safety reviewer`,
-        path: ["reviewers"]
-      });
-    }
-    const correctnessSessionIds = new Set(correctnessReviews.map((r) => r.sessionId));
-    const adversarialSessionIds = new Set(adversarialReviews.map((r) => r.sessionId));
-    const sessionIntersection = [...correctnessSessionIds].filter((id) => adversarialSessionIds.has(id));
-    if (sessionIntersection.length > 0) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.HISTORY_LEAKAGE,
-        message: `Reviewer session '${sessionIntersection.join(", ")}' cannot be reused across correctness-usefulness and adversarial-safety reviewer roles`,
-        path: ["reviewers"]
-      });
-    }
-  }
-  const computedReplayDigest = computeIndependentReplayDigest(bundle.replay);
-  if (normalizeSha256(bundle.replay.recordDigest, false) !== computedReplayDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.BUNDLE_MISMATCH,
-      message: `Replay recordDigest '${bundle.replay.recordDigest}' does not match computed digest '${computedReplayDigest}'`,
-      path: ["replay", "recordDigest"]
-    });
-  }
-  if (bundle.replay.status !== "passed") {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-      message: `Independent replay status must be 'passed', found '${bundle.replay.status}'`,
-      path: ["replay", "status"]
-    });
-  }
-  const targetRun = bundle.runs.find((r) => r.runId === bundle.replay.targetRunId);
-  if (!targetRun) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-      message: `Independent replay targetRunId '${bundle.replay.targetRunId}' not found in bundle runs`,
-      path: ["replay", "targetRunId"]
-    });
-  } else {
-    if (targetRun.status !== "passed") {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-        message: `Independent replay target run '${targetRun.runId}' did not pass (status: '${targetRun.status}')`,
-        path: ["replay", "targetRunId"]
-      });
-    }
-    if (bundle.replay.replayEnvironment === targetRun.environment) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.INSUFFICIENT_ENVIRONMENTS,
-        message: `Independent replay environment '${bundle.replay.replayEnvironment}' must be fresh and distinct from target run environment '${targetRun.environment}'`,
-        path: ["replay", "replayEnvironment"]
-      });
-    }
-    if (normalizeSha256(bundle.replay.outputDigest, false) !== normalizeSha256(targetRun.outputDigest, false)) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-        message: `Independent replay output digest '${bundle.replay.outputDigest}' does not match target run output digest '${targetRun.outputDigest}'`,
-        path: ["replay", "outputDigest"]
-      });
-    }
-    if (normalizeSha256(bundle.replay.checkDigest, false) !== normalizeSha256(targetRun.checkDigest, false)) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-        message: `Independent replay check digest '${bundle.replay.checkDigest}' does not match target run check digest '${targetRun.checkDigest}'`,
-        path: ["replay", "checkDigest"]
-      });
-    }
-  }
-  if (bundle.approval.decision !== "approved") {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.APPROVAL_MISMATCH,
-      message: `Approval decision must be 'approved', found '${bundle.approval.decision}'`,
-      path: ["approval", "decision"]
-    });
-  } else {
-    bundle.runs.forEach((run, index) => {
-      if (run.status !== "passed") {
-        issues.push({
-          code: QUALIFICATION_ERROR_CODES.APPROVAL_MISMATCH,
-          message: `Bundle approval decision is 'approved' but run[${index}] has status '${run.status}' (failed/incomplete runs cannot be approved)`,
-          path: ["approval", "decision"]
-        });
-      }
-    });
-    if (bundle.replay.status !== "passed") {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.REPLAY_MISMATCH,
-        message: `Bundle approval decision is 'approved' but replay status is '${bundle.replay.status}'`,
-        path: ["replay", "status"]
-      });
-    }
-  }
-  const computedArtifactBundleDigest = computeQualificationBundleDigest(bundle);
-  if (normalizeSha256(bundle.approval.artifactBundleDigest, false) !== computedArtifactBundleDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.APPROVAL_MISMATCH,
-      message: `Approval artifactBundleDigest '${bundle.approval.artifactBundleDigest}' does not match computed bundle digest '${computedArtifactBundleDigest}'`,
-      path: ["approval", "artifactBundleDigest"]
-    });
-  }
-  const computedApprovalDigest = computeApprovalDigest(bundle.approval);
-  if (normalizeSha256(bundle.approval.approvalDigest, false) !== computedApprovalDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.APPROVAL_MISMATCH,
-      message: `Approval approvalDigest '${bundle.approval.approvalDigest}' does not match computed approval digest '${computedApprovalDigest}'`,
-      path: ["approval", "approvalDigest"]
-    });
-  }
-  const normalizedSignedDigest = normalizeSha256(bundle.approval.signature.signedDigest, false);
-  if (normalizedSignedDigest !== computedArtifactBundleDigest && normalizedSignedDigest !== computedApprovalDigest) {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.APPROVAL_MISMATCH,
-      message: `Approval signature signedDigest '${bundle.approval.signature.signedDigest}' must bind to artifactBundleDigest '${computedArtifactBundleDigest}' or approvalDigest '${computedApprovalDigest}'`,
-      path: ["approval", "signature", "signedDigest"]
-    });
-  }
-  if (bundle.approval.signature.algorithm !== "ed25519") {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.INVALID_SIGNATURE,
-      message: `Unsupported signature algorithm '${bundle.approval.signature.algorithm}', only 'ed25519' is supported`,
-      path: ["approval", "signature", "algorithm"]
-    });
-  }
-  if (!bundle.approval.signature.signature || bundle.approval.signature.signature.trim() === "") {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.INVALID_SIGNATURE,
-      message: "Approval signature is empty or whitespace",
-      path: ["approval", "signature", "signature"]
-    });
-  }
-  if (!bundle.approval.signature.keyId || bundle.approval.signature.keyId.trim() === "") {
-    issues.push({
-      code: QUALIFICATION_ERROR_CODES.INVALID_SIGNATURE,
-      message: "Approval keyId is empty or whitespace",
-      path: ["approval", "signature", "keyId"]
-    });
-  }
-  if (options?.verifier) {
-    try {
-      const signingPayload = computeApprovalSigningPayload(computedArtifactBundleDigest, computedApprovalDigest);
-      const isSigValid = options.verifier({
-        keyId: bundle.approval.signature.keyId,
-        algorithm: bundle.approval.signature.algorithm,
-        signature: bundle.approval.signature.signature,
-        payload: signingPayload,
-        signedDigest: normalizedSignedDigest
-      });
-      if (!isSigValid) {
-        issues.push({
-          code: QUALIFICATION_ERROR_CODES.INVALID_SIGNATURE,
-          message: "Cryptographic signature verification failed for approval",
-          path: ["approval", "signature"]
-        });
-      }
-    } catch (err) {
-      issues.push({
-        code: QUALIFICATION_ERROR_CODES.INVALID_SIGNATURE,
-        message: `Signature verification threw an error: ${err instanceof Error ? err.message : String(err)}`,
-        path: ["approval", "signature"]
-      });
-    }
-  }
-  return issues;
-}
-var CURRENT_QUALIFICATION_VERSION, NormalizedSha256DigestSchema, QUALIFICATION_ERROR_CODES, FrozenToolIntentSchema, EffectObservationStatusSchema, ConsequentialActionSchema, ObservedEffectProfileSchema, StructuredCheckSchema, QualificationCostsSchema, QualificationRunRecordBaseSchema, QualificationRunRecordSchema, ReviewerVerdictSchema, IndependentReplayRecordSchema, ApprovalSignatureSchema, ToolQualificationApprovalSchema, RawBundleDescriptorSchema, QualificationArtifactBundleBaseSchema, QualificationArtifactBundleSchema;
-var init_qualification = __esm({
-  "packages/contracts/dist/qualification.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    init_common();
-    CURRENT_QUALIFICATION_VERSION = "1.0.0";
-    NormalizedSha256DigestSchema = external_exports.string().regex(/^(sha256:)?[a-f0-9]{64}$/i, "Invalid SHA-256 digest format (expected 64 hex characters or sha256:<hex>)").transform((val) => normalizeSha256(val, false));
-    QUALIFICATION_ERROR_CODES = {
-      INSUFFICIENT_ENVIRONMENTS: "INSUFFICIENT_ENVIRONMENTS",
-      MIXED_REVISIONS: "MIXED_REVISIONS",
-      MISSING_REVIEWERS: "MISSING_REVIEWERS",
-      REVIEWER_VERDICT_FAILED: "REVIEWER_VERDICT_FAILED",
-      HISTORY_LEAKAGE: "HISTORY_LEAKAGE",
-      BUNDLE_MISMATCH: "BUNDLE_MISMATCH",
-      REPLAY_MISMATCH: "REPLAY_MISMATCH",
-      APPROVAL_MISMATCH: "APPROVAL_MISMATCH",
-      INVALID_SIGNATURE: "INVALID_SIGNATURE"
-    };
-    FrozenToolIntentSchema = external_exports.object({
-      intentId: IdentifierSchema,
-      schemaVersion: external_exports.literal(CURRENT_QUALIFICATION_VERSION),
-      goal: external_exports.string().min(1, "Goal cannot be empty"),
-      successCriteria: external_exports.array(external_exports.string().min(1, "Success criterion cannot be empty")).min(1, "successCriteria cannot be empty"),
-      inputSchemaDigest: NormalizedSha256DigestSchema,
-      constraints: external_exports.array(external_exports.string()),
-      createdAt: ISOTimestampSchema,
-      createdBy: external_exports.string().min(1, "CreatedBy cannot be empty"),
-      intentDigest: NormalizedSha256DigestSchema
-    }).strict();
-    EffectObservationStatusSchema = external_exports.enum(["complete", "unknown"]);
-    ConsequentialActionSchema = external_exports.object({
-      actionType: external_exports.string().min(1, "actionType cannot be empty"),
-      target: external_exports.string().min(1, "target cannot be empty"),
-      description: external_exports.string().min(1, "description cannot be empty"),
-      requiresExplicitAuthorization: external_exports.literal(true),
-      authorizationEvidence: external_exports.string().min(1, "authorizationEvidence cannot be empty").optional()
-    }).strict();
-    ObservedEffectProfileSchema = external_exports.object({
-      filesRead: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        paths: external_exports.array(external_exports.string())
-      }).strict(),
-      filesCreated: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        paths: external_exports.array(external_exports.string())
-      }).strict(),
-      filesModified: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        paths: external_exports.array(external_exports.string())
-      }).strict(),
-      filesDeleted: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        paths: external_exports.array(external_exports.string())
-      }).strict(),
-      processTree: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        spawnedProcesses: external_exports.array(external_exports.string())
-      }).strict(),
-      network: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        destinations: external_exports.array(external_exports.string()),
-        methods: external_exports.array(external_exports.string())
-      }).strict(),
-      environmentVariables: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        names: external_exports.array(external_exports.string())
-      }).strict(),
-      credentials: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        names: external_exports.array(external_exports.string())
-      }).strict(),
-      dependencyChanges: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        changes: external_exports.array(external_exports.string())
-      }).strict(),
-      artifacts: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        items: external_exports.array(external_exports.object({
-          name: external_exports.string().min(1),
-          digest: NormalizedSha256DigestSchema
-        }).strict())
-      }).strict(),
-      validationChecks: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        checks: external_exports.array(external_exports.object({
-          checkId: external_exports.string().min(1),
-          name: external_exports.string().min(1),
-          passed: external_exports.boolean(),
-          details: external_exports.string().optional()
-        }).strict())
-      }).strict(),
-      resourceEnvelope: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        maxMemoryBytes: external_exports.number().int().nonnegative(),
-        cpuTimeMs: external_exports.number().nonnegative(),
-        wallDurationMs: external_exports.number().nonnegative()
-      }).strict(),
-      consequentialActions: external_exports.object({
-        observation: EffectObservationStatusSchema,
-        actions: external_exports.array(ConsequentialActionSchema)
-      }).strict(),
-      determinism: external_exports.enum(["deterministic", "non_deterministic", "pseudo_deterministic"]),
-      profileDigest: NormalizedSha256DigestSchema.optional()
-    }).strict();
-    StructuredCheckSchema = external_exports.object({
-      checkId: external_exports.string().min(1, "checkId cannot be empty"),
-      name: external_exports.string().min(1, "name cannot be empty"),
-      status: external_exports.enum(["passed", "failed", "error"]),
-      message: external_exports.string().optional(),
-      actualDigest: NormalizedSha256DigestSchema.optional(),
-      expectedDigest: NormalizedSha256DigestSchema.optional()
-    }).strict().superRefine((data, ctx) => {
-      if (data.status === "passed") {
-        if (data.expectedDigest !== void 0 && data.actualDigest === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "Check with status 'passed' specifying expectedDigest must also bind actualDigest",
-            path: ["actualDigest"]
-          });
-        }
-        if (data.actualDigest !== void 0 && data.expectedDigest === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "Check with status 'passed' specifying actualDigest must also bind expectedDigest",
-            path: ["expectedDigest"]
-          });
-        }
-        if (data.actualDigest !== void 0 && data.expectedDigest !== void 0 && normalizeSha256(data.actualDigest, false) !== normalizeSha256(data.expectedDigest, false)) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `Check with status 'passed' has mismatched actualDigest '${data.actualDigest}' and expectedDigest '${data.expectedDigest}'`,
-            path: ["actualDigest"]
-          });
-        }
-      }
-    });
-    QualificationCostsSchema = external_exports.object({
-      modelUsageObservation: external_exports.enum(["complete", "not-applicable", "unknown"]),
-      inputTokens: external_exports.number().int().nonnegative().optional(),
-      outputTokens: external_exports.number().int().nonnegative().optional(),
-      cacheReadTokens: external_exports.number().int().nonnegative().optional(),
-      costUsd: external_exports.number().nonnegative().optional()
-    }).strict().superRefine((data, ctx) => {
-      if (data.modelUsageObservation === "complete") {
-        if (data.inputTokens === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "inputTokens is required when modelUsageObservation is 'complete'",
-            path: ["inputTokens"]
-          });
-        }
-        if (data.outputTokens === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "outputTokens is required when modelUsageObservation is 'complete'",
-            path: ["outputTokens"]
-          });
-        }
-        if (data.cacheReadTokens === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "cacheReadTokens is required when modelUsageObservation is 'complete'",
-            path: ["cacheReadTokens"]
-          });
-        }
-        if (data.costUsd === void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "costUsd is required when modelUsageObservation is 'complete'",
-            path: ["costUsd"]
-          });
-        }
-      } else if (data.modelUsageObservation === "not-applicable") {
-        if (data.inputTokens !== void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "inputTokens must be absent when modelUsageObservation is 'not-applicable'",
-            path: ["inputTokens"]
-          });
-        }
-        if (data.outputTokens !== void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "outputTokens must be absent when modelUsageObservation is 'not-applicable'",
-            path: ["outputTokens"]
-          });
-        }
-        if (data.cacheReadTokens !== void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "cacheReadTokens must be absent when modelUsageObservation is 'not-applicable'",
-            path: ["cacheReadTokens"]
-          });
-        }
-        if (data.costUsd !== void 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "costUsd must be absent when modelUsageObservation is 'not-applicable'",
-            path: ["costUsd"]
-          });
-        }
-      }
-    });
-    QualificationRunRecordBaseSchema = external_exports.object({
-      runId: IdentifierSchema,
-      sequence: external_exports.number().int().nonnegative(),
-      candidateId: IdentifierSchema,
-      environment: external_exports.string().min(1, "Environment identifier cannot be empty"),
-      status: external_exports.enum(["passed", "failed", "error"]),
-      sourceDigest: NormalizedSha256DigestSchema,
-      dependencyDigest: NormalizedSha256DigestSchema,
-      intentDigest: NormalizedSha256DigestSchema,
-      environmentDigest: NormalizedSha256DigestSchema,
-      inputDigest: NormalizedSha256DigestSchema,
-      traceDigest: NormalizedSha256DigestSchema,
-      beforeStateDigest: NormalizedSha256DigestSchema,
-      afterStateDigest: NormalizedSha256DigestSchema,
-      outputDigest: NormalizedSha256DigestSchema,
-      checkDigest: NormalizedSha256DigestSchema,
-      effectDigest: NormalizedSha256DigestSchema,
-      observedEffectProfile: ObservedEffectProfileSchema,
-      structuredChecks: external_exports.array(StructuredCheckSchema),
-      costs: QualificationCostsSchema,
-      previousRecordDigest: NormalizedSha256DigestSchema.nullable().optional(),
-      recordDigest: NormalizedSha256DigestSchema,
-      startedAt: ISOTimestampSchema,
-      completedAt: ISOTimestampSchema,
-      logsUri: external_exports.string().optional()
-    }).strict();
-    QualificationRunRecordSchema = QualificationRunRecordBaseSchema.superRefine((data, ctx) => {
-      if (data.status === "passed") {
-        const profile = data.observedEffectProfile;
-        const axes = [
-          "filesRead",
-          "filesCreated",
-          "filesModified",
-          "filesDeleted",
-          "processTree",
-          "network",
-          "environmentVariables",
-          "credentials",
-          "dependencyChanges",
-          "artifacts",
-          "validationChecks",
-          "resourceEnvelope",
-          "consequentialActions"
-        ];
-        for (const axis of axes) {
-          const section = profile[axis];
-          if (section && section.observation !== "complete") {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Run with status 'passed' requires axis '${axis}' observation to be 'complete', found '${section.observation}'`,
-              path: ["observedEffectProfile", axis, "observation"]
-            });
-          }
-        }
-        if (profile.validationChecks && profile.validationChecks.checks) {
-          for (let i = 0; i < profile.validationChecks.checks.length; i++) {
-            const check = profile.validationChecks.checks[i];
-            if (!check.passed) {
-              ctx.addIssue({
-                code: external_exports.ZodIssueCode.custom,
-                message: `Run with status 'passed' has failing validationCheck '${check.checkId}'`,
-                path: ["observedEffectProfile", "validationChecks", "checks", i, "passed"]
-              });
-            }
-          }
-        }
-        if (data.costs.modelUsageObservation === "unknown") {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "Run with status 'passed' cannot have unknown modelUsageObservation",
-            path: ["costs", "modelUsageObservation"]
-          });
-        }
-        if (data.structuredChecks.length === 0) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "Run with status 'passed' must contain at least one structured check",
-            path: ["structuredChecks"]
-          });
-        }
-        for (let i = 0; i < data.structuredChecks.length; i++) {
-          const check = data.structuredChecks[i];
-          if (check.status !== "passed") {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Run with status 'passed' contains non-passed structured check '${check.checkId}' with status '${check.status}'`,
-              path: ["structuredChecks", i, "status"]
-            });
-          }
-          if (check.actualDigest !== void 0 && check.expectedDigest !== void 0 && normalizeSha256(check.actualDigest, false) !== normalizeSha256(check.expectedDigest, false)) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Run with status 'passed' structured check '${check.checkId}' actualDigest '${check.actualDigest}' does not match expectedDigest '${check.expectedDigest}'`,
-              path: ["structuredChecks", i, "actualDigest"]
-            });
-          }
-        }
-        if (profile.consequentialActions && profile.consequentialActions.actions) {
-          for (let i = 0; i < profile.consequentialActions.actions.length; i++) {
-            const action = profile.consequentialActions.actions[i];
-            if (!action.authorizationEvidence || action.authorizationEvidence.trim() === "") {
-              ctx.addIssue({
-                code: external_exports.ZodIssueCode.custom,
-                message: `Run with status 'passed' contains unauthorized consequential action '${action.actionType}' on '${action.target}' (missing authorizationEvidence)`,
-                path: [
-                  "observedEffectProfile",
-                  "consequentialActions",
-                  "actions",
-                  i,
-                  "authorizationEvidence"
-                ]
-              });
-            }
-          }
-        }
-      }
-    });
-    ReviewerVerdictSchema = external_exports.object({
-      verdictId: IdentifierSchema,
-      sequence: external_exports.number().int().nonnegative(),
-      sessionId: IdentifierSchema,
-      reviewerId: external_exports.string().min(1, "ReviewerId cannot be empty"),
-      reviewerRole: external_exports.enum(["correctness-usefulness", "adversarial-safety"]),
-      verdict: external_exports.enum(["approved", "rejected"]),
-      noGeneratorHistory: external_exports.literal(true),
-      sourceDigest: NormalizedSha256DigestSchema,
-      dependencyDigest: NormalizedSha256DigestSchema,
-      intentDigest: NormalizedSha256DigestSchema,
-      rawEvidenceDigest: NormalizedSha256DigestSchema,
-      findings: external_exports.array(external_exports.string()),
-      comments: external_exports.string().optional(),
-      previousRecordDigest: NormalizedSha256DigestSchema.nullable().optional(),
-      recordDigest: NormalizedSha256DigestSchema,
-      reviewedAt: ISOTimestampSchema
-    }).strict();
-    IndependentReplayRecordSchema = external_exports.object({
-      replayId: IdentifierSchema,
-      candidateId: IdentifierSchema,
-      targetRunId: IdentifierSchema,
-      replayEnvironment: external_exports.string().min(1, "Replay environment cannot be empty"),
-      status: external_exports.enum(["passed", "failed"]),
-      sourceDigest: NormalizedSha256DigestSchema,
-      dependencyDigest: NormalizedSha256DigestSchema,
-      intentDigest: NormalizedSha256DigestSchema,
-      rawEvidenceDigest: NormalizedSha256DigestSchema,
-      outputDigest: NormalizedSha256DigestSchema,
-      checkDigest: NormalizedSha256DigestSchema,
-      recordDigest: NormalizedSha256DigestSchema,
-      durationMs: external_exports.number().nonnegative(),
-      completedAt: ISOTimestampSchema
-    }).strict();
-    ApprovalSignatureSchema = external_exports.object({
-      keyId: external_exports.string().min(1, "keyId cannot be empty"),
-      algorithm: external_exports.literal("ed25519"),
-      signature: external_exports.string().min(1, "signature cannot be empty"),
-      signedDigest: NormalizedSha256DigestSchema
-    }).strict();
-    ToolQualificationApprovalSchema = external_exports.object({
-      approvalId: IdentifierSchema,
-      approverId: external_exports.string().min(1, "approverId cannot be empty"),
-      decision: external_exports.enum(["approved", "rejected"]),
-      sourceDigest: NormalizedSha256DigestSchema,
-      dependencyDigest: NormalizedSha256DigestSchema,
-      intentDigest: NormalizedSha256DigestSchema,
-      rawEvidenceDigest: NormalizedSha256DigestSchema,
-      artifactBundleDigest: NormalizedSha256DigestSchema,
-      approvalDigest: NormalizedSha256DigestSchema,
-      signature: ApprovalSignatureSchema,
-      signedAt: ISOTimestampSchema,
-      comments: external_exports.string().optional()
-    }).strict();
-    RawBundleDescriptorSchema = external_exports.object({
-      rawBundleDigest: NormalizedSha256DigestSchema,
-      uri: external_exports.string().min(1).optional(),
-      sizeBytes: external_exports.number().int().nonnegative().optional(),
-      format: external_exports.enum(["js_bundle", "zip", "tar_gz", "embedded", "wasm", "directory"]).default("js_bundle")
-    }).strict();
-    QualificationArtifactBundleBaseSchema = external_exports.object({
-      bundleId: IdentifierSchema,
-      schemaVersion: external_exports.literal(CURRENT_QUALIFICATION_VERSION),
-      candidateId: IdentifierSchema,
-      previousBundleDigest: NormalizedSha256DigestSchema.nullable().optional(),
-      frozenIntent: FrozenToolIntentSchema,
-      rawEvidenceDigest: NormalizedSha256DigestSchema,
-      rawBundle: RawBundleDescriptorSchema.optional(),
-      runs: external_exports.array(QualificationRunRecordSchema).min(2, "Qualification requires at least two qualification runs"),
-      reviewers: external_exports.array(ReviewerVerdictSchema).min(2, "Qualification requires at least two reviewer verdicts"),
-      replay: IndependentReplayRecordSchema,
-      approval: ToolQualificationApprovalSchema,
-      createdAt: ISOTimestampSchema,
-      metadata: external_exports.record(external_exports.unknown()).optional()
-    }).strict();
-    QualificationArtifactBundleSchema = QualificationArtifactBundleBaseSchema.superRefine((data, ctx) => {
-      const issues = checkQualificationBundleInvariants(data);
-      for (const issue of issues) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `[${issue.code}] ${issue.message}`,
-          params: { code: issue.code },
-          path: issue.path ?? []
-        });
-      }
-    });
-  }
-});
-
 // packages/contracts/dist/v1.js
 var V1_SCHEMA_VERSION, V1_SCHEMA_KINDS, V1Sha256DigestSchema, V1ExactSemVerSchema, V1OwnerTypeSchema, V1RoleSchema, V1OwnerReferenceSchema, V1PersonalScopeSchema, V1WorkspaceScopeSchema, V1AccountScopeSchema, V1OrganizationScopeSchema, V1AuthorizationScopeSchema, V1SubjectTypeSchema, V1OwnerAuthorizationSchema, V1ProjectSettingsSchema, V1ProjectMetadataSchema, V1LockSignatureIdentitySchema, V1LockedToolEntrySchema, V1ToolLockSchema, V1CertificateSubjectSchema, V1ActivationCertificateSchema, V1RevokedToolEntrySchema, V1RevokedCertificateEntrySchema, V1RevocationMetadataSchema;
 var init_v1 = __esm({
   "packages/contracts/dist/v1.js"() {
     "use strict";
     init_zod();
-    init_canonical();
     init_common();
     init_versions();
     V1_SCHEMA_VERSION = "1.0.0";
@@ -6788,3235 +5545,11 @@ var init_v1 = __esm({
   }
 });
 
-// packages/contracts/dist/computation-evidence.js
-function normalizeFieldKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-function fieldKeySegments(key) {
-  return key.split(/[^A-Za-z0-9]+/).flatMap((part) => part.split(/(?=[A-Z])/)).map((part) => part.toLowerCase()).filter((part) => part.length > 0);
-}
-function isSafeComputationFieldKey(key) {
-  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(key)) {
-    return false;
-  }
-  const normalized = normalizeFieldKey(key);
-  if (normalized.length === 0 || Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_KEY_LOOKUP, normalized)) {
-    return false;
-  }
-  return fieldKeySegments(key).every((segment) => !Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_SEGMENTS, segment) && !Object.prototype.hasOwnProperty.call(UNSAFE_FIELD_PREFIX_SEGMENTS, segment));
-}
-function childrenOf(min, max) {
-  return NodeIdList.min(min).max(max);
-}
-function nodeOf(kind, children, fields) {
-  return external_exports.object({
-    id: ComputationNodeIdSchema,
-    kind: external_exports.literal(kind),
-    children,
-    ...fields
-  }).strict();
-}
-function checkProgramStructure(program) {
-  const issues = [];
-  const report = (path10, code, detail) => issues.push({ path: path10, message: `${code}: ${detail}` });
-  if (program.nodes.length > COMPUTATION_IR_LIMITS.nodes) {
-    report(["nodes"], COMPUTATION_VALIDATION_CODES.LIMIT_NODES, "node limit exceeded");
-  }
-  if (program.symbols.length > COMPUTATION_IR_LIMITS.symbols) {
-    report(["symbols"], COMPUTATION_VALIDATION_CODES.LIMIT_SYMBOLS, "symbol limit exceeded");
-  }
-  if (program.slots.length > COMPUTATION_IR_LIMITS.slots) {
-    report(["slots"], COMPUTATION_VALIDATION_CODES.LIMIT_SLOTS, "slot limit exceeded");
-  }
-  if (program.definitions.length > COMPUTATION_IR_LIMITS.definitions) {
-    report(["definitions"], COMPUTATION_VALIDATION_CODES.LIMIT_DEFINITIONS, "definition limit exceeded");
-  }
-  const nodeById = /* @__PURE__ */ new Map();
-  program.nodes.forEach((node, index) => {
-    if (node.id !== `n${index}`) {
-      report(["nodes", index, "id"], COMPUTATION_VALIDATION_CODES.NODE_ORDER, `nodes must be in canonical pre-order with positional ids; expected 'n${index}'`);
-    }
-    nodeById.set(node.id, { index, value: node });
-  });
-  const symbolById = /* @__PURE__ */ new Map();
-  program.symbols.forEach((symbol, index) => {
-    if (symbol.id !== `sym${index}`) {
-      report(["symbols", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `symbols must be positional anonymous ids; expected 'sym${index}'`);
-    }
-    symbolById.set(symbol.id, symbol);
-  });
-  const slotById = /* @__PURE__ */ new Map();
-  program.slots.forEach((slot, index) => {
-    if (slot.id !== `slot${index}`) {
-      report(["slots", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `slots must be positional anonymous ids; expected 'slot${index}'`);
-    }
-    slotById.set(slot.id, slot);
-  });
-  const definitionIndexById = /* @__PURE__ */ new Map();
-  const definitionBySymbol = /* @__PURE__ */ new Map();
-  const definitionBodyIds = /* @__PURE__ */ new Set();
-  program.definitions.forEach((definition, index) => {
-    if (definition.id !== `def${index}`) {
-      report(["definitions", index, "id"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `definitions must be positional anonymous ids; expected 'def${index}'`);
-    }
-    if (definition.scope !== `scope${index + 1}`) {
-      report(["definitions", index, "scope"], COMPUTATION_VALIDATION_CODES.CANONICAL_ID, `definition scope must be 'scope${index + 1}'`);
-    }
-    if (definitionBySymbol.has(definition.nameSymbol)) {
-      report(["definitions", index, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, "each definition symbol may carry at most one definition record");
-    }
-    definitionIndexById.set(definition.id, index);
-    definitionBySymbol.set(definition.nameSymbol, definition);
-    definitionBodyIds.add(definition.body);
-  });
-  const nestedScopeByNode = /* @__PURE__ */ new Map();
-  for (const node of program.nodes) {
-    if ((node.kind === "function" || node.kind === "lambda") && !definitionBodyIds.has(node.id)) {
-      nestedScopeByNode.set(node.id, `scope${program.definitions.length + nestedScopeByNode.size + 1}`);
-    }
-  }
-  const definitionScopes = new Set(program.definitions.map((definition) => definition.scope));
-  const knownScopes = /* @__PURE__ */ new Set([
-    "scope0",
-    ...definitionScopes,
-    ...nestedScopeByNode.values()
-  ]);
-  const referenceNode = (path10, id) => {
-    if (!nodeById.has(id)) {
-      report(path10, COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown node reference '${id}'`);
-      return false;
-    }
-    return true;
-  };
-  const usedSymbols = /* @__PURE__ */ new Set();
-  const usedSlots = /* @__PURE__ */ new Set();
-  const declarationSites = /* @__PURE__ */ new Map();
-  const readSites = [];
-  const enclosingScope = /* @__PURE__ */ new Map();
-  const bindingTargetKinds = {
-    assign: true,
-    for: true,
-    for_clause: true,
-    with: true
-  };
-  program.nodes.forEach((node, index) => {
-    const nodePath = ["nodes", index];
-    const record = node;
-    if (node.kind === "literal" && node.constant === void 0 === (node.slot === void 0)) {
-      report([...nodePath, "constant"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a literal node must carry exactly one of a finite constant or an anonymous slot");
-    }
-    if (node.kind === "member" || node.kind === "pair") {
-      if (node.field === void 0 === (node.fieldSlot === void 0)) {
-        report([...nodePath, "field"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "exactly one of 'field' or 'fieldSlot' is required");
-      }
-    }
-    if (node.kind === "compare" || node.kind === "boolean") {
-      if (node.operators.length !== node.children.length - 1) {
-        report([...nodePath, "operators"], COMPUTATION_VALIDATION_CODES.CHILD_ARITY, `expected ${node.children.length - 1} operator(s) for ${node.children.length} operand(s)`);
-      }
-    }
-    if (node.kind === "slice") {
-      const boundCount = node.children.length - 1;
-      if (boundCount > 0 && node.slicePart === void 0) {
-        report([...nodePath, "slicePart"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a slice with bounds must declare 'slicePart'");
-      }
-      if (node.slicePart !== void 0) {
-        const remainingRoles = COMPUTATION_SLICE_PARTS.length - COMPUTATION_SLICE_PARTS.indexOf(node.slicePart);
-        if (boundCount < 1 || boundCount > remainingRoles) {
-          report([...nodePath, "children"], COMPUTATION_VALIDATION_CODES.CHILD_ARITY, `slicePart '${node.slicePart}' allows 1..${remainingRoles} bound(s) after the target, received ${boundCount}`);
-        }
-      }
-    }
-    if (node.kind === "call") {
-      if (node.api === void 0 === (node.symbol === void 0)) {
-        report([...nodePath, "api"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, "a call must select exactly one of a finite canonical 'api' or a resolved definition 'symbol'");
-      }
-      if (node.symbol !== void 0) {
-        const callee = symbolById.get(node.symbol);
-        if (callee === void 0 || callee.kind !== "definition" || !definitionBySymbol.has(node.symbol)) {
-          report([...nodePath, "symbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `call target '${node.symbol}' must be a materialized definition symbol (aliases resolve in the parser)`);
-        }
-      }
-    }
-    if (node.kind === "new") {
-      if (!Object.prototype.hasOwnProperty.call(CONSTRUCT_APIS, node.api)) {
-        report([...nodePath, "api"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, `'new' must construct a 'construct.*' API, received '${node.api}'`);
-      }
-    }
-    if ((node.kind === "call" || node.kind === "new") && node.keywordArgs !== void 0) {
-      const seenNames = /* @__PURE__ */ new Set();
-      node.keywordArgs.forEach((arg, argIndex) => {
-        if (seenNames.has(arg.name)) {
-          report([...nodePath, "keywordArgs", argIndex, "name"], COMPUTATION_VALIDATION_CODES.FIELD_FORM, `duplicate keyword argument name '${arg.name}'`);
-        }
-        seenNames.add(arg.name);
-      });
-    }
-    if (node.kind === "function" || node.kind === "lambda") {
-      const isDefinitionBody = definitionBodyIds.has(node.id);
-      const ownerIndex = Number(node.scope.slice("scope".length)) - 1;
-      const claimedDefinition = Number.isInteger(ownerIndex) && ownerIndex >= 0 ? program.definitions[ownerIndex] : void 0;
-      if (isDefinitionBody) {
-        const owner = program.definitions.find((definition) => definition.body === node.id);
-        if (owner === void 0 || owner.scope !== node.scope) {
-          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition body '${node.id}' must claim its definition scope '${owner?.scope ?? "unknown"}'`);
-        } else if (owner.nameSymbol !== node.symbol) {
-          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `definition body '${node.id}' must declare the definition symbol '${owner.nameSymbol}'`);
-        }
-      } else {
-        const expectedScope = nestedScopeByNode.get(node.id);
-        if (node.scope !== expectedScope) {
-          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `nested function scope must be '${expectedScope ?? "a definition scope"}'`);
-        }
-        if (claimedDefinition !== void 0) {
-          report([...nodePath, "scope"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `nested function '${node.id}' must not claim definition scope '${node.scope}'`);
-        }
-      }
-    }
-    const isDeclarationKind = Object.prototype.hasOwnProperty.call(SYMBOL_FIELD_BINDING_NODE_KINDS, node.kind);
-    if (isDeclarationKind && typeof record.symbol === "string") {
-      const sites = declarationSites.get(record.symbol) ?? [];
-      sites.push(node.id);
-      declarationSites.set(record.symbol, sites);
-    }
-    if (Object.prototype.hasOwnProperty.call(bindingTargetKinds, node.kind) && node.children.length > 0) {
-      const target = nodeById.get(node.children[0])?.value;
-      if (target !== void 0 && target.kind === "identifier") {
-        const sites = declarationSites.get(target.symbol) ?? [];
-        sites.push(target.id);
-        declarationSites.set(target.symbol, sites);
-      }
-    }
-    for (const [field, value] of Object.entries(record)) {
-      if (value === void 0) {
-        continue;
-      }
-      if (field === "symbol") {
-        if (typeof value === "string") {
-          if (!symbolById.has(value)) {
-            report([...nodePath, field], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown symbol reference '${value}'`);
-          } else if (!(declarationSites.get(value) ?? []).includes(node.id)) {
-            usedSymbols.add(value);
-            readSites.push({ nodeId: node.id, symbolId: value });
-          }
-        }
-        continue;
-      }
-      if (field === "slot" || field === "fieldSlot") {
-        if (typeof value === "string") {
-          if (slotById.has(value)) {
-            usedSlots.add(value);
-          } else {
-            report([...nodePath, field], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown slot reference '${value}'`);
-          }
-        }
-      }
-      if (field === "scope" && typeof value === "string" && !knownScopes.has(value)) {
-        report([...nodePath, field], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `unknown scope '${value}'`);
-      }
-    }
-    node.children.forEach((child, childIndex) => referenceNode([...nodePath, "children", childIndex], child));
-    for (const field of COMPUTATION_NODE_FIELDS[node.kind].nodeFields) {
-      const value = record[field];
-      if (typeof value === "string") {
-        referenceNode([...nodePath, field], value);
-      }
-    }
-    if ((node.kind === "call" || node.kind === "new") && node.keywordArgs !== void 0) {
-      node.keywordArgs.forEach((arg, argIndex) => {
-        referenceNode([...nodePath, "keywordArgs", argIndex, "value"], arg.value);
-      });
-    }
-  });
-  const scopeParent = /* @__PURE__ */ new Map();
-  const parentOf = /* @__PURE__ */ new Map();
-  const assignScope = (id, scope) => {
-    enclosingScope.set(id, scope);
-    const node = nodeById.get(id)?.value;
-    if (node === void 0) {
-      return;
-    }
-    const childScope = node.kind === "function" || node.kind === "lambda" ? node.scope : scope;
-    if (childScope !== scope && !scopeParent.has(childScope)) {
-      scopeParent.set(childScope, scope);
-    }
-    for (const ref of computationChildRefs(node)) {
-      const existingParent = parentOf.get(ref);
-      if (existingParent !== void 0) {
-        if (existingParent !== id) {
-          report(["nodes", nodeById.get(ref)?.index ?? 0, "id"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `node '${ref}' is referenced from more than one parent; the canonical form is a tree`);
-        }
-        continue;
-      }
-      parentOf.set(ref, id);
-      assignScope(ref, childScope);
-    }
-  };
-  for (const root of program.roots) {
-    assignScope(root, "scope0");
-  }
-  const scopeChain = (scope) => {
-    const chain = [scope];
-    let current = scope;
-    while (current !== "scope0") {
-      const parent = scopeParent.get(current);
-      if (parent === void 0 || chain.includes(parent)) {
-        break;
-      }
-      chain.push(parent);
-      current = parent;
-    }
-    return chain;
-  };
-  const BINDING_DECLARATION_KINDS = {
-    // A local is bound either by its own `declare`/`catch` node or by being the binding TARGET of an
-    // `assign`/`for`/`for_clause`/`with`, which is always an `identifier` node (`children[0]`).
-    // A nested function/lambda introduces its binding in the enclosing scope, so `function`/`lambda`
-    // are legitimate binding sites for a local.
-    local: ["identifier", "declare", "catch", "function", "lambda"],
-    parameter: ["parameter"],
-    definition: ["function", "lambda"],
-    import: ["import"],
-    external: []
-  };
-  program.symbols.forEach((symbol, index) => {
-    const symbolPath = ["symbols", index];
-    const sites = declarationSites.get(symbol.id) ?? [];
-    const allowedKinds = BINDING_DECLARATION_KINDS[symbol.kind] ?? [];
-    for (const siteId of sites) {
-      const site = nodeById.get(siteId);
-      if (site === void 0) {
-        report(symbolPath, COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown symbol binding '${siteId}'`);
-        continue;
-      }
-      if (allowedKinds.length > 0 && !allowedKinds.includes(site.value.kind)) {
-        report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `symbol '${symbol.id}' of kind '${symbol.kind}' cannot be bound by a '${site.value.kind}' node`);
-      }
-      const siteScope = enclosingScope.get(siteId);
-      if (siteScope !== void 0 && siteScope !== symbol.scope) {
-        report([...symbolPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `symbol '${symbol.id}' is declared in '${siteScope}' but claims scope '${symbol.scope}'`);
-      }
-    }
-    if (symbol.node !== void 0) {
-      if (!nodeById.has(symbol.node)) {
-        report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown declaration node '${symbol.node}'`);
-      } else if (!sites.includes(symbol.node)) {
-        report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `declaration node '${symbol.node}' does not bind symbol '${symbol.id}'`);
-      }
-    } else if (sites.length > 0) {
-      report([...symbolPath, "node"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `symbol '${symbol.id}' is bound at ${sites[0]} but declares no declaration node`);
-    }
-    if (symbol.kind === "external" && sites.length > 0) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `external symbol '${symbol.id}' must not be bound in the captured program`);
-    }
-    if (symbol.kind === "parameter" && sites.length === 0) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, `parameter symbol '${symbol.id}' has no 'parameter' declaration node`);
-    }
-    if (symbol.kind === "local" && sites.length === 0) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.SYMBOL_DECLARATION, usedSymbols.has(symbol.id) ? `symbol '${symbol.id}' is read but never declared; undeclared captures are unsupported hidden state` : `symbol '${symbol.id}' is neither declared nor used`);
-    }
-    if (symbol.kind === "external" && !usedSymbols.has(symbol.id)) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.ORPHAN_SYMBOL, `external symbol '${symbol.id}' is never used`);
-    }
-    if (symbol.kind === "definition" && !definitionBySymbol.has(symbol.id)) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition symbol '${symbol.id}' has no definition record`);
-    }
-    if (symbol.kind !== "definition" && definitionBySymbol.has(symbol.id)) {
-      report([...symbolPath, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `symbol '${symbol.id}' carries a definition record but is not of kind 'definition'`);
-    }
-    if (symbol.kind === "local" || symbol.kind === "parameter") {
-      if (!knownScopes.has(symbol.scope)) {
-        report([...symbolPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `unknown scope '${symbol.scope}'`);
-      }
-      for (const { nodeId, symbolId } of readSites) {
-        if (symbolId !== symbol.id) {
-          continue;
-        }
-        const useScope = enclosingScope.get(nodeId);
-        if (useScope === void 0) {
-          continue;
-        }
-        if (!scopeChain(useScope).includes(symbol.scope)) {
-          report(["nodes", nodeById.get(nodeId)?.index ?? 0, "symbol"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `symbol '${symbol.id}' is read outside its scope '${symbol.scope}'`);
-        }
-      }
-    }
-  });
-  program.slots.forEach((slot, index) => {
-    if (!usedSlots.has(slot.id)) {
-      report(["slots", index, "id"], COMPUTATION_VALIDATION_CODES.ORPHAN_SLOT, `slot '${slot.id}' is never used`);
-    }
-  });
-  program.definitions.forEach((definition, index) => {
-    const definitionPath = ["definitions", index];
-    const nameSymbol = symbolById.get(definition.nameSymbol);
-    if (nameSymbol === void 0) {
-      report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown definition symbol '${definition.nameSymbol}'`);
-    } else {
-      if (nameSymbol.kind !== "definition") {
-        report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition '${definition.id}' must reference a symbol of kind 'definition'`);
-      }
-      if (!scopeChain(definition.scope).includes(nameSymbol.scope)) {
-        report([...definitionPath, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition '${definition.id}' name must be visible from its body scope '${definition.scope}'`);
-      }
-    }
-    const bodyNode = nodeById.get(definition.body);
-    if (bodyNode === void 0) {
-      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown body node '${definition.body}'`);
-    } else if (bodyNode.value.kind !== "function" && bodyNode.value.kind !== "lambda") {
-      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition body '${definition.body}' must be a function or lambda node`);
-    } else if (bodyNode.value.symbol !== definition.nameSymbol) {
-      report([...definitionPath, "body"], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `definition body '${definition.body}' must declare symbol '${definition.nameSymbol}'`);
-    }
-    if (!definition.complete && definition.unsupportedReasons.length === 0) {
-      report([...definitionPath, "unsupportedReasons"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "an incomplete definition must name at least one unsupported reason");
-    }
-    definition.parameters.forEach((parameter, parameterIndex) => {
-      const parameterSymbol = symbolById.get(parameter);
-      if (parameterSymbol === void 0) {
-        report([...definitionPath, "parameters", parameterIndex], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown parameter symbol '${parameter}'`);
-        return;
-      }
-      if (parameterSymbol.kind !== "parameter" || parameterSymbol.scope !== definition.scope) {
-        report([...definitionPath, "parameters", parameterIndex], COMPUTATION_VALIDATION_CODES.CAPTURE_MISMATCH, `parameter '${parameter}' must be a 'parameter' symbol in scope '${definition.scope}'`);
-      }
-    });
-    definition.dependencies.forEach((dependency, dependencyIndex) => {
-      const dependencySymbol = symbolById.get(dependency);
-      if (dependencySymbol === void 0) {
-        report([...definitionPath, "dependencies", dependencyIndex], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown dependency symbol '${dependency}'`);
-        return;
-      }
-      if (dependencySymbol.kind !== "definition" || !definitionBySymbol.has(dependency)) {
-        report([...definitionPath, "dependencies", dependencyIndex], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `dependency '${dependency}' is not a resolved definition symbol`);
-      }
-    });
-  });
-  const directDefinitionUses = /* @__PURE__ */ new Map();
-  for (const { nodeId, symbolId } of readSites) {
-    if (symbolById.get(symbolId)?.kind !== "definition") {
-      continue;
-    }
-    const readScope = enclosingScope.get(nodeId);
-    if (readScope === void 0) {
-      continue;
-    }
-    const owningScope = scopeChain(readScope).find((scope) => definitionScopes.has(scope));
-    if (owningScope === void 0) {
-      continue;
-    }
-    const uses = directDefinitionUses.get(owningScope) ?? /* @__PURE__ */ new Set();
-    uses.add(symbolId);
-    directDefinitionUses.set(owningScope, uses);
-  }
-  const resolvedDefinitionScopes = /* @__PURE__ */ new Set();
-  program.definitions.forEach((definition, index) => {
-    const definitionPath = ["definitions", index];
-    const nameSymbol = symbolById.get(definition.nameSymbol);
-    if (nameSymbol !== void 0 && (nameSymbol.kind !== "definition" || !definitionBySymbol.has(definition.nameSymbol))) {
-      report([...definitionPath, "nameSymbol"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `definition '${definition.id}' must name a resolvable 'definition' symbol`);
-    }
-    const expected = directDefinitionUses.get(definition.scope) ?? /* @__PURE__ */ new Set();
-    const declared = new Set(definition.dependencies);
-    for (const dependency of expected) {
-      if (!declared.has(dependency)) {
-        report([...definitionPath, "dependencies"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `definition '${definition.id}' must list the definition symbol '${dependency}' it reads`);
-      }
-    }
-    for (const dependency of definition.dependencies) {
-      if (!expected.has(dependency)) {
-        report([...definitionPath, "dependencies"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `definition '${definition.id}' lists '${dependency}' but its own scope never reads it`);
-      }
-    }
-    const reachedSymbols = /* @__PURE__ */ new Set();
-    const pendingSymbols = [...definition.dependencies];
-    let reachesItself = false;
-    while (pendingSymbols.length > 0 && !reachesItself) {
-      const symbolId = pendingSymbols.pop();
-      if (symbolId === definition.nameSymbol) {
-        reachesItself = true;
-        break;
-      }
-      if (reachedSymbols.has(symbolId)) {
-        continue;
-      }
-      reachedSymbols.add(symbolId);
-      pendingSymbols.push(...definitionBySymbol.get(symbolId)?.dependencies ?? []);
-    }
-    if (definition.recursive !== reachesItself) {
-      report([...definitionPath, "recursive"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, "'recursive' must equal whether the definition reaches itself through its materialized dependencies");
-    }
-    resolvedDefinitionScopes.add(definition.scope);
-  });
-  const visitedDefinitionSymbols = /* @__PURE__ */ new Set();
-  const pendingDefinitionSymbols = [...usedSymbols].filter((symbolId) => symbolById.get(symbolId)?.kind === "definition");
-  while (pendingDefinitionSymbols.length > 0) {
-    const symbolId = pendingDefinitionSymbols.pop();
-    if (visitedDefinitionSymbols.has(symbolId)) {
-      continue;
-    }
-    visitedDefinitionSymbols.add(symbolId);
-    const definition = definitionBySymbol.get(symbolId);
-    if (definition === void 0) {
-      const symbolIndex = program.symbols.findIndex((symbol) => symbol.id === symbolId);
-      report(["symbols", symbolIndex, "kind"], COMPUTATION_VALIDATION_CODES.DEFINITION_CLOSURE, `used definition symbol '${symbolId}' has no materialized definition record`);
-      continue;
-    }
-    if (!resolvedDefinitionScopes.has(definition.scope)) {
-      report(["definitions", definitionIndexById.get(definition.id) ?? 0, "scope"], COMPUTATION_VALIDATION_CODES.SYMBOL_SCOPE, `definition '${definition.id}' scope '${definition.scope}' is not a definition scope`);
-    }
-    pendingDefinitionSymbols.push(...definition.dependencies);
-  }
-  program.roots.forEach((root, index) => referenceNode(["roots", index], root));
-  const nodeState = /* @__PURE__ */ new Map();
-  const walk = (id, stackDepth) => {
-    const entry = nodeById.get(id);
-    if (entry === void 0) {
-      return;
-    }
-    if (stackDepth > COMPUTATION_IR_LIMITS.nesting) {
-      report(["nodes", entry.index, "children"], COMPUTATION_VALIDATION_CODES.NESTING_LIMIT, "AST nesting depth limit exceeded");
-      return;
-    }
-    const current = nodeState.get(id);
-    if (current === "visiting") {
-      report(["nodes", entry.index, "children"], COMPUTATION_VALIDATION_CODES.NODE_CYCLE, `AST child cycle detected at '${id}'`);
-      return;
-    }
-    if (current === "done") {
-      return;
-    }
-    nodeState.set(id, "visiting");
-    for (const ref of computationChildRefs(entry.value)) {
-      walk(ref, stackDepth + 1);
-    }
-    nodeState.set(id, "done");
-  };
-  for (const root of program.roots)
-    walk(root, 1);
-  program.nodes.forEach((node, index) => {
-    if (!enclosingScope.has(node.id)) {
-      report(["nodes", index, "id"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `node '${node.id}' is not reachable from any ordered root`);
-    }
-  });
-  program.outputs.forEach((output, index) => {
-    const outputPath = ["outputs", index];
-    const entry = nodeById.get(output.node);
-    if (entry === void 0) {
-      report([...outputPath, "node"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown output node '${output.node}'`);
-      return;
-    }
-    if (entry.value.kind !== "return" && entry.value.kind !== "yield" && entry.value.kind !== "expression") {
-      report([...outputPath, "node"], COMPUTATION_VALIDATION_CODES.OUTPUT_INVALID, `output node '${output.node}' must be a return, yield or expression node`);
-    }
-    if (output.definitionId !== void 0 && !definitionIndexById.has(output.definitionId)) {
-      report([...outputPath, "definitionId"], COMPUTATION_VALIDATION_CODES.CROSS_REF, `unknown definition '${output.definitionId}'`);
-    }
-  });
-  const unsupportedNodes = program.nodes.filter((node) => node.kind === "unsupported");
-  if (unsupportedNodes.length > 0 && program.complete) {
-    report(["complete"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "a program containing an 'unsupported' node cannot claim to be complete");
-  }
-  if (!program.complete && program.unsupportedReasons.length === 0) {
-    report(["unsupportedReasons"], COMPUTATION_VALIDATION_CODES.UNSUPPORTED_CONSISTENCY, "an incomplete program must name at least one unsupported reason");
-  }
-  return issues;
-}
-function checkEnvelopeStructure(envelope) {
-  const issues = [];
-  const report = (path10, code, detail) => issues.push({ path: path10, message: `${code}: ${detail}` });
-  if (envelope.dependencies.length > COMPUTATION_IR_LIMITS.dependencies) {
-    report(["dependencies"], COMPUTATION_VALIDATION_CODES.LIMIT_DEPENDENCIES, "dependency limit exceeded");
-  }
-  if (envelope.corrections.length > COMPUTATION_IR_LIMITS.dependencies) {
-    report(["corrections"], COMPUTATION_VALIDATION_CODES.LIMIT_DEPENDENCIES, "correction limit exceeded");
-  }
-  const definitionIds = new Set(envelope.program.definitions.map((definition) => definition.id));
-  const seenDependencies = /* @__PURE__ */ new Set();
-  envelope.dependencies.forEach((dependency, index) => {
-    if (!definitionIds.has(dependency.definitionId)) {
-      report(["dependencies", index, "definitionId"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `dependency '${dependency.definitionId}' is not materialized in the program closure`);
-    }
-    if (seenDependencies.has(dependency.definitionId)) {
-      report(["dependencies", index, "definitionId"], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `duplicate dependency '${dependency.definitionId}'`);
-    }
-    seenDependencies.add(dependency.definitionId);
-  });
-  const seenCorrections = /* @__PURE__ */ new Set();
-  envelope.corrections.forEach((correction, index) => {
-    const key = `${correction.supersedesDefinitionId}:${correction.supersededProgramDigest}`;
-    if (seenCorrections.has(key)) {
-      report(["corrections", index], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, "duplicate correction entry");
-    }
-    seenCorrections.add(key);
-  });
-  for (const [metricField, collectionField] of METRIC_COUNT_FIELDS) {
-    const declared = envelope.metrics[metricField];
-    const actual = envelope.program[collectionField].length;
-    if (declared !== actual) {
-      report(["metrics", metricField], COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH, `metric '${metricField}' must equal the program ${collectionField} length (${actual})`);
-    }
-  }
-  return issues;
-}
-function orderedKeywordArgs(node) {
-  if (node.kind !== "call" && node.kind !== "new") {
-    return [];
-  }
-  return node.keywordArgs ?? [];
-}
-function computationChildRefs(node) {
-  const refs = [...node.children];
-  for (const field of COMPUTATION_NODE_FIELDS[node.kind].nodeFields) {
-    const value = node[field];
-    if (typeof value === "string") {
-      refs.push(value);
-    }
-  }
-  for (const arg of orderedKeywordArgs(node)) {
-    refs.push(arg.value);
-  }
-  return refs;
-}
-function projectProgramForDigest(program) {
-  const symbolById = /* @__PURE__ */ new Map();
-  const symbolOrdinal = /* @__PURE__ */ new Map();
-  program.symbols.forEach((symbol, index) => {
-    symbolById.set(symbol.id, symbol);
-    symbolOrdinal.set(symbol.id, index);
-  });
-  const slotById = /* @__PURE__ */ new Map();
-  const slotOrdinal = /* @__PURE__ */ new Map();
-  program.slots.forEach((slot, index) => {
-    slotById.set(slot.id, slot);
-    slotOrdinal.set(slot.id, index);
-  });
-  const definitionBySymbol = /* @__PURE__ */ new Map();
-  const definitionOrdinal = /* @__PURE__ */ new Map();
-  program.definitions.forEach((definition, index) => {
-    definitionBySymbol.set(definition.nameSymbol, definition);
-    definitionOrdinal.set(definition.id, index);
-  });
-  const kindByNode = /* @__PURE__ */ new Map();
-  for (const node of program.nodes)
-    kindByNode.set(node.id, node.kind);
-  const ordinalOfSymbol = (symbolId) => symbolOrdinal.get(symbolId) ?? null;
-  const ordinalOfSlot = (slotId) => slotOrdinal.get(slotId) ?? null;
-  const ordinalOfScope = (scopeId) => scopeId === "scope0" ? 0 : Number(scopeId.slice("scope".length));
-  const symbolProjection = (symbolId) => {
-    const symbol = symbolById.get(symbolId);
-    if (symbol === void 0) {
-      return { ordinal: null, unresolved: true };
-    }
-    return {
-      ordinal: ordinalOfSymbol(symbolId),
-      kind: symbol.kind,
-      scope: ordinalOfScope(symbol.scope),
-      resolved: definitionBySymbol.has(symbolId)
-    };
-  };
-  const slotProjection = (slotId) => {
-    const slot = slotById.get(slotId);
-    return { ordinal: ordinalOfSlot(slotId), kind: slot?.kind ?? null, role: slot?.role ?? null };
-  };
-  const projectNode = (node) => {
-    const abstracted = /* @__PURE__ */ new Set([
-      "id",
-      "definitionId",
-      "symbol",
-      "slot",
-      "fieldSlot",
-      "children",
-      "receiver",
-      "keywordArgs"
-    ]);
-    for (const field of DIGEST_ABSTRACTED_FIELDS[node.kind] ?? []) {
-      abstracted.add(field);
-    }
-    const projection = { kind: node.kind };
-    for (const [field, value] of Object.entries(node)) {
-      if (abstracted.has(field)) {
-        continue;
-      }
-      projection[field] = value;
-    }
-    projection.children = [...node.children];
-    if ("receiver" in node) {
-      projection.receiver = node.receiver ?? null;
-    }
-    if ("keywordArgs" in node) {
-      const args = orderedKeywordArgs(node);
-      projection.keywordArgs = args.length === 0 ? null : args.map((arg) => ({ name: arg.name, value: arg.value }));
-    }
-    if ("symbol" in node && typeof node.symbol === "string") {
-      projection.symbol = symbolProjection(node.symbol);
-    }
-    if ("fieldSlot" in node && typeof node.fieldSlot === "string") {
-      projection.fieldSlot = slotProjection(node.fieldSlot);
-    }
-    if ("slot" in node && typeof node.slot === "string") {
-      projection.slot = slotProjection(node.slot);
-    }
-    return projection;
-  };
-  const definitions = program.definitions.map((definition) => ({
-    symbol: ordinalOfSymbol(definition.nameSymbol),
-    kind: definition.kind,
-    parameters: definition.parameters.map((parameter) => ordinalOfSymbol(parameter)),
-    dependencies: definition.dependencies.map((dependency) => ordinalOfSymbol(dependency)).sort((left, right) => (left ?? -1) - (right ?? -1)),
-    body: definition.body,
-    recursive: definition.recursive,
-    complete: definition.complete,
-    unsupportedReasons: [...definition.unsupportedReasons]
-  }));
-  return {
-    version: program.version,
-    language: program.language,
-    rootKinds: program.roots.map((root) => kindByNode.get(root) ?? null),
-    nodes: program.nodes.map(projectNode),
-    definitions,
-    slots: program.slots.map((slot) => ({ kind: slot.kind, role: slot.role })),
-    outputs: program.outputs.map((output) => ({
-      node: output.node,
-      shape: output.shape,
-      definition: output.definitionId === void 0 ? null : definitionOrdinal.get(output.definitionId) ?? null
-    })),
-    complete: program.complete,
-    unsupportedReasons: [...program.unsupportedReasons]
-  };
-}
-function computeComputationProgramDigest(program) {
-  if (typeof program !== "object" || program === null) {
-    throw new TypeError("program must be an object");
-  }
-  return hashCanonicalContent(projectProgramForDigest(program));
-}
-function computeComputationEvidenceDigest(body) {
-  if (typeof body !== "object" || body === null) {
-    throw new TypeError("evidence body must be an object");
-  }
-  return hashCanonicalContent(body);
-}
-var COMPUTATION_IR_VERSION, COMPUTATION_IR_LIMITS, HARD_LIMIT_FACTOR, COMPUTATION_VALIDATION_CODES, COMPUTATION_LANGUAGES, COMPUTATION_TRANSFORM_NODE_KINDS, SYMBOL_FIELD_BINDING_NODE_KINDS, TRANSFORM_NODE_KINDS, COMPUTATION_BINARY_OPERATORS, COMPUTATION_UNARY_OPERATORS, COMPUTATION_COMPARE_OPERATORS, COMPUTATION_BOOLEAN_OPERATORS, COMPUTATION_ASSIGN_OPERATORS, COMPUTATION_CONSTANTS, COMPUTATION_DECLARE_KINDS, COMPUTATION_PARAMETER_KINDS, COMPUTATION_DEFINITION_KINDS, COMPUTATION_COMPREHENSION_KINDS, COMPUTATION_SPREAD_KINDS, COMPUTATION_TEMPLATE_KINDS, COMPUTATION_WITH_KINDS, COMPUTATION_SLICE_PARTS, COMPUTATION_SYMBOL_KINDS, COMPUTATION_SLOT_KINDS, COMPUTATION_SLOT_ROLES, COMPUTATION_ORIGIN_KINDS, COMPUTATION_OBSERVATION_KINDS, COMPUTATION_OBSERVATION_STATUSES, COMPUTATION_OUTPUT_SHAPES, COMPUTATION_UNSUPPORTED_REASONS, COMPUTATION_APIS, COMPUTATION_TRANSFORM_APIS, TRANSFORM_APIS, COMPUTATION_CONSTRUCT_APIS, CONSTRUCT_APIS, COMPUTATION_UNSAFE_FIELD_KEYS, UNSAFE_FIELD_KEY_LOOKUP, UNSAFE_FIELD_SEGMENTS, UNSAFE_FIELD_PREFIX_SEGMENTS, ComputationNodeIdSchema, ComputationSymbolIdSchema, ComputationSlotIdSchema, ComputationDefinitionIdSchema, ComputationScopeIdSchema, ComputationDigestSchema, ComputationFieldKeySchema, ComputationPathPatternSchema, DIGEST_ABSTRACTED_FIELDS, COMPUTATION_NODE_FIELDS, NodeIdList, KeywordArgNameSchema, KeywordArgSchema, UNBOUNDED, KeywordArgsSchema, ComputationProgramNodeSchema, ComputationBlockNodeSchema, ComputationFunctionNodeSchema, ComputationParametersNodeSchema, ComputationParameterNodeSchema, ComputationReturnNodeSchema, ComputationAssignNodeSchema, ComputationDeclareNodeSchema, ComputationIdentifierNodeSchema, ComputationApiReferenceNodeSchema, ComputationLiteralNodeSchema, ComputationMemberNodeSchema, ComputationIndexNodeSchema, ComputationCallNodeSchema, ComputationNewNodeSchema, ComputationArrayNodeSchema, ComputationTupleNodeSchema, ComputationObjectNodeSchema, ComputationPairNodeSchema, ComputationLambdaNodeSchema, ComputationBinaryNodeSchema, ComputationUnaryNodeSchema, ComputationCompareNodeSchema, ComputationBooleanNodeSchema, ComputationConditionalNodeSchema, ComputationIfNodeSchema, ComputationForNodeSchema, ComputationWhileNodeSchema, ComputationTryNodeSchema, ComputationCatchNodeSchema, ComputationFinallyNodeSchema, ComputationThrowNodeSchema, ComputationAssertNodeSchema, ComputationImportNodeSchema, ComputationAwaitNodeSchema, ComputationBreakNodeSchema, ComputationContinueNodeSchema, ComputationExpressionNodeSchema, ComputationComprehensionNodeSchema, ComputationForClauseNodeSchema, ComputationIfClauseNodeSchema, ComputationSliceNodeSchema, ComputationSpreadNodeSchema, ComputationTemplateNodeSchema, ComputationWithNodeSchema, ComputationYieldNodeSchema, ComputationUnsupportedNodeSchema, ComputationNodeSchema, ComputationSymbolSchema, ComputationSlotSchema, ComputationDefinitionSchema, ComputationOutputSchema, ProgramBodyShape, ComputationProgramV1Schema, ComputationOriginSchema, ComputationObservationSchema, ComputationDependencySchema, ComputationCorrectionSchema, ComputationMetricsSchema, EnvelopeBodyShape, METRIC_COUNT_FIELDS, ResinComputationEvidenceV1Schema;
-var init_computation_evidence = __esm({
-  "packages/contracts/dist/computation-evidence.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    init_common();
-    COMPUTATION_IR_VERSION = "1.0.0";
-    COMPUTATION_IR_LIMITS = {
-      /** Maximum canonical serialized size of a program, and of a full evidence envelope. */
-      serializedBytes: 65536,
-      nodes: 512,
-      symbols: 256,
-      slots: 64,
-      definitions: 32,
-      /** Also bounds envelope `dependencies` and `corrections` entries. */
-      dependencies: 64,
-      /** Maximum AST child-edge depth from a root. def/use recursion is not depth-limited here. */
-      nesting: 64,
-      /** Bounds only the ESTIMATED authoring-size metrics; never model usage or savings. */
-      sourceLines: 1e5,
-      sourceBytes: 4194304
-    };
-    HARD_LIMIT_FACTOR = 4;
-    COMPUTATION_VALIDATION_CODES = {
-      CANONICAL_ID: "CANONICAL_ID",
-      CHILD_ARITY: "CHILD_ARITY",
-      CROSS_REF: "CROSS_REF",
-      NODE_CYCLE: "NODE_CYCLE",
-      NODE_ORDER: "NODE_ORDER",
-      NESTING_LIMIT: "NESTING_LIMIT",
-      LIMIT_NODES: "LIMIT_NODES",
-      LIMIT_SYMBOLS: "LIMIT_SYMBOLS",
-      LIMIT_SLOTS: "LIMIT_SLOTS",
-      LIMIT_DEFINITIONS: "LIMIT_DEFINITIONS",
-      LIMIT_DEPENDENCIES: "LIMIT_DEPENDENCIES",
-      LIMIT_SERIALIZED_BYTES: "LIMIT_SERIALIZED_BYTES",
-      FIELD_FORM: "FIELD_FORM",
-      SYMBOL_SCOPE: "SYMBOL_SCOPE",
-      SYMBOL_DECLARATION: "SYMBOL_DECLARATION",
-      ORPHAN_SYMBOL: "ORPHAN_SYMBOL",
-      ORPHAN_SLOT: "ORPHAN_SLOT",
-      DEFINITION_CLOSURE: "DEFINITION_CLOSURE",
-      CAPTURE_MISMATCH: "CAPTURE_MISMATCH",
-      DEPENDENCY_MISMATCH: "DEPENDENCY_MISMATCH",
-      OUTPUT_INVALID: "OUTPUT_INVALID",
-      UNSUPPORTED_CONSISTENCY: "UNSUPPORTED_CONSISTENCY",
-      SERIALIZATION: "SERIALIZATION"
-    };
-    COMPUTATION_LANGUAGES = ["python", "javascript", "typescript"];
-    COMPUTATION_TRANSFORM_NODE_KINDS = [
-      "assert",
-      "binary",
-      "boolean",
-      "compare",
-      "comprehension",
-      "conditional",
-      "for",
-      "if",
-      "slice",
-      "template",
-      "try",
-      "unary",
-      "while"
-    ];
-    SYMBOL_FIELD_BINDING_NODE_KINDS = {
-      catch: true,
-      declare: true,
-      function: true,
-      import: true,
-      lambda: true,
-      parameter: true
-    };
-    TRANSFORM_NODE_KINDS = Object.fromEntries(COMPUTATION_TRANSFORM_NODE_KINDS.map((kind) => [kind, true]));
-    COMPUTATION_BINARY_OPERATORS = [
-      "add",
-      "and",
-      "bit_and",
-      "bit_or",
-      "bit_xor",
-      "coalesce",
-      "concat",
-      "div",
-      "floor_div",
-      "matmul",
-      "mod",
-      "mul",
-      "or",
-      "pow",
-      "shift_left",
-      "shift_right",
-      "sub"
-    ];
-    COMPUTATION_UNARY_OPERATORS = ["bit_not", "negate", "not", "positive"];
-    COMPUTATION_COMPARE_OPERATORS = [
-      "eq",
-      "ge",
-      "gt",
-      "in",
-      "is",
-      "is_not",
-      "le",
-      "lt",
-      "ne",
-      "not_in"
-    ];
-    COMPUTATION_BOOLEAN_OPERATORS = ["and", "coalesce", "or"];
-    COMPUTATION_ASSIGN_OPERATORS = [
-      "add",
-      "and",
-      "bit_and",
-      "bit_or",
-      "bit_xor",
-      "coalesce",
-      "div",
-      "floor_div",
-      "mod",
-      "mul",
-      "or",
-      "pow",
-      "set",
-      "shift_left",
-      "shift_right",
-      "sub"
-    ];
-    COMPUTATION_CONSTANTS = [
-      "empty_string",
-      "false",
-      "intrinsic_undefined",
-      "null",
-      "one",
-      "python_type_bool",
-      "python_type_dict",
-      "python_type_float",
-      "python_type_int",
-      "python_type_list",
-      "python_type_object",
-      "python_type_set",
-      "python_type_str",
-      "python_type_tuple",
-      "true",
-      "type_name_bigint",
-      "type_name_boolean",
-      "type_name_function",
-      "type_name_number",
-      "type_name_object",
-      "type_name_string",
-      "type_name_symbol",
-      "type_name_undefined",
-      "zero"
-    ];
-    COMPUTATION_DECLARE_KINDS = ["const", "global", "let", "local", "var"];
-    COMPUTATION_PARAMETER_KINDS = [
-      "destructured",
-      "keyword_only",
-      "positional",
-      "rest_keyword",
-      "rest_positional"
-    ];
-    COMPUTATION_DEFINITION_KINDS = [
-      "async_function",
-      "function",
-      "generator_function",
-      "method"
-    ];
-    COMPUTATION_COMPREHENSION_KINDS = ["dict", "generator", "list", "set"];
-    COMPUTATION_SPREAD_KINDS = ["iterable", "mapping"];
-    COMPUTATION_TEMPLATE_KINDS = ["format", "fstring", "template_literal"];
-    COMPUTATION_WITH_KINDS = ["async_with", "using", "with"];
-    COMPUTATION_SLICE_PARTS = ["lower", "upper", "step"];
-    COMPUTATION_SYMBOL_KINDS = [
-      "definition",
-      "external",
-      "import",
-      "local",
-      "parameter"
-    ];
-    COMPUTATION_SLOT_KINDS = [
-      "array",
-      "boolean",
-      "bytes",
-      "function",
-      "null",
-      "number",
-      "object",
-      "string",
-      "unknown"
-    ];
-    COMPUTATION_SLOT_ROLES = [
-      "dynamic",
-      "field_key",
-      "free_variable",
-      "literal",
-      "path"
-    ];
-    COMPUTATION_ORIGIN_KINDS = [
-      "authored_file",
-      "heredoc",
-      "inline",
-      "referenced_file"
-    ];
-    COMPUTATION_OBSERVATION_KINDS = ["definition", "invocation"];
-    COMPUTATION_OBSERVATION_STATUSES = ["error", "pending", "success"];
-    COMPUTATION_OUTPUT_SHAPES = [
-      "array",
-      "boolean",
-      "null",
-      "number",
-      "object",
-      "string",
-      "tuple",
-      "unknown"
-    ];
-    COMPUTATION_UNSUPPORTED_REASONS = [
-      "incomplete_parse",
-      "limit_definition",
-      "limit_depth",
-      "limit_dependencies",
-      "limit_nodes",
-      "limit_outputs",
-      "limit_serialized_bytes",
-      "limit_slots",
-      "limit_symbols",
-      "unsupported_api",
-      "unsupported_construct",
-      "unsupported_dynamic_key",
-      "unsupported_external_input",
-      "unsupported_hidden_state",
-      "unsupported_language",
-      "unsupported_mutable_capture",
-      "unsupported_operator",
-      "unsupported_reflection"
-    ];
-    COMPUTATION_APIS = [
-      "bytes.from_hex",
-      "clock.iso_format",
-      "clock.monotonic",
-      "clock.now",
-      "clock.parse",
-      "collection.all",
-      "collection.any",
-      "collection.append",
-      "collection.count",
-      "collection.delete",
-      "collection.dict_setdefault",
-      "collection.entries",
-      "collection.extend",
-      "collection.filter",
-      "collection.find",
-      "collection.get",
-      "collection.group_by",
-      "collection.has",
-      "collection.includes",
-      "collection.items",
-      "collection.iterator",
-      "collection.join",
-      "collection.keys",
-      "collection.map",
-      "collection.map_set",
-      "collection.max",
-      "collection.min",
-      "collection.next",
-      "collection.pop",
-      "collection.range",
-      "collection.reduce",
-      "collection.reverse",
-      "collection.set_add",
-      "collection.slice",
-      "collection.sort",
-      "collection.sum",
-      "collection.values",
-      "collection.zip",
-      "construct.array",
-      "construct.date",
-      "construct.error",
-      "construct.map",
-      "construct.object",
-      "construct.path",
-      "construct.set",
-      "core.hash",
-      "core.len",
-      "core.print",
-      "core.to_string",
-      "core.type_of",
-      "csv.parse_records",
-      "fs.close",
-      "fs.exists",
-      "fs.open_read",
-      "fs.read_json",
-      "fs.read_line",
-      "fs.read_lines",
-      "fs.read_text",
-      "fs.write_text",
-      "identity",
-      "json.parse",
-      "json.serialize",
-      "number.abs",
-      "number.ceil",
-      "number.float",
-      "number.floor",
-      "number.format",
-      "number.int",
-      "number.is_finite",
-      "number.is_integer",
-      "number.is_nan",
-      "number.max",
-      "number.min",
-      "number.parse",
-      "number.round",
-      "number.to_fixed",
-      "object.has_own",
-      "path.basename",
-      "path.dirname",
-      "path.extname",
-      "path.join",
-      "path.normalize",
-      "string.endswith",
-      "string.find",
-      "string.format",
-      "string.isalpha",
-      "string.join",
-      "string.lower",
-      "string.lstrip",
-      "string.replace",
-      "string.rsplit",
-      "string.rstrip",
-      "string.slice",
-      "string.split",
-      "string.startswith",
-      "string.strip",
-      "string.upper",
-      "text.regex_compile",
-      "text.regex_findall",
-      "text.regex_match",
-      "text.regex_replace",
-      "text.regex_search",
-      "text.regex_test",
-      "type.is_array",
-      "type.is_instance"
-    ];
-    COMPUTATION_TRANSFORM_APIS = [
-      "clock.iso_format",
-      "clock.parse",
-      "collection.all",
-      "collection.any",
-      "collection.count",
-      "collection.delete",
-      "collection.dict_setdefault",
-      "collection.filter",
-      "collection.find",
-      "collection.group_by",
-      "collection.join",
-      "collection.map",
-      "collection.max",
-      "collection.min",
-      "collection.pop",
-      "collection.reduce",
-      "collection.reverse",
-      "collection.set_add",
-      "collection.slice",
-      "collection.sort",
-      "collection.sum",
-      "collection.zip",
-      "core.hash",
-      "core.to_string",
-      "json.serialize",
-      "number.abs",
-      "number.ceil",
-      "number.float",
-      "number.floor",
-      "number.int",
-      "number.max",
-      "number.min",
-      "number.parse",
-      "number.round",
-      "number.to_fixed",
-      "path.basename",
-      "path.dirname",
-      "path.extname",
-      "path.join",
-      "path.normalize",
-      "string.format",
-      "string.join",
-      "string.lower",
-      "string.lstrip",
-      "string.replace",
-      "string.rsplit",
-      "string.rstrip",
-      "string.slice",
-      "string.split",
-      "string.strip",
-      "string.upper",
-      "text.regex_findall",
-      "text.regex_match",
-      "text.regex_replace",
-      "text.regex_search"
-    ];
-    TRANSFORM_APIS = Object.fromEntries(COMPUTATION_TRANSFORM_APIS.map((api) => [api, true]));
-    COMPUTATION_CONSTRUCT_APIS = COMPUTATION_APIS.filter((api) => api.startsWith("construct."));
-    CONSTRUCT_APIS = Object.fromEntries(COMPUTATION_CONSTRUCT_APIS.map((api) => [api, true]));
-    COMPUTATION_UNSAFE_FIELD_KEYS = [
-      "accesstoken",
-      "apikey",
-      "authorization",
-      "authtoken",
-      "bearer",
-      "childprocess",
-      "completion",
-      "completions",
-      "constructor",
-      "cookie",
-      "cookies",
-      "credentials",
-      "execsync",
-      "generatorhistory",
-      "modelmessage",
-      "modelmessages",
-      "oauthtoken",
-      "password",
-      "passwd",
-      "privatekey",
-      "prompt",
-      "prompts",
-      "proto",
-      "prototype",
-      "rawcompletion",
-      "rawprompt",
-      "rawsource",
-      "rawtranscript",
-      "refreshtoken",
-      "secret",
-      "secrets",
-      "sessiontoken",
-      "source",
-      "spawnsync",
-      "systemprompt",
-      "token",
-      "tojson",
-      "toolinvocationhistory",
-      "transcript",
-      "transcripts"
-    ];
-    UNSAFE_FIELD_KEY_LOOKUP = Object.fromEntries(COMPUTATION_UNSAFE_FIELD_KEYS.map((key) => [key, true]));
-    UNSAFE_FIELD_SEGMENTS = {
-      api: true,
-      auth: true,
-      authorization: true,
-      bearer: true,
-      cookie: true,
-      cookies: true,
-      credential: true,
-      credentials: true,
-      key: true,
-      oauth: true,
-      passwd: true,
-      password: true,
-      private: true,
-      proto: true,
-      secret: true,
-      secrets: true,
-      session: true,
-      ssn: true,
-      token: true
-    };
-    UNSAFE_FIELD_PREFIX_SEGMENTS = {
-      akia: true,
-      aws: true,
-      ghp: true,
-      ghr: true,
-      ghs: true,
-      gho: true,
-      pk: true,
-      sk: true,
-      xoxa: true,
-      xoxb: true,
-      xoxp: true,
-      xoxr: true,
-      xoxs: true
-    };
-    ComputationNodeIdSchema = external_exports.string().regex(/^n(?:0|[1-9][0-9]{0,3})$/, "Node id must be a canonical anonymous 'n<index>' id");
-    ComputationSymbolIdSchema = external_exports.string().regex(/^sym(?:0|[1-9][0-9]{0,3})$/, "Symbol id must be a canonical anonymous 'sym<index>' id");
-    ComputationSlotIdSchema = external_exports.string().regex(/^slot(?:0|[1-9][0-9]{0,3})$/, "Slot id must be a canonical anonymous 'slot<index>' id");
-    ComputationDefinitionIdSchema = external_exports.string().regex(/^def(?:0|[1-9][0-9]{0,3})$/, "Definition id must be a canonical anonymous 'def<index>' id");
-    ComputationScopeIdSchema = external_exports.string().regex(/^scope(?:0|[1-9][0-9]{0,3})$/, "Scope id must be 'scope0' (module) or a definition scope 'scope<index>'");
-    ComputationDigestSchema = external_exports.string().regex(/^[a-f0-9]{64}$/, "Digest must be 64 lowercase hex characters");
-    ComputationFieldKeySchema = external_exports.string().min(1).max(64).regex(/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/, "Field key must be a bounded safe structural identifier").refine(isSafeComputationFieldKey, "Secret-like, prototype or raw-evidence field keys must be captured as a field slot instead");
-    ComputationPathPatternSchema = external_exports.string().min(1).max(128).regex(/^[A-Za-z0-9_][A-Za-z0-9_./*-]*$/, "Path pattern must be a normalized relative pattern (no leading '/', '~', '.', drive letter or backslash)").refine((pattern) => !pattern.split("/").includes(".."), "Path pattern must not traverse parent directories");
-    DIGEST_ABSTRACTED_FIELDS = {
-      import: ["modulePath"]
-    };
-    COMPUTATION_NODE_FIELDS = {
-      program: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      block: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      function: {
-        required: ["symbol", "scope"],
-        optional: ["defKind", "async", "generator"],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      parameters: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      parameter: { required: ["symbol"], optional: ["paramKind"], nodeFields: [], keywordArgs: false },
-      return: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      assign: { required: [], optional: ["operator"], nodeFields: [], keywordArgs: false },
-      declare: {
-        required: ["symbol", "declKind"],
-        optional: [],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      identifier: { required: ["symbol"], optional: [], nodeFields: [], keywordArgs: false },
-      api_reference: { required: ["api"], optional: [], nodeFields: [], keywordArgs: false },
-      literal: {
-        required: [],
-        optional: ["constant", "slot"],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      member: {
-        required: [],
-        optional: ["field", "fieldSlot"],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      index: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      call: {
-        required: [],
-        optional: ["api", "symbol", "optional"],
-        nodeFields: ["receiver"],
-        keywordArgs: true
-      },
-      new: { required: ["api"], optional: [], nodeFields: [], keywordArgs: true },
-      array: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      tuple: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      object: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      pair: {
-        required: [],
-        optional: ["field", "fieldSlot"],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      lambda: {
-        required: ["symbol", "scope"],
-        optional: ["async"],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      binary: { required: ["operator"], optional: [], nodeFields: [], keywordArgs: false },
-      unary: { required: ["operator"], optional: [], nodeFields: [], keywordArgs: false },
-      compare: { required: ["operators"], optional: [], nodeFields: [], keywordArgs: false },
-      boolean: { required: ["operators"], optional: [], nodeFields: [], keywordArgs: false },
-      conditional: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      if: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      for: { required: [], optional: ["async"], nodeFields: [], keywordArgs: false },
-      while: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      try: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      catch: { required: [], optional: ["symbol"], nodeFields: [], keywordArgs: false },
-      finally: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      throw: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      assert: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      import: {
-        required: ["modulePath", "symbol"],
-        optional: [],
-        nodeFields: [],
-        keywordArgs: false
-      },
-      await: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      break: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      continue: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      expression: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      comprehension: { required: ["compKind"], optional: [], nodeFields: [], keywordArgs: false },
-      for_clause: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      if_clause: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      slice: { required: [], optional: ["slicePart"], nodeFields: [], keywordArgs: false },
-      spread: { required: ["spreadKind"], optional: [], nodeFields: [], keywordArgs: false },
-      template: { required: ["templateKind"], optional: [], nodeFields: [], keywordArgs: false },
-      with: { required: ["withKind"], optional: [], nodeFields: [], keywordArgs: false },
-      yield: { required: [], optional: [], nodeFields: [], keywordArgs: false },
-      unsupported: {
-        required: ["unsupportedReason"],
-        optional: [],
-        nodeFields: [],
-        keywordArgs: false
-      }
-    };
-    NodeIdList = external_exports.array(ComputationNodeIdSchema);
-    KeywordArgNameSchema = external_exports.union([external_exports.literal("key"), ComputationFieldKeySchema]);
-    KeywordArgSchema = external_exports.object({ name: KeywordArgNameSchema, value: ComputationNodeIdSchema }).strict();
-    UNBOUNDED = COMPUTATION_IR_LIMITS.nodes;
-    KeywordArgsSchema = external_exports.array(KeywordArgSchema).max(COMPUTATION_IR_LIMITS.nodes);
-    ComputationProgramNodeSchema = nodeOf("program", childrenOf(0, UNBOUNDED), {});
-    ComputationBlockNodeSchema = nodeOf("block", childrenOf(0, UNBOUNDED), {});
-    ComputationFunctionNodeSchema = nodeOf("function", childrenOf(2, 2), {
-      symbol: ComputationSymbolIdSchema,
-      scope: ComputationScopeIdSchema,
-      async: external_exports.boolean().optional(),
-      defKind: external_exports.enum(COMPUTATION_DEFINITION_KINDS).optional(),
-      generator: external_exports.boolean().optional()
-    });
-    ComputationParametersNodeSchema = nodeOf("parameters", childrenOf(0, UNBOUNDED), {});
-    ComputationParameterNodeSchema = nodeOf("parameter", childrenOf(0, 1), {
-      symbol: ComputationSymbolIdSchema,
-      paramKind: external_exports.enum(COMPUTATION_PARAMETER_KINDS).optional()
-    });
-    ComputationReturnNodeSchema = nodeOf("return", childrenOf(0, 1), {});
-    ComputationAssignNodeSchema = nodeOf("assign", childrenOf(2, 2), {
-      operator: external_exports.enum(COMPUTATION_ASSIGN_OPERATORS).optional()
-    });
-    ComputationDeclareNodeSchema = nodeOf("declare", childrenOf(0, 1), {
-      symbol: ComputationSymbolIdSchema,
-      declKind: external_exports.enum(COMPUTATION_DECLARE_KINDS)
-    });
-    ComputationIdentifierNodeSchema = nodeOf("identifier", childrenOf(0, 0), {
-      symbol: ComputationSymbolIdSchema
-    });
-    ComputationApiReferenceNodeSchema = nodeOf("api_reference", childrenOf(0, 0), {
-      api: external_exports.enum(COMPUTATION_APIS)
-    });
-    ComputationLiteralNodeSchema = nodeOf("literal", childrenOf(0, 0), {
-      constant: external_exports.enum(COMPUTATION_CONSTANTS).optional(),
-      slot: ComputationSlotIdSchema.optional()
-    });
-    ComputationMemberNodeSchema = nodeOf("member", childrenOf(1, 1), {
-      field: ComputationFieldKeySchema.optional(),
-      fieldSlot: ComputationSlotIdSchema.optional()
-    });
-    ComputationIndexNodeSchema = nodeOf("index", childrenOf(2, UNBOUNDED), {});
-    ComputationCallNodeSchema = nodeOf("call", childrenOf(0, UNBOUNDED), {
-      api: external_exports.enum(COMPUTATION_APIS).optional(),
-      symbol: ComputationSymbolIdSchema.optional(),
-      receiver: ComputationNodeIdSchema.optional(),
-      optional: external_exports.boolean().optional(),
-      keywordArgs: KeywordArgsSchema.optional()
-    });
-    ComputationNewNodeSchema = nodeOf("new", childrenOf(0, UNBOUNDED), {
-      api: external_exports.enum(COMPUTATION_APIS),
-      keywordArgs: KeywordArgsSchema.optional()
-    });
-    ComputationArrayNodeSchema = nodeOf("array", childrenOf(0, UNBOUNDED), {});
-    ComputationTupleNodeSchema = nodeOf("tuple", childrenOf(0, UNBOUNDED), {});
-    ComputationObjectNodeSchema = nodeOf("object", childrenOf(0, UNBOUNDED), {});
-    ComputationPairNodeSchema = nodeOf("pair", childrenOf(1, 1), {
-      field: ComputationFieldKeySchema.optional(),
-      fieldSlot: ComputationSlotIdSchema.optional()
-    });
-    ComputationLambdaNodeSchema = nodeOf("lambda", childrenOf(2, 2), {
-      symbol: ComputationSymbolIdSchema,
-      scope: ComputationScopeIdSchema,
-      async: external_exports.boolean().optional()
-    });
-    ComputationBinaryNodeSchema = nodeOf("binary", childrenOf(2, 2), {
-      operator: external_exports.enum(COMPUTATION_BINARY_OPERATORS)
-    });
-    ComputationUnaryNodeSchema = nodeOf("unary", childrenOf(1, 1), {
-      operator: external_exports.enum(COMPUTATION_UNARY_OPERATORS)
-    });
-    ComputationCompareNodeSchema = nodeOf("compare", childrenOf(2, UNBOUNDED), {
-      operators: external_exports.array(external_exports.enum(COMPUTATION_COMPARE_OPERATORS)).min(1).max(COMPUTATION_IR_LIMITS.nodes)
-    });
-    ComputationBooleanNodeSchema = nodeOf("boolean", childrenOf(2, UNBOUNDED), {
-      operators: external_exports.array(external_exports.enum(COMPUTATION_BOOLEAN_OPERATORS)).min(1).max(COMPUTATION_IR_LIMITS.nodes)
-    });
-    ComputationConditionalNodeSchema = nodeOf("conditional", childrenOf(3, 3), {});
-    ComputationIfNodeSchema = nodeOf("if", childrenOf(2, 3), {});
-    ComputationForNodeSchema = nodeOf("for", childrenOf(3, 3), {
-      async: external_exports.boolean().optional()
-    });
-    ComputationWhileNodeSchema = nodeOf("while", childrenOf(2, 2), {});
-    ComputationTryNodeSchema = nodeOf("try", childrenOf(1, UNBOUNDED), {});
-    ComputationCatchNodeSchema = nodeOf("catch", childrenOf(1, 1), {
-      symbol: ComputationSymbolIdSchema.optional()
-    });
-    ComputationFinallyNodeSchema = nodeOf("finally", childrenOf(1, 1), {});
-    ComputationThrowNodeSchema = nodeOf("throw", childrenOf(1, 1), {});
-    ComputationAssertNodeSchema = nodeOf("assert", childrenOf(1, 2), {});
-    ComputationImportNodeSchema = nodeOf("import", childrenOf(0, 0), {
-      modulePath: ComputationPathPatternSchema,
-      symbol: ComputationSymbolIdSchema
-    });
-    ComputationAwaitNodeSchema = nodeOf("await", childrenOf(1, 1), {});
-    ComputationBreakNodeSchema = nodeOf("break", childrenOf(0, 0), {});
-    ComputationContinueNodeSchema = nodeOf("continue", childrenOf(0, 0), {});
-    ComputationExpressionNodeSchema = nodeOf("expression", childrenOf(1, 1), {});
-    ComputationComprehensionNodeSchema = nodeOf("comprehension", childrenOf(2, UNBOUNDED), {
-      compKind: external_exports.enum(COMPUTATION_COMPREHENSION_KINDS)
-    });
-    ComputationForClauseNodeSchema = nodeOf("for_clause", childrenOf(2, 2), {});
-    ComputationIfClauseNodeSchema = nodeOf("if_clause", childrenOf(1, 1), {});
-    ComputationSliceNodeSchema = nodeOf("slice", childrenOf(1, 4), {
-      slicePart: external_exports.enum(COMPUTATION_SLICE_PARTS).optional()
-    });
-    ComputationSpreadNodeSchema = nodeOf("spread", childrenOf(1, 1), {
-      spreadKind: external_exports.enum(COMPUTATION_SPREAD_KINDS)
-    });
-    ComputationTemplateNodeSchema = nodeOf("template", childrenOf(0, UNBOUNDED), {
-      templateKind: external_exports.enum(COMPUTATION_TEMPLATE_KINDS)
-    });
-    ComputationWithNodeSchema = nodeOf("with", childrenOf(2, 2), {
-      withKind: external_exports.enum(COMPUTATION_WITH_KINDS)
-    });
-    ComputationYieldNodeSchema = nodeOf("yield", childrenOf(0, 1), {});
-    ComputationUnsupportedNodeSchema = nodeOf("unsupported", childrenOf(0, UNBOUNDED), {
-      unsupportedReason: external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)
-    });
-    ComputationNodeSchema = external_exports.discriminatedUnion("kind", [
-      ComputationProgramNodeSchema,
-      ComputationBlockNodeSchema,
-      ComputationFunctionNodeSchema,
-      ComputationParametersNodeSchema,
-      ComputationParameterNodeSchema,
-      ComputationReturnNodeSchema,
-      ComputationAssignNodeSchema,
-      ComputationDeclareNodeSchema,
-      ComputationIdentifierNodeSchema,
-      ComputationApiReferenceNodeSchema,
-      ComputationLiteralNodeSchema,
-      ComputationMemberNodeSchema,
-      ComputationIndexNodeSchema,
-      ComputationCallNodeSchema,
-      ComputationNewNodeSchema,
-      ComputationArrayNodeSchema,
-      ComputationTupleNodeSchema,
-      ComputationObjectNodeSchema,
-      ComputationPairNodeSchema,
-      ComputationLambdaNodeSchema,
-      ComputationBinaryNodeSchema,
-      ComputationUnaryNodeSchema,
-      ComputationCompareNodeSchema,
-      ComputationBooleanNodeSchema,
-      ComputationConditionalNodeSchema,
-      ComputationIfNodeSchema,
-      ComputationForNodeSchema,
-      ComputationWhileNodeSchema,
-      ComputationTryNodeSchema,
-      ComputationCatchNodeSchema,
-      ComputationFinallyNodeSchema,
-      ComputationThrowNodeSchema,
-      ComputationAssertNodeSchema,
-      ComputationImportNodeSchema,
-      ComputationAwaitNodeSchema,
-      ComputationBreakNodeSchema,
-      ComputationContinueNodeSchema,
-      ComputationExpressionNodeSchema,
-      ComputationComprehensionNodeSchema,
-      ComputationForClauseNodeSchema,
-      ComputationIfClauseNodeSchema,
-      ComputationSliceNodeSchema,
-      ComputationSpreadNodeSchema,
-      ComputationTemplateNodeSchema,
-      ComputationWithNodeSchema,
-      ComputationYieldNodeSchema,
-      ComputationUnsupportedNodeSchema
-    ]);
-    ComputationSymbolSchema = external_exports.object({
-      id: ComputationSymbolIdSchema,
-      kind: external_exports.enum(COMPUTATION_SYMBOL_KINDS),
-      scope: ComputationScopeIdSchema,
-      /** Definition node id that introduces the symbol (declaration site). */
-      node: ComputationNodeIdSchema.optional()
-    }).strict();
-    ComputationSlotSchema = external_exports.object({
-      id: ComputationSlotIdSchema,
-      kind: external_exports.enum(COMPUTATION_SLOT_KINDS),
-      role: external_exports.enum(COMPUTATION_SLOT_ROLES)
-    }).strict();
-    ComputationDefinitionSchema = external_exports.object({
-      id: ComputationDefinitionIdSchema,
-      kind: external_exports.enum(COMPUTATION_DEFINITION_KINDS),
-      nameSymbol: ComputationSymbolIdSchema,
-      parameters: external_exports.array(ComputationSymbolIdSchema).max(COMPUTATION_IR_LIMITS.symbols),
-      body: ComputationNodeIdSchema,
-      dependencies: external_exports.array(ComputationSymbolIdSchema).max(COMPUTATION_IR_LIMITS.definitions),
-      /** True when the definition reaches itself through `dependencies` (possibly mutually). */
-      recursive: external_exports.boolean(),
-      scope: ComputationScopeIdSchema,
-      complete: external_exports.boolean(),
-      unsupportedReasons: external_exports.array(external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)).max(8)
-    }).strict();
-    ComputationOutputSchema = external_exports.object({
-      /** `return` or `yield` node id, or an `expression` node for an emitted value. */
-      node: ComputationNodeIdSchema,
-      shape: external_exports.enum(COMPUTATION_OUTPUT_SHAPES),
-      definitionId: ComputationDefinitionIdSchema.optional()
-    }).strict();
-    ProgramBodyShape = {
-      version: external_exports.literal(COMPUTATION_IR_VERSION),
-      language: external_exports.enum(COMPUTATION_LANGUAGES),
-      nodes: external_exports.array(ComputationNodeSchema).max(COMPUTATION_IR_LIMITS.nodes * HARD_LIMIT_FACTOR),
-      symbols: external_exports.array(ComputationSymbolSchema).max(COMPUTATION_IR_LIMITS.symbols * HARD_LIMIT_FACTOR),
-      slots: external_exports.array(ComputationSlotSchema).max(COMPUTATION_IR_LIMITS.slots * HARD_LIMIT_FACTOR),
-      definitions: external_exports.array(ComputationDefinitionSchema).max(COMPUTATION_IR_LIMITS.definitions * HARD_LIMIT_FACTOR),
-      /** Ordered root node ids; the order is the program's top-level execution order. */
-      roots: external_exports.array(ComputationNodeIdSchema).min(1).max(COMPUTATION_IR_LIMITS.nodes * HARD_LIMIT_FACTOR),
-      outputs: external_exports.array(ComputationOutputSchema).max(COMPUTATION_IR_LIMITS.definitions + 1),
-      /** False whenever any part of the authored computation could not be represented. */
-      complete: external_exports.boolean(),
-      unsupportedReasons: external_exports.array(external_exports.enum(COMPUTATION_UNSUPPORTED_REASONS)).max(16)
-    };
-    ComputationProgramV1Schema = external_exports.object(ProgramBodyShape).strict().superRefine((program, ctx) => {
-      let issues;
-      try {
-        issues = checkProgramStructure(program);
-      } catch {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: [],
-          message: `${COMPUTATION_VALIDATION_CODES.CROSS_REF}: program structure could not be walked`
-        });
-        return;
-      }
-      for (const issue of issues) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [...issue.path], message: issue.message });
-      }
-    });
-    ComputationOriginSchema = external_exports.object({
-      kind: external_exports.enum(COMPUTATION_ORIGIN_KINDS),
-      /** Source event that carried the body; provenance only, excluded from the program digest. */
-      sourceEventId: IdentifierSchema,
-      /** Normalized relative path pattern; never raw file contents or an absolute private path. */
-      pathPattern: ComputationPathPatternSchema.optional()
-    }).strict();
-    ComputationObservationSchema = external_exports.object({
-      kind: external_exports.enum(COMPUTATION_OBSERVATION_KINDS),
-      status: external_exports.enum(COMPUTATION_OBSERVATION_STATUSES),
-      callEventId: IdentifierSchema,
-      callId: IdentifierSchema.optional(),
-      resultEventId: IdentifierSchema.optional()
-    }).strict();
-    ComputationDependencySchema = external_exports.object({
-      definitionId: ComputationDefinitionIdSchema,
-      programDigest: ComputationDigestSchema,
-      sourceEventId: IdentifierSchema
-    }).strict();
-    ComputationCorrectionSchema = external_exports.object({
-      supersedesDefinitionId: ComputationDefinitionIdSchema,
-      supersededProgramDigest: ComputationDigestSchema
-    }).strict();
-    ComputationMetricsSchema = external_exports.object({
-      sourceLines: external_exports.number().int().nonnegative().max(COMPUTATION_IR_LIMITS.sourceLines),
-      sourceBytes: external_exports.number().int().nonnegative().max(COMPUTATION_IR_LIMITS.sourceBytes),
-      nodeCount: external_exports.number().int().nonnegative(),
-      symbolCount: external_exports.number().int().nonnegative(),
-      slotCount: external_exports.number().int().nonnegative(),
-      definitionCount: external_exports.number().int().nonnegative()
-    }).strict();
-    EnvelopeBodyShape = {
-      version: external_exports.literal(COMPUTATION_IR_VERSION),
-      evidenceId: ComputationDigestSchema,
-      program: ComputationProgramV1Schema,
-      programDigest: ComputationDigestSchema,
-      origin: ComputationOriginSchema,
-      observation: ComputationObservationSchema,
-      dependencies: external_exports.array(ComputationDependencySchema).max(COMPUTATION_IR_LIMITS.dependencies * HARD_LIMIT_FACTOR),
-      corrections: external_exports.array(ComputationCorrectionSchema).max(COMPUTATION_IR_LIMITS.dependencies * HARD_LIMIT_FACTOR),
-      metrics: ComputationMetricsSchema,
-      /** Structural marker: this contract is evidence for analysis only and grants no authority. */
-      analysisOnly: external_exports.literal(true)
-    };
-    METRIC_COUNT_FIELDS = [
-      ["nodeCount", "nodes"],
-      ["symbolCount", "symbols"],
-      ["slotCount", "slots"],
-      ["definitionCount", "definitions"]
-    ];
-    ResinComputationEvidenceV1Schema = external_exports.object(EnvelopeBodyShape).strict().superRefine((envelope, ctx) => {
-      try {
-        const { evidenceId, ...body } = envelope;
-        if (envelope.programDigest !== computeComputationProgramDigest(envelope.program)) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            path: ["programDigest"],
-            message: `${COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH}: programDigest does not match the program body`
-          });
-        }
-        if (evidenceId !== computeComputationEvidenceDigest(body)) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            path: ["evidenceId"],
-            message: `${COMPUTATION_VALIDATION_CODES.DEPENDENCY_MISMATCH}: evidenceId does not match the bounded evidence body`
-          });
-        }
-        for (const issue of checkEnvelopeStructure(envelope)) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            path: [...issue.path],
-            message: issue.message
-          });
-        }
-      } catch {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: [],
-          message: `${COMPUTATION_VALIDATION_CODES.SERIALIZATION}: evidence body could not be canonicalized`
-        });
-      }
-    });
-  }
-});
-
-// packages/contracts/dist/deterministic-command-sequence.js
-function isUnsafeDeterministicCommandExecutable(executable) {
-  const normalized = executable.toLowerCase().replace(/\.exe$/i, "");
-  return UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES[normalized] === true;
-}
-function isForbiddenKey(key) {
-  return key === "__proto__" || key === "constructor" || key === "prototype";
-}
-function isDescriptorSafePlainTree(value, options = {}) {
-  const maxDepth = options.maxDepth ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceDepth;
-  const maxNodes = options.maxNodes ?? DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes;
-  let nodes = 0;
-  const seen = /* @__PURE__ */ new Set();
-  const walk = (current, depth) => {
-    nodes++;
-    if (nodes > maxNodes || depth > maxDepth) {
-      return false;
-    }
-    if (current === null || typeof current !== "object") {
-      return true;
-    }
-    if (seen.has(current)) {
-      return false;
-    }
-    seen.add(current);
-    const proto = Object.getPrototypeOf(current);
-    if (Array.isArray(current)) {
-      if (proto !== Array.prototype) {
-        return false;
-      }
-      const propNames2 = Object.getOwnPropertyNames(current);
-      for (let i = 0; i < propNames2.length; i++) {
-        const key = propNames2[i];
-        if (key === "length")
-          continue;
-        if (isForbiddenKey(key))
-          return false;
-        const desc = Object.getOwnPropertyDescriptor(current, key);
-        if (!desc || !("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
-          return false;
-        }
-        if (!walk(desc.value, depth + 1)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    if (proto !== null && proto !== Object.prototype) {
-      return false;
-    }
-    const propNames = Object.getOwnPropertyNames(current);
-    for (let i = 0; i < propNames.length; i++) {
-      const key = propNames[i];
-      if (isForbiddenKey(key)) {
-        return false;
-      }
-      const desc = Object.getOwnPropertyDescriptor(current, key);
-      if (!desc || !("value" in desc) || desc.get !== void 0 || desc.set !== void 0) {
-        return false;
-      }
-      if (!walk(desc.value, depth + 1)) {
-        return false;
-      }
-    }
-    return true;
-  };
-  try {
-    return walk(value, 0);
-  } catch {
-    return false;
-  }
-}
-var DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION, DETERMINISTIC_COMMAND_SEQUENCE_KIND, DETERMINISTIC_COMMAND_SEQUENCE_CONTROL, DETERMINISTIC_COMMAND_SEQUENCE_LIMITS, DeterministicCommandParameterRoleSchema, DeterministicCommandArgLiteralSchema, DeterministicCommandArgParameterSchema, DeterministicCommandArgPrefixedParameterSchema, DeterministicCommandArgSchema, UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES, DeterministicCommandExecutableSchema, DeterministicCommandStepSchema, RawDeterministicCommandSequenceSchema, DeterministicCommandSequenceSchema;
-var init_deterministic_command_sequence = __esm({
-  "packages/contracts/dist/deterministic-command-sequence.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION = 1;
-    DETERMINISTIC_COMMAND_SEQUENCE_KIND = "command-sequence";
-    DETERMINISTIC_COMMAND_SEQUENCE_CONTROL = "and-then";
-    DETERMINISTIC_COMMAND_SEQUENCE_LIMITS = {
-      /** Maximum number of arguments in a single step. */
-      maxArgs: 32,
-      /**
-       * Maximum number of arguments across every step of one sequence. This is a size limit on the
-       * evidence (and therefore on compiled source and invocation cost), not a bound on how many
-       * commands a useful workflow may contain.
-       */
-      maxSequenceArgs: 256,
-      /** Maximum length of an executable basename. */
-      maxExecutableLength: 128,
-      /** Maximum length of a literal token. */
-      maxLiteralLength: 128,
-      /** Maximum length of a parameter identifier. */
-      maxParameterLength: 64,
-      /** Maximum length of a step identifier. */
-      maxStepIdLength: 32,
-      /**
-       * Structural bounds for untrusted evidence: maximum node count and nesting depth accepted while
-       * walking a payload descriptor-safely, pinned to the same numbers used for canonical
-       * serialization so every accepted sequence can always be digested without throwing.
-       */
-      maxEvidenceNodes: 1e4,
-      maxEvidenceDepth: 64
-    };
-    DeterministicCommandParameterRoleSchema = external_exports.enum(["path", "string", "number"]);
-    DeterministicCommandArgLiteralSchema = external_exports.object({
-      literal: external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^[^\s\x00\r\n`$|;&<>(){}!'"\\]+$/, "Literal argument must be a shell-free argv token")
-    }).strict();
-    DeterministicCommandArgParameterSchema = external_exports.object({
-      parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
-      role: DeterministicCommandParameterRoleSchema
-    }).strict();
-    DeterministicCommandArgPrefixedParameterSchema = external_exports.object({
-      prefix: external_exports.string().min(3).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxLiteralLength).regex(/^-{1,2}[A-Za-z][A-Za-z0-9_.-]*=$/, "Parameter prefix must be a shell-free --flag= token prefix"),
-      parameter: external_exports.string().regex(/^arg[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxParameterLength),
-      role: DeterministicCommandParameterRoleSchema
-    }).strict();
-    DeterministicCommandArgSchema = external_exports.union([
-      DeterministicCommandArgLiteralSchema,
-      DeterministicCommandArgParameterSchema,
-      DeterministicCommandArgPrefixedParameterSchema
-    ]);
-    UNSAFE_DETERMINISTIC_COMMAND_EXECUTABLES = {
-      // Shells and command interpreters.
-      sh: true,
-      bash: true,
-      zsh: true,
-      csh: true,
-      tcsh: true,
-      ksh: true,
-      dash: true,
-      fish: true,
-      cmd: true,
-      "cmd.exe": true,
-      powershell: true,
-      "powershell.exe": true,
-      pwsh: true,
-      "pwsh.exe": true,
-      wscript: true,
-      cscript: true,
-      // Positional-program tools can execute caller-controlled code without a flag.
-      awk: true,
-      gawk: true,
-      mawk: true,
-      nawk: true,
-      sed: true,
-      gsed: true,
-      // Wrappers whose outer binary hides the executable identity checked by the broker.
-      sudo: true,
-      env: true,
-      time: true,
-      nohup: true,
-      exec: true,
-      nice: true,
-      ionice: true,
-      timeout: true,
-      setsid: true,
-      stdbuf: true,
-      busybox: true,
-      xargs: true,
-      chroot: true,
-      watch: true,
-      strace: true,
-      ltrace: true,
-      taskset: true,
-      numactl: true,
-      unshare: true,
-      nsenter: true,
-      // Stateful or shell-only builtins cannot preserve sequential subprocess semantics.
-      cd: true,
-      pushd: true,
-      popd: true,
-      export: true,
-      unset: true,
-      alias: true,
-      unalias: true,
-      set: true,
-      shift: true,
-      trap: true,
-      wait: true,
-      jobs: true,
-      fg: true,
-      bg: true,
-      disown: true,
-      hash: true,
-      type: true,
-      source: true,
-      builtin: true,
-      command: true,
-      eval: true,
-      umask: true,
-      ulimit: true,
-      readonly: true,
-      local: true,
-      declare: true,
-      typeset: true,
-      read: true,
-      exit: true,
-      return: true,
-      break: true,
-      continue: true
-    };
-    DeterministicCommandExecutableSchema = external_exports.string().min(1).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxExecutableLength).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/, "Executable must be a portable bare command name").refine((executable) => !isUnsafeDeterministicCommandExecutable(executable), "Shell interpreters, process-launching wrappers, and stateful builtins are not deterministic command executables");
-    DeterministicCommandStepSchema = external_exports.object({
-      id: external_exports.string().regex(/^step[0-9]+$/).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxStepIdLength),
-      executable: DeterministicCommandExecutableSchema,
-      argv: external_exports.array(DeterministicCommandArgSchema).max(DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxArgs)
-    }).strict();
-    RawDeterministicCommandSequenceSchema = external_exports.object({
-      schemaVersion: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_SCHEMA_VERSION),
-      kind: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
-      control: external_exports.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
-      steps: external_exports.array(DeterministicCommandStepSchema).min(1),
-      parameterValueSha256: external_exports.record(external_exports.string().regex(/^arg[0-9]+$/), external_exports.string().regex(/^[0-9a-f]{64}$/)).optional()
-    }).strict().superRefine((seq, ctx) => {
-      const seenParamNames = /* @__PURE__ */ new Map();
-      const stringParamNames = /* @__PURE__ */ new Set();
-      let totalArgs = 0;
-      for (let i = 0; i < seq.steps.length; i++) {
-        const step = seq.steps[i];
-        totalArgs += step.argv.length;
-        const expectedStepId = `step${i}`;
-        if (step.id !== expectedStepId) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `Step at index ${i} must have id '${expectedStepId}', got '${step.id}'`,
-            path: ["steps", i, "id"]
-          });
-        }
-        for (let j = 0; j < step.argv.length; j++) {
-          const arg = step.argv[j];
-          if ("parameter" in arg) {
-            const existingRole = seenParamNames.get(arg.parameter);
-            if (existingRole === void 0) {
-              const expectedParamName = `arg${seenParamNames.size}`;
-              if (arg.parameter !== expectedParamName) {
-                ctx.addIssue({
-                  code: external_exports.ZodIssueCode.custom,
-                  message: `Parameter identifier '${arg.parameter}' first appears at position ${seenParamNames.size}: expected '${expectedParamName}'`,
-                  path: ["steps", i, "argv", j, "parameter"]
-                });
-              }
-              seenParamNames.set(arg.parameter, arg.role);
-            } else if (existingRole !== arg.role) {
-              ctx.addIssue({
-                code: external_exports.ZodIssueCode.custom,
-                message: `Parameter '${arg.parameter}' is reused with conflicting role: expected '${existingRole}', got '${arg.role}'`,
-                path: ["steps", i, "argv", j]
-              });
-            }
-            if (arg.role === "string") {
-              stringParamNames.add(arg.parameter);
-            }
-          }
-        }
-      }
-      if (totalArgs > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `Command sequence carries ${totalArgs} arguments; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxSequenceArgs} across all steps`,
-          path: ["steps"]
-        });
-      }
-      let totalNodes = 5 + (seq.parameterValueSha256 ? 1 + Object.keys(seq.parameterValueSha256).length : 0);
-      for (let i = 0; i < seq.steps.length; i++) {
-        const step = seq.steps[i];
-        totalNodes += 4;
-        for (let j = 0; j < step.argv.length; j++) {
-          const arg = step.argv[j];
-          if ("prefix" in arg) {
-            totalNodes += 4;
-          } else if ("parameter" in arg) {
-            totalNodes += 3;
-          } else {
-            totalNodes += 2;
-          }
-        }
-      }
-      if (totalNodes > DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `Command sequence carries ${totalNodes} structural nodes; the evidence budget allows at most ${DETERMINISTIC_COMMAND_SEQUENCE_LIMITS.maxEvidenceNodes}`,
-          path: ["steps"]
-        });
-      }
-      for (const parameter of stringParamNames) {
-        if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
-            path: ["parameterValueSha256", parameter]
-          });
-        }
-      }
-      for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
-        if (!stringParamNames.has(parameter)) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: `Value commitment '${parameter}' must reference a string parameter`,
-            path: ["parameterValueSha256", parameter]
-          });
-        }
-      }
-    });
-    DeterministicCommandSequenceSchema = external_exports.preprocess((val) => {
-      if (!isDescriptorSafePlainTree(val)) {
-        return null;
-      }
-      return val;
-    }, RawDeterministicCommandSequenceSchema);
-  }
-});
-
-// packages/contracts/dist/tool-link-evidence.js
-function checkCarrierStructure(carrier, ctx) {
-  const declared = [...carrier.reads, ...carrier.writes];
-  const fields = [
-    ["reads", carrier.reads],
-    ["writes", carrier.writes]
-  ];
-  for (const [field, refs] of fields) {
-    for (let index = 0; index < refs.length; index++) {
-      const entry = refs[index];
-      if (refs.findIndex((other) => other.ref === entry.ref) !== index) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: [field, index, "ref"],
-          message: `${field} must be deduplicated by ref`
-        });
-        continue;
-      }
-      if (declared.some((other) => other.ref === entry.ref && other.kind !== entry.kind)) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: [field, index, "kind"],
-          message: "One ref names exactly one resource kind within a carrier"
-        });
-      }
-    }
-  }
-  for (let index = 0; index < carrier.inputs.length; index++) {
-    const entry = carrier.inputs[index];
-    if (carrier.inputs.findIndex((other) => other.name === entry.name) !== index) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        path: ["inputs", index, "name"],
-        message: "inputs must be deduplicated by name"
-      });
-    }
-    if (!declared.some((resource) => resource.ref === entry.ref)) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        path: ["inputs", index, "ref"],
-        message: "An input role must reference a resource this carrier declares as read or written"
-      });
-    }
-  }
-  for (let index = 0; index < carrier.contentKinds.length; index++) {
-    const kind = carrier.contentKinds[index];
-    if (carrier.contentKinds.indexOf(kind) !== index) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        path: ["contentKinds", index],
-        message: "contentKinds must be deduplicated"
-      });
-    }
-  }
-  const readKinds = carrier.reads.map((entry) => entry.kind);
-  const writeKinds = carrier.writes.map((entry) => entry.kind);
-  const hasRead = carrier.reads.length > 0;
-  const hasWrite = carrier.writes.length > 0;
-  if (!hasRead && !hasWrite) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      path: ["reads"],
-      message: "A carrier states a declared data flow and needs at least one resource"
-    });
-  }
-  switch (carrier.operation) {
-    case "file.read":
-      if (hasWrite) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["writes"],
-          message: "file.read declares no written resource"
-        });
-      }
-      break;
-    case "file.write":
-      if (hasRead) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["reads"],
-          message: "file.write declares no read resource"
-        });
-      }
-      break;
-    case "file.transform":
-      if (!hasRead || !hasWrite) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["reads"],
-          message: "file.transform consumes a read resource and produces a written one"
-        });
-      }
-      break;
-    case "github.issue.read":
-      if (!readKinds.includes("github_issue")) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["reads"],
-          message: "github.issue.read reads at least one issue"
-        });
-      }
-      if (writeKinds.includes("github_issue")) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["writes"],
-          message: "github.issue.read never writes an issue"
-        });
-      }
-      break;
-    case "github.issue.update":
-      if (!writeKinds.includes("github_issue")) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["writes"],
-          message: "github.issue.update writes at least one issue"
-        });
-      }
-      if (readKinds.includes("github_issue")) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["reads"],
-          message: "github.issue.update never reads the issue it writes"
-        });
-      }
-      break;
-    case "command.exec":
-      break;
-  }
-}
-var TOOL_LINK_EVIDENCE_VERSION, TOOL_LINK_EVIDENCE_LIMITS, TOOL_LINK_OPERATIONS, TOOL_LINK_RESOURCE_KINDS, TOOL_LINK_INPUT_NAMES, TOOL_LINK_CONTENT_KINDS, TOOL_LINK_OBSERVATION_STATUSES, ToolLinkResourceRefIdSchema, ToolLinkResourceRefSchema, ToolLinkInputSchema, ToolLinkObservationSchema, ToolLinkReadsSchema, ToolLinkWritesSchema, ToolLinkInputsSchema, ToolLinkContentKindsSchema, ToolLinkEvidenceV1Schema;
-var init_tool_link_evidence = __esm({
-  "packages/contracts/dist/tool-link-evidence.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    init_common();
-    TOOL_LINK_EVIDENCE_VERSION = 1;
-    TOOL_LINK_EVIDENCE_LIMITS = {
-      /** Distinct resources declared as read by one invocation. */
-      reads: 4,
-      /** Distinct resources declared as written by one invocation. */
-      writes: 4,
-      /** Distinct semantic input roles named by one invocation. */
-      inputs: 6,
-      /** Distinct content-shape facts recorded for one invocation. */
-      contentKinds: 1,
-      /** Highest resource ordinal a ref may name; the per-scope namespace is `r0`…`r<maxRefIndex>`. */
-      maxRefIndex: 999,
-      /** Canonical serialized byte ceiling of one carrier; larger payloads are rejected unparsed. */
-      serializedBytes: 8192
-    };
-    TOOL_LINK_OPERATIONS = [
-      "github.issue.read",
-      "github.issue.update",
-      "file.read",
-      "file.write",
-      "file.transform",
-      "command.exec"
-    ];
-    TOOL_LINK_RESOURCE_KINDS = ["file", "github_issue", "value"];
-    TOOL_LINK_INPUT_NAMES = ["subject", "source", "target", "changes"];
-    TOOL_LINK_CONTENT_KINDS = ["markdown_checklist"];
-    TOOL_LINK_OBSERVATION_STATUSES = ["pending", "success", "failure"];
-    ToolLinkResourceRefIdSchema = external_exports.string().regex(new RegExp(`^r(?:0|[1-9][0-9]{0,${String(TOOL_LINK_EVIDENCE_LIMITS.maxRefIndex).length - 1}})$`), "Resource ref must be a bounded 'r<ordinal>' ordinal id").refine((ref) => Number.parseInt(ref.slice(1), 10) <= TOOL_LINK_EVIDENCE_LIMITS.maxRefIndex, "Resource ref exceeds the pinned ordinal namespace");
-    ToolLinkResourceRefSchema = external_exports.object({
-      kind: external_exports.enum(TOOL_LINK_RESOURCE_KINDS),
-      ref: ToolLinkResourceRefIdSchema
-    }).strict();
-    ToolLinkInputSchema = external_exports.object({
-      name: external_exports.enum(TOOL_LINK_INPUT_NAMES),
-      ref: ToolLinkResourceRefIdSchema
-    }).strict();
-    ToolLinkObservationSchema = external_exports.object({
-      callId: IdentifierSchema,
-      callEventId: IdentifierSchema,
-      resultEventId: IdentifierSchema.optional(),
-      status: external_exports.enum(TOOL_LINK_OBSERVATION_STATUSES)
-    }).strict().superRefine((observation, ctx) => {
-      if (observation.status === "pending" && observation.resultEventId !== void 0) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["resultEventId"],
-          message: "A pending observation is call-side only and cannot carry a result event id"
-        });
-      }
-      if (observation.status !== "pending" && observation.resultEventId === void 0) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["resultEventId"],
-          message: "A completed observation must name the result event that carried the outcome"
-        });
-      }
-    });
-    ToolLinkReadsSchema = external_exports.array(ToolLinkResourceRefSchema).max(TOOL_LINK_EVIDENCE_LIMITS.reads);
-    ToolLinkWritesSchema = external_exports.array(ToolLinkResourceRefSchema).max(TOOL_LINK_EVIDENCE_LIMITS.writes);
-    ToolLinkInputsSchema = external_exports.array(ToolLinkInputSchema).max(TOOL_LINK_EVIDENCE_LIMITS.inputs);
-    ToolLinkContentKindsSchema = external_exports.array(external_exports.enum(TOOL_LINK_CONTENT_KINDS)).max(TOOL_LINK_EVIDENCE_LIMITS.contentKinds);
-    ToolLinkEvidenceV1Schema = external_exports.object({
-      version: external_exports.literal(TOOL_LINK_EVIDENCE_VERSION),
-      scopeId: IdentifierSchema,
-      operation: external_exports.enum(TOOL_LINK_OPERATIONS),
-      reads: ToolLinkReadsSchema,
-      writes: ToolLinkWritesSchema,
-      inputs: ToolLinkInputsSchema,
-      contentKinds: ToolLinkContentKindsSchema,
-      observation: ToolLinkObservationSchema
-    }).strict().superRefine((carrier, ctx) => {
-      checkCarrierStructure(carrier, ctx);
-    });
-  }
-});
-
-// packages/contracts/dist/assistant-stop-reason.js
-var ASSISTANT_STOP_REASONS, AssistantStopReasonSchema, AssistantStopReasonCorrectionSchema;
-var init_assistant_stop_reason = __esm({
-  "packages/contracts/dist/assistant-stop-reason.js"() {
-    "use strict";
-    init_zod();
-    ASSISTANT_STOP_REASONS = ["stop", "end_turn", "completed"];
-    AssistantStopReasonSchema = external_exports.enum(ASSISTANT_STOP_REASONS);
-    AssistantStopReasonCorrectionSchema = external_exports.object({ stopReason: AssistantStopReasonSchema }).strict();
-  }
-});
-
-// packages/contracts/dist/recorded-workflow.js
-function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isJsonValue(value) {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return true;
-  if (typeof value === "number")
-    return Number.isFinite(value);
-  if (Array.isArray(value))
-    return value.every(isJsonValue);
-  if (isPlainObject(value))
-    return Object.values(value).every(isJsonValue);
-  return false;
-}
-function hasOnlyKeys(value, allowed) {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-function validateWorkflowProgramSourceInterface(program, stepId, errors) {
-  if (program.sourceInterface === void 0)
-    return;
-  if (program.sourceInterface === "python-eval") {
-    if (program.kind !== "python") {
-      errors.push(`step ${stepId} has a Python Eval sourceInterface on a non-Python program`);
-    }
-    return;
-  }
-  if (program.sourceInterface === "javascript-eval") {
-    if (program.kind !== "javascript") {
-      errors.push(`step ${stepId} has a JavaScript Eval sourceInterface on a non-JavaScript program`);
-    }
-    return;
-  }
-  errors.push(`step ${stepId} has an unsupported program sourceInterface`);
-}
-function validateWorkflowPythonState(program, stepId, targetCallId, workflowCallIds, declaredPrivates, errors) {
-  const state = program.pythonState;
-  if (state === void 0)
-    return;
-  if (program.kind !== "python") {
-    errors.push(`step ${stepId} has pythonState on a non-Python program`);
-    return;
-  }
-  if (!isPlainObject(state)) {
-    errors.push(`step ${stepId} pythonState must be an object`);
-    return;
-  }
-  if (!hasOnlyKeys(state, PYTHON_STATE_KEYS)) {
-    errors.push(`step ${stepId} pythonState contains unsupported metadata`);
-  }
-  if (state.schemaVersion !== 1) {
-    errors.push(`step ${stepId} pythonState has an unsupported schemaVersion`);
-  }
-  if (state.status !== "closed" && state.status !== "unresolved") {
-    errors.push(`step ${stepId} pythonState needs a closed or unresolved status`);
-  }
-  if (typeof state.unresolvedReadCount !== "number" || !Number.isInteger(state.unresolvedReadCount) || state.unresolvedReadCount < 0) {
-    errors.push(`step ${stepId} pythonState.unresolvedReadCount must be a non-negative integer`);
-  } else if (state.status === "closed" && state.unresolvedReadCount !== 0) {
-    errors.push(`step ${stepId} closed pythonState cannot have unresolved reads`);
-  }
-  if (state.status === "unresolved") {
-    errors.push(`step ${stepId} pythonState is unresolved`);
-  }
-  if (!Array.isArray(state.setup)) {
-    errors.push(`step ${stepId} pythonState.setup must be an array`);
-    return;
-  }
-  if (state.setup.length > MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
-    errors.push(`step ${stepId} pythonState.setup exceeds ${MAX_WORKFLOW_PYTHON_SETUP_CELLS} cells`);
-  }
-  const callIds = /* @__PURE__ */ new Set();
-  const sourceEventIds = /* @__PURE__ */ new Set();
-  const resultEventIds = /* @__PURE__ */ new Set();
-  const descriptorIds = /* @__PURE__ */ new Set();
-  const references = /* @__PURE__ */ new Set();
-  for (const [index, descriptor] of state.setup.entries()) {
-    const where = `step ${stepId} pythonState.setup[${index}]`;
-    if (!isPlainObject(descriptor)) {
-      errors.push(`${where} must be an object`);
-      continue;
-    }
-    if (!hasOnlyKeys(descriptor, PYTHON_SETUP_KEYS)) {
-      errors.push(`${where} contains unsupported metadata`);
-    }
-    const fields = [
-      "callId",
-      "sourceEventId",
-      "resultEventId",
-      "reference"
-    ];
-    for (const field of fields) {
-      if (typeof descriptor[field] !== "string" || descriptor[field].length === 0) {
-        errors.push(`${where}.${field} must be a non-empty string`);
-      }
-    }
-    const callId = typeof descriptor.callId === "string" ? descriptor.callId : void 0;
-    const sourceEventId = typeof descriptor.sourceEventId === "string" ? descriptor.sourceEventId : void 0;
-    const resultEventId = typeof descriptor.resultEventId === "string" ? descriptor.resultEventId : void 0;
-    for (const id of [callId, sourceEventId, resultEventId]) {
-      if (id === void 0)
-        continue;
-      if (descriptorIds.has(id))
-        errors.push(`${where} duplicates descriptor identity ${id}`);
-      descriptorIds.add(id);
-      if (targetCallId !== void 0 && id === targetCallId) {
-        errors.push(`${where} references its target callId ${id}`);
-      }
-    }
-    const reference = typeof descriptor.reference === "string" ? descriptor.reference : void 0;
-    if (callId !== void 0) {
-      if (callIds.has(callId))
-        errors.push(`${where} duplicates callId ${callId}`);
-      callIds.add(callId);
-      if (workflowCallIds.has(callId)) {
-        errors.push(`${where} overlaps workflow callId ${callId}`);
-      }
-    }
-    if (sourceEventId !== void 0) {
-      if (sourceEventIds.has(sourceEventId)) {
-        errors.push(`${where} duplicates sourceEventId ${sourceEventId}`);
-      }
-      sourceEventIds.add(sourceEventId);
-    }
-    if (resultEventId !== void 0) {
-      if (resultEventIds.has(resultEventId)) {
-        errors.push(`${where} duplicates resultEventId ${resultEventId}`);
-      }
-      resultEventIds.add(resultEventId);
-    }
-    if (callId !== void 0 && (sourceEventId !== void 0 && callId === sourceEventId || resultEventId !== void 0 && callId === resultEventId)) {
-      errors.push(`${where} self-references its own call event`);
-    }
-    if (sourceEventId !== void 0 && resultEventId !== void 0 && sourceEventId === resultEventId) {
-      errors.push(`${where} uses the same source and result event`);
-    }
-    if (reference !== void 0) {
-      if (references.has(reference))
-        errors.push(`${where} duplicates reference ${reference}`);
-      references.add(reference);
-      if (declaredPrivates !== void 0 && !declaredPrivates.has(reference)) {
-        errors.push(`${where} reads undeclared private reference '${reference}'`);
-      }
-    }
-  }
-}
-function validateDemonstration(label, demonstration, order, declaredPrivates, errors) {
-  if (!isPlainObject(demonstration)) {
-    errors.push(`${label} must be an object when present`);
-    return;
-  }
-  const entries = [
-    ["inputs", demonstration.inputs],
-    ["observed", demonstration.observed]
-  ];
-  for (const [entryLabel, list] of entries) {
-    if (!Array.isArray(list)) {
-      errors.push(`${label}.${entryLabel} must be an array`);
-      continue;
-    }
-    for (const entry of list) {
-      if (!isPlainObject(entry)) {
-        errors.push(`every ${label}.${entryLabel} entry must be an object`);
-        continue;
-      }
-      if (entryLabel === "observed" && entry.comparison !== void 0 && entry.comparison !== "text-trim") {
-        errors.push(`${label}.observed entry for step ${String(entry.stepId)} has unsupported comparison ${String(entry.comparison)}`);
-      }
-      if (!order.has(String(entry.stepId))) {
-        errors.push(`every ${label}.${entryLabel} entry names unknown step ${String(entry.stepId)}`);
-      }
-      if (typeof entry.reference !== "string" || !declaredPrivates.has(entry.reference)) {
-        errors.push(`${label}.${entryLabel} reads undeclared local reference ${String(entry.reference)}`);
-      }
-      if (entryLabel === "inputs" && typeof entry.argument !== "string") {
-        errors.push(`every ${label}.inputs entry needs the argument it was supplied for`);
-      }
-    }
-  }
-}
-function validateRecordedWorkflow(value) {
-  const errors = [];
-  if (!isPlainObject(value))
-    return { valid: false, errors: ["workflow must be an object"] };
-  if (value.schemaVersion !== RECORDED_WORKFLOW_SCHEMA_VERSION) {
-    errors.push(`unsupported schemaVersion: ${String(value.schemaVersion)}`);
-  }
-  if (typeof value.workflowId !== "string" || value.workflowId.length === 0) {
-    errors.push("workflowId must be a non-empty string");
-  }
-  const inputs = Array.isArray(value.inputs) ? value.inputs : null;
-  if (!inputs)
-    errors.push("inputs must be an array");
-  const inputNames = /* @__PURE__ */ new Set();
-  const inputTypes = /* @__PURE__ */ new Map();
-  for (const input of inputs ?? []) {
-    if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
-      errors.push("every input needs a non-empty name");
-      continue;
-    }
-    if (inputNames.has(input.name))
-      errors.push(`duplicate input: ${input.name}`);
-    inputNames.add(input.name);
-    if (input.type !== "string" && input.type !== "number" && input.type !== "boolean" && input.type !== "object" && input.type !== "array") {
-      errors.push(`input ${input.name} needs a recorded type`);
-    } else {
-      inputTypes.set(input.name, input.type);
-    }
-  }
-  const declaredPrivates = /* @__PURE__ */ new Set();
-  const privateReferences = value.privateReferences;
-  if (privateReferences !== void 0) {
-    if (!Array.isArray(privateReferences)) {
-      errors.push("privateReferences must be an array when present");
-    } else {
-      for (const reference of privateReferences) {
-        if (typeof reference !== "string" || reference.length === 0) {
-          errors.push("every private reference must be a non-empty string");
-          continue;
-        }
-        declaredPrivates.add(reference);
-      }
-    }
-  }
-  const steps = Array.isArray(value.steps) ? value.steps : null;
-  if (!steps || steps.length === 0)
-    errors.push("steps must be a non-empty array");
-  const workflowCallIds = /* @__PURE__ */ new Set();
-  for (const step of steps ?? []) {
-    if (isPlainObject(step) && typeof step.callId === "string" && step.callId.length > 0) {
-      workflowCallIds.add(step.callId);
-    }
-  }
-  const stepIds = /* @__PURE__ */ new Set();
-  for (const step of steps ?? []) {
-    if (!isPlainObject(step) || typeof step.id !== "string" || step.id.length === 0) {
-      errors.push("every step needs a non-empty id");
-      continue;
-    }
-    if (stepIds.has(step.id))
-      errors.push(`duplicate step id: ${step.id}`);
-    stepIds.add(step.id);
-    if (typeof step.callId !== "string" || step.callId.length === 0) {
-      errors.push(`step ${step.id} needs the callId it was recorded from`);
-    }
-    const callable = step.callable;
-    if (!isPlainObject(callable) || typeof callable.runtime !== "string" || typeof callable.name !== "string" || callable.name.length === 0) {
-      errors.push(`step ${step.id} needs a callable with a runtime and a recorded name`);
-    }
-    const failurePolicy = step.failurePolicy;
-    if (!isPlainObject(failurePolicy) || failurePolicy.onError !== "abort" && failurePolicy.onError !== "continue" || failurePolicy.policy !== "recorded" && failurePolicy.policy !== "default") {
-      errors.push(`step ${step.id} needs a failurePolicy with onError and policy`);
-    }
-    const observed = step.observed;
-    if (!isPlainObject(observed) || observed.outcome !== "succeeded" && observed.outcome !== "failed" && observed.outcome !== "unknown") {
-      errors.push(`step ${step.id} needs an observed outcome`);
-    }
-    const permissions = step.permissions;
-    if (permissions !== void 0 && !isJsonValue(permissions)) {
-      errors.push(`step ${step.id} permissions must be JSON`);
-    }
-  }
-  const order = /* @__PURE__ */ new Map();
-  (steps ?? []).forEach((step, index) => {
-    if (isPlainObject(step) && typeof step.id === "string")
-      order.set(step.id, index);
-  });
-  for (const step of steps ?? []) {
-    if (!isPlainObject(step) || typeof step.id !== "string")
-      continue;
-    const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn : null;
-    if (!dependsOn) {
-      errors.push(`step ${step.id} dependsOn must be an array`);
-    }
-    for (const dependency of dependsOn ?? []) {
-      if (typeof dependency !== "string" || !order.has(dependency)) {
-        errors.push(`step ${step.id} depends on unknown step ${String(dependency)}`);
-        continue;
-      }
-      if ((order.get(dependency) ?? 0) >= (order.get(step.id) ?? 0)) {
-        errors.push(`step ${step.id} depends on ${dependency}, which does not come earlier`);
-      }
-    }
-    const args = Array.isArray(step.arguments) ? step.arguments : null;
-    if (!args) {
-      errors.push(`step ${step.id} arguments must be an array`);
-      continue;
-    }
-    for (const argument of args) {
-      if (!isPlainObject(argument) || typeof argument.name !== "string") {
-        errors.push(`step ${step.id} has an argument without a name`);
-        continue;
-      }
-      const source = argument.source;
-      if (!isPlainObject(source) || typeof source.kind !== "string") {
-        errors.push(`step ${step.id} argument ${argument.name} needs a value source`);
-        continue;
-      }
-      if (source.kind === "input" && !inputNames.has(String(source.name))) {
-        errors.push(`step ${step.id} argument ${argument.name} reads unknown input ${String(source.name)}`);
-      }
-      if (source.kind === "result") {
-        const stepRef = String(source.stepId);
-        if (!order.has(stepRef)) {
-          errors.push(`step ${step.id} argument ${argument.name} reads unknown step ${stepRef}`);
-        } else if ((order.get(stepRef) ?? 0) >= (order.get(step.id) ?? 0)) {
-          errors.push(`step ${step.id} argument ${argument.name} reads ${stepRef}, which does not come earlier`);
-        }
-        const path10 = source.path;
-        if (!Array.isArray(path10) || !path10.every((part) => typeof part === "string" || typeof part === "number")) {
-          errors.push(`step ${step.id} argument ${argument.name} has an invalid result path`);
-        }
-      }
-      if (source.kind === "literal" && !isJsonValue(source.value)) {
-        errors.push(`step ${step.id} argument ${argument.name} has a non-JSON literal`);
-      }
-      if (source.kind === "unresolved" && typeof source.reason !== "string") {
-        errors.push(`step ${step.id} argument ${argument.name} needs a reason for its unknown origin`);
-      }
-      if (source.kind === "template") {
-        const problems = [];
-        const walk = (template, where) => {
-          if (!isPlainObject(template)) {
-            problems.push(`${where} is not a template node`);
-            return;
-          }
-          switch (template.type) {
-            case "literal":
-              if (!isJsonValue(template.value))
-                problems.push(`${where} has a non-JSON literal`);
-              return;
-            case "input":
-              if (typeof template.name !== "string" || !inputNames.has(template.name)) {
-                problems.push(`${where} reads unknown input ${String(template.name)}`);
-              }
-              return;
-            case "result": {
-              const stepRef = typeof template.stepId === "string" ? template.stepId : "";
-              if (!order.has(stepRef))
-                problems.push(`${where} reads unknown step ${stepRef}`);
-              else if ((order.get(stepRef) ?? 0) >= (order.get(typeof step.id === "string" ? step.id : "") ?? 0)) {
-                problems.push(`${where} reads ${stepRef}, which does not come earlier`);
-              }
-              return;
-            }
-            case "private":
-              if (typeof template.reference !== "string" || !declaredPrivates.has(template.reference)) {
-                problems.push(`${where} reads undeclared private reference ${String(template.reference)}`);
-              }
-              return;
-            case "unresolved":
-              if (typeof template.reason !== "string")
-                problems.push(`${where} needs a reason`);
-              return;
-            case "object": {
-              if (!isPlainObject(template.entries)) {
-                problems.push(`${where} object entries must be an object`);
-                return;
-              }
-              for (const [key, entry] of Object.entries(template.entries)) {
-                walk(entry, `${where}.${key}`);
-              }
-              return;
-            }
-            case "array": {
-              if (!Array.isArray(template.items)) {
-                problems.push(`${where} array items must be an array`);
-                return;
-              }
-              template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
-              return;
-            }
-            case "program": {
-              if (template.language !== "shell" && template.language !== "python" && template.language !== "javascript" && template.language !== "typescript") {
-                problems.push(`${where} program needs the language it runs in`);
-              }
-              if (!isPlainObject(template.source)) {
-                problems.push(`${where} program needs the recorded text it resolves`);
-              } else {
-                walk(template.source, `${where}<text>`);
-              }
-              if (!Array.isArray(template.holes)) {
-                problems.push(`${where} program holes must be an array`);
-                return;
-              }
-              for (const [index, hole] of template.holes.entries()) {
-                if (!isPlainObject(hole) || typeof hole.token !== "number" || !Number.isInteger(hole.token) || hole.token < 0) {
-                  problems.push(`${where} hole ${index} must name a recorded token index`);
-                  continue;
-                }
-                walk(hole.binding, `${where}<token ${hole.token}>`);
-              }
-              return;
-            }
-            default:
-              problems.push(`${where} has unknown template type ${String(template.type)}`);
-          }
-        };
-        walk(source.template, `step ${step.id} argument ${argument.name}`);
-        errors.push(...problems);
-      }
-      if (source.kind === "private") {
-        if (typeof source.reference !== "string" || source.reference.length === 0) {
-          errors.push(`step ${step.id} argument ${argument.name} needs a private reference`);
-        } else if (!declaredPrivates.has(source.reference)) {
-          errors.push(`step ${step.id} argument ${argument.name} reads undeclared private reference '${source.reference}'`);
-        }
-      }
-      const provenance = argument.provenance;
-      if (provenance !== void 0) {
-        if (!isPlainObject(provenance) || provenance.standing !== "recorded" && provenance.standing !== "derived" && provenance.standing !== "candidate" || typeof provenance.rule !== "string") {
-          errors.push(`step ${step.id} argument ${argument.name} has an invalid provenance`);
-        } else if (provenance.standing === "candidate" && typeof provenance.missing !== "string") {
-          errors.push(`step ${step.id} argument ${argument.name} is a candidate without the missing fact`);
-        }
-      }
-    }
-    const callable = step.callable;
-    const program = isPlainObject(callable) ? callable.program : void 0;
-    if (program !== void 0) {
-      if (!isPlainObject(program) || program.kind !== "shell" && program.kind !== "python" && program.kind !== "javascript" && program.kind !== "typescript" || typeof program.source !== "string") {
-        errors.push(`step ${step.id} has an invalid recorded program`);
-      } else if (program.source.length === 0 && (!Array.isArray(program.argv) || program.argv.length === 0) && typeof program.argument !== "string") {
-        errors.push(`step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`);
-      } else {
-        validateWorkflowProgramSourceInterface(program, step.id, errors);
-        validateWorkflowPythonState(program, step.id, typeof step.callId === "string" ? step.callId : void 0, workflowCallIds, declaredPrivates, errors);
-      }
-    }
-  }
-  const candidates = value.candidates;
-  if (candidates !== void 0) {
-    if (!Array.isArray(candidates)) {
-      errors.push("candidates must be an array when present");
-    } else {
-      for (const candidate of candidates) {
-        if (!isPlainObject(candidate) || typeof candidate.argument !== "string") {
-          errors.push("every candidate needs a step and an argument");
-          continue;
-        }
-        const stepId = typeof candidate.stepId === "string" ? candidate.stepId : "";
-        if (!order.has(stepId)) {
-          errors.push(`candidate names unknown step ${stepId}`);
-          continue;
-        }
-        const step = (steps ?? []).find((entry) => isPlainObject(entry) && entry.id === stepId);
-        const args = isPlainObject(step) && Array.isArray(step.arguments) ? step.arguments : [];
-        if (!args.some((entry) => isPlainObject(entry) && entry.name === candidate.argument)) {
-          errors.push(`candidate ${stepId}.${candidate.argument} names no such argument`);
-        }
-        const path10 = Array.isArray(candidate.path) ? candidate.path : [];
-        if (path10[0] === "tokens") {
-          if (!Number.isInteger(path10[1]) || path10[1] < 0 || path10.length !== 2) {
-            errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
-          }
-          const program = isPlainObject(step) ? step.callable : void 0;
-          const recorded = isPlainObject(program) ? program.program : void 0;
-          if (!isPlainObject(recorded) || recorded.argument !== candidate.argument) {
-            errors.push(`candidate ${stepId}.${candidate.argument} names a token of a program the step's record does not hold in that argument`);
-          }
-        }
-        const proposed = candidate.proposed;
-        if (!isPlainObject(proposed) || typeof proposed.kind !== "string") {
-          errors.push(`candidate ${stepId}.${candidate.argument} needs a proposal`);
-        } else if (proposed.kind === "result") {
-          const stepRef = String(proposed.stepId);
-          if (!order.has(stepRef)) {
-            errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
-          }
-        } else if (proposed.kind === "input") {
-          if (typeof proposed.name !== "string" || proposed.name.length === 0) {
-            errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
-          }
-          if (proposed.type !== "string" && proposed.type !== "number" && proposed.type !== "boolean" && proposed.type !== "object" && proposed.type !== "array") {
-            errors.push(`candidate ${stepId}.${candidate.argument} needs an input type`);
-          }
-        } else {
-          errors.push(`candidate ${stepId}.${candidate.argument} has an unknown proposal kind`);
-        }
-        if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
-          errors.push(`candidate ${stepId}.${candidate.argument} must name the fact the record is missing`);
-        }
-      }
-    }
-  }
-  if (value.baseline !== void 0) {
-    validateDemonstration("baseline", value.baseline, order, declaredPrivates, errors);
-  }
-  if (value.heldOut !== void 0) {
-    validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
-  }
-  return { valid: errors.length === 0, errors };
-}
-var RECORDED_WORKFLOW_SCHEMA_VERSION, MAX_WORKFLOW_PYTHON_SETUP_CELLS, PYTHON_STATE_KEYS, PYTHON_SETUP_KEYS;
-var init_recorded_workflow = __esm({
-  "packages/contracts/dist/recorded-workflow.js"() {
-    "use strict";
-    RECORDED_WORKFLOW_SCHEMA_VERSION = 1;
-    MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
-    PYTHON_STATE_KEYS = ["schemaVersion", "status", "unresolvedReadCount", "setup"];
-    PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "reference"];
-  }
-});
-
-// packages/contracts/dist/program-tokens.js
-var init_program_tokens = __esm({
-  "packages/contracts/dist/program-tokens.js"() {
-    "use strict";
-  }
-});
-
-// packages/contracts/dist/workflow-validation.js
-var SHA256_HEX, WORKFLOW_VALIDATION_SCHEMA_VERSION, NonEmptyString, WorkflowValuePathSchema, ProposedBindingSchema, ProgramIdentitySchema, ReplayProofSchema, PlanVerificationSchema, VerdictSchema, WorkflowValidationRequestSchema, WorkflowValidationDecisionSchema;
-var init_workflow_validation = __esm({
-  "packages/contracts/dist/workflow-validation.js"() {
-    "use strict";
-    init_zod();
-    init_canonical();
-    init_recorded_workflow();
-    SHA256_HEX = /^[a-f0-9]{64}$/;
-    WORKFLOW_VALIDATION_SCHEMA_VERSION = 2;
-    NonEmptyString = external_exports.string().min(1);
-    WorkflowValuePathSchema = external_exports.array(external_exports.union([external_exports.string(), external_exports.number().int().nonnegative()]));
-    ProposedBindingSchema = external_exports.union([
-      external_exports.object({
-        kind: external_exports.literal("result"),
-        stepId: NonEmptyString,
-        path: WorkflowValuePathSchema
-      }),
-      external_exports.object({
-        kind: external_exports.literal("input"),
-        name: NonEmptyString,
-        type: external_exports.enum(["string", "number", "boolean", "object", "array"])
-      })
-    ]);
-    ProgramIdentitySchema = external_exports.object({
-      stepId: NonEmptyString,
-      argument: NonEmptyString,
-      path: WorkflowValuePathSchema,
-      templateDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
-      sourceDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters")
-    });
-    ReplayProofSchema = external_exports.object({
-      kind: external_exports.literal("fresh-process"),
-      planDigest: external_exports.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters")
-    });
-    PlanVerificationSchema = external_exports.object({
-      status: external_exports.enum(["verified", "incomplete", "failed"]),
-      reproduced: external_exports.array(external_exports.string()),
-      missed: external_exports.array(external_exports.object({ stepId: external_exports.string(), detail: external_exports.string() })),
-      dropped: external_exports.array(external_exports.object({ candidate: external_exports.unknown(), reason: external_exports.string() })),
-      programIdentities: external_exports.array(ProgramIdentitySchema).optional(),
-      replay: ReplayProofSchema.optional()
-    });
-    VerdictSchema = external_exports.object({
-      candidate: external_exports.object({
-        stepId: NonEmptyString,
-        argument: NonEmptyString,
-        path: WorkflowValuePathSchema,
-        proposed: ProposedBindingSchema
-      }),
-      confirmed: external_exports.boolean(),
-      reason: external_exports.string().optional()
-    });
-    WorkflowValidationRequestSchema = external_exports.object({
-      schemaVersion: external_exports.literal(WORKFLOW_VALIDATION_SCHEMA_VERSION),
-      requestId: NonEmptyString,
-      workspaceId: NonEmptyString,
-      deviceId: NonEmptyString.optional(),
-      attempt: NonEmptyString,
-      planDigest: NonEmptyString,
-      evidenceDigest: NonEmptyString,
-      createdAt: NonEmptyString,
-      expiresAt: NonEmptyString.optional(),
-      plan: external_exports.unknown().superRefine((plan, context) => {
-        const validation = validateRecordedWorkflow(plan);
-        if (!validation.valid) {
-          context.addIssue({ code: external_exports.ZodIssueCode.custom, message: validation.errors.join("; ") });
-        }
-      })
-    });
-    WorkflowValidationDecisionSchema = external_exports.object({
-      schemaVersion: external_exports.literal(WORKFLOW_VALIDATION_SCHEMA_VERSION),
-      requestId: NonEmptyString,
-      attempt: NonEmptyString,
-      planDigest: NonEmptyString,
-      evidenceDigest: NonEmptyString,
-      environment: NonEmptyString,
-      verdicts: external_exports.array(VerdictSchema),
-      verification: PlanVerificationSchema.optional(),
-      accepted: external_exports.array(external_exports.object({
-        stepId: NonEmptyString,
-        argument: NonEmptyString,
-        path: WorkflowValuePathSchema
-      })),
-      decidedAt: NonEmptyString
-    });
-  }
-});
-
-// packages/contracts/dist/agent-arguments.js
-var init_agent_arguments = __esm({
-  "packages/contracts/dist/agent-arguments.js"() {
-    "use strict";
-  }
-});
-
-// packages/contracts/dist/index.js
-var init_dist = __esm({
-  "packages/contracts/dist/index.js"() {
-    "use strict";
-    init_common();
-    init_canonical();
-    init_events();
-    init_tools();
-    init_components();
-    init_capabilities();
-    init_secrets();
-    init_versions();
-    init_deployments();
-    init_records();
-    init_opportunity();
-    init_safety_gate();
-    init_qualification();
-    init_v1();
-    init_computation_evidence();
-    init_deterministic_command_sequence();
-    init_tool_link_evidence();
-    init_assistant_stop_reason();
-    init_recorded_workflow();
-    init_program_tokens();
-    init_workflow_validation();
-    init_agent_arguments();
-  }
-});
-
-// packages/harness-contracts/dist/types.js
-var InstallationStatusSchema, HarnessInstallationSchema, HarnessWorkspaceSchema, SessionStatusSchema, HarnessSessionSchema, SourceCursorSchema, RecordTypeSchema, RawHarnessRecordSchema, DiagnosticSeveritySchema, AdapterDiagnosticSchema, ConfigMutationPlanSchema, ConfigBackupSchema, RefreshCapabilitySchema, TranscriptAvailabilitySchema, VisibilityLevelSchema, SubagentVisibilitySchema, McpListChangeSupportSchema, ContextNudgeSupportSchema, ObservationFidelitySchema, AdapterCapabilitiesSchema, CatalogChangeSummarySchema;
-var init_types2 = __esm({
-  "packages/harness-contracts/dist/types.js"() {
-    "use strict";
-    init_dist();
-    init_zod();
-    InstallationStatusSchema = external_exports.enum([
-      "ready",
-      "unsupported_version",
-      "missing_executable",
-      "config_error",
-      "corrupt",
-      "unknown"
-    ]);
-    HarnessInstallationSchema = external_exports.object({
-      harnessId: IdentifierSchema,
-      displayName: external_exports.string().min(1),
-      version: SchemaVersionSchema,
-      executablePath: external_exports.string().optional(),
-      configPath: external_exports.string().optional(),
-      homePath: external_exports.string().optional(),
-      isInstalled: external_exports.boolean(),
-      status: InstallationStatusSchema,
-      detectedAt: ISOTimestampSchema,
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    HarnessWorkspaceSchema = external_exports.object({
-      workspaceId: IdentifierSchema,
-      rootPath: external_exports.string().min(1),
-      name: external_exports.string().min(1),
-      harnessId: IdentifierSchema,
-      configPath: external_exports.string().min(1),
-      mcpConfigPath: external_exports.string().optional(),
-      activeSessionId: IdentifierSchema.optional(),
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    SessionStatusSchema = external_exports.enum([
-      "active",
-      "idle",
-      "completed",
-      "interrupted",
-      "failed",
-      "unknown"
-    ]);
-    HarnessSessionSchema = external_exports.object({
-      sessionId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      harnessId: IdentifierSchema,
-      transcriptPath: external_exports.string().min(1),
-      status: SessionStatusSchema,
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema,
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    SourceCursorSchema = external_exports.object({
-      offset: external_exports.number().int().nonnegative(),
-      line: external_exports.number().int().positive(),
-      sequence: external_exports.number().int().nonnegative(),
-      checkpoint: Sha256DigestSchema.optional(),
-      timestamp: ISOTimestampSchema
-    });
-    RecordTypeSchema = external_exports.enum([
-      "transcript_line",
-      "tool_call",
-      "tool_result",
-      "prompt",
-      "completion",
-      "system",
-      "custom"
-    ]);
-    RawHarnessRecordSchema = external_exports.object({
-      recordId: IdentifierSchema,
-      sessionId: IdentifierSchema,
-      harnessId: IdentifierSchema,
-      sequenceNumber: external_exports.number().int().nonnegative(),
-      timestamp: ISOTimestampSchema,
-      recordType: RecordTypeSchema,
-      rawPayload: external_exports.unknown(),
-      cursor: SourceCursorSchema,
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    DiagnosticSeveritySchema = external_exports.enum(["info", "warning", "error"]);
-    AdapterDiagnosticSchema = external_exports.object({
-      code: external_exports.string().min(1),
-      severity: DiagnosticSeveritySchema,
-      message: external_exports.string().min(1),
-      path: external_exports.string().optional(),
-      timestamp: ISOTimestampSchema,
-      details: external_exports.record(external_exports.unknown()).optional()
-    });
-    ConfigMutationPlanSchema = external_exports.object({
-      planId: IdentifierSchema,
-      harnessId: IdentifierSchema,
-      targetPath: external_exports.string().min(1),
-      preconditionHash: external_exports.string(),
-      plannedContent: external_exports.string(),
-      backupPath: external_exports.string().optional(),
-      description: external_exports.string().min(1),
-      diffSummary: external_exports.string().optional(),
-      createdAt: ISOTimestampSchema,
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    ConfigBackupSchema = external_exports.object({
-      backupId: IdentifierSchema,
-      targetPath: external_exports.string().min(1),
-      backupPath: external_exports.string().min(1),
-      contentHash: Sha256DigestSchema,
-      originalContent: external_exports.string(),
-      createdAt: ISOTimestampSchema,
-      restored: external_exports.boolean().default(false),
-      restoredAt: ISOTimestampSchema.optional()
-    });
-    RefreshCapabilitySchema = external_exports.object({
-      supportsNativeListChange: external_exports.boolean(),
-      supportsContextNudge: external_exports.boolean(),
-      requiresSessionRestart: external_exports.boolean(),
-      description: external_exports.string().optional()
-    });
-    TranscriptAvailabilitySchema = external_exports.enum([
-      "none",
-      "polling",
-      "file_tail",
-      "stream",
-      "websocket"
-    ]);
-    VisibilityLevelSchema = external_exports.enum(["none", "partial", "full", "sanitized"]);
-    SubagentVisibilitySchema = external_exports.enum(["none", "shallow", "full"]);
-    McpListChangeSupportSchema = external_exports.enum(["supported", "unsupported", "requires_restart"]);
-    ContextNudgeSupportSchema = external_exports.enum([
-      "supported",
-      "unsupported",
-      "via_file",
-      "via_prompt"
-    ]);
-    ObservationFidelitySchema = external_exports.object({
-      transcriptAvailability: TranscriptAvailabilitySchema,
-      toolCallVisibility: VisibilityLevelSchema,
-      toolResultVisibility: VisibilityLevelSchema,
-      subagentVisibility: SubagentVisibilitySchema,
-      mcpListChange: McpListChangeSupportSchema,
-      contextNudge: ContextNudgeSupportSchema,
-      overallScore: external_exports.number().min(0).max(100),
-      notes: external_exports.string().optional()
-    });
-    AdapterCapabilitiesSchema = external_exports.object({
-      refresh: RefreshCapabilitySchema,
-      fidelity: ObservationFidelitySchema,
-      supportedTransports: external_exports.array(external_exports.enum(["stdio", "sse", "websocket", "http"])).default(["stdio"]),
-      supportsMultiWorkspace: external_exports.boolean().default(true),
-      supportsConcurrentSessions: external_exports.boolean().default(true),
-      features: external_exports.record(external_exports.boolean()).default({})
-    });
-    CatalogChangeSummarySchema = external_exports.object({
-      addedToolIds: external_exports.array(IdentifierSchema).default([]),
-      updatedToolIds: external_exports.array(IdentifierSchema).default([]),
-      removedToolIds: external_exports.array(IdentifierSchema).default([]),
-      catalogVersion: SchemaVersionSchema,
-      timestamp: ISOTimestampSchema,
-      /** Rendered catalog instructions markdown for harnesses that inject prompts. */
-      instructionsMarkdown: external_exports.string().optional(),
-      /** Evolved tool names for per-tool invocation snippets. */
-      evolvedToolNames: external_exports.array(external_exports.string()).optional()
-    });
-  }
-});
-
-// packages/harness-contracts/dist/adapter.js
-var init_adapter = __esm({
-  "packages/harness-contracts/dist/adapter.js"() {
-    "use strict";
-  }
-});
-
-// packages/harness-contracts/dist/source.js
-var init_source = __esm({
-  "packages/harness-contracts/dist/source.js"() {
-    "use strict";
-  }
-});
-
-// packages/harness-contracts/dist/errors.js
-var HarnessErrorCode, HarnessError, HarnessPermissionError;
-var init_errors2 = __esm({
-  "packages/harness-contracts/dist/errors.js"() {
-    "use strict";
-    HarnessErrorCode = {
-      MISSING_HARNESS: "MISSING_HARNESS",
-      UNSUPPORTED_VERSION: "UNSUPPORTED_VERSION",
-      INACCESSIBLE_TRANSCRIPT: "INACCESSIBLE_TRANSCRIPT",
-      MALFORMED_RECORD: "MALFORMED_RECORD",
-      AMBIGUOUS_ACTIVE_SESSION: "AMBIGUOUS_ACTIVE_SESSION",
-      PERMISSION_ERROR: "PERMISSION_ERROR",
-      CONCURRENT_CONFIG_MUTATION: "CONCURRENT_CONFIG_MUTATION",
-      CONFIG_PRECONDITION_FAILED: "CONFIG_PRECONDITION_FAILED",
-      TRANSCRIPT_ROTATED: "TRANSCRIPT_ROTATED",
-      REFRESH_FAILED: "REFRESH_FAILED",
-      INTERNAL_ERROR: "INTERNAL_ERROR"
-    };
-    HarnessError = class extends Error {
-      code;
-      harnessId;
-      details;
-      isHarnessError = true;
-      constructor(code, message, options) {
-        super(message, { cause: options?.cause });
-        this.name = this.constructor.name;
-        this.code = code;
-        this.harnessId = options?.harnessId;
-        this.details = options?.details;
-        Object.setPrototypeOf(this, new.target.prototype);
-      }
-    };
-    HarnessPermissionError = class extends HarnessError {
-      targetPath;
-      constructor(message, options) {
-        super(HarnessErrorCode.PERMISSION_ERROR, message, {
-          ...options,
-          details: { ...options?.details, targetPath: options?.targetPath }
-        });
-        this.targetPath = options?.targetPath;
-      }
-    };
-  }
-});
-
-// packages/harness-contracts/dist/config.js
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-var NodeConfigFsBridge, defaultFsBridge;
-var init_config = __esm({
-  "packages/harness-contracts/dist/config.js"() {
-    "use strict";
-    init_errors2();
-    NodeConfigFsBridge = class {
-      async readFile(filePath) {
-        try {
-          return await fs.readFile(filePath, "utf8");
-        } catch (err) {
-          if (err instanceof Error && "code" in err && err.code === "ENOENT") {
-            return null;
-          }
-          if (err instanceof Error && "code" in err && err.code === "EACCES") {
-            throw new HarnessPermissionError(`Permission denied reading ${filePath}`, {
-              targetPath: filePath,
-              cause: err
-            });
-          }
-          throw err;
-        }
-      }
-      async writeFile(filePath, content) {
-        try {
-          const dir = path.dirname(filePath);
-          await fs.mkdir(dir, { recursive: true });
-          await fs.writeFile(filePath, content, "utf8");
-        } catch (err) {
-          if (err instanceof Error && "code" in err && err.code === "EACCES") {
-            throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
-              targetPath: filePath,
-              cause: err
-            });
-          }
-          throw err;
-        }
-      }
-      async exists(filePath) {
-        try {
-          await fs.access(filePath);
-          return true;
-        } catch {
-          return false;
-        }
-      }
-      async mkdirp(dirPath) {
-        await fs.mkdir(dirPath, { recursive: true });
-      }
-      async copyFile(srcPath, destPath) {
-        await this.mkdirp(path.dirname(destPath));
-        await fs.copyFile(srcPath, destPath);
-      }
-      async unlink(filePath) {
-        try {
-          await fs.unlink(filePath);
-        } catch (err) {
-          if (err instanceof Error && "code" in err && err.code === "ENOENT") {
-            return;
-          }
-          throw err;
-        }
-      }
-    };
-    defaultFsBridge = new NodeConfigFsBridge();
-  }
-});
-
-// packages/harness-contracts/dist/refresh.js
-var RefreshOutcomeSchema, RefreshResultSchema;
-var init_refresh = __esm({
-  "packages/harness-contracts/dist/refresh.js"() {
-    "use strict";
-    init_dist();
-    init_zod();
-    RefreshOutcomeSchema = external_exports.enum([
-      "native_list_change",
-      "context_nudge",
-      "next_session_required",
-      "unsupported",
-      "failed"
-    ]);
-    RefreshResultSchema = external_exports.object({
-      outcome: RefreshOutcomeSchema,
-      appliedAt: ISOTimestampSchema,
-      message: external_exports.string().min(1),
-      catalogVersion: SchemaVersionSchema,
-      affectedToolCount: external_exports.number().int().nonnegative().default(0),
-      requiresRestart: external_exports.boolean().default(false),
-      details: external_exports.record(external_exports.unknown()).default({})
-    });
-  }
-});
-
-// packages/harness-contracts/dist/fidelity.js
-function calculateFidelityScore(components) {
-  const transcriptScore = FIDELITY_WEIGHTS.transcriptAvailability[components.transcriptAvailability] ?? 0;
-  const callScore = FIDELITY_WEIGHTS.toolCallVisibility[components.toolCallVisibility] ?? 0;
-  const resultScore = FIDELITY_WEIGHTS.toolResultVisibility[components.toolResultVisibility] ?? 0;
-  const subagentScore = FIDELITY_WEIGHTS.subagentVisibility[components.subagentVisibility] ?? 0;
-  const listChangeScore = FIDELITY_WEIGHTS.mcpListChange[components.mcpListChange] ?? 0;
-  const nudgeScore = FIDELITY_WEIGHTS.contextNudge[components.contextNudge] ?? 0;
-  const total = transcriptScore + callScore + resultScore + subagentScore + listChangeScore + nudgeScore;
-  return Math.min(100, Math.max(0, total));
-}
-function createObservationFidelity(components) {
-  const computedScore = components.overallScore ?? calculateFidelityScore(components);
-  return {
-    transcriptAvailability: components.transcriptAvailability,
-    toolCallVisibility: components.toolCallVisibility,
-    toolResultVisibility: components.toolResultVisibility,
-    subagentVisibility: components.subagentVisibility,
-    mcpListChange: components.mcpListChange,
-    contextNudge: components.contextNudge,
-    overallScore: computedScore,
-    notes: components.notes
-  };
-}
-var FIDELITY_WEIGHTS, TIER1_HIGH_FIDELITY, TIER2_MEDIUM_FIDELITY, TIER3_LOW_FIDELITY;
-var init_fidelity = __esm({
-  "packages/harness-contracts/dist/fidelity.js"() {
-    "use strict";
-    FIDELITY_WEIGHTS = {
-      transcriptAvailability: {
-        none: 0,
-        polling: 10,
-        file_tail: 20,
-        stream: 25,
-        websocket: 25
-      },
-      toolCallVisibility: {
-        none: 0,
-        partial: 10,
-        sanitized: 15,
-        full: 20
-      },
-      toolResultVisibility: {
-        none: 0,
-        partial: 10,
-        sanitized: 15,
-        full: 20
-      },
-      subagentVisibility: {
-        none: 0,
-        shallow: 10,
-        full: 15
-      },
-      mcpListChange: {
-        unsupported: 0,
-        requires_restart: 5,
-        supported: 10
-      },
-      contextNudge: {
-        unsupported: 0,
-        via_file: 5,
-        via_prompt: 8,
-        supported: 10
-      }
-    };
-    TIER1_HIGH_FIDELITY = Object.freeze({
-      transcriptAvailability: "stream",
-      toolCallVisibility: "full",
-      toolResultVisibility: "full",
-      subagentVisibility: "full",
-      mcpListChange: "supported",
-      contextNudge: "supported",
-      overallScore: 100,
-      notes: "Full real-time streaming, bi-directional tool invocation inspection, subagent visibility, dynamic catalog reload."
-    });
-    TIER2_MEDIUM_FIDELITY = Object.freeze({
-      transcriptAvailability: "file_tail",
-      toolCallVisibility: "full",
-      toolResultVisibility: "full",
-      subagentVisibility: "shallow",
-      mcpListChange: "unsupported",
-      contextNudge: "via_prompt",
-      overallScore: 78,
-      notes: "Session log file tailing, full tool call capture, shallow subagent visibility, prompt-based context injection."
-    });
-    TIER3_LOW_FIDELITY = Object.freeze({
-      transcriptAvailability: "polling",
-      toolCallVisibility: "partial",
-      toolResultVisibility: "partial",
-      subagentVisibility: "none",
-      mcpListChange: "requires_restart",
-      contextNudge: "unsupported",
-      overallScore: 35,
-      notes: "Periodic polling, partial tool visibility, session restart required for catalog updates."
-    });
-  }
-});
-
-// packages/harness-contracts/dist/decoder.js
-var init_decoder = __esm({
-  "packages/harness-contracts/dist/decoder.js"() {
-    "use strict";
-  }
-});
-
-// packages/harness-contracts/dist/index.js
-var init_dist2 = __esm({
-  "packages/harness-contracts/dist/index.js"() {
-    "use strict";
-    init_types2();
-    init_adapter();
-    init_source();
-    init_config();
-    init_refresh();
-    init_fidelity();
-    init_errors2();
-    init_decoder();
-  }
-});
-
 // adapters/claude-code/dist/config-planner.js
 var init_config_planner = __esm({
   "adapters/claude-code/dist/config-planner.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
   }
 });
 
@@ -10028,7 +5561,6 @@ var init_discovery = __esm({
   "adapters/claude-code/dist/discovery.js"() {
     "use strict";
     init_dist();
-    init_dist2();
     init_zod();
     execFileAsync = promisify(execFile);
     PROJECT_METADATA_BYTES = 64 * 1024;
@@ -10049,7 +5581,7 @@ var init_discovery = __esm({
 var init_refresh2 = __esm({
   "adapters/claude-code/dist/refresh.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
   }
 });
 
@@ -10057,7 +5589,7 @@ var init_refresh2 = __esm({
 var init_source2 = __esm({
   "adapters/claude-code/dist/source.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
   }
 });
 
@@ -10066,7 +5598,6 @@ var init_adapter2 = __esm({
   "adapters/claude-code/dist/adapter.js"() {
     "use strict";
     init_dist();
-    init_dist2();
     init_config_planner();
     init_discovery();
     init_refresh2();
@@ -10079,7 +5610,6 @@ var ClaudeTranscriptValueSchema, ClaudeTranscriptPayloadSchema;
 var init_decoder2 = __esm({
   "adapters/claude-code/dist/decoder.js"() {
     "use strict";
-    init_dist();
     init_zod();
     ClaudeTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
       external_exports.string(),
@@ -10095,7 +5625,7 @@ var init_decoder2 = __esm({
 });
 
 // adapters/claude-code/dist/index.js
-var init_dist3 = __esm({
+var init_dist2 = __esm({
   "adapters/claude-code/dist/index.js"() {
     "use strict";
     init_adapter2();
@@ -10110,11 +5640,15 @@ var init_dist3 = __esm({
 // adapters/codex-cli/dist/discovery.js
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-var execFileAsync2;
+var execFileAsync2, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
 var init_discovery2 = __esm({
   "adapters/codex-cli/dist/discovery.js"() {
     "use strict";
     execFileAsync2 = promisify2(execFile2);
+    CODEX_HEADER_MAX_BYTES = 1024 * 1024;
+    CODEX_TAIL_BYTES = 16 * 1024;
+    CODEX_READ_CHUNK_BYTES = 64 * 1024;
+    CODEX_ACTIVE_GRACE_MS = 5 * 60 * 1e3;
   }
 });
 
@@ -10122,7 +5656,7 @@ var init_discovery2 = __esm({
 var init_config_planner2 = __esm({
   "adapters/codex-cli/dist/config-planner.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_discovery2();
   }
 });
@@ -10132,7 +5666,7 @@ var CODEX_DEFAULT_REFRESH_CAPABILITY;
 var init_refresh3 = __esm({
   "adapters/codex-cli/dist/refresh.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     CODEX_DEFAULT_REFRESH_CAPABILITY = Object.freeze({
       supportsNativeListChange: false,
       supportsContextNudge: false,
@@ -10143,10 +5677,14 @@ var init_refresh3 = __esm({
 });
 
 // adapters/codex-cli/dist/source.js
+var CODEX_READ_CHUNK_BYTES2, CODEX_READ_QUANTUM_BYTES, CODEX_MAX_PENDING_RECORD_BYTES;
 var init_source3 = __esm({
   "adapters/codex-cli/dist/source.js"() {
     "use strict";
     init_discovery2();
+    CODEX_READ_CHUNK_BYTES2 = 64 * 1024;
+    CODEX_READ_QUANTUM_BYTES = 1024 * 1024;
+    CODEX_MAX_PENDING_RECORD_BYTES = 8 * 1024 * 1024;
   }
 });
 
@@ -10155,7 +5693,7 @@ var CODEX_OBSERVATION_FIDELITY, CODEX_ADAPTER_CAPABILITIES;
 var init_adapter3 = __esm({
   "adapters/codex-cli/dist/adapter.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_config_planner2();
     init_discovery2();
     init_refresh3();
@@ -10190,7 +5728,6 @@ var init_decoder3 = __esm({
   "adapters/codex-cli/dist/decoder.js"() {
     "use strict";
     init_dist();
-    init_dist2();
     init_zod();
     CodexTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
       external_exports.string(),
@@ -10212,7 +5749,7 @@ var init_decoder3 = __esm({
 });
 
 // adapters/codex-cli/dist/index.js
-var init_dist4 = __esm({
+var init_dist3 = __esm({
   "adapters/codex-cli/dist/index.js"() {
     "use strict";
     init_adapter3();
@@ -10237,7 +5774,6 @@ var init_device_surface = __esm({
 var init_decoder4 = __esm({
   "adapters/omp/dist/decoder.js"() {
     "use strict";
-    init_dist();
     init_device_surface();
   }
 });
@@ -10300,7 +5836,7 @@ var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH;
 var init_config_planner3 = __esm({
   "adapters/omp/dist/config-planner.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_discovery3();
     DEFAULT_OMP_CONFIG_FILENAME = path2.join("agent", "mcp.json");
     DEFAULT_OMP_MCP_CONFIG_PATH = path2.join("agent", "mcp.json");
@@ -10322,7 +5858,7 @@ var init_instructions = __esm({
 var init_refresh4 = __esm({
   "adapters/omp/dist/refresh.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_instructions();
   }
 });
@@ -10340,7 +5876,7 @@ var init_source4 = __esm({
 var init_adapter4 = __esm({
   "adapters/omp/dist/adapter.js"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_config_planner3();
     init_discovery3();
     init_refresh4();
@@ -10356,7 +5892,7 @@ var init_native_tool_invoker = __esm({
 });
 
 // adapters/omp/dist/index.js
-var init_dist5 = __esm({
+var init_dist4 = __esm({
   "adapters/omp/dist/index.js"() {
     "use strict";
     init_adapter4();
@@ -10435,7 +5971,7 @@ var init_stringify = __esm({
 });
 
 // node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js
-var init_dist6 = __esm({
+var init_dist5 = __esm({
   "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js"() {
     init_parse();
     init_stringify();
@@ -10449,11 +5985,11 @@ var SUPPORTED_HARNESS_IDS;
 var init_harness_config = __esm({
   "apps/cli/src/installer/harness-config.ts"() {
     "use strict";
+    init_dist2();
     init_dist3();
     init_dist4();
+    init_dist();
     init_dist5();
-    init_dist2();
-    init_dist6();
     SUPPORTED_HARNESS_IDS = ["claude-code", "codex-cli", "omp"];
   }
 });
@@ -10476,7 +6012,7 @@ var HarnessJsonValueSchema, HarnessJsonObjectSchema, BACKUP_FORMAT, SHA256_PATTE
 var init_harness_reconciler = __esm({
   "apps/cli/src/installer/harness-reconciler.ts"() {
     "use strict";
-    init_dist2();
+    init_dist();
     init_zod();
     init_harness_config();
     HarnessJsonValueSchema = external_exports.lazy(
@@ -11348,7 +6884,7 @@ var init_harness_reconciler = __esm({
 });
 
 // apps/cli/src/installer/bootstrap-entry.ts
-init_dist2();
+init_dist();
 import child_process from "node:child_process";
 import os5 from "node:os";
 import path9 from "node:path";
@@ -11695,12 +7231,12 @@ import fsSync from "node:fs";
 import os2 from "node:os";
 import path5 from "node:path";
 import process3 from "node:process";
-init_dist2();
+init_dist();
 import { fileURLToPath } from "node:url";
 import { promisify as promisify4 } from "node:util";
 
 // apps/cli/src/installer/harness-health.ts
-init_dist2();
+init_dist();
 init_zod();
 init_harness_config();
 init_harness_reconciler();
@@ -12739,11 +8275,11 @@ function createUserServiceManager(options = {}) {
 }
 
 // apps/cli/src/service/verification.ts
+init_dist2();
 init_dist3();
 init_dist4();
-init_dist5();
 init_zod();
-init_dist2();
+init_dist();
 import os4 from "node:os";
 import path7 from "node:path";
 
@@ -12838,7 +8374,7 @@ var PersistedConfigRecoveryWarningSchema = external_exports.object({
 var MAX_CONFIG_RECOVERY_WARNING_BYTES = 64 * 1024;
 
 // packages/protocol/dist/errors.js
-init_dist();
+init_common();
 init_zod();
 var ProtocolErrorCodeSchema = external_exports.enum([
   "retryable",
@@ -12886,7 +8422,7 @@ var ProtocolErrorResponseSchema = external_exports.object({
 });
 
 // packages/protocol/dist/envelope.js
-init_dist();
+init_common();
 init_zod();
 var SUPPORTED_PROTOCOL_MAJOR_VERSIONS = [1];
 var SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
@@ -12953,7 +8489,7 @@ var ProtocolMessageEnvelopeSchema = external_exports.object({
 }).strict();
 
 // packages/protocol/dist/auth.js
-init_dist();
+init_common();
 init_zod();
 var AuthEntityIdentifierSchema = IdentifierSchema.max(64, "Authentication identifier exceeds persistent storage limit of 64 characters");
 var AuthScopeSchema = external_exports.enum([
@@ -13120,7 +8656,12 @@ var AccountProfileResponseSchema = external_exports.object({
 });
 
 // packages/protocol/dist/http.js
-init_dist();
+init_capabilities();
+init_common();
+init_deployments();
+init_events();
+init_records();
+init_tools();
 init_zod();
 var InstallationRegisterRequestSchema = external_exports.object({
   installationId: IdentifierSchema,
@@ -13276,7 +8817,8 @@ var HealthNegotiateResponseSchema = external_exports.object({
 });
 
 // packages/protocol/dist/stream.js
-init_dist();
+init_common();
+init_tools();
 init_zod();
 var StreamClientHeartbeatSchema = external_exports.object({
   type: external_exports.literal("client.heartbeat"),
@@ -13383,14 +8925,9 @@ var StreamMessageSchema = external_exports.object({
   payload: external_exports.union([ClientStreamMessagePayloadSchema, ServerStreamMessagePayloadSchema])
 });
 
-// packages/protocol/dist/mock.js
-init_dist();
-
-// packages/protocol/dist/client.js
-init_dist();
-
 // packages/protocol/dist/projects.js
-init_dist();
+init_common();
+init_v1();
 init_zod();
 var ProjectVisibilitySchema = external_exports.enum(["personal", "workspace"]);
 var ProjectRegistrationOutcomeSchema = external_exports.enum([
@@ -13409,7 +8946,9 @@ var ProjectRegistrationResponseSchema = external_exports.object({
 }).strict();
 
 // packages/protocol/dist/console.js
-init_dist();
+init_capabilities();
+init_common();
+init_v1();
 init_zod();
 var ZodIssuePathSegmentSchema = external_exports.union([external_exports.string(), external_exports.number()]);
 var ZodIssueDetailPrimitiveSchema = external_exports.union([
@@ -13567,7 +9106,7 @@ var ExactLockedArtifactResolutionResponseSchema = external_exports.object({
 }).strict();
 
 // packages/protocol/dist/jobs.js
-init_dist();
+init_common();
 init_zod();
 var JobExecutionStatusSchema = external_exports.enum([
   "accepted",
@@ -13629,7 +9168,7 @@ var JobStatusResponseSchema = external_exports.object({
 });
 
 // packages/protocol/dist/notifications.js
-init_dist();
+init_common();
 init_zod();
 var MAX_NOTIFICATION_ID_LENGTH = 96;
 var MAX_NOTIFICATION_TITLE_LENGTH = 120;
@@ -13706,7 +9245,7 @@ var NotificationInboxStateSchema = external_exports.object({
 });
 
 // packages/protocol/dist/control-plane.js
-init_dist();
+init_common();
 init_zod();
 var ControlPlaneTargetSchema = external_exports.discriminatedUnion("scope", [
   external_exports.object({ scope: external_exports.literal("workspace") }).strict(),
@@ -14244,7 +9783,7 @@ var verifyDaemonReadiness = async (options) => {
 };
 
 // apps/cli/src/installer/asset-downloader.ts
-init_dist2();
+init_dist();
 import crypto3 from "node:crypto";
 import fs3 from "node:fs";
 import fsPromises from "node:fs/promises";
@@ -15666,16 +11205,16 @@ function getActiveVersion(resinHome) {
 import crypto4 from "node:crypto";
 var REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 var ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-function canonicalJson2(val) {
+function canonicalJson(val) {
   if (val === null || val === void 0 || Array.isArray(val) || Object.prototype.toString.call(val) !== "[object Object]") {
     return JSON.stringify(val);
   }
   if (Array.isArray(val)) {
-    return `[${val.map((item) => canonicalJson2(item)).join(",")}]`;
+    return `[${val.map((item) => canonicalJson(item)).join(",")}]`;
   }
   const obj = val;
   const keys = Object.keys(obj).filter((key) => obj[key] !== void 0).sort();
-  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson2(obj[key])}`);
+  const pairs = keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(obj[key])}`);
   return `{${pairs.join(",")}}`;
 }
 function createPublicKeyFromInput(key) {
@@ -15702,7 +11241,7 @@ function createPublicKeyFromInput(key) {
 function verifyEd25519Signature(payload, signatureHex, publicKey) {
   try {
     const keyObject = createPublicKeyFromInput(publicKey);
-    const canonicalString = canonicalJson2(payload);
+    const canonicalString = canonicalJson(payload);
     const dataBuffer = Buffer.from(canonicalString, "utf8");
     const signatureBuffer = Buffer.from(signatureHex, "hex");
     return crypto4.verify(null, dataBuffer, keyObject, signatureBuffer);
@@ -16002,7 +11541,7 @@ function verifyManifest(manifestData, options = {}) {
     }
   }
   if (options.expectedDigest) {
-    const digestInput = options.rawManifestBytes ?? canonicalJson2(manifest);
+    const digestInput = options.rawManifestBytes ?? canonicalJson(manifest);
     const actualDigest = crypto4.createHash("sha256").update(digestInput).digest("hex");
     if (actualDigest !== options.expectedDigest) {
       errors.push(

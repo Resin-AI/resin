@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type McpToolConnection, connectMcpServer } from "../../src/workflow/mcp-connection.js";
 import { createProcessAdapter } from "../../src/workflow/process-adapter.js";
 import { createProgramAdapter } from "../../src/workflow/program-adapter.js";
-import { runRecordedProgram } from "../../src/workflow/program-runner.js";
+import { runRecordedCall, runRecordedProgram } from "../../src/workflow/program-runner.js";
 import {
   RuntimeAdapterRegistry,
   executeRecordedWorkflow,
@@ -411,6 +411,159 @@ describe("recorded program adapters", () => {
     expect(combinedDefaultAndNamespace.value).toBe("file.txt.txt");
     expect(sideEffectImport.value).toBe("imported");
     expect(importWithBlockCompletion.value).toBe("");
+  });
+
+  it("replays native Codex exec text items in a fresh asynchronous VM context", async () => {
+    const workspace = await makeWorkspace();
+    const source = [
+      "globalThis.runCount = (globalThis.runCount ?? 0) + 1;",
+      'text("first");',
+      'text("");',
+      "await Promise.resolve();",
+      'text({ runCount: globalThis.runCount, label: "second" });',
+      '"completion is not authored output";',
+    ].join("\n");
+    const program: WorkflowRecordedProgram = {
+      kind: "javascript",
+      source,
+      sourceInterface: "codex-exec",
+    };
+    const expected = [
+      { type: "input_text", text: "first" },
+      { type: "input_text", text: "" },
+      { type: "input_text", text: '{"runCount":1,"label":"second"}' },
+    ];
+    const first = await runRecordedProgram(program, { cwd: workspace });
+    const second = await runRecordedProgram(program, { cwd: workspace });
+
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toBe("");
+    expect(first.value).toEqual(expected);
+    expect(second.value).toEqual(expected);
+
+    const rawSource = 'text("argument source stays authored");  ';
+    const callValue = await runRecordedCall(
+      {
+        step: recordedStep({
+          id: "codex-exec",
+          runtime: RESIN_PROGRAM_RUNTIME,
+          name: "exec",
+          program: {
+            kind: "javascript",
+            source: "",
+            argument: "raw",
+            sourceInterface: "codex-exec",
+          },
+        }),
+        arguments: { raw: rawSource },
+      },
+      { cwd: workspace },
+    );
+    expect(callValue).toEqual([{ type: "input_text", text: "argument source stays authored" }]);
+  });
+
+  it("keeps native Codex exec host APIs unavailable and bounds output and runtime", async () => {
+    const workspace = await makeWorkspace();
+    const unavailable = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'text([typeof process, typeof require, typeof console].join(":"));',
+        sourceInterface: "codex-exec",
+      },
+      { cwd: workspace },
+    );
+    expect(unavailable.exitCode).toBe(0);
+    expect(unavailable.value).toEqual([
+      { type: "input_text", text: "undefined:undefined:undefined" },
+    ]);
+
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "javascript",
+          source: 'import fs from "node:fs"; text(typeof fs);',
+          sourceInterface: "codex-exec",
+        },
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow(/does not support imports/);
+
+    // Dynamic imports must be rejected before the VM linker can expose a host error to source.
+    await expect(
+      runRecordedProgram(
+        {
+          kind: "javascript",
+          source: 'try { await import("node:fs"); } catch { text("caught"); }',
+          sourceInterface: "codex-exec",
+        },
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow(/does not support imports/);
+
+    const promiseMutation = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          'try { Promise.prototype.then = function(resolve) { text(resolve.constructor("return typeof process")()); resolve(); }; } catch {} text("failed closed");',
+        sourceInterface: "codex-exec",
+      },
+      { cwd: workspace },
+    );
+    expect(promiseMutation.exitCode).not.toBe(0);
+    expect(promiseMutation.value).toBe("");
+
+    const errorHookMutation = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          'try { Error.prepareStackTrace = (error, frames) => frames; } catch {} text("failed closed");',
+        sourceInterface: "codex-exec",
+      },
+      { cwd: workspace },
+    );
+    expect(errorHookMutation.exitCode).not.toBe(0);
+    expect(errorHookMutation.value).toBe("");
+
+    const detachedRejection = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source:
+          'Promise.reject({ [Symbol.for("nodejs.util.inspect.custom")](depth, options, inspect) { return inspect.constructor("return typeof process")(); } }); text("complete");',
+        sourceInterface: "codex-exec",
+      },
+      { cwd: workspace },
+    );
+    expect(detachedRejection.exitCode).not.toBe(0);
+    expect(detachedRejection.value).toBe("");
+    const oversized = await runRecordedProgram(
+      {
+        kind: "javascript",
+        source: 'text("exceeds the configured output cap");',
+        sourceInterface: "codex-exec",
+      },
+      { cwd: workspace, maxOutputBytes: 8 },
+    );
+    expect(oversized.exitCode).not.toBe(0);
+    expect(oversized.value).toBe("");
+
+    await expect(
+      runRecordedCall(
+        {
+          step: recordedStep({
+            id: "codex-exec-timeout",
+            runtime: RESIN_PROGRAM_RUNTIME,
+            name: "exec",
+            program: {
+              kind: "javascript",
+              source: "while (true) {}",
+              sourceInterface: "codex-exec",
+            },
+          }),
+          arguments: {},
+        },
+        { cwd: workspace, timeoutMs: 1_000 },
+      ),
+    ).rejects.toThrow(/exceeded its 1000ms time budget and was killed/);
   });
 
   it("rejects unsupported JavaScript module syntax instead of replaying it differently", async () => {

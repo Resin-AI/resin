@@ -1,4 +1,4 @@
-import { ISOTimestampSchema, SchemaVersionSchema } from "@resin/contracts";
+import { ISOTimestampSchema, SchemaVersionSchema } from "@resin/contracts/common";
 import { z } from "zod";
 import type { RefreshCapability } from "./types.js";
 

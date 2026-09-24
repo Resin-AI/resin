@@ -15,6 +15,10 @@ export const SUBAGENTS_AND_FORKS_ROLLOUT_PATH = path.join(
   ROLLOUTS_DIR,
   "subagents-and-forks.jsonl",
 );
+export const SYNTHETIC_NATIVE_ROLLOUT_PATH = path.join(
+  ROLLOUTS_DIR,
+  "synthetic-native-rollout.jsonl",
+);
 export const SAMPLE_CONFIG_TOML_PATH = path.join(CONFIGS_DIR, "sample-config.toml");
 export const SAMPLE_CONFIG_JSON_PATH = path.join(CONFIGS_DIR, "sample-config.json");
 

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  type CapabilityEnvelope,
-  type DeploymentRecord,
-  type NormalizedSessionEvent,
-  type ToolManifest,
-  hashCanonicalContent,
+import type {
+  CapabilityEnvelope,
+  DeploymentRecord,
+  NormalizedSessionEvent,
+  ToolManifest,
 } from "@resin/contracts";
+import { hashCanonicalContent } from "@resin/contracts/canonical";
 import type {
   AuthClaims,
   DeviceAuthBootstrapRequest,

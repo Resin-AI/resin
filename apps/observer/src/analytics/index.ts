@@ -53,12 +53,9 @@ export {
 export {
   type DerivationCall,
   type DerivedCall,
-  type ExecutionArgument,
-  type ExecutionRecording,
   type NativeDerivation,
   type ObservedResourceFlow,
   deriveNativeCalls,
-  proposeInputsAcrossExecutions,
 } from "./native-argument-derivation.js";
 
 export {
