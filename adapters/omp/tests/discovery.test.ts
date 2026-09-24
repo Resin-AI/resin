@@ -793,6 +793,21 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
           }),
         ].join("\n")}\n`,
       );
+      const fallbackLookingDir = path.join(ompHome, "agent", "sessions", "-project-beta");
+      await fsp.mkdir(fallbackLookingDir, { recursive: true });
+      const fallbackLookingTranscript = path.join(fallbackLookingDir, "session-conflict.jsonl");
+      await fsp.writeFile(
+        fallbackLookingTranscript,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "sess-alpha-in-beta-directory",
+            cwd: wsPathA,
+            timestamp: new Date().toISOString(),
+          }),
+        ].join("\n")}\n`,
+      );
 
       const workspaceA = {
         workspaceId: "ws-alpha",
@@ -812,6 +827,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const sessionsB = await discoverOmpSessions(workspaceB, { ompHome });
 
       expect(sessionsA.map((s) => s.sessionId)).toContain("sess-for-alpha");
+      expect(sessionsA.map((s) => s.sessionId)).toContain("sess-alpha-in-beta-directory");
       expect(sessionsB.map((s) => s.sessionId)).not.toContain("sess-for-alpha");
       expect(sessionsB.length).toBe(0);
     } finally {

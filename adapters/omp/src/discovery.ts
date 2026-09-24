@@ -122,6 +122,18 @@ export function classifyTranscriptSessionKind(
   filePath: string,
   workspace?: HarnessWorkspace,
 ): "user" | "agent" {
+  return classifyTranscriptSessionKindWithKeys(
+    filePath,
+    workspace,
+    workspace ? getWorkspaceKeys(workspace) : undefined,
+  );
+}
+
+function classifyTranscriptSessionKindWithKeys(
+  filePath: string,
+  workspace: HarnessWorkspace | undefined,
+  workspaceKeys?: ReadonlySet<string>,
+): "user" | "agent" {
   const normPath = path.resolve(filePath);
   const dir = path.dirname(normPath);
   const dirName = path.basename(dir);
@@ -131,11 +143,14 @@ export function classifyTranscriptSessionKind(
   const grandparentDirName = path.basename(grandparentDir);
 
   // If workspace is available, check if the file is nested inside a session directory under the workspace
-  if (workspace) {
-    if (matchesWorkspace(parentDirName, workspace) && !matchesWorkspace(dirName, workspace)) {
+  if (workspace && workspaceKeys) {
+    if (
+      matchesWorkspaceWithKeys(parentDirName, workspaceKeys) &&
+      !matchesWorkspaceWithKeys(dirName, workspaceKeys)
+    ) {
       return "agent";
     }
-    if (matchesWorkspace(dirName, workspace)) {
+    if (matchesWorkspaceWithKeys(dirName, workspaceKeys)) {
       return "user";
     }
   }
@@ -627,6 +642,8 @@ export async function inspectTranscriptFile(
     now?: number | Date;
     activeOnly?: boolean;
     onInspectTranscript?: (filePath: string) => void;
+    // Internal cache signal; this does not change parsed transcript output.
+    onFutureTerminalMessage?: (filePath: string) => void;
   },
 ): Promise<ParsedTranscript | null> {
   let fileHandle: fsp.FileHandle | null = null;
@@ -704,13 +721,16 @@ export async function inspectTranscriptFile(
         (eventType === "message" || eventType === "message_end") &&
         OmpActivityMessageSchema.safeParse(parsed.message ?? parsed).success;
       const timestamp = parsed.timestamp ?? parsed.time ?? parsed.ts;
-      if (
-        isMessage &&
-        (explicitStatus === "completed" || explicitStatus === "failed") &&
-        !(typeof timestamp === "string" && Date.parse(timestamp) <= now)
-      ) {
-        // A malformed/future message must not turn historical completion into active capture.
-        return;
+      if (isMessage && (explicitStatus === "completed" || explicitStatus === "failed")) {
+        const messageTimestampMs =
+          typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+        if (Number.isFinite(messageTimestampMs) && messageTimestampMs > now) {
+          options?.onFutureTerminalMessage?.(filePath);
+        }
+        if (!(typeof timestamp === "string" && messageTimestampMs <= now)) {
+          // A malformed/future message must not turn historical completion into active capture.
+          return;
+        }
       }
       let lifecycleStatus: SessionStatus | null = null;
       if (
@@ -1292,41 +1312,33 @@ export async function buildOmpDiscoveryCatalog(
   const sessionsByWorkspaceKey = new Map<string, HarnessSession[]>();
   const globalSeenSessionIds = new Set<string>();
   const allDeduplicatedSessions: HarnessSession[] = [];
+  const transcriptMatchIndex = createTranscriptMatchIndex(inspectedTranscripts);
 
   for (const workspace of allWorkspaces) {
     const realWsRoot = await fsp
       .realpath(workspace.rootPath)
       .catch(() => path.resolve(workspace.rootPath));
-    const matchingTranscripts = inspectedTranscripts.filter((t) => {
-      if (t.canonicalCwd || t.headerCwd) {
-        const tCwd = t.canonicalCwd ?? (t.headerCwd ? path.resolve(t.headerCwd) : null);
-        return (
-          tCwd === realWsRoot ||
-          tCwd === path.resolve(workspace.rootPath) ||
-          t.headerCwd === realWsRoot ||
-          t.headerCwd === path.resolve(workspace.rootPath)
-        );
-      }
-      if (
-        t.canonicalPath.startsWith(path.join(realWsRoot, ".omp")) ||
-        t.canonicalPath.startsWith(path.join(workspace.rootPath, ".omp")) ||
-        t.filePath.startsWith(path.join(realWsRoot, ".omp")) ||
-        t.filePath.startsWith(path.join(workspace.rootPath, ".omp"))
-      ) {
-        return true;
-      }
-      const dirName = path.basename(path.dirname(t.filePath));
-      const parentDirName = path.basename(path.dirname(path.dirname(t.filePath)));
-      return matchesWorkspace(dirName, workspace) || matchesWorkspace(parentDirName, workspace);
-    });
+    const resolvedRoot = path.resolve(workspace.rootPath);
+    const workspaceKeys = getWorkspaceKeys(workspace);
+    const matchingTranscriptIndexes = findMatchingTranscriptIndexes(
+      transcriptMatchIndex,
+      [realWsRoot, resolvedRoot],
+      [realWsRoot, workspace.rootPath],
+      workspaceKeys,
+    );
 
     const sessionMap = new Map<string, HarnessSession>();
-    for (const t of matchingTranscripts) {
+    for (const transcriptIndex of matchingTranscriptIndexes) {
+      const t = inspectedTranscripts[transcriptIndex];
       const effectiveSessionId =
         !t.headerSessionId && (t.sessionId === "session-main" || t.sessionId === "transcript-main")
           ? `${workspace.workspaceId}-main`
           : t.sessionId;
-      const sessionKind = classifyTranscriptSessionKind(t.filePath, workspace);
+      const sessionKind = classifyTranscriptSessionKindWithKeys(
+        t.filePath,
+        workspace,
+        workspaceKeys,
+      );
       const session: HarnessSession = {
         sessionId: effectiveSessionId,
         workspaceId: workspace.workspaceId,
@@ -1386,38 +1398,28 @@ export async function buildOmpDiscoveryCatalog(
       }
 
       // Dynamic fallback matching for workspaces not pre-registered in workspacesMap
-      const realWsRoot = path.resolve(workspace.rootPath);
-      const matchingTranscripts = inspectedTranscripts.filter((t) => {
-        if (t.canonicalCwd || t.headerCwd) {
-          const tCwd = t.canonicalCwd ?? (t.headerCwd ? path.resolve(t.headerCwd) : null);
-          return (
-            tCwd === realWsRoot ||
-            tCwd === path.resolve(workspace.rootPath) ||
-            t.headerCwd === realWsRoot ||
-            t.headerCwd === path.resolve(workspace.rootPath)
-          );
-        }
-        if (
-          t.canonicalPath.startsWith(path.join(realWsRoot, ".omp")) ||
-          t.canonicalPath.startsWith(path.join(workspace.rootPath, ".omp")) ||
-          t.filePath.startsWith(path.join(realWsRoot, ".omp")) ||
-          t.filePath.startsWith(path.join(workspace.rootPath, ".omp"))
-        ) {
-          return true;
-        }
-        const dirName = path.basename(path.dirname(t.filePath));
-        const parentDirName = path.basename(path.dirname(path.dirname(t.filePath)));
-        return matchesWorkspace(dirName, workspace) || matchesWorkspace(parentDirName, workspace);
-      });
+      const resolvedRoot = path.resolve(workspace.rootPath);
+      const workspaceKeys = getWorkspaceKeys(workspace);
+      const matchingTranscriptIndexes = findMatchingTranscriptIndexes(
+        transcriptMatchIndex,
+        [resolvedRoot],
+        [resolvedRoot, workspace.rootPath],
+        workspaceKeys,
+      );
 
       const sessionMap = new Map<string, HarnessSession>();
-      for (const t of matchingTranscripts) {
+      for (const transcriptIndex of matchingTranscriptIndexes) {
+        const t = inspectedTranscripts[transcriptIndex];
         const effectiveSessionId =
           !t.headerSessionId &&
           (t.sessionId === "session-main" || t.sessionId === "transcript-main")
             ? `${workspace.workspaceId}-main`
             : t.sessionId;
-        const sessionKind = classifyTranscriptSessionKind(t.filePath, workspace);
+        const sessionKind = classifyTranscriptSessionKindWithKeys(
+          t.filePath,
+          workspace,
+          workspaceKeys,
+        );
         const session: HarnessSession = {
           sessionId: effectiveSessionId,
           workspaceId: workspace.workspaceId,
@@ -1524,15 +1526,119 @@ function getWorkspaceKeys(workspace: HarnessWorkspace): Set<string> {
 }
 
 /**
- * Matches a session directory name against a workspace descriptor.
+ * Matches a session directory name against normalized workspace keys.
  */
-function matchesWorkspace(dirName: string, workspace: HarnessWorkspace): boolean {
-  if (!dirName || !workspace) return false;
-  const candidateKeys = getWorkspaceKeys(workspace);
+function matchesWorkspaceWithKeys(dirName: string, candidateKeys: ReadonlySet<string>): boolean {
+  if (!dirName) return false;
   const normDir = dirName.toLowerCase();
   const strippedDir = normDir.replace(/^[-_]+|[-_]+$/g, "");
-
   return candidateKeys.has(normDir) || candidateKeys.has(strippedDir);
+}
+
+interface TranscriptMatchIndex {
+  cwdByPath: Map<string, number[]>;
+  paths: Array<{ value: string; transcriptIndex: number }>;
+  directoriesByKey: Map<string, number[]>;
+}
+
+function createTranscriptMatchIndex(transcripts: ParsedTranscript[]): TranscriptMatchIndex {
+  const cwdByPath = new Map<string, number[]>();
+  const paths: TranscriptMatchIndex["paths"] = [];
+  const directoriesByKey = new Map<string, number[]>();
+
+  function addIndex(index: Map<string, number[]>, key: string, transcriptIndex: number) {
+    const transcriptIndexes = index.get(key);
+    if (transcriptIndexes) {
+      transcriptIndexes.push(transcriptIndex);
+    } else {
+      index.set(key, [transcriptIndex]);
+    }
+  }
+
+  function addDirectoryKeys(dirName: string, transcriptIndex: number) {
+    if (!dirName) return;
+    const normalized = dirName.toLowerCase();
+    addIndex(directoriesByKey, normalized, transcriptIndex);
+    const stripped = normalized.replace(/^[-_]+|[-_]+$/g, "");
+    if (stripped !== normalized) {
+      addIndex(directoriesByKey, stripped, transcriptIndex);
+    }
+  }
+
+  for (let transcriptIndex = 0; transcriptIndex < transcripts.length; transcriptIndex++) {
+    const transcript = transcripts[transcriptIndex];
+    if (transcript.canonicalCwd || transcript.headerCwd) {
+      const cwd =
+        transcript.canonicalCwd ??
+        (transcript.headerCwd ? path.resolve(transcript.headerCwd) : null);
+      if (cwd !== null) {
+        addIndex(cwdByPath, cwd, transcriptIndex);
+      }
+      if (transcript.headerCwd !== null) {
+        addIndex(cwdByPath, transcript.headerCwd, transcriptIndex);
+      }
+      continue;
+    }
+
+    paths.push({ value: transcript.canonicalPath, transcriptIndex });
+    paths.push({ value: transcript.filePath, transcriptIndex });
+    addDirectoryKeys(path.basename(path.dirname(transcript.filePath)), transcriptIndex);
+    addDirectoryKeys(
+      path.basename(path.dirname(path.dirname(transcript.filePath))),
+      transcriptIndex,
+    );
+  }
+
+  paths.sort((a, b) =>
+    a.value < b.value ? -1 : a.value > b.value ? 1 : a.transcriptIndex - b.transcriptIndex,
+  );
+  return { cwdByPath, paths, directoriesByKey };
+}
+
+function findMatchingTranscriptIndexes(
+  index: TranscriptMatchIndex,
+  cwdRoots: string[],
+  pathRoots: string[],
+  workspaceKeys: ReadonlySet<string>,
+): number[] {
+  const matchingIndexes = new Set<number>();
+  const addIndexes = (indexes: number[] | undefined) => {
+    if (indexes) {
+      for (const transcriptIndex of indexes) {
+        matchingIndexes.add(transcriptIndex);
+      }
+    }
+  };
+
+  // Header-cwd transcripts are indexed separately, so path/name fallback cannot claim them.
+  for (const root of cwdRoots) {
+    addIndexes(index.cwdByPath.get(root));
+  }
+
+  // The sorted path index makes .omp prefix lookups logarithmic plus their matching candidates.
+  for (const root of pathRoots) {
+    const prefix = path.join(root, ".omp");
+    let low = 0;
+    let high = index.paths.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (index.paths[middle].value < prefix) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    for (let i = low; i < index.paths.length && index.paths[i].value.startsWith(prefix); i++) {
+      matchingIndexes.add(index.paths[i].transcriptIndex);
+    }
+  }
+
+  for (const key of workspaceKeys) {
+    addIndexes(index.directoriesByKey.get(key));
+  }
+
+  // Restore transcript input order after combining independent indexes.
+  return Array.from(matchingIndexes).sort((a, b) => a - b);
 }
 /**
  * Creates a normalized workspace ID from an absolute workspace path.
