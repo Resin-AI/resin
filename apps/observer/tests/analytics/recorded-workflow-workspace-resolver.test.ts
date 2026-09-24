@@ -1,4 +1,7 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { OmpHarnessAdapter } from "@resin/adapter-omp";
 import type { RecordedWorkflow } from "@resin/contracts";
 import type { HarnessAdapter, HarnessSession, HarnessWorkspace } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
@@ -180,6 +183,101 @@ function programPlan(
 }
 
 describe("recorded workflow workspace resolution", () => {
+  it("binds real OMP recordings to their own roots when workspace labels collide", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "recorded-omp-projects-"));
+    try {
+      const ompHome = path.join(directory, ".omp");
+      const sessionDirectory = path.join(ompHome, "agent", "sessions", "shared-project");
+      await fs.mkdir(sessionDirectory, { recursive: true });
+      const projectA = path.join(directory, "project-a");
+      const projectB = path.join(directory, "project", "a");
+      const projects = [
+        { root: projectA, sessionId: "recorded-session-a" },
+        { root: projectB, sessionId: "recorded-session-b" },
+      ];
+      for (const project of projects) {
+        await fs.mkdir(project.root, { recursive: true });
+        await fs.writeFile(
+          path.join(sessionDirectory, `${project.sessionId}.jsonl`),
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: project.sessionId,
+            cwd: project.root,
+            timestamp,
+          })}\n`,
+        );
+      }
+      const adapter = new OmpHarnessAdapter({ ompHome, cwd: directory, activeOnly: false });
+      const workspaces = await adapter.listWorkspaces();
+      expect(workspaces.find((workspace) => workspace.rootPath === projectA)?.workspaceId).toBe(
+        workspaces.find((workspace) => workspace.rootPath === projectB)?.workspaceId,
+      );
+      const store = new InMemoryPrivateValueStore();
+      const resolveWorkspace = createRecordedWorkflowWorkspaceResolver({
+        workspaceId: ownerWorkspaceId,
+        privateValues: store,
+        adapters: [adapter],
+      });
+      for (const project of projects) {
+        const plan = programPlan(store, project.sessionId, project.sessionId);
+        expect(await resolveWorkspace(plan)).toBe(await fs.realpath(project.root));
+      }
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    "isolates a healthy project from deleted OMP root aliases (registered: %s)",
+    async (registered) => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), "recorded-omp-aliases-"));
+      try {
+        const ompHome = path.join(directory, ".omp");
+        const legacyRoot = path.basename(directory);
+        const deletedRoot = path.resolve(legacyRoot);
+        const healthyRoot = path.join(directory, "healthy-project");
+        const sessionDirectory = path.join(ompHome, "agent", "sessions", legacyRoot);
+        await fs.mkdir(sessionDirectory, { recursive: true });
+        await fs.mkdir(healthyRoot, { recursive: true });
+        for (const project of [
+          { root: deletedRoot, sessionId: "deleted-session" },
+          { root: healthyRoot, sessionId: "healthy-session" },
+        ]) {
+          await fs.writeFile(
+            path.join(sessionDirectory, `${project.sessionId}.jsonl`),
+            `${JSON.stringify({
+              type: "session",
+              version: 3,
+              id: project.sessionId,
+              cwd: project.root,
+              timestamp,
+            })}\n`,
+          );
+        }
+        if (registered) {
+          await fs.writeFile(
+            path.join(ompHome, "workspaces.json"),
+            JSON.stringify([{ path: deletedRoot, workspaceId: "registered-deleted-project" }]),
+          );
+        }
+        const adapter = new OmpHarnessAdapter({ ompHome, cwd: directory, activeOnly: false });
+        const store = new InMemoryPrivateValueStore();
+        const resolveWorkspace = createRecordedWorkflowWorkspaceResolver({
+          workspaceId: ownerWorkspaceId,
+          privateValues: store,
+          adapters: [adapter],
+        });
+        const healthyPlan = programPlan(store, "healthy-session", "healthy-project");
+        const deletedPlan = programPlan(store, "deleted-session", "deleted-project");
+        expect(await resolveWorkspace(healthyPlan)).toBe(await fs.realpath(healthyRoot));
+        expect(await resolveWorkspace(deletedPlan)).toBeUndefined();
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("isolates project bindings without blocking unrelated projects whose cwd is known", async () => {
     const store = new InMemoryPrivateValueStore();
     const projectA = programPlan(store, "session-project-a", "project-a");

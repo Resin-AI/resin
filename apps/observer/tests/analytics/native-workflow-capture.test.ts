@@ -5,7 +5,12 @@
 
 import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
-import { NormalizedSessionEventSchema, validateRecordedWorkflow } from "@resin/contracts";
+import {
+  NormalizedSessionEventSchema,
+  RESIN_COMPUTATION_EVIDENCE_KEY,
+  readComputationEvidence,
+  validateRecordedWorkflow,
+} from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
@@ -209,6 +214,100 @@ describe("native capture of ordinary calls", () => {
     const carrier = carrierOf(events[1]!);
     expect(carrier!.runtime).toBe(RESIN_PROGRAM_RUNTIME);
     expect(carrier!.program).toEqual({ kind: "python", source: "", argument: "code" });
+  });
+
+  it.each([
+    { language: "python", path: "tools/helper.py", source: "values = [2, 4]\nprint(values)\n" },
+    {
+      language: "javascript",
+      path: "tools/helper.mjs",
+      source: "const values = [2, 4]; console.log(values);\n",
+    },
+    {
+      language: "typescript",
+      path: "tools/helper.ts",
+      source: "const values: number[] = [2, 4]; console.log(values);\n",
+    },
+  ])(
+    "keeps an authored $language file write as a file operation through privacy projection",
+    ({ language, path, source }) => {
+      const store = new InMemoryPrivateValueStore();
+      const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+      const computationRecorder = createComputationEvidenceRecorder();
+      const observed = [
+        call(1, "write", { path, content: source }),
+        result(1, "write", "file written"),
+      ].map((entry) =>
+        computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+      );
+      const projected = observed.map(projectEventToMetadataOnly);
+
+      const carrier = carrierOf(projected[0]!);
+      expect(carrier?.runtime).toBe(RESIN_HARNESS_TOOL_RUNTIME);
+      expect(carrier?.name).toBe("write");
+      expect(carrier?.program).toBeUndefined();
+      expect(resolvePrivateReference(store, referenceOf(carrier!.origins.content!))).toBe(source);
+      expect(JSON.stringify(projected)).not.toContain(JSON.stringify(source).slice(1, -1));
+      expect(
+        readComputationEvidence(projected[1]?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ).toMatchObject({
+        origin: { kind: "authored_file" },
+        program: { language },
+        observation: { kind: "definition", status: "success" },
+      });
+
+      const recipe = recordCallsFromEvents("wf_authored_file", projected);
+      expect(recipe?.workflow.steps).toHaveLength(1);
+      expect(recipe?.workflow.steps[0]?.callable).toEqual({
+        runtime: RESIN_HARNESS_TOOL_RUNTIME,
+        name: "write",
+      });
+      expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
+    },
+  );
+
+  it("keeps reading a Python source file distinct from its later execution", () => {
+    const source = "print([2, 4])\n";
+    const store = new InMemoryPrivateValueStore();
+    const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const projected = [
+      call(1, "read", { path: "tools/helper.py" }),
+      result(1, "read", source),
+      call(2, "bash", { command: "python3 tools/helper.py" }),
+      result(2, "bash", "[2, 4]\n"),
+    ].map((entry) =>
+      projectEventToMetadataOnly(
+        computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+      ),
+    );
+
+    expect(carrierOf(projected[0]!)?.runtime).toBe(RESIN_HARNESS_TOOL_RUNTIME);
+    expect(carrierOf(projected[0]!)?.program).toBeUndefined();
+    expect(
+      readComputationEvidence(projected[1]?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+    ).toMatchObject({
+      origin: { kind: "referenced_file" },
+      observation: { kind: "definition", status: "success" },
+    });
+    expect(
+      readComputationEvidence(projected[3]?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+    ).toMatchObject({
+      origin: { kind: "referenced_file" },
+      observation: { kind: "invocation", status: "success" },
+    });
+    expect(JSON.stringify(projected)).not.toContain(source.trim());
+
+    const recipe = recordCallsFromEvents("wf_read_then_execute", projected);
+    expect(recipe?.workflow.steps.map((step) => step.callable)).toEqual([
+      { runtime: RESIN_HARNESS_TOOL_RUNTIME, name: "read" },
+      {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell", source: "", argument: "command" },
+      },
+    ]);
+    expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
 
   it("captures a closed Python setup chain and successful baseline references", () => {

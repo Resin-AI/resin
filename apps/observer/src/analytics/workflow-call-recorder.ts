@@ -921,9 +921,9 @@ export class WorkflowCallRecorder {
    * The program this call ran, as the record establishes it.
    *
    * A command-bearing call is a process program whatever the callable is called; a call whose record
-   * frames source in a language is a program in that language. Neither is decided by a list of tool
-   * names, and a plain shell chain is preserved whole — it is never split into steps or reduced to
-   * an argv, because its operators, pipes, redirections and exit status are part of what it did.
+   * frames executed source in a language is a program in that language. Observing source in a file
+   * read or write is not execution. Neither is decided by a list of tool names, and a plain shell
+   * chain is preserved whole — its operators, pipes, redirections and exit status are part of it.
    *
    * The program text is not carried: it is the user's own work, so it stays in the local value store
    * behind the argument it arrived in, and the host resolves it before running. What travels is that
@@ -953,7 +953,9 @@ export class WorkflowCallRecorder {
             : undefined
         : undefined;
     for (const frame of extractComputationSourceFrames(event)) {
-      if (frame.rejectionReason !== undefined) continue;
+      if (frame.rejectionReason !== undefined || frame.executionScope === "file_observation") {
+        continue;
+      }
       const interfaceMatchesFrame =
         sourceInterface !== undefined &&
         frame.executionScope === "persistent" &&
