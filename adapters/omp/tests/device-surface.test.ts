@@ -215,6 +215,103 @@ describe("reading the servers the harness is configured with", () => {
   });
 });
 
+describe("Resin catalog discovery through the device surface", () => {
+  it.each(["marker-first", "assistant-first", "marker-only", "assistant-only"])(
+    "does not capture manage_tools documentation as executable work (%s)",
+    (order) => {
+      const marker = readMarker("docs", "xd://mcp__resin_manage_tools");
+      const assistant = assistantRead("docs", "xd://mcp__resin_manage_tools");
+      const prefix =
+        order === "marker-first"
+          ? [marker, assistant]
+          : order === "assistant-first"
+            ? [assistant, marker]
+            : order === "marker-only"
+              ? [marker]
+              : [assistant];
+      const { calls, discoveries, results } = decodeAll(
+        [...prefix, readResult("docs", "Tool documentation")],
+        ["resin"],
+      );
+
+      expect(calls).toEqual([]);
+      expect(discoveries).toHaveLength(1);
+      expect(discoveries[0]!.tools).toEqual([{ name: "manage_tools", provider: "resin" }]);
+      expect(results).toHaveLength(1);
+    },
+  );
+
+  it.each(["list_versions", "status"])(
+    "records read-only manage_tools %s as discovery, not a workflow step",
+    (action) => {
+      const { calls, discoveries, results } = decodeAll(
+        [
+          startMarker("catalog", "xd://mcp__resin_manage_tools"),
+          assistantWrite(
+            "catalog",
+            "xd://mcp__resin_manage_tools",
+            JSON.stringify({ action, query: "synthetic catalog query" }),
+          ),
+          toolResult("catalog", '{"versions":[]}'),
+        ],
+        ["resin"],
+      );
+
+      expect(calls).toEqual([]);
+      expect(discoveries).toHaveLength(1);
+      expect(discoveries[0]!.tools).toEqual([{ name: "manage_tools", provider: "resin" }]);
+      expect(JSON.stringify(discoveries)).not.toContain("synthetic catalog query");
+      expect(results).toHaveLength(1);
+    },
+  );
+
+  it.each(["pin", "unpin", "disable", "enable", "rollback", "clear_override", "unknown"])(
+    "preserves manage_tools %s as executable work",
+    (action) => {
+      const { calls } = decodeAll(
+        [
+          startMarker("management", "xd://mcp__resin_manage_tools"),
+          assistantWrite("management", "xd://mcp__resin_manage_tools", JSON.stringify({ action })),
+          toolResult("management", "{}"),
+        ],
+        ["resin"],
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        toolName: "manage_tools",
+        connection: "resin",
+        parameters: { action },
+      });
+    },
+  );
+
+  it("preserves same-named tools on other servers, unknown arguments, and actual invocations", () => {
+    const { calls } = decodeAll(
+      [
+        assistantRead("other-read", "xd://mcp__other_manage_tools"),
+        readResult("other-read", "{}"),
+        assistantWrite("other-list", "xd://mcp__other_manage_tools", '{"action":"list_versions"}'),
+        toolResult("other-list", "{}"),
+        startMarker("missing-arguments", "xd://mcp__resin_manage_tools"),
+        toolResult("missing-arguments", "{}"),
+        assistantWrite(
+          "invoke",
+          "xd://mcp__resin_invoke_tool",
+          '{"tool":"synthetic_tool","arguments":{}}',
+        ),
+        toolResult("invoke", "{}"),
+      ],
+      ["resin", "other"],
+    );
+    expect(calls.map((call) => [call.toolName, call.connection])).toEqual([
+      ["manage_tools", "other"],
+      ["manage_tools", "other"],
+      ["manage_tools", "resin"],
+      ["invoke_tool", "resin"],
+    ]);
+  });
+});
+
 describe("capturing a call made through the device surface", () => {
   it("records the tool the path reached, over the connection that owns it, with the invocation's arguments", () => {
     const { calls, discoveries, results } = decodeAll([
