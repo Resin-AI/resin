@@ -1,4 +1,4 @@
-import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resin/contracts";
+import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resin/contracts/common";
 import { z } from "zod";
 
 /**

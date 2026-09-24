@@ -65,6 +65,30 @@ function fourCallWorkflow(): RecordedWorkflow {
   };
 }
 
+function workflowWithProgramTemplate(
+  template: unknown,
+  additionalPrivateReferences: string[] = ["private:original-program"],
+): unknown {
+  const workflow = fourCallWorkflow();
+  return {
+    ...workflow,
+    privateReferences: [...(workflow.privateReferences ?? []), ...additionalPrivateReferences],
+    steps: workflow.steps.map((step, index) =>
+      index === 0
+        ? {
+            ...step,
+            arguments: [
+              {
+                name: "command",
+                source: { kind: "template", template },
+              },
+            ],
+          }
+        : step,
+    ),
+  };
+}
+
 describe("recorded workflow validation", () => {
   it("accepts a workflow of unfamiliar callables bound through results, inputs and private references", () => {
     const result = validateRecordedWorkflow(fourCallWorkflow());
@@ -131,6 +155,37 @@ describe("recorded workflow validation", () => {
     });
     expect(untypedInput.valid).toBe(false);
     expect(untypedInput.errors.join("\n")).toContain("recorded type");
+  });
+
+  it("accepts defaults that match their declared types and rejects incompatible defaults", () => {
+    const workflow = fourCallWorkflow();
+    workflow.inputs = [
+      { ...workflow.inputs[0]!, default: "" },
+      { ...workflow.inputs[1]!, default: "" },
+      { name: "retries", type: "number", default: 0 },
+      { name: "enabled", type: "boolean", default: false },
+      { name: "options", type: "object", default: { depth: 2 } },
+      { name: "labels", type: "array", default: [] },
+    ];
+    expect(validateRecordedWorkflow(workflow).valid).toBe(true);
+
+    const incompatible = validateRecordedWorkflow({
+      ...workflow,
+      inputs: [...workflow.inputs, { name: "limit", type: "number", default: false }],
+    });
+    expect(incompatible.valid).toBe(false);
+    expect(incompatible.errors.join("\n")).toContain(
+      "input limit default must match its recorded type 'number'",
+    );
+
+    const nullDefault = validateRecordedWorkflow({
+      ...workflow,
+      inputs: [{ name: "source", type: "string", default: null }, workflow.inputs[1]!],
+    });
+    expect(nullDefault.valid).toBe(false);
+    expect(nullDefault.errors.join("\n")).toContain(
+      "input source default must match its recorded type 'string'",
+    );
   });
 
   it("validates recursively constructed arguments, including unknown origins", () => {
@@ -258,7 +313,189 @@ describe("recorded workflow validation", () => {
     expect(brokenTemplate.valid).toBe(false);
     expect(brokenTemplate.errors.join("\n")).toContain("unknown input");
   });
-  it("admits explicit language-specific Eval semantics and rejects mismatched interfaces", () => {
+  it("validates projected program metadata as a paired, fail-closed shape", () => {
+    const projected = {
+      type: "program",
+      language: "shell",
+      source: { type: "literal", value: "echo '<redacted>'" },
+      sourceReference: "private:original-program",
+      protectedTokens: [2, 4],
+      holes: [],
+    };
+    expect(validateRecordedWorkflow(workflowWithProgramTemplate(projected))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    expect(
+      validateRecordedWorkflow(workflowWithProgramTemplate({ ...projected, protectedTokens: [] })),
+    ).toMatchObject({ valid: true, errors: [] });
+
+    const legacy = {
+      type: "program",
+      language: "shell",
+      source: { type: "literal", value: "echo 'unchanged'" },
+      holes: [],
+    };
+    expect(validateRecordedWorkflow(workflowWithProgramTemplate(legacy, []))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+
+    const withoutProtectedTokens = Object.fromEntries(
+      Object.entries(projected).filter(([key]) => key !== "protectedTokens"),
+    );
+    const withoutSourceReference = Object.fromEntries(
+      Object.entries(projected).filter(([key]) => key !== "sourceReference"),
+    );
+    const invalidShapes: Array<{ template: unknown; error: string }> = [
+      { template: withoutProtectedTokens, error: "together" },
+      { template: withoutSourceReference, error: "together" },
+      {
+        template: { ...projected, source: { type: "literal", value: 42 } },
+        error: "literal string",
+      },
+      {
+        template: { ...projected, sourceReference: "" },
+        error: "non-empty private sourceReference",
+      },
+      {
+        template: { ...projected, sourceReference: 123 },
+        error: "non-empty private sourceReference",
+      },
+      { template: { ...projected, protectedTokens: [4, 2] }, error: "sorted and unique" },
+      { template: { ...projected, protectedTokens: [2, 2] }, error: "sorted and unique" },
+      { template: { ...projected, protectedTokens: [-1] }, error: "non-negative integer" },
+      { template: { ...projected, protectedTokens: [2, 2.5] }, error: "non-negative integer" },
+      { template: { ...projected, protectedTokens: "2" }, error: "must be an array" },
+    ];
+    for (const { template, error } of invalidShapes) {
+      const result = validateRecordedWorkflow(workflowWithProgramTemplate(template));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join("\n")).toContain(error);
+    }
+
+    const undeclared = validateRecordedWorkflow(workflowWithProgramTemplate(projected, []));
+    expect(undeclared.valid).toBe(false);
+    expect(undeclared.errors.join("\n")).toContain("undeclared private reference");
+  });
+
+  it("rejects holes that target protected program tokens", () => {
+    const protectedHole = {
+      type: "program",
+      language: "shell",
+      source: { type: "literal", value: "echo '<redacted>'" },
+      sourceReference: "private:original-program",
+      protectedTokens: [2],
+      holes: [{ token: 2, binding: { type: "literal", value: "replacement" } }],
+    };
+    const rejected = validateRecordedWorkflow(workflowWithProgramTemplate(protectedHole));
+    expect(rejected.valid).toBe(false);
+    expect(rejected.errors.join("\n")).toContain("targets a protected token index");
+
+    const unprotectedHole = {
+      ...protectedHole,
+      holes: [{ token: 1, binding: { type: "literal", value: "replacement" } }],
+    };
+    expect(validateRecordedWorkflow(workflowWithProgramTemplate(unprotectedHole))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+  });
+
+  it("keeps projected callable source aligned only with its matching top-level argument", () => {
+    const projected = {
+      type: "program",
+      language: "shell",
+      source: { type: "literal", value: "echo '<redacted>'" },
+      sourceReference: "private:original-program",
+      protectedTokens: [],
+      holes: [],
+    };
+    const withProgram = (template: unknown, programSource: string) => {
+      const workflow = fourCallWorkflow();
+      return {
+        ...workflow,
+        privateReferences: [...(workflow.privateReferences ?? []), "private:original-program"],
+        steps: workflow.steps.map((step, index) =>
+          index === 0
+            ? {
+                ...step,
+                callable: {
+                  ...step.callable,
+                  program: { kind: "shell", source: programSource, argument: "command" },
+                },
+                arguments: [{ name: "command", source: { kind: "template", template } }],
+              }
+            : step,
+        ),
+      };
+    };
+    expect(validateRecordedWorkflow(withProgram(projected, "echo '<redacted>'"))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+
+    const divergent = validateRecordedWorkflow(withProgram(projected, "echo '<other>'"));
+    expect(divergent.valid).toBe(false);
+    expect(divergent.errors.join("\n")).toContain("differs from projected argument command");
+
+    const legacy = {
+      type: "program",
+      language: "shell",
+      source: { type: "literal", value: "echo '<legacy>'" },
+      holes: [],
+    };
+    expect(validateRecordedWorkflow(withProgram(legacy, "echo '<different>'"))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    expect(
+      validateRecordedWorkflow(
+        withProgram({ type: "object", entries: { nested: projected } }, "echo '<different>'"),
+      ),
+    ).toMatchObject({ valid: true, errors: [] });
+  });
+
+  it("collects original program and nested hole private references", () => {
+    const template = {
+      type: "object",
+      entries: {
+        program: {
+          type: "program",
+          language: "shell",
+          source: { type: "literal", value: "echo '<redacted>'" },
+          sourceReference: "private:original-program",
+          protectedTokens: [2],
+          holes: [
+            {
+              token: 1,
+              binding: {
+                type: "array",
+                items: [
+                  { type: "private", reference: "private:hole-one" },
+                  {
+                    type: "object",
+                    entries: { nested: { type: "private", reference: "private:hole-two" } },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        sibling: { type: "private", reference: "private:sibling" },
+      },
+    };
+    const workflow = workflowWithProgramTemplate(template, []) as RecordedWorkflow;
+    expect(collectWorkflowPrivateReferences(workflow)).toEqual([
+      "secret:storage_token",
+      "private:original-program",
+      "private:hole-one",
+      "private:hole-two",
+      "private:sibling",
+    ]);
+  });
+
+  it("admits explicit language-specific Eval and Codex exec semantics and rejects mismatches", () => {
     const workflow = fourCallWorkflow();
     const withProgram = (program: unknown) => ({
       ...workflow,
@@ -295,6 +532,21 @@ describe("recorded workflow validation", () => {
     );
     expect(mismatchedJavaScript.valid).toBe(false);
     expect(mismatchedJavaScript.errors.join("\n")).toContain("non-JavaScript");
+
+    const codexProgram: WorkflowRecordedProgram = {
+      kind: "javascript",
+      source: "text('native output')",
+      sourceInterface: "codex-exec",
+    };
+    expect(validateRecordedWorkflow(withProgram(codexProgram))).toMatchObject({
+      valid: true,
+      errors: [],
+    });
+    const mismatchedCodex = validateRecordedWorkflow(
+      withProgram({ ...codexProgram, kind: "typescript" }),
+    );
+    expect(mismatchedCodex.valid).toBe(false);
+    expect(mismatchedCodex.errors.join("\n")).toContain("non-JavaScript");
 
     const unknown = validateRecordedWorkflow(
       withProgram({ ...javascriptProgram, sourceInterface: "unknown-eval" }),

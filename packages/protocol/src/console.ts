@@ -1,16 +1,18 @@
+import { CapabilityManifestSchema } from "@resin/contracts/capabilities";
 import {
-  CapabilityManifestSchema,
   ISOTimestampSchema,
   IdentifierSchema,
   Sha256DigestSchema,
   UUIDSchema,
+  normalizeSha256,
+} from "@resin/contracts/common";
+import {
   V1ActivationCertificateSchema,
   V1ExactSemVerSchema,
   V1LockedToolEntrySchema,
   type V1MetadataPayloadValue,
   V1RevocationMetadataSchema,
-  normalizeSha256,
-} from "@resin/contracts";
+} from "@resin/contracts/v1";
 import { z } from "zod";
 import { ProtocolError, type ProtocolErrorDetailRecord, ValidationError } from "./errors.js";
 

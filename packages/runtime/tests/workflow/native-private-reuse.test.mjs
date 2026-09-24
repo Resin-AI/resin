@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tokenizeProgram } from "@resin/contracts";
 import {
   FilePrivateValueStore,
   NormalizationPipeline,
@@ -23,7 +24,7 @@ import {
 } from "../../src/workflow/index.js";
 
 it.skipIf(process.platform === "win32")(
-  "learns a path from redacted native programs and reuses two new files",
+  "reuses two new files through an explicitly selected private native-program input",
   async () => {
     const root = mkdtempSync(join(tmpdir(), "resin-actual-replay-"));
     const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -104,7 +105,20 @@ it.skipIf(process.platform === "win32")(
         supportingEvents: events.slice(2),
       });
       assert.equal(recipe.workflow.steps.length, 1);
-      assert.ok(recipe.workflow.candidates.length > 0);
+      const token = tokenizeProgram("shell", command(paths[0])).findIndex(
+        (entry) => entry.bindable && entry.value === paths[0],
+      );
+      assert.ok(token >= 0, "recorded path must be a bindable canonical shell token");
+      const candidates = [
+        {
+          stepId: "step0",
+          argument: "command",
+          path: ["tokens", token],
+          proposed: { kind: "input", name: "file_path", type: "string" },
+          reason: "varies-across-executions",
+          missing: "the caller must explicitly select the filename token",
+        },
+      ];
       const resolve = (reference) => {
         assert.equal(store.origin(reference)?.workspaceId, workspaceId);
         return resolvePrivateReference(store, reference);
@@ -121,7 +135,7 @@ it.skipIf(process.platform === "win32")(
       );
       const environment = await demonstrationEnvironment({
         plan: recipe.workflow,
-        candidates: recipe.workflow.candidates,
+        candidates,
         adapters,
         workspaceDir: root,
         resolvePrivate: resolve,
@@ -129,7 +143,7 @@ it.skipIf(process.platform === "win32")(
       });
       const validated = await validateAndConfirmCandidates({
         plan: recipe.workflow,
-        candidates: recipe.workflow.candidates,
+        candidates,
         environment,
       });
       assert.equal(validated.verification.status, "verified");

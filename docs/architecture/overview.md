@@ -105,7 +105,7 @@ When starting MCP or resolving tools, Resin automatically identifies the project
 - **Deleting `.resin/project.json`**: Resets and breaks the stable project identity and its link to local trust records unless explicitly recovered from Cloud or git history; it is not a routine safe repair operation.
 - **Deleting `.resin/resin.lock`**: Destroys the exact locked tool selections and cryptographic digests; execution cannot proceed with silent empty locks or substituted versions and requires explicit lock recovery or re-qualification.
 - **Deleting Local Trust State or Cache**: Disables offline execution and invalidates local authorization, requiring online re-authentication, fresh signature verification, and re-downloading authorized tool packages.
-- **Data Residency & Execution Invariant**: Raw session transcripts and source code remain strictly local. Cloud never executes tools against developer repositories.
+- **Data Residency & Execution Invariant**: Raw session transcripts and original private source remain local. Sanitized evidence may include engine-redacted recorded-program source views; cloud never executes tools against developer repositories.
 
 ## Core Local Components
 
@@ -123,6 +123,7 @@ The Observer passively monitors tool executions, transcript interactions, and pe
 - Generates sanitized observation summaries for the evolution engine.
 - Continuously tracks each session's workflow episodes locally, running the deterministic opportunity engine over metadata-projected events to attest recurring patterns. Proven patterns are queued in a local outbox, deduplicated by structural hash, and dispatched only when projected savings exceed the configured synthesis cost; the evolution kill switch halts detection.
 - Exposes `@resin/observer/recording` for parser-free reconstruction from frozen workflow carriers. `recordCarriedCallsFromEvents` preserves recorded programs, private references, and binding proposals without deriving native source from raw transcripts. Missing carriers are reported as skipped, unknown reference scopes remain unresolved, and proposed bindings are not executable facts.
+- Recorded JavaScript, TypeScript, and Python program templates may expose a redacted literal source view with paired `sourceReference` and `protectedTokens`. Canonical token alignment must survive redaction; changed tokens cannot become parameter holes. Shell, unparseable, truncated, or untrusted projections remain opaque. Replay and identity require the locally resolved original, never the public view as fallback.
 - Binding proposals referring outside the selected execution are not retained as parameterization candidates. They do not mark recorded calls as skipped: the original argument remains unchanged. Missing recorded dependencies, unlike optional proposals, still make the capture incomplete.
 - Python cells with session dependencies carry a bounded, ordered closure of successful setup cells from the same kernel. Source and required inputs remain private local references, not serialized globals. Unresolved reads, failed or reset state, and unsupported mutation fail closed; verified setup runs once before its target in a fresh Python process.
 - Native OMP observations preserve the authoritative full output, recovering bounded local artifacts when the transcript display is truncated. An unavailable full output cannot become a replay baseline. Interface-specific whitespace comparison is recorded explicitly and does not change runtime stdout.
@@ -134,6 +135,7 @@ The Capability Broker enforces the pre-authorized **Capability Envelope** ([ADR 
 - Restricts filesystem access to authorized workspace roots and prevents access to sensitive files (`.git`, `.env`).
 - Restricts network calls to whitelisted domains and blocks unauthorized shell spawns.
 - After a complete workflow replay verifies, reports hash-only identities for its parameterized programs. Each identity binds the exact applied template and hashes workspace-scoped source with only executable parameter holes substituted; non-parameter code remains significant. Private source is resolved locally and never included in the decision. Missing identities establish no equivalence.
+- Recorded inputs may declare type-matching defaults. Defaults make those schema properties optional and apply only when the input is absent; supplied `0`, `false`, and empty strings remain intact. Unknown inputs and type mismatches, including invalid explicit `null`, fail before execution.
 
 ### 4. Deno Execution Sandbox (`@resin/runtime`)
 Executes tool code in hermetically isolated, pinned Deno worker subprocesses ([ADR 0002](../adr/0002-daemon-and-worker-isolation.md)):
@@ -164,7 +166,7 @@ Embedded SQLite with Write-Ahead Logging (WAL mode) and OS-standard identity-par
 
 1. **Local-First & Offline-Capable**: All local tools execute and function with 100% reliability even when completely disconnected from the internet.
 2. **Zero-Prompt Autonomy within Envelope**: Tools bootstrap, lock, qualify, and execute autonomously without prompting the developer, provided they stay within the pre-authorized security envelope.
-3. **Strict Data Residency**: Proprietary source code, raw session transcripts, and unredacted conversation turns never leave the local machine. Cloud never executes tools against developer repositories.
+3. **Strict Data Residency**: Raw session transcripts, unredacted conversation turns, original private program source, and private store values remain local. Sanitized observation DTOs may carry engine-redacted program views with non-secret code and literals. Cloud never executes tools against developer repositories.
 4. **Hermetic & Deterministic**: Pinned runtime binaries, exact version/digest locks, and comprehensive contract tests ensure identical behavior across Linux, macOS, and WSL2 ([ADR 0003](../adr/0003-supported-harnesses-and-platforms.md)).
 
 ## Architecture References

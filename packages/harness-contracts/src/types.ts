@@ -3,7 +3,7 @@ import {
   IdentifierSchema,
   SchemaVersionSchema,
   Sha256DigestSchema,
-} from "@resin/contracts";
+} from "@resin/contracts/common";
 import { z } from "zod";
 
 /**

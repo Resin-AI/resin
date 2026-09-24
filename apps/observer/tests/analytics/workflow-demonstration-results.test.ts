@@ -75,9 +75,6 @@ describe("demonstrations reconstructed from stored call and result events", () =
     expect(recipe.workflow.heldOut?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
     const observed = recipe.workflow.heldOut!.observed[0]!;
     expect(resolvePrivateReference(store, observed.reference)).toBe("second contents");
-    expect(recipe.workflow.candidates?.some((candidate) => candidate.argument === "path")).toBe(
-      true,
-    );
     expect(JSON.stringify(recipe.workflow)).not.toContain("second contents");
   });
 

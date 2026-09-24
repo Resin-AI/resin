@@ -1,4 +1,5 @@
-import { UUIDSchema, type V1MetadataPayloadValue, V1ProjectMetadataSchema } from "@resin/contracts";
+import { UUIDSchema } from "@resin/contracts/common";
+import { type V1MetadataPayloadValue, V1ProjectMetadataSchema } from "@resin/contracts/v1";
 import { z } from "zod";
 import { PermissionDeniedError, type ProtocolError, ValidationError } from "./errors.js";
 

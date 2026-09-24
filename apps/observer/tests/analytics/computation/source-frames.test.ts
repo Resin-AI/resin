@@ -111,6 +111,71 @@ describe("extractComputationSourceFrames", () => {
     expect(frames[0]?.fileAction).toBeUndefined();
   });
 
+  it("frames only an adapter-qualified native Codex exec as isolated JavaScript", () => {
+    const source = "const value = 42;\ntext(value);\n";
+    const nativeExec = asToolCall(
+      NormalizedSessionEventSchema.parse({
+        ...baseHeaders(36),
+        type: "tool_call",
+        callId: "call-native-exec",
+        toolName: "exec",
+        parameters: { raw: source },
+        metadata: {
+          codexNative: {
+            type: "response_item",
+            itemType: "custom_tool_call",
+            sourceInterface: "codex-exec",
+          },
+        },
+      }),
+    );
+    expect(extractComputationSourceFrames(nativeExec)).toMatchObject([
+      {
+        language: "javascript",
+        source,
+        originKind: "inline",
+        executionScope: "isolated",
+        sourceInterface: "codex-exec",
+      },
+    ]);
+
+    const genericExec = toolCall(37, "exec", { raw: source });
+    expect(extractComputationSourceFrames(genericExec)).toEqual([]);
+
+    const foreignNamespace = asToolCall(
+      NormalizedSessionEventSchema.parse({
+        ...nativeExec,
+        eventId: "evt_frame_000038",
+        callId: "call-38",
+        metadata: {
+          codexNative: {
+            type: "response_item",
+            itemType: "custom_tool_call",
+            sourceInterface: "codex-exec",
+            namespace: "mcp__filesystem",
+          },
+        },
+      }),
+    );
+    expect(extractComputationSourceFrames(foreignNamespace)).toEqual([]);
+
+    const truncatedExec = asToolCall(
+      NormalizedSessionEventSchema.parse({
+        ...nativeExec,
+        eventId: "evt_frame_000039",
+        callId: "call-39",
+        parameters: { raw: "const value = 42; ... [TRUNCATED 12 chars]" },
+      }),
+    );
+    expect(extractComputationSourceFrames(truncatedExec)[0]).toMatchObject({
+      language: "javascript",
+      source: "",
+      executionScope: "isolated",
+      sourceInterface: "codex-exec",
+      rejectionReason: "truncated_source",
+    });
+  });
+
   it("carries a persistent kernel reset for the selected language only", () => {
     const pythonReset = extractComputationSourceFrames(
       toolCall(28, "eval", { language: "python", code: "rows = []", reset: true }),

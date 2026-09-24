@@ -35,7 +35,7 @@ import {
   isLocalWorkflowResultSuppressed,
   retainLocalWorkflowPayload,
 } from "./local-workflow-payload.js";
-import type { JsonObject, JsonValue } from "./redaction.js";
+import type { JsonObject, JsonValue, RedactedStringResult } from "./redaction.js";
 import { type RedactionConfig, RedactionEngine } from "./redaction.js";
 
 /**
@@ -117,6 +117,8 @@ export class NormalizationPipeline {
   private readonly syncRepository?: SyncRepository;
   private readonly dbConnection?: LocalDatabaseConnection;
   private readonly defaultSchemaVersion: string;
+  private readonly programSourceRedactor = (source: string) =>
+    this.redactionEngine.redactProgramSource(source);
 
   // Session sequence to event ID map: sessionId -> Map<sequenceNumber, eventId>
   private readonly sessionEventsBySequence = new Map<string, Map<number, string>>();
@@ -452,8 +454,12 @@ export class NormalizationPipeline {
       | {
           resultObservation?: { result: string; comparison?: "text-trim" };
           suppressResult?: boolean;
+          programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
         }
       | undefined;
+    if (validEvent.type === "tool_call") {
+      localPayloadOptions = { programSourceRedactor: this.programSourceRedactor };
+    }
     if (validEvent.type === "tool_result" && originalRawRecord !== undefined) {
       const nativeObservation = getOmpProgramObservation(originalRawRecord);
       if (nativeObservation?.callId === validEvent.callId) {

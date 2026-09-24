@@ -13,6 +13,7 @@ import {
   type RecordedCallRequest,
   RuntimeAdapterRegistry,
   executeRecordedWorkflow,
+  recordedWorkflowInputSchema,
 } from "../src/workflow/recorded-workflow.js";
 
 /**
@@ -120,7 +121,67 @@ function workflow(): RecordedWorkflow {
   };
 }
 
+function projectedProgramTemplate(
+  holes: Array<{ token: number; binding: WorkflowValueTemplate }> = [],
+  protectedTokens: number[] = [1],
+): WorkflowValueTemplate {
+  return {
+    type: "program",
+    language: "javascript",
+    source: { type: "literal", value: 'const secret = "REDACTED"; console.log("alpha");' },
+    sourceReference: "private:program-source",
+    protectedTokens,
+    holes,
+  };
+}
+
+function projectedProgramWorkflow(template: WorkflowValueTemplate): RecordedWorkflow {
+  return {
+    schemaVersion: 1,
+    workflowId: "wf_projected_program",
+    inputs: [],
+    privateReferences: ["private:program-source"],
+    steps: [
+      {
+        id: "run",
+        callId: "call-run",
+        callable: { runtime: "projected-program", name: "execute" },
+        arguments: [{ name: "program", source: asTemplate(template) }],
+        dependsOn: [],
+        failurePolicy: { onError: "abort", policy: "recorded" },
+        observed: { outcome: "succeeded" },
+      },
+    ],
+  };
+}
+
+function projectedProgramAdapters(recorded: RecordedCallRequest[]): RuntimeAdapterRegistry {
+  const registry = new RuntimeAdapterRegistry();
+  registry.register({
+    runtime: "projected-program",
+    async call(request) {
+      recorded.push(request);
+      return request.arguments.program;
+    },
+  });
+  return registry;
+}
+
 describe("recorded workflow execution", () => {
+  it("makes inputs with defaults optional in the direct workflow schema", () => {
+    const recorded = workflow();
+    recorded.inputs[0] = { ...recorded.inputs[0]!, default: "" };
+    expect(recordedWorkflowInputSchema(recorded)).toEqual({
+      type: "object",
+      properties: {
+        source: { type: "string", default: "" },
+        target: { type: "string" },
+      },
+      required: ["target"],
+      additionalProperties: false,
+    });
+  });
+
   it("runs a four-call workflow of unfamiliar callables and passes fresh results along", async () => {
     const calls: RecordedCallRequest[] = [];
     const first = await executeRecordedWorkflow(workflow(), {
@@ -242,5 +303,139 @@ describe("recorded workflow execution", () => {
       expect(entry.reference.length).toBeGreaterThan(0);
       expect(entry.workspaceId).toBe("ws_recording");
     }
+  });
+  it("executes the locally resolved original for a redacted program projection", async () => {
+    const calls: RecordedCallRequest[] = [];
+    const resolved: Array<{ reference: string; workspaceId?: string }> = [];
+    const result = await executeRecordedWorkflow(
+      projectedProgramWorkflow(projectedProgramTemplate()),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(calls),
+        access: { workspaceId: "workspace-a" },
+        resolvePrivate: (reference, access) => {
+          resolved.push({
+            reference,
+            ...(access?.workspaceId ? { workspaceId: access.workspaceId } : {}),
+          });
+          return 'const secret = "ORIGINAL"; console.log("alpha");';
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(calls[0]?.arguments.program).toBe('const secret = "ORIGINAL"; console.log("alpha");');
+    expect(calls[0]?.arguments.program).not.toBe(
+      'const secret = "REDACTED"; console.log("alpha");',
+    );
+    expect(resolved).toEqual([{ reference: "private:program-source", workspaceId: "workspace-a" }]);
+  });
+
+  it("fails closed when a projected source reference is missing or not program text", async () => {
+    const missingCalls: RecordedCallRequest[] = [];
+    const missing = await executeRecordedWorkflow(
+      projectedProgramWorkflow(projectedProgramTemplate()),
+      { inputs: {}, adapters: projectedProgramAdapters(missingCalls) },
+    );
+    expect(missing.status).toBe("failed");
+    expect(missingCalls).toHaveLength(0);
+
+    const unresolvedCalls: RecordedCallRequest[] = [];
+    const unresolved = await executeRecordedWorkflow(
+      projectedProgramWorkflow(projectedProgramTemplate()),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(unresolvedCalls),
+        resolvePrivate: () => {
+          throw new Error("private source unavailable");
+        },
+      },
+    );
+    expect(unresolved.status).toBe("failed");
+    expect(unresolvedCalls).toHaveLength(0);
+    const invalidCalls: RecordedCallRequest[] = [];
+    const nonString = await executeRecordedWorkflow(
+      projectedProgramWorkflow(projectedProgramTemplate()),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(invalidCalls),
+        resolvePrivate: () => ({ text: "not program text" }),
+      },
+    );
+    expect(nonString.status).toBe("failed");
+    expect(invalidCalls).toHaveLength(0);
+  });
+
+  it("rejects incomplete projection metadata and holes targeting protected tokens", async () => {
+    const malformed: WorkflowValueTemplate = {
+      type: "program",
+      language: "javascript",
+      source: { type: "literal", value: 'const secret = "REDACTED"; console.log("alpha");' },
+      sourceReference: "private:program-source",
+      holes: [],
+    };
+    const malformedCalls: RecordedCallRequest[] = [];
+    const malformedResult = await executeRecordedWorkflow(projectedProgramWorkflow(malformed), {
+      inputs: {},
+      adapters: projectedProgramAdapters(malformedCalls),
+      resolvePrivate: () => 'const secret = "ORIGINAL"; console.log("alpha");',
+    });
+    expect(malformedResult.status).toBe("failed");
+    expect(malformedCalls).toHaveLength(0);
+
+    const protectedCalls: RecordedCallRequest[] = [];
+    const protectedResult = await executeRecordedWorkflow(
+      projectedProgramWorkflow(
+        projectedProgramTemplate([{ token: 1, binding: literal("replacement") }], [1]),
+      ),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(protectedCalls),
+        resolvePrivate: () => 'const secret = "ORIGINAL"; console.log("alpha");',
+      },
+    );
+    expect(protectedResult.status).toBe("failed");
+    expect(protectedCalls).toHaveLength(0);
+    const failure = protectedResult.steps[0];
+    expect(failure?.status === "failed" ? failure.error : "").toContain("protected token");
+  });
+  it("rejects projection tampering before binding resolution or adapter execution", async () => {
+    const missingBinding = { type: "input", name: "missing" } as WorkflowValueTemplate;
+
+    const droppedProtectionCalls: RecordedCallRequest[] = [];
+    const droppedProtection = await executeRecordedWorkflow(
+      projectedProgramWorkflow(
+        projectedProgramTemplate([{ token: 4, binding: missingBinding }], []),
+      ),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(droppedProtectionCalls),
+        resolvePrivate: () => 'const secret = "ORIGINAL"; console.log("alpha");',
+      },
+    );
+    expect(droppedProtection.status).toBe("failed");
+    expect(droppedProtectionCalls).toHaveLength(0);
+    const droppedFailure = droppedProtection.steps[0];
+    expect(droppedFailure?.status === "failed" ? droppedFailure.error : "").toContain(
+      "protected-token indexes",
+    );
+
+    const changedShape = {
+      ...projectedProgramTemplate([{ token: 4, binding: missingBinding }]),
+      source: { type: "literal", value: "const secret = 'REDACTED'; console.log(\"alpha\");" },
+    } as WorkflowValueTemplate;
+    const changedShapeCalls: RecordedCallRequest[] = [];
+    const changedProjection = await executeRecordedWorkflow(
+      projectedProgramWorkflow(changedShape),
+      {
+        inputs: {},
+        adapters: projectedProgramAdapters(changedShapeCalls),
+        resolvePrivate: () => 'const secret = "ORIGINAL"; console.log("alpha");',
+      },
+    );
+    expect(changedProjection.status).toBe("failed");
+    expect(changedShapeCalls).toHaveLength(0);
+    const shapeFailure = changedProjection.steps[0];
+    expect(shapeFailure?.status === "failed" ? shapeFailure.error : "").toContain("token 1 shape");
   });
 });

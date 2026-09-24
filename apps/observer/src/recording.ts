@@ -29,7 +29,6 @@ export type {
 } from "./analytics/workflow-carrier.js";
 export type {
   InputProposal,
-  InputProposalSet,
   ObservedResourceFlow,
   RecordedArgumentOrigin,
   RecordedCallObservation,

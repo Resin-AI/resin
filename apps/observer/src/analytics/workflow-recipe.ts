@@ -20,10 +20,8 @@ import {
 
 export {
   acceptInputProposals,
-  proposeInputsFromVariation,
   recordWorkflowRecipe,
   type InputProposal,
-  type InputProposalSet,
   type RecordableEvent,
   type RecordedArgumentOrigin,
   type RecordedCallObservation,

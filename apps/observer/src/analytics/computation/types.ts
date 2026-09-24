@@ -198,6 +198,8 @@ export interface ComputationParseContext {
   imports?: readonly LocalComputationImport[];
   modules?: readonly LocalComputationModule[];
   sourcePath?: string;
+  /** Adapter-established native builtins, never inferred from a JavaScript callee name. */
+  sourceInterface?: "codex-exec";
 }
 
 /**
@@ -282,6 +284,8 @@ export interface ComputationSourceFrame {
   source: string;
   originKind: ComputationOriginKind;
   executionScope: ComputationExecutionScope;
+  /** Native output semantics established by the source adapter. */
+  sourceInterface?: "codex-exec";
   /** Event that carried the body; provenance only, never model evidence by itself. */
   sourceEventId: string;
   path?: string;

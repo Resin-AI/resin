@@ -1,15 +1,14 @@
+import { CapabilityEnvelopeSchema } from "@resin/contracts/capabilities";
 import {
-  CapabilityEnvelopeSchema,
-  DeploymentRecordSchema,
-  DeploymentStateSchema,
   ISOTimestampSchema,
   IdentifierSchema,
-  InvocationRecordSchema,
-  NormalizedSessionEventSchema,
   SchemaVersionSchema,
   Sha256DigestSchema,
-  ToolManifestSchema,
-} from "@resin/contracts";
+} from "@resin/contracts/common";
+import { DeploymentRecordSchema, DeploymentStateSchema } from "@resin/contracts/deployments";
+import { NormalizedSessionEventSchema } from "@resin/contracts/events";
+import { InvocationRecordSchema } from "@resin/contracts/records";
+import { ToolManifestSchema } from "@resin/contracts/tools";
 import { z } from "zod";
 import {
   AuthScopeSchema,

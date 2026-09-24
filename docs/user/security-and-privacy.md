@@ -6,7 +6,7 @@ Resin is built on strict **Local-First**, **Zero Raw Data Exfiltration**, and **
 
 ## 1. Core Security Guarantees
 
-1. **Local-Only Raw Transcripts**: Raw prompts, assistant reasoning, thinking blocks, and workspace code never leave your local machine unless the install privacy plan separately and explicitly enables cloud sync.
+1. **Local-Only Originals**: Raw prompts, assistant reasoning, thinking blocks, original private program source, and private store entries remain local. When cloud sync is enabled, sanitized evidence may include secret-redacted recorded-program views that retain non-secret code and literal values.
 2. **Capability Envelopes**: Evolved tools execute in restricted sandboxes with explicitly declared and authorized permissions.
 3. **Mediated Secret Access**: Tools never have raw read access to API keys, passwords, or cloud credentials.
 4. **Automated Secret Redaction**: All normalized events, logs, and telemetry pass through real-time entropy and regex pattern masking.
@@ -117,7 +117,7 @@ AI coding harnesses generate rich session transcripts. Resin guarantees:
 
 - Session files in `~/.claude/projects/`, `~/.codex/sessions/`, or `~/.omp/` are parsed **locally** by the observer daemon.
 - Raw text is distilled into **Normalized Session Events** (e.g. `tool_discovery`, `tool_call`, `durationMs`, `exitCode`).
-- If cloud synchronization is enabled for candidate evolution, only sanitized, abstract opportunity descriptors are transmitted; raw prompts are discarded.
+- If cloud synchronization is enabled for candidate evolution, sanitized evidence may include engine-redacted JavaScript, TypeScript, and Python program views with non-secret code and literals. Their original source stays in the local private store; redaction-sensitive token positions cannot be parameterized, and execution never falls back to the public view. Raw prompts and tool outputs are not uploaded.
 
 When the cloud is unreachable or after logout, the local MCP gateway continues to serve `search_tools`, `get_tool_schema`, `invoke_tool`, and `manage_tools`.
 

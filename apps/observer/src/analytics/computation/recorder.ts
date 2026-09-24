@@ -898,6 +898,7 @@ export class ComputationEvidenceRecorder {
       imports: kernel === undefined ? [] : Array.from(kernel.imports.values()),
       modules: Array.from(this.knownFiles(session).values()),
       ...(frame.path === undefined ? {} : { sourcePath: frame.path }),
+      ...(frame.sourceInterface === undefined ? {} : { sourceInterface: frame.sourceInterface }),
     };
   }
 

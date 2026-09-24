@@ -1518,6 +1518,37 @@ describe("Codex CLI Session Decoder", () => {
         { sessionId: "sess_native_shell" },
       );
 
+    const decodeNativeCodeModeExec = (
+      input: string,
+      output: CodexTranscriptValue,
+      callFields: CodexTranscriptPayload = {},
+      resultFields: CodexTranscriptPayload = {},
+    ) =>
+      decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: "call-native-codex-exec",
+              name: "exec",
+              input,
+              ...callFields,
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: "call-native-codex-exec",
+              output,
+              ...resultFields,
+            },
+          },
+        ],
+        { sessionId: "sess_native_codex_exec" },
+      );
+
     it.each([
       {
         name: "strips a representative exec formatter and reports its nonzero status",
@@ -1584,6 +1615,265 @@ describe("Codex CLI Session Decoder", () => {
       expect(toolResult.result).toEqual(result);
       expect(toolResult.isError).toBe(isError);
       expect(toolResult.metadata?.codexNative).toMatchObject({ outcome });
+    });
+
+    const authoredOne = { type: "input_text", text: "first authored item" };
+    const authoredTwo = { type: "input_text", text: "second authored item" };
+    it.each([
+      {
+        name: "strips exactly the validated completion header and preserves authored item boundaries",
+        output: [
+          {
+            type: "input_text",
+            text: "Script completed\nWall time 0.100 seconds (code-mode 0.080 seconds; overhead 0.020 seconds)\nOutput:\n",
+          },
+          authoredOne,
+          authoredTwo,
+          {
+            type: "input_text",
+            text: "Script completed\nWall time 0.1 seconds\nOutput:\n",
+          },
+        ],
+        fields: {},
+        result: [
+          authoredOne,
+          authoredTwo,
+          {
+            type: "input_text",
+            text: "Script completed\nWall time 0.1 seconds\nOutput:\n",
+          },
+        ],
+        outcome: "completed",
+        isError: false,
+      },
+      {
+        name: "treats a native failed header as failure",
+        output: [
+          { type: "input_text", text: "Script failed\nWall time 0.1 seconds\nOutput:\n" },
+          authoredOne,
+        ],
+        fields: {},
+        result: [authoredOne],
+        outcome: "failed",
+        isError: true,
+      },
+      {
+        name: "treats a native terminated header as failure",
+        output: [
+          { type: "input_text", text: "Script terminated\nWall time 0.1 seconds\nOutput:\n" },
+          authoredOne,
+        ],
+        fields: {},
+        result: [authoredOne],
+        outcome: "failed",
+        isError: true,
+      },
+      {
+        name: "does not complete an explicitly truncated exec result",
+        output: [
+          { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+          authoredOne,
+        ],
+        fields: { output_truncated: true },
+        result: [authoredOne],
+        outcome: "truncated",
+        isError: false,
+      },
+    ])("$name", ({ output, fields, result, outcome, isError }) => {
+      const events = decodeNativeCodeModeExec("{}", output, {}, fields);
+      const call = events.find((event) => event.type === "tool_call");
+      const toolResult = events.find((event) => event.type === "tool_result");
+      if (call?.type !== "tool_call" || toolResult?.type !== "tool_result") {
+        throw new Error("Expected native Code Mode exec call and result");
+      }
+      expect(call.parameters).toEqual({ raw: "{}" });
+      expect(call.metadata?.codexNative).toMatchObject({
+        type: "response_item",
+        itemType: "custom_tool_call",
+        sourceInterface: "codex-exec",
+      });
+      expect(toolResult.result).toEqual(result);
+      expect(toolResult.isError).toBe(isError);
+      expect(toolResult.metadata?.codexNative).toMatchObject({
+        outcome,
+        sourceInterface: "codex-exec",
+      });
+    });
+
+    it.each([
+      {
+        name: "withholds a running native exec response item",
+        output: [
+          {
+            type: "input_text",
+            text: "Script running with cell ID cell_123\nWall time 0.1 seconds\nOutput:\n",
+          },
+          authoredOne,
+        ],
+        fields: {},
+      },
+      {
+        name: "withholds an unclassified native exec output",
+        output: [authoredOne, authoredTwo],
+        fields: {},
+      },
+      {
+        name: "withholds a completion header contradicted by unknown status",
+        output: [
+          { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+          authoredOne,
+        ],
+        fields: { status: "unknown" },
+      },
+    ])("$name", ({ output, fields }) => {
+      const events = decodeNativeCodeModeExec("{}", output, {}, fields);
+      expect(events.some((event) => event.type === "tool_call")).toBe(true);
+      expect(events.some((event) => event.type === "tool_result")).toBe(false);
+    });
+
+    it("keeps intermediate exec outputs from consuming the later complete result", () => {
+      const intermediate = [
+        {
+          type: "input_text",
+          text: "Script running with cell ID cell_123\nWall time 0.1 seconds\nOutput:\n",
+        },
+        { type: "input_text", text: "intermediate notification" },
+      ];
+      const authored = [{ type: "input_text", text: "final authored result" }];
+      const events = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: "call-native-codex-exec",
+              name: "exec",
+              input: "{}",
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "custom_tool_call_output",
+                call_id: "call-native-codex-exec",
+                output: intermediate,
+              },
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: "call-native-codex-exec",
+              output: intermediate,
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: "call-native-codex-exec",
+              output: [
+                { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+                ...authored,
+              ],
+            },
+          },
+        ],
+        { sessionId: "sess_native_codex_exec_notifications" },
+      );
+      const results = events.filter((event) => event.type === "tool_result");
+      expect(results).toHaveLength(1);
+      expect(results[0]?.type === "tool_result" ? results[0].result : undefined).toEqual(authored);
+      expect(results[0]?.metadata?.codexNative).toMatchObject({
+        outcome: "completed",
+        sourceInterface: "codex-exec",
+      });
+    });
+
+    it("does not tag generic, shell, connected, or foreign-namespace exec calls as native Code Mode", () => {
+      const generic = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call",
+              call_id: "call-generic-exec",
+              name: "exec",
+              arguments: "{}",
+            },
+          },
+        ],
+        { sessionId: "sess_generic_exec" },
+      ).find((event) => event.type === "tool_call");
+      const foreign = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: "call-foreign-exec",
+              name: "exec",
+              namespace: "mcp__filesystem",
+              input: "{}",
+            },
+          },
+        ],
+        { sessionId: "sess_foreign_exec" },
+      ).find((event) => event.type === "tool_call");
+      const connected = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: "call-connected-exec",
+              name: "exec",
+              connection: "filesystem",
+              input: "{}",
+            },
+          },
+        ],
+        { sessionId: "sess_connected_exec" },
+      ).find((event) => event.type === "tool_call");
+      const shell = decodeCodexTranscript(
+        [{ type: "command_exec", command: "exec node -e 'text(42)'" }],
+        { sessionId: "sess_shell_exec" },
+      ).find((event) => event.type === "command_exec");
+      const mcp = decodeCodexTranscript(
+        [
+          {
+            type: "event_msg",
+            payload: {
+              type: "mcp_tool_call_begin",
+              call_id: "call-mcp-exec",
+              invocation: {
+                tool: "exec",
+                server: "filesystem",
+                arguments: { raw: "{}" },
+              },
+            },
+          },
+        ],
+        { sessionId: "sess_mcp_exec" },
+      ).find((event) => event.type === "tool_call");
+      expect(
+        (generic?.metadata?.codexNative as Record<string, unknown> | undefined)?.sourceInterface,
+      ).toBeUndefined();
+      expect(
+        (connected?.metadata?.codexNative as Record<string, unknown> | undefined)?.sourceInterface,
+      ).toBeUndefined();
+      expect(
+        (foreign?.metadata?.codexNative as Record<string, unknown> | undefined)?.sourceInterface,
+      ).toBeUndefined();
+      expect(
+        (shell?.metadata?.codexNative as Record<string, unknown> | undefined)?.sourceInterface,
+      ).toBeUndefined();
+      expect(
+        (mcp?.metadata?.codexNative as Record<string, unknown> | undefined)?.sourceInterface,
+      ).toBeUndefined();
     });
 
     it("represents a failed native task as an error and crash, not a successful end", () => {

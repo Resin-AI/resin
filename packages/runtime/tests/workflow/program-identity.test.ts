@@ -1,4 +1,9 @@
-import type { RecordedWorkflow, WorkflowJsonValue, WorkflowValueTemplate } from "@resin/contracts";
+import {
+  type RecordedWorkflow,
+  type WorkflowJsonValue,
+  type WorkflowValueTemplate,
+  tokenizeProgram,
+} from "@resin/contracts";
 import { expect, it } from "vitest";
 import {
   type CandidateValidationEnvironment,
@@ -25,11 +30,39 @@ function program(
   };
 }
 
-function workflow(template: WorkflowValueTemplate): RecordedWorkflow {
+function numericProgram(reference: string, source: string, binding: number): WorkflowValueTemplate {
+  const token = tokenizeProgram("javascript", source).findIndex((entry) => entry.kind === "number");
+  if (token < 0) throw new Error("test program has no numeric token");
+  return {
+    type: "program",
+    language: "javascript",
+    source: { type: "private", reference },
+    holes: [{ token, binding: { type: "literal", value: binding } }],
+  };
+}
+
+function projectedProgram(
+  reference: string,
+  holes: Array<{ token: number; binding: WorkflowValueTemplate }>,
+): WorkflowValueTemplate {
+  return {
+    type: "program",
+    language: "javascript",
+    source: { type: "literal", value: 'const secret = "REDACTED"; console.log("alpha");' },
+    sourceReference: reference,
+    protectedTokens: [1],
+    holes,
+  };
+}
+function workflow(
+  template: WorkflowValueTemplate,
+  privateReferences: string[] = [],
+): RecordedWorkflow {
   return {
     schemaVersion: 1,
     workflowId: "wf-program-identity",
     inputs: [],
+    privateReferences,
     steps: [
       {
         id: "run",
@@ -152,6 +185,65 @@ it("propagates malformed applied-hole positions instead of suppressing a proof",
       resolvePrivate: resolveSources({ "private-malformed": "printf failure" }),
     }),
   ).rejects.toThrow("no token 99");
+});
+
+it("bases projected identities on the locally resolved original source", async () => {
+  const first = await computeWorkflowProgramIdentities({
+    plan: workflow(projectedProgram("private-projected-a", [hole(4)]), ["private-projected-a"]),
+    workspaceId: "workspace-a",
+    resolvePrivate: resolveSources({
+      "private-projected-a": 'const secret = "original-secret-a"; console.log("alpha");',
+    }),
+  });
+  const second = await computeWorkflowProgramIdentities({
+    plan: workflow(projectedProgram("private-projected-b", [hole(4)]), ["private-projected-b"]),
+    workspaceId: "workspace-a",
+    resolvePrivate: resolveSources({
+      "private-projected-b": 'const secret = "original-secret-b"; console.log("alpha");',
+    }),
+  });
+  const missing = await computeWorkflowProgramIdentities({
+    plan: workflow(projectedProgram("private-projected-missing", [hole(4)]), [
+      "private-projected-missing",
+    ]),
+  });
+  const nonString = await computeWorkflowProgramIdentities({
+    plan: workflow(projectedProgram("private-projected-non-string", [hole(4)]), [
+      "private-projected-non-string",
+    ]),
+    resolvePrivate: () => ({ text: "not program text" }),
+  });
+
+  expect(first).toHaveLength(1);
+  expect(second).toHaveLength(1);
+  expect(first[0]!.sourceDigest).not.toBe(second[0]!.sourceDigest);
+  expect(missing).toEqual([]);
+  expect(nonString).toEqual([]);
+  expect(JSON.stringify([first, second])).not.toContain("original-secret");
+});
+
+it("normalizes numeric holes with type-compatible identity values", async () => {
+  const firstSource = 'const amount = 1; const label = "stable";';
+  const secondSource = 'const amount = 987; const label = "stable";';
+  const changedNonHoleSource = 'const amount = 987; const label = "changed";';
+
+  const first = await computeWorkflowProgramIdentities({
+    plan: workflow(numericProgram("private-numeric", firstSource, 1), ["private-numeric"]),
+    resolvePrivate: () => firstSource,
+  });
+  const second = await computeWorkflowProgramIdentities({
+    plan: workflow(numericProgram("private-numeric", secondSource, 987), ["private-numeric"]),
+    resolvePrivate: () => secondSource,
+  });
+  const changedNonHole = await computeWorkflowProgramIdentities({
+    plan: workflow(numericProgram("private-numeric", changedNonHoleSource, 987), [
+      "private-numeric",
+    ]),
+    resolvePrivate: () => changedNonHoleSource,
+  });
+
+  expect(first[0]!.sourceDigest).toBe(second[0]!.sourceDigest);
+  expect(second[0]!.sourceDigest).not.toBe(changedNonHole[0]!.sourceDigest);
 });
 
 function executablePlan(): RecordedWorkflow {

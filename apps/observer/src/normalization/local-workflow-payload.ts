@@ -1,4 +1,5 @@
 import type { NormalizedSessionEvent } from "@resin/contracts";
+import type { RedactedStringResult } from "./redaction.js";
 
 export type LocalWorkflowResultComparison = "text-trim";
 
@@ -16,6 +17,8 @@ interface RetainLocalWorkflowPayloadOptions {
   resultObservation?: LocalWorkflowResultObservation;
   /** Hide an untrusted native display result from local workflow derivation. */
   suppressResult?: boolean;
+  /** Trusted normalization redactor; retained only in memory beside the original payload. */
+  programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
 
 interface LocalWorkflowPayload {
@@ -23,6 +26,7 @@ interface LocalWorkflowPayload {
   result?: unknown;
   resultComparison?: LocalWorkflowResultComparison;
   resultSuppressed?: true;
+  programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
 
 /** Exact payloads stay beside an event in this process, never in serialized metadata or storage. */
@@ -41,10 +45,13 @@ export function retainLocalWorkflowPayload(
     options.resultObservation !== undefined &&
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
-  if (!hasOriginalField && !hasNativeResult && !suppressResult) return;
+  const hasProgramSourceRedactor =
+    event.type === "tool_call" && options.programSourceRedactor !== undefined;
+  if (!hasOriginalField && !hasNativeResult && !suppressResult && !hasProgramSourceRedactor) return;
 
   const payload: LocalWorkflowPayload = {};
   if (hasOriginalField) payload[field] = structuredClone(original[field]);
+  if (hasProgramSourceRedactor) payload.programSourceRedactor = options.programSourceRedactor;
   if (hasNativeResult) {
     payload.result = structuredClone(options.resultObservation!.result);
     if (options.resultObservation!.comparison !== undefined) {
@@ -65,6 +72,14 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
   if (field === undefined || !Object.hasOwn(payload, field)) return event;
   return { ...event, [field]: payload[field] } as T;
+}
+
+/** Source exposure requires the actual normalization engine, not an event's claimed metadata. */
+export function redactLocalWorkflowProgramSource(
+  event: NormalizedSessionEvent,
+  source: string,
+): RedactedStringResult | undefined {
+  return payloads.get(event)?.programSourceRedactor?.(source);
 }
 
 /** Reads the source-native result and its optional comparison mode without publishing either. */

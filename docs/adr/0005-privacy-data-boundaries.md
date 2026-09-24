@@ -15,7 +15,7 @@ We must define strict privacy invariants, data residency boundaries, redaction g
 
 ## Decision Drivers
 
-- **Zero Unintended Data Exfiltration**: Never send private source code, secrets, or raw conversation transcripts to cloud systems by default.
+- **Zero Unintended Data Exfiltration**: Keep original private source, secrets, and raw conversation transcripts local; only allowlisted, locally sanitized evidence may cross the cloud boundary.
 - **Local Source of Truth**: All operational state, full transcripts, and debug traces remain resident on the developer's local machine.
 - **Synthesis Utility**: Provide enough structural, semantic, and telemetry context to cloud or local evolution engines to enable high-quality tool synthesis.
 - **Cryptographic Auditability**: Provide verifiable cryptographic proofs of what data was captured, redacted, and synced.
@@ -31,7 +31,7 @@ We must define strict privacy invariants, data residency boundaries, redaction g
    - *Cons*: Requires heavy local LLMs capable of code synthesis running on every developer machine; prevents team-wide tool sharing and collective optimization.
 
 3. **Option 3: Local Source of Truth with Sanitized Observation Sync and Strict No-Raw-Upload Boundary (Selected)**
-   - *Pros*: Raw transcripts and proprietary code never leave the local machine; deterministic local redaction pipeline strips secrets and PII; sanitized observations (latency, tool sequence DAGs, error codes, AST shapes) provide rich signal for cloud synthesis; raw upload is architecturally impossible and strictly prohibited.
+   - *Pros*: Raw transcripts and original private source remain local; deterministic local redaction strips secrets and PII. Sanitized observations include execution structure, metrics, and explicitly allowed redacted recorded-program views without exposing local private store entries.
    - *Cons*: Requires maintaining a robust local redaction and anonymization pipeline.
 
 ## Decision
@@ -49,11 +49,12 @@ Before any observation is queued for cloud synchronization, it passes through a 
 1. **Secret & Credential Scrubbing**: High-entropy token detection, regex filters for API keys (AWS, OpenAI, GitHub, SSH private keys, JWTs).
 2. **Path & Identifier Anonymization**: Absolute file paths are normalized to relative workspace root tokens (`<WORKSPACE_ROOT>/src/...`); user home directories (`/home/username/`) are scrubbed.
 3. **Payload Abstraction**: Tool input and output values are replaced with structural schema descriptors, byte counts, and execution metrics unless explicitly whitelisted as structural metadata.
+   Recorded JavaScript, TypeScript, and Python source views are an explicit exception to value-free abstraction: they retain non-secret code and literals after the configured engine's scanning and canonical token alignment. Paired `sourceReference` and `protectedTokens` retain local original authority and prohibit binding redaction-sensitive tokens. Shell, truncated, unparseable, or unalignable source is not projected.
 4. **Error Signature Extraction**: Stack traces are stripped of local user names and private string literals, preserving only canonical error codes, exception types, and public module frames.
 
 ### 3. Strict Invariant: Zero Raw Data Upload (No-Raw-Upload V1 Policy)
 
-- **Hard Boundary**: **Zero lines of raw source code, zero raw prompts, and zero raw conversation turns** are ever uploaded to cloud services.
+- **Hard Boundary**: Raw prompts, raw conversation turns, original private program source, and private store entries are not uploaded. Engine-redacted recorded-program views may be transmitted as sanitized evidence, including their non-secret code and literal values.
 - **No Raw Upload Path**: There is no configuration flag, opt-in toggle (`sync.upload_raw_traces`), remote directive, or alternative upload mode that permits raw transcript or source file exfiltration. All cloud sync is strictly limited to validated, branded, sanitized observation DTOs.
 
 ### 4. Cryptographic Audit Trail
@@ -103,7 +104,7 @@ Before any observation is queued for cloud synchronization, it passes through a 
 - Cloud synthesis still receives rich telemetry (latency profiles, repetitive tool chains, abstract AST patterns) to drive autonomous tool evolution.
 
 ### Negative / Trade-offs
-- Cloud synthesis models cannot inspect proprietary business logic or raw transcripts directly, operating strictly on sanitized observation signals (AST structures, error codes, latency, tool execution graphs) and occasionally requiring iterative synthesis attempts.
+- Cloud synthesis receives sanitized observations and redacted recorded-program views, not raw transcripts or original private store values. The source view intentionally discloses non-secret program logic and literals; local replay still requires the original and rejects unavailable or invalid projections.
 
 ### Mitigations
 - Use local synthetic mock generators to reproduce execution patterns without needing raw proprietary inputs.

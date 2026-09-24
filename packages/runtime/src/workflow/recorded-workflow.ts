@@ -8,8 +8,14 @@
  * change here.
  */
 
-import { applyProgramTokenValues, tokenizeProgram } from "@resin/contracts";
+import {
+  analyzeProgramSourceProjection,
+  applyProgramTokenValues,
+  tokenizeProgram,
+  validateWorkflowProgramProjection,
+} from "@resin/contracts";
 import type {
+  ProgramToken,
   RecordedWorkflow,
   WorkflowJsonValue,
   WorkflowStep,
@@ -102,6 +108,25 @@ export class WorkflowBindingError extends Error {
   }
 }
 
+function matchesWorkflowInputType(
+  value: unknown,
+  type: RecordedWorkflow["inputs"][number]["type"],
+): value is WorkflowJsonValue {
+  if (type === "string") return typeof value === "string";
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  if (type === "boolean") return typeof value === "boolean";
+  if (type === "object")
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (type === "array") return Array.isArray(value);
+  return false;
+}
+
+function copyWorkflowJsonValue(value: WorkflowJsonValue): WorkflowJsonValue {
+  return value !== null && typeof value === "object"
+    ? (JSON.parse(JSON.stringify(value)) as WorkflowJsonValue)
+    : value;
+}
+
 function readPath(
   value: WorkflowJsonValue,
   path: WorkflowValuePath,
@@ -120,6 +145,30 @@ function readPath(
   return current;
 }
 
+/** Validate projection metadata before trusting it to select the executable source. */
+function projectedProgramSource(
+  template: Extract<WorkflowValueTemplate, { type: "program" }>,
+  stepId: string,
+  argumentName: string,
+): string | undefined {
+  const hasReference = Object.prototype.hasOwnProperty.call(template, "sourceReference");
+  const hasProtectedTokens = Object.prototype.hasOwnProperty.call(template, "protectedTokens");
+  if (!hasReference && !hasProtectedTokens) return undefined;
+  const errors: string[] = [];
+  validateWorkflowProgramProjection(template, `${stepId}.${argumentName}`, errors);
+  if (errors.length > 0) {
+    throw new WorkflowBindingError(errors.join("; "), stepId, argumentName);
+  }
+  if (typeof template.sourceReference !== "string") {
+    throw new WorkflowBindingError(
+      "the projected program source reference is malformed",
+      stepId,
+      argumentName,
+    );
+  }
+  return template.sourceReference;
+}
+
 /** Builds a recursively constructed argument: every leaf keeps its own source. */
 async function buildTemplate(
   template: WorkflowValueTemplate,
@@ -127,14 +176,15 @@ async function buildTemplate(
   argumentName: string,
   options: RecordedWorkflowExecutionOptions,
   results: Map<string, WorkflowJsonValue>,
+  declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowJsonValue> {
   const resolveLeaf = async (leaf: WorkflowValueTemplate): Promise<WorkflowJsonValue> =>
-    buildTemplate(leaf, step, argumentName, options, results);
+    buildTemplate(leaf, step, argumentName, options, results, declaredPrivateReferences);
   switch (template.type) {
     case "literal":
       return template.value;
     case "input": {
-      if (!(template.name in options.inputs)) {
+      if (!Object.hasOwn(options.inputs, template.name)) {
         throw new WorkflowBindingError(
           `input '${template.name}' was not supplied`,
           step.id,
@@ -190,30 +240,85 @@ async function buildTemplate(
       return built;
     }
     case "program": {
-      // A program is executed as the text it was recorded as, with each confirmed binding rendered
-      // back into the exact token it replaced: quoting is the recorded token's, and a value that
-      // would otherwise read as syntax is quoted so it stays data. Every other byte is untouched.
-      const text = await resolveLeaf(template.source);
-      if (typeof text !== "string") {
+      // A projected literal is only a bounded, secret-redacted view. Its whole original is the
+      // execution authority and must resolve locally before tokenization or binding substitution.
+      const projection = projectedProgramSource(template, step.id, argumentName);
+      if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
         throw new WorkflowBindingError(
-          "the recorded program did not resolve to program text",
+          "the projected program source reference is not declared by the workflow",
           step.id,
           argumentName,
         );
       }
-      const values = new Map<number, string>();
+      let text: string;
+      if (projection !== undefined) {
+        if (!options.resolvePrivate) {
+          throw new WorkflowBindingError(
+            "the original program source reference cannot be resolved in this environment",
+            step.id,
+            argumentName,
+          );
+        }
+        const original = await options.resolvePrivate(projection, options.access);
+        if (typeof original !== "string") {
+          throw new WorkflowBindingError(
+            "the original program source reference did not resolve to program text",
+            step.id,
+            argumentName,
+          );
+        }
+        text = original;
+      } else {
+        const sourceText = await resolveLeaf(template.source);
+        if (typeof sourceText !== "string") {
+          throw new WorkflowBindingError(
+            "the recorded program did not resolve to program text",
+            step.id,
+            argumentName,
+          );
+        }
+        text = sourceText;
+      }
+      let tokens: ProgramToken[] | undefined;
+      if (projection !== undefined) {
+        const sanitizedSource = template.source;
+        if (
+          sanitizedSource.type !== "literal" ||
+          typeof sanitizedSource.value !== "string" ||
+          template.protectedTokens === undefined
+        ) {
+          throw new WorkflowBindingError(
+            "the projected program metadata is malformed",
+            step.id,
+            argumentName,
+          );
+        }
+        tokens = analyzeProgramSourceProjection(
+          template.language,
+          text,
+          sanitizedSource.value,
+          template.protectedTokens,
+        ).tokens;
+      }
+      const values = new Map<number, string | number | boolean | null>();
       for (const hole of template.holes) {
         const bound = await resolveLeaf(hole.binding);
         values.set(
           hole.token,
-          typeof bound === "string"
+          typeof bound === "string" ||
+            typeof bound === "number" ||
+            typeof bound === "boolean" ||
+            bound === null
             ? bound
-            : typeof bound === "number" || typeof bound === "boolean"
-              ? String(bound)
-              : JSON.stringify(bound),
+            : JSON.stringify(bound),
         );
       }
-      return applyProgramTokenValues(text, tokenizeProgram(template.language, text), values);
+      return applyProgramTokenValues(
+        text,
+        tokens ?? tokenizeProgram(template.language, text),
+        values,
+        template.language,
+      );
     }
     default: {
       const exhaustive: never = template;
@@ -232,12 +337,13 @@ async function resolveArgument(
   source: WorkflowStep["arguments"][number]["source"],
   options: RecordedWorkflowExecutionOptions,
   results: Map<string, WorkflowJsonValue>,
+  declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowJsonValue> {
   switch (source.kind) {
     case "literal":
       return source.value;
     case "input": {
-      if (!(source.name in options.inputs)) {
+      if (!Object.hasOwn(options.inputs, source.name)) {
         throw new WorkflowBindingError(
           `input '${source.name}' was not supplied`,
           step.id,
@@ -281,7 +387,14 @@ async function resolveArgument(
         argumentName,
       );
     case "template":
-      return await buildTemplate(source.template, step, argumentName, options, results);
+      return await buildTemplate(
+        source.template,
+        step,
+        argumentName,
+        options,
+        results,
+        declaredPrivateReferences,
+      );
     default: {
       const exhaustive: never = source;
       throw new WorkflowBindingError(
@@ -302,9 +415,36 @@ export async function executeRecordedWorkflow(
   workflow: RecordedWorkflow,
   options: RecordedWorkflowExecutionOptions,
 ): Promise<RecordedWorkflowExecution> {
+  const suppliedNames = new Set(Object.keys(options.inputs));
+  const declaredNames = new Set(workflow.inputs.map((input) => input.name));
+  for (const name of suppliedNames) {
+    if (!declaredNames.has(name)) throw new TypeError(`unknown workflow input '${name}'`);
+  }
+
+  const inputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  for (const input of workflow.inputs) {
+    if (Object.hasOwn(options.inputs, input.name)) {
+      const value = options.inputs[input.name];
+      if (!matchesWorkflowInputType(value, input.type)) {
+        throw new TypeError(`workflow input '${input.name}' must be a ${input.type}`);
+      }
+      inputs[input.name] = value;
+    } else if (Object.hasOwn(input, "default")) {
+      if (!matchesWorkflowInputType(input.default, input.type)) {
+        throw new TypeError(
+          `workflow input '${input.name}' has a default incompatible with ${input.type}`,
+        );
+      }
+      inputs[input.name] = copyWorkflowJsonValue(input.default);
+    } else {
+      throw new TypeError(`missing required workflow input '${input.name}'`);
+    }
+  }
+  const executionOptions = { ...options, inputs };
   const outcomes: RecordedStepOutcome[] = [];
   const results = new Map<string, WorkflowJsonValue>();
   const state = new Map<string, "completed" | "failed" | "skipped">();
+  const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
   let aborted = false;
 
   for (const step of workflow.steps) {
@@ -324,10 +464,10 @@ export async function executeRecordedWorkflow(
       continue;
     }
 
-    const adapter = options.adapters.resolve(step);
+    const adapter = executionOptions.adapters.resolve(step);
     if (!adapter) {
       const reason = `no adapter for runtime '${step.callable.runtime}'`;
-      options.onUnavailable?.(step, reason);
+      executionOptions.onUnavailable?.(step, reason);
       state.set(step.id, "failed");
       outcomes.push({ stepId: step.id, status: "failed", error: reason });
       if (step.failurePolicy.onError === "abort") aborted = true;
@@ -342,8 +482,9 @@ export async function executeRecordedWorkflow(
           step,
           argument.name,
           argument.source,
-          options,
+          executionOptions,
           results,
+          declaredPrivateReferences,
         );
       }
     } catch (error) {
@@ -382,7 +523,7 @@ export async function executeRecordedWorkflow(
   };
 }
 
-/** The input schema of a recorded workflow: every declared input is required. */
+/** The input schema of a recorded workflow, with defaults optional and other inputs required. */
 export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<string, unknown> {
   const JSON_SCHEMA_TYPES: Record<string, string> = {
     string: "string",
@@ -396,12 +537,15 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
     properties[input.name] = {
       type: JSON_SCHEMA_TYPES[input.type] ?? "string",
       ...(input.description ? { description: input.description } : {}),
+      ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
     };
   }
   return {
     type: "object",
     properties,
-    required: workflow.inputs.map((input) => input.name),
+    required: workflow.inputs
+      .filter((input) => !Object.hasOwn(input, "default"))
+      .map((input) => input.name),
     additionalProperties: false,
   };
 }

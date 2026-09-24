@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { hashCanonicalContent } from "@resin/contracts/canonical";
 import {
   ISOTimestampSchema,
   IdentifierSchema,
   SchemaVersionSchema,
   Sha256DigestSchema,
-  hashCanonicalContent,
   normalizeSha256,
-} from "@resin/contracts";
+} from "@resin/contracts/common";
 import { z } from "zod";
 import {
   ChecksumMismatchError,

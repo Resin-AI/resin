@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   CausalRef,
   DiscoveredToolEntry,
@@ -406,6 +406,125 @@ function parseNativeShellOutput(
   };
 }
 
+interface NativeCodeModeExecOutput {
+  result: CodexTranscriptValue;
+  outcome: NativeOutcome;
+}
+
+const CODE_MODE_EXEC_HEADER =
+  /^Script (completed|failed|terminated|running with cell ID [^\r\n]+)\r?\nWall time \d+(?:\.\d+)? seconds(?: \(code-mode \d+\.\d{3} seconds; overhead -?\d+\.\d{3} seconds\))?\r?\nOutput:\r?\n$/;
+const CODE_MODE_OUTPUT_TRUNCATION_MARKER = /\.\.\. \[TRUNCATED \d+ chars\]/;
+
+function hasNativeTruncationFlag(value: CodexTranscriptPayload | undefined): boolean {
+  return (
+    value?.truncated === true ||
+    value?.is_truncated === true ||
+    value?.isTruncated === true ||
+    value?.output_truncated === true ||
+    value?.outputTruncated === true
+  );
+}
+
+/**
+ * Code Mode adds exactly one first content item at the transport boundary. Its wording and optional
+ * host-timing suffix come from the native exec output formatter; the authored items that follow are
+ * kept as-is, including their order and boundaries.
+ */
+function parseNativeCodeModeExecOutput(
+  rawOutput: CodexTranscriptValue | undefined,
+  rawRecord: CodexTranscriptPayload,
+): NativeCodeModeExecOutput {
+  const items = asArray(rawOutput);
+  const first = asObject(items?.[0]);
+  const header =
+    first !== undefined &&
+    Object.keys(first).length === 2 &&
+    first.type === "input_text" &&
+    typeof first.text === "string"
+      ? first.text.match(CODE_MODE_EXEC_HEADER)
+      : null;
+  const body = header === null ? undefined : items!.slice(1);
+  const recordMetadata = asObject(rawRecord.metadata);
+  const outputMetadata = asObject(asObject(rawOutput)?.metadata);
+  const status = (
+    asString(rawRecord.status) ??
+    asString(rawRecord.state) ??
+    asString(recordMetadata?.status) ??
+    asString(recordMetadata?.state) ??
+    asString(outputMetadata?.status) ??
+    asString(outputMetadata?.state) ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  const truncated =
+    hasNativeTruncationFlag(rawRecord) ||
+    hasNativeTruncationFlag(recordMetadata) ||
+    hasNativeTruncationFlag(outputMetadata) ||
+    (items ?? []).some((item) => {
+      const content = asObject(item);
+      const metadata = asObject(content?.metadata);
+      return (
+        hasNativeTruncationFlag(content) ||
+        hasNativeTruncationFlag(metadata) ||
+        (asString(content?.text) !== undefined &&
+          CODE_MODE_OUTPUT_TRUNCATION_MARKER.test(asString(content?.text)!))
+      );
+    });
+  const failed =
+    rawRecord.is_error === true ||
+    rawRecord.isError === true ||
+    rawRecord.success === false ||
+    (rawRecord.error !== undefined && rawRecord.error !== null) ||
+    status === "failed" ||
+    status === "error" ||
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "terminated";
+  const running =
+    status === "running" ||
+    status === "in_progress" ||
+    status === "in-progress" ||
+    status === "pending";
+  const explicitlyUnknown =
+    rawRecord.completed === false ||
+    recordMetadata?.completed === false ||
+    status === "unknown" ||
+    status === "uncertain" ||
+    (status !== "" &&
+      status !== "completed" &&
+      status !== "complete" &&
+      status !== "success" &&
+      status !== "succeeded" &&
+      status !== "truncated" &&
+      status !== "incomplete" &&
+      status !== "partial" &&
+      !failed &&
+      !running);
+
+  let outcome: NativeOutcome = "unknown";
+  if (truncated || status === "truncated" || status === "incomplete" || status === "partial") {
+    outcome = "truncated";
+  } else if (failed) {
+    outcome = "failed";
+  } else if (running) {
+    outcome = "running";
+  } else if (!explicitlyUnknown && header !== null) {
+    const headerStatus = header[1];
+    outcome =
+      headerStatus === "completed"
+        ? "completed"
+        : headerStatus === "failed" || headerStatus === "terminated"
+          ? "failed"
+          : "running";
+  }
+
+  return {
+    result: body ?? rawOutput ?? null,
+    outcome,
+  };
+}
+
 function parseWallTimeMs(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const numeric = Number(value.replace(/(?: seconds?|s)$/i, ""));
@@ -421,14 +540,46 @@ function isNativeTerminalTool(toolName: string): boolean {
   );
 }
 
-function stableNativeItemKey(item: CodexTranscriptPayload): string {
+function stableNativeItemKey(
+  item: CodexTranscriptPayload,
+  source?: "response_item" | "item_completed",
+): string {
   const itemType = asString(item.type) ?? "unknown";
   const callId = asString(item.call_id) ?? asString(item.callId);
   const itemId = asString(item.id);
+  if (itemType === "custom_tool_call_output" && source !== undefined) {
+    // Progress and final output can reuse a call id. Retain only a compact payload fingerprint.
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(item) ?? "")
+      .digest("hex");
+    return `${itemType}:${source}:${itemId ?? ""}:${callId ?? ""}:${fingerprint}`;
+  }
   if (callId || itemId) {
     return `${itemType}:${itemId ?? ""}:${callId ?? ""}`;
   }
   return `${itemType}:${JSON.stringify(item)}`;
+}
+
+function withoutUntrustedCodexExecSourceInterface(
+  metadata: CodexTranscriptPayload,
+): CodexTranscriptPayload {
+  const native = asObject(metadata.codexNative);
+  if (!native || !Object.hasOwn(native, "sourceInterface")) return metadata;
+  const cleanedNative = { ...native };
+  delete cleanedNative.sourceInterface;
+  return { ...metadata, codexNative: cleanedNative };
+}
+
+function hasNoNativeConnectionOrForeignNamespace(
+  record: CodexTranscriptPayload,
+  native: CodexTranscriptPayload | undefined,
+): boolean {
+  const connection = native?.connection ?? record.connection ?? record.server;
+  const namespace = native?.namespace ?? record.namespace;
+  return (
+    (connection === undefined || connection === null) &&
+    (namespace === undefined || namespace === null || namespace === "default")
+  );
 }
 
 function sumUsageRecords(records: readonly CodexTranscriptPayload[]): CodexTranscriptPayload {
@@ -836,6 +987,7 @@ export class CodexSessionDecoder {
       connection?: string;
       metadata?: CodexTranscriptPayload;
       callEvent?: NormalizedToolCallEvent;
+      deferredProviderUsage?: ProviderReportedUsage;
     }
   >();
   private hasEmittedTurnUsage = false;
@@ -1001,8 +1153,12 @@ export class CodexSessionDecoder {
     state.cumulativeUsage = undefined;
   }
 
-  private rememberNativeItem(item: CodexTranscriptPayload, threadId?: string): boolean {
-    const key = `${threadId ?? ""}:${stableNativeItemKey(item)}`;
+  private rememberNativeItem(
+    item: CodexTranscriptPayload,
+    threadId?: string,
+    source?: "response_item" | "item_completed",
+  ): boolean {
+    const key = `${threadId ?? ""}:${stableNativeItemKey(item, source)}`;
     if (this.seenNativeItems.has(key)) return false;
     if (this.seenNativeItems.size >= 4096) {
       const oldest = this.seenNativeItemOrder.shift();
@@ -1070,7 +1226,8 @@ export class CodexSessionDecoder {
       ...(asObject(payload.metadata) ?? {}),
       ...(asObject(envelope.metadata) ?? {}),
     };
-    const priorNative = asObject(asObject(envelope.metadata)?.codexNative) ?? {};
+    const priorNative = { ...(asObject(asObject(envelope.metadata)?.codexNative) ?? {}) };
+    delete priorNative.sourceInterface;
     const currentThreadId =
       asString(payload.thread_id) ??
       asString(payload.threadId) ??
@@ -1200,11 +1357,38 @@ export class CodexSessionDecoder {
     item: CodexTranscriptPayload,
     timestamp?: string,
     metadata = this.currentMetadata,
+    source: "response_item" | "item_completed" = "response_item",
   ): NormalizedSessionEvent[] {
     const threadId =
       asString(asObject(metadata?.codexNative)?.threadId) ?? this.currentNativeThreadId;
-    if (!this.rememberNativeItem(item, threadId)) return [];
     const itemType = asString(item.type)?.toLowerCase();
+    const outputCallId = asString(item.call_id) ?? asString(item.callId);
+    const outputCall =
+      itemType === "custom_tool_call_output" && outputCallId !== undefined
+        ? this.callMap.get(this.nativeCallMapKey(outputCallId, metadata))
+        : undefined;
+    const outputCallNative = asObject(
+      outputCall?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
+    );
+    const outputSource =
+      outputCall?.toolName === "exec" &&
+      outputCallNative?.type === "response_item" &&
+      outputCallNative?.itemType === "custom_tool_call" &&
+      outputCallNative?.sourceInterface === "codex-exec"
+        ? source
+        : undefined;
+    if (
+      source === "item_completed" &&
+      itemType === "custom_tool_call_output" &&
+      outputCall?.toolName === "exec" &&
+      outputCallNative?.type === "response_item" &&
+      outputCallNative?.itemType === "custom_tool_call" &&
+      outputCallNative?.sourceInterface === "codex-exec"
+    ) {
+      // Item-completed notifications can be partial. Only the later response_item is authoritative.
+      return [];
+    }
+    if (!this.rememberNativeItem(item, threadId, outputSource)) return [];
     const itemRole =
       itemType === "usermessage" || itemType === "user_message"
         ? "user"
@@ -1240,7 +1424,11 @@ export class CodexSessionDecoder {
       itemType === "agentmessage" ||
       itemType === "user_message" ||
       itemType === "agent_message";
-    const itemMetadata = asObject(item.metadata);
+    const suppliedItemMetadata = asObject(item.metadata);
+    const itemMetadata =
+      suppliedItemMetadata === undefined
+        ? undefined
+        : withoutUntrustedCodexExecSourceInterface(suppliedItemMetadata);
     const combinedMetadata =
       itemMetadata || metadata
         ? {
@@ -1275,7 +1463,7 @@ export class CodexSessionDecoder {
       };
       this.currentMetadata = normalizedItem.metadata;
     }
-    return this.normalizePayload(normalizedItem);
+    return this.normalizePayload(normalizedItem, source === "response_item");
   }
 
   private nativeLifecycle(
@@ -1559,7 +1747,7 @@ export class CodexSessionDecoder {
         },
       };
       this.currentMetadata = itemMetadata;
-      return this.normalizeNativeItem(payload, timestamp, itemMetadata);
+      return this.normalizeNativeItem(payload, timestamp, itemMetadata, "response_item");
     }
     if (wrapperType !== "event_msg") {
       return this.normalizePayload({
@@ -1595,7 +1783,7 @@ export class CodexSessionDecoder {
         },
       };
       this.currentMetadata = itemMetadata;
-      return this.normalizeNativeItem(item, timestamp, itemMetadata);
+      return this.normalizeNativeItem(item, timestamp, itemMetadata, "item_completed");
     }
     if (eventType === "token_count") {
       const state = this.nativeUsageState(this.currentNativeThreadId);
@@ -1636,7 +1824,10 @@ export class CodexSessionDecoder {
     });
   }
 
-  private normalizePayload(p: CodexTranscriptPayload): NormalizedSessionEvent[] {
+  private normalizePayload(
+    p: CodexTranscriptPayload,
+    nativeResponseItem = false,
+  ): NormalizedSessionEvent[] {
     const envelopeType = asString(p.type)?.toLowerCase();
     const envelopePayload = asObject(p.payload);
     if (
@@ -1655,7 +1846,7 @@ export class CodexSessionDecoder {
 
     const metaObj = asObject(p.metadata);
     if (metaObj) {
-      this.currentMetadata = metaObj;
+      this.currentMetadata = withoutUntrustedCodexExecSourceInterface(metaObj);
     }
 
     const rawSessionId = asString(p.sessionId) ?? asString(p.session_id);
@@ -2082,6 +2273,16 @@ export class CodexSessionDecoder {
           "unknown_tool",
       );
       const codexNative = asObject(asObject(p.metadata)?.codexNative);
+      const rawExecSource =
+        nativeResponseItem &&
+        rawType === "custom_tool_call" &&
+        toolName === "exec" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "custom_tool_call" &&
+        asString(p.input) !== undefined &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative)
+          ? asString(p.input)
+          : undefined;
       const nativeCallId = asString(p.callId) ?? asString(p.call_id) ?? asString(p.tool_call_id);
       if (codexNative && !nativeCallId) {
         events.push({
@@ -2099,18 +2300,20 @@ export class CodexSessionDecoder {
         return events;
       }
       const rawArgs = fnObj.arguments ?? fnObj.params ?? p.input ?? p.args ?? {};
-      const parameters = parseToolParameters(rawArgs);
+      const parameters =
+        rawExecSource === undefined ? parseToolParameters(rawArgs) : { raw: rawExecSource };
       const connection = asString(p.connection) ?? asString(p.server);
       const nativeFields: CodexTranscriptPayload = {
         ...(connection ? { connection } : {}),
         ...(asString(p.namespace) ? { namespace: asString(p.namespace) } : {}),
       };
       const header = this.emitHeader("tool_call", timestamp, rawEventId);
-      if (codexNative && Object.keys(nativeFields).length > 0) {
+      if (codexNative && (Object.keys(nativeFields).length > 0 || rawExecSource !== undefined)) {
         const metadata = { ...(header.metadata ?? {}) };
         metadata.codexNative = {
           ...(asObject(metadata.codexNative) ?? {}),
           ...nativeFields,
+          ...(rawExecSource === undefined ? {} : { sourceInterface: "codex-exec" }),
         };
         header.metadata = metadata;
       }
@@ -2152,7 +2355,6 @@ export class CodexSessionDecoder {
       let resUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
         resUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (resUsage) this.hasEmittedTurnUsage = true;
       } else if (cumUsageRec) {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
@@ -2170,7 +2372,8 @@ export class CodexSessionDecoder {
       }
       const callId = nativeCallId ?? asString(p.id) ?? generateEventId("call");
       const callKey = this.nativeCallMapKey(callId, asObject(p.metadata));
-      const cached = this.callMap.get(callKey) ?? this.callMap.get(callId);
+      const exactCached = this.callMap.get(callKey);
+      const cached = exactCached ?? this.callMap.get(callId);
       const toolName = String(
         asString(p.toolName) ??
           asString(p.tool_name) ??
@@ -2179,6 +2382,26 @@ export class CodexSessionDecoder {
           "unknown_tool",
       );
       const rawResult = p.result ?? p.output ?? p.content ?? p.data ?? p.response;
+      const pairedNativeExec = asObject(
+        exactCached?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
+      );
+      const pairedNativeExecCall =
+        exactCached?.toolName === "exec" &&
+        exactCached.connection === undefined &&
+        pairedNativeExec?.type === "response_item" &&
+        pairedNativeExec?.itemType === "custom_tool_call" &&
+        pairedNativeExec?.sourceInterface === "codex-exec" &&
+        hasNoNativeConnectionOrForeignNamespace({}, pairedNativeExec);
+      const nativeCodeModeExecResult =
+        nativeResponseItem &&
+        rawType === "custom_tool_call_output" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "custom_tool_call_output" &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative) &&
+        pairedNativeExecCall;
+      const nativeCodeModeOutput = nativeCodeModeExecResult
+        ? parseNativeCodeModeExecOutput(rawResult, p)
+        : undefined;
       const terminalOutput =
         codexNative && isNativeTerminalTool(toolName)
           ? parseNativeShellOutput(rawResult, p)
@@ -2199,7 +2422,7 @@ export class CodexSessionDecoder {
           outputObject?.is_error === true ||
           outputObject?.isError === true ||
           outputObject?.success === false ||
-          (outputObject?.error !== undefined && outputObject.error !== null) ||
+          nativeCodeModeOutput?.outcome === "failed" ||
           terminalOutput?.outcome === "failed" ||
           (terminalOutput?.exitCode !== undefined && terminalOutput.exitCode !== 0) ||
           status === "failed" ||
@@ -2209,21 +2432,40 @@ export class CodexSessionDecoder {
       );
       const outcome: NativeOutcome = isError
         ? "failed"
-        : (terminalOutput?.outcome ??
-          (status === "running" || status === "in_progress" || status === "pending"
-            ? "running"
-            : status === "truncated" || status === "incomplete" || status === "partial"
-              ? "truncated"
-              : status === "unknown" || status === "uncertain"
-                ? "unknown"
-                : codexNative && (rawResult === undefined || rawResult === null)
-                  ? "unknown"
-                  : "completed"));
-      const resultMetadata = codexNative
+        : (nativeCodeModeOutput?.outcome ??
+          (pairedNativeExecCall
+            ? "unknown"
+            : (terminalOutput?.outcome ??
+              (status === "running" || status === "in_progress" || status === "pending"
+                ? "running"
+                : status === "truncated" || status === "incomplete" || status === "partial"
+                  ? "truncated"
+                  : status === "unknown" || status === "uncertain"
+                    ? "unknown"
+                    : codexNative && (rawResult === undefined || rawResult === null)
+                      ? "unknown"
+                      : "completed"))));
+      if (nativeCodeModeExecResult && (outcome === "running" || outcome === "unknown")) {
+        // Keep the call pending for a later terminal response_item instead of consuming it here.
+        if (resUsage !== undefined && exactCached !== undefined) {
+          exactCached.deferredProviderUsage = resUsage;
+        }
+        return events;
+      }
+      let resultMetadata = codexNative
         ? this.nativeMetadataWithOutcome(outcome, {
             ...(cached?.connection ? { connection: cached.connection } : {}),
           })
         : this.currentMetadata;
+      if (nativeCodeModeExecResult && resultMetadata) {
+        resultMetadata = {
+          ...resultMetadata,
+          codexNative: {
+            ...(asObject(resultMetadata.codexNative) ?? {}),
+            sourceInterface: "codex-exec",
+          },
+        };
+      }
       const durationMs =
         terminalOutput?.durationMs ??
         asNumber(p.executionDurationMs) ??
@@ -2231,17 +2473,20 @@ export class CodexSessionDecoder {
         asNumber(p.duration_ms) ??
         0;
 
+      const providerUsage = resUsage ?? exactCached?.deferredProviderUsage;
+      if (providerUsage !== undefined) this.hasEmittedTurnUsage = true;
+      if (exactCached !== undefined) delete exactCached.deferredProviderUsage;
       const header = this.emitHeader("tool_result", timestamp, rawEventId, resultMetadata);
       events.push({
         ...header,
         type: "tool_result",
         callId,
         toolName,
-        result: terminalOutput?.result ?? rawResult ?? {},
+        result: nativeCodeModeOutput?.result ?? terminalOutput?.result ?? rawResult ?? {},
         isError,
         executionDurationMs: durationMs,
         isShadow: false,
-        providerUsage: resUsage,
+        providerUsage,
       });
       return events;
     }
