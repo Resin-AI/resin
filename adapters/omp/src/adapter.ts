@@ -1,3 +1,6 @@
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
+
 import {
   type AdapterCapabilities,
   CANONICAL_RESIN_MCP_ARGS,
@@ -25,9 +28,11 @@ import {
 import {
   type OmpDiscoveryCatalog,
   type OmpDiscoveryOptions,
+  type ParsedTranscript,
   buildOmpDiscoveryCatalog,
   discoverOmpSessions,
   discoverOmpWorkspaces,
+  inspectTranscriptFile,
   probeOmpInstallation,
 } from "./discovery.js";
 import { getOmpRefreshCapability, handleOmpCatalogRefresh } from "./refresh.js";
@@ -51,6 +56,64 @@ export interface OmpHarnessAdapterOptions {
   onInspectTranscript?: (filePath: string) => void;
 }
 
+interface TranscriptFileIdentity {
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  dev: number;
+  ino: number;
+}
+
+interface TranscriptInspectionCacheEntry {
+  identity: TranscriptFileIdentity;
+  transcript: ParsedTranscript;
+}
+
+// Matches inspectTranscriptFile's stale-to-idle threshold.
+const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
+
+async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile() || stat.size === 0) return null;
+    return {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs || stat.mtime.getTime(),
+      ctimeMs: stat.ctimeMs || stat.ctime.getTime(),
+      dev: stat.dev,
+      ino: stat.ino,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameTranscriptIdentity(
+  left: TranscriptFileIdentity,
+  right: TranscriptFileIdentity,
+): boolean {
+  return (
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.dev === right.dev &&
+    left.ino === right.ino
+  );
+}
+
+async function refreshCachedCanonicalPaths(
+  transcript: ParsedTranscript,
+): Promise<ParsedTranscript> {
+  const canonicalPath = await fsp
+    .realpath(transcript.filePath)
+    .catch(() => path.resolve(transcript.filePath));
+  const headerCwd = transcript.headerCwd;
+  const canonicalCwd = headerCwd
+    ? await fsp.realpath(headerCwd).catch(() => path.resolve(headerCwd))
+    : null;
+  return { ...transcript, canonicalPath, canonicalCwd };
+}
+
 export class OmpHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "omp";
   readonly name = "omp";
@@ -60,6 +123,8 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   private readonly fsBridge?: ConfigFsBridge;
   private discoveryOptions?: OmpDiscoveryOptions;
   private cachedCatalog?: OmpDiscoveryCatalog;
+  private readonly transcriptCache = new Map<string, TranscriptInspectionCacheEntry>();
+  private workspaceListInFlight?: Promise<HarnessWorkspace[]>;
   constructor(options?: OmpHarnessAdapterOptions & OmpDiscoveryOptions) {
     this.fsBridge = options?.fsBridge;
     this.discoveryOptions = {
@@ -91,8 +156,81 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
    * Scans OMP home once per refresh cycle and caches the catalog.
    */
   async listWorkspaces(): Promise<HarnessWorkspace[]> {
-    this.cachedCatalog = await buildOmpDiscoveryCatalog(this.discoveryOptions);
-    return this.cachedCatalog.workspaces;
+    if (this.workspaceListInFlight) return this.workspaceListInFlight;
+
+    const scan = this.refreshWorkspaceCatalog();
+    this.workspaceListInFlight = scan;
+    try {
+      return await scan;
+    } finally {
+      if (this.workspaceListInFlight === scan) this.workspaceListInFlight = undefined;
+    }
+  }
+
+  private async refreshWorkspaceCatalog(): Promise<HarnessWorkspace[]> {
+    const discoveryOptions = this.discoveryOptions;
+    if (
+      discoveryOptions?.activeOnly !== false ||
+      discoveryOptions.inspectTranscript ||
+      discoveryOptions.onInspectTranscript
+    ) {
+      const catalog = await buildOmpDiscoveryCatalog(discoveryOptions);
+      this.transcriptCache.clear();
+      this.cachedCatalog = catalog;
+      return catalog.workspaces;
+    }
+
+    const cycleCache = new Map<string, TranscriptInspectionCacheEntry>();
+    const pathsWithFutureTerminalMessages = new Set<string>();
+    const noteFutureTerminalMessage = (filePath: string): void => {
+      pathsWithFutureTerminalMessages.add(filePath);
+    };
+    const catalog = await buildOmpDiscoveryCatalog({
+      ...discoveryOptions,
+      inspectTranscript: async (filePath, options) => {
+        const before = await getTranscriptFileIdentity(filePath);
+        const nowMs =
+          options?.now instanceof Date
+            ? options.now.getTime()
+            : typeof options?.now === "number"
+              ? options.now
+              : Date.now();
+        const ageMs = before ? nowMs - before.mtimeMs : Number.NEGATIVE_INFINITY;
+        const historical = before !== null && ageMs > TRANSCRIPT_STATUS_SETTLE_MS;
+        const cached = this.transcriptCache.get(filePath);
+
+        if (before && historical && cached && sameTranscriptIdentity(before, cached.identity)) {
+          const transcript = await refreshCachedCanonicalPaths(cached.transcript);
+          cycleCache.set(filePath, { identity: before, transcript });
+          return transcript;
+        }
+
+        const transcript = await inspectTranscriptFile(filePath, {
+          ...options,
+          onFutureTerminalMessage: noteFutureTerminalMessage,
+        });
+        if (
+          !before ||
+          !historical ||
+          !transcript ||
+          transcript.status === "active" ||
+          pathsWithFutureTerminalMessages.has(filePath)
+        ) {
+          return transcript;
+        }
+
+        const after = await getTranscriptFileIdentity(filePath);
+        if (after && sameTranscriptIdentity(before, after)) {
+          cycleCache.set(filePath, { identity: after, transcript });
+        }
+        return transcript;
+      },
+    });
+
+    this.transcriptCache.clear();
+    for (const [filePath, entry] of cycleCache) this.transcriptCache.set(filePath, entry);
+    this.cachedCatalog = catalog;
+    return catalog.workspaces;
   }
   /**
    * Convenience alias for listWorkspaces.

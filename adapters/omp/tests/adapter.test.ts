@@ -517,6 +517,314 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
     }
   });
 
+  it("caches unchanged historical transcripts and invalidates appends and atomic replacements", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-transcript-cache-"));
+    const inspectSpy = vi.spyOn(discoveryModule, "inspectTranscriptFile");
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "cache-project");
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-cache-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "session.jsonl");
+      const historicalTime = new Date(Date.now() - 10 * 60_000);
+      const sessionLine = (sessionId: string) =>
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: sessionId,
+          cwd: wsPath,
+          timestamp: historicalTime.toISOString(),
+        })}\n`;
+      await fsp.writeFile(transcriptPath, sessionLine("cached-session"));
+      await fsp.utimes(transcriptPath, historicalTime, historicalTime);
+
+      const adapter = new OmpHarnessAdapter({ customHome: ompHome, activeOnly: false });
+      const [firstWorkspaces] = await Promise.all([
+        adapter.listWorkspaces(),
+        adapter.listWorkspaces(),
+      ]);
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+      await adapter.listWorkspaces();
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+      const workspace = firstWorkspaces.find((item) => item.rootPath === wsPath)!;
+      expect((await adapter.listSessions(workspace)).map((session) => session.sessionId)).toEqual([
+        "cached-session",
+      ]);
+
+      await fsp.appendFile(
+        transcriptPath,
+        `${JSON.stringify({
+          type: "session_lifecycle",
+          lifecycleType: "end",
+          timestamp: new Date(Date.now() - 8 * 60_000).toISOString(),
+        })}\n`,
+      );
+      await fsp.utimes(transcriptPath, historicalTime, historicalTime);
+      const afterAppend = (await adapter.listWorkspaces()).find(
+        (item) => item.rootPath === wsPath,
+      )!;
+      expect(inspectSpy).toHaveBeenCalledTimes(2);
+      expect((await adapter.listSessions(afterAppend))[0].status).toBe("completed");
+      await adapter.listWorkspaces();
+      expect(inspectSpy).toHaveBeenCalledTimes(2);
+
+      const replacementPath = path.join(sessionsDir, "replacement.tmp");
+      await fsp.writeFile(replacementPath, sessionLine("atomic-replacement"));
+      await fsp.utimes(replacementPath, historicalTime, historicalTime);
+      await fsp.rename(replacementPath, transcriptPath);
+      const afterReplace = (await adapter.listWorkspaces()).find(
+        (item) => item.rootPath === wsPath,
+      )!;
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+      expect(
+        (await adapter.listSessions(afterReplace)).map((session) => session.sessionId),
+      ).toEqual(["atomic-replacement"]);
+      await adapter.listWorkspaces();
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      inspectSpy.mockRestore();
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache terminal status while a future-dated message can change it", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-future-terminal-"));
+    const inspectSpy = vi.spyOn(discoveryModule, "inspectTranscriptFile");
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "future-terminal-project");
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-future-terminal-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const now = new Date();
+      const fileTime = new Date(now.getTime() - 10 * 60_000);
+      const completedAt = new Date(now.getTime() - 9 * 60_000);
+      const futureMessageAt = new Date(now.getTime() + 30_000);
+      const transcriptPath = path.join(sessionsDir, "future-message.jsonl");
+      await fsp.writeFile(
+        transcriptPath,
+        `${[
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "future-terminal-session",
+            cwd: wsPath,
+            timestamp: fileTime.toISOString(),
+          }),
+          JSON.stringify({
+            type: "session_lifecycle",
+            lifecycleType: "end",
+            timestamp: completedAt.toISOString(),
+          }),
+          JSON.stringify({
+            type: "message_end",
+            timestamp: futureMessageAt.toISOString(),
+            message: { role: "assistant", content: "resumes later" },
+          }),
+        ].join("\n")}\n`,
+      );
+      await fsp.utimes(transcriptPath, fileTime, fileTime);
+
+      const adapter = new OmpHarnessAdapter({
+        customHome: ompHome,
+        activeOnly: false,
+        now,
+      });
+      const readSession = async () => {
+        const workspace = (await adapter.listWorkspaces()).find(
+          (item) => item.rootPath === wsPath,
+        )!;
+        return (await adapter.listSessions(workspace))[0];
+      };
+
+      expect((await readSession()).status).toBe("completed");
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+      expect((await readSession()).status).toBe("completed");
+      expect(inspectSpy).toHaveBeenCalledTimes(2);
+
+      now.setTime(futureMessageAt.getTime() + 1);
+      const resumed = await readSession();
+      expect(resumed.status).toBe("idle");
+      expect(resumed.updatedAt).toBe(futureMessageAt.toISOString());
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+      expect((await readSession()).status).toBe("idle");
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      inspectSpy.mockRestore();
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recomputes recent status at the idle boundary and caches only after it settles", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-transcript-age-"));
+    const inspectSpy = vi.spyOn(discoveryModule, "inspectTranscriptFile");
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "age-project");
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-age-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "recent.jsonl");
+      const fileTime = new Date(Date.now() - 10_000);
+      await fsp.writeFile(
+        transcriptPath,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "age-session",
+          cwd: wsPath,
+          timestamp: fileTime.toISOString(),
+        })}\n`,
+      );
+      await fsp.utimes(transcriptPath, fileTime, fileTime);
+
+      const now = new Date(Date.now());
+      const adapter = new OmpHarnessAdapter({
+        customHome: ompHome,
+        activeOnly: false,
+        now,
+      });
+      const readSession = async () => {
+        const workspace = (await adapter.listWorkspaces()).find(
+          (item) => item.rootPath === wsPath,
+        )!;
+        return (await adapter.listSessions(workspace))[0];
+      };
+
+      expect((await readSession()).status).toBe("active");
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+      expect((await readSession()).status).toBe("active");
+      expect(inspectSpy).toHaveBeenCalledTimes(2);
+
+      now.setTime(fileTime.getTime() + 60_001);
+      expect((await readSession()).status).toBe("idle");
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+      expect((await readSession()).status).toBe("idle");
+      expect(inspectSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      inspectSpy.mockRestore();
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps cached entries across failed scans, then prunes missing files on a successful scan", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-transcript-prune-"));
+    const inspectSpy = vi.spyOn(discoveryModule, "inspectTranscriptFile");
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "prune-project");
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-prune-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "session.jsonl");
+      const historicalTime = new Date(Date.now() - 10 * 60_000);
+      const writeSession = async (sessionId: string) => {
+        await fsp.writeFile(
+          transcriptPath,
+          `${JSON.stringify({
+            type: "session",
+            version: 3,
+            id: sessionId,
+            cwd: wsPath,
+            timestamp: historicalTime.toISOString(),
+          })}\n`,
+        );
+        await fsp.utimes(transcriptPath, historicalTime, historicalTime);
+      };
+      await writeSession("before-delete");
+
+      const adapter = new OmpHarnessAdapter({
+        customHome: ompHome,
+        searchPaths: [wsPath],
+        activeOnly: false,
+      });
+      await adapter.listWorkspaces();
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+      const buildSpy = vi
+        .spyOn(discoveryModule, "buildOmpDiscoveryCatalog")
+        .mockRejectedValueOnce(new Error("temporary scan failure"));
+      try {
+        await expect(adapter.listWorkspaces()).rejects.toThrow("temporary scan failure");
+      } finally {
+        buildSpy.mockRestore();
+      }
+      await adapter.listWorkspaces();
+      expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+      await fsp.rm(transcriptPath);
+      const afterDelete = (await adapter.listWorkspaces()).find(
+        (item) => item.rootPath === wsPath,
+      )!;
+      expect(await adapter.listSessions(afterDelete)).toEqual([]);
+
+      await writeSession("recreated-session");
+      const afterRecreate = (await adapter.listWorkspaces()).find(
+        (item) => item.rootPath === wsPath,
+      )!;
+      expect(
+        (await adapter.listSessions(afterRecreate)).map((session) => session.sessionId),
+      ).toEqual(["recreated-session"]);
+      expect(inspectSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      inspectSpy.mockRestore();
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bypasses the cache for an injected transcript inspector", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-custom-inspector-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsPath = path.join(tmpDir, "custom-inspector-project");
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "-custom-inspector-project");
+      await fsp.mkdir(wsPath, { recursive: true });
+      await fsp.mkdir(sessionsDir, { recursive: true });
+
+      const transcriptPath = path.join(sessionsDir, "session.jsonl");
+      const historicalTime = new Date(Date.now() - 10 * 60_000);
+      await fsp.writeFile(
+        transcriptPath,
+        `${JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "custom-inspector-session",
+          cwd: wsPath,
+          timestamp: historicalTime.toISOString(),
+        })}\n`,
+      );
+      await fsp.utimes(transcriptPath, historicalTime, historicalTime);
+
+      const inspectTranscript = vi.fn(
+        async (
+          filePath: string,
+          options?: {
+            now?: number | Date;
+            activeOnly?: boolean;
+            onInspectTranscript?: (filePath: string) => void;
+          },
+        ) => discoveryModule.inspectTranscriptFile(filePath, options),
+      );
+      const adapter = new OmpHarnessAdapter({
+        customHome: ompHome,
+        activeOnly: false,
+        discoveryOptions: { inspectTranscript },
+      });
+
+      await adapter.listWorkspaces();
+      await adapter.listWorkspaces();
+      expect(inspectTranscript).toHaveBeenCalledTimes(2);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("discovers nested sessions and handles directory cycles safely via OmpHarnessAdapter", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-adapter-nested-"));
     try {
