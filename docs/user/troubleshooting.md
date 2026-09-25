@@ -58,6 +58,8 @@ resin repair
 
 Do not run `resin init --auto-approve` as a restart shortcut. That re-enters install/pairing. Use `resin repair`.
 
+An explicitly standalone connection (`resin mcp --standalone`) does not require a daemon. It initializes its owner-only local state database, including invocation records, even after `init --no-service`; database initialization errors stop startup rather than silently disabling recording.
+
 ---
 
 ### Recipe 3: Pairing, Login, Or Expired Cloud Credentials
