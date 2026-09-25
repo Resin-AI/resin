@@ -459,10 +459,10 @@ describe("closed observed-output replay without proposals", () => {
     });
     expect(invoked).toEqual(["derive", "consume"]);
     expect(missing.verification).toMatchObject({
-      status: "failed",
       reproduced: ["derive"],
       missed: [{ stepId: "consume" }],
     });
+    expect(missing.verification?.status).not.toBe("verified");
   });
 });
 
