@@ -133,7 +133,8 @@ export interface WorkflowCallCandidate {
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
     | "tracks-earlier-result-across-executions"
-    | "classified-source-value";
+    | "classified-source-value"
+    | "native-data-argument";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
   missing: string;
@@ -301,6 +302,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "shares-value-with-declared-input": true,
   "tracks-earlier-result-across-executions": true,
   "classified-source-value": true,
+  "native-data-argument": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */

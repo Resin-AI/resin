@@ -585,16 +585,25 @@ export function reconstructWorkflowFromEvents(
             ? stepIdByRepeatCallId.get(candidate.proposed.callId)
             : undefined;
         if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
-        if (
-          carrierCandidates.some(
-            (entry) =>
-              entry.stepId === stepId &&
-              entry.argument === candidate.argument &&
-              entry.path.length === candidate.path.length &&
-              entry.path.every((part, index) => part === candidate.path[index]),
-          )
-        )
-          continue;
+        const priorIndex = carrierCandidates.findIndex(
+          (entry) =>
+            entry.stepId === stepId &&
+            entry.argument === candidate.argument &&
+            entry.path.length === candidate.path.length &&
+            entry.path.every((part, index) => part === candidate.path[index]),
+        );
+        if (priorIndex >= 0) {
+          // A later repeat can establish a result-shaped proposal at a position that
+          // the earlier repeat only offered as an unconstrained caller input.
+          if (
+            carrierCandidates[priorIndex]!.proposed.kind === "input" &&
+            candidate.proposed.kind === "result"
+          ) {
+            carrierCandidates.splice(priorIndex, 1);
+          } else {
+            continue;
+          }
+        }
         carrierCandidates.push({
           stepId,
           argument: candidate.argument,
@@ -636,7 +645,14 @@ export function reconstructWorkflowFromEvents(
     }
   }
 
-  const recipe = recordWorkflowRecipe(workflowId, observations, derivation?.candidates);
+  const derivedCandidates = derivation?.candidates.filter(
+    (candidate) =>
+      candidate.proposed.kind !== "input" ||
+      observations[Number(candidate.stepId.slice("step".length))]?.argumentOrigins?.[
+        candidate.argument
+      ] === undefined,
+  );
+  const recipe = recordWorkflowRecipe(workflowId, observations, derivedCandidates);
   if (!recipe) return undefined;
   recipe.skipped.push(...skipped);
   const heldOut = demonstratedWorkflow(

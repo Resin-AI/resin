@@ -896,6 +896,16 @@ export class WorkflowCallRecorder {
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
       if (candidate.stepId !== ownStepId) continue;
+      if (candidate.proposed.kind === "input") {
+        candidates.push({
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+          reason: candidate.reason,
+          missing: candidate.missing,
+        });
+        continue;
+      }
       if (candidate.proposed.kind !== "result") continue;
       const producingIndex = Number.parseInt(candidate.proposed.stepId.slice("local".length), 10);
       const producingCall = calls[producingIndex];

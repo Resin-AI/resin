@@ -119,8 +119,9 @@ function deepEqual(left: unknown, right: unknown): boolean {
 }
 
 /**
- * Compares one replay result with its selected demonstration. The only non-exact mode is the
- * explicitly declared textual whitespace projection; expected text is never normalized.
+ * Compares one replay result with its selected demonstration. Exact matches always reproduce the
+ * recording, including meaningful trailing whitespace. The optional text projection additionally
+ * permits replay-only surrounding whitespace; expected text is never normalized.
  */
 function matchesObservedResult(
   actual: WorkflowJsonValue,
@@ -129,7 +130,11 @@ function matchesObservedResult(
 ): boolean {
   if (comparison === undefined) return deepEqual(actual, expected);
   if (comparison !== "text-trim") return false;
-  return typeof actual === "string" && typeof expected === "string" && actual.trim() === expected;
+  return (
+    typeof actual === "string" &&
+    typeof expected === "string" &&
+    (actual === expected || actual.trim() === expected)
+  );
 }
 
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */

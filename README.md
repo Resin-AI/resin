@@ -61,6 +61,8 @@ With metadata sharing enabled, workflow links identify shared files or issues us
 
 Recorded output observations share only a JSON type and whether meaningful output was present; the values and program source stay local. Native command output is associated with its original call even when completion arrives late, without replacing a recorded failure or treating the child command as another call.
 
+Capture retains bounded, dependency-closed subworkflows without rewriting the original recording. Ordinary non-program data arguments can suggest typed caller inputs without sharing their values; prior-result bindings take precedence. These remain proposals until independent recorded variations distinguish the bound workflow from the original literals.
+
 A captured baseline can request replay, but it cannot prove correctness or establish new input bindings. Required replay compares every selected step against its local observation and binds the result to the exact plan digest. Process-only plans carry fresh-process proof; mixed plans identify which steps ran in fresh processes. Host replay does not imply remote-service isolation. Replay cancellation stops owned process groups and prevents later steps; external adapters must cooperate with cancellation.
 
 ## Coding agent compatibility

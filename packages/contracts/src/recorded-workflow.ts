@@ -224,7 +224,8 @@ export type WorkflowBindingCandidate = {
     | "varies-across-executions"
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
-    | "classified-source-value";
+    | "classified-source-value"
+    | "native-data-argument";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -1124,7 +1125,8 @@ export function validateRecordedWorkflow(value: unknown): {
           candidate.reason !== "varies-across-executions" &&
           candidate.reason !== "declared-by-the-callable" &&
           candidate.reason !== "shares-value-with-declared-input" &&
-          candidate.reason !== "classified-source-value"
+          candidate.reason !== "classified-source-value" &&
+          candidate.reason !== "native-data-argument"
         )
           errors.push(`candidate ${stepId}.${candidate.argument} has an unknown reason`);
         if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {

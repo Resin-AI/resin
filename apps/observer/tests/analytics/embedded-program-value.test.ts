@@ -121,8 +121,10 @@ describe("a value embedded in a recorded program", () => {
     // numbering a replay renders a confirmed binding back into.
     expect(tokenizeProgram("shell", command)[2]!.raw).toBe("'alpha-7f3c'");
 
-    expect(derivation.candidates).toHaveLength(1);
-    const candidate = derivation.candidates[0]!;
+    const programCandidates = derivation.candidates.filter((entry) => entry.stepId === "step1");
+    const candidate = programCandidates.find(
+      (entry) => entry.argument === "command" && entry.path[0] === "tokens",
+    )!;
     expect(candidate.stepId).toBe("step1");
     expect(candidate.argument).toBe("command");
     expect(candidate.path).toEqual(["tokens", 2]);
@@ -166,7 +168,7 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.filter((entry) => entry.stepId === "step2")).toEqual([]);
   });
 
   it("refuses a token no result ever produced", () => {
@@ -182,7 +184,7 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.filter((entry) => entry.stepId === "step1")).toEqual([]);
   });
 
   it("refuses a token shorter than the shortest candidate", () => {
@@ -205,7 +207,7 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.filter((entry) => entry.stepId === "step1")).toEqual([]);
   });
 
   it("offers every position of a value the program repeats, and no operator", () => {
@@ -223,13 +225,21 @@ describe("a value embedded in a recorded program", () => {
 
     // Two occurrences are two positions in the program, so each is its own candidate: a replay
     // renders the confirmed value into the token it confirmed, not into every equal token.
-    expect(derivation.candidates.map((candidate) => candidate.path)).toEqual([
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1")
+        .map((candidate) => candidate.path),
+    ).toEqual([
       ["tokens", 1],
       ["tokens", 2],
     ]);
     // Both name the same producer: the program repeats one value, and the record shows one call
     // that returned it.
-    expect(derivation.candidates.map((candidate) => candidate.proposed)).toEqual([
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1")
+        .map((candidate) => candidate.proposed),
+    ).toEqual([
       { kind: "result", stepId: "step0", path: ["stdout"] },
       { kind: "result", stepId: "step0", path: ["stdout"] },
     ]);
@@ -253,9 +263,11 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.argument).toBe("command");
-    expect(derivation.candidates[0]!.path).toEqual(["tokens", 2]);
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1")
+        .map((entry) => [entry.argument, entry.path]),
+    ).toEqual([["command", ["tokens", 2]]]);
   });
 
   it("reads the program in the language its record named", () => {
@@ -279,10 +291,11 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.argument).toBe("code");
-    expect(derivation.candidates[0]!.path).toEqual(["tokens", valueToken]);
-    expect(derivation.candidates[0]!.proposed).toEqual({
+    const programCandidates = derivation.candidates.filter((entry) => entry.stepId === "step1");
+    expect(programCandidates.map((entry) => [entry.argument, entry.path])).toEqual([
+      ["code", ["tokens", valueToken]],
+    ]);
+    expect(programCandidates[0]!.proposed).toEqual({
       kind: "result",
       stepId: "step0",
       path: ["stdout"],
@@ -303,7 +316,11 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(
+      derivation.candidates.filter(
+        (entry) => entry.stepId === "step1" && entry.path[0] === "tokens",
+      ),
+    ).toEqual([]);
   });
 });
 

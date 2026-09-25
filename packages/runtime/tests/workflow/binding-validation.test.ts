@@ -340,6 +340,18 @@ describe("binding candidate validation by replay", () => {
       }),
     });
     expect(expectedTrailing[0]?.accepted).toBe(false);
+
+    const exactTrailing = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("trailing"),
+        inputs: { seed: "replay-seed" },
+        observed: { consume: " \ttok(replay-seed)\t\n" },
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(exactTrailing[0]?.accepted).toBe(true);
   });
 });
 

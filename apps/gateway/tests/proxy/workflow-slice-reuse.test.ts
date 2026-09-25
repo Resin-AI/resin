@@ -5,7 +5,6 @@ import path from "node:path";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
-  type WorkflowBindingCandidate,
   type WorkflowJsonValue,
 } from "@resin/contracts";
 import {
@@ -114,15 +113,17 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
     const recorded = recordCallsFromEvents("release-slice", selected as RecordableEvent[], {
       supportingEvents: events as RecordableEvent[],
     })!.workflow;
-    const input: WorkflowBindingCandidate = {
-      stepId: "step0",
-      argument: "project",
-      path: [],
-      proposed: { kind: "input", name: "produce_project", type: "string" },
-      reason: "declared-by-the-callable",
-      missing: "the caller must confirm that project is a supplied input",
-    };
-    const plan = { ...recorded, candidates: [...(recorded.candidates ?? []), input] };
+    const input = recorded.candidates?.find(
+      (candidate) =>
+        candidate.stepId === "step0" &&
+        candidate.argument === "project" &&
+        candidate.path.length === 0 &&
+        candidate.proposed.kind === "input",
+    );
+    expect(input?.proposed.kind).toBe("input");
+    if (input?.proposed.kind !== "input") throw new Error("missing native project input proposal");
+    const inputName = input.proposed.name;
+    const plan = recorded;
     expect(plan.steps.map((step) => step.callId)).toEqual([...wanted]);
     const seen: ToolProtocolDispatchRequest[] = [];
     const dispatch = async (request: ToolProtocolDispatchRequest) => {
@@ -153,7 +154,7 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       );
     const promoted = applyAcceptedBindings(plan, accepted);
     const artifact = compileRecordedWorkflow(promoted);
-    expect(artifact.inputSchema.required).toEqual(["produce_project"]);
+    expect(artifact.inputSchema.required).toEqual([inputName]);
     const adapters = new RuntimeAdapterRegistry();
     adapters.register(createProcessAdapter({ cwd: consumerDir }));
     adapters.register(createToolProtocolAdapter({ dispatch }));
@@ -164,7 +165,7 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
     });
     seen.length = 0;
     for (const project of ["gamma-project", "delta-project"]) {
-      const result = await callable.invoke({ produce_project: project });
+      const result = await callable.invoke({ [inputName]: project });
       expect(result.status, result.error).toBe("completed");
       expect(result.result).toEqual({ sealed: `release-for-${project}` });
       expect(readFileSync(path.join(consumerDir, "release/README.txt"), "utf8")).toBe(

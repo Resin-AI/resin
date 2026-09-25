@@ -735,8 +735,10 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toHaveLength(1);
-    const candidate = derivation.candidates[0]!;
+    expect(derivation.candidates.filter((entry) => entry.proposed.kind === "result")).toHaveLength(
+      1,
+    );
+    const candidate = derivation.candidates.find((entry) => entry.proposed.kind === "result")!;
     expect(candidate.stepId).toBe("step1");
     expect(candidate.argument).toBe("entry");
     expect(candidate.proposed).toEqual({
@@ -768,7 +770,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("refuses a short token that collides with unrelated arguments", () => {
@@ -790,7 +792,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("proves a producer-to-consumer edge from the calls' own declared resource use", () => {
@@ -838,8 +840,87 @@ describe("what the derivation offers, and what it refuses to offer", () => {
     ]);
 
     // It is offered as a result binding instead, which is what the record actually supports.
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.reason).toBe("equal-to-earlier-result");
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1" && entry.argument === "handle")
+        .map((entry) => entry.reason),
+    ).toEqual(["equal-to-earlier-result"]);
+  });
+  it("proposes private nested primitive inputs, including false and zero, without displacing results", () => {
+    const derivation = deriveNativeCalls([
+      {
+        callId: "first",
+        stepId: "step0",
+        toolName: "vendor.measure",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { payload: { count: 0, enabled: false, label: "private-label" } },
+        result: { count: 0 },
+      },
+      {
+        callId: "second",
+        stepId: "step1",
+        toolName: "vendor.render",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { count: 0, enabled: false },
+      },
+    ]);
+    const inputs = derivation.candidates.filter((entry) => entry.proposed.kind === "input");
+    expect(
+      inputs.map((entry) => [
+        entry.stepId,
+        entry.argument,
+        entry.path,
+        entry.proposed.kind === "input" && entry.proposed.type,
+      ]),
+    ).toEqual([
+      ["step0", "payload", ["count"], "number"],
+      ["step0", "payload", ["enabled"], "boolean"],
+      ["step0", "payload", ["label"], "string"],
+      ["step1", "count", [], "number"],
+      ["step1", "enabled", [], "boolean"],
+    ]);
+    expect(JSON.stringify(inputs)).not.toContain("private-label");
+    expect(inputs.every((entry) => entry.missing.length > 0)).toBe(true);
+  });
+  it("bounds weak input proposals without starving a later producer-to-consumer binding", () => {
+    const firstArguments = Object.fromEntries(
+      Array.from({ length: 300 }, (_, position) => [`field${position}`, position]),
+    );
+    const derivation = deriveNativeCalls([
+      {
+        callId: "producer",
+        stepId: "step0",
+        toolName: "vendor.produce",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: firstArguments,
+        result: { id: "minted-late-result" },
+      },
+      {
+        callId: "consumer",
+        stepId: "step1",
+        toolName: "vendor.consume",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { id: "minted-late-result" },
+      },
+    ]);
+    expect(derivation.candidates.length).toBeLessThanOrEqual(256);
+    expect(
+      derivation.candidates.filter(
+        (candidate) => candidate.stepId === "step1" && candidate.argument === "id",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        proposed: { kind: "result", stepId: "step0", path: ["id"] },
+      }),
+    ]);
+    expect(
+      derivation.candidates.some(
+        (candidate) =>
+          candidate.stepId === "step0" &&
+          candidate.argument === "field0" &&
+          candidate.proposed.kind === "input",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -870,13 +951,12 @@ describe("the recording an ordinary session produces", () => {
     ]);
 
     // The suggestion is reported and not executed: the step still carries the recorded value.
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]!.stepId).toBe("step1");
-    expect(workflow.candidates![0]!.proposed).toEqual({
-      kind: "result",
-      stepId: "step0",
-      path: ["entry", "handle"],
-    });
+    expect(workflow.candidates).toContainEqual(
+      expect.objectContaining({
+        stepId: "step1",
+        proposed: { kind: "result", stepId: "step0", path: ["entry", "handle"] },
+      }),
+    );
     const storedArgument = workflow.steps[1]!.arguments.find((entry) => entry.name === "token")!;
     expect(storedArgument.source.kind).toBe("template");
 
@@ -1024,7 +1104,7 @@ describe("the demonstration an ordinary session offers", () => {
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
 
-  it("does not infer inputs from discovered schema, shared values, or repeated calls", () => {
+  it("does not declare inputs from discovered schema, shared values, or repeated calls", () => {
     const observed = record([
       discovery([
         {
@@ -1037,11 +1117,18 @@ describe("the demonstration an ordinary session offers", () => {
       userTurn(2),
       call(3, "vendor.intake", { feed: "bravo-feed", note: "bravo-feed" }),
     ]).events;
-    expect(carrierOf(observed[1]!)?.candidates).toBeUndefined();
-    expect(carrierOf(observed[3]!)?.candidates).toBeUndefined();
+    const recipe = recordCallsFromEvents("wf_no_inferred_inputs", observed)!;
+    expect(recipe.workflow.inputs).toEqual([]);
     expect(
-      recordCallsFromEvents("wf_no_inferred_inputs", observed)!.workflow.candidates,
-    ).toBeUndefined();
+      recipe.workflow.steps[0]!.arguments.every((argument) => argument.source.kind === "template"),
+    ).toBe(true);
+    expect(
+      recipe.workflow.candidates?.every(
+        (candidate) => candidate.proposed.kind === "input" && candidate.missing.length > 0,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("alpha-feed");
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("bravo-feed");
   });
 });
 

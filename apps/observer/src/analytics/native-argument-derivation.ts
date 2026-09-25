@@ -130,6 +130,8 @@ function scalarKey(value: CandidateScalar): string {
 export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDerivation {
   const derived: DerivedCall[] = [];
   const candidates: WorkflowBindingCandidate[] = [];
+  // Weak caller-input suggestions never consume slots reserved for result evidence.
+  const inputCandidates: WorkflowBindingCandidate[] = [];
   /** Every typed primitive leaf shown before each call's result arrived. */
   const seenBeforeResult: Array<Set<string>> = [];
 
@@ -189,6 +191,33 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       });
     }
 
+    // Ordinary JSON leaves can be proposed as caller inputs, but one observation cannot
+    // establish that they vary. Result-derived proposals take precedence at the same position.
+    // Program-bearing calls use token proposals instead: never bind their source wholesale.
+    if (call.program === undefined && inputCandidates.length < MAX_CANDIDATES) {
+      for (const [leafIndex, leaf] of argumentLeaves.entries()) {
+        if (inputCandidates.length >= MAX_CANDIDATES) break;
+        const argument = leaf.path[0];
+        if (typeof argument !== "string") continue;
+        const type = typeof leaf.value;
+        if (type !== "string" && type !== "number" && type !== "boolean") continue;
+        const path = leaf.path.slice(1);
+        inputCandidates.push({
+          stepId: call.stepId,
+          argument,
+          path,
+          proposed: {
+            kind: "input",
+            name: `input_${encodeURIComponent(call.toolName)}_${index}_${encodeURIComponent(argument)}_${leafIndex}`,
+            type,
+          },
+          reason: "native-data-argument",
+          missing:
+            "the record does not establish that this argument varies with caller input across independent executions",
+        });
+      }
+    }
+
     // A value embedded in the text of a program this call ran. The string leaves above are the
     // arguments' own values; a value inside a program is part of its text, so it is read as the
     // tokenizer both halves of the round-trip share reads it, and the candidate names the token
@@ -232,6 +261,17 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     }
   }
 
+  const resultPositions = new Set(
+    candidates.map((candidate) =>
+      JSON.stringify([candidate.stepId, candidate.argument, candidate.path]),
+    ),
+  );
+  for (const candidate of inputCandidates) {
+    if (candidates.length >= MAX_CANDIDATES) break;
+    if (resultPositions.has(JSON.stringify([candidate.stepId, candidate.argument, candidate.path])))
+      continue;
+    candidates.push(candidate);
+  }
   return { calls: derived, candidates };
 }
 
