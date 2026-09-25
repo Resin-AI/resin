@@ -340,6 +340,18 @@ describe("binding candidate validation by replay", () => {
       }),
     });
     expect(expectedTrailing[0]?.accepted).toBe(false);
+
+    const exactTrailing = await validateBindingCandidates({
+      plan,
+      candidates: [candidate],
+      environment: await environmentOf({
+        adapters: projectedTransformAdapters("trailing"),
+        inputs: { seed: "replay-seed" },
+        observed: { consume: " \ttok(replay-seed)\t\n" },
+        observedComparisons: { consume: "text-trim" },
+      }),
+    });
+    expect(exactTrailing[0]?.accepted).toBe(true);
   });
 });
 
@@ -421,6 +433,240 @@ describe("the plan that results from accepting proposals", () => {
   });
 });
 
+describe("closed observed-output replay without proposals", () => {
+  it("executes a native plan once and reports every reproduced and missing observation", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-baseline-native-"));
+    workspaces.push(workspaceDir);
+    const invoked: string[] = [];
+    const adapters = new RuntimeAdapterRegistry();
+    adapters.register({
+      runtime: TEST_RUNTIME,
+      async call(request) {
+        invoked.push(request.step.id);
+        return request.step.id === "derive"
+          ? { token: `tok(${String(request.arguments.seed)})` }
+          : { echoed: request.arguments.text };
+      },
+    });
+    const environment = {
+      adapters,
+      workspaceDir,
+      inputs: { seed: "alpha" },
+      observed: { derive: { token: "tok(alpha)" }, consume: { echoed: "different" } },
+    };
+    const plan = recordedPlan({ type: "literal", value: "tok(alpha)" });
+    const mismatch = await validateAndConfirmCandidates({ plan, candidates: [], environment });
+    expect(invoked).toEqual(["derive", "consume"]);
+    expect(mismatch.outcomes).toEqual([]);
+    expect(mismatch.verification).toMatchObject({
+      status: "failed",
+      reproduced: ["derive"],
+      missed: [{ stepId: "consume" }],
+    });
+    invoked.length = 0;
+    const missing = await validateAndConfirmCandidates({
+      plan,
+      candidates: [],
+      environment: { ...environment, observed: { derive: { token: "tok(alpha)" } } },
+    });
+    expect(invoked).toEqual(["derive", "consume"]);
+    expect(missing.verification).toMatchObject({
+      reproduced: ["derive"],
+      missed: [{ stepId: "consume" }],
+    });
+    expect(missing.verification?.status).not.toBe("verified");
+  });
+});
+
+describe("nested caller inputs in a held-out whole-plan replay", () => {
+  function plan(): RecordedWorkflow {
+    return {
+      schemaVersion: 1,
+      workflowId: "wf-nested-input-replay",
+      inputs: [
+        { name: "source", type: "string" },
+        { name: "factor", type: "number" },
+        { name: "enabled", type: "boolean" },
+      ],
+      steps: [
+        {
+          id: "prepare",
+          callId: "call-prepare",
+          callable: { runtime: TEST_RUNTIME, name: "prepare" },
+          arguments: [
+            {
+              name: "payload",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: {
+                    rows: {
+                      type: "array",
+                      items: [
+                        { type: "input", name: "source" },
+                        {
+                          type: "object",
+                          entries: {
+                            factor: { type: "input", name: "factor" },
+                            enabled: { type: "input", name: "enabled" },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+        {
+          id: "finish",
+          callId: "call-finish",
+          callable: { runtime: TEST_RUNTIME, name: "finish" },
+          arguments: [
+            {
+              name: "prepared",
+              source: { kind: "result", stepId: "prepare", path: ["text"] },
+            },
+          ],
+          dependsOn: ["prepare"],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+      heldOut: {
+        inputs: [{ stepId: "prepare", argument: "payload", reference: "private:payload" }],
+        observed: [
+          { stepId: "prepare", reference: "private:prepared" },
+          { stepId: "finish", reference: "private:finished" },
+        ],
+      },
+    };
+  }
+
+  it("replays all steps on the recorded nested array values, including zero and false", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resin-nested-replay-"));
+    workspaces.push(directory);
+    const adapters = new RuntimeAdapterRegistry();
+    const called: string[] = [];
+    adapters.register({
+      runtime: TEST_RUNTIME,
+      async call(request) {
+        called.push(request.step.id);
+        if (request.step.id === "prepare") {
+          const payload = request.arguments.payload;
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new Error("prepare needs a payload object");
+          }
+          const rows = payload.rows;
+          if (
+            !Array.isArray(rows) ||
+            typeof rows[0] !== "string" ||
+            !rows[1] ||
+            typeof rows[1] !== "object" ||
+            Array.isArray(rows[1]) ||
+            typeof rows[1].factor !== "number" ||
+            typeof rows[1].enabled !== "boolean"
+          ) {
+            throw new Error("prepare needs source, factor and enabled");
+          }
+          return { text: `${rows[0]}:${rows[1].factor}:${rows[1].enabled}` };
+        }
+        return { completed: request.arguments.prepared };
+      },
+    });
+    const values: Record<string, WorkflowJsonValue> = {
+      "private:payload": { rows: ["second-source", { factor: 0, enabled: false }] },
+      "private:prepared": { text: "second-source:0:false" },
+      "private:finished": { completed: "second-source:0:false" },
+    };
+    const workflow = plan();
+    const environment = await demonstrationEnvironment({
+      plan: workflow,
+      candidates: [],
+      adapters,
+      workspaceDir: directory,
+      resolvePrivate: (reference) => values[reference]!,
+    });
+    expect(environment?.inputs).toEqual({
+      source: "second-source",
+      factor: 0,
+      enabled: false,
+    });
+    const confirmed = await validateAndConfirmCandidates({
+      plan: workflow,
+      candidates: [],
+      environment: environment!,
+    });
+    expect(called).toEqual(["prepare", "finish"]);
+    expect(confirmed.verification).toMatchObject({
+      status: "verified",
+      reproduced: ["prepare", "finish"],
+      missed: [],
+    });
+
+    const missing = {
+      ...workflow,
+      heldOut: {
+        ...workflow.heldOut!,
+        inputs: [{ stepId: "prepare", argument: "payload", reference: "private:missing" }],
+      },
+    };
+    values["private:missing"] = { rows: ["second-source", { enabled: false }] };
+    expect(
+      await demonstrationEnvironment({
+        plan: missing,
+        candidates: [],
+        adapters,
+        workspaceDir: directory,
+        resolvePrivate: (reference) => values[reference]!,
+      }),
+    ).toBeUndefined();
+
+    const conflicting: RecordedWorkflow = {
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            ...workflow.steps[0]!.arguments,
+            {
+              name: "mirror",
+              source: { kind: "input", name: "source" },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+      ],
+      heldOut: {
+        ...workflow.heldOut!,
+        inputs: [
+          ...workflow.heldOut!.inputs,
+          {
+            stepId: "prepare",
+            argument: "mirror",
+            reference: "private:conflict",
+          },
+        ],
+      },
+    };
+    values["private:conflict"] = "another-source";
+    expect(
+      await demonstrationEnvironment({
+        plan: conflicting,
+        candidates: [],
+        adapters,
+        workspaceDir: directory,
+        resolvePrivate: (reference) => values[reference]!,
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe("selected demonstration comparison projections", () => {
   it("uses the held-out result projection during whole-plan replay", async () => {
     const plan: RecordedWorkflow = {
@@ -499,7 +745,7 @@ describe("Python Eval baseline replay comparison", () => {
     });
 
     expect(exact.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
-    expect(different.verification.status).toBe("incomplete");
+    expect(different.verification.status).toBe("failed");
     expect(different.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
   });
 });

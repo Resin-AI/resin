@@ -34,6 +34,8 @@ export interface RecordedCallRequest {
   ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Workspace scope forwarded to the private resolver. */
   access?: { workspaceId?: string };
+  /** Cancels owned I/O; adapter calls must settle after abort before replay cleanup. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -69,6 +71,8 @@ export class RuntimeAdapterRegistry {
 export interface RecordedWorkflowExecutionOptions {
   inputs: Record<string, WorkflowJsonValue>;
   adapters: RuntimeAdapterRegistry;
+  /** Stops subsequent steps and forwards cancellation to every adapter call. */
+  signal?: AbortSignal;
   /** The workspace this invocation runs in, checked before any private reference resolves. */
   access?: { workspaceId?: string };
   /**
@@ -448,6 +452,7 @@ export async function executeRecordedWorkflow(
   let aborted = false;
 
   for (const step of workflow.steps) {
+    if (options.signal?.aborted) aborted = true;
     if (aborted) {
       state.set(step.id, "skipped");
       outcomes.push({ stepId: step.id, status: "skipped", reason: "an earlier step failed" });
@@ -501,6 +506,7 @@ export async function executeRecordedWorkflow(
         arguments: args,
         ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
         ...(options.access ? { access: options.access } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
       });
       results.set(step.id, result);
       state.set(step.id, "completed");

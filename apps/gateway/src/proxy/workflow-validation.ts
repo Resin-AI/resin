@@ -98,7 +98,7 @@ export interface LocalWorkflowValidatorOptions {
    */
   connections?: Record<string, McpToolConnection>;
   /** Dial a connection on first use, for a host that does not keep them open already. */
-  openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  openConnection?: (name: string, signal?: AbortSignal) => Promise<McpToolConnection | undefined>;
   /** Additional host-owned runtime families, built for the replay's disposable workspace. */
   runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
   /** Wall-clock bound for the replay. */
@@ -106,11 +106,8 @@ export interface LocalWorkflowValidatorOptions {
 }
 
 /**
- * The validator the local half of the product runs.
- *
- * Candidate promotion uses only a held-out demonstration. Program execution may instead be checked
- * against the original baseline, without promoting any candidate. Neither replay can borrow the
- * original interpreter's namespace: each program runs in a fresh process.
+ * The validator the local half of the product runs. Candidates require held-out evidence.
+ * With no held-out run, captured baseline output can prove only the original closed plan.
  */
 export function createLocalWorkflowValidator(
   options: LocalWorkflowValidatorOptions = {},
@@ -180,8 +177,15 @@ export function createLocalWorkflowValidator(
           (step.callable.runtime === RESIN_PROGRAM_RUNTIME ||
             step.callable.runtime === RESIN_PROCESS_RUNTIME),
       );
-      const baselineOnly =
-        plan.heldOut === undefined && hasRecordedProgram && plan.baseline !== undefined;
+      const entirelyFreshProcess =
+        plan.steps.length > 0 &&
+        plan.steps.every(
+          (step) =>
+            step.callable.program !== undefined &&
+            (step.callable.runtime === RESIN_PROGRAM_RUNTIME ||
+              step.callable.runtime === RESIN_PROCESS_RUNTIME),
+        );
+      const baselineOnly = plan.heldOut === undefined && plan.baseline !== undefined;
       const environment = await demonstrationEnvironment({
         plan: baselineOnly ? { ...plan, heldOut: plan.baseline } : plan,
         candidates: baselineOnly ? [] : candidates,
@@ -202,10 +206,22 @@ export function createLocalWorkflowValidator(
         candidates: baselineOnly ? [] : candidates,
         environment,
       });
-      if (hasRecordedProgram && decided.verification?.status === "verified") {
+      if (decided.verification?.status === "verified") {
         decided.verification.replay = {
-          kind: "fresh-process",
+          kind: entirelyFreshProcess ? "fresh-process" : "host-replay",
           planDigest: workflowValidationPlanDigest(decided.plan),
+          ...(!entirelyFreshProcess && hasRecordedProgram
+            ? {
+                freshProcessStepIds: decided.plan.steps
+                  .filter(
+                    (step) =>
+                      step.callable.program !== undefined &&
+                      (step.callable.runtime === RESIN_PROGRAM_RUNTIME ||
+                        step.callable.runtime === RESIN_PROCESS_RUNTIME),
+                  )
+                  .map((step) => step.id),
+              }
+            : {}),
         };
       }
       if (hasRecordedProgram && decided.verification !== undefined) {

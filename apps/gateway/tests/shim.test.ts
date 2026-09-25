@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
   });
   it("detects absent daemon and starts in standalone mode by default", async () => {
     const nonExistentSocket = path.join(os.tmpdir(), `test-nonexistent-${Date.now()}.sock`);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-home-"));
 
     const stdin = new stream.PassThrough();
     const stdout = new stream.PassThrough();
@@ -36,6 +38,8 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       socketPath: nonExistentSocket,
       standaloneFallback: true,
       maxStartupAttempts: 0,
+      home,
+      resinHome: path.join(home, ".resin"),
       stdin,
       stdout,
       stderr,
@@ -47,6 +51,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       expect(status.daemonReachable).toBe(false);
     } finally {
       await shim.stop();
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 
@@ -55,6 +60,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       os.tmpdir(),
       `test-absent-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
     );
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-home-"));
     const stdin = new stream.PassThrough();
     const stdout = new stream.PassThrough();
     const stderr = new stream.PassThrough();
@@ -64,6 +70,8 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       socketPath: nonExistentSocket,
       standaloneFallback: true,
       maxStartupAttempts: 0,
+      home,
+      resinHome: path.join(home, ".resin"),
       stdin,
       stdout,
       stderr,
@@ -131,6 +139,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       expect(toolNames).not.toContain("slow_tool");
     } finally {
       await shim.stop();
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

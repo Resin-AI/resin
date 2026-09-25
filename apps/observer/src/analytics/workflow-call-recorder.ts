@@ -29,6 +29,7 @@ import {
   analyzeAgentArguments,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
 import {
@@ -104,6 +105,7 @@ interface LocalCall {
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
+  resultHandle?: string;
   resultReference?: string;
   resultComparison?: "text-trim";
   reads?: string[];
@@ -150,6 +152,7 @@ interface SessionDerivationState {
    * uniformly, and the turn index a transcript may carry is not set by every decoder.
    */
   newExecutionPending: boolean;
+  nativeOutputs: Map<string, { stdout: string; exitCode: number }>;
 }
 
 /** Observed calls kept per session for derivation. */
@@ -225,6 +228,7 @@ export class WorkflowCallRecorder {
       turnKey: "",
       position: 0,
       executions: [],
+      nativeOutputs: new Map(),
       newExecutionPending: false,
     };
     this.sessions.set(sessionId, created);
@@ -321,15 +325,81 @@ export class WorkflowCallRecorder {
       this.sessionState(event.sessionId).newExecutionPending = true;
       return event;
     }
+    if (event.type === "command_exec") {
+      const command = readCodexCommandMetadata(event.metadata);
+      if (command?.kind !== "command") return event;
+      const raw = localWorkflowEvent(event);
+      if (
+        raw?.type !== "command_exec" ||
+        typeof raw.stdout !== "string" ||
+        !Number.isInteger(raw.exitCode)
+      )
+        return event;
+      const state = this.sessionState(event.sessionId);
+      state.nativeOutputs.set(command.nativeId, { stdout: raw.stdout, exitCode: raw.exitCode });
+      while (state.nativeOutputs.size > MAX_LOCAL_CALLS) {
+        const oldest = state.nativeOutputs.keys().next();
+        if (oldest.done) break;
+        state.nativeOutputs.delete(oldest.value);
+      }
+      const association = command.association;
+      if (association === undefined || association.nativeCommandId !== command.nativeId)
+        return event;
+      const reference =
+        raw.exitCode === 0
+          ? this.localReference(
+              raw.stdout,
+              event.sessionId,
+              association.callId,
+              "native-result:v1:text-trim",
+            )
+          : undefined;
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          [RESIN_WORKFLOW_RESULT_METADATA_KEY]: {
+            ...(reference === undefined
+              ? {}
+              : {
+                  baselineReference: reference,
+                  baselineComparison: "text-trim",
+                }),
+            output: { type: "string", hasContent: raw.stdout.length > 0 },
+          },
+        },
+      };
+    }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
-      const resultObservation = localWorkflowResultObservation(event);
-      const observed = this.observeResult(original ?? event, event, resultObservation);
+      const source = original ?? event;
+      const codex =
+        source.type === "tool_result" && source.toolName === "exec"
+          ? readCodexCommandMetadata(source.metadata)
+          : undefined;
+      const native =
+        codex?.kind === "result" && codex.association !== undefined
+          ? this.sessionState(event.sessionId).nativeOutputs.get(codex.association.nativeCommandId)
+          : undefined;
+      const codexObservation =
+        codex?.kind === "result" &&
+        codex.form === "single-command-output" &&
+        codex.status === "completed" &&
+        native !== undefined
+          ? { result: native.stdout, comparison: "text-trim" as const }
+          : undefined;
+      const resultObservation =
+        codex?.kind === "result" ? codexObservation : localWorkflowResultObservation(event);
+      const suppressResult =
+        isLocalWorkflowResultSuppressed(event) ||
+        (codex?.kind === "result" &&
+          (codex.status !== "completed" || native === undefined || native.exitCode !== 0));
+      const observed = this.observeResult(source, event, resultObservation, suppressResult);
       const resultEvent = { ...event, metadata: observed.metadata };
-      if (resultObservation !== undefined) {
-        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
-      } else if (isLocalWorkflowResultSuppressed(event)) {
+      if (suppressResult) {
         retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
+      } else if (resultObservation !== undefined) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
       }
       return resultEvent;
     }
@@ -430,7 +500,22 @@ export class WorkflowCallRecorder {
               : undefined;
     if (routedName === undefined) return event;
     const inner = parameters.parameters ?? parameters.arguments;
-    const analysis = analyzeAgentArguments(isPlainObject(inner) ? inner : {});
+    const argumentsAtCall = isPlainObject(inner) ? inner : {};
+    const state = this.sessionState(event.sessionId);
+    // A delayed redelivery belongs to its original call, even after later executions.
+    // Its input identities must not drift to the current execution's next position.
+    let existing: LocalCall | undefined;
+    for (let index = state.executions.length - 1; index >= 0 && !existing; index--) {
+      existing = state.executions[index]!.calls.find((call) => call.callId === event.callId);
+    }
+    const position =
+      existing?.position ??
+      (state.executions.length === 0 || state.newExecutionPending ? 0 : state.position);
+    // Input identity follows the selected workflow step, not a session-global call id.
+    // Repeated executions have new call ids but the same logical positions.
+    const nameInput = (argument: string, path: WorkflowValuePath): string =>
+      `step${position}_${argument}${path.length === 0 ? "" : `.${path.map(String).join(".")}`}`;
+    const analysis = analyzeAgentArguments(argumentsAtCall, { nameInput });
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
@@ -454,6 +539,67 @@ export class WorkflowCallRecorder {
     // recorded for the callable. Nothing else: not the harness, never a guess from the name.
     const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
+    const actualArguments: Record<string, WorkflowJsonValue> = {};
+    for (const [argument, envelope] of Object.entries(argumentsAtCall)) {
+      try {
+        const resolved = analyzeAgentArguments(
+          { [argument]: envelope },
+          {
+            resolveReference: (reference, path) => {
+              let producer: LocalCall | undefined;
+              for (
+                let index = state.executions.length - 1;
+                index >= 0 && producer === undefined;
+                index--
+              ) {
+                const calls = state.executions[index]!.calls;
+                for (let position = calls.length - 1; position >= 0; position--) {
+                  if (calls[position]!.resultHandle === reference) {
+                    producer = calls[position];
+                    break;
+                  }
+                }
+              }
+              if (producer?.result === undefined) throw new Error("unobserved reference");
+              let value: WorkflowJsonValue = producer.result;
+              for (const part of path) {
+                if (typeof part === "number") {
+                  if (
+                    !Number.isInteger(part) ||
+                    part < 0 ||
+                    !Array.isArray(value) ||
+                    part >= value.length
+                  ) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                } else {
+                  if (!isPlainObject(value) || !Object.hasOwn(value, part)) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                }
+              }
+              return value;
+            },
+          },
+        ).resolved;
+        if (resolved !== undefined) actualArguments[argument] = resolved[argument]!;
+      } catch {
+        // An unresolved reference supplies no demonstration or baseline value.
+      }
+    }
+    const local =
+      existing ??
+      this.recordLocalCall(
+        state,
+        { ...event, toolName: routedName, parameters: actualArguments },
+        actualArguments,
+      );
+    carrier.executionIndex = local.executionIndex;
+    carrier.baselineInputs = { ...local.argumentReferences };
+    const heldOut = this.heldOutSoFar(state, local);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     return this.withCallCarrier(event, carrier);
   }
 
@@ -472,7 +618,20 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     normalizedEvent: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
   ): NormalizedSessionEvent {
-    const parameters = isPlainObject(event.parameters) ? event.parameters : {};
+    // Optional arguments omitted by a producer have no JSON value to reference locally.
+    const rawParameters = isPlainObject(event.parameters) ? event.parameters : {};
+    let observedParameters = rawParameters;
+    for (const argument in rawParameters) {
+      if (!Object.hasOwn(rawParameters, argument) || rawParameters[argument] !== undefined)
+        continue;
+      if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
+      delete observedParameters[argument];
+    }
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    const parameters =
+      codex?.kind === "call" && typeof observedParameters.cmd === "string"
+        ? { ...observedParameters, resinCodexShellProfile: "bash-login-v1" }
+        : observedParameters;
     const program = this.programOf(event, parameters);
     const origins: WorkflowCallCarrier["origins"] = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
@@ -513,6 +672,7 @@ export class WorkflowCallRecorder {
     const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call);
     carrier.executionIndex = call.executionIndex;
+    carrier.baselineInputs = { ...call.argumentReferences };
     const heldOut = this.heldOutSoFar(state, call);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
@@ -805,6 +965,16 @@ export class WorkflowCallRecorder {
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
       if (candidate.stepId !== ownStepId) continue;
+      if (candidate.proposed.kind === "input") {
+        candidates.push({
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+          reason: candidate.reason,
+          missing: candidate.missing,
+        });
+        continue;
+      }
       if (candidate.proposed.kind !== "result") continue;
       const producingIndex = Number.parseInt(candidate.proposed.stepId.slice("local".length), 10);
       const producingCall = calls[producingIndex];
@@ -837,6 +1007,10 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     parameters: Record<string, WorkflowJsonValue>,
   ): WorkflowRecordedProgram | undefined {
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    if (codex?.kind === "call" && typeof parameters.cmd === "string") {
+      return { kind: "shell", source: "", argument: "cmd" };
+    }
     const command = extractRawCommandStringFromEvent(event);
     if (command !== null) {
       const program: WorkflowRecordedProgram = { kind: "shell", source: "" };
@@ -974,9 +1148,13 @@ export class WorkflowCallRecorder {
     event: NormalizedSessionEvent,
     publicEvent: NormalizedSessionEvent = event,
     localResultObservation?: { result: string; comparison?: "text-trim" },
+    suppressResult = false,
   ): NormalizedSessionEvent {
     let baselineReference: string | undefined;
     let baselineComparison: "text-trim" | undefined;
+    let output:
+      | { type: "null" | "boolean" | "number" | "string" | "array" | "object"; hasContent: boolean }
+      | undefined;
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -985,7 +1163,45 @@ export class WorkflowCallRecorder {
         const execution = state.executions[e]!;
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
-        call.result = extractResultValueOf(localResultObservation?.result ?? event.result);
+        const wrappedComposedResult =
+          isInvokeToolCallName(event.toolName) &&
+          this.resultHandle(publicEvent) !== undefined &&
+          isPlainObject(event.result) &&
+          Object.hasOwn(event.result, "result");
+        const actual = suppressResult
+          ? undefined
+          : localResultObservation !== undefined
+            ? localResultObservation.result
+            : wrappedComposedResult
+              ? (event.result as Record<string, WorkflowJsonValue>).result
+              : event.result;
+        call.result = extractResultValueOf(actual);
+        call.resultHandle = call.result === undefined ? undefined : this.resultHandle(publicEvent);
+        if (actual !== undefined) {
+          const type = actual === null ? "null" : Array.isArray(actual) ? "array" : typeof actual;
+          if (
+            type === "null" ||
+            type === "boolean" ||
+            type === "number" ||
+            type === "string" ||
+            type === "array" ||
+            type === "object"
+          ) {
+            output = {
+              type,
+              hasContent:
+                type === "null"
+                  ? false
+                  : type === "string"
+                    ? (actual as string).length > 0
+                    : type === "array"
+                      ? (actual as unknown[]).length > 0
+                      : type === "object"
+                        ? Object.keys(actual as object).length > 0
+                        : true,
+            };
+          }
+        }
         call.resultComparison = localResultObservation?.comparison;
         call.resultReference =
           call.result === undefined
@@ -998,7 +1214,11 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (event.isError === false && !isLocalWorkflowResultSuppressed(publicEvent)) {
+        if (
+          event.isError === false &&
+          !suppressResult &&
+          !isLocalWorkflowResultSuppressed(publicEvent)
+        ) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
         }
@@ -1028,7 +1248,8 @@ export class WorkflowCallRecorder {
       handle === undefined &&
       heldOut === undefined &&
       baselineReference === undefined &&
-      baselineComparison === undefined
+      baselineComparison === undefined &&
+      output === undefined
     ) {
       return event;
     }
@@ -1037,6 +1258,7 @@ export class WorkflowCallRecorder {
       ...(handle === undefined ? {} : { handle }),
       ...(heldOut === undefined ? {} : { heldOut }),
       ...(baselineReference === undefined ? {} : { baselineReference }),
+      ...(output === undefined ? {} : { output }),
       ...(baselineComparison === undefined ? {} : { baselineComparison }),
     };
     return { ...event, metadata } as NormalizedSessionEvent;

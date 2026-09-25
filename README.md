@@ -59,9 +59,21 @@ Search for tools that can inspect this repository's structure.
 
 With metadata sharing enabled, workflow links identify shared files or issues using temporary labels—not paths, repository names, issue numbers, contents, or hashes of those values. Only completed, successful steps count as workflow evidence. These links never grant tool permissions.
 
+Recorded output observations share only a JSON type and whether meaningful output was present; the values and program source stay local. Native command output is associated with its original call even when completion arrives late, without replacing a recorded failure or treating the child command as another call.
+
+Capture retains bounded, dependency-closed subworkflows without rewriting the original recording. Ordinary non-program data arguments can suggest typed caller inputs without sharing their values; prior-result bindings take precedence. These remain proposals until independent recorded variations distinguish the bound workflow from the original literals.
+
+A captured baseline can request replay, but it cannot prove correctness or establish new input bindings. Required replay compares every selected step against its local observation and binds the result to the exact plan digest. Process-only plans carry fresh-process proof; mixed plans identify which steps ran in fresh processes. Host replay does not imply remote-service isolation. Replay cancellation stops owned process groups and prevents later steps; external adapters must cooperate with cancellation.
+
 ## Coding agent compatibility
 
 Codex CLI uses four stable MCP tools: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Newly available tools are reached through these same routes, without restarting the session. Claude Code and Oh My Pi retain their native dynamic tool catalogs.
+
+Oh My Pi supports deeply nested workspaces with bounded, deterministic workspace IDs. Existing IDs within the shared 128-character limit remain unchanged; longer paths use a readable prefix and a path-derived hash.
+
+For Codex CLI 0.156.1 rollouts, the local observer decodes native `session_meta`, `response_item`, and `event_msg` records for session lifecycle, model context, messages, tool calls/results, and reported token usage. Structured `item_completed` / `CommandExecution` items retain their native argv, working directory, outcome, output, and duration; only terminal status with explicit exit code produces a command event. A restricted, single-awaited-`tools.exec_command` code-mode wrapper followed by `text(result.output)` is parsed locally (never executed as JavaScript). A unique compatible native command start inside that wrapper's call-to-reply window may associate the two observations, including command completions arriving after the reply. Unrecognized, overlapping, yielded, or missing-start cases remain unassociated. The operational association carrier contains only bounded IDs, times, and its rule; script, command, working directory, and output remain local and are not exported as association metadata. Failed wrappers and native nonzero exits keep their separate outcomes. Missing status and usage are not treated as zero or success; unsupported records remain available as unknown events rather than inferred activity.
+
+Matching is derived evidence, not a parent ID recorded by Codex. Supported wrappers replay the original command through `/bin/bash -lc`; an omitted working directory is taken only from recorded session or turn context.
 
 After a connection's initial catalog baseline, Resin includes a brief notice of catalog changes in the next successful Resin tool response. Notices coalesce pending changes: new or updated tools include names and short descriptions from the connection's visible catalog; removals receive a generic notice. Notices are bounded and do not include tool arguments, results, or secrets.
 

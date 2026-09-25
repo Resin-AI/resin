@@ -15,6 +15,7 @@ import type {
   RecordedWorkflow,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
+  WorkflowObservedOutput,
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
@@ -208,6 +209,7 @@ export function reconstructWorkflowFromEvents(
       value: WorkflowJsonValue | undefined;
       isError: boolean | undefined;
       baselineReference?: string;
+      output?: WorkflowObservedOutput;
       baselineComparison?: "text-trim";
     }
   >();
@@ -228,6 +230,7 @@ export function reconstructWorkflowFromEvents(
     resultsByCallId.set(eventKey, {
       value: event.result ?? extractResultValue(event.content),
       isError: event.isError,
+      ...(resultCarrier?.output === undefined ? {} : { output: resultCarrier.output }),
       ...(resultCarrier?.baselineReference === undefined
         ? {}
         : { baselineReference: resultCarrier.baselineReference }),
@@ -443,6 +446,7 @@ export function reconstructWorkflowFromEvents(
         ...(carrier?.program === undefined ? {} : { program: carrier.program }),
       },
       arguments: carrier !== undefined ? callArguments : (event.parameters ?? {}),
+      ...(carrier?.baselineInputs === undefined ? {} : { baselineInputs: carrier.baselineInputs }),
       ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
       ...(Object.keys(argumentTypes).length > 0 ? { argumentTypes } : {}),
       ...(carrier?.provenance === undefined ? {} : { argumentProvenance: carrier.provenance }),
@@ -462,6 +466,7 @@ export function reconstructWorkflowFromEvents(
       ...(declaredFlow === undefined ? {} : { flow: declaredFlow }),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(isPrivateValue ? { isPrivateValue } : {}),
+      ...(recordedResult?.output === undefined ? {} : { output: recordedResult.output }),
       observed:
         recordedResult === undefined
           ? "unknown"
@@ -581,16 +586,25 @@ export function reconstructWorkflowFromEvents(
             ? stepIdByRepeatCallId.get(candidate.proposed.callId)
             : undefined;
         if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
-        if (
-          carrierCandidates.some(
-            (entry) =>
-              entry.stepId === stepId &&
-              entry.argument === candidate.argument &&
-              entry.path.length === candidate.path.length &&
-              entry.path.every((part, index) => part === candidate.path[index]),
-          )
-        )
-          continue;
+        const priorIndex = carrierCandidates.findIndex(
+          (entry) =>
+            entry.stepId === stepId &&
+            entry.argument === candidate.argument &&
+            entry.path.length === candidate.path.length &&
+            entry.path.every((part, index) => part === candidate.path[index]),
+        );
+        if (priorIndex >= 0) {
+          // A later repeat can establish a result-shaped proposal at a position that
+          // the earlier repeat only offered as an unconstrained caller input.
+          if (
+            carrierCandidates[priorIndex]!.proposed.kind === "input" &&
+            candidate.proposed.kind === "result"
+          ) {
+            carrierCandidates.splice(priorIndex, 1);
+          } else {
+            continue;
+          }
+        }
         carrierCandidates.push({
           stepId,
           argument: candidate.argument,
@@ -632,7 +646,14 @@ export function reconstructWorkflowFromEvents(
     }
   }
 
-  const recipe = recordWorkflowRecipe(workflowId, observations, derivation?.candidates);
+  const derivedCandidates = derivation?.candidates.filter(
+    (candidate) =>
+      candidate.proposed.kind !== "input" ||
+      observations[Number(candidate.stepId.slice("step".length))]?.argumentOrigins?.[
+        candidate.argument
+      ] === undefined,
+  );
+  const recipe = recordWorkflowRecipe(workflowId, observations, derivedCandidates);
   if (!recipe) return undefined;
   recipe.skipped.push(...skipped);
   const heldOut = demonstratedWorkflow(

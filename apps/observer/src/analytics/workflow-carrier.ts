@@ -13,6 +13,7 @@ import type {
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
+import type { WorkflowObservedOutput } from "@resin/contracts";
 
 export const RESIN_WORKFLOW_CALL_METADATA_KEY = "workflowCall";
 export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
@@ -86,6 +87,8 @@ export interface WorkflowCallCarrier {
   candidates?: WorkflowCallCandidate[];
   /** Which execution of this session this call belongs to, so a recording can keep them apart. */
   executionIndex?: number;
+  /** Original call arguments, held by owner-scoped reference for baseline replay only. */
+  baselineInputs?: Record<string, string>;
   /** The repeat of earlier work this call is part of, as far as it has repeated it yet. */
   heldOut?: WorkflowCallHeldOut;
 }
@@ -131,7 +134,9 @@ export interface WorkflowCallCandidate {
     | "varies-across-executions"
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
-    | "tracks-earlier-result-across-executions";
+    | "tracks-earlier-result-across-executions"
+    | "classified-source-value"
+    | "native-data-argument";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
   missing: string;
@@ -298,6 +303,8 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "declared-by-the-callable": true,
   "shares-value-with-declared-input": true,
   "tracks-earlier-result-across-executions": true,
+  "classified-source-value": true,
+  "native-data-argument": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -396,6 +403,15 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
     }
   }
   if (value.executionIndex !== undefined && !Number.isInteger(value.executionIndex)) return false;
+  if (value.baselineInputs !== undefined) {
+    if (!isPlainObject(value.baselineInputs)) return false;
+    if (
+      Object.values(value.baselineInputs).some(
+        (reference) => typeof reference !== "string" || reference.length === 0,
+      )
+    )
+      return false;
+  }
   if (value.heldOut !== undefined && readHeldOut(value.heldOut) === undefined) return false;
   return true;
 }
@@ -483,6 +499,7 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
     carrier.candidates = candidates;
   }
   if (value.executionIndex !== undefined) carrier.executionIndex = value.executionIndex;
+  if (value.baselineInputs !== undefined) carrier.baselineInputs = { ...value.baselineInputs };
   if (value.heldOut !== undefined) {
     const heldOut = readHeldOut(value.heldOut);
     if (heldOut !== undefined) carrier.heldOut = heldOut;
@@ -497,6 +514,7 @@ export interface WorkflowResultCarrier {
   baselineReference?: string;
   /** How the original baseline result may be projected before comparison. */
   baselineComparison?: "text-trim";
+  output?: WorkflowObservedOutput;
 }
 
 /** Re-reads a result carrier for projection. */
@@ -515,10 +533,25 @@ export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier
     if (value.baselineComparison !== "text-trim") return undefined;
     carrier.baselineComparison = value.baselineComparison;
   }
+  if (value.output !== undefined) {
+    const output = value.output;
+    if (
+      !isPlainObject(output) ||
+      Object.keys(output).some((key) => key !== "type" && key !== "hasContent") ||
+      !["null", "boolean", "number", "string", "array", "object"].includes(output.type as string) ||
+      typeof output.hasContent !== "boolean"
+    )
+      return undefined;
+    carrier.output = {
+      type: output.type as WorkflowObservedOutput["type"],
+      hasContent: output.hasContent,
+    };
+  }
   return carrier.handle === undefined &&
     carrier.heldOut === undefined &&
     carrier.baselineReference === undefined &&
-    carrier.baselineComparison === undefined
+    carrier.baselineComparison === undefined &&
+    carrier.output === undefined
     ? undefined
     : carrier;
 }

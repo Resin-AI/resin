@@ -18,6 +18,7 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
@@ -26,6 +27,7 @@ import {
   estimatePayloadTokens,
   nowIso,
   parseAssistantStopReason,
+  readCodexCommandMetadata,
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
@@ -743,6 +745,10 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
+  if (event.type === "tool_call" || event.type === "tool_result" || event.type === "command_exec") {
+    const codexCommand = readCodexCommandMetadata(event.metadata);
+    if (codexCommand !== undefined) metadata[RESIN_CODEX_COMMAND_METADATA_KEY] = codexCommand;
+  }
   // Keep only this bounded suppression signal; native status and output remain outside the allowlist.
   if (event.type === "tool_result" && isLocalWorkflowResultSuppressed(event)) {
     metadata[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY] = true;

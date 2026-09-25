@@ -39,8 +39,12 @@ export interface RecordedProgramRun {
 export interface ProgramRunnerOptions {
   /** Directory the program runs in. Defaults to the process cwd. */
   cwd?: string;
+  /** Fixed local process profile, selected only from a recorded process argument. */
+  shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
   timeoutMs?: number;
+  /** Cancel only this replay-owned child process tree. */
+  signal?: AbortSignal;
   /** Cap on captured stdout or source-interface-specific authored output bytes. */
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
@@ -653,9 +657,11 @@ function invocationFor(
     case "shell":
       // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
       // recorded call did, and exit status is the program's exit status.
-      return platform === "win32"
-        ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
-        : { command: "/bin/sh", args: ["-c", source] };
+      return options.shellInvocation === "bash-login"
+        ? { command: "/bin/bash", args: ["-lc", source] }
+        : platform === "win32"
+          ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
+          : { command: "/bin/sh", args: ["-c", source] };
     case "python": {
       const interpreter = resolveInterpreter(["python3", "python"], env, platform);
       if (!interpreter) {
@@ -718,7 +724,11 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
   const interfaceErrors: string[] = [];
   validateWorkflowProgramSourceInterface(program, "recorded program", interfaceErrors);
   if (interfaceErrors.length > 0) throw new Error(interfaceErrors[0]);
-  if (program.source.length === 0 && (program.argv?.length ?? 0) === 0) {
+  if (
+    program.source.length === 0 &&
+    (program.argv?.length ?? 0) === 0 &&
+    !(program.kind === "shell" && program.argument !== undefined)
+  ) {
     throw new Error(
       "the record carries neither a program source nor an argv, so there is nothing to run",
     );
@@ -1071,7 +1081,8 @@ function runChild(
   const stdout = new BoundedOutput(maxOutputBytes);
   const stderr = new BoundedOutput(maxOutputBytes);
   const cwd = options.cwd ?? process.cwd();
-
+  if (options.signal?.aborted)
+    return Promise.reject(new Error("recorded program replay was cancelled"));
   return new Promise<CapturedRun>((resolve, reject) => {
     const stdio: SpawnOptions["stdio"] =
       invocation.privateResultFd === undefined
@@ -1091,19 +1102,27 @@ function runChild(
       detached: process.platform !== "win32",
     });
     let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
+    let termination: string | undefined;
+    const terminate = (reason: string): void => {
+      if (settled || termination !== undefined) return;
+      termination = reason;
       killProcessTree(child);
-      reject(new Error(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`));
-    }, timeoutMs);
-
+    };
+    const onAbort = (): void => terminate("recorded program replay was cancelled");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    const timer = setTimeout(
+      () => terminate(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`),
+      timeoutMs,
+    );
     const finish = (run: CapturedRun): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(run);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (termination !== undefined) reject(new Error(termination));
+      else resolve(run);
     };
-
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.write(chunk);
     });
@@ -1112,13 +1131,10 @@ function runChild(
     });
     child.on("error", (error: Error) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(
-        new Error(
-          `recorded program could not be started (${invocation.command}): ${error.message}`,
-        ),
-      );
+      // Spawn failures also emit close; keep the abort reason when cancellation won the race.
+      if (termination === undefined) {
+        termination = `recorded program could not be started (${invocation.command}): ${error.message}`;
+      }
     });
     if (invocation.input !== undefined && child.stdin !== null) {
       // The interpreter may exit before consuming all source; EPIPE is a normal transport race.
@@ -1490,17 +1506,46 @@ export async function runRecordedCall(
     );
   }
   const source = programTextFor(program, request.arguments);
-  if (source.length === 0) {
+  if (
+    source.length === 0 &&
+    !(
+      program.kind === "shell" &&
+      program.argument !== undefined &&
+      Object.hasOwn(request.arguments, program.argument) &&
+      request.arguments[program.argument] === ""
+    )
+  ) {
     throw new Error(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
+  const requestedWorkdir = request.arguments.workdir;
+  const shellProfile = request.arguments.resinCodexShellProfile;
+  if (shellProfile === "bash-login-v1" && typeof requestedWorkdir !== "string") {
+    throw new Error(`step '${step.id}' cannot run: workdir must be a string`);
+  }
+  if (
+    shellProfile !== undefined &&
+    (shellProfile !== "bash-login-v1" ||
+      step.callable.name !== "exec" ||
+      program.kind !== "shell" ||
+      program.argument !== "cmd" ||
+      typeof requestedWorkdir !== "string" ||
+      typeof request.arguments.raw !== "string")
+  ) {
+    throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
+  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
+    ...(shellProfile === "bash-login-v1" && typeof requestedWorkdir === "string"
+      ? { cwd: requestedWorkdir }
+      : {}),
+    ...(shellProfile === "bash-login-v1" ? { shellInvocation: "bash-login" as const } : {}),
     ...(options.resolvePrivate === undefined && request.resolvePrivate
       ? { resolvePrivate: request.resolvePrivate }
       : {}),
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
   };
   const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {

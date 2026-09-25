@@ -119,8 +119,9 @@ function deepEqual(left: unknown, right: unknown): boolean {
 }
 
 /**
- * Compares one replay result with its selected demonstration. The only non-exact mode is the
- * explicitly declared textual whitespace projection; expected text is never normalized.
+ * Compares one replay result with its selected demonstration. Exact matches always reproduce the
+ * recording, including meaningful trailing whitespace. The optional text projection additionally
+ * permits replay-only surrounding whitespace; expected text is never normalized.
  */
 function matchesObservedResult(
   actual: WorkflowJsonValue,
@@ -129,7 +130,11 @@ function matchesObservedResult(
 ): boolean {
   if (comparison === undefined) return deepEqual(actual, expected);
   if (comparison !== "text-trim") return false;
-  return typeof actual === "string" && typeof expected === "string" && actual.trim() === expected;
+  return (
+    typeof actual === "string" &&
+    typeof expected === "string" &&
+    (actual === expected || actual.trim() === expected)
+  );
 }
 
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */
@@ -304,23 +309,23 @@ function buildCandidatePlans(
   return { kind: "plans", bound: all.plan, literal: without.plan };
 }
 
-/**
- * Bounds one replay. `executeRecordedWorkflow` exposes no cancellation, so a run that outlives the
- * bound keeps going in the background while the candidate is refused for being unproven.
- */
+/** Bound a replay and wait for its owned work to settle after cancelling at expiry. */
 async function withDeadline(
-  execution: Promise<RecordedWorkflowExecution>,
+  execute: (signal: AbortSignal) => Promise<RecordedWorkflowExecution>,
   timeoutMs: number | undefined,
 ): Promise<RecordedWorkflowExecution | undefined> {
-  if (timeoutMs === undefined) return await execution;
-  let timer: NodeJS.Timeout | undefined;
-  const expiry = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), timeoutMs);
-  });
+  const controller = new AbortController();
+  if (timeoutMs === undefined) return await execute(controller.signal);
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    return await Promise.race([execution, expiry]);
+    const result = await execute(controller.signal);
+    return expired ? undefined : result;
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }
 
@@ -375,10 +380,11 @@ async function replayStep(
   const options: RecordedWorkflowExecutionOptions = {
     inputs: inputsDeclaredByPlan(plan, environment.inputs),
     adapters: environment.adapters,
+    ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
   };
   const execution = await withDeadline(
-    executeRecordedWorkflow(plan, options),
+    (signal) => executeRecordedWorkflow(plan, { ...options, signal }),
     environment.timeoutMs,
   );
   if (!execution) {
@@ -570,15 +576,35 @@ export async function demonstrationEnvironment(params: {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
     const argument = step?.arguments.find((candidate) => candidate.name === entry.argument);
     if (step === undefined || argument === undefined) return undefined;
+    const supplied = await resolveOnce(entry.reference);
+    const bindInput = (name: string, path: WorkflowValuePath): boolean => {
+      const input = params.plan.inputs.find((candidate) => candidate.name === name);
+      if (input === undefined) return false;
+      const value = demonstratedValueAtPath(supplied, path);
+      if (value === undefined || !matchesDemonstratedType(value, input.type)) return false;
+      if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) return false;
+      inputs[name] = value;
+      return true;
+    };
+    const bindTemplate = (template: WorkflowValueTemplate, path: WorkflowValuePath): boolean => {
+      switch (template.type) {
+        case "input":
+          return bindInput(template.name, path);
+        case "object":
+          return Object.entries(template.entries).every(([key, child]) =>
+            bindTemplate(child, [...path, key]),
+          );
+        case "array":
+          return template.items.every((child, index) => bindTemplate(child, [...path, index]));
+        default:
+          // Program holes are token positions, not JSON paths. Their candidate-specific
+          // derivation below remains authoritative; no guessed token extraction here.
+          return true;
+      }
+    };
     const source = argument.source;
-    if (source.kind !== "input") continue;
-    const input = params.plan.inputs.find((candidate) => candidate.name === source.name);
-    if (input === undefined) return undefined;
-    const value = await resolveOnce(entry.reference);
-    if (!matchesDemonstratedType(value, input.type)) return undefined;
-    const name = input.name;
-    if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) return undefined;
-    inputs[name] = value;
+    if (source.kind === "input" && !bindInput(source.name, [])) return undefined;
+    if (source.kind === "template" && !bindTemplate(source.template, [])) return undefined;
   }
   for (const candidate of params.candidates) {
     if (candidate.proposed.kind !== "input") continue;
@@ -650,10 +676,11 @@ async function replayPlanOnce(
   const options: RecordedWorkflowExecutionOptions = {
     inputs: inputsDeclaredByPlan(plan, environment.inputs),
     adapters: environment.adapters,
+    ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
   };
   const execution = await withDeadline(
-    executeRecordedWorkflow(plan, options),
+    (signal) => executeRecordedWorkflow(plan, { ...options, signal }),
     environment.timeoutMs,
   );
   const reproduced: string[] = [];
@@ -751,8 +778,16 @@ export async function confirmPromotedPlan(params: {
     plan = applyAcceptedBindings(params.plan, accepted);
     replay = await replayPlanOnce(plan, params.environment);
   }
+  const missingObservation = replay.missed.some(
+    ({ stepId }) => !Object.hasOwn(params.environment.observed, stepId),
+  );
   const verification: WorkflowPlanVerification = {
-    status: replay.missed.length === 0 ? "verified" : unattributed ? "incomplete" : "failed",
+    status:
+      replay.missed.length === 0
+        ? "verified"
+        : missingObservation || (unattributed && accepted.length > 0)
+          ? "incomplete"
+          : "failed",
     reproduced: replay.reproduced,
     missed: replay.missed,
     dropped,
@@ -786,11 +821,14 @@ export async function validateAndConfirmCandidates(params: {
   plan: RecordedWorkflow;
   verification?: WorkflowPlanVerification;
 }> {
-  const decided = await validateBindingCandidates({
-    plan: params.plan,
-    candidates: params.candidates,
-    environment: params.environment,
-  });
+  const decided =
+    params.candidates.length === 0
+      ? []
+      : await validateBindingCandidates({
+          plan: params.plan,
+          candidates: params.candidates,
+          environment: params.environment,
+        });
   const accepted = decided
     .filter((outcome) => outcome.accepted)
     .map((outcome) => outcome.candidate);
@@ -829,28 +867,26 @@ export async function validateBindingCandidates(params: {
   // Replays may write files. The workspace is guaranteed to exist before any run, and the adapters
   // handed in are expected to execute there — never in the caller's project.
   await mkdir(environment.workspaceDir, { recursive: true });
-  // Older capture versions proposed the entire executable argument from discovery's schema.
-  // Replacing it proves only that another program ran, not that the recorded program accepts new
-  // data. Exclude such proposals from ALL A/B plans too: otherwise a whole-source replacement can
-  // shadow a legitimate token binding and make its evidence appear inconclusive. Explicit inputs
-  // already present in an authored plan and result-to-program dependencies are unaffected.
-  const sourceInputs = new Set(
+  // Inferred replacement of the entire executable argument proves only that another
+  // program ran, not that the recorded implementation accepts varying data. Exclude
+  // both input and result proposals from every A/B plan so they cannot shadow a
+  // legitimate token binding. Authored argument sources are unchanged.
+  const sourceCandidates = new Set(
     candidates.filter(
       (candidate) =>
-        candidate.proposed.kind === "input" &&
         candidate.path.length === 0 &&
         plan.steps.find((step) => step.id === candidate.stepId)?.callable.program?.argument ===
           candidate.argument,
     ),
   );
-  const dataCandidates = candidates.filter((candidate) => !sourceInputs.has(candidate));
+  const dataCandidates = candidates.filter((candidate) => !sourceCandidates.has(candidate));
   const outcomes: CandidateValidationOutcome[] = [];
   for (const candidate of candidates) {
     outcomes.push(
-      sourceInputs.has(candidate)
+      sourceCandidates.has(candidate)
         ? refused(
             candidate,
-            "the whole executable program is the recorded implementation, not an inferred caller input; propose the changing data positions within it instead",
+            "the whole executable program is the recorded implementation, not an inferred binding; propose changing data positions within it instead",
           )
         : await evaluateCandidate(plan, candidate, dataCandidates, environment),
     );

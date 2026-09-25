@@ -72,6 +72,47 @@ describe("a missing replay is not a completed validation", () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("validates native baseline outputs without converting them into parameter evidence", async () => {
+    const plan = recording();
+    const store = new InMemoryPrivateValueStore();
+    store.set("private:observed", "fixed-value", { workspaceId: owner });
+    plan.privateReferences = ["private:observed"];
+    plan.baseline = { inputs: [], observed: [{ stepId: "step0", reference: "private:observed" }] };
+    plan.candidates = [
+      {
+        stepId: "step0",
+        argument: "value",
+        path: [],
+        proposed: { kind: "input", name: "value", type: "string" },
+        reason: "varies-across-executions",
+        missing: "requires a held-out execution",
+      },
+    ];
+    const dispatch = vi.fn(async (request: ToolProtocolDispatchRequest) => request.arguments.value);
+    const validate = createLocalWorkflowValidator({
+      workspaceId: owner,
+      privateValues: store,
+      dispatch,
+    });
+    const verified = await validate(plan);
+    expect(verified.verification).toMatchObject({
+      status: "verified",
+      reproduced: ["step0"],
+      missed: [],
+      replay: { kind: "host-replay", planDigest: workflowValidationPlanDigest(plan) },
+    });
+    expect(verified.verdicts).toMatchObject([{ confirmed: false }]);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    dispatch.mockResolvedValueOnce("different");
+    const failed = await validate(plan);
+    expect(failed.verification).toMatchObject({
+      status: "failed",
+      reproduced: [],
+      missed: [{ stepId: "step0" }],
+    });
+    expect(failed.verification?.replay).toBeUndefined();
+  });
+
   it("records an explicit failed decision when the demonstration is unavailable", async () => {
     const plan = recording();
     plan.candidates = [

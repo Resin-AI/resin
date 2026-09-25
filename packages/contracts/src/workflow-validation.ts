@@ -80,11 +80,13 @@ export interface WorkflowValidationVerdict {
   reason?: string;
 }
 
-/** Proof that a plan was replayed once in a fresh disposable process. */
+/** Digest-bound proof of an actual disposable host replay; program replays use a fresh process. */
 export interface WorkflowValidationReplayProof {
-  kind: "fresh-process";
+  kind: "fresh-process" | "host-replay";
   /** The exact plan digest that the replay executed. */
   planDigest: string;
+  /** On mixed host replays, only these steps were dispatched through fresh process adapters. */
+  freshProcessStepIds?: string[];
 }
 
 /** What replaying the plan as a whole concluded, as the runtime that ran it reported it. */
@@ -95,7 +97,7 @@ export interface WorkflowValidationPlanVerification {
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   /** Program identities are emitted only when the whole replay was verified. */
   programIdentities?: WorkflowProgramIdentity[];
-  /** Fresh-process proof is optional for old decisions and required by cloud publication gates. */
+  /** Replay proof is optional for old decisions and required by publication gates. */
   replay?: WorkflowValidationReplayProof;
 }
 
@@ -178,8 +180,9 @@ const ProgramIdentitySchema = z.object({
 });
 
 const ReplayProofSchema = z.object({
-  kind: z.literal("fresh-process"),
+  kind: z.enum(["fresh-process", "host-replay"]),
   planDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
+  freshProcessStepIds: z.array(z.string().min(1)).optional(),
 });
 
 const PlanVerificationSchema = z.object({

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { type RecordedWorkflow, workflowValidationPlanDigest } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
-import { RESIN_PROGRAM_RUNTIME } from "@resin/runtime";
+import { RESIN_PROGRAM_RUNTIME, RESIN_TOOL_PROTOCOL_RUNTIME } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   ReplayWorkspaceUnavailableError,
@@ -243,22 +243,49 @@ describe("fresh-process baseline replay", () => {
     await expect(validate(plan)).rejects.toBeInstanceOf(ReplayWorkspaceUnavailableError);
   });
 
-  it("does not inspect a host workspace for a protocol-only plan", async () => {
+  it("replays a protocol-only baseline without inspecting the host workspace", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    privateValues.set("private:protocol-observed", "protocol result", { workspaceId });
     const plan: RecordedWorkflow = {
       schemaVersion: 1,
       workflowId: "protocol-only",
       inputs: [],
-      steps: [],
-      baseline: { inputs: [], observed: [] },
+      steps: [
+        {
+          id: "target",
+          callId: "protocol-call",
+          callable: { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name: "echo" },
+          arguments: [{ name: "value", source: { kind: "literal", value: "protocol result" } }],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+      baseline: {
+        inputs: [],
+        observed: [{ stepId: "target", reference: "private:protocol-observed" }],
+      },
     };
-    const validate = createWorkspaceSnapshotValidator(
-      () => ({ ready: true, root: path.join(os.tmpdir(), "missing-workspace-root") }),
-      { workspaceId },
-    );
+    const inspectHost = vi.spyOn(fsPromises, "lstat");
+    const dispatch = vi.fn(async () => "protocol result");
+    try {
+      const validate = createWorkspaceSnapshotValidator(
+        () => ({ ready: true, root: path.join(os.tmpdir(), "missing-workspace-root") }),
+        { workspaceId, privateValues, dispatch },
+      );
+      const result = await validate(plan);
 
-    const result = await validate(plan);
-
-    expect(result.unavailable).toContain("no matching recorded demonstration");
+      expect(result.verification).toMatchObject({
+        status: "verified",
+        reproduced: ["target"],
+        missed: [],
+        replay: { kind: "host-replay", planDigest: workflowValidationPlanDigest(plan) },
+      });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(inspectHost).not.toHaveBeenCalled();
+    } finally {
+      inspectHost.mockRestore();
+    }
   });
 
   it("defers when a source file exceeds the snapshot bound", async () => {

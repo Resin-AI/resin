@@ -26,12 +26,15 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import {
   RESIN_HARNESS_TOOL_RUNTIME,
+  RESIN_INVOKE_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
   WorkflowCallRecorder,
   readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 import {
@@ -181,6 +184,149 @@ describe("native capture of ordinary calls", () => {
     expect(JSON.stringify(events[1]!.parameters)).toBe(
       JSON.stringify({ source: "alpha-feed", page: 2 }),
     );
+  });
+
+  it("retains a zero-input composed call's meaningful result as an owned baseline", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const observedCall = recorder.observe(
+      call(1, "invoke_tool", { toolName: "local.render_result", parameters: {} }),
+      { workspaceId: "ws_native" },
+    );
+    const observedResult = recorder.observe(
+      result(1, "invoke_tool", { result: "meaningful-observed-private" }),
+      { workspaceId: "ws_native" },
+    );
+    expect(carrierOf(observedCall)).toMatchObject({
+      runtime: RESIN_INVOKE_TOOL_RUNTIME,
+      name: "local.render_result",
+      executionIndex: 0,
+    });
+    const projected = projectEventToMetadataOnly(observedResult);
+    const carrier = readWorkflowResultCarrier(
+      projected.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+    );
+    expect(carrier?.output).toEqual({ type: "object", hasContent: true });
+    expect(carrier?.baselineReference).toEqual(expect.any(String));
+    expect(resolvePrivateReference(store, carrier!.baselineReference!)).toEqual({
+      result: "meaningful-observed-private",
+    });
+    const recipe = recordCallsFromEvents("composed-zero-input", [observedCall, observedResult]);
+    expect(recipe?.workflow.steps[0]?.observed.output).toEqual({
+      type: "object",
+      hasContent: true,
+    });
+    expect(recipe?.workflow.baseline?.observed).toMatchObject([
+      { stepId: "step0", reference: carrier!.baselineReference },
+    ]);
+    expect(store.origin(carrier!.baselineReference!)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(projected.metadata)).not.toContain("meaningful-observed-private");
+  });
+
+  it("records original explicit arguments for baseline replay without independent evidence", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const events = [
+      recorder.observe(
+        call(1, "invoke_tool", {
+          toolName: "local.fetch",
+          parameters: { source: { value: "original-private-source" } },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+      recorder.observe(
+        result(1, "invoke_tool", {
+          handle: "ref:session-native-capture:call_1",
+          result: { source: "original-private-source" },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+    ];
+    const recipe = recordCallsFromEvents("original-input-baseline", events);
+    expect(recipe?.workflow.inputs).toEqual([{ name: "step0_source", type: "string" }]);
+    expect(recipe?.workflow.heldOut).toBeUndefined();
+    const baseline = recipe!.workflow.baseline!;
+    expect(baseline.observed).toHaveLength(1);
+    expect(resolvePrivateReference(store, baseline.observed[0]!.reference)).toEqual({
+      source: "original-private-source",
+    });
+    const source = baseline.inputs.find(
+      (entry) => entry.stepId === "step0" && entry.argument === "source",
+    );
+    expect(source).toBeDefined();
+    expect(resolvePrivateReference(store, source!.reference)).toBe("original-private-source");
+    expect(store.origin(source!.reference)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(events.map((entry) => entry.metadata))).not.toContain(
+      "original-private-source",
+    );
+  });
+
+  it("distinguishes two caller inputs named echo across independent complete executions", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const captured = [
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
+      call(2, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-1" } } }),
+      result(2, "invoke_tool", { handle: "ref:scope:call_2", result: { echo: "ping-1" } }),
+      userTurn(3),
+      call(3, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-9" } },
+      }),
+      result(3, "invoke_tool", { handle: "ref:scope:call_3", result: { echo: "release-9" } }),
+      call(4, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-2" } } }),
+      result(4, "invoke_tool", { handle: "ref:scope:call_4", result: { echo: "ping-2" } }),
+      // A retry may redeliver an early call/result only after the second execution
+      // completed; it is still the original step, not the next position of the repeat.
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
+    ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
+    const originalAndRedelivered = captured.filter(
+      (entry) => entry.type === "tool_call" && entry.callId === "call_1",
+    );
+    expect(originalAndRedelivered).toHaveLength(2);
+    const original = carrierOf(originalAndRedelivered[0]!)!;
+    const redelivered = carrierOf(originalAndRedelivered[1]!)!;
+    const repeated = carrierOf(
+      captured.find((entry) => entry.type === "tool_call" && entry.callId === "call_3")!,
+    )!;
+    expect(redelivered.origins).toEqual(original.origins);
+    expect(redelivered.inputs).toEqual(original.inputs);
+    expect(redelivered.executionIndex).toBe(original.executionIndex);
+    expect(repeated.inputs).toEqual(original.inputs);
+    const recipe = recordCallsFromEvents("two-echo-inputs", captured);
+    expect(recipe?.workflow.steps).toHaveLength(2);
+    expect(recipe?.workflow.inputs).toEqual([
+      { name: "step0_echo", type: "string" },
+      { name: "step1_echo", type: "string" },
+    ]);
+    expect(recipe?.workflow.heldOut?.observed).toHaveLength(2);
+    expect(
+      recipe?.workflow.heldOut?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-9", "ping-2"]);
+    expect(
+      recipe?.workflow.baseline?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-7", "ping-1"]);
   });
 
   it("never puts a recorded value into the projected metadata of an ordinary call", () => {
@@ -338,7 +484,6 @@ describe("native capture of ordinary calls", () => {
     ]);
 
     expect(recipe?.workflow.steps).toHaveLength(1);
-    expect(recipe?.workflow.baseline?.inputs).toEqual([]);
     expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
@@ -692,8 +837,10 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toHaveLength(1);
-    const candidate = derivation.candidates[0]!;
+    expect(derivation.candidates.filter((entry) => entry.proposed.kind === "result")).toHaveLength(
+      1,
+    );
+    const candidate = derivation.candidates.find((entry) => entry.proposed.kind === "result")!;
     expect(candidate.stepId).toBe("step1");
     expect(candidate.argument).toBe("entry");
     expect(candidate.proposed).toEqual({
@@ -725,7 +872,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("refuses a short token that collides with unrelated arguments", () => {
@@ -747,7 +894,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("proves a producer-to-consumer edge from the calls' own declared resource use", () => {
@@ -795,8 +942,87 @@ describe("what the derivation offers, and what it refuses to offer", () => {
     ]);
 
     // It is offered as a result binding instead, which is what the record actually supports.
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.reason).toBe("equal-to-earlier-result");
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1" && entry.argument === "handle")
+        .map((entry) => entry.reason),
+    ).toEqual(["equal-to-earlier-result"]);
+  });
+  it("proposes private nested primitive inputs, including false and zero, without displacing results", () => {
+    const derivation = deriveNativeCalls([
+      {
+        callId: "first",
+        stepId: "step0",
+        toolName: "vendor.measure",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { payload: { count: 0, enabled: false, label: "private-label" } },
+        result: { count: 0 },
+      },
+      {
+        callId: "second",
+        stepId: "step1",
+        toolName: "vendor.render",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { count: 0, enabled: false },
+      },
+    ]);
+    const inputs = derivation.candidates.filter((entry) => entry.proposed.kind === "input");
+    expect(
+      inputs.map((entry) => [
+        entry.stepId,
+        entry.argument,
+        entry.path,
+        entry.proposed.kind === "input" && entry.proposed.type,
+      ]),
+    ).toEqual([
+      ["step0", "payload", ["count"], "number"],
+      ["step0", "payload", ["enabled"], "boolean"],
+      ["step0", "payload", ["label"], "string"],
+      ["step1", "count", [], "number"],
+      ["step1", "enabled", [], "boolean"],
+    ]);
+    expect(JSON.stringify(inputs)).not.toContain("private-label");
+    expect(inputs.every((entry) => entry.missing.length > 0)).toBe(true);
+  });
+  it("bounds weak input proposals without starving a later producer-to-consumer binding", () => {
+    const firstArguments = Object.fromEntries(
+      Array.from({ length: 300 }, (_, position) => [`field${position}`, position]),
+    );
+    const derivation = deriveNativeCalls([
+      {
+        callId: "producer",
+        stepId: "step0",
+        toolName: "vendor.produce",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: firstArguments,
+        result: { id: "minted-late-result" },
+      },
+      {
+        callId: "consumer",
+        stepId: "step1",
+        toolName: "vendor.consume",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { id: "minted-late-result" },
+      },
+    ]);
+    expect(derivation.candidates.length).toBeLessThanOrEqual(256);
+    expect(
+      derivation.candidates.filter(
+        (candidate) => candidate.stepId === "step1" && candidate.argument === "id",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        proposed: { kind: "result", stepId: "step0", path: ["id"] },
+      }),
+    ]);
+    expect(
+      derivation.candidates.some(
+        (candidate) =>
+          candidate.stepId === "step0" &&
+          candidate.argument === "field0" &&
+          candidate.proposed.kind === "input",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -827,17 +1053,15 @@ describe("the recording an ordinary session produces", () => {
     ]);
 
     // The suggestion is reported and not executed: the step still carries the recorded value.
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]!.stepId).toBe("step1");
-    expect(workflow.candidates![0]!.proposed).toEqual({
-      kind: "result",
-      stepId: "step0",
-      path: ["entry", "handle"],
-    });
+    expect(workflow.candidates).toContainEqual(
+      expect.objectContaining({
+        stepId: "step1",
+        proposed: { kind: "result", stepId: "step0", path: ["entry", "handle"] },
+      }),
+    );
     const storedArgument = workflow.steps[1]!.arguments.find((entry) => entry.name === "token")!;
     expect(storedArgument.source.kind).toBe("template");
 
-    expect(workflow.baseline?.inputs).toEqual([]);
     expect(workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0", "step1"]);
     expect(
       workflow.baseline?.observed.every((entry) =>
@@ -981,7 +1205,7 @@ describe("the demonstration an ordinary session offers", () => {
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
 
-  it("does not infer inputs from discovered schema, shared values, or repeated calls", () => {
+  it("does not declare inputs from discovered schema, shared values, or repeated calls", () => {
     const observed = record([
       discovery([
         {
@@ -994,11 +1218,18 @@ describe("the demonstration an ordinary session offers", () => {
       userTurn(2),
       call(3, "vendor.intake", { feed: "bravo-feed", note: "bravo-feed" }),
     ]).events;
-    expect(carrierOf(observed[1]!)?.candidates).toBeUndefined();
-    expect(carrierOf(observed[3]!)?.candidates).toBeUndefined();
+    const recipe = recordCallsFromEvents("wf_no_inferred_inputs", observed)!;
+    expect(recipe.workflow.inputs).toEqual([]);
     expect(
-      recordCallsFromEvents("wf_no_inferred_inputs", observed)!.workflow.candidates,
-    ).toBeUndefined();
+      recipe.workflow.steps[0]!.arguments.every((argument) => argument.source.kind === "template"),
+    ).toBe(true);
+    expect(
+      recipe.workflow.candidates?.every(
+        (candidate) => candidate.proposed.kind === "input" && candidate.missing.length > 0,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("alpha-feed");
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("bravo-feed");
   });
 });
 
@@ -1058,7 +1289,6 @@ describe("a recording and the demonstrations read beside it", () => {
       "step0",
       "step1",
     ]);
-    expect(recipe!.workflow.baseline?.inputs).toEqual([]);
     expect(recipe!.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual([
       "step0",
       "step1",

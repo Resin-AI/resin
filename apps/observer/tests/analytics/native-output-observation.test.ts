@@ -160,4 +160,136 @@ describe("source-native output observation", () => {
     const recipe = recordCallsFromEvents("native-output-unavailable", observed);
     expect(recipe?.workflow.baseline).toBeUndefined();
   });
+  it("retains actual native output when completion precedes or follows the outer result", () => {
+    for (const late of [false, true]) {
+      const store = new InMemoryPrivateValueStore();
+      const recorder = new WorkflowCallRecorder({ privateValues: store });
+      const association = {
+        kind: "derived",
+        rule: "codex-single-command-start-window-v1",
+        callId: "native-call",
+        nativeCommandId: "native-1",
+        startedAtMs: 2,
+        callStartedAtMs: 1,
+        callCompletedAtMs: 3,
+      };
+      const command = event({
+        eventId: `native-command-${late}`,
+        type: "command_exec",
+        command: "/bin/bash",
+        args: ["-lc", "printf actual"],
+        exitCode: 0,
+        stdout: "redacted-display",
+        stderr: "",
+        cwd: ".",
+        durationMs: 1,
+        metadata: {
+          resinCodexCommandV1: {
+            version: 1,
+            kind: "command",
+            nativeId: "native-1",
+            ...(late ? { association } : {}),
+          },
+        },
+        causalRef: { causalSequence: late ? 4 : 2, parentId: null },
+      });
+      retainLocalWorkflowPayload(command, { stdout: "actual\n", stderr: "" });
+      const result = event({
+        eventId: `native-result-${late}`,
+        type: "tool_result",
+        callId: "native-call",
+        toolName: "exec",
+        result: [{ text: "Script completed" }],
+        isError: false,
+        executionDurationMs: 1,
+        metadata: {
+          resinCodexCommandV1: {
+            version: 1,
+            kind: "result",
+            form: "single-command-output",
+            status: "completed",
+            ...(!late ? { association } : {}),
+          },
+        },
+        causalRef: { causalSequence: late ? 3 : 4, parentId: null },
+      });
+      const recorded = [
+        user(1),
+        call(2, "native-call"),
+        ...(late ? [result, command] : [command, result]),
+      ].map((entry) => recorder.observe(entry, { workspaceId: WORKSPACE }));
+      const carrierEvent = recorded.find(
+        (entry) =>
+          entry.type === (late ? "command_exec" : "tool_result") &&
+          (late || entry.type !== "tool_result" || entry.callId === "native-call"),
+      );
+      const carrier = carrierEvent?.metadata?.workflowResult as
+        | { baselineReference?: string; output?: { type: string; hasContent: boolean } }
+        | undefined;
+      expect(carrier?.output).toEqual({ type: "string", hasContent: true });
+      expect(resolvePrivateReference(store, carrier!.baselineReference!)).toBe("actual\n");
+      expect(JSON.stringify(recorded)).not.toContain("actual\n");
+      if (late) {
+        expect(recorded[2]?.metadata?.workflowResult).toBeUndefined();
+      }
+    }
+  });
+
+  it("never turns an unverified or failed native command into a successful baseline", () => {
+    for (const exitCode of [1, 0]) {
+      const store = new InMemoryPrivateValueStore();
+      const recorder = new WorkflowCallRecorder({ privateValues: store });
+      const command = event({
+        eventId: `native-failure-${exitCode}`,
+        type: "command_exec",
+        command: "/bin/bash",
+        args: ["-lc", "false"],
+        exitCode,
+        stdout: "",
+        stderr: "",
+        cwd: ".",
+        durationMs: 1,
+        metadata: {
+          resinCodexCommandV1: {
+            version: 1,
+            kind: "command",
+            nativeId: "other-native",
+          },
+        },
+        causalRef: { causalSequence: 3, parentId: null },
+      });
+      retainLocalWorkflowPayload(command, { stdout: "", stderr: "" });
+      const result = event({
+        eventId: `outer-failure-${exitCode}`,
+        type: "tool_result",
+        callId: "native-call",
+        toolName: "exec",
+        result: [{ text: "Script completed" }],
+        isError: exitCode !== 0,
+        executionDurationMs: 1,
+        metadata: {
+          resinCodexCommandV1: {
+            version: 1,
+            kind: "result",
+            form: "single-command-output",
+            status: "completed",
+            association: {
+              kind: "derived",
+              rule: "codex-single-command-start-window-v1",
+              callId: "native-call",
+              nativeCommandId: exitCode === 1 ? "other-native" : "different-native",
+              startedAtMs: 2,
+              callStartedAtMs: 1,
+              callCompletedAtMs: 4,
+            },
+          },
+        },
+        causalRef: { causalSequence: 4, parentId: null },
+      });
+      const recorded = [user(1), call(2, "native-call"), command, result].map((entry) =>
+        recorder.observe(entry, { workspaceId: WORKSPACE }),
+      );
+      expect(recorded[3]?.metadata?.workflowResult).toBeUndefined();
+    }
+  });
 });

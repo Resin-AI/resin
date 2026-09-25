@@ -1162,6 +1162,64 @@ describe("recorded program adapters", () => {
       "from-argument\n",
     );
     expect(await adapter.call({ step, arguments: {} })).toBe("from-source\n");
+    const ordinary = recordedStep({
+      id: "ordinary-workdir-data",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "run-command",
+      program: { kind: "shell", source: "pwd", argument: "command" },
+      arguments: [literalArgument("command", "pwd")],
+    });
+    expect(
+      await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: "/" } }),
+    ).toBe(`${workspace}\n`);
+    expect(await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: 3 } })).toBe(
+      `${workspace}\n`,
+    );
+  });
+
+  it("runs explicitly recorded Codex bash-login scripts in the observed working directory", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter({ cwd: "/" });
+    const step = recordedStep({
+      id: "codex-shell",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+      arguments: [literalArgument("cmd", '[[ -n "$BASH_VERSION" ]] && pwd')],
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: '[[ -n "$BASH_VERSION" ]] && pwd',
+          workdir: workspace,
+          raw: "const r = await tools.exec_command({cmd:'x'}); text(r.output);",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).toBe(`${workspace}\n`);
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: "",
+          workdir: workspace,
+          raw: "source",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).toBe("");
+    await expect(
+      adapter.call({
+        step,
+        arguments: {
+          cmd: "pwd",
+          workdir: 3,
+          raw: "source",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).rejects.toThrow("workdir must be a string");
   });
 
   it("kills a program that outlives its time budget instead of waiting for it", async () => {

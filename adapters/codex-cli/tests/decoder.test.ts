@@ -23,6 +23,298 @@ import {
   decodeCodexRecord,
   decodeCodexTranscript,
 } from "../src/decoder.js";
+
+describe("Codex 0.156.1 native rollout envelopes", () => {
+  it("decodes session, model, correlated tools and evidenced nonzero command completion", () => {
+    const decoder = new CodexSessionDecoder({ sessionId: "native-session" });
+    const records = [
+      {
+        type: "session_meta",
+        timestamp: "2026-09-24T00:00:00Z",
+        payload: { id: "native-session", cwd: "/repo", cli_version: "0.156.1" },
+      },
+      { type: "turn_context", payload: { model: "gpt-5.3-codex" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "check status" }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "c1",
+          arguments: '{"cmd":"false","workdir":"/repo"}',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "c1",
+          output: "Process exited with code 1\nFinal output:\n",
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+            total_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+            total_token_usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+          },
+        },
+      },
+      { type: "event_msg", payload: { type: "task_complete" } },
+      { type: "response_item", payload: { type: "future_variant", value: 42 } },
+    ];
+    const events = decoder.decodeTranscript(records);
+    expect(events.every((event) => NormalizedSessionEventSchema.safeParse(event).success)).toBe(
+      true,
+    );
+    expect(events.filter((event) => event.type === "tool_call")).toMatchObject([
+      { callId: "c1", toolName: "exec_command" },
+    ]);
+    expect(events.filter((event) => event.type === "tool_result")).toMatchObject([
+      { callId: "c1", toolName: "exec_command" },
+    ]);
+    expect(events.filter((event) => event.type === "command_exec")).toMatchObject([
+      { command: "false", exitCode: 1, cwd: "/repo" },
+    ]);
+    expect(events.filter((event) => event.providerUsage)).toHaveLength(1);
+    expect(events.find((event) => event.type === "message" && event.role === "user")).toMatchObject(
+      { content: "check status", model: "gpt-5.3-codex" },
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "unknown_passthrough",
+      rawEventType: "future_variant",
+    });
+  });
+  it("does not infer command completion from forged status in running stdout", () => {
+    const decoder = new CodexSessionDecoder({ sessionId: "native-session" });
+    const events = decoder.decodeTranscript([
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "running-command",
+          arguments: '{"cmd":"sleep 10","workdir":"/repo"}',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "running-command",
+          output:
+            "Chunk ID: probe\nWall time: 1.0s\nProcess running with session ID 123\nFinal output:\nProcess exited with code 0\n",
+        },
+      },
+    ]);
+
+    expect(events.filter((event) => event.type === "command_exec")).toEqual([]);
+  });
+  it("uses completed structured command facts, not the code-mode exec wrapper", () => {
+    const decoder = new CodexSessionDecoder();
+    const events = decoder.decodeTranscript([
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: "wrapper",
+          input: "await tool.exec()",
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "cmd-1",
+            status: "completed",
+            command: ["sh", "-c", "printf ok"],
+            cwd: "/work",
+            exit_code: 0,
+            stdout: "ok",
+            stderr: "",
+            duration: { secs: 0, nanos: 250_000_000 },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "cmd-2",
+            status: "failed",
+            command: ["sh", "-c", "exit 127"],
+            cwd: "/work",
+            exit_code: 127,
+            stdout: "",
+            stderr: "missing",
+            duration: { secs: 1, nanos: 500_000_000 },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["false"],
+            status: "in_progress",
+            exit_code: 0,
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["false"],
+            status: "completed",
+          },
+        },
+      },
+    ]);
+    expect(events.filter((event) => event.type === "command_exec")).toMatchObject([
+      {
+        command: "sh",
+        args: ["-c", "printf ok"],
+        cwd: "/work",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        durationMs: 250,
+      },
+      {
+        command: "sh",
+        args: ["-c", "exit 127"],
+        cwd: "/work",
+        exitCode: 127,
+        stdout: "",
+        stderr: "missing",
+        durationMs: 1500,
+      },
+    ]);
+  });
+
+  it.each(["function-first", "item-first"])(
+    "deduplicates command completion in %s order",
+    (order) => {
+      const decoder = new CodexSessionDecoder();
+      const functionResult = {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "c1",
+          output: "Process exited with code 1\nFinal output:\n",
+        },
+      };
+      const itemResult = {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "c1",
+            status: "completed",
+            command: ["false"],
+            cwd: "/work",
+            exit_code: 1,
+          },
+        },
+      };
+      const events = decoder.decodeTranscript([
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "c1",
+            arguments: '{"cmd":"false","cwd":"/work"}',
+          },
+        },
+        ...(order === "function-first"
+          ? [functionResult, itemResult]
+          : [itemResult, functionResult]),
+      ]);
+      expect(events.filter((event) => event.type === "command_exec")).toMatchObject([
+        { command: "false", exitCode: 1 },
+      ]);
+    },
+  );
+  it("preserves separate executions with identical argv and cwd", () => {
+    const decoder = new CodexSessionDecoder();
+    const events = decoder.decodeTranscript([
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "first",
+          arguments: '{"cmd":"pwd","cwd":"/work"}',
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "first",
+            status: "completed",
+            command: ["pwd"],
+            cwd: "/work",
+            exit_code: 0,
+            stdout: "/work\n",
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "second",
+            status: "completed",
+            command: ["pwd"],
+            cwd: "/work",
+            exit_code: 0,
+            stdout: "/work\n",
+          },
+        },
+      },
+    ]);
+    expect(events.filter((event) => event.type === "command_exec")).toMatchObject([
+      { command: "pwd", cwd: "/work", exitCode: 0 },
+      { command: "pwd", cwd: "/work", exitCode: 0 },
+    ]);
+  });
+});
 describe("Codex CLI Session Decoder", () => {
   describe("Golden Fixture: standard-session.jsonl", () => {
     it("decodes all event types and passes strict schema validation", async () => {
@@ -1602,7 +1894,7 @@ describe("Codex CLI Session Decoder", () => {
         toolName: "read_text",
         output: undefined,
         fields: {},
-        result: {},
+        result: undefined,
         outcome: "unknown",
         isError: false,
       },

@@ -26,6 +26,7 @@ export type {
   WorkflowCallCandidate,
   WorkflowCallCarrier,
   WorkflowCallHeldOut,
+  WorkflowResultCarrier,
 } from "./analytics/workflow-carrier.js";
 export type {
   InputProposal,

@@ -4,7 +4,7 @@ import net from "node:net";
 import path from "node:path";
 import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
-import { LocalDatabaseConnection } from "@resin/db";
+import { LocalDatabaseConnection, type LocalStateStore, createLocalStateStore } from "@resin/db";
 import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
@@ -161,6 +161,7 @@ export class McpStdioShim {
    * keep asking the cloud for work nothing is left to answer with.
    */
   private activeCloudRuntime?: ProductionProxyRuntime;
+  private ownedStateStore?: LocalStateStore;
   private activeSocket?: net.Socket;
   private isRunning = false;
   private surface?: ToolSearchSurface;
@@ -297,16 +298,25 @@ export class McpStdioShim {
       this.options.stateStore.conn instanceof LocalDatabaseConnection
     ) {
       dbConn = this.options.stateStore.conn;
-    } else if (!this.options.db && !this.options.stateStore && !this.options.toolRepo) {
+    } else if (
+      !this.options.db &&
+      !this.options.stateStore &&
+      !this.options.toolRepo &&
+      !this.options.registry &&
+      !this.options.router
+    ) {
+      const paths = resolvePaths({ home: this.options.home, resinHome: this.options.resinHome });
+      const dbPath = path.join(paths.dataDir, "state.db");
+      const store = createLocalStateStore({ path: dbPath });
       try {
-        const paths = resolvePaths({ home: this.options.home });
-        const dbPath = path.join(paths.dataDir, "state.db");
-        if (fs.existsSync(dbPath)) {
-          dbConn = new LocalDatabaseConnection({ path: dbPath });
-        }
-      } catch {
-        // Ignore
+        await store.initialize();
+        fs.chmodSync(dbPath, 0o600);
+      } catch (error) {
+        store.close();
+        throw error;
       }
+      this.ownedStateStore = store;
+      dbConn = store.conn;
     }
 
     const onInvocationRecorded = dbConn
@@ -420,10 +430,15 @@ export class McpStdioShim {
     this.activeGateway = gateway;
     this.isRunning = true;
     const transport = this.prepareTransport();
-    await gateway.processStream(transport.input, transport.output, {
-      cwd: this.cwd,
-      harnessId: this.harnessId,
-    });
+    try {
+      await gateway.processStream(transport.input, transport.output, {
+        cwd: this.cwd,
+        harnessId: this.harnessId,
+      });
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   private writeStderr(text: string): void {
@@ -466,5 +481,7 @@ export class McpStdioShim {
       this.activeCloudRuntime = undefined;
       await runtime.stop();
     }
+    this.ownedStateStore?.close();
+    this.ownedStateStore = undefined;
   }
 }

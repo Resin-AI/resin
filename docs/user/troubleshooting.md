@@ -58,6 +58,8 @@ resin repair
 
 Do not run `resin init --auto-approve` as a restart shortcut. That re-enters install/pairing. Use `resin repair`.
 
+An explicitly standalone connection (`resin mcp --standalone`) does not require a daemon. It initializes its owner-only local state database, including invocation records, even after `init --no-service`; database initialization errors stop startup rather than silently disabling recording.
+
 ---
 
 ### Recipe 3: Pairing, Login, Or Expired Cloud Credentials
@@ -93,6 +95,14 @@ Stay inside the authorized workspace root. Denied paths include `.git`, `.ssh`, 
 **Symptom**: Cloud is down or you signed out; the harness still needs tools.
 
 The locked local meta-tools stay on the gateway: `search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`. Confirm IPC `CONNECTED` with `resin status`. There is no `resin status --all-tools` or `resin repair --promote-tool` flag; catalog promotion is a `manage_tools` MCP action, not a CLI repair flag.
+
+---
+
+### Recipe 6: Worker IPC Failure
+
+**Symptom**: A tool invocation returns `write_error`, possibly mentioning `EPIPE`.
+
+The host could not write an RPC frame to the worker. Treat the invocation as failed, not as evidence of success; inspect execution receipts before retrying because side effects may already have occurred. Worker disposal closes IPC before termination. Late pipe errors do not replace an already-settled result such as `OUTPUT_LIMIT_EXCEEDED` or a timeout.
 
 ---
 

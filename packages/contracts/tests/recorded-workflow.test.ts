@@ -96,6 +96,31 @@ describe("recorded workflow validation", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("accepts empty and scalar output facts but rejects leaked values and malformed shapes", () => {
+    for (const output of [
+      { type: "string", hasContent: false },
+      { type: "boolean", hasContent: true },
+      { type: "number", hasContent: true },
+    ] as const) {
+      const workflow = fourCallWorkflow();
+      workflow.steps[0]!.observed.output = output;
+      expect(validateRecordedWorkflow(workflow).valid).toBe(true);
+    }
+    for (const output of [
+      { type: "string", hasContent: true, value: "private" },
+      { type: "unknown", hasContent: true },
+      { type: "object", hasContent: "yes" },
+    ]) {
+      const workflow = fourCallWorkflow();
+      const untrusted = { ...workflow.steps[0]!, observed: { outcome: "succeeded", output } };
+      const result = validateRecordedWorkflow({
+        ...workflow,
+        steps: [untrusted, ...workflow.steps.slice(1)],
+      } as RecordedWorkflow);
+      expect(result.valid).toBe(false);
+    }
+  });
+
   it("rejects a binding to a step that does not come earlier", () => {
     const workflow = fourCallWorkflow();
     const result = validateRecordedWorkflow({

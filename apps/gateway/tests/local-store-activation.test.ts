@@ -424,4 +424,97 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
       }
     },
   );
+
+  it("persists a real standalone invocation in the store created on first startup", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-fresh-standalone-"));
+    const resinHome = path.join(home, ".resin");
+    const dbPath = path.join(resinHome, "data", "state.db");
+    const streams = () => ({
+      stdin: new stream.PassThrough(),
+      stdout: new stream.PassThrough(),
+      stderr: new stream.PassThrough(),
+    });
+    const firstStreams = streams();
+    const first = new McpStdioShim({
+      socketPath: "",
+      maxStartupAttempts: 0,
+      home,
+      resinHome,
+      cwd: home,
+      ...firstStreams,
+    });
+    let second: McpStdioShim | undefined;
+    let conn: LocalDatabaseConnection | undefined;
+    try {
+      expect(fs.existsSync(dbPath)).toBe(false);
+      expect((await first.start()).mode).toBe("standalone_inprocess");
+      await first.stop();
+
+      conn = new LocalDatabaseConnection({ path: dbPath });
+      const { manifest, toolVersion } = makeEvolvedTool("fresh_standalone_audit", "2.3.4");
+      const repo = new ToolRepository(conn);
+      await repo.saveManifest(manifest);
+      await repo.saveToolVersion(toolVersion);
+      conn.close();
+
+      const secondStreams = streams();
+      second = new McpStdioShim({
+        socketPath: "",
+        maxStartupAttempts: 0,
+        home,
+        resinHome,
+        cwd: home,
+        ...secondStreams,
+      });
+      expect((await second.start()).mode).toBe("standalone_inprocess");
+      const decoder = new McpFrameDecoder();
+      const { promise, resolve } = withResolvers<JsonRpcSuccessResponse<CallToolResult>>();
+      secondStreams.stdout.on("data", (chunk) => {
+        for (const message of decoder.push(chunk)) {
+          if ("id" in message && message.id === "audit_call") {
+            resolve(message as JsonRpcSuccessResponse<CallToolResult>);
+          }
+        }
+      });
+      secondStreams.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: "audit_init",
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            clientInfo: { name: "test-harness", version: "1.0.0" },
+            capabilities: {},
+            rootUri: pathToFileURL(home).href,
+          },
+        })}\n`,
+      );
+      secondStreams.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: "audit_call",
+          method: "tools/call",
+          params: { name: "fresh_standalone_audit", arguments: { query: "durable" } },
+        })}\n`,
+      );
+      const response = await promise;
+      expect(response.error).toBeUndefined();
+      expect(response.result.isError).not.toBe(true);
+      expect(JSON.parse(response.result.content[0].text)).toMatchObject({
+        status: "executed",
+        tool: "fresh_standalone_audit",
+      });
+      await second.stop();
+      conn.open();
+      const rows = conn.all<{ tool_id: string; tool_version: string; status: string }>(
+        "SELECT tool_id, tool_version, status FROM invocation_records;",
+      );
+      expect(rows).toEqual([{ tool_id: manifest.id, tool_version: "2.3.4", status: "success" }]);
+    } finally {
+      await second?.stop();
+      await first.stop();
+      conn?.close();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

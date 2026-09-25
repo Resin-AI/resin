@@ -5722,6 +5722,13 @@ var init_adapter3 = __esm({
   }
 });
 
+// adapters/codex-cli/dist/code-command.js
+var init_code_command = __esm({
+  "adapters/codex-cli/dist/code-command.js"() {
+    "use strict";
+  }
+});
+
 // adapters/codex-cli/dist/decoder.js
 var CodexTranscriptValueSchema, CodexTranscriptPayloadSchema, CodexDecoderOptionsSchema;
 var init_decoder3 = __esm({
@@ -5729,6 +5736,7 @@ var init_decoder3 = __esm({
     "use strict";
     init_dist();
     init_zod();
+    init_code_command();
     CodexTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
       external_exports.string(),
       external_exports.number(),

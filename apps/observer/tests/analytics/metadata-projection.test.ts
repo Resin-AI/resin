@@ -15,7 +15,9 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   nowIso,
+  readCodexCommandMetadata,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -320,6 +322,94 @@ describe("projectEventToMetadataOnly", () => {
     }
 
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("retains only strict Codex command association IDs and times, never source values", () => {
+    const association = {
+      kind: "derived",
+      rule: "codex-single-command-start-window-v1",
+      callId: "call_1",
+      nativeCommandId: "exec_1",
+      startedAtMs: 20,
+      callStartedAtMs: 10,
+      callCompletedAtMs: 30,
+    };
+    const events: NormalizedSessionEvent[] = [
+      {
+        ...createBaseHeaders(21),
+        type: "tool_call",
+        callId: "call_1",
+        toolName: "exec",
+        parameters: {
+          raw: "const r = await tools.exec_command({cmd:'echo private-secret'}); text(r.output);",
+          cmd: "echo private-secret",
+          workdir: "/repo",
+        },
+        isShadow: false,
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "call",
+            form: "single-command-output",
+          },
+        },
+      },
+      {
+        ...createBaseHeaders(22),
+        type: "command_exec",
+        command: "/bin/bash",
+        args: ["-lc", "echo private-secret"],
+        cwd: "/repo",
+        exitCode: 0,
+        stdout: "private-secret",
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "command",
+            nativeId: "exec_1",
+            startedAtMs: 20,
+          },
+        },
+      },
+      {
+        ...createBaseHeaders(23),
+        type: "tool_result",
+        callId: "call_1",
+        toolName: "exec",
+        result: [
+          { type: "input_text", text: "Script completed" },
+          { type: "input_text", text: "private-secret" },
+        ],
+        executionDurationMs: 20,
+        isError: false,
+        isShadow: false,
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "result",
+            form: "single-command-output",
+            status: "completed",
+            association,
+          },
+        },
+      },
+    ];
+    for (const event of events) {
+      const projected = projectEventToMetadataOnly(event, { enrichEvidence: false });
+      expect(readCodexCommandMetadata(projected.metadata)).toBeDefined();
+      expect(JSON.stringify(projected)).not.toContain("private-secret");
+      expect(JSON.stringify(projected.metadata)).not.toContain("/repo");
+    }
+    expect(
+      readCodexCommandMetadata({
+        [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+          version: 1,
+          kind: "command",
+          nativeId: "exec_1",
+          cmd: "echo private-secret",
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it("projects command_exec event with enrichment disabled: drops the command entirely", () => {
