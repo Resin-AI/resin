@@ -123,6 +123,15 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
     confidence: "medium",
   },
   {
+    id: "secret_named_assignment",
+    name: "Assignment to a Secret-Named Variable",
+    secretType: "CREDENTIAL",
+    // DB_PASS='v', ERP_PASSWORD=v, GH_TOKEN=v, access_token=v: the variable name marks the value.
+    regex:
+      /\b[A-Za-z0-9_]*(?:PASS|PASSWD|PASSWORD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)\s*=\s*["']?([^"'\s;&|]{6,})["']?/gi,
+    confidence: "medium",
+  },
+  {
     id: "cli_password_argument",
     name: "Password Argument of a Known Client",
     secretType: "CREDENTIAL",

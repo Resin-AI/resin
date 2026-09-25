@@ -209,7 +209,8 @@ describe("command text through normalization and projection", () => {
   it("carries only a secret-scrubbed, home-generalized command line and nothing a local-only policy keeps", async () => {
     const secretCommand =
       "mysql -u root -phunter2secret -e 'select 1' && sshpass -p hunter2secret ssh host && " +
-      "/home/PRIVATE_USER/repo/deploy.sh --token SECRET_TOKEN_XYZ12 && PGPASSWORD=hunter2secret psql";
+      "/home/PRIVATE_USER/repo/deploy.sh --token SECRET_TOKEN_XYZ12 && PGPASSWORD=hunter2secret psql && " +
+      "ERP_USER=planner ERP_PASS='Planner#2025' python dbgw.py";
     const record = ompCommandExec({ command: secretCommand });
     const projected = projectEventToMetadataOnly(await normalize(record, "command_exec"), {
       validate: true,
@@ -217,7 +218,7 @@ describe("command text through normalization and projection", () => {
     });
     const text = projected.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY] as { text: string };
     expect(text.text).toMatch(
-      /^mysql -u root -p\[REDACTED_CREDENTIAL:\w+\] -e 'select 1' && sshpass -p \[REDACTED_CREDENTIAL:\w+\] ssh host && ~\/repo\/deploy\.sh --token \[REDACTED_CREDENTIAL:\w+\] && PGPASSWORD=\[REDACTED_CREDENTIAL:\w+\] psql$/,
+      /^mysql -u root -p\[REDACTED_CREDENTIAL:\w+\] -e 'select 1' && sshpass -p \[REDACTED_CREDENTIAL:\w+\] ssh host && ~\/repo\/deploy\.sh --token \[REDACTED_CREDENTIAL:\w+\] && PGPASSWORD=\[REDACTED_CREDENTIAL:\w+\] psql && ERP_USER=planner ERP_PASS='\[REDACTED_CREDENTIAL:\w+\]' python dbgw\.py$/,
     );
 
     const local = await normalize(record, "command_exec", { localOnlyFields: ["command"] });

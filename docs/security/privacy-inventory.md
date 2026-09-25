@@ -68,7 +68,7 @@ Resin manages data through explicit state transitions for revocation, export, re
 
 Before any event or diagnostic metadata is written to cloud storage or diagnostic bundles:
 
-- **Secret & Token Redaction**: Scans for JWTs, Bearer tokens, GitHub PATs, AWS access keys, Anthropic/OpenAI API keys, private key headers, credential assignments, and passwords passed as command-line arguments (`--password V`, `--token=V`, `sshpass -p V`, `docker login -p V`, `redis-cli -a V`, `mysql -pV`).
+- **Secret & Token Redaction**: Scans for JWTs, Bearer tokens, GitHub PATs, AWS access keys, Anthropic/OpenAI API keys, private key headers, credential assignments including secret-named variables (`DB_PASS=V`, `GH_TOKEN=V`), and passwords passed as command-line arguments (`--password V`, `--token=V`, `sshpass -p V`, `docker login -p V`, `redis-cli -a V`, `mysql -pV`).
 - **Path & Username Redaction**: Normalizes local file paths (e.g. `/Users/alice/projects/app` → `~/app`) to prevent username leakage.
 - **High-Entropy Filtering**: Filters unstructured high-entropy strings exceeding Shannon entropy thresholds.
 
