@@ -624,6 +624,47 @@ function validateDemonstration(
 }
 
 /**
+ * The steps whose results a recorded workflow returns, in recorded order: those no later step
+ * consumes through a bound result, a declared dependency or Python setup. A chain returns its final
+ * result; a run of independent steps returns every step's output.
+ */
+export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
+  const consumed = new Set<string>();
+  const stepByCall = new Map(workflow.steps.map((step) => [step.callId, step.id]));
+  const walkTemplate = (template: WorkflowValueTemplate): void => {
+    switch (template.type) {
+      case "result":
+        consumed.add(template.stepId);
+        return;
+      case "object":
+        for (const entry of Object.values(template.entries)) walkTemplate(entry);
+        return;
+      case "array":
+        for (const entry of template.items) walkTemplate(entry);
+        return;
+      case "program":
+        walkTemplate(template.source);
+        for (const hole of template.holes) walkTemplate(hole.binding);
+        return;
+      default:
+        return;
+    }
+  };
+  for (const step of workflow.steps) {
+    for (const dependency of step.dependsOn) consumed.add(dependency);
+    for (const argument of step.arguments) {
+      if (argument.source.kind === "result") consumed.add(argument.source.stepId);
+      if (argument.source.kind === "template") walkTemplate(argument.source.template);
+    }
+    for (const descriptor of step.callable.program?.pythonState?.setup ?? []) {
+      const producer = stepByCall.get(descriptor.callId);
+      if (producer !== undefined) consumed.add(producer);
+    }
+  }
+  return workflow.steps.filter((step) => !consumed.has(step.id)).map((step) => step.id);
+}
+
+/**
  * Collects all local references an executable workflow may resolve.
  *
  * The result is metadata only: it contains opaque reference identities, never resolved values or

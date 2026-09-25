@@ -4,6 +4,7 @@ import {
   type WorkflowRecordedProgram,
   collectWorkflowPrivateReferences,
   validateRecordedWorkflow,
+  workflowSinkStepIds,
 } from "../src/recorded-workflow.js";
 
 /** fetch -> calculate -> write -> upload: four calls, values flowing through results. */
@@ -721,5 +722,42 @@ describe("recorded workflow validation", () => {
       expect(invalid.errors.join("\n")).toContain(`${label}.observed`);
       expect(invalid.errors.join("\n")).toContain("unsupported comparison");
     }
+  });
+});
+
+describe("workflow sink steps", () => {
+  it("returns a chain's final step but every output no later step consumes", () => {
+    expect(workflowSinkStepIds(fourCallWorkflow())).toEqual(["upload"]);
+
+    const independent = fourCallWorkflow();
+    for (const step of independent.steps) {
+      step.dependsOn = [];
+      step.arguments = step.arguments.filter(({ source }) => source.kind !== "result");
+    }
+    expect(workflowSinkStepIds(independent)).toEqual(["fetch", "calculate", "write", "upload"]);
+
+    // A program template's result hole and a Python setup cell each consume their producer.
+    const consumed = structuredClone(independent);
+    consumed.steps[1]!.arguments.push({
+      name: "command",
+      source: {
+        kind: "template",
+        template: { type: "array", items: [{ type: "result", stepId: "fetch", path: [] }] },
+      },
+    });
+    consumed.steps[3]!.callable.program = {
+      kind: "python",
+      source: "",
+      argument: "code",
+      pythonState: {
+        schemaVersion: 1,
+        status: "closed",
+        unresolvedReadCount: 0,
+        setup: [
+          { callId: "call_3", sourceEventId: "s", resultEventId: "r", reference: "private:setup" },
+        ],
+      },
+    };
+    expect(workflowSinkStepIds(consumed)).toEqual(["calculate", "upload"]);
   });
 });

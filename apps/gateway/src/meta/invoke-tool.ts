@@ -91,14 +91,25 @@ export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
 }
 
 /**
- * A result whose value is a string reaches the caller as that text rather than as a JSON string
- * literal of it: command output keeps its own formatting and costs no escaping.
+ * Text output reaches the caller as text rather than as a JSON string literal of it: command output
+ * keeps its own formatting and costs no escaping. A workflow that returns several steps' text
+ * outputs is shown one labeled section per step, in recorded order.
  */
 function presentedResult(result: CallToolResult): CallToolResult {
   const value = composedResultValue(result);
   const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
-  return typeof value === "string" && text !== undefined && value !== text
-    ? { ...result, content: [{ type: "text", text: value }] }
+  const presented =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value) &&
+          value.length > 1 &&
+          value.every((item) => typeof item === "string" || item === null)
+        ? value
+            .map((item, index) => `--- step ${index + 1}/${value.length} ---\n${item ?? ""}`)
+            .join("\n")
+        : undefined;
+  return presented !== undefined && text !== undefined && presented !== text
+    ? { ...result, content: [{ type: "text", text: presented }] }
     : result;
 }
 

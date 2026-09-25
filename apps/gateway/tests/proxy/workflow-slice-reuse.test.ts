@@ -167,7 +167,11 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
     for (const project of ["gamma-project", "delta-project"]) {
       const result = await callable.invoke({ [inputName]: project });
       expect(result.status, result.error).toBe("completed");
-      expect(result.result).toEqual({ sealed: `release-for-${project}` });
+      // No step consumes another's output (they share a file), so both outputs are the result.
+      expect(result.result).toEqual([
+        `release-for-${project}\n`,
+        { sealed: `release-for-${project}` },
+      ]);
       expect(readFileSync(path.join(consumerDir, "release/README.txt"), "utf8")).toBe(
         `release-for-${project}\n`,
       );

@@ -264,14 +264,14 @@ describe("fresh-process baseline replay", () => {
     }
   });
 
-  it("snapshots current bytes on each attempt and still requires the recorded output to match", async () => {
+  it("snapshots current bytes on each attempt, so a program that no longer holds fails", async () => {
     const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-python-current-bytes-"));
     try {
       const input = path.join(sourceRoot, "input.txt");
       fs.writeFileSync(input, "recorded");
       const { plan, privateValues } = recording(
-        "from pathlib import Path\nprint(Path('input.txt').read_text())",
-        "recorded\n",
+        "from pathlib import Path\nassert Path('input.txt').read_text() == 'recorded'\nprint('ok')",
+        "ok\n",
       );
       const validate = createWorkspaceSnapshotValidator(() => ({ ready: true, root: sourceRoot }), {
         workspaceId,
@@ -473,12 +473,11 @@ describe("fresh-process baseline replay", () => {
     expect(JSON.stringify(result)).not.toContain("lock_data");
   });
 
-  it("does not replace recorded expectations with a successful process exit", async () => {
+  it("verifies a recorded program that completes even though its printed output changed", async () => {
     const { plan, validate } = recording("print(sum([1, 2, 3]))", "999\n");
     const result = await validate(plan);
-    expect(result.verification?.status).not.toBe("verified");
-    expect(result.verification?.reproduced).toEqual([]);
-    expect(result.verification?.replay).toBeUndefined();
+    expect(result.verification?.status).toBe("verified");
+    expect(result.verification?.reproduced).toEqual(["target"]);
   });
 
   it("does not use the original baseline to promote a proposed input", async () => {

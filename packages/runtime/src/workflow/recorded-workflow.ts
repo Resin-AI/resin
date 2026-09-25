@@ -13,6 +13,7 @@ import {
   applyProgramTokenValues,
   tokenizeProgram,
   validateWorkflowProgramProjection,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import type {
   ProgramToken,
@@ -521,10 +522,23 @@ export async function executeRecordedWorkflow(
 
   const failure = outcomes.find((outcome) => outcome.status === "failed");
   const lastCompleted = [...outcomes].reverse().find((outcome) => outcome.status === "completed");
+  // A run of independent steps returns every output it produced, in recorded order; a chain, the
+  // result its last step produced.
+  const sinks = workflowSinkStepIds(workflow);
+  const outcomeOf = new Map(outcomes.map((outcome) => [outcome.stepId, outcome]));
+  const result =
+    sinks.length > 1
+      ? sinks.map((stepId) => {
+          const outcome = outcomeOf.get(stepId);
+          return outcome?.status === "completed" ? outcome.result : null;
+        })
+      : lastCompleted?.status === "completed"
+        ? lastCompleted.result
+        : undefined;
   return {
     status: failure ? "failed" : "completed",
     steps: outcomes,
-    result: lastCompleted?.status === "completed" ? lastCompleted.result : undefined,
+    result,
     ...(failure?.status === "failed" ? { error: failure.error } : {}),
   };
 }

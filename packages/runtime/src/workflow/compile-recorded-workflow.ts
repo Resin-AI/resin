@@ -13,6 +13,7 @@ import {
   type WorkflowValueTemplate,
   collectWorkflowPrivateReferences,
   validateRecordedWorkflow,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import {
   type RecordedWorkflowExecution,
@@ -39,8 +40,11 @@ export interface CompiledWorkflowArtifact {
   name: string;
   /** Caller-facing input schema, using the recorded types. */
   inputSchema: Record<string, unknown>;
-  /** What the artifact returns: the last step's recorded result shape. */
-  outputContract: { fromStep: string; callable: string };
+  /**
+   * What the artifact returns: the last step's result, or, when several steps' outputs go unused
+   * by any later step, each of those outputs in recorded order (`fromSteps`).
+   */
+  outputContract: { fromStep: string; callable: string; fromSteps?: string[] };
   /** Runtimes the artifact needs adapters for. */
   requiredRuntimes: string[];
   /** Private references the host must resolve locally at invocation time. */
@@ -161,6 +165,7 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
   // and the digest always describes the executable contents.
   const plan = isolate(workflow);
   const last = plan.steps[plan.steps.length - 1]!;
+  const sinks = workflowSinkStepIds(plan);
 
   const JSON_SCHEMA_TYPES: Record<string, string> = {
     string: "string",
@@ -189,7 +194,11 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
         .map((input) => input.name),
       additionalProperties: false,
     },
-    outputContract: { fromStep: last.id, callable: last.callable.name },
+    outputContract: {
+      fromStep: last.id,
+      callable: last.callable.name,
+      ...(sinks.length > 1 ? { fromSteps: sinks } : {}),
+    },
     requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
     requiredPrivateReferences: collectWorkflowPrivateReferences(plan),
     permissions: plan.steps
