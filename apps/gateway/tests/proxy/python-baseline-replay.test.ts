@@ -288,10 +288,11 @@ describe("fresh-process baseline replay", () => {
     }
   });
 
-  it("defers when a source file exceeds the snapshot bound", async () => {
+  it("rejects a source file exceeding the snapshot bound without treating it as transient", async () => {
     const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-python-oversize-"));
     try {
-      fs.writeFileSync(path.join(sourceRoot, "too-large.bin"), Buffer.alloc(10 * 1024 * 1024 + 1));
+      fs.closeSync(fs.openSync(path.join(sourceRoot, "too-large.bin"), "w"));
+      fs.truncateSync(path.join(sourceRoot, "too-large.bin"), 10 * 1024 * 1024 + 1);
       const { plan, privateValues } = recording("print('unused')", "unused\n");
       const validate = createWorkspaceSnapshotValidator(() => ({ ready: true, root: sourceRoot }), {
         workspaceId,
@@ -299,7 +300,7 @@ describe("fresh-process baseline replay", () => {
         timeoutMs: 5_000,
       });
 
-      await expect(validate(plan)).rejects.toBeInstanceOf(ReplayWorkspaceUnavailableError);
+      await expect(validate(plan)).rejects.toThrow("per-file size limit");
       expect(fs.existsSync(path.join(sourceRoot, "too-large.bin"))).toBe(true);
     } finally {
       fs.rmSync(sourceRoot, { recursive: true, force: true });
@@ -319,7 +320,7 @@ describe("fresh-process baseline replay", () => {
         timeoutMs: 5_000,
       });
 
-      await expect(validate(plan)).rejects.toBeInstanceOf(ReplayWorkspaceUnavailableError);
+      await expect(validate(plan)).rejects.toThrow("entry-count limit");
     } finally {
       fs.rmSync(sourceRoot, { recursive: true, force: true });
     }

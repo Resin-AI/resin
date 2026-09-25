@@ -24,9 +24,9 @@ import {
   InMemoryPrivateValueStore,
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import { RESIN_TOOL_PROTOCOL_RUNTIME, type ToolProtocolDispatchRequest } from "@resin/runtime";
+import { RESIN_PROGRAM_RUNTIME, RESIN_TOOL_PROTOCOL_RUNTIME, type ToolProtocolDispatchRequest } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
-import { ReplayWorkspaceUnavailableError } from "../../src/proxy/replay-workspace-snapshot.js";
+import { ReplayWorkspaceUnavailableError, createWorkspaceSnapshotValidator } from "../../src/proxy/replay-workspace-snapshot.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,
@@ -367,6 +367,45 @@ describe("WorkflowValidationWorker", () => {
     expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
     expect(dispatch).not.toHaveBeenCalled();
     expect(logs.join("\n")).toContain("replay failed");
+  });
+
+  it("submits a failed decision when a ready workspace exceeds the snapshot capacity", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-worker-capacity-"));
+    try {
+      const oversized = path.join(sourceRoot, "oversized.bin");
+      fs.closeSync(fs.openSync(oversized, "w"));
+      fs.truncateSync(oversized, 10 * 1024 * 1024 + 1);
+      const plan = recordedPlan();
+      plan.steps[0]!.callable = {
+        runtime: RESIN_PROGRAM_RUNTIME,
+        name: "eval",
+        program: { kind: "python", source: "print('unused')", argument: "code" },
+      };
+      const { calls, fetchImpl } = recordingFetch((url) =>
+        url.includes("/pending")
+          ? jsonResponse({ requests: [requestFor(plan)] })
+          : jsonResponse({ status: "recorded" }),
+      );
+      const worker = new WorkflowValidationWorker({
+        client: clientOver(fetchImpl),
+        identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+        createValidator: () =>
+          createWorkspaceSnapshotValidator(() => ({ ready: true, root: sourceRoot }), {
+            workspaceId: WORKSPACE_ID,
+            privateValues: privateValues(),
+          }),
+        now: () => new Date(DECIDED_AT),
+      });
+
+      expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 1, refused: 0 });
+      expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(1);
+      const decision = postedDecision(calls);
+      expect(decision.verification?.status).toBe("failed");
+      expect(decision.accepted).toEqual([]);
+      expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+    }
   });
 
   it("does not submit a decision before its trusted workspace is ready", async () => {
