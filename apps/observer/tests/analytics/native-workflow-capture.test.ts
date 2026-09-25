@@ -289,8 +289,29 @@ describe("native capture of ordinary calls", () => {
       result(3, "invoke_tool", { handle: "ref:scope:call_3", result: { echo: "release-9" } }),
       call(4, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-2" } } }),
       result(4, "invoke_tool", { handle: "ref:scope:call_4", result: { echo: "ping-2" } }),
+      // A retry may redeliver an early call/result only after the second execution
+      // completed; it is still the original step, not the next position of the repeat.
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
     ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
+    const originalAndRedelivered = captured.filter(
+      (entry) => entry.type === "tool_call" && entry.callId === "call_1",
+    );
+    expect(originalAndRedelivered).toHaveLength(2);
+    const original = carrierOf(originalAndRedelivered[0]!)!;
+    const redelivered = carrierOf(originalAndRedelivered[1]!)!;
+    const repeated = carrierOf(
+      captured.find((entry) => entry.type === "tool_call" && entry.callId === "call_3")!,
+    )!;
+    expect(redelivered.origins).toEqual(original.origins);
+    expect(redelivered.inputs).toEqual(original.inputs);
+    expect(redelivered.executionIndex).toBe(original.executionIndex);
+    expect(repeated.inputs).toEqual(original.inputs);
     const recipe = recordCallsFromEvents("two-echo-inputs", captured);
+    expect(recipe?.workflow.steps).toHaveLength(2);
     expect(recipe?.workflow.inputs).toEqual([
       { name: "step0_echo", type: "string" },
       { name: "step1_echo", type: "string" },

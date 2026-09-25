@@ -502,8 +502,15 @@ export class WorkflowCallRecorder {
     const inner = parameters.parameters ?? parameters.arguments;
     const argumentsAtCall = isPlainObject(inner) ? inner : {};
     const state = this.sessionState(event.sessionId);
+    // A delayed redelivery belongs to its original call, even after later executions.
+    // Its input identities must not drift to the current execution's next position.
+    let existing: LocalCall | undefined;
+    for (let index = state.executions.length - 1; index >= 0 && !existing; index--) {
+      existing = state.executions[index]!.calls.find((call) => call.callId === event.callId);
+    }
     const position =
-      state.executions.length === 0 || state.newExecutionPending ? 0 : state.position;
+      existing?.position ??
+      (state.executions.length === 0 || state.newExecutionPending ? 0 : state.position);
     // Input identity follows the selected workflow step, not a session-global call id.
     // Repeated executions have new call ids but the same logical positions.
     const nameInput = (argument: string, path: WorkflowValuePath): string =>
@@ -582,11 +589,13 @@ export class WorkflowCallRecorder {
         // An unresolved reference supplies no demonstration or baseline value.
       }
     }
-    const local = this.recordLocalCall(
-      state,
-      { ...event, toolName: routedName, parameters: actualArguments },
-      actualArguments,
-    );
+    const local =
+      existing ??
+      this.recordLocalCall(
+        state,
+        { ...event, toolName: routedName, parameters: actualArguments },
+        actualArguments,
+      );
     carrier.executionIndex = local.executionIndex;
     carrier.baselineInputs = { ...local.argumentReferences };
     const heldOut = this.heldOutSoFar(state, local);
