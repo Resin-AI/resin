@@ -705,9 +705,9 @@ describe("selected demonstration comparison projections", () => {
   });
 });
 
-describe("Python Eval baseline replay comparison", () => {
-  it("reproduces the exact Eval text without loosening baseline comparison", async () => {
-    const plan: RecordedWorkflow = {
+describe("recorded program replay verification", () => {
+  function evalPlan(source: string): RecordedWorkflow {
+    return {
       schemaVersion: 1,
       workflowId: "wf-python-eval-baseline",
       inputs: [],
@@ -718,11 +718,7 @@ describe("Python Eval baseline replay comparison", () => {
           callable: {
             runtime: RESIN_PROGRAM_RUNTIME,
             name: "eval",
-            program: {
-              kind: "python",
-              source: "{'count': 2}",
-              sourceInterface: "python-eval",
-            },
+            program: { kind: "python", source, sourceInterface: "python-eval" },
           },
           arguments: [],
           dependsOn: [],
@@ -731,22 +727,34 @@ describe("Python Eval baseline replay comparison", () => {
         },
       ],
     };
-    const environment = await environmentOf({
-      inputs: {},
-      observed: { eval: "{'count': 2}" },
-    });
+  }
+
+  it("verifies a program that completes again, even when its output changed since recording", async () => {
+    // Tests, builds and queries legitimately print different text on a later run.
+    const environment = await environmentOf({ inputs: {}, observed: { eval: "{'count': 1}" } });
     environment.adapters.register(createProgramAdapter({ cwd: environment.workspaceDir }));
 
-    const exact = await confirmPromotedPlan({ plan, accepted: [], environment });
-    const different = await confirmPromotedPlan({
-      plan,
+    const confirmed = await confirmPromotedPlan({
+      plan: evalPlan("{'count': 2}"),
       accepted: [],
-      environment: { ...environment, observed: { eval: "{'count': 2}\n" } },
+      environment,
     });
 
-    expect(exact.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
-    expect(different.verification.status).toBe("failed");
-    expect(different.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
+    expect(confirmed.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
+  });
+
+  it("misses a program that no longer runs to completion", async () => {
+    const environment = await environmentOf({ inputs: {}, observed: { eval: "0.5" } });
+    environment.adapters.register(createProgramAdapter({ cwd: environment.workspaceDir }));
+
+    const confirmed = await confirmPromotedPlan({
+      plan: evalPlan("1/0"),
+      accepted: [],
+      environment,
+    });
+
+    expect(confirmed.verification.status).toBe("failed");
+    expect(confirmed.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
   });
 });
 

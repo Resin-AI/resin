@@ -91,6 +91,18 @@ export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
 }
 
 /**
+ * A result whose value is a string reaches the caller as that text rather than as a JSON string
+ * literal of it: command output keeps its own formatting and costs no escaping.
+ */
+function presentedResult(result: CallToolResult): CallToolResult {
+  const value = composedResultValue(result);
+  const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+  return typeof value === "string" && text !== undefined && value !== text
+    ? { ...result, content: [{ type: "text", text: value }] }
+    : result;
+}
+
+/**
  * Factory for creating the invoke_tool handler.
  */
 export function createInvokeToolHandler(
@@ -550,7 +562,7 @@ export function createInvokeToolHandler(
           ],
         };
       }
-      return result;
+      return result.isError ? result : presentedResult(result);
     } catch (error) {
       if (timedOut) {
         const res: CallToolResult = {

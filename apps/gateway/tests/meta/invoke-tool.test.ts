@@ -89,6 +89,26 @@ describe("invoke_tool Meta-Tool", () => {
     expect(resMissing.content[0].text).toContain("Missing required parameter 'mode'");
   });
 
+  it("returns a tool's text output as text, not as an escaped JSON string", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-invoke" });
+    const output = '{\n  "rows": [1, 2]\n}\n';
+    const router: ToolInvocationRouter = {
+      async invoke(): Promise<CallToolResult> {
+        // A recorded command's result is its stdout string, carried as a JSON string literal.
+        return { content: [{ type: "text", text: JSON.stringify(output) }] };
+      },
+    };
+
+    const result = await createInvokeToolHandler(registry, router)(makeContext("ws-invoke"), {
+      toolId: "tool_validator",
+      parameters: { count: 1, mode: "fast" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: output }]);
+  });
+
   it("validates parameter types, enums, and bounds strictly", async () => {
     const registry = new ToolRegistry();
     const manifest = makeManifest();

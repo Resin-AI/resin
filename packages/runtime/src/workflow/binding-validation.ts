@@ -37,6 +37,7 @@ import {
   type RuntimeAdapterRegistry,
   executeRecordedWorkflow,
 } from "./recorded-workflow.js";
+import { RESIN_PROCESS_RUNTIME, RESIN_PROGRAM_RUNTIME } from "./runtime-families.js";
 
 export interface CandidateValidationEnvironment {
   adapters: RuntimeAdapterRegistry;
@@ -137,6 +138,18 @@ function matchesObservedResult(
   );
 }
 
+/**
+ * A recorded program or process is verified by running to successful completion again. Its output
+ * may legitimately change with the workspace, the clock or ordering (tests, builds, listings,
+ * queries), while a program that cannot run here still fails. Tool calls are compared by result.
+ */
+function completionReproduces(step: WorkflowStep): boolean {
+  return (
+    step.callable.program !== undefined &&
+    (step.callable.runtime === RESIN_PROCESS_RUNTIME ||
+      step.callable.runtime === RESIN_PROGRAM_RUNTIME)
+  );
+}
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */
 function pathText(path: WorkflowValuePath): string {
   const parts = path.map((part) =>
@@ -664,7 +677,8 @@ export async function demonstrationEnvironment(params: {
  * The plan runs a single time per attempt. The work is a sequence — a later step reads what an
  * earlier one produced — so running it once per step would both multiply the cost and compare
  * traces that never existed: step 3 of a second run follows a first run's side effects, not the
- * recorded execution's. One run, every observed step compared against that one trace.
+ * recorded execution's. One run: recorded programs reproduce by completing, every other observed
+ * step by matching that one trace.
  */
 async function replayPlanOnce(
   plan: RecordedWorkflow,
@@ -712,6 +726,7 @@ async function replayPlanOnce(
       continue;
     }
     if (
+      completionReproduces(step) ||
       matchesObservedResult(outcome.result, observed, environment.observedComparisons?.[stepId])
     ) {
       reproduced.push(stepId);

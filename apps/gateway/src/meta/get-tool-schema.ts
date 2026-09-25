@@ -9,7 +9,12 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
-import { type LocalToolDescriber, describeToolLocally, isToolInScope } from "./search-tools.js";
+import {
+  type LocalToolDescriber,
+  describeToolLocally,
+  isToolInScope,
+  toolInputSchema,
+} from "./search-tools.js";
 
 export interface ToolProvenance {
   manifestDigest: string;
@@ -145,14 +150,7 @@ export function createGetToolSchemaHandler(
     const isDisabled =
       controls.disabledTools.includes(resolvedTool.toolId) && !resolvedTool.isSystem;
 
-    // Extract input schema safely
-    const inputSchema: ToolParameterSchema | JsonRpcParams = resolvedTool.parameters ??
-      resolvedTool.manifest?.parameters ?? {
-        type: "object",
-        properties: {},
-        required: [],
-        additionalProperties: false,
-      };
+    const inputSchema = toolInputSchema(resolvedTool);
 
     // Extract output schema if available in metadata
     const outputSchema: ToolOutputSchema | JsonRpcParams | undefined =

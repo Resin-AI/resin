@@ -1,4 +1,4 @@
-import type { CapabilityManifest } from "@resin/contracts";
+import type { CapabilityManifest, ToolParameterSchema } from "@resin/contracts";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -27,6 +27,8 @@ export interface SearchToolsResultItem {
   scope: string;
   status: string;
   description: string;
+  /** The tool's input schema, so a caller can invoke it without a separate schema lookup. */
+  inputSchema: ToolParameterSchema | JsonRpcParams;
   tags: string[];
   capabilities: CapabilitySummary;
   isPinned: boolean;
@@ -60,6 +62,19 @@ export type LocalToolDescriber = (
   tool: RegistryTool,
   context: WorkspaceContext,
 ) => string | undefined;
+
+/** The input schema a tool is invoked with; a tool without declared inputs takes none. */
+export function toolInputSchema(tool: RegistryTool): ToolParameterSchema | JsonRpcParams {
+  return (
+    tool.parameters ??
+    tool.manifest?.parameters ?? {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    }
+  );
+}
 
 /** The description an agent sees: the catalog's, followed by any local detail. */
 export function describeToolLocally(
@@ -327,6 +342,10 @@ export function createSearchToolsHandler(
       if (!isToolInScope(tool, context)) {
         continue;
       }
+      // The meta-tools are always exposed directly; searching lists them only when asked for.
+      if (tool.isSystem && requestedScope !== "system") {
+        continue;
+      }
 
       const isPinned = controls.pinnedVersions[tool.toolId] === tool.version;
       const isDisabled = controls.disabledTools.includes(tool.toolId) && !tool.isSystem;
@@ -416,6 +435,7 @@ export function createSearchToolsHandler(
         scope: tool.scope ?? "workspace",
         status: isDisabled ? "disabled" : tool.status || "active",
         description,
+        inputSchema: toolInputSchema(tool),
         tags,
         capabilities: capSummary,
         isPinned,
@@ -458,7 +478,7 @@ export function createSearchToolsHandler(
       content: [
         {
           type: "text",
-          text: JSON.stringify(response, null, 2),
+          text: JSON.stringify(response),
         },
       ],
     };
