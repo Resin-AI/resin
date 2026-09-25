@@ -478,6 +478,195 @@ describe("closed observed-output replay without proposals", () => {
   });
 });
 
+describe("nested caller inputs in a held-out whole-plan replay", () => {
+  function plan(): RecordedWorkflow {
+    return {
+      schemaVersion: 1,
+      workflowId: "wf-nested-input-replay",
+      inputs: [
+        { name: "source", type: "string" },
+        { name: "factor", type: "number" },
+        { name: "enabled", type: "boolean" },
+      ],
+      steps: [
+        {
+          id: "prepare",
+          callId: "call-prepare",
+          callable: { runtime: TEST_RUNTIME, name: "prepare" },
+          arguments: [
+            {
+              name: "payload",
+              source: {
+                kind: "template",
+                template: {
+                  type: "object",
+                  entries: {
+                    rows: {
+                      type: "array",
+                      items: [
+                        { type: "input", name: "source" },
+                        {
+                          type: "object",
+                          entries: {
+                            factor: { type: "input", name: "factor" },
+                            enabled: { type: "input", name: "enabled" },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+        {
+          id: "finish",
+          callId: "call-finish",
+          callable: { runtime: TEST_RUNTIME, name: "finish" },
+          arguments: [
+            {
+              name: "prepared",
+              source: { kind: "result", stepId: "prepare", path: ["text"] },
+            },
+          ],
+          dependsOn: ["prepare"],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+      heldOut: {
+        inputs: [{ stepId: "prepare", argument: "payload", reference: "private:payload" }],
+        observed: [
+          { stepId: "prepare", reference: "private:prepared" },
+          { stepId: "finish", reference: "private:finished" },
+        ],
+      },
+    };
+  }
+
+  it("replays all steps on the recorded nested array values, including zero and false", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resin-nested-replay-"));
+    workspaces.push(directory);
+    const adapters = new RuntimeAdapterRegistry();
+    const called: string[] = [];
+    adapters.register({
+      runtime: TEST_RUNTIME,
+      async call(request) {
+        called.push(request.step.id);
+        if (request.step.id === "prepare") {
+          const payload = request.arguments.payload;
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new Error("prepare needs a payload object");
+          }
+          const rows = payload.rows;
+          if (
+            !Array.isArray(rows) ||
+            typeof rows[0] !== "string" ||
+            !rows[1] ||
+            typeof rows[1] !== "object" ||
+            Array.isArray(rows[1]) ||
+            typeof rows[1].factor !== "number" ||
+            typeof rows[1].enabled !== "boolean"
+          ) {
+            throw new Error("prepare needs source, factor and enabled");
+          }
+          return { text: `${rows[0]}:${rows[1].factor}:${rows[1].enabled}` };
+        }
+        return { completed: request.arguments.prepared };
+      },
+    });
+    const values: Record<string, WorkflowJsonValue> = {
+      "private:payload": { rows: ["second-source", { factor: 0, enabled: false }] },
+      "private:prepared": { text: "second-source:0:false" },
+      "private:finished": { completed: "second-source:0:false" },
+    };
+    const workflow = plan();
+    const environment = await demonstrationEnvironment({
+      plan: workflow,
+      candidates: [],
+      adapters,
+      workspaceDir: directory,
+      resolvePrivate: (reference) => values[reference]!,
+    });
+    expect(environment?.inputs).toEqual({
+      source: "second-source",
+      factor: 0,
+      enabled: false,
+    });
+    const confirmed = await validateAndConfirmCandidates({
+      plan: workflow,
+      candidates: [],
+      environment: environment!,
+    });
+    expect(called).toEqual(["prepare", "finish"]);
+    expect(confirmed.verification).toMatchObject({
+      status: "verified",
+      reproduced: ["prepare", "finish"],
+      missed: [],
+    });
+
+    const missing = {
+      ...workflow,
+      heldOut: {
+        ...workflow.heldOut!,
+        inputs: [{ stepId: "prepare", argument: "payload", reference: "private:missing" }],
+      },
+    };
+    values["private:missing"] = { rows: ["second-source", { enabled: false }] };
+    expect(
+      await demonstrationEnvironment({
+        plan: missing,
+        candidates: [],
+        adapters,
+        workspaceDir: directory,
+        resolvePrivate: (reference) => values[reference]!,
+      }),
+    ).toBeUndefined();
+
+    const conflicting: RecordedWorkflow = {
+      ...workflow,
+      steps: [
+        {
+          ...workflow.steps[0]!,
+          arguments: [
+            ...workflow.steps[0]!.arguments,
+            {
+              name: "mirror",
+              source: { kind: "input", name: "source" },
+            },
+          ],
+        },
+        workflow.steps[1]!,
+      ],
+      heldOut: {
+        ...workflow.heldOut!,
+        inputs: [
+          ...workflow.heldOut!.inputs,
+          {
+            stepId: "prepare",
+            argument: "mirror",
+            reference: "private:conflict",
+          },
+        ],
+      },
+    };
+    values["private:conflict"] = "another-source";
+    expect(
+      await demonstrationEnvironment({
+        plan: conflicting,
+        candidates: [],
+        adapters,
+        workspaceDir: directory,
+        resolvePrivate: (reference) => values[reference]!,
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe("selected demonstration comparison projections", () => {
   it("uses the held-out result projection during whole-plan replay", async () => {
     const plan: RecordedWorkflow = {

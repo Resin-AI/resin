@@ -576,15 +576,35 @@ export async function demonstrationEnvironment(params: {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
     const argument = step?.arguments.find((candidate) => candidate.name === entry.argument);
     if (step === undefined || argument === undefined) return undefined;
+    const supplied = await resolveOnce(entry.reference);
+    const bindInput = (name: string, path: WorkflowValuePath): boolean => {
+      const input = params.plan.inputs.find((candidate) => candidate.name === name);
+      if (input === undefined) return false;
+      const value = demonstratedValueAtPath(supplied, path);
+      if (value === undefined || !matchesDemonstratedType(value, input.type)) return false;
+      if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) return false;
+      inputs[name] = value;
+      return true;
+    };
+    const bindTemplate = (template: WorkflowValueTemplate, path: WorkflowValuePath): boolean => {
+      switch (template.type) {
+        case "input":
+          return bindInput(template.name, path);
+        case "object":
+          return Object.entries(template.entries).every(([key, child]) =>
+            bindTemplate(child, [...path, key]),
+          );
+        case "array":
+          return template.items.every((child, index) => bindTemplate(child, [...path, index]));
+        default:
+          // Program holes are token positions, not JSON paths. Their candidate-specific
+          // derivation below remains authoritative; no guessed token extraction here.
+          return true;
+      }
+    };
     const source = argument.source;
-    if (source.kind !== "input") continue;
-    const input = params.plan.inputs.find((candidate) => candidate.name === source.name);
-    if (input === undefined) return undefined;
-    const value = await resolveOnce(entry.reference);
-    if (!matchesDemonstratedType(value, input.type)) return undefined;
-    const name = input.name;
-    if (Object.hasOwn(inputs, name) && !deepEqual(inputs[name], value)) return undefined;
-    inputs[name] = value;
+    if (source.kind === "input" && !bindInput(source.name, [])) return undefined;
+    if (source.kind === "template" && !bindTemplate(source.template, [])) return undefined;
   }
   for (const candidate of params.candidates) {
     if (candidate.proposed.kind !== "input") continue;
