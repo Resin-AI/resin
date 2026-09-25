@@ -32,7 +32,7 @@ export interface RecordedProgramRun {
   exitCode: number;
   stdout: string;
   stderr: string;
-  /** Raw stdout for ordinary programs; rendered result text for explicit Eval interfaces. */
+  /** Raw stdout for ordinary programs, rendered text for Eval, or authored content for Codex exec. */
   value: WorkflowJsonValue;
 }
 
@@ -45,7 +45,7 @@ export interface ProgramRunnerOptions {
   timeoutMs?: number;
   /** Cancel only this replay-owned child process tree. */
   signal?: AbortSignal;
-  /** Cap on captured stdout bytes. */
+  /** Cap on captured stdout or source-interface-specific authored output bytes. */
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
   env?: Record<string, string>;
@@ -181,6 +181,115 @@ const JAVASCRIPT_EVAL_STDIN_DRIVER = [
   "  __resin_emit({ d: true, h: display.h, v: display.v });",
   "})();",
 ].join("\n");
+
+/** Native Codex exec is a fresh JavaScript module with a private text-content result channel. */
+const CODEX_EXEC_STDIN_DRIVER = [
+  "const __resin_fs = require('node:fs');",
+  "const __resin_vm = require('node:vm');",
+  "const __resin_payload = JSON.parse(__resin_fs.readFileSync(0, 'utf8'));",
+  "function __resin_failOnUnhandled() {",
+  "  process.exit(1);",
+  "}",
+  "process.on('unhandledRejection', __resin_failOnUnhandled);",
+  "process.on('uncaughtException', __resin_failOnUnhandled);",
+  "async function __resin_run() {",
+  "  const sandbox = Object.create(null);",
+  "  sandbox.console = undefined;",
+  "  const context = __resin_vm.createContext(sandbox, {",
+  "    codeGeneration: { strings: false, wasm: false },",
+  "  });",
+  "  const setupSource = [",
+  "    '(() => {',",
+  "    '  const maxOutputBytes = ' + JSON.stringify(__resin_payload.maxOutputBytes) + ';',",
+  "    '  const maxItems = ' + JSON.stringify(__resin_payload.maxItems) + ';',",
+  "    '  const outputs = [];',",
+  "    '  const stringify = JSON.stringify;',",
+  "    '  const create = Object.create;',",
+  "    '  const setPrototypeOf = Object.setPrototypeOf;',",
+  "    '  const defineProperty = Object.defineProperty;',",
+  "    '  const charCodeAt = String.prototype.charCodeAt;',",
+  "    '  const apply = Reflect.apply;',",
+  "    '  setPrototypeOf(outputs, null);',",
+  "    '  let outputBytes = 0;',",
+  "    '  let failed = false;',",
+  "    '  const nativePromiseThen = Promise.prototype.then;',",
+  "    '  defineProperty(Promise.prototype, \"then\", {',",
+  "    '    get: () => nativePromiseThen,',",
+  "    '    set: () => {',",
+  "    '      failed = true;',",
+  "    '      throw new TypeError(\"Codex exec replay does not support Promise intrinsic mutation\");',",
+  "    '    },',",
+  "    '    enumerable: false,',",
+  "    '    configurable: false',",
+  "    '  });',",
+  "    '  Object.freeze(Promise.prototype);',",
+  "    '  Object.freeze(Promise);',",
+  "    '  const stackHook = Object.getOwnPropertyDescriptor(Error, \"prepareStackTrace\");',",
+  "    '  if (stackHook !== undefined && !stackHook.configurable) throw new TypeError(\"Codex exec replay cannot disable Error.prepareStackTrace\");',",
+  "    '  defineProperty(Error, \"prepareStackTrace\", {',",
+  "    '    get: () => undefined,',",
+  "    '    set: () => {',",
+  "    '      failed = true;',",
+  "    '      throw new TypeError(\"Codex exec replay does not support Error.prepareStackTrace\");',",
+  "    '    },',",
+  "    '    enumerable: false,',",
+  "    '    configurable: false',",
+  "    '  });',",
+  "    '  Object.freeze(Error.prototype);',",
+  "    '  Object.freeze(Error);',",
+  "    '  function text(value) {',",
+  "    '    let textValue;',",
+  "    '    if (typeof value === \"string\") textValue = value;',",
+  "    '    else {',",
+  "    '      try { textValue = stringify(value); } catch { return; }',",
+  "    '      if (typeof textValue !== \"string\") return;',",
+  "    '    }',",
+  "    '    let bytes = 0;',",
+  "    '    const budget = maxOutputBytes - outputBytes;',",
+  "    '    for (let index = 0; index < textValue.length; index += 1) {',",
+  "    '      const code = apply(charCodeAt, textValue, [index]);',",
+  "    '      if (code <= 0x7f) bytes += 1;',",
+  "    '      else if (code <= 0x7ff) bytes += 2;',",
+  "    '      else if (code >= 0xd800 && code <= 0xdbff && index + 1 < textValue.length) {',",
+  "    '        const next = apply(charCodeAt, textValue, [index + 1]);',",
+  "    '        if (next >= 0xdc00 && next <= 0xdfff) { bytes += 4; index += 1; }',",
+  "    '        else bytes += 3;',",
+  "    '      } else bytes += 3;',",
+  "    '      if (bytes > budget) { failed = true; throw new RangeError(\"Codex exec replay exceeded its output byte bound\"); }',",
+  "    '    }',",
+  "    '    if (outputs.length >= maxItems) { failed = true; throw new RangeError(\"Codex exec replay exceeded its content item bound\"); }',",
+  "    '    const item = create(null);',",
+  "    '    item.type = \"input_text\";',",
+  "    '    item.text = textValue;',",
+  "    '    outputs[outputs.length] = item;',",
+  "    '    outputBytes += bytes;',",
+  "    '  }',",
+  "    '  defineProperty(globalThis, \"text\", { value: text, enumerable: false, writable: false, configurable: false });',",
+  '    \'  defineProperty(globalThis, "__resin_codex_exec_result__", { value: () => { if (failed) throw new RangeError("Codex exec replay exceeded its output bounds"); return stringify(outputs); }, enumerable: false, writable: false, configurable: false });\',',
+  "    '})();',",
+  '  ].join("\\n");',
+  "  new __resin_vm.Script(setupSource, { filename: '<resin-codex-exec-runtime>' }).runInContext(context);",
+  "  const module = new __resin_vm.SourceTextModule(__resin_payload.source, { context });",
+  "  await module.link(async () => { throw new Error('Codex exec replay does not support imports'); });",
+  "  await module.evaluate();",
+  "  const contentJson = __resin_vm.runInContext('__resin_codex_exec_result__()', context);",
+  "  const content = JSON.parse(contentJson);",
+  "  const frame = JSON.stringify({ complete: true, content });",
+  "  const frameBytes = Buffer.from(frame, 'utf8');",
+  "  if (frameBytes.length > __resin_payload.maxEventBytes) {",
+  "    throw new Error('Codex exec replay result channel exceeded its byte bound');",
+  "  }",
+  "  let offset = 0;",
+  "  while (offset < frameBytes.length) {",
+  "    offset += __resin_fs.writeSync(3, frameBytes, offset, frameBytes.length - offset, offset);",
+  "  }",
+  "}",
+  "__resin_run().catch(() => {",
+  "  process.stderr.write('Codex exec replay failed\\n');",
+  "  process.exitCode = 1;",
+  "});",
+].join("\n");
+
 interface ChildInvocation {
   command: string;
   args: string[];
@@ -197,6 +306,14 @@ interface JavaScriptEvalOutputBounds {
   output: number;
   events: number;
 }
+
+interface CodexExecOutputBounds {
+  output: number;
+  events: number;
+  items: number;
+}
+
+const MAX_CODEX_EXEC_OUTPUT_ITEMS = 4_096;
 
 const JAVASCRIPT_FUNCTION_NODES: Readonly<Record<string, true>> = {
   ArrowFunctionExpression: true,
@@ -372,6 +489,52 @@ function prepareJavaScriptEval(source: string): PreparedJavaScriptEval {
   return { source: applyJavaScriptSourceEdits(source, edits), mode: "async" };
 }
 
+function hasUnsupportedCodexExecImport(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasUnsupportedCodexExecImport);
+  if (typeof node !== "object" || node === null) return false;
+  const record = node as Record<string, unknown>;
+  if (record.type === "ImportDeclaration" || record.type === "ImportExpression") return true;
+  if (record.type === "Import") return true;
+  if (record.type === "MetaProperty") {
+    const meta = record.meta;
+    const property = record.property;
+    if (
+      typeof meta === "object" &&
+      meta !== null &&
+      "name" in meta &&
+      typeof property === "object" &&
+      property !== null &&
+      "name" in property &&
+      meta.name === "import" &&
+      property.name === "meta"
+    ) {
+      return true;
+    }
+  }
+  if (record.type === "CallExpression") {
+    const callee = record.callee;
+    if (
+      typeof callee === "object" &&
+      callee !== null &&
+      "type" in callee &&
+      callee.type === "Import"
+    ) {
+      return true;
+    }
+  }
+  return Object.values(record).some(hasUnsupportedCodexExecImport);
+}
+
+function assertCodexExecHasNoImports(source: string): void {
+  const syntax = parse(source, {
+    sourceType: "module",
+    allowAwaitOutsideFunction: true,
+  });
+  if (hasUnsupportedCodexExecImport(syntax.program)) {
+    throw new Error("recorded Codex exec replay does not support imports or import.meta");
+  }
+}
+
 function javascriptEvalOutputBounds(maxOutputBytes: number): JavaScriptEvalOutputBounds {
   const output = Math.floor(maxOutputBytes);
   const events = output * 24 + 128;
@@ -381,6 +544,17 @@ function javascriptEvalOutputBounds(maxOutputBytes: number): JavaScriptEvalOutpu
     );
   }
   return { output, events };
+}
+
+function codexExecOutputBounds(maxOutputBytes: number): CodexExecOutputBounds {
+  const output = Math.floor(maxOutputBytes);
+  const items = Math.max(1, Math.min(MAX_CODEX_EXEC_OUTPUT_ITEMS, output));
+  // JSON escaping uses at most six bytes per input byte; each content item adds bounded structure.
+  const events = output * 6 + items * 64 + 256;
+  if (!Number.isSafeInteger(output) || output < 0 || !Number.isSafeInteger(events)) {
+    throw new Error("Codex exec replay output limit must be a finite non-negative safe integer");
+  }
+  return { output, events, items };
 }
 
 interface CapturedRun {
@@ -506,6 +680,17 @@ function invocationFor(
     }
     case "javascript":
     case "typescript":
+      if (program.sourceInterface === "codex-exec") {
+        if (input === undefined || privateResultFd === undefined) {
+          throw new Error("Codex exec replay result channel was not prepared");
+        }
+        return {
+          command: process.execPath,
+          args: ["--experimental-vm-modules", "-e", CODEX_EXEC_STDIN_DRIVER],
+          input,
+          privateResultFd,
+        };
+      }
       if (program.sourceInterface === "javascript-eval") {
         if (input === undefined || privateResultFd === undefined) {
           throw new Error("JavaScript Eval replay result channel was not prepared");
@@ -946,14 +1131,10 @@ function runChild(
     });
     child.on("error", (error: Error) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-      reject(
-        new Error(
-          `recorded program could not be started (${invocation.command}): ${error.message}`,
-        ),
-      );
+      // Spawn failures also emit close; keep the abort reason when cancellation won the race.
+      if (termination === undefined) {
+        termination = `recorded program could not be started (${invocation.command}): ${error.message}`;
+      }
     });
     if (invocation.input !== undefined && child.stdin !== null) {
       // The interpreter may exit before consuming all source; EPIPE is a normal transport race.
@@ -1089,11 +1270,56 @@ function javascriptEvalResultValue(output: string, maxOutputBytes: number): Work
   return resultParts.join("").trim();
 }
 
+/** Validates the complete private result channel and preserves each authored text item separately. */
+function codexExecResultValue(output: string, bounds: CodexExecOutputBounds): WorkflowJsonValue {
+  let frame: unknown;
+  try {
+    frame = JSON.parse(output);
+  } catch {
+    throw new Error("recorded Codex exec replay produced an invalid output result");
+  }
+  if (
+    typeof frame !== "object" ||
+    frame === null ||
+    Array.isArray(frame) ||
+    Object.keys(frame).length !== 2
+  ) {
+    throw new Error("recorded Codex exec replay produced an invalid output result");
+  }
+  const result = frame as Record<string, unknown>;
+  if (result.complete !== true || !Array.isArray(result.content)) {
+    throw new Error("recorded Codex exec replay did not complete its output");
+  }
+  if (result.content.length > bounds.items) {
+    throw new Error("recorded Codex exec replay exceeded its content item bound");
+  }
+  let outputBytes = 0;
+  for (const item of result.content) {
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      Array.isArray(item) ||
+      Object.keys(item).length !== 2
+    ) {
+      throw new Error("recorded Codex exec replay produced an invalid content item");
+    }
+    const content = item as Record<string, unknown>;
+    if (content.type !== "input_text" || typeof content.text !== "string") {
+      throw new Error("recorded Codex exec replay produced an invalid text content item");
+    }
+    outputBytes += Buffer.byteLength(content.text, "utf8");
+    if (outputBytes > bounds.output) {
+      throw new Error("recorded Codex exec replay exceeded its output byte bound");
+    }
+  }
+  return result.content as WorkflowJsonValue;
+}
+
 /**
  * Runs a recorded program exactly once, through the family its record names. Shell programs keep
- * shell semantics. Python state replay sends composed source through stdin; JavaScript Eval sends
- * its bounded driver payload through stdin and a private output channel. Ordinary programs receive
- * their source as an argument. A non-zero exit code is left for the caller to
+ * shell semantics. Python state replay sends composed source through stdin; JavaScript Eval and
+ * Codex exec send their source through bounded stdin/private-result channels. Ordinary programs
+ * receive their source as an argument. A non-zero exit code is left for the caller to
  * refuse: this function never invents a value for a program that failed.
  */
 export async function runRecordedProgram(
@@ -1102,14 +1328,23 @@ export async function runRecordedProgram(
   targetCallId?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
+  if (program.sourceInterface === "codex-exec") {
+    assertCodexExecHasNoImports(program.source);
+  }
   const isPythonEval = program.sourceInterface === "python-eval";
   const isJavaScriptEval = program.sourceInterface === "javascript-eval";
+  const isCodexExec = program.sourceInterface === "codex-exec";
   const javascriptEval = isJavaScriptEval ? prepareJavaScriptEval(program.source) : undefined;
   let outputDirectory: string | undefined;
   let outputFile: FileHandle | undefined;
+  let codexExecBounds: CodexExecOutputBounds | undefined;
   try {
     let outputPath: string | undefined;
-    let outputBounds: PythonEvalOutputBounds | JavaScriptEvalOutputBounds | undefined;
+    let outputBounds:
+      | PythonEvalOutputBounds
+      | JavaScriptEvalOutputBounds
+      | CodexExecOutputBounds
+      | undefined;
     if (isPythonEval) {
       outputBounds = pythonEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
       outputDirectory = await mkdtemp(join(tmpdir(), "resin-python-eval-"));
@@ -1119,6 +1354,12 @@ export async function runRecordedProgram(
       outputBounds = javascriptEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
       outputDirectory = await mkdtemp(join(tmpdir(), "resin-javascript-eval-"));
       outputPath = join(outputDirectory, "events.jsonl");
+      outputFile = await open(outputPath, "wx+", 0o600);
+    } else if (isCodexExec) {
+      codexExecBounds = codexExecOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+      outputBounds = codexExecBounds;
+      outputDirectory = await mkdtemp(join(tmpdir(), "resin-codex-exec-"));
+      outputPath = join(outputDirectory, "result.json");
       outputFile = await open(outputPath, "wx+", 0o600);
     }
     const source =
@@ -1143,14 +1384,32 @@ export async function runRecordedProgram(
     if (isJavaScriptEval && (javascriptReplayInput === undefined || outputFile === undefined)) {
       throw new Error("recorded JavaScript Eval replay result channel was not prepared");
     }
+    const codexExecReplayInput =
+      codexExecBounds === undefined
+        ? undefined
+        : JSON.stringify({
+            source: program.source,
+            maxOutputBytes: codexExecBounds.output,
+            maxEventBytes: codexExecBounds.events,
+            maxItems: codexExecBounds.items,
+          });
+    if (isCodexExec && (codexExecReplayInput === undefined || outputFile === undefined)) {
+      throw new Error("recorded Codex exec replay result channel was not prepared");
+    }
+    // The VM driver is trusted Node code, but source-module text must not be preloaded into it.
+    const childEnv = isCodexExec ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" } : env;
     const invocation = invocationFor(
       runnable,
       options,
-      env,
-      isJavaScriptEval ? javascriptReplayInput : pythonReplayInput,
-      isJavaScriptEval ? outputFile?.fd : undefined,
+      childEnv,
+      isCodexExec
+        ? codexExecReplayInput
+        : isJavaScriptEval
+          ? javascriptReplayInput
+          : pythonReplayInput,
+      isJavaScriptEval || isCodexExec ? outputFile?.fd : undefined,
     );
-    const captured = await runChild(invocation, options, env);
+    const captured = await runChild(invocation, options, childEnv);
     let value: WorkflowJsonValue = captured.stdout;
     if (isPythonEval && captured.exitCode === 0) {
       if (outputFile === undefined || outputBounds === undefined) {
@@ -1173,6 +1432,19 @@ export async function runRecordedProgram(
       value = javascriptEvalResultValue(
         await outputFile.readFile({ encoding: "utf8" }),
         outputBounds.output,
+      );
+    }
+    if (isCodexExec && captured.exitCode === 0) {
+      if (outputFile === undefined || codexExecBounds === undefined) {
+        throw new Error("recorded Codex exec replay did not preserve its complete output");
+      }
+      const outputStat = await outputFile.stat();
+      if (outputStat.size > codexExecBounds.events) {
+        throw new Error("recorded Codex exec replay exceeded its result event bound");
+      }
+      value = codexExecResultValue(
+        await outputFile.readFile({ encoding: "utf8" }),
+        codexExecBounds,
       );
     }
     return {

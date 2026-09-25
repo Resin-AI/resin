@@ -7,14 +7,17 @@
  */
 
 import {
+  type ProgramToken,
   type RecordedWorkflow,
   type WorkflowJsonValue,
   type WorkflowProgramIdentity,
   type WorkflowValuePath,
   type WorkflowValueTemplate,
+  analyzeProgramSourceProjection,
   applyProgramTokenValues,
   hashCanonical,
   tokenizeProgram,
+  validateWorkflowProgramProjection,
 } from "@resin/contracts";
 
 export interface WorkflowProgramIdentityOptions {
@@ -25,11 +28,34 @@ export interface WorkflowProgramIdentityOptions {
   resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
 }
 
+function projectedProgramSource(
+  template: Extract<WorkflowValueTemplate, { type: "program" }>,
+  path: string,
+): string | undefined {
+  const hasReference = Object.prototype.hasOwnProperty.call(template, "sourceReference");
+  const hasProtectedTokens = Object.prototype.hasOwnProperty.call(template, "protectedTokens");
+  if (!hasReference && !hasProtectedTokens) return undefined;
+  const errors: string[] = [];
+  validateWorkflowProgramProjection(template, path, errors);
+  if (errors.length > 0) throw new Error(errors.join("; "));
+  if (typeof template.sourceReference !== "string") {
+    throw new Error(`${path} projected program source reference is malformed`);
+  }
+  return template.sourceReference;
+}
+
 /** Resolve only source shapes that are safe to attest without inventing executable equivalence. */
 async function resolveProgramSource(
-  source: WorkflowValueTemplate,
+  template: Extract<WorkflowValueTemplate, { type: "program" }>,
+  projection: string | undefined,
   resolvePrivate: WorkflowProgramIdentityOptions["resolvePrivate"],
 ): Promise<string | undefined> {
+  if (projection !== undefined) {
+    if (resolvePrivate === undefined) return undefined;
+    const value = await resolvePrivate(projection);
+    return typeof value === "string" ? value : undefined;
+  }
+  const source = template.source;
   if (source.type === "literal") {
     return typeof source.value === "string" ? source.value : undefined;
   }
@@ -45,22 +71,46 @@ async function identityForProgram(
   path: WorkflowValuePath,
   workspaceId: string | undefined,
   resolvePrivate: WorkflowProgramIdentityOptions["resolvePrivate"],
+  declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowProgramIdentity | undefined> {
+  const projection = projectedProgramSource(template, `${stepId}.${argument}`);
+  if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
+    throw new Error(`${stepId}.${argument} projected source reference is not declared`);
+  }
   // A program without an applied hole is not a parameterized identity. In particular, a source that
   // was merely observed or proposed must not become an equivalence proof.
   if (template.holes.length === 0) return undefined;
-  const source = await resolveProgramSource(template.source, resolvePrivate);
+  const source = await resolveProgramSource(template, projection, resolvePrivate);
   if (source === undefined) return undefined;
-
-  const values = new Map<number, string>();
-  for (const hole of template.holes) {
-    values.set(hole.token, `__resin_program_hole_${hole.token}__`);
+  let tokens: ProgramToken[];
+  if (projection === undefined) {
+    tokens = tokenizeProgram(template.language, source);
+  } else {
+    const sanitizedSource = template.source;
+    if (
+      sanitizedSource.type !== "literal" ||
+      typeof sanitizedSource.value !== "string" ||
+      template.protectedTokens === undefined
+    ) {
+      throw new Error(`${stepId}.${argument} projected program metadata is malformed`);
+    }
+    tokens = analyzeProgramSourceProjection(
+      template.language,
+      source,
+      sanitizedSource.value,
+      template.protectedTokens,
+    ).tokens;
   }
-  const rendered = applyProgramTokenValues(
-    source,
-    tokenizeProgram(template.language, source),
-    values,
-  );
+
+  const values = new Map<number, string | number | boolean | null>();
+  for (const hole of template.holes) {
+    const token = tokens[hole.token];
+    if (token?.kind === "number") values.set(hole.token, 0);
+    else if (token?.kind === "boolean") values.set(hole.token, false);
+    else if (token?.kind === "null") values.set(hole.token, null);
+    else values.set(hole.token, `__resin_program_hole_${hole.token}__`);
+  }
+  const rendered = applyProgramTokenValues(source, tokens, values, template.language);
   return {
     stepId,
     argument,
@@ -82,6 +132,7 @@ async function collectTemplatePrograms(
   path: WorkflowValuePath,
   workspaceId: string | undefined,
   resolvePrivate: WorkflowProgramIdentityOptions["resolvePrivate"],
+  declaredPrivateReferences: ReadonlySet<string>,
   identities: WorkflowProgramIdentity[],
 ): Promise<void> {
   switch (template.type) {
@@ -94,6 +145,7 @@ async function collectTemplatePrograms(
           [...path, key],
           workspaceId,
           resolvePrivate,
+          declaredPrivateReferences,
           identities,
         );
       }
@@ -107,6 +159,7 @@ async function collectTemplatePrograms(
           [...path, index],
           workspaceId,
           resolvePrivate,
+          declaredPrivateReferences,
           identities,
         );
       }
@@ -119,6 +172,7 @@ async function collectTemplatePrograms(
         path,
         workspaceId,
         resolvePrivate,
+        declaredPrivateReferences,
       );
       if (identity !== undefined) identities.push(identity);
       return;
@@ -139,6 +193,7 @@ export async function computeWorkflowProgramIdentities(
   params: WorkflowProgramIdentityOptions,
 ): Promise<WorkflowProgramIdentity[]> {
   const identities: WorkflowProgramIdentity[] = [];
+  const declaredPrivateReferences = new Set(params.plan.privateReferences ?? []);
   for (const step of params.plan.steps) {
     for (const argument of step.arguments) {
       if (argument.source.kind !== "template") continue;
@@ -149,6 +204,7 @@ export async function computeWorkflowProgramIdentities(
         [],
         params.workspaceId,
         params.resolvePrivate,
+        declaredPrivateReferences,
         identities,
       );
     }

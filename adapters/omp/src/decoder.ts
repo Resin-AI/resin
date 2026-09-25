@@ -984,6 +984,24 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   }
 
   /**
+   * Resin's management tool requires an action: reading its device path is documentation, not a
+   * zero-argument invocation. Only its two read-only catalog actions are discovery when written.
+   * Unknown arguments, mutations, and same-named tools on other connections remain executable work.
+   */
+  private isResinCatalogDiscovery(
+    toolName: string,
+    identity: OmpDeviceSurfaceCall,
+    args: OmpTranscriptPayload | undefined,
+  ): boolean {
+    if (identity.connection !== "resin" || identity.tool !== "manage_tools") return false;
+    return (
+      (toolName === OMP_DEVICE_SURFACE_READ_TOOL && args === undefined) ||
+      (toolName === OMP_DEVICE_SURFACE_WRITE_TOOL &&
+        (args?.action === "list_versions" || args?.action === "status"))
+    );
+  }
+
+  /**
    * Records a device-surface invocation as the tool the surface reached, over the connection the
    * harness's own registry resolved to: the tool's own name, that connection as a separate field,
    * and the invocation's own arguments, never the transport's envelope.
@@ -1105,7 +1123,25 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       const surface = this.deviceSurfaceCallOf(toolName, recordedParameters);
       // Results may only carry the sanitized identity, so keep the name resolvable under it too.
       this.setToolCallName(sessionId, callId, surface?.identity.tool ?? toolName);
-      this.pendingDeviceSurfaceCalls.getAndClear(sessionId, call.rawCallId);
+      const pendingSurface = this.pendingDeviceSurfaceCalls.getAndClear(sessionId, call.rawCallId);
+      if (
+        surface !== undefined &&
+        this.isResinCatalogDiscovery(toolName, surface.identity, surface.arguments)
+      ) {
+        // A path-only execution marker may already have announced this same discovery.
+        if (pendingSurface === undefined) {
+          events.push(
+            this.deviceSurfaceDiscovery(
+              surface.identity,
+              sessionId,
+              timestamp,
+              { ...causalRef, stepIndex },
+              metadata,
+            ),
+          );
+        }
+        continue;
+      }
       const event: IntermediateToolCallEvent = {
         sessionId,
         timestamp,
@@ -1949,6 +1985,14 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     // that follows, so the call is held for it, and its result emits it if none comes. The
     // discovery goes out with this record, which carries nothing else.
     const surface = this.deviceSurfaceCallOf(toolName, parameters);
+    if (
+      surface !== undefined &&
+      this.isResinCatalogDiscovery(toolName, surface.identity, surface.arguments)
+    ) {
+      return [
+        this.deviceSurfaceDiscovery(surface.identity, sessionId, timestamp, causalRef, metadata),
+      ];
+    }
     if (surface !== undefined && surface.arguments === undefined) {
       this.announcedToolCalls.getAndClear(sessionId, cacheCallId);
       this.setToolCallName(sessionId, callId, surface.identity.tool);

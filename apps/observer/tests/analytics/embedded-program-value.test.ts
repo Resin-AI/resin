@@ -7,13 +7,7 @@
  * the token and the runtime that renders a bound value back into it — says where each token sits, so
  * the value can be offered at that position under exactly the rule that governs every other result
  * binding.
- *
- * The same token is what a second execution of the work offers when the two executions' program
- * texts disagreed about it. A program argument is never offered as a whole — replacing it would
- * replace the work — so the difference is offered at the token it sits at, and only when the two
- * texts read as one program with the text of some of its tokens changed.
  */
-
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { NormalizedSessionEventSchema, tokenizeProgram } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
@@ -36,7 +30,7 @@ const SESSION = "session-embedded-value";
 
 /** The recorded execution's program: what the first run of the work actually ran. */
 const RECORDED_PROGRAM = "printf '%s\\n' 'alpha-7f3c' > f";
-/** A second execution of the same work, with the text of one quoted token changed. */
+/** A second execution of the work, with a different result-derived token. */
 const REPEAT_PROGRAM = "printf '%s\\n' 'bravo-9k2m' > f";
 
 function event(fields: Record<string, unknown>): NormalizedSessionEvent {
@@ -269,8 +263,8 @@ describe("a value embedded in a recorded program", () => {
     // command there, not a token of its own — so a program read in the wrong language would offer a
     // position no interpreter of that program has.
     const code = "text = '''alpha-7f3c'''";
-    expect(tokenizeProgram("shell", code).findIndex((token) => token.value === "alpha-7f3c")).toBe(
-      2,
+    const valueToken = tokenizeProgram("python", code).findIndex(
+      (token) => token.value === "alpha-7f3c",
     );
 
     const derivation = deriveNativeCalls([
@@ -287,7 +281,7 @@ describe("a value embedded in a recorded program", () => {
 
     expect(derivation.candidates).toHaveLength(1);
     expect(derivation.candidates[0]!.argument).toBe("code");
-    expect(derivation.candidates[0]!.path).toEqual(["tokens", 0]);
+    expect(derivation.candidates[0]!.path).toEqual(["tokens", valueToken]);
     expect(derivation.candidates[0]!.proposed).toEqual({
       kind: "result",
       stepId: "step0",
@@ -313,162 +307,51 @@ describe("a value embedded in a recorded program", () => {
   });
 });
 
-describe("a program that ran twice with one token changed", () => {
-  /** Two executions of one shell program, differing only in the text of one quoted token. */
-  function repeated(): NormalizedSessionEvent[] {
-    return [
-      call(1, { command: RECORDED_PROGRAM }),
-      userTurn(2),
-      call(3, { command: REPEAT_PROGRAM }),
-    ];
-  }
+it("keeps a repeated program's result-derived token binding without inferring an input", () => {
+  const { events } = record([
+    call(1, { command: "make-token" }),
+    result(1, { stdout: "alpha-7f3c" }),
+    call(2, { command: RECORDED_PROGRAM }),
+    userTurn(3),
+    call(4, { command: "make-token" }),
+    result(4, { stdout: "bravo-9k2m" }),
+    call(5, { command: REPEAT_PROGRAM }),
+  ]);
 
-  it("offers the differing token of the recorded execution's step, with structural evidence only", () => {
-    // The token is the same position in both texts — `printf` `'%s\n'` `'…'` `>` `f` — so what is
-    // offered is a value at the position the two executions disagreed about, and never the program
-    // as a whole, which would be the work itself.
-    expect(tokenizeProgram("shell", RECORDED_PROGRAM)[2]!.value).toBe("alpha-7f3c");
-    expect(tokenizeProgram("shell", REPEAT_PROGRAM)[2]!.value).toBe("bravo-9k2m");
-
-    const { events, store } = record(repeated());
-    const repeat = carrierOf(events[2]!)!;
-    expect(repeat.program).toEqual({ kind: "shell", source: "", argument: "command" });
-    expect(repeat.candidates).toHaveLength(1);
-    const candidate = repeat.candidates![0]!;
-    expect(candidate).toMatchObject({
-      argument: "command",
-      path: ["tokens", 2],
-      proposed: { kind: "input", name: "bash_command_2", type: "string" },
-      reason: "varies-across-executions",
-      // Structural only: how many executions disagreed, how many tokens the program has, which one
-      // this is. Neither text is carried.
-      evidence: { tasks: 2, tokens: 5, token: 2 },
-    });
-    // The fact the record does not establish, stated so a refusal can name it.
-    expect(candidate.missing).toContain("does not establish that a caller supplies it");
-    const carried = JSON.stringify(projectEventToMetadataOnly(events[2]!).metadata ?? {});
-    expect(carried).not.toContain("alpha-7f3c");
-    expect(carried).not.toContain("bravo-9k2m");
-
-    // The repeat is one demonstration of the work, not a second step of it: the candidate is
-    // related to the step built from the execution the token differs from, and nothing declares an
-    // input.
-    const workflow = recordCallsFromEvents("wf_embedded_variation", events)!.workflow;
-    expect(workflow.inputs).toEqual([]);
-    expect(workflow.steps).toHaveLength(1);
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]).toMatchObject({
-      stepId: "step0",
-      argument: "command",
-      path: ["tokens", 2],
-      proposed: { kind: "input", name: "bash_command_2", type: "string" },
-      reason: "varies-across-executions",
-      evidence: { tasks: 2, tokens: 5, token: 2 },
-    });
-    const recorded = JSON.stringify(workflow);
-    expect(recorded).not.toContain("alpha-7f3c");
-    expect(recorded).not.toContain("bravo-9k2m");
-    // The step is the earliest execution's: the text it runs is the text that execution ran.
-    const argument = workflow.steps[0]!.arguments.find((entry) => entry.name === "command")!;
-    const template = argument.source.kind === "template" ? argument.source.template : undefined;
-    const reference = template?.type === "private" ? template.reference : undefined;
-    expect(resolvePrivateReference(store, reference!)).toBe(RECORDED_PROGRAM);
+  const repeat = carrierOf(events[6]!)!;
+  expect(repeat.candidates?.map((candidate) => candidate.reason)).toEqual([
+    "equal-to-earlier-result",
+  ]);
+  expect(repeat.candidates?.[0]).toMatchObject({
+    argument: "command",
+    path: ["tokens", 2],
+    proposed: { kind: "result", callId: "call_4", path: ["stdout"] },
   });
 
-  it("offers the differing token when the repeat arrives as supporting evidence", () => {
-    // The work being compiled and the execution that demonstrates it are read from different places:
-    // the evidence names the calls of the recorded execution and the session's other executions are
-    // handed in beside it. A repeat is a repeat wherever it was read, so its minted candidate is
-    // related to the recording's step the same way — and it is still never a step of it.
-    const { events } = record(repeated());
-    const workflow = recordCallsFromEvents("wf_embedded_supporting", [events[0]!], {
-      supportingEvents: [events[2]!],
-    })!.workflow;
-    expect(workflow.steps).toHaveLength(1);
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]).toMatchObject({
-      stepId: "step0",
-      argument: "command",
-      path: ["tokens", 2],
-      proposed: { kind: "input", name: "bash_command_2", type: "string" },
-      reason: "varies-across-executions",
-      evidence: { tasks: 2, tokens: 5, token: 2 },
-    });
-    // The demonstration the candidate is decided against is the one the recording carries, from the
-    // same execution whose call minted the candidate.
-    expect(workflow.heldOut?.inputs.map((entry) => entry.stepId)).toEqual(["step0"]);
+  const workflow = recordCallsFromEvents("wf_embedded_producer", events)!.workflow;
+  expect(workflow.candidates?.map((candidate) => candidate.reason)).toEqual([
+    "equal-to-earlier-result",
+  ]);
+  expect(workflow.candidates?.[0]).toMatchObject({
+    stepId: "step1",
+    path: ["tokens", 2],
+    proposed: { kind: "result", stepId: "step0", path: ["stdout"] },
+  });
+});
+
+it("reprojects Codex exec profiles through the frozen workflow carrier vocabulary", () => {
+  const program = {
+    kind: "javascript",
+    source: "text('authored output')",
+    sourceInterface: "codex-exec",
+  };
+  const carrier = readWorkflowCallCarrier({
+    runtime: RESIN_PROGRAM_RUNTIME,
+    name: "exec",
+    origins: {},
+    inputs: [],
+    program,
   });
 
-  it("offers nothing when the two texts do not read as the same program", () => {
-    // The missing fact: a token position is only comparable when the two texts read as one program
-    // with the text of some of its tokens changed. A different number of tokens, a token of another
-    // kind, and an operator whose text changed all say the two executions ran something different —
-    // and a position inside one program is not a position inside another.
-    const pairs: Array<[string, string]> = [
-      [RECORDED_PROGRAM, "printf '%s\\n' 'bravo-9k2m' > f extra"],
-      [RECORDED_PROGRAM, "printf '%s\\n' bravo-9k2m > f"],
-      [RECORDED_PROGRAM, "printf '%s\\n' 'alpha-7f3c' >> f"],
-    ];
-    for (const [recorded, repeatedProgram] of pairs) {
-      const { events } = record([
-        call(1, { command: recorded }),
-        userTurn(2),
-        call(3, { command: repeatedProgram }),
-      ]);
-      expect(carrierOf(events[2]!)?.candidates).toBeUndefined();
-      expect(
-        recordCallsFromEvents("wf_embedded_shape", events)!.workflow.candidates,
-      ).toBeUndefined();
-    }
-  });
-
-  it("offers nothing from one execution, however its program reads", () => {
-    // The missing fact: a single execution shows the program ran with that text and nothing more.
-    // Whether the text is a constant of the work or a value the caller chose can only be told by a
-    // second execution of the same work that used a different one.
-    const { events } = record([call(1, { command: RECORDED_PROGRAM })]);
-
-    expect(carrierOf(events[0]!)?.candidates).toBeUndefined();
-    expect(
-      recordCallsFromEvents("wf_embedded_single", events)!.workflow.candidates,
-    ).toBeUndefined();
-  });
-
-  it("leaves a differing token an earlier call produced to the producer rule", () => {
-    // The missing fact: in the later execution the token's text is that execution's own earlier
-    // result, so the dependency the producer rule offers at that exact position is what the record
-    // already says. A second candidate on one token would be decided against the first, so the
-    // variation rule mints none — and the token is left to the rule that owns it.
-    const { events } = record([
-      call(1, { command: "make-token" }),
-      result(1, { stdout: "alpha-7f3c" }),
-      call(2, { command: RECORDED_PROGRAM }),
-      userTurn(3),
-      call(4, { command: "make-token" }),
-      result(4, { stdout: "bravo-9k2m" }),
-      call(5, { command: REPEAT_PROGRAM }),
-    ]);
-
-    const repeat = carrierOf(events[6]!)!;
-    expect(repeat.candidates?.map((candidate) => candidate.reason)).toEqual([
-      "equal-to-earlier-result",
-    ]);
-    expect(repeat.candidates?.[0]).toMatchObject({
-      argument: "command",
-      path: ["tokens", 2],
-      proposed: { kind: "result", callId: "call_4", path: ["stdout"] },
-    });
-
-    // The plan keeps that one candidate on the step that ran the program, and nothing the variation
-    // rule would have offered at the same token.
-    const workflow = recordCallsFromEvents("wf_embedded_producer", events)!.workflow;
-    expect(workflow.candidates?.map((candidate) => candidate.reason)).toEqual([
-      "equal-to-earlier-result",
-    ]);
-    expect(workflow.candidates?.[0]).toMatchObject({
-      stepId: "step1",
-      path: ["tokens", 2],
-      proposed: { kind: "result", stepId: "step0", path: ["stdout"] },
-    });
-  });
+  expect(carrier?.program).toEqual(program);
 });

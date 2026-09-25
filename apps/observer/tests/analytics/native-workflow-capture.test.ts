@@ -3,17 +3,20 @@
  * compiler consumes, without the caller changing anything about how it calls.
  */
 
+import { CodexRecordDecoder, decodeCodexTranscript } from "@resin/adapter-codex";
 import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import {
   NormalizedSessionEventSchema,
   RESIN_COMPUTATION_EVIDENCE_KEY,
+  isSubstantiveComputationEvidence,
   readComputationEvidence,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
+import { extractComputationSourceFrames } from "../../src/analytics/computation/source-frames.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import { deriveNativeCalls } from "../../src/analytics/native-argument-derivation.js";
 import {
@@ -31,6 +34,10 @@ import {
   readWorkflowCallCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import {
+  RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY,
+  isLocalWorkflowResultSuppressed,
+} from "../../src/normalization/local-workflow-payload.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
 const SESSION = "session-native-capture";
@@ -488,6 +495,181 @@ describe("native capture of ordinary calls", () => {
     expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("javascript-eval");
   });
+
+  it("keeps intermediate native exec output pending until both recorders observe the final result", () => {
+    const sessionId = "session-native-codex-exec";
+    const source = "text(JSON.stringify({ answer: 42 }));\n";
+    const intermediate = [
+      {
+        type: "input_text",
+        text: "Script running with cell ID cell_123\nWall time 0.1 seconds\nOutput:\n",
+      },
+      { type: "input_text", text: "intermediate output" },
+    ];
+    const output = [
+      {
+        type: "input_text",
+        text: "Script completed\nWall time 0.1 seconds\nOutput:\n",
+      },
+      { type: "input_text", text: "authored item one" },
+      { type: "input_text", text: "authored item two" },
+    ];
+    const decoded = decodeCodexTranscript(
+      [
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            call_id: "call-native-codex-exec",
+            name: "exec",
+            input: source,
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "custom_tool_call_output",
+              call_id: "call-native-codex-exec",
+              output: intermediate,
+            },
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "call-native-codex-exec",
+            output: intermediate,
+            turn_usage: { input_tokens: 11, output_tokens: 2, total_tokens: 13 },
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "call-native-codex-exec",
+            output,
+          },
+        },
+      ],
+      { sessionId },
+    );
+    const nativeCall = decoded.find((entry) => entry.type === "tool_call");
+    const nativeResult = decoded.find((entry) => entry.type === "tool_result");
+    if (nativeCall?.type !== "tool_call" || nativeResult?.type !== "tool_result") {
+      throw new Error("expected paired native exec call and final result");
+    }
+
+    expect(decoded.filter((entry) => entry.type === "tool_result")).toHaveLength(1);
+    expect(nativeCall.parameters).toEqual({ raw: source });
+    expect(nativeCall.metadata?.codexNative).toMatchObject({
+      type: "response_item",
+      itemType: "custom_tool_call",
+      sourceInterface: "codex-exec",
+    });
+    expect(nativeResult.result).toEqual(output.slice(1));
+    expect(nativeResult.metadata?.codexNative).toMatchObject({
+      outcome: "completed",
+      sourceInterface: "codex-exec",
+    });
+    expect(nativeResult.providerUsage).toMatchObject({
+      inputTokens: 11,
+      outputTokens: 2,
+      totalTokens: 13,
+    });
+
+    const store = new InMemoryPrivateValueStore();
+    const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = decoded.map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+    const recordedCall = observed.find((entry) => entry.type === "tool_call");
+    const recordedResult = observed.find((entry) => entry.type === "tool_result");
+    if (recordedCall?.type !== "tool_call" || recordedResult?.type !== "tool_result") {
+      throw new Error("both recorders must see the paired native exec result");
+    }
+
+    const carrier = carrierOf(recordedCall);
+    expect(carrier?.runtime).toBe(RESIN_PROGRAM_RUNTIME);
+    expect(carrier?.program).toEqual({
+      kind: "javascript",
+      source: "",
+      argument: "raw",
+      sourceInterface: "codex-exec",
+    });
+    expect(resolvePrivateReference(store, referenceOf(carrier!.origins.raw!))).toBe(source);
+    expect(JSON.stringify(projectEventToMetadataOnly(recordedCall))).not.toContain(source);
+    expect(
+      readComputationEvidence(recordedCall.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])?.observation
+        .status,
+    ).toBe("pending");
+    expect(
+      readComputationEvidence(recordedResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])
+        ?.observation,
+    ).toMatchObject({
+      callId: nativeCall.callId,
+      status: "success",
+      resultEventId: recordedResult.eventId,
+    });
+    const recipe = recordCallsFromEvents(sessionId, observed);
+    expect(recipe?.workflow.baseline?.observed).toHaveLength(1);
+    expect(
+      resolvePrivateReference(store, recipe!.workflow.baseline!.observed[0]!.reference),
+    ).toEqual(output.slice(1));
+  });
+
+  it("does not establish workflow or computation success from a terminal truncated exec result", () => {
+    const sessionId = "session-native-codex-exec-truncated";
+    const decoded = decodeCodexTranscript(
+      [
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            call_id: "call-native-codex-exec-truncated",
+            name: "exec",
+            input: "text('partial');",
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "call-native-codex-exec-truncated",
+            output: [
+              { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+              { type: "input_text", text: "partial output" },
+            ],
+            output_truncated: true,
+          },
+        },
+      ],
+      { sessionId },
+    );
+    const store = new InMemoryPrivateValueStore();
+    const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = decoded.map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+    const result = observed.find((entry) => entry.type === "tool_result");
+    if (result?.type !== "tool_result") {
+      throw new Error("expected an explicit terminal truncated result");
+    }
+
+    expect(result.isError).toBe(false);
+    expect(result.metadata?.codexNative).toMatchObject({ outcome: "truncated" });
+    expect(isLocalWorkflowResultSuppressed(result)).toBe(true);
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(result.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    expect(recordCallsFromEvents(sessionId, observed)?.workflow.baseline).toBeUndefined();
+  });
 });
 
 describe("what the derivation offers, and what it refuses to offer", () => {
@@ -593,34 +775,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
     expect(derivation.calls[0]!.dependsOn).toEqual([]);
   });
 
-  it("offers a declared argument nothing produced as a caller-input candidate", () => {
-    const derivation = deriveNativeCalls([
-      {
-        callId: "call_1",
-        stepId: "step0",
-        toolName: "vendor.score",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { dataset: "alpha-set", page: 2 },
-        inputSchema: {
-          type: "object",
-          properties: { dataset: { type: "string" }, page: { type: "number" } },
-        },
-      },
-    ]);
-
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.proposed).toEqual({
-      kind: "input",
-      name: "vendor_score_dataset",
-      type: "string",
-    });
-    expect(derivation.candidates[0]!.reason).toBe("declared-by-the-callable");
-    expect(derivation.candidates[0]!.missing).toContain(
-      "only running the work with a different value establishes that",
-    );
-  });
-
-  it("refuses to call an argument an input when the recording produced its value", () => {
+  it("retains the result candidate when a later call consumes the minted value", () => {
     const derivation = deriveNativeCalls([
       {
         callId: "call_1",
@@ -636,41 +791,12 @@ describe("what the derivation offers, and what it refuses to offer", () => {
         toolName: "vendor.score",
         runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
         arguments: { handle: "entry-alpha-feed-001" },
-        inputSchema: { type: "object", properties: { handle: { type: "string" } } },
       },
     ]);
 
-    const inputCandidates = derivation.candidates.filter(
-      (candidate) => candidate.proposed.kind === "input",
-    );
-    expect(inputCandidates).toEqual([]);
     // It is offered as a result binding instead, which is what the record actually supports.
     expect(derivation.candidates).toHaveLength(1);
     expect(derivation.candidates[0]!.reason).toBe("equal-to-earlier-result");
-  });
-
-  it("offers an argument that took a different value in another task as a caller input", () => {
-    // Two tasks of one session, compared by callable and argument position.
-    const store = new InMemoryPrivateValueStore();
-    const recorder = new WorkflowCallRecorder({ privateValues: store });
-    const observed = [
-      discovery([{ name: "vendor.score", provider: "vendor-srv" }]),
-      call(2, "vendor.score", { dataset: "alpha-set" }),
-      userTurn(3),
-      call(4, "vendor.score", { dataset: "beta-set" }),
-    ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
-
-    expect(carrierOf(observed[1]!)!.candidates).toBeUndefined();
-    const carrier = carrierOf(observed[3]!);
-    expect(carrier!.candidates).toHaveLength(1);
-    expect(carrier!.candidates![0]!.proposed).toEqual({
-      kind: "input",
-      name: "vendor_score_dataset",
-      type: "string",
-    });
-    expect(carrier!.candidates![0]!.missing).toContain(
-      "does not establish that a caller supplies it",
-    );
   });
 });
 
@@ -800,81 +926,6 @@ describe("a value embedded in a program an ordinary session ran", () => {
   });
 });
 
-describe("a program an ordinary session ran twice with one token changed", () => {
-  /** The recorded execution's program: what the first run of the work actually ran. */
-  const recorded = "printf '%s\\n' 'alpha-7f3c' > f";
-  /** The same work again, with the text of one quoted token changed. */
-  const repeatedProgram = "printf '%s\\n' 'bravo-9k2m' > f";
-
-  function session() {
-    return record([
-      discovery([{ name: "bash", provider: "omp" }]),
-      call(1, "bash", { command: recorded }),
-      userTurn(2),
-      call(3, "bash", { command: repeatedProgram }),
-    ]);
-  }
-
-  it("keeps the changed token's candidate on the recorded step, and the program as it ran", () => {
-    const { events, store } = session();
-    const recipe = recordCallsFromEvents("wf_program_variation", events);
-    expect(recipe).toBeDefined();
-    const workflow = recipe!.workflow;
-
-    // The repeat is a demonstration of the work, not a second step of it, so the candidate the
-    // capture minted on its call is related to the step the same ordinal of this recording has.
-    expect(workflow.steps).toHaveLength(1);
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]).toMatchObject({
-      stepId: "step0",
-      argument: "command",
-      path: ["tokens", 2],
-      proposed: { kind: "input", name: "bash_command_2", type: "string" },
-      reason: "varies-across-executions",
-      evidence: { tasks: 2, tokens: 5, token: 2 },
-    });
-
-    // The demonstration the repeat offered names the same step's program argument, which is the
-    // value a replay reads the token's own value out of — the half that makes the candidate
-    // decidable at all.
-    expect(workflow.heldOut?.inputs).toContainEqual({
-      stepId: "step0",
-      argument: "command",
-      reference: expect.stringContaining("private:"),
-    });
-
-    // The suggestion is reported and never applied — and the value it is about is not carried: the
-    // step still holds the program that actually ran, which is the recorded execution's text.
-    const argument = workflow.steps[0]!.arguments.find((entry) => entry.name === "command")!;
-    expect(argument.source.kind).toBe("template");
-    const template = argument.source.kind === "template" ? argument.source.template : undefined;
-    expect(template?.type).toBe("private");
-    const reference = template?.type === "private" ? template.reference : undefined;
-    expect(resolvePrivateReference(store, reference!)).toBe(recorded);
-    expect(JSON.stringify(workflow)).not.toContain("bravo-9k2m");
-    expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
-  });
-
-  it("never re-targets a step when the repeat did something else", () => {
-    // The repeat's first call is the same program on a different token, but the work it continued
-    // with is not this recording's work — so its candidate has no step of this recording to belong
-    // to, and is dropped as it always was. An ordinal is only a step identity when the callables
-    // around it are the same callables.
-    const { events } = record([
-      discovery([{ name: "bash", provider: "omp" }]),
-      call(1, "bash", { command: recorded }),
-      call(2, "vendor.finish", { note: "alpha-done" }),
-      userTurn(3),
-      call(4, "bash", { command: repeatedProgram }),
-      call(5, "vendor.other", { note: "bravo-done" }),
-    ]);
-
-    const recipe = recordCallsFromEvents("wf_program_other_work", events);
-    expect(recipe!.workflow.steps).toHaveLength(2);
-    expect(recipe!.workflow.candidates).toBeUndefined();
-  });
-});
-
 describe("the demonstration an ordinary session offers", () => {
   /** Two executions of the same work: the same callables in the same order, on different values. */
   function repeated(): NormalizedSessionEvent[] {
@@ -930,125 +981,24 @@ describe("the demonstration an ordinary session offers", () => {
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
 
-  it("offers a value the callable declares as an input wherever else it was used", () => {
-    const derivation = deriveNativeCalls([
-      {
-        callId: "call_1",
-        stepId: "step0",
-        toolName: "vendor.intake",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { feed: "alpha-feed" },
-        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
-      },
-      {
-        callId: "call_2",
-        stepId: "step1",
-        toolName: "vendor.commit",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { meta: { note: "alpha-feed" } },
-      },
-    ]);
-
-    const shared = derivation.candidates.find(
-      (candidate) => candidate.reason === "shares-value-with-declared-input",
-    );
-    expect(shared).toBeDefined();
-    // The same input, not a second one: a caller supplies the value once and both calls get it.
-    expect(shared!.proposed).toEqual({
-      kind: "input",
-      name: "vendor_intake_feed",
-      type: "string",
-    });
-    expect(shared!.argument).toBe("meta");
-    expect(shared!.path).toEqual(["note"]);
-  });
-
-  it("keeps a declared input whose own result echoes it, once that result has arrived", () => {
-    // A callable that echoes what it was given must not disqualify its own input: the value is in
-    // the result because it was passed in, and whether the result has arrived yet cannot decide
-    // what the recording proposes.
-    const withResult = deriveNativeCalls([
-      {
-        callId: "call_1",
-        stepId: "step0",
-        toolName: "pluto_intake",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { feed: "alpha-feed" },
-        result: { record: { handle: "hdl-alpha-feed", feed: "alpha-feed", note: "alpha-feed" } },
-        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
-      },
-      {
-        callId: "call_2",
-        stepId: "step1",
-        toolName: "vesta_commit",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { meta: { note: "alpha-feed" } },
-        result: { stored: { artifactId: "art-1" } },
-      },
-    ]);
-    const withoutResult = deriveNativeCalls([
-      {
-        callId: "call_1",
-        stepId: "step0",
-        toolName: "pluto_intake",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { feed: "alpha-feed" },
-        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
-      },
-      {
-        callId: "call_2",
-        stepId: "step1",
-        toolName: "vesta_commit",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { meta: { note: "alpha-feed" } },
-      },
-    ]);
-
-    const identity = (derivation: typeof withResult) =>
-      derivation.candidates
-        .map((candidate) => `${candidate.stepId}.${candidate.argument}@${candidate.reason}`)
-        .sort();
-    // The same proposals before and after the result arrives: the call is the same work either way.
-    expect(identity(withResult)).toEqual(identity(withoutResult));
-    expect(identity(withResult)).toEqual([
-      "step0.feed@declared-by-the-callable",
-      "step1.meta@shares-value-with-declared-input",
-    ]);
-    // The later argument is offered as the SAME caller's value, not a second input.
-    const shared = withResult.candidates.find(
-      (candidate) => candidate.reason === "shares-value-with-declared-input",
-    )!;
-    expect(shared.proposed).toEqual({ kind: "input", name: "pluto_intake_feed", type: "string" });
-    // And it is a proposal: nothing about it is executable.
-    expect(withResult.candidates.some((candidate) => candidate.proposed.kind === "result")).toBe(
-      false,
-    );
-  });
-
-  it("leaves a value two arguments share, with nothing declaring it, exactly where it is", () => {
-    const derivation = deriveNativeCalls([
-      {
-        callId: "call_1",
-        stepId: "step0",
-        toolName: "vendor.intake",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { meta: { tag: "ops-run" } },
-        inputSchema: { type: "object", properties: { feed: { type: "string" } } },
-      },
-      {
-        callId: "call_2",
-        stepId: "step1",
-        toolName: "vendor.commit",
-        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
-        arguments: { meta: { tag: "ops-run" } },
-      },
-    ]);
-
+  it("does not infer inputs from discovered schema, shared values, or repeated calls", () => {
+    const observed = record([
+      discovery([
+        {
+          name: "vendor.intake",
+          provider: "vendor-srv",
+          inputSchema: { type: "object", properties: { feed: { type: "string" } } },
+        },
+      ]),
+      call(1, "vendor.intake", { feed: "alpha-feed", note: "alpha-feed" }),
+      userTurn(2),
+      call(3, "vendor.intake", { feed: "bravo-feed", note: "bravo-feed" }),
+    ]).events;
+    expect(carrierOf(observed[1]!)?.candidates).toBeUndefined();
+    expect(carrierOf(observed[3]!)?.candidates).toBeUndefined();
     expect(
-      derivation.candidates.filter(
-        (candidate) => candidate.reason === "shares-value-with-declared-input",
-      ),
-    ).toEqual([]);
+      recordCallsFromEvents("wf_no_inferred_inputs", observed)!.workflow.candidates,
+    ).toBeUndefined();
   });
 });
 
@@ -1128,13 +1078,8 @@ describe("a recording and the demonstrations read beside it", () => {
   });
 });
 
-describe("what a repeat's own calls proposed", () => {
-  /**
-   * The same work performed twice on different values, with nothing declaring the argument: the
-   * only thing that can propose a caller input is the variation between the two executions, and
-   * the capture mints that proposal on the second one's call — the execution a recording compiled
-   * from the first does not number.
-   */
+describe("what a repeat's own calls demonstrate", () => {
+  /** The same work performed twice on different values, retained as distinct executions. */
   function repeatedOnDifferentDatasets() {
     return record([
       discovery([{ name: "vendor.score", provider: "vendor-srv" }]),
@@ -1146,34 +1091,7 @@ describe("what a repeat's own calls proposed", () => {
     ]);
   }
 
-  it("offers the input the repeat varied, against the step it is the same call of", () => {
-    const { events } = repeatedOnDifferentDatasets();
-    const recipe = recordCallsFromEvents("wf_repeat_input", executionOf(events, 0), {
-      supportingEvents: executionOf(events, 1),
-    });
-    const workflow = recipe!.workflow;
-
-    // One execution is the plan: the repeat is evidence, never a second step.
-    expect(workflow.steps).toHaveLength(1);
-    expect(workflow.steps[0]!.callable.name).toBe("vendor.score");
-
-    // The variation the repeat's call showed is offered at the argument the two executions
-    // disagreed about, named for the callable and the argument rather than for a value.
-    expect(workflow.candidates).toContainEqual({
-      stepId: "step0",
-      argument: "dataset",
-      path: [],
-      proposed: { kind: "input", name: "vendor_score_dataset", type: "string" },
-      reason: "varies-across-executions",
-      evidence: { tasks: 2 },
-      missing: expect.any(String),
-    });
-    // A proposal is not a binding: the step still holds what the recorded execution ran.
-    expect(JSON.stringify(workflow)).not.toContain("bravo-set");
-    expect(validateRecordedWorkflow(workflow)).toEqual({ valid: true, errors: [] });
-  });
-
-  it("carries the demonstration that decides it, by reference, at the same step", () => {
+  it("carries the repeat's demonstration by reference at the same step", () => {
     const { events, store } = repeatedOnDifferentDatasets();
     const recipe = recordCallsFromEvents("wf_repeat_demo", executionOf(events, 0), {
       supportingEvents: executionOf(events, 1),
@@ -1457,3 +1375,427 @@ function referenceOf(origin: { type: string; reference?: string }): string {
   }
   return origin.reference;
 }
+
+async function captureCodexNativeCall(
+  sessionId: string,
+  callId: string,
+  toolName: string,
+  parameters: Record<string, unknown>,
+  nativeOutput: unknown,
+  nativeOutputStatus?: string,
+): Promise<{ events: NormalizedSessionEvent[]; store: InMemoryPrivateValueStore }> {
+  const timestamp = "2026-09-23T12:00:00.000Z";
+  const pipeline = new NormalizationPipeline();
+  pipeline.registerDecoder(new CodexRecordDecoder());
+  const store = new InMemoryPrivateValueStore();
+  const workflowRecorder = new WorkflowCallRecorder({ privateValues: store });
+  const computationRecorder = createComputationEvidenceRecorder();
+  const events = [
+    computationRecorder.observe(
+      workflowRecorder.observe(
+        event({
+          eventId: `evt_${callId}_user`,
+          sessionId,
+          type: "message",
+          role: "user",
+          content: "run this process and capture its output",
+          causalRef: { causalSequence: 1, parentId: null },
+        }),
+        { workspaceId: "ws_codex_native" },
+      ),
+    ),
+  ];
+  const nativeRecords = [
+    {
+      type: "session_meta",
+      payload: {
+        session_id: `native_session_${callId}`,
+        id: `native_root_${callId}`,
+        cwd: "/workspace/demo",
+      },
+    },
+    {
+      type: "turn_context",
+      payload: {
+        turn_id: `turn_${callId}`,
+        cwd: "/workspace/demo",
+        model: "gpt-6-luna",
+      },
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        id: `item_${callId}`,
+        call_id: callId,
+        name: toolName,
+        arguments: JSON.stringify(parameters),
+      },
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: callId,
+        output: nativeOutput,
+        ...(nativeOutputStatus === undefined ? {} : { status: nativeOutputStatus }),
+      },
+    },
+  ] as const;
+
+  for (const [index, native] of nativeRecords.entries()) {
+    const ordinal = index + 1;
+    const record: RawHarnessRecord = {
+      recordId: `rec_${sessionId}_${ordinal}`,
+      sessionId,
+      harnessId: "codex-cli",
+      sequenceNumber: ordinal,
+      recordType: "transcript_line",
+      timestamp,
+      rawPayload: JSON.stringify({ timestamp, ordinal, ...native }),
+      cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+      metadata: {},
+    };
+    const normalized = await pipeline.processRecord(record, {
+      sessionId,
+      harnessId: "codex-cli",
+      workspaceId: "ws_codex_native",
+    });
+    for (const result of normalized) {
+      if (result.status !== "success" || result.isDuplicate) continue;
+      events.push(
+        computationRecorder.observe(
+          workflowRecorder.observe(result.event, { workspaceId: "ws_codex_native" }),
+        ),
+      );
+    }
+  }
+  return { events, store };
+}
+
+describe("native Codex rollout workflow and computation capture", () => {
+  it("records generic and Codex shell calls through normalization with honest output and outcomes", async () => {
+    const command = "python3 -c 'print(6)'";
+    const stdout = "6\n";
+    const display = `Chunk ID: smoke\nWall time: 0.01s\nProcess exited with code 0\nFinal output:\n${stdout}`;
+    const completedCalls = [
+      {
+        sessionId: "codex-exec-command-capture",
+        callId: "codex_exec_command",
+        toolName: "exec_command",
+        parameters: { cmd: command },
+      },
+    ];
+
+    for (const turn of completedCalls) {
+      const captured = await captureCodexNativeCall(
+        turn.sessionId,
+        turn.callId,
+        turn.toolName,
+        turn.parameters,
+        display,
+      );
+      const callEvent = captured.events.find((entry) => entry.type === "tool_call");
+      const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+      if (callEvent?.type !== "tool_call" || resultEvent?.type !== "tool_result") {
+        throw new Error("Codex rollout did not produce a matched tool call and result");
+      }
+      expect(callEvent.sessionId).toBe(turn.sessionId);
+      expect(callEvent.timestamp).toBe("2026-09-23T12:00:00.000Z");
+      expect(callEvent.callId).toBe(turn.callId);
+      expect(callEvent.toolName).toBe(turn.toolName);
+      expect(callEvent.parameters).toEqual(turn.parameters);
+      expect((callEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.cwd).toBe(
+        "/workspace/demo",
+      );
+      expect(resultEvent.sessionId).toBe(turn.sessionId);
+      expect(resultEvent.timestamp).toBe("2026-09-23T12:00:00.000Z");
+      expect(resultEvent.callId).toBe(callEvent.callId);
+      expect(resultEvent.toolName).toBe(callEvent.toolName);
+      expect(resultEvent.result).toBe(stdout);
+      expect(resultEvent.isError).toBe(false);
+      expect(
+        (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+      ).toBe("completed");
+
+      const carrier = carrierOf(callEvent);
+      expect(carrier?.program).toMatchObject({ kind: "shell" });
+      expect(carrier?.program?.argument).toBe(Object.keys(turn.parameters)[0]);
+      const evidence = readComputationEvidence(
+        resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+      );
+      expect(evidence?.observation).toMatchObject({
+        callId: turn.callId,
+        status: "success",
+        resultEventId: resultEvent.eventId,
+      });
+      // Print-only source is captured successfully but is not substantive computation.
+      expect(isSubstantiveComputationEvidence(evidence)).toBe(false);
+
+      const recipe = recordCallsFromEvents(turn.sessionId, captured.events);
+      expect(recipe?.workflow.baseline?.observed).toHaveLength(1);
+      expect(
+        resolvePrivateReference(captured.store, recipe!.workflow.baseline!.observed[0]!.reference),
+      ).toBe(stdout);
+      const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+      const metadataOnlyResult = projected.find((entry) => entry.type === "tool_result");
+      expect(
+        metadataOnlyResult?.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY],
+      ).toBeUndefined();
+      const projectedRecipe = recordCallsFromEvents(turn.sessionId, projected);
+      expect(projectedRecipe?.workflow.baseline?.observed).toHaveLength(1);
+      expect(
+        resolvePrivateReference(
+          captured.store,
+          projectedRecipe!.workflow.baseline!.observed[0]!.reference,
+        ),
+      ).toBe(stdout);
+    }
+
+    const genericSession = "codex-generic-command-capture";
+    const generic = await captureCodexNativeCall(
+      genericSession,
+      "codex_generic_command",
+      "custom_process_runner",
+      { commandLine: command },
+      "unframed generic process output",
+    );
+    const genericCall = generic.events.find((entry) => entry.type === "tool_call");
+    const genericResult = generic.events.find((entry) => entry.type === "tool_result");
+    if (genericCall?.type !== "tool_call" || genericResult?.type !== "tool_result") {
+      throw new Error("Generic native command did not produce a matched call and result");
+    }
+    expect(genericCall.parameters).toEqual({ commandLine: command });
+    expect(carrierOf(genericCall)?.program).toMatchObject({
+      kind: "shell",
+      argument: "commandLine",
+    });
+    const genericEvidence = readComputationEvidence(
+      genericCall.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+    );
+    expect(genericEvidence?.observation).toMatchObject({
+      callId: "codex_generic_command",
+      kind: "invocation",
+      status: "pending",
+    });
+    expect(genericEvidence?.program.complete).toBe(true);
+    expect(isSubstantiveComputationEvidence(genericEvidence)).toBe(false);
+    expect(genericResult.isError).toBe(false);
+    expect(genericResult.result).toBe("unframed generic process output");
+    expect(
+      (genericResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("completed");
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(genericResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    const genericRecipe = recordCallsFromEvents(genericSession, generic.events);
+    expect(genericRecipe?.workflow.baseline?.observed).toHaveLength(1);
+    expect(
+      resolvePrivateReference(
+        generic.store,
+        genericRecipe!.workflow.baseline!.observed[0]!.reference,
+      ),
+    ).toBe("unframed generic process output");
+
+    for (const [suffix, nativeOutput, expectedOutcome, expectedPublicResult] of [
+      [
+        "unknown",
+        "volatile execution display without a terminal status",
+        "unknown",
+        "volatile execution display without a terminal status",
+      ],
+      [
+        "running",
+        "Chunk ID: smoke\nWall time: 0.01s\nProcess running with session ID 123\n",
+        "running",
+        "",
+      ],
+    ] as const) {
+      const sessionId = `codex-${suffix}-capture`;
+      const captured = await captureCodexNativeCall(
+        sessionId,
+        `codex_${suffix}_call`,
+        "exec_command",
+        { cmd: command },
+        nativeOutput,
+      );
+      const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+      if (resultEvent?.type !== "tool_result") {
+        throw new Error("Codex rollout did not produce its terminal result");
+      }
+      expect(resultEvent.isError).toBe(false);
+      expect(resultEvent.result).toBe(expectedPublicResult);
+      expect(
+        (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+      ).toBe(expectedOutcome);
+      expect(
+        isSubstantiveComputationEvidence(
+          readComputationEvidence(resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+        ),
+      ).toBe(false);
+      expect(recordCallsFromEvents(sessionId, captured.events)?.workflow.baseline).toBeUndefined();
+
+      const replayRecorder = new WorkflowCallRecorder({
+        privateValues: new InMemoryPrivateValueStore(),
+      });
+      const replayed = structuredClone(captured.events).map((entry) =>
+        replayRecorder.observe(entry, { workspaceId: "ws_codex_native" }),
+      );
+      expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+
+      const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+      const projectedResult = projected.find((entry) => entry.type === "tool_result");
+      expect(projectedResult?.type === "tool_result" ? projectedResult.result : undefined).toBe(
+        undefined,
+      );
+      expect(
+        isSubstantiveComputationEvidence(
+          projectedResult?.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
+        ),
+      ).toBe(false);
+      expect(recordCallsFromEvents(sessionId, projected)?.workflow.baseline).toBeUndefined();
+    }
+
+    const failed = await captureCodexNativeCall(
+      "codex-nonzero-capture",
+      "codex_nonzero_call",
+      "exec_command",
+      { cmd: command },
+      "Chunk ID: smoke\nWall time: 0.01s\nProcess exited with code 7\nFinal output:\nprogram error\n",
+    );
+    const failedResult = failed.events.find((entry) => entry.type === "tool_result");
+    if (failedResult?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its failed result");
+    }
+    expect(failedResult.isError).toBe(true);
+    expect(failedResult.result).toBe("program error\n");
+    expect(
+      (failedResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("failed");
+    expect(
+      readComputationEvidence(failedResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])?.observation
+        .status,
+    ).toBe("error");
+    expect(
+      recordCallsFromEvents("codex-nonzero-capture", failed.events)?.workflow.baseline,
+    ).toBeUndefined();
+    const projectedFailure = projectEventToMetadataOnly(failedResult);
+    if (projectedFailure.type !== "tool_result") {
+      throw new Error("Projected Codex result lost its tool-result identity");
+    }
+    expect(projectedFailure.isError).toBe(true);
+    expect(
+      projectedFailure.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY],
+    ).toBeUndefined();
+    expect(
+      readComputationEvidence(projectedFailure.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY])
+        ?.observation.status,
+    ).toBe("error");
+
+    for (const [suffix, parameters] of [
+      ["ambiguous-aliases", { command: "python3 -c 'print(1)'", cmd: "python3 -c 'print(2)'" }],
+      ["structured-argv", { args: ["python3", "-c", "print(1 + 1)"] }],
+    ] as const) {
+      const sessionId = `codex-${suffix}-capture`;
+      const captured = await captureCodexNativeCall(
+        sessionId,
+        `codex_${suffix}_call`,
+        "custom_process_runner",
+        parameters,
+        "result without command evidence",
+      );
+      const callEvent = captured.events.find((entry) => entry.type === "tool_call");
+      if (callEvent?.type !== "tool_call") {
+        throw new Error("Codex rollout did not produce its native tool call");
+      }
+      expect(carrierOf(callEvent)?.program).toBeUndefined();
+      expect(extractComputationSourceFrames(callEvent)).toEqual([]);
+    }
+  });
+
+  it("suppresses an explicit structured truncated-result status flag", async () => {
+    const sessionId = "codex-explicit-truncated-flag-capture";
+    const captured = await captureCodexNativeCall(
+      sessionId,
+      "codex_explicit_truncated_flag_call",
+      "exec_command",
+      { cmd: "python3 -c 'print(1)'" },
+      "partial stdout",
+      "truncated",
+    );
+    const resultEvent = captured.events.find((entry) => entry.type === "tool_result");
+    if (resultEvent?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its structured truncated result");
+    }
+    expect(resultEvent.result).toBe("partial stdout");
+    expect(resultEvent.isError).toBe(false);
+    expect(
+      (resultEvent.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("truncated");
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(resultEvent.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    expect(recordCallsFromEvents(sessionId, captured.events)?.workflow.baseline).toBeUndefined();
+
+    const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+    expect(recordCallsFromEvents(sessionId, projected)?.workflow.baseline).toBeUndefined();
+  });
+
+  it("keeps unknown native-result suppression through metadata projection and JSON reload", async () => {
+    const sessionId = "codex-unknown-projection-capture";
+    const captured = await captureCodexNativeCall(
+      sessionId,
+      "codex_unknown_projection_call",
+      "exec_command",
+      { cmd: "python3 -c 'print(1)'" },
+      "unclassified rollout result display",
+    );
+    const sourceResult = captured.events.find((entry) => entry.type === "tool_result");
+    if (sourceResult?.type !== "tool_result") {
+      throw new Error("Codex rollout did not produce its unknown result");
+    }
+    expect(
+      (sourceResult.metadata?.codexNative as Record<string, unknown> | undefined)?.outcome,
+    ).toBe("unknown");
+
+    const projected = captured.events.map((entry) => projectEventToMetadataOnly(entry));
+    const serialized = JSON.stringify(projected);
+    expect(serialized).not.toContain("codexNative");
+    expect(serialized).not.toContain("unclassified rollout result display");
+    const reloaded = JSON.parse(serialized) as NormalizedSessionEvent[];
+    const reloadedResult = reloaded.find((entry) => entry.type === "tool_result");
+    if (reloadedResult?.type !== "tool_result") {
+      throw new Error("Metadata-only reload lost the unknown result event");
+    }
+    expect(reloadedResult.result).toBeUndefined();
+    expect(reloadedResult.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY]).toBe(
+      true,
+    );
+    expect(isLocalWorkflowResultSuppressed(reloadedResult)).toBe(true);
+
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const replayed = reloaded.map((entry) =>
+      workflowRecorder.observe(computationRecorder.observe(entry), {
+        workspaceId: "ws_codex_native",
+      }),
+    );
+    const replayedResult = replayed.find((entry) => entry.type === "tool_result");
+    if (replayedResult?.type !== "tool_result") {
+      throw new Error("Fresh recorders did not preserve the unknown result event");
+    }
+    expect(isLocalWorkflowResultSuppressed(replayedResult)).toBe(true);
+    expect(
+      isSubstantiveComputationEvidence(
+        readComputationEvidence(replayedResult.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]),
+      ),
+    ).toBe(false);
+    expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+  });
+});

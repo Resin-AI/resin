@@ -74,20 +74,25 @@ Before any event or diagnostic metadata is written to cloud storage or diagnosti
 
 ### Metadata-only evidence: what the cloud receives per event
 
-The default `metadata-only` redaction strategy is a deterministic projection, not a filter. Every uploaded event is rebuilt from an allowlist of operational fields; nothing else is copied. Fields marked *normalized* are replaced on-device by a value-free form drawn from a finite vocabulary before upload (`apps/observer/src/analytics/evidence-normalization.ts`).
+The default `metadata-only` redaction strategy is a deterministic projection, not a filter. Every uploaded event is rebuilt from an allowlist of operational fields; nothing else is copied. Most normalized fields use a value-free vocabulary (`apps/observer/src/analytics/evidence-normalization.ts`). Recorded-program source projections are an explicit exception: their engine-redacted views preserve non-secret code and literal values.
 
 | Event | Kept verbatim | Normalized on device | Dropped |
 |---|---|---|---|
 | `message`, `model_reasoning` | role, model, token/usage metrics | — | all text |
 | `tool_call` (shell tools such as `bash`) | tool name | `command` → command profile: executable basename, leading subcommand words for a fixed executable allowlist (`git`, `pnpm`, `cargo`, …), flag names, shell operators; every other argument becomes a typed placeholder (`$STR`, `$PATH`, `$SRC_FILE`, `$TEST_FILE`, `$URL`, `$NUM`, `$GLOB`); `cwd` → path pattern | quoted strings, environment values, heredoc bodies, all other parameters |
 | `tool_call` (file tools such as `read`, `write`, `edit`, `grep`) | tool name | `path`-like parameters → path pattern: home directory removed, at most the last 4 segments, hash/UUID/timestamp/version segments replaced by `*` | file contents, patches, search patterns, all other parameters |
+| `tool_call` (recorded JavaScript, TypeScript, or Python program) | tool name | program source → engine-redacted, canonical-token-aligned view; local original → opaque `sourceReference`; changed token indexes → `protectedTokens` | original private source and store entries; source without trusted scanning, complete parsing, or token alignment |
 | `tool_call` (everything else) | tool name | parameter *shape* only (key names and primitive types) | all values |
-| `tool_result` | tool name, error flag, duration, output size | — | result body |
+| `tool_result` | tool name, error flag, duration, output size | incomplete or unverified result → value-free suppression flag | result body, raw native outcome metadata |
 | `command_exec` | exit code, duration | `command` → command profile (as above) | args, cwd, stdout, stderr |
 | `file_edit` | operation, before/after hashes, diff line counts | `filePath` → path pattern | patch |
 | `error` | error type, recoverable flag | — | message, stack, details |
 
-Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. The residual disclosure is which command-line tools, flags, file names and directory names a workspace uses—comparable to a dependency manifest—and never prompt text, code, output, or argument values. `redaction.redactionStrategy` on each uploaded event records whether its sensitive fields were `drop`ped or normalized (`mask`).
+The suppression marker (`__resinLocalWorkflowResultSuppressedV1: true`) survives metadata-only persistence so reloaded events cannot turn an incomplete result into a successful baseline. It carries no output, source, or native error text.
+
+A projected program template carries both `sourceReference` and `protectedTokens` alongside its redacted literal `source`; the callable's source mirrors that view. The reference is declared in `privateReferences` and resolves to the complete original in the local workspace's private store. Runtime binding and program identity resolve and align the original before using canonical token indexes. Missing or non-string originals, changed alignment, or bindings to protected tokens fail closed: the scrubbed view is never an executable fallback. Shell programs remain opaque because their conservative lexer cannot establish the required parseability.
+
+Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. These command/path profiles disclose tool, flag, file, and directory names without their argument values. Recorded-program projections additionally disclose redacted code and non-secret literal values; raw prompts, outputs, original private source, and private store entries remain local. `redaction.redactionStrategy` records whether sensitive fields were `drop`ped or normalized (`mask`).
 
 ---
 

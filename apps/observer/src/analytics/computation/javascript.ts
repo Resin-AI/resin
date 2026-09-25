@@ -208,6 +208,7 @@ const REFLECTION_NAMES: Readonly<Record<string, true>> = {
 
 /** Assignment roots that mutate state outside the modeled frame. */
 const GLOBAL_MUTATION_ROOTS: Readonly<Record<string, true>> = {
+  Bun: true,
   exports: true,
   global: true,
   globalThis: true,
@@ -2471,6 +2472,10 @@ class JavaScriptFrameAnalyzer {
         : this.emitExpression(argument, scope),
     );
     const optional = node.questionDotToken !== undefined;
+    const bunWrite = this.emitBunWrite(node, args, scope);
+    if (bunWrite !== undefined) {
+      return bunWrite;
+    }
     if (ts.isIdentifier(callee)) {
       const carried = requireSpecifier(node);
       if (carried !== undefined) {
@@ -2554,6 +2559,111 @@ class JavaScriptFrameAnalyzer {
   ): DraftNode {
     this.useDefinition(symbol);
     return this.node("call", args, fields);
+  }
+
+  private emitBunWrite(
+    node: ts.CallExpression,
+    args: readonly DraftNode[],
+    scope: JsScope,
+  ): DraftNode | undefined {
+    const callee = node.expression;
+    if (
+      this.invalidatesState ||
+      node.questionDotToken !== undefined ||
+      !ts.isPropertyAccessExpression(callee) ||
+      callee.questionDotToken !== undefined ||
+      callee.name.text !== "write" ||
+      !ts.isIdentifier(callee.expression) ||
+      callee.expression.text !== "Bun" ||
+      this.resolveBoundName("Bun", scope) !== undefined ||
+      this.importBindings.has("Bun") ||
+      this.isOpaqueName("Bun", scope) ||
+      node.arguments.length !== 2
+    ) {
+      return undefined;
+    }
+    const [destination, payload] = node.arguments;
+    // Deliberately recognize syntax, not shapeOf's coarse output metadata or mutable aliases.
+    if (
+      destination === undefined ||
+      payload === undefined ||
+      !(ts.isStringLiteral(destination) || ts.isNoSubstitutionTemplateLiteral(destination)) ||
+      !this.isBunWriteText(payload, scope)
+    ) {
+      return undefined;
+    }
+    return this.node("call", args, { api: "fs.write_text" });
+  }
+
+  private isBunWriteText(node: ts.Expression, scope: JsScope): boolean {
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateExpression(node)
+    ) {
+      return true;
+    }
+    if (ts.isParenthesizedExpression(node)) {
+      return this.isBunWriteText(node.expression, scope);
+    }
+    if (ts.isBinaryExpression(node)) {
+      return (
+        node.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+        ts.isStringLiteral(node.right) &&
+        node.right.text === "\n" &&
+        this.isBunWriteText(node.left, scope)
+      );
+    }
+    if (
+      !ts.isCallExpression(node) ||
+      node.questionDotToken !== undefined ||
+      !ts.isPropertyAccessExpression(node.expression)
+    ) {
+      return false;
+    }
+    const callee = node.expression;
+    if (
+      callee.questionDotToken !== undefined ||
+      callee.name.text !== "stringify" ||
+      !ts.isIdentifier(callee.expression) ||
+      callee.expression.text !== "JSON" ||
+      this.resolveBoundName("JSON", scope) !== undefined ||
+      this.importBindings.has("JSON") ||
+      this.isOpaqueName("JSON", scope) ||
+      node.arguments.length < 1 ||
+      node.arguments.length > 3 ||
+      node.arguments.some((argument) => ts.isSpreadElement(argument))
+    ) {
+      return false;
+    }
+    const [value, replacer, spacing] = node.arguments;
+    if (
+      value === undefined ||
+      (replacer !== undefined && replacer.kind !== ts.SyntaxKind.NullKeyword) ||
+      (spacing !== undefined && !ts.isNumericLiteral(spacing) && !ts.isStringLiteral(spacing))
+    ) {
+      return false;
+    }
+    // Like the existing json.serialize operation, an identifier models the value in a successful
+    // recorded invocation, not a universal proof that JSON.stringify always returns a string.
+    if (ts.isIdentifier(value)) {
+      const bound = this.resolveBoundName(value.text, scope);
+      return (
+        value.text !== "undefined" &&
+        !this.isOpaqueName(value.text, scope) &&
+        bound?.kind !== "definition" &&
+        (bound === undefined || !this.immutableAliases.has(bound))
+      );
+    }
+    return (
+      ts.isObjectLiteralExpression(value) ||
+      ts.isArrayLiteralExpression(value) ||
+      ts.isStringLiteral(value) ||
+      ts.isNumericLiteral(value) ||
+      value.kind === ts.SyntaxKind.NullKeyword ||
+      value.kind === ts.SyntaxKind.TrueKeyword ||
+      value.kind === ts.SyntaxKind.FalseKeyword
+    );
   }
 
   private emitBunFileRead(

@@ -1,6 +1,9 @@
 /** Frozen workflow carrier vocabulary shared by live capture, projection, and import reconstruction. */
 
-import { validateWorkflowProgramSourceInterface } from "@resin/contracts";
+import {
+  validateWorkflowProgramProjection,
+  validateWorkflowProgramSourceInterface,
+} from "@resin/contracts";
 import type {
   AgentArgumentOrigin,
   WorkflowArgumentProvenance,
@@ -8,6 +11,7 @@ import type {
   WorkflowPythonState,
   WorkflowRecordedProgram,
   WorkflowValuePath,
+  WorkflowValueTemplate,
 } from "@resin/contracts";
 import type { WorkflowObservedOutput } from "@resin/contracts";
 
@@ -61,7 +65,10 @@ export interface WorkflowCallCarrier {
    */
   program?: WorkflowRecordedProgram;
   /** Per top-level argument, the origin the caller stated, swept for private values. */
-  origins: Record<string, AgentArgumentOrigin>;
+  origins: Record<
+    string,
+    AgentArgumentOrigin | Extract<WorkflowValueTemplate, { type: "program" }>
+  >;
   /** Declared caller inputs, with the types the caller used. */
   inputs: Array<{
     name: string;
@@ -230,7 +237,9 @@ function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
     );
     if (
       errors.length > 0 ||
-      (value.sourceInterface !== "python-eval" && value.sourceInterface !== "javascript-eval")
+      (value.sourceInterface !== "python-eval" &&
+        value.sourceInterface !== "javascript-eval" &&
+        value.sourceInterface !== "codex-exec")
     ) {
       return undefined;
     }
@@ -349,6 +358,21 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
   if (!isPlainObject(value)) return false;
   if (typeof value.runtime !== "string" || typeof value.name !== "string") return false;
   if (!isPlainObject(value.origins)) return false;
+  for (const [argument, origin] of Object.entries(value.origins)) {
+    if (!isPlainObject(origin) || origin.type !== "program") continue;
+    const errors: string[] = [];
+    validateWorkflowProgramProjection(origin, `carrier argument '${argument}'`, errors);
+    if (errors.length > 0) return false;
+    if (
+      origin.sourceReference !== undefined &&
+      isPlainObject(value.program) &&
+      value.program.argument === argument &&
+      isPlainObject(origin.source) &&
+      value.program.source !== origin.source.value
+    ) {
+      return false;
+    }
+  }
   if (value.connection !== undefined && typeof value.connection !== "string") return false;
   if (!Array.isArray(value.inputs)) return false;
   if (value.cwd !== undefined && typeof value.cwd !== "string") return false;
@@ -434,7 +458,7 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
   const carrier: WorkflowCallCarrier = {
     runtime: value.runtime,
     name: value.name,
-    origins: JSON.parse(JSON.stringify(value.origins)) as Record<string, AgentArgumentOrigin>,
+    origins: JSON.parse(JSON.stringify(value.origins)) as WorkflowCallCarrier["origins"],
     inputs: JSON.parse(JSON.stringify(value.inputs)) as WorkflowCallCarrier["inputs"],
   };
   if (value.connection !== undefined) carrier.connection = value.connection;

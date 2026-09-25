@@ -77,11 +77,6 @@ describe("a selected workflow keeps its own slice of a recorded repetition", () 
     expect(recipe.workflow.candidates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          stepId: "step0",
-          argument: "project",
-          proposed: { kind: "input", name: "produce_project", type: "string" },
-        }),
-        expect.objectContaining({
           stepId: "step1",
           argument: "release",
           proposed: { kind: "result", stepId: "step0", path: ["release"] },

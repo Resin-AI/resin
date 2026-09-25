@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-  ISOTimestampSchema,
-  IdentifierSchema,
-  SchemaVersionSchema,
-  ToolManifestSchema,
-} from "@resin/contracts";
+import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resin/contracts/common";
+import { ToolManifestSchema } from "@resin/contracts/tools";
 import { z } from "zod";
 
 /**

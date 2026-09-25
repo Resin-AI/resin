@@ -87,8 +87,8 @@ function createFakeCloudClient() {
   return { client, submitted, batches };
 }
 
-function createCaptureEnvironment() {
-  const pipeline = new NormalizationPipeline();
+function createCaptureEnvironment(customSecrets: string[]) {
+  const pipeline = new NormalizationPipeline({ redactionConfig: { customSecrets } });
   pipeline.registerDecoder(new OmpRecordDecoder());
   const cloud = createFakeCloudClient();
   const localEvents: NormalizedSessionEvent[] = [];
@@ -105,9 +105,11 @@ function createCaptureEnvironment() {
 }
 
 async function captureVariant(
+  family: ComputationFixtureFamily,
   variant: ComputationFixtureVariant,
 ): Promise<NormalizedSessionEvent[]> {
-  const environment = createCaptureEnvironment();
+  // Planted fixture values are configured private; ordinary source literals remain visible.
+  const environment = createCaptureEnvironment(canaryValues(family, variant));
   const session = sessionFor(variant);
   const records = variant.records.map((record, index) => rawRecord(record, index));
   for (const record of records) {
@@ -226,7 +228,7 @@ describe("public computation pipeline from native fixture records", () => {
 
     for (const family of families) {
       for (const variant of family.variants) {
-        const events = await captureVariant(variant);
+        const events = await captureVariant(family, variant);
         assertProjectedPrivacy(family, variant, events);
 
         const episodes = episodesFrom(events);
@@ -337,7 +339,7 @@ describe("public computation pipeline from native fixture records", () => {
   it("admits both obsolete join V1 and corrected V2 as strict substantive computation", async () => {
     const join = families.find((family) => family.familyId === "record-join-lineage")!;
     const variant = join.variants[0]!;
-    const events = await captureVariant(variant);
+    const events = await captureVariant(join, variant);
 
     for (const dataset of variant.datasets) {
       expect(dataset.superseded).toBeDefined();
@@ -364,7 +366,7 @@ describe("public computation pipeline from native fixture records", () => {
     });
     const family = families.find((entry) => entry.familyId === "record-join-lineage")!;
     const variant = family.variants[0]!;
-    const events = await captureVariant(variant);
+    const events = await captureVariant(family, variant);
 
     await tracker.handleSessionEvents(sessionFor(variant), events, {
       isTerminal: true,

@@ -24,6 +24,7 @@ import {
   hashCanonicalContent,
   readComputationEvidence,
 } from "@resin/contracts";
+import { isLocalWorkflowResultSuppressed } from "../../normalization/local-workflow-payload.js";
 import { RESIN_WORKFLOW_CALL_METADATA_KEY, readWorkflowCallCarrier } from "../workflow-carrier.js";
 import { parseJavaScriptComputation } from "./javascript.js";
 import { parsePythonComputation } from "./python.js";
@@ -489,6 +490,14 @@ export class ComputationEvidenceRecorder {
       return event;
     }
 
+    if (isLocalWorkflowResultSuppressed(event) && !event.isError) {
+      if (pending.prepared !== undefined) {
+        this.invalidateTouched(session, pending.prepared);
+      }
+      this.settlePending(session, event.callId, pending, true);
+      return event;
+    }
+
     let prepared = pending.prepared;
     if (prepared === undefined) {
       const relatedCall: NormalizedToolCallEvent = {
@@ -889,6 +898,7 @@ export class ComputationEvidenceRecorder {
       imports: kernel === undefined ? [] : Array.from(kernel.imports.values()),
       modules: Array.from(this.knownFiles(session).values()),
       ...(frame.path === undefined ? {} : { sourcePath: frame.path }),
+      ...(frame.sourceInterface === undefined ? {} : { sourceInterface: frame.sourceInterface }),
     };
   }
 

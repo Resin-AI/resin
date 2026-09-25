@@ -1,4 +1,8 @@
-import type { RecordedWorkflow, WorkflowValueTemplate } from "@resin/contracts";
+import {
+  type RecordedWorkflow,
+  type WorkflowValueTemplate,
+  tokenizeProgram,
+} from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
   RecordedWorkflowCompilationError,
@@ -102,6 +106,111 @@ describe("recorded workflow compilation", () => {
 
     // Deterministic: the same recording compiles to the same artifact.
     expect(compileRecordedWorkflow(workflow()).digest).toBe(artifact.digest);
+  });
+
+  it("executes defaults, preserves explicit falsy overrides, and rejects invalid inputs", async () => {
+    const recording = workflow();
+    recording.inputs = [
+      { ...recording.inputs[0]!, default: "preset-source" },
+      { ...recording.inputs[1]!, default: 4 },
+      { name: "enabled", type: "boolean", default: true },
+      { name: "empty", type: "string", default: "" },
+      { name: "zero", type: "number", default: 0 },
+      { name: "disabled", type: "boolean", default: false },
+    ];
+    recording.steps[0]!.arguments.push(
+      { name: "enabled", source: template({ type: "input", name: "enabled" }) },
+      { name: "empty", source: template({ type: "input", name: "empty" }) },
+      { name: "zero", source: template({ type: "input", name: "zero" }) },
+      { name: "disabled", source: template({ type: "input", name: "disabled" }) },
+    );
+
+    const artifact = compileRecordedWorkflow(recording);
+    expect(artifact.inputSchema).toMatchObject({
+      properties: {
+        source: { type: "string", default: "preset-source" },
+        retries: { type: "number", default: 4 },
+        enabled: { type: "boolean", default: true },
+        empty: { type: "string", default: "" },
+        zero: { type: "number", default: 0 },
+        disabled: { type: "boolean", default: false },
+      },
+      required: [],
+    });
+    expect(artifact.plan.inputs[0]?.default).toBe("preset-source");
+    expect(
+      compileRecordedWorkflow({
+        ...workflow(),
+        inputs: [
+          { name: "source", type: "string", default: "other-source" },
+          workflow().inputs[1]!,
+        ],
+      }).digest,
+    ).not.toBe(artifact.digest);
+
+    const calls: Array<{ stepId: string; arguments: Record<string, WorkflowJsonValue> }> = [];
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      runtime: "fam-alpha",
+      call: async ({ step, arguments: args }) => {
+        calls.push({ stepId: step.id, arguments: args });
+        return step.id === "step0"
+          ? { body: { text: `fetched-${String(args.source)}-${String(args.retries)}` } }
+          : { uploaded: args.artifact };
+      },
+    });
+    registry.register({
+      runtime: "fam-beta",
+      call: async ({ step }) =>
+        step.id === "step1" ? { stdout: "transformed" } : { path: "/artifact" },
+    });
+    const tool = instantiateRecordedWorkflow(artifact, {
+      adapters: registry,
+      resolvePrivate: () => "resolved-locally",
+    });
+
+    const defaults = await tool.invoke({});
+    expect(defaults.status).toBe("completed");
+    expect(calls[0]?.arguments).toMatchObject({
+      source: "preset-source",
+      retries: 4,
+      enabled: true,
+      empty: "",
+      zero: 0,
+      disabled: false,
+    });
+
+    const overrides = await tool.invoke({ source: "", retries: 0, enabled: false });
+    expect(overrides.status).toBe("completed");
+    const sourceCalls = calls.filter((call) => call.stepId === "step0");
+    expect(sourceCalls).toHaveLength(2);
+    expect(sourceCalls[1]?.arguments).toMatchObject({
+      source: "",
+      retries: 0,
+      enabled: false,
+      empty: "",
+      zero: 0,
+      disabled: false,
+    });
+    await expect(tool.invoke({ source: null, retries: 0, enabled: false })).rejects.toThrow(
+      /workflow input 'source' must be a string/,
+    );
+    await expect(
+      tool.invoke({ source: "valid", retries: "wrong", enabled: false }),
+    ).rejects.toThrow(/workflow input 'retries' must be a number/);
+
+    const invalidDefault = workflow();
+    invalidDefault.inputs[1] = { ...invalidDefault.inputs[1]!, default: false };
+    expect(() => compileRecordedWorkflow(invalidDefault)).toThrow(
+      /input retries default must match its recorded type 'number'/,
+    );
+    await expect(
+      instantiateRecordedWorkflow(compileRecordedWorkflow(workflow()), {
+        adapters: registry,
+      }).invoke({
+        source: "only-source",
+      }),
+    ).rejects.toThrow(/missing required workflow input 'retries'/);
   });
 
   it("refuses to compile behaviour the recording does not establish", () => {
@@ -240,5 +349,65 @@ describe("recorded workflow compilation", () => {
     // The artifact still runs what was compiled, not what the recording became.
     expect(result.status).toBe("completed");
     expect(calls[1]).toEqual({ request: { text: "fetched-alpha", options: { depth: 2 } } });
+  });
+
+  it("renders typed falsey and overridden literals inside compiled programs", async () => {
+    const source = "const retries = 9; const enabled = true;";
+    const tokens = tokenizeProgram("javascript", source);
+    const retryToken = tokens.findIndex((token) => token.kind === "number");
+    const enabledToken = tokens.findIndex((token) => token.kind === "boolean");
+    const recorded: RecordedWorkflow = {
+      schemaVersion: 1,
+      workflowId: "wf_typed_program_literals",
+      inputs: [
+        { name: "retries", type: "number", default: 0 },
+        { name: "enabled", type: "boolean", default: false },
+      ],
+      steps: [
+        {
+          id: "run",
+          callId: "call_run",
+          callable: {
+            runtime: "program-runtime",
+            name: "script",
+            program: { kind: "javascript", source, argument: "source" },
+          },
+          arguments: [
+            {
+              name: "source",
+              source: template({
+                type: "program",
+                language: "javascript",
+                source: { type: "literal", value: source },
+                holes: [
+                  { token: retryToken, binding: { type: "input", name: "retries" } },
+                  { token: enabledToken, binding: { type: "input", name: "enabled" } },
+                ],
+              }),
+            },
+          ],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    };
+    const scripts: string[] = [];
+    const registry = new RuntimeAdapterRegistry();
+    registry.register({
+      runtime: "program-runtime",
+      call: async ({ arguments: args }) => {
+        scripts.push(String(args.source));
+        return { executed: true };
+      },
+    });
+    const tool = instantiateRecordedWorkflow(compileRecordedWorkflow(recorded), {
+      adapters: registry,
+    });
+
+    expect((await tool.invoke({})).status).toBe("completed");
+    expect(scripts[0]).toBe("const retries = 0; const enabled = false;");
+    expect((await tool.invoke({ retries: 2, enabled: true })).status).toBe("completed");
+    expect(scripts[1]).toBe("const retries = 2; const enabled = true;");
   });
 });

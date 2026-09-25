@@ -154,8 +154,13 @@ interface CaptureEnvironment {
   localByEventId: () => Map<string, NormalizedSessionEvent>;
 }
 
-function createCaptureEnvironment(options?: { attributed?: boolean }): CaptureEnvironment {
-  const pipeline = new NormalizationPipeline();
+function createCaptureEnvironment(options?: {
+  attributed?: boolean;
+  customSecrets?: string[];
+}): CaptureEnvironment {
+  const pipeline = new NormalizationPipeline({
+    redactionConfig: { customSecrets: options?.customSecrets ?? [] },
+  });
   pipeline.registerDecoder(new OmpRecordDecoder());
   const cloud = createFakeCloudClient();
   const localEvents: NormalizedSessionEvent[] = [];
@@ -335,6 +340,24 @@ it("captures completed computation from nested OMP messages without explicit sta
 
 describe("Computation capture integration (native fixtures through the real pipeline)", () => {
   const families = buildComputationFixtureFamilies();
+  function fixtureCanaryValues(
+    family: ComputationFixtureFamily,
+    variant: ComputationFixtureVariant,
+  ) {
+    return [
+      ...new Set([...family.canaries, ...variant.datasets.flatMap((dataset) => dataset.canaries)]),
+    ]
+      .map(String)
+      .filter((value) => value.length > 8);
+  }
+
+  function fixtureEnvironment(
+    family: ComputationFixtureFamily,
+    variant: ComputationFixtureVariant,
+  ) {
+    // Planted fixture values are configured private; ordinary source literals remain visible.
+    return createCaptureEnvironment({ customSecrets: fixtureCanaryValues(family, variant) });
+  }
 
   it("exposes all four ordinary-algorithm fixture families with both capture shapes", () => {
     expect(families.map((family) => family.familyId).sort()).toEqual([
@@ -351,7 +374,12 @@ describe("Computation capture integration (native fixtures through the real pipe
   it.each([false, true])(
     "captures marker-first native eval across batches without leaking source or changing results (attributed=%s)",
     async (attributed) => {
-      const environment = createCaptureEnvironment({ attributed });
+      const sourceOnlySentinel = "OMP_ORDER_SOURCE_ONLY_SENTINEL";
+      // This planted source marker is private for this capture, not a generic source-literal rule.
+      const environment = createCaptureEnvironment({
+        attributed,
+        customSecrets: [sourceOnlySentinel],
+      });
       const session = sessionFor(`session-marker-first-${attributed}`);
       const normalized: NormalizedSessionEvent[] = [];
       const processRecord = environment.pipeline.processRecord.bind(environment.pipeline);
@@ -369,7 +397,7 @@ describe("Computation capture integration (native fixtures through the real pipe
             'values = json.loads(Path("values.json").read_text())',
             'doubled = [item["amount"] * 2 for item in values]',
             'print(json.dumps({"values": sorted(doubled)}))',
-            "# OMP_ORDER_SOURCE_ONLY_SENTINEL",
+            `# ${sourceOnlySentinel}`,
           ].join("\n"),
           output: '{"values":[4,8]}',
         },
@@ -476,7 +504,7 @@ describe("Computation capture integration (native fixtures through the real pipe
         expect(evidence?.observation.resultEventId).toBe(captured?.eventId);
         expect(evidence?.program.complete).toBe(true);
         expect(JSON.stringify(events)).not.toContain("__resinLocalOmpNativeCallV1");
-        expect(JSON.stringify(events)).not.toContain("OMP_ORDER_SOURCE_ONLY_SENTINEL");
+        expect(JSON.stringify(events)).not.toContain(sourceOnlySentinel);
         expect(JSON.stringify(events)).not.toContain(cells[1]!.code);
       }
       if (attributed) {
@@ -486,9 +514,7 @@ describe("Computation capture integration (native fixtures through the real pipe
         expect(JSON.stringify(environment.cloud.submitted)).not.toContain(
           "__resinLocalOmpNativeCallV1",
         );
-        expect(JSON.stringify(environment.cloud.submitted)).not.toContain(
-          "OMP_ORDER_SOURCE_ONLY_SENTINEL",
-        );
+        expect(JSON.stringify(environment.cloud.submitted)).not.toContain(sourceOnlySentinel);
       }
       expect(JSON.stringify(projectEventToMetadataOnly(result))).not.toContain(
         "__resinLocalOmpNativeCallV1",
@@ -499,7 +525,7 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("produces only causally justified evidence for every fixture family", async () => {
     for (const family of families) {
       for (const variant of family.variants) {
-        const environment = createCaptureEnvironment();
+        const environment = fixtureEnvironment(family, variant);
         await captureVariant(environment, variant);
 
         const calls = collectOmpFixtureToolCalls(variant.records);
@@ -533,7 +559,7 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("produces substantive evidence on both surfaces for the python definition/use families", async () => {
     const family = families.find((entry) => entry.familyId === "record-join-lineage")!;
     for (const variant of family.variants) {
-      const environment = createCaptureEnvironment();
+      const environment = fixtureEnvironment(family, variant);
       await captureVariant(environment, variant);
 
       const substantive = substantiveCarriers(environment, variant);
@@ -566,7 +592,7 @@ describe("Computation capture integration (native fixtures through the real pipe
     for (const familyId of ["record-schema-order", "cpu-pss-delta"]) {
       const family = families.find((entry) => entry.familyId === familyId)!;
       for (const variant of family.variants) {
-        const environment = createCaptureEnvironment();
+        const environment = fixtureEnvironment(family, variant);
         await captureVariant(environment, variant);
 
         const substantive = substantiveCarriers(environment, variant);
@@ -603,7 +629,7 @@ describe("Computation capture integration (native fixtures through the real pipe
     // the same session: executing it statically resolves that observed module body.
     const family = families.find((entry) => entry.familyId === "record-schema-order")!;
     const variant = family.variants.find((entry) => entry.kind === "file-write-then-execute")!;
-    const environment = createCaptureEnvironment();
+    const environment = fixtureEnvironment(family, variant);
     await captureVariant(environment, variant);
 
     const executed = carriersFor(environment, variant)
@@ -630,7 +656,7 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("captures the complete ownership script without dropping its closure", async () => {
     const ownership = families.find((entry) => entry.familyId === "process-snapshot-ownership")!;
     const variant = ownership.variants.find((entry) => entry.kind === "file-write-then-execute")!;
-    const environment = createCaptureEnvironment();
+    const environment = fixtureEnvironment(ownership, variant);
     await captureVariant(environment, variant);
 
     for (const carrier of carriersFor(environment, variant)) {
@@ -651,7 +677,7 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("carries identical validated evidence on the local sink and the cloud batch for the same event", async () => {
     const joinFamily = families.find((family) => family.familyId === "record-join-lineage")!;
     const variant = joinFamily.variants[0]!;
-    const environment = createCaptureEnvironment();
+    const environment = fixtureEnvironment(joinFamily, variant);
     await captureVariant(environment, variant);
 
     const localCarriers = new Map<string, unknown>();
@@ -688,7 +714,7 @@ describe("Computation capture integration (native fixtures through the real pipe
     const variant = joinFamily.variants[0]!;
     expect(variant.kind).toBe("corrected-helper");
 
-    const environment = createCaptureEnvironment();
+    const environment = fixtureEnvironment(joinFamily, variant);
     await captureVariant(environment, variant);
 
     const superseded = variant.datasets[0]!.superseded;
@@ -773,7 +799,7 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("keeps every observed file body definition-only across all families", async () => {
     for (const family of families) {
       for (const variant of family.variants) {
-        const environment = createCaptureEnvironment();
+        const environment = fixtureEnvironment(family, variant);
         await captureVariant(environment, variant);
         for (const carrier of carriersFor(environment, variant)) {
           const evidence = readComputationEvidence(carrier.evidence);
@@ -831,17 +857,11 @@ describe("Computation capture integration (native fixtures through the real pipe
   it("drops every fixture canary from both carriers and projected metadata", async () => {
     for (const family of families) {
       for (const variant of family.variants) {
-        const environment = createCaptureEnvironment();
+        const environment = fixtureEnvironment(family, variant);
         await captureVariant(environment, variant);
 
-        const canaries = new Set<string>([
-          ...family.canaries,
-          ...variant.datasets.flatMap((dataset) => dataset.canaries),
-        ]);
-        // Fixture token values are the canaries to look for, not their identifiers.
-        const canaryValues = [...canaries]
-          .map((canary) => String(canary))
-          .filter((value) => value.length > 8);
+        // Only declared private fixture values are expected to be redacted.
+        const canaryValues = fixtureCanaryValues(family, variant);
         if (canaryValues.length === 0) continue;
 
         for (const carrier of carriersFor(environment, variant)) {
@@ -867,7 +887,7 @@ describe("Computation capture integration (native fixtures through the real pipe
     const joinFamily = families.find((family) => family.familyId === "record-join-lineage")!;
     const variant = joinFamily.variants[0]!;
     const sessionId = variant.sessionId;
-    const environment = createCaptureEnvironment();
+    const environment = fixtureEnvironment(joinFamily, variant);
     const records = variant.records.map((record, index) => rawRecord(record, index));
 
     // The definition cell commits the helper into the recorder kernel.

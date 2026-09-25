@@ -53,7 +53,10 @@ export interface ObserverCoordinatorOptions {
   pollIntervalMs?: number;
   defaultBackfillPolicy?: BackfillPolicy;
   autoStart?: boolean;
-  backfillPolicyForSession?: (session: HarnessSession) => BackfillPolicy | undefined;
+  backfillPolicyForSession?: (
+    session: HarnessSession,
+    startedAt?: number,
+  ) => BackfillPolicy | undefined;
   defaultMaxInFlightBatches?: number;
   captureUserSessionsOnly?: boolean;
   /** Opt into idle/terminal catchup during this run; historical sessions are never attached. */
@@ -82,6 +85,7 @@ export class ObserverCoordinator extends EventEmitter {
   private readonly terminalNotifications = new Map<string, Promise<void>>();
   private readonly backfillPolicyForSession?: (
     session: HarnessSession,
+    startedAt?: number,
   ) => BackfillPolicy | undefined;
   private readonly defaultMaxInFlightBatches?: number;
   private readonly captureUserSessionsOnly: boolean;
@@ -330,7 +334,7 @@ export class ObserverCoordinator extends EventEmitter {
                       }
                     }
 
-                    const backfillPolicy = this.backfillPolicyForSession?.(session);
+                    const backfillPolicy = this.backfillPolicyForSession?.(session, this.startedAt);
 
                     await this.tailer.attachSession(session, source, {
                       workspaceId: workspace.workspaceId,

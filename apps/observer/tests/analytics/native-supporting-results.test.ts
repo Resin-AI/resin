@@ -96,11 +96,6 @@ describe("supporting executions survive native capture and projection", () => {
       supportingEvents: projected,
     });
     expect(recipe?.workflow.steps.map((step) => step.callId)).toEqual(["call-1"]);
-    expect(
-      recipe?.workflow.candidates?.some(
-        (candidate) => candidate.argument === "path" && candidate.proposed.kind === "input",
-      ),
-    ).toBe(true);
     const observation = recipe?.workflow.heldOut?.observed.find(
       (entry) => entry.stepId === "step0",
     );

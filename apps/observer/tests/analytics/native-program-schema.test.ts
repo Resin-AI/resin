@@ -1,12 +1,8 @@
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
-import { deriveNativeCalls } from "../../src/analytics/native-argument-derivation.js";
 import { InMemoryPrivateValueStore } from "../../src/analytics/private-value-store.js";
-import {
-  RESIN_PROGRAM_RUNTIME,
-  WorkflowCallRecorder,
-} from "../../src/analytics/workflow-call-recorder.js";
+import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 
 const RECORDED_PROGRAM = "printf '%s\\n' 'alpha-7f3c' > f";
@@ -79,27 +75,7 @@ describe("discovery describes the executor, not the generated workflow's inputs"
     });
   }
 
-  it("does not offer a whole recorded program just because discovery accepts source text", () => {
-    const derived = deriveNativeCalls([
-      {
-        callId: "call-source",
-        stepId: "step0",
-        toolName: "unfamiliar_executor",
-        runtime: RESIN_PROGRAM_RUNTIME,
-        arguments: { payload: "print('recorded algorithm')", data: "project-alpha" },
-        program: { kind: "python", argument: "payload" },
-        inputSchema: {
-          type: "object",
-          properties: { payload: { type: "string" }, data: { type: "string" } },
-        },
-      },
-    ]);
-    expect(derived.candidates.map(({ argument, path }) => ({ argument, path }))).toEqual([
-      { argument: "data", path: [] },
-    ]);
-  });
-
-  it("carries only the changing data token through a schema-bearing recorded repeat", () => {
+  it("retains a schema-bearing repeat without suggesting a changing program token as input", () => {
     const { events } = record([
       executorDiscovery(),
       call(1, { command: RECORDED_PROGRAM }),
@@ -112,14 +88,7 @@ describe("discovery describes the executor, not the generated workflow's inputs"
       supportingEvents: events,
     })!.workflow;
     expect(workflow.steps.map((step) => step.callId)).toEqual(["call_1"]);
-    expect(workflow.candidates).toEqual([
-      expect.objectContaining({
-        stepId: "step0",
-        argument: "command",
-        path: ["tokens", 2],
-        proposed: { kind: "input", name: "execute_any_command_2", type: "string" },
-      }),
-    ]);
+    expect(workflow.candidates).toBeUndefined();
   });
 
   it("does not turn incompatible implementations into a full-command input fallback", () => {

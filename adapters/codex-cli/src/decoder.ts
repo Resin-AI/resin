@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { type CodexCommandAssociation, RESIN_CODEX_COMMAND_METADATA_KEY } from "@resin/contracts";
 import type {
@@ -252,6 +252,377 @@ function parseDurationMs(raw: CodexTranscriptPayload): number | undefined {
 
   return undefined;
 }
+type NativeOutcome = "completed" | "failed" | "unknown" | "running" | "truncated";
+
+interface NativeShellOutput {
+  result: CodexTranscriptValue;
+  exitCode?: number;
+  durationMs?: number;
+  outcome: NativeOutcome;
+}
+
+function parseNativeShellOutput(
+  rawOutput: CodexTranscriptValue | undefined,
+  rawRecord: CodexTranscriptPayload,
+): NativeShellOutput {
+  const outputObject = asObject(rawOutput);
+  const recordMetadata = asObject(rawRecord.metadata);
+  const nestedMetadata = asObject(outputObject?.metadata) ?? recordMetadata;
+  const exitValue =
+    outputObject?.exit_code ??
+    outputObject?.exitCode ??
+    outputObject?.code ??
+    rawRecord.exit_code ??
+    rawRecord.exitCode ??
+    nestedMetadata?.exit_code ??
+    nestedMetadata?.exitCode ??
+    recordMetadata?.exit_code ??
+    recordMetadata?.exitCode;
+  const exitCode = asNumber(exitValue);
+  const durationSource: CodexTranscriptPayload = {
+    ...rawRecord,
+    ...(outputObject ?? {}),
+    ...(nestedMetadata ? { metadata: nestedMetadata } : {}),
+  };
+  const durationMs =
+    parseDurationMs(durationSource) ??
+    (nestedMetadata ? parseDurationMs(nestedMetadata) : undefined) ??
+    (recordMetadata && recordMetadata !== nestedMetadata
+      ? parseDurationMs(recordMetadata)
+      : undefined);
+  const status = (
+    asString(outputObject?.status) ??
+    asString(outputObject?.state) ??
+    asString(rawRecord.status) ??
+    asString(rawRecord.state) ??
+    asString(recordMetadata?.status) ??
+    asString(recordMetadata?.state) ??
+    ""
+  ).toLowerCase();
+  const isTruncated =
+    outputObject?.truncated === true ||
+    outputObject?.is_truncated === true ||
+    outputObject?.output_truncated === true ||
+    rawRecord.truncated === true ||
+    rawRecord.is_truncated === true ||
+    rawRecord.output_truncated === true ||
+    nestedMetadata?.truncated === true ||
+    nestedMetadata?.is_truncated === true ||
+    nestedMetadata?.output_truncated === true ||
+    recordMetadata?.truncated === true ||
+    recordMetadata?.is_truncated === true ||
+    recordMetadata?.output_truncated === true;
+  const statusOutcome: NativeOutcome | undefined =
+    isTruncated || status === "truncated" || status === "incomplete" || status === "partial"
+      ? "truncated"
+      : status === "failed" ||
+          status === "error" ||
+          status === "cancelled" ||
+          status === "canceled" ||
+          outputObject?.is_error === true ||
+          outputObject?.isError === true ||
+          outputObject?.success === false ||
+          rawRecord.is_error === true ||
+          rawRecord.isError === true ||
+          rawRecord.success === false ||
+          (outputObject?.error !== undefined && outputObject.error !== null) ||
+          (rawRecord.error !== undefined && rawRecord.error !== null)
+        ? "failed"
+        : status === "running" ||
+            status === "in_progress" ||
+            status === "in-progress" ||
+            status === "pending"
+          ? "running"
+          : status === "unknown" ||
+              status === "uncertain" ||
+              outputObject?.completed === false ||
+              rawRecord.completed === false
+            ? "unknown"
+            : status === "completed" ||
+                status === "complete" ||
+                status === "success" ||
+                status === "succeeded" ||
+                outputObject?.completed === true ||
+                rawRecord.completed === true
+              ? "completed"
+              : undefined;
+  let result: CodexTranscriptValue = rawOutput ?? null;
+  if (outputObject) {
+    const stdout = asString(outputObject.stdout);
+    const stderr = asString(outputObject.stderr);
+    const body = outputObject.output ?? outputObject.result ?? outputObject.content;
+    if (stdout !== undefined || stderr !== undefined) {
+      result =
+        stderr !== undefined && stderr.length > 0
+          ? { stdout: stdout ?? "", stderr }
+          : (stdout ?? "");
+    } else if (body !== undefined) {
+      result = body;
+    }
+  }
+
+  const formatted = asString(rawOutput);
+  if (formatted !== undefined) {
+    const unified = formatted.match(
+      /^Chunk ID: [A-Za-z0-9_-]+\r?\nWall time: (\d+(?:\.\d+)?(?:s| seconds?)?)\r?\nProcess exited with code (-?\d+)\r?\nFinal output:\r?\n([\s\S]*)$/,
+    );
+    if (unified) {
+      const wallTimeMs = parseWallTimeMs(unified[1]);
+      const formattedExitCode = Number(unified[2]);
+      return {
+        result: unified[3] ?? "",
+        exitCode: formattedExitCode,
+        durationMs: wallTimeMs ?? durationMs,
+        outcome: statusOutcome ?? (formattedExitCode === 0 ? "completed" : "failed"),
+      };
+    }
+
+    const running = formatted.match(
+      /^Chunk ID: [A-Za-z0-9_-]+\r?\nWall time: (\d+(?:\.\d+)?(?:s| seconds?)?)\r?\nProcess running with session ID:?[ \t]*[A-Za-z0-9_-]+(?:\r?\nFinal output:\r?\n([\s\S]*))?(?:\r?\n)?$/,
+    );
+    if (running) {
+      return {
+        result: running[2] ?? "",
+        durationMs: parseWallTimeMs(running[1]) ?? durationMs,
+        outcome: statusOutcome ?? "running",
+      };
+    }
+
+    const shellCommand = formatted.match(
+      /^Exit code: (-?\d+)\r?\nWall time: (\d+(?:\.\d+)?(?:s| seconds?)?)\r?\nOutput:\r?\n([\s\S]*)$/,
+    );
+    if (shellCommand) {
+      const formattedExitCode = Number(shellCommand[1]);
+      return {
+        result: shellCommand[3] ?? "",
+        exitCode: formattedExitCode,
+        durationMs: parseWallTimeMs(shellCommand[2]) ?? durationMs,
+        outcome: statusOutcome ?? (formattedExitCode === 0 ? "completed" : "failed"),
+      };
+    }
+  }
+
+  const outcome =
+    statusOutcome ?? (exitCode === undefined ? "unknown" : exitCode === 0 ? "completed" : "failed");
+
+  return {
+    result,
+    exitCode,
+    durationMs,
+    outcome,
+  };
+}
+
+interface NativeCodeModeExecOutput {
+  result: CodexTranscriptValue;
+  outcome: NativeOutcome;
+}
+
+const CODE_MODE_EXEC_HEADER =
+  /^Script (completed|failed|terminated|running with cell ID [^\r\n]+)\r?\nWall time \d+(?:\.\d+)? seconds(?: \(code-mode \d+\.\d{3} seconds; overhead -?\d+\.\d{3} seconds\))?\r?\nOutput:\r?\n$/;
+const CODE_MODE_EXEC_CONCISE_FAILED_HEADER = /^Script failed\r?\nOutput:\r?\n$/;
+const CODE_MODE_OUTPUT_TRUNCATION_MARKER = /\.\.\. \[TRUNCATED \d+ chars\]/;
+
+function hasNativeTruncationFlag(value: CodexTranscriptPayload | undefined): boolean {
+  return (
+    value?.truncated === true ||
+    value?.is_truncated === true ||
+    value?.isTruncated === true ||
+    value?.output_truncated === true ||
+    value?.outputTruncated === true
+  );
+}
+
+/**
+ * Code Mode adds exactly one first content item at the transport boundary. Its wording and optional
+ * host-timing suffix come from the native exec output formatter; the authored items that follow are
+ * kept as-is, including their order and boundaries.
+ */
+function parseNativeCodeModeExecOutput(
+  rawOutput: CodexTranscriptValue | undefined,
+  rawRecord: CodexTranscriptPayload,
+): NativeCodeModeExecOutput {
+  const items = asArray(rawOutput);
+  const first = asObject(items?.[0]);
+  const header =
+    first !== undefined &&
+    Object.keys(first).length === 2 &&
+    first.type === "input_text" &&
+    typeof first.text === "string"
+      ? first.text.match(CODE_MODE_EXEC_HEADER)
+      : null;
+  const conciseFailedHeader =
+    header === null &&
+    first !== undefined &&
+    Object.keys(first).length === 2 &&
+    first.type === "input_text" &&
+    typeof first.text === "string" &&
+    CODE_MODE_EXEC_CONCISE_FAILED_HEADER.test(first.text);
+  const body = header === null ? undefined : items!.slice(1);
+  const recordMetadata = asObject(rawRecord.metadata);
+  const outputMetadata = asObject(asObject(rawOutput)?.metadata);
+  const status = (
+    asString(rawRecord.status) ??
+    asString(rawRecord.state) ??
+    asString(recordMetadata?.status) ??
+    asString(recordMetadata?.state) ??
+    asString(outputMetadata?.status) ??
+    asString(outputMetadata?.state) ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  const truncated =
+    hasNativeTruncationFlag(rawRecord) ||
+    hasNativeTruncationFlag(recordMetadata) ||
+    hasNativeTruncationFlag(outputMetadata) ||
+    (items ?? []).some((item) => {
+      const content = asObject(item);
+      const metadata = asObject(content?.metadata);
+      return (
+        hasNativeTruncationFlag(content) ||
+        hasNativeTruncationFlag(metadata) ||
+        (asString(content?.text) !== undefined &&
+          CODE_MODE_OUTPUT_TRUNCATION_MARKER.test(asString(content?.text)!))
+      );
+    });
+  const failed =
+    rawRecord.is_error === true ||
+    rawRecord.isError === true ||
+    rawRecord.success === false ||
+    (rawRecord.error !== undefined && rawRecord.error !== null) ||
+    status === "failed" ||
+    status === "error" ||
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "terminated";
+  const running =
+    status === "running" ||
+    status === "in_progress" ||
+    status === "in-progress" ||
+    status === "pending";
+  const explicitlyUnknown =
+    rawRecord.completed === false ||
+    recordMetadata?.completed === false ||
+    status === "unknown" ||
+    status === "uncertain" ||
+    (status !== "" &&
+      status !== "completed" &&
+      status !== "complete" &&
+      status !== "success" &&
+      status !== "succeeded" &&
+      status !== "truncated" &&
+      status !== "incomplete" &&
+      status !== "partial" &&
+      !failed &&
+      !running);
+
+  let outcome: NativeOutcome = "unknown";
+  if (truncated || status === "truncated" || status === "incomplete" || status === "partial") {
+    outcome = "truncated";
+  } else if (failed) {
+    outcome = "failed";
+  } else if (running) {
+    outcome = "running";
+  } else if (!explicitlyUnknown && conciseFailedHeader) {
+    outcome = "failed";
+  } else if (!explicitlyUnknown && header !== null) {
+    const headerStatus = header[1];
+    outcome =
+      headerStatus === "completed"
+        ? "completed"
+        : headerStatus === "failed" || headerStatus === "terminated"
+          ? "failed"
+          : "running";
+  }
+
+  return {
+    result: body ?? rawOutput ?? null,
+    outcome,
+  };
+}
+
+function parseWallTimeMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const numeric = Number(value.replace(/(?: seconds?|s)$/i, ""));
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.round(numeric * 1000) : undefined;
+}
+
+function isNativeTerminalTool(toolName: string): boolean {
+  return (
+    toolName === "exec_command" ||
+    toolName === "write_stdin" ||
+    toolName === "shell_command" ||
+    toolName === "terminal"
+  );
+}
+
+function stableNativeItemKey(
+  item: CodexTranscriptPayload,
+  source?: "response_item" | "item_completed",
+): string {
+  const itemType = asString(item.type) ?? "unknown";
+  const callId = asString(item.call_id) ?? asString(item.callId);
+  const itemId = asString(item.id);
+  if (itemType === "custom_tool_call_output" && source !== undefined) {
+    // Progress and final output can reuse a call id. Retain only a compact payload fingerprint.
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(item) ?? "")
+      .digest("hex");
+    return `${itemType}:${source}:${itemId ?? ""}:${callId ?? ""}:${fingerprint}`;
+  }
+  if (callId || itemId) {
+    return `${itemType}:${itemId ?? ""}:${callId ?? ""}`;
+  }
+  return `${itemType}:${JSON.stringify(item)}`;
+}
+
+function withoutUntrustedCodexExecSourceInterface(
+  metadata: CodexTranscriptPayload,
+): CodexTranscriptPayload {
+  const native = asObject(metadata.codexNative);
+  if (!native || !Object.hasOwn(native, "sourceInterface")) return metadata;
+  const cleanedNative = { ...native };
+  delete cleanedNative.sourceInterface;
+  return { ...metadata, codexNative: cleanedNative };
+}
+
+function hasNoNativeConnectionOrForeignNamespace(
+  record: CodexTranscriptPayload,
+  native: CodexTranscriptPayload | undefined,
+): boolean {
+  const connection = native?.connection ?? record.connection ?? record.server;
+  const namespace = native?.namespace ?? record.namespace;
+  return (
+    (connection === undefined || connection === null) &&
+    (namespace === undefined || namespace === null || namespace === "default")
+  );
+}
+
+function sumUsageRecords(records: readonly CodexTranscriptPayload[]): CodexTranscriptPayload {
+  const keys = [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+  ] as const;
+  const totals: CodexTranscriptPayload = {};
+  for (const key of keys) {
+    let sum = 0;
+    let seen = false;
+    for (const record of records) {
+      const value = parseNonNegativeInt(record[key]);
+      if (value !== undefined) {
+        sum += value;
+        seen = true;
+      }
+    }
+    if (seen && Number.isSafeInteger(sum)) totals[key] = sum;
+  }
+  return totals;
+}
 interface CodexExtractedTokens {
   inputTokens?: number;
   outputTokens?: number;
@@ -259,6 +630,22 @@ interface CodexExtractedTokens {
   cachedInputTokens?: number;
   totalTokens?: number;
   hasAnyMetrics: boolean;
+}
+
+function nativeContentText(value: CodexTranscriptValue | undefined): string | undefined {
+  const direct = asString(value);
+  if (direct !== undefined) return direct;
+  const parts = asArray(value);
+  if (!parts) return undefined;
+  const text = parts
+    .map((part) => {
+      if (asString(part) !== undefined) return asString(part);
+      const item = asObject(part);
+      return asString(item?.text) ?? asString(item?.output_text) ?? "";
+    })
+    .filter((part) => part !== "")
+    .join("\n");
+  return text || undefined;
 }
 
 /**
@@ -300,6 +687,8 @@ function extractTokenComponents(raw: CodexTranscriptPayload): CodexExtractedToke
   const reasoningTokens =
     parseNonNegativeInt(raw.reasoning_tokens) ??
     parseNonNegativeInt(raw.reasoningTokens) ??
+    parseNonNegativeInt(raw.reasoning_output_tokens) ??
+    parseNonNegativeInt(raw.reasoningOutputTokens) ??
     parseNonNegativeInt(raw.reasoning) ??
     parseNonNegativeInt(completionDetails?.reasoning_tokens) ??
     parseNonNegativeInt(completionDetails?.reasoningTokens) ??
@@ -573,16 +962,51 @@ export interface BaseNormalizedEventHeader {
   metadata?: CodexTranscriptPayload;
 }
 
+/** Native context scoped to one thread within a rollout. */
+interface CodexNativeThreadContext {
+  threadId?: string;
+  rootThreadId?: string;
+  nativeSessionId?: string;
+  turnId?: string;
+  rootTurnId?: string;
+  cwd?: string;
+  model?: string;
+  modelProvider?: string;
+  effort?: string;
+  contextWindow?: number;
+}
+
+interface CodexNativeThreadUsage {
+  turnId?: string;
+  turnUsage?: CodexTranscriptPayload;
+  lastTokenUsage?: CodexTranscriptPayload;
+  responseUsage: CodexTranscriptPayload[];
+  responseIds: Set<string>;
+  cumulativeUsage?: CodexTranscriptPayload;
+}
+
 /**
  * Stateful session-level decoder for Codex CLI transcript events.
  */
+
 export class CodexSessionDecoder {
   readonly sessionId: string;
   readonly workspaceId: string;
   private sequenceCounter: number;
   private lastEventId: string | null = null;
   private toolCallSeq = 0;
-  private callMap = new Map<string, { toolName: string; toolCallId: string; eventId: string }>();
+  private callMap = new Map<
+    string,
+    {
+      toolName: string;
+      toolCallId: string;
+      eventId: string;
+      connection?: string;
+      metadata?: CodexTranscriptPayload;
+      callEvent?: NormalizedToolCallEvent;
+      deferredProviderUsage?: ProviderReportedUsage;
+    }
+  >();
   private hasEmittedTurnUsage = false;
   private lastCumulativeUsage?: {
     rawUsage: CodexTranscriptPayload;
@@ -611,6 +1035,19 @@ export class CodexSessionDecoder {
   private nativeMatches = new Set<string>();
   private unsafeCodeMode = false;
   private nativeUsageSeen = new Set<string>();
+  private nativeContexts = new Map<string, CodexNativeThreadContext>();
+  private currentNativeContext?: CodexNativeThreadContext;
+  private currentNativeThreadId?: string;
+  private seenNativeItems = new Set<string>();
+  private seenNativeItemOrder: string[] = [];
+  private seenNativeAssistantMessages = new Set<string>();
+  private seenNativeMessageKeys = new Map<
+    string,
+    { responseItem: number; itemCompleted: number }
+  >();
+  private nativeUsageByThread = new Map<string, CodexNativeThreadUsage>();
+  private nativeStartedThreads = new Set<string>();
+  private seenNativeTerminalTurns = new Set<string>();
 
   constructor(options: CodexDecoderOptions = {}) {
     this.sessionId = options.sessionId || generateEventId("sess");
@@ -803,7 +1240,750 @@ export class CodexSessionDecoder {
     ];
   }
 
-  private normalizePayload(p: CodexTranscriptPayload): NormalizedSessionEvent[] {
+  private nativeCallMapKey(callId: string, metadata = this.currentMetadata): string {
+    const nativeMetadata = asObject(metadata?.codexNative);
+    const threadId = asString(nativeMetadata?.threadId) ?? this.currentNativeThreadId;
+    return threadId ? `native:${threadId}:${callId}` : callId;
+  }
+
+  private nativeUsageState(threadId = this.currentNativeThreadId): CodexNativeThreadUsage {
+    const key = threadId ?? this.sessionId;
+    let state = this.nativeUsageByThread.get(key);
+    if (!state) {
+      state = { responseUsage: [], responseIds: new Set<string>() };
+      this.nativeUsageByThread.set(key, state);
+    }
+    return state;
+  }
+
+  private resetNativeTurnUsage(threadId = this.currentNativeThreadId, turnId?: string): void {
+    const state = this.nativeUsageState(threadId);
+    state.turnId = turnId;
+    state.turnUsage = undefined;
+    state.lastTokenUsage = undefined;
+    state.responseUsage = [];
+    state.responseIds.clear();
+    state.cumulativeUsage = undefined;
+  }
+
+  private rememberNativeItem(
+    item: CodexTranscriptPayload,
+    threadId?: string,
+    source?: "response_item" | "item_completed",
+  ): boolean {
+    const key = `${threadId ?? ""}:${stableNativeItemKey(item, source)}`;
+    if (this.seenNativeItems.has(key)) return false;
+    if (this.seenNativeItems.size >= 4096) {
+      const oldest = this.seenNativeItemOrder.shift();
+      if (oldest !== undefined) this.seenNativeItems.delete(oldest);
+    }
+    this.seenNativeItemOrder.push(key);
+    this.seenNativeItems.add(key);
+    return true;
+  }
+
+  private rememberNativeAssistantMessage(text: string, context: CodexNativeThreadContext): boolean {
+    const key = `${context.threadId ?? ""}:${context.turnId ?? ""}:${text}`;
+    if (this.seenNativeAssistantMessages.has(key)) return false;
+    if (this.seenNativeAssistantMessages.size >= 4096) {
+      const oldest = this.seenNativeAssistantMessages.values().next().value as string | undefined;
+      if (oldest !== undefined) this.seenNativeAssistantMessages.delete(oldest);
+    }
+    this.seenNativeAssistantMessages.add(key);
+    return true;
+  }
+  private rememberNativeMessage(
+    role: "user" | "assistant",
+    text: string,
+    context: CodexNativeThreadContext,
+    source?: "response_item" | "item_completed",
+  ): boolean {
+    if (!source) return true;
+    const key = JSON.stringify([context.threadId, context.turnId, role, text]);
+    let counts = this.seenNativeMessageKeys.get(key);
+    if (!counts) {
+      if (this.seenNativeMessageKeys.size >= 4096) {
+        const oldest = this.seenNativeMessageKeys.keys().next().value as string | undefined;
+        if (oldest !== undefined) this.seenNativeMessageKeys.delete(oldest);
+      }
+      counts = { responseItem: 0, itemCompleted: 0 };
+      this.seenNativeMessageKeys.set(key, counts);
+    }
+    const ownCount = source === "response_item" ? counts.responseItem : counts.itemCompleted;
+    const otherCount = source === "response_item" ? counts.itemCompleted : counts.responseItem;
+    if (source === "response_item") counts.responseItem += 1;
+    else counts.itemCompleted += 1;
+    return otherCount <= ownCount;
+  }
+
+  private nativeMetadataWithOutcome(
+    outcome: NativeOutcome,
+    extra?: CodexTranscriptPayload,
+  ): CodexTranscriptPayload {
+    const metadata = { ...(this.currentMetadata ?? {}) };
+    const native = { ...(asObject(metadata.codexNative) ?? {}), outcome, ...(extra ?? {}) };
+    metadata.codexNative = native;
+    this.currentMetadata = metadata;
+    return metadata;
+  }
+
+  private prepareNativeRecord(
+    wrapperType: string,
+    envelope: CodexTranscriptPayload,
+    payload: CodexTranscriptPayload,
+  ): CodexTranscriptPayload {
+    const priorMetadata = { ...(this.currentMetadata ?? {}) };
+    delete priorMetadata.codexNative;
+    const sourceMetadata = {
+      ...priorMetadata,
+      ...(asObject(payload.metadata) ?? {}),
+      ...(asObject(envelope.metadata) ?? {}),
+    };
+    const priorNative = { ...(asObject(asObject(envelope.metadata)?.codexNative) ?? {}) };
+    delete priorNative.sourceInterface;
+    const currentThreadId =
+      asString(payload.thread_id) ??
+      asString(payload.threadId) ??
+      asString(sourceMetadata.threadId) ??
+      asString(priorNative.threadId) ??
+      (wrapperType === "session_meta" ? asString(payload.id) : undefined) ??
+      this.currentNativeThreadId;
+    const contextKey = currentThreadId ?? this.sessionId;
+    const previous = this.nativeContexts.get(contextKey) ?? {};
+    const sessionId = asString(payload.session_id);
+    const rootThreadId =
+      asString(payload.root_thread_id) ??
+      asString(payload.rootThreadId) ??
+      asString(payload.root_id) ??
+      asString(payload.rootId) ??
+      asString(sourceMetadata.rootThreadId) ??
+      asString(sourceMetadata.rootId) ??
+      (wrapperType === "session_meta" ? sessionId : undefined);
+    const turnId = asString(payload.turn_id) ?? asString(payload.turnId);
+    const rootTurnId = asString(payload.root_turn_id) ?? asString(payload.rootTurnId);
+    const context: CodexNativeThreadContext = {
+      ...previous,
+      ...(currentThreadId ? { threadId: currentThreadId } : {}),
+      ...(rootTurnId ? { rootTurnId } : {}),
+      ...(turnId ? { turnId } : {}),
+      ...(asString(payload.cwd) ? { cwd: asString(payload.cwd) } : {}),
+      ...(asString(payload.model) ? { model: asString(payload.model) } : {}),
+      ...(asString(payload.model_provider)
+        ? { modelProvider: asString(payload.model_provider) }
+        : {}),
+      ...(asString(payload.effort) ? { effort: asString(payload.effort) } : {}),
+      ...(asNumber(payload.context_window) !== undefined
+        ? { contextWindow: asNumber(payload.context_window) }
+        : {}),
+      ...(wrapperType === "session_meta" && sessionId ? { nativeSessionId: sessionId } : {}),
+      ...(rootThreadId ? { rootThreadId } : {}),
+    };
+    const newTurn = context.turnId !== previous.turnId && context.turnId !== undefined;
+    if (newTurn) this.resetNativeTurnUsage(currentThreadId, context.turnId);
+    this.nativeContexts.set(contextKey, context);
+    this.currentNativeContext = context;
+    this.currentNativeThreadId = context.threadId;
+
+    const nativeMetadata: CodexTranscriptPayload = {
+      ...priorNative,
+      type: wrapperType,
+      ...(asNumber(envelope.ordinal) !== undefined ? { ordinal: asNumber(envelope.ordinal) } : {}),
+      ...(asString(payload.type) ? { eventType: asString(payload.type) } : {}),
+      ...(context.threadId ? { threadId: context.threadId } : {}),
+      ...(context.rootThreadId ? { rootThreadId: context.rootThreadId } : {}),
+      ...(context.nativeSessionId ? { nativeSessionId: context.nativeSessionId } : {}),
+      ...(context.turnId ? { turnId: context.turnId } : {}),
+      ...(context.rootTurnId ? { rootTurnId: context.rootTurnId } : {}),
+      ...(context.cwd ? { cwd: context.cwd } : {}),
+      ...(context.model ? { model: context.model } : {}),
+      ...(context.modelProvider ? { modelProvider: context.modelProvider } : {}),
+      ...(context.effort ? { effort: context.effort } : {}),
+      ...(context.contextWindow !== undefined ? { contextWindow: context.contextWindow } : {}),
+    };
+    const metadata: CodexTranscriptPayload = {
+      ...sourceMetadata,
+      codexNative: nativeMetadata,
+    };
+    this.currentMetadata = metadata;
+    return metadata;
+  }
+
+  private saveNativeUsageRecord(payload: CodexTranscriptPayload): void {
+    const threadId = asString(payload.thread_id) ?? this.currentNativeThreadId;
+    let state = this.nativeUsageState(threadId);
+    const turnId = asString(payload.turn_id);
+    if (turnId && state.turnId !== turnId) {
+      this.resetNativeTurnUsage(threadId, turnId);
+      state = this.nativeUsageState(threadId);
+    }
+    const turnUsage = asObject(payload.turn_token_usage);
+    const responseUsage = asObject(payload.usage);
+    const cumulativeUsage = asObject(payload.thread_token_usage);
+    const responseId = asString(payload.response_id);
+    if (turnUsage) state.turnUsage = turnUsage;
+    if (cumulativeUsage) state.cumulativeUsage = cumulativeUsage;
+    if (responseUsage && (!responseId || !state.responseIds.has(responseId))) {
+      if (responseId) state.responseIds.add(responseId);
+      state.responseUsage.push(responseUsage);
+    }
+  }
+
+  private nativeTurnUsage(
+    state: CodexNativeThreadUsage,
+  ): { rawUsage: CodexTranscriptPayload; isLastResponseSnapshot: boolean } | undefined {
+    if (state.turnUsage) {
+      return { rawUsage: state.turnUsage, isLastResponseSnapshot: false };
+    }
+    if (state.responseUsage.length > 0) {
+      return {
+        rawUsage: sumUsageRecords(state.responseUsage),
+        isLastResponseSnapshot: false,
+      };
+    }
+    if (state.lastTokenUsage) {
+      return { rawUsage: state.lastTokenUsage, isLastResponseSnapshot: true };
+    }
+    return undefined;
+  }
+
+  private nativeProviderUsage(
+    rawUsage: CodexTranscriptPayload,
+    threadId: string | undefined,
+    isLastResponseSnapshot: boolean,
+  ): ProviderReportedUsage | undefined {
+    const context =
+      this.nativeContexts.get(threadId ?? this.sessionId) ?? this.currentNativeContext;
+    const rawPayload: CodexTranscriptPayload = {
+      ...(context?.modelProvider ? { provider: context.modelProvider } : {}),
+      ...(context?.model ? { model: context.model } : {}),
+    };
+    const preserveUnavailable =
+      asString(rawUsage.availability) === "unavailable" || rawUsage.unavailable === true;
+    const usage =
+      isLastResponseSnapshot && !preserveUnavailable
+        ? { ...rawUsage, availability: "partial" }
+        : rawUsage;
+    return buildProviderUsage(usage, rawPayload, "codex-cli-native-rollout-v1");
+  }
+
+  private normalizeNativeItem(
+    item: CodexTranscriptPayload,
+    timestamp?: string,
+    metadata = this.currentMetadata,
+    source: "response_item" | "item_completed" = "response_item",
+  ): NormalizedSessionEvent[] {
+    const threadId =
+      asString(asObject(metadata?.codexNative)?.threadId) ?? this.currentNativeThreadId;
+    const itemType = asString(item.type)?.toLowerCase();
+    const outputCallId = asString(item.call_id) ?? asString(item.callId);
+    const outputCall =
+      itemType === "custom_tool_call_output" && outputCallId !== undefined
+        ? this.callMap.get(this.nativeCallMapKey(outputCallId, metadata))
+        : undefined;
+    const outputCallNative = asObject(
+      outputCall?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
+    );
+    const outputSource =
+      outputCall?.toolName === "exec" &&
+      outputCallNative?.type === "response_item" &&
+      outputCallNative?.itemType === "custom_tool_call" &&
+      outputCallNative?.sourceInterface === "codex-exec"
+        ? source
+        : undefined;
+    if (
+      source === "item_completed" &&
+      itemType === "custom_tool_call_output" &&
+      outputCall?.toolName === "exec" &&
+      outputCallNative?.type === "response_item" &&
+      outputCallNative?.itemType === "custom_tool_call" &&
+      outputCallNative?.sourceInterface === "codex-exec"
+    ) {
+      // Item-completed notifications can be partial. Only the later response_item is authoritative.
+      return [];
+    }
+    if (!this.rememberNativeItem(item, threadId, outputSource)) return [];
+    if (
+      source === "response_item" &&
+      (itemType === "function_call" ||
+        itemType === "custom_tool_call" ||
+        itemType === "function_call_output" ||
+        itemType === "custom_tool_call_output") &&
+      (asString(item.name) === "exec" ||
+        asString(item.name) === "exec_command" ||
+        asString(item.name) === "write_stdin" ||
+        asString(item.name) === "unified_exec" ||
+        (outputCall?.toolName === "exec" &&
+          (outputCallId === undefined || this.wrappers.has(outputCallId))) ||
+        this.nativeCommands.has(outputCallId ?? ""))
+    ) {
+      return this.normalizePayload(
+        { type: "response_item", payload: item, timestamp, metadata },
+        false,
+        true,
+      );
+    }
+    const itemRole =
+      itemType === "usermessage" || itemType === "user_message"
+        ? "user"
+        : itemType === "agentmessage" || itemType === "agent_message"
+          ? "assistant"
+          : itemType === "message"
+            ? asString(item.role)?.toLowerCase()
+            : undefined;
+    const role = itemRole === "user" || itemRole === "assistant" ? itemRole : undefined;
+    const itemTurnId =
+      asString(item.turn_id) ??
+      asString(asObject(item.internal_chat_message_metadata_passthrough)?.turn_id);
+    const messageContext: CodexNativeThreadContext = {
+      ...(this.currentNativeContext ?? {}),
+      ...(threadId ? { threadId } : {}),
+      ...(itemTurnId ? { turnId: itemTurnId } : {}),
+    };
+    const text = nativeContentText(item.content);
+    const nativeType = asString(asObject(metadata?.codexNative)?.type);
+    const nativeEventType = asString(asObject(metadata?.codexNative)?.eventType)?.toLowerCase();
+    const messageSource =
+      nativeType === "response_item"
+        ? "response_item"
+        : nativeType === "event_msg" && nativeEventType === "item_completed"
+          ? "item_completed"
+          : undefined;
+    if (role && text !== undefined) {
+      if (!this.rememberNativeMessage(role, text, messageContext, messageSource)) return [];
+      if (role === "assistant") this.rememberNativeAssistantMessage(text, messageContext);
+    }
+    const isMessageAlias =
+      itemType === "usermessage" ||
+      itemType === "agentmessage" ||
+      itemType === "user_message" ||
+      itemType === "agent_message";
+    const suppliedItemMetadata = asObject(item.metadata);
+    const itemMetadata =
+      suppliedItemMetadata === undefined
+        ? undefined
+        : withoutUntrustedCodexExecSourceInterface(suppliedItemMetadata);
+    const combinedMetadata =
+      itemMetadata || metadata
+        ? {
+            ...(itemMetadata ?? {}),
+            ...(metadata ?? {}),
+            ...(itemMetadata?.codexNative || metadata?.codexNative
+              ? {
+                  codexNative: {
+                    ...(asObject(itemMetadata?.codexNative) ?? {}),
+                    ...(asObject(metadata?.codexNative) ?? {}),
+                  },
+                }
+              : {}),
+          }
+        : undefined;
+    const normalizedItem: CodexTranscriptPayload = {
+      ...item,
+      ...(isMessageAlias && role ? { type: "message", role } : {}),
+      ...(timestamp ? { timestamp } : {}),
+      ...(combinedMetadata ? { metadata: combinedMetadata } : {}),
+    };
+    if (normalizedItem.model === undefined && this.currentNativeContext?.model) {
+      normalizedItem.model = this.currentNativeContext.model;
+    }
+    if (itemTurnId && combinedMetadata) {
+      normalizedItem.metadata = {
+        ...combinedMetadata,
+        codexNative: {
+          ...(asObject(combinedMetadata.codexNative) ?? {}),
+          turnId: itemTurnId,
+        },
+      };
+      this.currentMetadata = normalizedItem.metadata;
+    }
+    return this.normalizePayload(normalizedItem, source === "response_item");
+  }
+
+  private nativeLifecycle(
+    lifecycleType: "start" | "resume" | "end" | "crash",
+    timestamp: string | undefined,
+    rawEventId: string | undefined,
+    outcome: NativeOutcome,
+    exitReason?: string,
+  ): NormalizedSessionLifecycleEvent {
+    const isTerminal = lifecycleType === "end" || lifecycleType === "crash";
+    const threadId = this.currentNativeThreadId;
+    const state = this.nativeUsageState(threadId);
+    const turnUsage = this.nativeTurnUsage(state);
+    const rawUsage = turnUsage?.rawUsage;
+    const usage =
+      isTerminal && turnUsage
+        ? this.nativeProviderUsage(turnUsage.rawUsage, threadId, turnUsage.isLastResponseSnapshot)
+        : undefined;
+    const cacheWriteInputTokens =
+      rawUsage && parseNonNegativeInt(rawUsage.cache_write_input_tokens);
+    const metadata = this.nativeMetadataWithOutcome(outcome, {
+      lifecycle: asString(asObject(this.currentMetadata?.codexNative)?.eventType) ?? "unknown",
+      ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+      ...(state.cumulativeUsage ? { threadTokenUsage: state.cumulativeUsage } : {}),
+    });
+    const header = this.emitHeader("session_lifecycle", timestamp, rawEventId, metadata);
+    const event: NormalizedSessionLifecycleEvent = {
+      ...header,
+      type: "session_lifecycle",
+      lifecycleType,
+      harnessName: "codex-cli",
+      workspaceId: this.workspaceId,
+    };
+    if (exitReason) event.exitReason = exitReason;
+    if (usage) event.providerUsage = usage;
+    if (isTerminal) this.resetNativeTurnUsage(threadId, this.currentNativeContext?.turnId);
+    return event;
+  }
+
+  private normalizeNativeTaskStarted(
+    payload: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const turnId = asString(payload.turn_id);
+    if (turnId && turnId !== this.currentNativeContext?.turnId) {
+      this.currentNativeContext = { ...(this.currentNativeContext ?? {}), turnId };
+    }
+    const threadKey = this.currentNativeThreadId ?? this.sessionId;
+    const lifecycleType = this.nativeStartedThreads.has(threadKey) ? "resume" : "start";
+    this.nativeStartedThreads.add(threadKey);
+    return [
+      this.nativeLifecycle(
+        lifecycleType,
+        timestamp,
+        asString(payload.id),
+        "running",
+        "turn_started",
+      ),
+    ];
+  }
+
+  private normalizeNativeTerminal(
+    eventType: string,
+    payload: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const errorPayload = asObject(payload.error);
+    const errorText =
+      asString(errorPayload?.message) ??
+      asString(payload.error) ??
+      asString(payload.error_message) ??
+      asString(payload.message) ??
+      (errorPayload ? JSON.stringify(errorPayload) : undefined);
+    const status = asString(payload.status)?.toLowerCase();
+    const aborted =
+      /abort|interrupt|cancel/.test(eventType) ||
+      status === "aborted" ||
+      status === "interrupted" ||
+      status === "cancelled" ||
+      status === "canceled";
+    const failed =
+      aborted ||
+      /fail|error/.test(eventType) ||
+      (payload.error !== undefined && payload.error !== null) ||
+      errorText !== undefined ||
+      payload.success === false ||
+      payload.is_error === true ||
+      status === "failed" ||
+      status === "error";
+
+    const context = this.currentNativeContext;
+    const terminalKey = `${context?.threadId ?? this.sessionId}:${context?.turnId ?? eventType}`;
+    if (this.seenNativeTerminalTurns.has(terminalKey)) return [];
+    if (this.seenNativeTerminalTurns.size >= 4096) {
+      const oldest = this.seenNativeTerminalTurns.values().next().value as string | undefined;
+      if (oldest !== undefined) this.seenNativeTerminalTurns.delete(oldest);
+    }
+    this.seenNativeTerminalTurns.add(terminalKey);
+    const outcome: NativeOutcome = failed ? "failed" : "completed";
+    const events: NormalizedSessionEvent[] = [];
+
+    const lastMessage = asString(payload.last_agent_message);
+    if (
+      !failed &&
+      lastMessage &&
+      context &&
+      this.rememberNativeAssistantMessage(lastMessage, context)
+    ) {
+      events.push(
+        ...this.normalizePayload({
+          type: "assistant_message",
+          content: lastMessage,
+          timestamp,
+          ...(context.model ? { model: context.model } : {}),
+          ...(this.currentMetadata ? { metadata: this.currentMetadata } : {}),
+        }),
+      );
+    }
+
+    if (failed && !aborted) {
+      const message = errorText ?? "Codex native turn failed";
+      const errorMetadata = this.nativeMetadataWithOutcome(outcome, {
+        termination: eventType,
+        ...(asString(payload.id) ? { nativeEventId: asString(payload.id) } : {}),
+      });
+      const header = this.emitHeader("error", timestamp, undefined, errorMetadata);
+      const errorEvent: NormalizedErrorEvent = {
+        ...header,
+        type: "error",
+        errorType: asString(errorPayload?.code) ?? "CODEX_TURN_FAILED",
+        message,
+        recoverable: false,
+      };
+      events.push(errorEvent);
+    }
+
+    events.push(
+      this.nativeLifecycle(
+        failed ? "crash" : "end",
+        timestamp,
+        asString(payload.id),
+        outcome,
+        aborted ? (asString(payload.reason) ?? "aborted") : failed ? "failed" : "completed",
+      ),
+    );
+    return events;
+  }
+  private normalizeNativeMcpEvent(
+    eventType: string,
+    payload: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const invocation = asObject(payload.invocation);
+    const callId = asString(payload.call_id);
+    const toolName = asString(invocation?.tool);
+    const connection = asString(invocation?.server);
+    if (!invocation || !callId || !toolName || !connection) {
+      return this.normalizePayload({
+        ...payload,
+        ...(timestamp ? { timestamp } : {}),
+        ...(this.currentMetadata ? { metadata: this.currentMetadata } : {}),
+        type: `native_${eventType}`,
+      });
+    }
+    const callKey = this.nativeCallMapKey(callId);
+    const cached = this.callMap.get(callKey);
+
+    if (eventType === "mcp_tool_call_begin") {
+      if (cached) {
+        if (cached.callEvent) {
+          cached.callEvent.connection = connection;
+          const metadata = { ...(cached.callEvent.metadata ?? {}) };
+          const existingCodexNative = CodexTranscriptValueSchema.safeParse(metadata.codexNative);
+          metadata.codexNative = {
+            ...(existingCodexNative.success ? (asObject(existingCodexNative.data) ?? {}) : {}),
+            connection,
+          };
+          cached.callEvent.metadata = metadata;
+        }
+        return [];
+      }
+      const metadata = {
+        ...(this.currentMetadata ?? {}),
+        codexNative: {
+          ...(asObject(this.currentMetadata?.codexNative) ?? {}),
+          connection,
+        },
+      };
+      this.currentMetadata = metadata;
+      const header = this.emitHeader("tool_call", timestamp, asString(payload.id), metadata);
+      const parameters = parseToolParameters(invocation.arguments);
+      const callEvent: NormalizedToolCallEvent = {
+        ...header,
+        type: "tool_call",
+        callId,
+        toolName,
+        connection,
+        parameters,
+        isShadow: false,
+      };
+      this.callMap.set(callKey, {
+        toolName,
+        toolCallId: callId,
+        eventId: header.eventId,
+        connection,
+        metadata,
+        callEvent,
+      });
+      return [callEvent];
+    }
+
+    if (eventType !== "mcp_tool_call_end") return [];
+    const resultEnvelope = asObject(payload.result);
+    const successResult =
+      asObject(resultEnvelope?.Ok) ?? asObject(resultEnvelope?.ok) ?? resultEnvelope;
+    const errorText =
+      asString(resultEnvelope?.Err) ??
+      asString(resultEnvelope?.err) ??
+      asString(asObject(resultEnvelope?.Err)?.message);
+    const content = asArray(successResult?.content);
+    const textContent =
+      content?.length && content.every((entry) => asString(asObject(entry)?.text) !== undefined)
+        ? content.map((entry) => asString(asObject(entry)?.text) ?? "").join("\n")
+        : undefined;
+    const structuredContent = successResult?.structured_content ?? successResult?.structuredContent;
+    const result =
+      errorText ??
+      textContent ??
+      structuredContent ??
+      successResult?.content ??
+      successResult ??
+      {};
+    const isError =
+      errorText !== undefined ||
+      successResult?.is_error === true ||
+      successResult?.isError === true ||
+      (resultEnvelope?.Err !== undefined && resultEnvelope?.Err !== null);
+    const outcome: NativeOutcome =
+      payload.result === undefined || payload.result === null
+        ? "unknown"
+        : isError
+          ? "failed"
+          : "completed";
+    const nativeMetadata = this.nativeMetadataWithOutcome(outcome, { connection });
+    const header = this.emitHeader("tool_result", timestamp, asString(payload.id), nativeMetadata);
+    const durationMs = parseDurationMs(payload) ?? 0;
+    const event: NormalizedToolResultEvent = {
+      ...header,
+      type: "tool_result",
+      callId,
+      toolName: cached?.toolName ?? toolName,
+      result,
+      isError,
+      executionDurationMs: durationMs,
+      isShadow: false,
+    };
+    return [event];
+  }
+
+  private normalizeNativeEnvelope(
+    wrapperType: string,
+    envelope: CodexTranscriptPayload,
+    payload: CodexTranscriptPayload,
+  ): NormalizedSessionEvent[] {
+    const metadata = this.prepareNativeRecord(wrapperType, envelope, payload);
+    const timestamp =
+      asString(envelope.timestamp) ?? asString(payload.timestamp) ?? asString(envelope.created_at);
+    this.currentModel = this.currentNativeContext?.model ?? this.currentModel;
+    this.currentCwd = this.currentNativeContext?.cwd ?? this.currentCwd;
+    if (wrapperType === "session_meta" || wrapperType === "turn_context") return [];
+    if (wrapperType === "token_usage_record") {
+      this.saveNativeUsageRecord(payload);
+      return [];
+    }
+    if (wrapperType === "response_item") {
+      const itemType = asString(payload.type);
+      const itemMetadata = {
+        ...metadata,
+        codexNative: {
+          ...(asObject(metadata.codexNative) ?? {}),
+          ...(itemType ? { itemType } : {}),
+          ...(asString(payload.namespace) ? { namespace: asString(payload.namespace) } : {}),
+        },
+      };
+      this.currentMetadata = itemMetadata;
+      return this.normalizeNativeItem(payload, timestamp, itemMetadata, "response_item");
+    }
+    if (wrapperType !== "event_msg") {
+      return this.normalizePayload({
+        ...payload,
+        timestamp,
+        metadata,
+        type: wrapperType,
+      });
+    }
+
+    const eventType = (asString(payload.type) ?? "").toLowerCase();
+    if (eventType === "task_started") {
+      return this.normalizeNativeTaskStarted(payload, timestamp);
+    }
+    if (
+      eventType === "task_complete" ||
+      eventType === "task_failed" ||
+      eventType === "turn_failed" ||
+      eventType === "task_aborted" ||
+      eventType === "turn_aborted" ||
+      eventType === "turn_interrupted"
+    ) {
+      return this.normalizeNativeTerminal(eventType, payload, timestamp);
+    }
+    if (eventType === "item_completed") {
+      const item = asObject(payload.item);
+      if (!item) return [];
+      if (item.type === "CommandExecution") {
+        return this.normalizePayload({ ...envelope, timestamp, metadata, payload }, false, true);
+      }
+      const itemMetadata = {
+        ...metadata,
+        codexNative: {
+          ...(asObject(metadata.codexNative) ?? {}),
+          ...(asString(item.type) ? { itemType: asString(item.type) } : {}),
+        },
+      };
+      this.currentMetadata = itemMetadata;
+      return this.normalizeNativeItem(item, timestamp, itemMetadata, "item_completed");
+    }
+    if (eventType === "exec_command_end") {
+      return this.normalizePayload({ ...envelope, timestamp, metadata, payload }, false, true);
+    }
+    if (eventType === "token_count") {
+      const state = this.nativeUsageState(this.currentNativeThreadId);
+      const info = asObject(payload.info);
+      const lastUsage = asObject(info?.last_token_usage);
+      const totalUsage = asObject(info?.total_token_usage);
+      if (lastUsage) state.lastTokenUsage = lastUsage;
+      if (totalUsage) state.cumulativeUsage = totalUsage;
+      return [];
+    }
+    if (eventType === "mcp_tool_call_begin" || eventType === "mcp_tool_call_end") {
+      return this.normalizeNativeMcpEvent(eventType, payload, timestamp);
+    }
+    if (eventType === "error") {
+      const error = asObject(payload.error);
+      const message =
+        asString(error?.message) ??
+        asString(payload.message) ??
+        asString(payload.error) ??
+        "Codex native event error";
+      const errorMetadata = this.nativeMetadataWithOutcome("failed", { termination: eventType });
+      const header = this.emitHeader("error", timestamp, asString(payload.id), errorMetadata);
+      const event: NormalizedErrorEvent = {
+        ...header,
+        type: "error",
+        errorType: asString(error?.code) ?? "CODEX_EVENT_ERROR",
+        message,
+        recoverable: false,
+      };
+      return [event];
+    }
+
+    return this.normalizePayload({
+      ...payload,
+      timestamp,
+      metadata,
+      type: `native_${eventType || "event"}`,
+    });
+  }
+
+  private normalizePayload(
+    p: CodexTranscriptPayload,
+    nativeResponseItem = false,
+    legacyNativeEnvelope = false,
+  ): NormalizedSessionEvent[] {
+    const envelopeType = asString(p.type)?.toLowerCase();
+    const envelopePayload = asObject(p.payload);
+    if (
+      !legacyNativeEnvelope &&
+      envelopePayload &&
+      (envelopeType === "session_meta" ||
+        envelopeType === "turn_context" ||
+        envelopeType === "response_item" ||
+        envelopeType === "event_msg" ||
+        envelopeType === "token_usage_record" ||
+        envelopeType === "world_state")
+    ) {
+      return this.normalizeNativeEnvelope(envelopeType, p, envelopePayload);
+    }
     const events: NormalizedSessionEvent[] = [];
     // Persisted Codex rollout records carry their semantic type in payload.type.
     const native = asObject(p.payload);
@@ -831,6 +2011,7 @@ export class CodexSessionDecoder {
         ...native,
         timestamp: p.timestamp,
         model: this.currentModel,
+        ...(asObject(p.metadata) ? { metadata: p.metadata } : {}),
       };
       if (nativeType === "message") {
         const role = asString(native.role);
@@ -894,14 +2075,17 @@ export class CodexSessionDecoder {
             observedStarted: Date.parse(asString(p.timestamp) ?? ""),
           });
         }
-        const decoded = this.normalizePayload({
-          ...base,
-          type: "tool_call",
-          name: native.name,
-          call_id: native.call_id,
-          arguments: nativeInput,
-          codex_extracted: canonical,
-        });
+        const decoded = this.normalizePayload(
+          {
+            ...base,
+            type: nativeType,
+            name: native.name,
+            call_id: native.call_id,
+            arguments: nativeInput,
+            codex_extracted: canonical,
+          },
+          true,
+        );
         if (extracted && callId && this.wrappers.has(callId))
           for (const event of decoded)
             if (event.type === "tool_call")
@@ -931,16 +2115,22 @@ export class CodexSessionDecoder {
           : envelope?.startsWith("Script failed")
             ? "failed"
             : "yielded";
-        const resultEvents = this.normalizePayload({
-          ...base,
-          type: "tool_result",
-          call_id: native.call_id,
-          output: rawResult,
-          is_error:
-            wrapper || (callId && this.callMap.get(callId)?.toolName === "exec")
-              ? status === "failed"
-              : undefined,
-        });
+        const resultEvents = this.normalizePayload(
+          {
+            ...base,
+            type: "tool_result",
+            call_id: native.call_id,
+            output: rawResult,
+            is_error:
+              wrapper ||
+              (callId &&
+                this.callMap.get(this.nativeCallMapKey(callId, asObject(p.metadata)))?.toolName ===
+                  "exec")
+                ? status === "failed"
+                : undefined,
+          },
+          true,
+        );
         if (wrapper && callId) {
           wrapper.completed = Date.parse(asString(p.timestamp) ?? "");
           if (status === "yielded") this.unsafeCodeMode = true;
@@ -1110,7 +2300,7 @@ export class CodexSessionDecoder {
 
     const metaObj = asObject(p.metadata);
     if (metaObj) {
-      this.currentMetadata = metaObj;
+      this.currentMetadata = withoutUntrustedCodexExecSourceInterface(metaObj);
     }
 
     const rawSessionId = asString(p.sessionId) ?? asString(p.session_id);
@@ -1120,7 +2310,7 @@ export class CodexSessionDecoder {
 
     const rawEventId = asString(p.eventId) ?? asString(p.event_id) ?? asString(p.id);
 
-    const rawType = String(
+    let rawType = String(
       asString(p.type) ??
         asString(p.event) ??
         asString(p.role) ??
@@ -1128,6 +2318,19 @@ export class CodexSessionDecoder {
         asString(p.kind) ??
         "",
     ).toLowerCase();
+    if (rawType === "message") {
+      const role = asString(p.role)?.toLowerCase();
+      rawType =
+        role === "user"
+          ? "user_message"
+          : role === "assistant"
+            ? "assistant_message"
+            : role === "system" || role === "developer"
+              ? "system_message"
+              : rawType;
+    } else if (rawType === "agent_message") {
+      rawType = "assistant_message";
+    }
 
     const turnUsageRec = getTurnUsageRecord(p);
     const cumUsageRec = getCumulativeUsageRecord(p);
@@ -1501,6 +2704,7 @@ export class CodexSessionDecoder {
     if (
       rawType === "tool_call" ||
       rawType === "function_call" ||
+      rawType === "custom_tool_call" ||
       rawType === "action_call" ||
       rawType === "call"
     ) {
@@ -1522,29 +2726,57 @@ export class CodexSessionDecoder {
           asString(p.tool_name) ??
           "unknown_tool",
       );
-      const toolCallId = String(
-        asString(p.callId) ??
-          asString(p.call_id) ??
-          asString(p.tool_call_id) ??
-          asString(p.id) ??
-          generateEventId("call"),
-      );
+      const codexNative = asObject(asObject(p.metadata)?.codexNative);
+      const rawExecSource =
+        nativeResponseItem &&
+        rawType === "custom_tool_call" &&
+        toolName === "exec" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "custom_tool_call" &&
+        asString(p.input) !== undefined &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative)
+          ? asString(p.input)
+          : undefined;
+      const nativeCallId = asString(p.callId) ?? asString(p.call_id) ?? asString(p.tool_call_id);
+      if (codexNative && !nativeCallId) {
+        events.push({
+          ...this.emitHeader("unknown_passthrough", timestamp, rawEventId),
+          type: "unknown_passthrough",
+          rawEventType: rawType,
+          rawPayload: p,
+        });
+        return events;
+      }
+      const toolCallId = nativeCallId ?? asString(p.id) ?? generateEventId("call");
+      const callKey = this.nativeCallMapKey(toolCallId, asObject(p.metadata));
+      const existing = this.callMap.get(callKey);
+      if (existing?.callEvent) {
+        return events;
+      }
       const rawArgs = fnObj.arguments ?? fnObj.params ?? p.input ?? p.args ?? {};
-      const parameters = parseToolParameters(rawArgs);
+      const parameters: CodexTranscriptPayload =
+        rawExecSource === undefined ? parseToolParameters(rawArgs) : { raw: rawExecSource };
+      const connection = asString(p.connection) ?? asString(p.server);
+      const nativeFields: CodexTranscriptPayload = {
+        ...(connection ? { connection } : {}),
+        ...(asString(p.namespace) ? { namespace: asString(p.namespace) } : {}),
+      };
       const extracted = this.wrappers.has(toolCallId) ? asObject(p.codex_extracted) : undefined;
       if (extracted && typeof rawArgs === "string") {
         parameters.raw = rawArgs;
         parameters.cmd = extracted.cmd;
         if (extracted.workdir !== undefined) parameters.workdir = extracted.workdir;
       }
-
       const header = this.emitHeader("tool_call", timestamp, rawEventId);
-      this.callMap.set(toolCallId, {
-        toolName,
-        toolCallId,
-        eventId: header.eventId,
-      });
-
+      if (codexNative && (Object.keys(nativeFields).length > 0 || rawExecSource !== undefined)) {
+        const metadata = { ...(header.metadata ?? {}) };
+        metadata.codexNative = {
+          ...(asObject(metadata.codexNative) ?? {}),
+          ...nativeFields,
+          ...(rawExecSource === undefined ? {} : { sourceInterface: "codex-exec" }),
+        };
+        header.metadata = metadata;
+      }
       const candidateRef = asString(p.candidateRef);
       const callEvt: NormalizedToolCallEvent = {
         ...header,
@@ -1554,12 +2786,17 @@ export class CodexSessionDecoder {
         parameters,
         isShadow: false,
       };
-      if (candidateRef) {
-        callEvt.candidateRef = candidateRef;
-      }
-      if (callUsage) {
-        callEvt.providerUsage = callUsage;
-      }
+      if (connection) callEvt.connection = connection;
+      if (candidateRef) callEvt.candidateRef = candidateRef;
+      if (callUsage) callEvt.providerUsage = callUsage;
+      this.callMap.set(callKey, {
+        toolName,
+        toolCallId,
+        eventId: header.eventId,
+        ...(connection ? { connection } : {}),
+        ...(header.metadata ? { metadata: header.metadata } : {}),
+        callEvent: callEvt,
+      });
       events.push(callEvt);
       return events;
     }
@@ -1568,6 +2805,8 @@ export class CodexSessionDecoder {
     if (
       rawType === "tool_result" ||
       rawType === "function_result" ||
+      rawType === "function_call_output" ||
+      rawType === "custom_tool_call_output" ||
       rawType === "action_result" ||
       rawType === "tool_response" ||
       rawType === "result" ||
@@ -1576,21 +2815,25 @@ export class CodexSessionDecoder {
       let resUsage: ProviderReportedUsage | undefined;
       if (turnUsageRec) {
         resUsage = buildProviderUsage(turnUsageRec, p, "codex-cli-transcript-v1");
-        if (resUsage) {
-          this.hasEmittedTurnUsage = true;
-        }
       } else if (cumUsageRec) {
         this.lastCumulativeUsage = { rawUsage: cumUsageRec, rawPayload: p };
       }
 
-      const callId = String(
-        asString(p.callId) ??
-          asString(p.call_id) ??
-          asString(p.tool_call_id) ??
-          asString(p.id) ??
-          generateEventId("call"),
-      );
-      const cached = this.callMap.get(callId);
+      const codexNative = asObject(asObject(p.metadata)?.codexNative);
+      const nativeCallId = asString(p.callId) ?? asString(p.call_id) ?? asString(p.tool_call_id);
+      if (codexNative && !nativeCallId) {
+        events.push({
+          ...this.emitHeader("unknown_passthrough", timestamp, rawEventId),
+          type: "unknown_passthrough",
+          rawEventType: rawType,
+          rawPayload: p,
+        });
+        return events;
+      }
+      const callId = nativeCallId ?? asString(p.id) ?? generateEventId("call");
+      const callKey = this.nativeCallMapKey(callId, asObject(p.metadata));
+      const exactCached = this.callMap.get(callKey);
+      const cached = exactCached ?? this.callMap.get(callId);
       const toolName = String(
         asString(p.toolName) ??
           asString(p.tool_name) ??
@@ -1598,23 +2841,112 @@ export class CodexSessionDecoder {
           cached?.toolName ??
           "unknown_tool",
       );
-
       const rawResult = p.result ?? p.output ?? p.content ?? p.data ?? p.response;
-      const isError = Boolean(p.is_error || p.isError || p.error || rawType === "tool_error");
+      const pairedNativeExec = asObject(
+        exactCached?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
+      );
+      const pairedNativeExecCall =
+        exactCached?.toolName === "exec" &&
+        exactCached.connection === undefined &&
+        pairedNativeExec?.type === "response_item" &&
+        pairedNativeExec?.itemType === "custom_tool_call" &&
+        pairedNativeExec?.sourceInterface === "codex-exec" &&
+        hasNoNativeConnectionOrForeignNamespace({}, pairedNativeExec);
+      const nativeCodeModeExecResult =
+        nativeResponseItem &&
+        rawType === "custom_tool_call_output" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "custom_tool_call_output" &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative) &&
+        pairedNativeExecCall;
+      const nativeCodeModeOutput = nativeCodeModeExecResult
+        ? parseNativeCodeModeExecOutput(rawResult, p)
+        : undefined;
+      const terminalOutput =
+        codexNative && isNativeTerminalTool(toolName)
+          ? parseNativeShellOutput(rawResult, p)
+          : undefined;
+      const outputObject = asObject(rawResult);
+      const status = (
+        asString(p.status) ??
+        asString(outputObject?.status) ??
+        asString(outputObject?.state) ??
+        ""
+      ).toLowerCase();
+      const isError = Boolean(
+        p.is_error ||
+          p.isError ||
+          p.error ||
+          rawType === "tool_error" ||
+          p.success === false ||
+          outputObject?.is_error === true ||
+          outputObject?.isError === true ||
+          outputObject?.success === false ||
+          nativeCodeModeOutput?.outcome === "failed" ||
+          terminalOutput?.outcome === "failed" ||
+          (terminalOutput?.exitCode !== undefined && terminalOutput.exitCode !== 0) ||
+          status === "failed" ||
+          status === "error" ||
+          status === "cancelled" ||
+          status === "canceled",
+      );
+      const outcome: NativeOutcome = isError
+        ? "failed"
+        : (nativeCodeModeOutput?.outcome ??
+          (pairedNativeExecCall
+            ? "unknown"
+            : (terminalOutput?.outcome ??
+              (status === "running" || status === "in_progress" || status === "pending"
+                ? "running"
+                : status === "truncated" || status === "incomplete" || status === "partial"
+                  ? "truncated"
+                  : status === "unknown" || status === "uncertain"
+                    ? "unknown"
+                    : codexNative && (rawResult === undefined || rawResult === null)
+                      ? "unknown"
+                      : "completed"))));
+      if (nativeCodeModeExecResult && (outcome === "running" || outcome === "unknown")) {
+        // Keep the call pending for a later terminal response_item instead of consuming it here.
+        if (resUsage !== undefined && exactCached !== undefined) {
+          exactCached.deferredProviderUsage = resUsage;
+        }
+        return events;
+      }
+      let resultMetadata = codexNative
+        ? this.nativeMetadataWithOutcome(outcome, {
+            ...(cached?.connection ? { connection: cached.connection } : {}),
+          })
+        : this.currentMetadata;
+      if (nativeCodeModeExecResult && resultMetadata) {
+        resultMetadata = {
+          ...resultMetadata,
+          codexNative: {
+            ...(asObject(resultMetadata.codexNative) ?? {}),
+            sourceInterface: "codex-exec",
+          },
+        };
+      }
       const durationMs =
-        asNumber(p.executionDurationMs) ?? asNumber(p.durationMs) ?? asNumber(p.duration_ms) ?? 0;
+        terminalOutput?.durationMs ??
+        asNumber(p.executionDurationMs) ??
+        asNumber(p.durationMs) ??
+        asNumber(p.duration_ms) ??
+        0;
 
-      const header = this.emitHeader("tool_result", timestamp, rawEventId);
+      const providerUsage = resUsage ?? exactCached?.deferredProviderUsage;
+      if (providerUsage !== undefined) this.hasEmittedTurnUsage = true;
+      if (exactCached !== undefined) delete exactCached.deferredProviderUsage;
+      const header = this.emitHeader("tool_result", timestamp, rawEventId, resultMetadata);
       events.push({
         ...header,
         type: "tool_result",
         callId,
         toolName,
-        result: rawResult ?? {},
+        result: nativeCodeModeOutput?.result ?? terminalOutput?.result ?? rawResult ?? {},
         isError,
         executionDurationMs: durationMs,
         isShadow: false,
-        providerUsage: resUsage,
+        providerUsage,
       });
       return events;
     }
@@ -1634,7 +2966,7 @@ export class CodexSessionDecoder {
       const command = String(asString(p.command) ?? asString(p.cmd) ?? "");
       const argsArray = asArray(p.args);
       const args = argsArray ? argsArray.map((a) => asString(a) ?? String(a)) : [];
-      const exitCode = asNumber(p.exitCode) ?? asNumber(p.exit_code) ?? 0;
+      const exitCode = asNumber(p.exitCode) ?? asNumber(p.exit_code) ?? -1;
       const stdout = asString(p.stdout) ?? asString(p.output);
       const stderr = asString(p.stderr);
       const durationMs = asNumber(p.durationMs) ?? asNumber(p.duration_ms) ?? 0;

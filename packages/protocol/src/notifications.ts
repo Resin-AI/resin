@@ -1,4 +1,5 @@
-import { ISOTimestampSchema, type V1MetadataPayloadValue } from "@resin/contracts";
+import type { V1MetadataPayloadValue } from "@resin/contracts";
+import { ISOTimestampSchema } from "@resin/contracts/common";
 import { z } from "zod";
 
 export const MAX_NOTIFICATION_ID_LENGTH = 96;

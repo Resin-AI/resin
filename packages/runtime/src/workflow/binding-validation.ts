@@ -13,6 +13,7 @@
 
 import { mkdir } from "node:fs/promises";
 import {
+  type ProgramTokenValue,
   type RecordedWorkflow,
   type WorkflowArgument,
   type WorkflowBindingCandidate,
@@ -353,6 +354,18 @@ function describeOutcome(
   }
 }
 
+/** Keep demonstration values scoped to the input contract of the exact plan being replayed. */
+function inputsDeclaredByPlan(
+  plan: RecordedWorkflow,
+  supplied: Record<string, WorkflowJsonValue>,
+): Record<string, WorkflowJsonValue> {
+  const projected: Record<string, WorkflowJsonValue> = Object.create(null);
+  for (const input of plan.inputs) {
+    if (Object.hasOwn(supplied, input.name)) projected[input.name] = supplied[input.name]!;
+  }
+  return projected;
+}
+
 async function replayStep(
   plan: RecordedWorkflow,
   stepId: string,
@@ -360,7 +373,7 @@ async function replayStep(
   environment: CandidateValidationEnvironment,
 ): Promise<StepReplay> {
   const options: RecordedWorkflowExecutionOptions = {
-    inputs: environment.inputs,
+    inputs: inputsDeclaredByPlan(plan, environment.inputs),
     adapters: environment.adapters,
     ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
@@ -467,14 +480,15 @@ function demonstratedTokenValue(
   plan: RecordedWorkflow,
   candidate: WorkflowBindingCandidate,
   supplied: WorkflowJsonValue,
-): string | undefined {
+): ProgramTokenValue | undefined {
   const index = candidate.path[1];
   if (candidate.path.length !== 2) return undefined;
   if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return undefined;
   const program = plan.steps.find((entry) => entry.id === candidate.stepId)?.callable.program;
   if (program === undefined || program.argument !== candidate.argument) return undefined;
   if (typeof supplied !== "string") return undefined;
-  return tokenizeProgram(program.kind, supplied)[index]?.value;
+  const token = tokenizeProgram(program.kind, supplied)[index];
+  return token?.bindable ? token.value : undefined;
 }
 
 /**
@@ -635,7 +649,7 @@ async function replayPlanOnce(
   missed: Array<{ stepId: string; detail: string }>;
 }> {
   const options: RecordedWorkflowExecutionOptions = {
-    inputs: environment.inputs,
+    inputs: inputsDeclaredByPlan(plan, environment.inputs),
     adapters: environment.adapters,
     ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),

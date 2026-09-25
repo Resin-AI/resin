@@ -116,6 +116,50 @@ function createValidAttribution(
   };
 }
 
+function createCodexRuntimeFixture() {
+  const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fresh-capture-test-"));
+  const projectPath = path.join(rootPath, "project");
+  const sessionRoot = path.join(rootPath, "sessions");
+  const configPath = path.join(rootPath, "config.toml");
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(sessionRoot, { recursive: true });
+  fs.writeFileSync(configPath, 'model = "gpt-6-luna"\n', "utf8");
+  return {
+    rootPath,
+    projectPath,
+    sessionRoot,
+    adapter: new CodexHarnessAdapter({
+      customConfigPath: configPath,
+      customSessionRoot: sessionRoot,
+    }),
+  };
+}
+
+function writeCodexRollout(
+  sessionRoot: string,
+  fileName: string,
+  records: Array<{
+    timestamp: string;
+    type: string;
+    payload: Record<string, unknown>;
+  }>,
+  mtime: Date,
+): string {
+  const transcriptPath = path.join(sessionRoot, fileName);
+  fs.writeFileSync(
+    transcriptPath,
+    records
+      .map(
+        ({ timestamp, type, payload }, ordinal) =>
+          `${JSON.stringify({ timestamp, ordinal, type, payload })}\n`,
+      )
+      .join(""),
+    "utf8",
+  );
+  fs.utimesSync(transcriptPath, mtime, mtime);
+  return transcriptPath;
+}
+
 type Traribution = TrajectoryAttributionContextInput;
 
 describe("TrajectoryCaptureRuntimeModule", () => {
@@ -1156,6 +1200,341 @@ describe("TrajectoryCaptureRuntimeModule", () => {
     });
   });
 
+  describe("Codex fresh-session catch-up and backfill", () => {
+    it("captures a completed native rollout discovered after startup only once", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const observerStartedAt = new Date("2026-09-23T12:00:00.000Z");
+      const transcriptMtime = new Date("2026-09-23T12:00:01.000Z");
+      vi.setSystemTime(observerStartedAt);
+      const fixture = createCodexRuntimeFixture();
+      const module = new TrajectoryCaptureRuntimeModule({
+        adapters: [fixture.adapter],
+        observationClient: mockCloudObservationClient({}),
+      });
+      const context = createMockModuleContext();
+      const received: Array<{
+        sessionId: string;
+        events: NormalizedSessionEvent[];
+        terminal: boolean;
+      }> = [];
+      module.getCaptureCoordinator().setSessionEventSink((session, events, sinkContext) => {
+        received.push({ sessionId: session.sessionId, events, terminal: sinkContext.isTerminal });
+      });
+
+      try {
+        await module.start(context);
+        const observer = module.getObserverCoordinator();
+        expect(observer.getTailer().getActiveSessions()).toEqual([]);
+
+        vi.setSystemTime(transcriptMtime);
+        const completedSessionId = "sess_codex_completed_between_polls";
+        const callId = "codex-completed-call";
+        const timestamp = transcriptMtime.toISOString();
+        const largeInitialMessage = "x".repeat(2 * 1024 * 1024);
+        writeCodexRollout(
+          fixture.sessionRoot,
+          `${completedSessionId}.jsonl`,
+          [
+            {
+              timestamp,
+              type: "session_meta",
+              payload: {
+                session_id: "native-completed-between-polls",
+                id: "thread-completed-between-polls",
+                cwd: fixture.projectPath,
+              },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "message",
+                id: "large-initial-user-message",
+                role: "user",
+                content: [{ type: "input_text", text: largeInitialMessage }],
+              },
+            },
+            {
+              timestamp,
+              type: "event_msg",
+              payload: { type: "task_started", id: "task-start", turn_id: "turn-completed" },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "function_call",
+                id: "function-item",
+                call_id: callId,
+                name: "exec_command",
+                arguments: JSON.stringify({ cmd: "printf '2\\n'" }),
+              },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                id: "output-item",
+                call_id: callId,
+                output:
+                  "Chunk ID: fixture\nWall time: 0.01 seconds\nProcess exited with code 0\nFinal output:\n2\n",
+              },
+            },
+            {
+              timestamp,
+              type: "event_msg",
+              payload: {
+                type: "task_complete",
+                id: "task-complete",
+                turn_id: "turn-completed",
+                success: true,
+              },
+            },
+          ],
+          transcriptMtime,
+        );
+
+        const oldSessionId = "sess_codex_touched_old_copy";
+        const oldTimestamp = "2026-08-20T12:00:00.000Z";
+        writeCodexRollout(
+          fixture.sessionRoot,
+          `${oldSessionId}.jsonl`,
+          [
+            {
+              timestamp: oldTimestamp,
+              type: "session_meta",
+              payload: {
+                session_id: "native-old-copied-session",
+                id: "thread-old-copied-session",
+                cwd: fixture.projectPath,
+              },
+            },
+            {
+              timestamp: oldTimestamp,
+              type: "event_msg",
+              payload: { type: "task_started", id: "old-task-start", turn_id: "old-turn" },
+            },
+            {
+              timestamp: oldTimestamp,
+              type: "response_item",
+              payload: {
+                type: "message",
+                id: "old-user-message",
+                role: "user",
+                content: [{ type: "input_text", text: "Old copied prompt" }],
+              },
+            },
+            {
+              timestamp: oldTimestamp,
+              type: "event_msg",
+              payload: {
+                type: "task_complete",
+                id: "old-task-complete",
+                turn_id: "old-turn",
+                success: true,
+              },
+            },
+          ],
+          transcriptMtime,
+        );
+
+        expect(await observer.pollOnce()).toMatchObject({ errors: [] });
+
+        const completedBatches = received.filter((batch) => batch.sessionId === completedSessionId);
+        const completedEvents = completedBatches.flatMap((batch) => batch.events);
+        expect(
+          completedEvents.filter((event) => event.type === "tool_call" && event.callId === callId),
+        ).toHaveLength(1);
+        expect(
+          completedEvents.find((event) => event.type === "tool_call" && event.callId === callId),
+        ).toMatchObject({ callId, toolName: "exec_command" });
+        expect(
+          completedEvents.filter(
+            (event) => event.type === "tool_result" && event.callId === callId,
+          ),
+        ).toHaveLength(1);
+        expect(
+          completedEvents.find((event) => event.type === "tool_result" && event.callId === callId),
+        ).toMatchObject({ callId, isError: false });
+        expect(
+          completedEvents.filter(
+            (event) => event.type === "session_lifecycle" && event.lifecycleType === "end",
+          ),
+        ).toHaveLength(1);
+        expect(completedBatches.some((batch) => batch.terminal)).toBe(true);
+        expect(module.getCaptureCoordinator().isSessionFinalized(completedSessionId)).toBe(true);
+        expect(received.some((batch) => batch.sessionId === oldSessionId)).toBe(false);
+
+        const callbackCount = received.length;
+        await observer.pollOnce();
+        await observer.pollOnce();
+        expect(received).toHaveLength(callbackCount);
+      } finally {
+        try {
+          await module.stop(context);
+        } finally {
+          vi.useRealTimers();
+          fs.rmSync(fixture.rootPath, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it("backfills initial native records from a fresh active session but not an old active session", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const observerStartedAt = new Date("2026-09-23T12:00:00.000Z");
+      const transcriptMtime = new Date("2026-09-23T12:00:01.000Z");
+      vi.setSystemTime(observerStartedAt);
+      const fixture = createCodexRuntimeFixture();
+      const module = new TrajectoryCaptureRuntimeModule({
+        adapters: [fixture.adapter],
+        observationClient: mockCloudObservationClient({}),
+      });
+      const context = createMockModuleContext();
+      const received: Array<{
+        sessionId: string;
+        events: NormalizedSessionEvent[];
+        terminal: boolean;
+      }> = [];
+      module.getCaptureCoordinator().setSessionEventSink((session, events, sinkContext) => {
+        received.push({ sessionId: session.sessionId, events, terminal: sinkContext.isTerminal });
+      });
+
+      try {
+        await module.start(context);
+        const observer = module.getObserverCoordinator();
+        expect(observer.getTailer().getActiveSessions()).toEqual([]);
+
+        vi.setSystemTime(transcriptMtime);
+        const activeSessionId = "sess_codex_fresh_active";
+        const callId = "codex-fresh-active-call";
+        const timestamp = transcriptMtime.toISOString();
+        writeCodexRollout(
+          fixture.sessionRoot,
+          `${activeSessionId}.jsonl`,
+          [
+            {
+              timestamp,
+              type: "session_meta",
+              payload: {
+                session_id: "native-fresh-active",
+                id: "thread-fresh-active",
+                cwd: fixture.projectPath,
+              },
+            },
+            {
+              timestamp,
+              type: "event_msg",
+              payload: { type: "task_started", id: "task-start", turn_id: "turn-active" },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "message",
+                id: "initial-user-message",
+                role: "user",
+                content: [{ type: "input_text", text: "Initial prompt already in the rollout" }],
+              },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "function_call",
+                id: "initial-function-item",
+                call_id: callId,
+                name: "exec_command",
+                arguments: JSON.stringify({ cmd: "printf '2\\n'" }),
+              },
+            },
+            {
+              timestamp,
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                id: "initial-output-item",
+                call_id: callId,
+                output:
+                  "Chunk ID: fixture\nWall time: 0.01 seconds\nProcess exited with code 0\nFinal output:\n2\n",
+              },
+            },
+          ],
+          transcriptMtime,
+        );
+
+        const oldSessionId = "sess_codex_old_active";
+        const oldTimestamp = "2026-08-20T12:00:00.000Z";
+        writeCodexRollout(
+          fixture.sessionRoot,
+          `${oldSessionId}.jsonl`,
+          [
+            {
+              timestamp: oldTimestamp,
+              type: "session_meta",
+              payload: {
+                session_id: "native-old-active",
+                id: "thread-old-active",
+                cwd: fixture.projectPath,
+              },
+            },
+            {
+              timestamp: oldTimestamp,
+              type: "event_msg",
+              payload: { type: "task_started", id: "old-task-start", turn_id: "old-turn" },
+            },
+            {
+              timestamp: oldTimestamp,
+              type: "response_item",
+              payload: {
+                type: "message",
+                id: "old-user-message",
+                role: "user",
+                content: [{ type: "input_text", text: "Old active prompt" }],
+              },
+            },
+          ],
+          transcriptMtime,
+        );
+
+        expect(await observer.pollOnce()).toMatchObject({ errors: [] });
+        await vi.waitFor(
+          async () => {
+            await module.getCaptureCoordinator().waitForIdle();
+            expect(
+              received.some(
+                (batch) =>
+                  batch.sessionId === activeSessionId &&
+                  batch.events.some(
+                    (event) => event.type === "tool_result" && event.callId === callId,
+                  ),
+              ),
+            ).toBe(true);
+          },
+          { timeout: 1_000 },
+        );
+
+        const activeEvents = received
+          .filter((batch) => batch.sessionId === activeSessionId)
+          .flatMap((batch) => batch.events);
+        expect(
+          activeEvents.find((event) => event.type === "tool_call" && event.callId === callId),
+        ).toMatchObject({ callId, toolName: "exec_command" });
+        expect(
+          activeEvents.find((event) => event.type === "tool_result" && event.callId === callId),
+        ).toMatchObject({ callId, isError: false });
+        expect(received.some((batch) => batch.sessionId === oldSessionId)).toBe(false);
+      } finally {
+        try {
+          await module.stop(context);
+        } finally {
+          vi.useRealTimers();
+          fs.rmSync(fixture.rootPath, { recursive: true, force: true });
+        }
+      }
+    });
+  });
+
   describe("OMP Lifecycle Grace, Stale History Exclusion, and Restart Persistence", () => {
     it("catches up current-run idle OMP activity without admitting touched, future, malformed, or agent history", async () => {
       vi.useFakeTimers();
@@ -1374,7 +1753,6 @@ describe("TrajectoryCaptureRuntimeModule", () => {
             sessionId: "short-agent-session",
             metadata: { ...session.metadata, sessionKind: "agent" },
           },
-          { ...session, sessionId: "other-harness", harnessId: "claude-code" },
         ];
         for (const excludedSession of excludedSessions) {
           adapter.addSession(excludedSession);

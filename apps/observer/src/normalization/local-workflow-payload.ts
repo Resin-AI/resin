@@ -1,6 +1,11 @@
 import type { NormalizedSessionEvent } from "@resin/contracts";
+import type { RedactedStringResult } from "./redaction.js";
 
 export type LocalWorkflowResultComparison = "text-trim";
+
+/** Value-free persisted signal that a result cannot establish workflow/computation success. */
+export const RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY =
+  "__resinLocalWorkflowResultSuppressedV1";
 
 export interface LocalWorkflowResultObservation {
   result: string;
@@ -12,6 +17,8 @@ interface RetainLocalWorkflowPayloadOptions {
   resultObservation?: LocalWorkflowResultObservation;
   /** Hide an untrusted native display result from local workflow derivation. */
   suppressResult?: boolean;
+  /** Trusted normalization redactor; retained only in memory beside the original payload. */
+  programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
 
 interface LocalWorkflowPayload {
@@ -20,6 +27,8 @@ interface LocalWorkflowPayload {
   resultComparison?: LocalWorkflowResultComparison;
   stdout?: unknown;
   stderr?: unknown;
+  resultSuppressed?: true;
+  programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
 
 /** Exact payloads stay beside an event in this process, never in serialized metadata or storage. */
@@ -42,12 +51,21 @@ export function retainLocalWorkflowPayload(
     options.resultObservation !== undefined &&
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
-  if (!hasOriginalField && commandFields.length === 0 && !hasNativeResult && !suppressResult)
+  const hasProgramSourceRedactor =
+    event.type === "tool_call" && options.programSourceRedactor !== undefined;
+  if (
+    !hasOriginalField &&
+    commandFields.length === 0 &&
+    !hasNativeResult &&
+    !suppressResult &&
+    !hasProgramSourceRedactor
+  )
     return;
 
   const payload: LocalWorkflowPayload = {};
   if (hasOriginalField) payload[field] = structuredClone(original[field]);
   for (const name of commandFields) payload[name] = structuredClone(original[name]);
+  if (hasProgramSourceRedactor) payload.programSourceRedactor = options.programSourceRedactor;
   if (hasNativeResult) {
     payload.result = structuredClone(options.resultObservation!.result);
     if (options.resultObservation!.comparison !== undefined) {
@@ -55,6 +73,7 @@ export function retainLocalWorkflowPayload(
     }
   } else if (suppressResult) {
     payload.result = undefined;
+    payload.resultSuppressed = true;
   }
   payloads.set(event, payload);
 }
@@ -77,6 +96,14 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
   return { ...event, [field]: payload[field] } as T;
 }
 
+/** Source exposure requires the actual normalization engine, not an event's claimed metadata. */
+export function redactLocalWorkflowProgramSource(
+  event: NormalizedSessionEvent,
+  source: string,
+): RedactedStringResult | undefined {
+  return payloads.get(event)?.programSourceRedactor?.(source);
+}
+
 /** Reads the source-native result and its optional comparison mode without publishing either. */
 export function localWorkflowResultObservation(
   event: NormalizedSessionEvent,
@@ -86,4 +113,23 @@ export function localWorkflowResultObservation(
   return payload.resultComparison === undefined
     ? { result: payload.result }
     : { result: payload.result, comparison: payload.resultComparison };
+}
+
+/** True when a result is unavailable for local evidence, including after metadata-only reload. */
+export function isLocalWorkflowResultSuppressed(event: NormalizedSessionEvent): boolean {
+  if (event.type !== "tool_result") return false;
+  if (
+    event.metadata?.[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY] === true ||
+    payloads.get(event)?.resultSuppressed === true
+  ) {
+    return true;
+  }
+  if (event.isError) return false;
+  const codexNative = event.metadata?.codexNative;
+  return (
+    typeof codexNative === "object" &&
+    codexNative !== null &&
+    !Array.isArray(codexNative) &&
+    (codexNative as Record<string, unknown>).outcome !== "completed"
+  );
 }

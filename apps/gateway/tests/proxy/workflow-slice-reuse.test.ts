@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
+  type WorkflowBindingCandidate,
   type WorkflowJsonValue,
 } from "@resin/contracts";
 import {
@@ -110,9 +111,18 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       (event) =>
         (event.type === "tool_call" || event.type === "tool_result") && wanted.has(event.callId),
     );
-    const plan = recordCallsFromEvents("release-slice", selected as RecordableEvent[], {
+    const recorded = recordCallsFromEvents("release-slice", selected as RecordableEvent[], {
       supportingEvents: events as RecordableEvent[],
     })!.workflow;
+    const input: WorkflowBindingCandidate = {
+      stepId: "step0",
+      argument: "project",
+      path: [],
+      proposed: { kind: "input", name: "produce_project", type: "string" },
+      reason: "declared-by-the-callable",
+      missing: "the caller must confirm that project is a supplied input",
+    };
+    const plan = { ...recorded, candidates: [...(recorded.candidates ?? []), input] };
     expect(plan.steps.map((step) => step.callId)).toEqual([...wanted]);
     const seen: ToolProtocolDispatchRequest[] = [];
     const dispatch = async (request: ToolProtocolDispatchRequest) => {

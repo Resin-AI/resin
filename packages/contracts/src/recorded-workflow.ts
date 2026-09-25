@@ -43,18 +43,22 @@ export type WorkflowValueTemplate =
   /**
    * A recorded program with the values a replay bound inside it.
    *
-   * The program text stays where it was recorded — `source` resolves it locally, exactly as a
-   * private leaf does — because the program is the user's own work. `holes` says which token of the
-   * program is a binding rather than a literal of that program, by token index, so re-running the
-   * program renders the bound value into the recorded token and leaves every other byte alone.
-   * Token indices are the ones `tokenizeProgram(language, source)` yields, so the capture that
-   * found the token and the runtime that renders it agree on its position.
+   * Without projection metadata, `source` has its legacy local-source semantics. A projected
+   * template carries sanitized, parseable text as a literal `source`, matching the sanitized
+   * `callable.program.source`; neither sanitized value is executable. Runtime uses `sourceReference`
+   * to resolve the complete original source locally, failing closed rather than falling back to
+   * sanitized text. `protectedTokens` marks canonical tokens whose raw content changed during
+   * redaction, so those tokens cannot also be replay holes.
    */
   | {
       type: "program";
       language: WorkflowRecordedProgram["kind"];
       source: WorkflowValueTemplate;
       holes: Array<{ token: number; binding: WorkflowValueTemplate }>;
+      /** Whole original program source, kept in a local private resource. */
+      sourceReference?: string;
+      /** Sorted canonical token indexes changed by secret redaction; never binding holes. */
+      protectedTokens?: number[];
     };
 
 export type WorkflowValueSource =
@@ -101,24 +105,29 @@ export type WorkflowPythonState = {
 };
 
 /**
- * A program the recording actually executed, preserved verbatim.
+ * A program the recording executed, with its source retained verbatim unless projected safely.
  *
- * The program is the executable artifact: it is never split, re-parsed, re-quoted or reduced to a
- * list of commands, because a shell's `&&`, pipelines, redirections and exit status are part of what
- * the call did. Reuse means running this text again through the same family of runtime, not
- * reconstructing an equivalent one.
+ * For a native projected capture, `source` is sanitized metadata matching the argument template's
+ * sanitized source; the original executable text is routed through that template's local
+ * `sourceReference`, never inferred from or recovered from this field.
+ *
+ * The program is the executable artifact in an ordinary capture: it is never split, re-parsed,
+ * re-quoted or reduced to a list of commands, because a shell's `&&`, pipelines, redirections and
+ * exit status are part of what the call did. Reuse means running this text again through the same
+ * family of runtime, not reconstructing an equivalent one.
  */
 export type WorkflowRecordedProgram = {
   /** How the program runs: the family of shell or interpreter the record establishes. */
   kind: "shell" | "python" | "javascript" | "typescript";
-  /** The complete program text exactly as recorded. Empty when the record carries only an argv. */
+  /** Program text as recorded, or sanitized source metadata in a projected capture. */
   source: string;
   /**
    * Adapter-established execution semantics. Python Eval renders the final expression as well as
-   * captured output; JavaScript Eval preserves the native completion and captured output. Absent
-   * means ordinary process stdout, never inferred from a callable name.
+   * captured output; JavaScript Eval preserves the native completion and captured output; Codex
+   * exec returns its authored text content items. Absent means ordinary process stdout, never
+   * inferred from a callable name.
    */
-  sourceInterface?: "python-eval" | "javascript-eval";
+  sourceInterface?: "python-eval" | "javascript-eval" | "codex-exec";
   /** The exact argument vector, when the record has one and it is not a shell wrapper. */
   argv?: string[];
   /** The argument the program arrived in, when it came as a tool argument rather than an event. */
@@ -294,6 +303,8 @@ export type RecordedWorkflow = {
     name: string;
     type: "string" | "number" | "boolean" | "object" | "array";
     description?: string;
+    /** The value to use when this caller input is omitted. */
+    default?: WorkflowJsonValue;
   }>;
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
@@ -329,6 +340,16 @@ function isJsonValue(value: unknown): value is WorkflowJsonValue {
   if (isPlainObject(value)) return Object.values(value).every(isJsonValue);
   return false;
 }
+
+function matchesWorkflowInputType(value: WorkflowJsonValue, type: string): boolean {
+  if (type === "string") return typeof value === "string";
+  if (type === "number") return typeof value === "number";
+  if (type === "boolean") return typeof value === "boolean";
+  if (type === "object") return isPlainObject(value);
+  if (type === "array") return Array.isArray(value);
+  return false;
+}
+
 const PYTHON_STATE_KEYS = ["schemaVersion", "status", "unresolvedReadCount", "setup"] as const;
 const PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "reference"] as const;
 
@@ -357,7 +378,67 @@ export function validateWorkflowProgramSourceInterface(
     }
     return;
   }
+  if (program.sourceInterface === "codex-exec") {
+    if (program.kind !== "javascript") {
+      errors.push(`step ${stepId} has a Codex exec sourceInterface on a non-JavaScript program`);
+    }
+    return;
+  }
   errors.push(`step ${stepId} has an unsupported program sourceInterface`);
+}
+
+/** Validates only the projection-specific shape shared by workflow and native carrier readers. */
+export function validateWorkflowProgramProjection(
+  template: unknown,
+  path: string,
+  errors: string[],
+): void {
+  if (!isPlainObject(template)) return;
+  const hasSourceReference = Object.prototype.hasOwnProperty.call(template, "sourceReference");
+  const hasProtectedTokens = Object.prototype.hasOwnProperty.call(template, "protectedTokens");
+  if (!hasSourceReference && !hasProtectedTokens) return;
+
+  if (hasSourceReference !== hasProtectedTokens) {
+    errors.push(`${path} projected program needs sourceReference and protectedTokens together`);
+  }
+  if (typeof template.sourceReference !== "string" || template.sourceReference.length === 0) {
+    errors.push(`${path} projected program needs a non-empty private sourceReference`);
+  }
+  if (
+    !isPlainObject(template.source) ||
+    template.source.type !== "literal" ||
+    typeof template.source.value !== "string"
+  ) {
+    errors.push(`${path} projected program source must be a literal string`);
+  }
+
+  const protectedTokens = new Set<number>();
+  if (!Array.isArray(template.protectedTokens)) {
+    errors.push(`${path} projected program protectedTokens must be an array`);
+  } else {
+    let previous = -1;
+    for (const [index, token] of template.protectedTokens.entries()) {
+      if (typeof token !== "number" || !Number.isInteger(token) || token < 0) {
+        errors.push(`${path} protected token ${index} must be a non-negative integer`);
+        continue;
+      }
+      if (token <= previous) errors.push(`${path} protectedTokens must be sorted and unique`);
+      previous = token;
+      protectedTokens.add(token);
+    }
+  }
+  if (!Array.isArray(template.holes)) return;
+  for (const hole of template.holes) {
+    if (
+      isPlainObject(hole) &&
+      typeof hole.token === "number" &&
+      Number.isInteger(hole.token) &&
+      hole.token >= 0 &&
+      protectedTokens.has(hole.token)
+    ) {
+      errors.push(`${path} hole ${hole.token} targets a protected token index`);
+    }
+  }
 }
 
 export function validateWorkflowPythonState(
@@ -563,6 +644,7 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
         return;
       case "program":
         walkTemplate(template.source);
+        if (template.sourceReference !== undefined) references.add(template.sourceReference);
         for (const hole of template.holes) walkTemplate(hole.binding);
         return;
       default:
@@ -625,6 +707,13 @@ export function validateRecordedWorkflow(value: unknown): {
       errors.push(`input ${input.name} needs a recorded type`);
     } else {
       inputTypes.set(input.name, input.type);
+      if (Object.hasOwn(input, "default")) {
+        if (!isJsonValue(input.default)) {
+          errors.push(`input ${input.name} default must be a JSON value`);
+        } else if (!matchesWorkflowInputType(input.default, input.type)) {
+          errors.push(`input ${input.name} default must match its recorded type '${input.type}'`);
+        }
+      }
     }
   }
   const declaredPrivates = new Set<string>();
@@ -840,6 +929,17 @@ export function validateRecordedWorkflow(value: unknown): {
               ) {
                 problems.push(`${where} program needs the language it runs in`);
               }
+              validateWorkflowProgramProjection(template, where, problems);
+              if (
+                Object.prototype.hasOwnProperty.call(template, "sourceReference") &&
+                typeof template.sourceReference === "string" &&
+                template.sourceReference.length > 0 &&
+                !declaredPrivates.has(template.sourceReference)
+              ) {
+                problems.push(
+                  `${where} reads undeclared private reference ${template.sourceReference}`,
+                );
+              }
               if (!isPlainObject(template.source)) {
                 problems.push(`${where} program needs the recorded text it resolves`);
               } else {
@@ -926,6 +1026,34 @@ export function validateRecordedWorkflow(value: unknown): {
           workflowCallIds,
           declaredPrivates,
           errors,
+        );
+      }
+    }
+    if (
+      isPlainObject(program) &&
+      typeof program.argument === "string" &&
+      typeof program.source === "string"
+    ) {
+      const argument = args.find(
+        (entry) => isPlainObject(entry) && entry.name === program.argument,
+      );
+      const argumentSource = isPlainObject(argument) ? argument.source : undefined;
+      const template =
+        isPlainObject(argumentSource) && argumentSource.kind === "template"
+          ? argumentSource.template
+          : undefined;
+      if (
+        isPlainObject(template) &&
+        template.type === "program" &&
+        Object.prototype.hasOwnProperty.call(template, "sourceReference") &&
+        Object.prototype.hasOwnProperty.call(template, "protectedTokens") &&
+        isPlainObject(template.source) &&
+        template.source.type === "literal" &&
+        typeof template.source.value === "string" &&
+        template.source.value !== program.source
+      ) {
+        errors.push(
+          `step ${step.id} recorded program source differs from projected argument ${program.argument}`,
         );
       }
     }

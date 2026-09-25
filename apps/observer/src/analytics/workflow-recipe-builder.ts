@@ -1,5 +1,7 @@
 /** Pure recorded-workflow recipe construction shared by native and carried capture. */
 
+import { collectWorkflowPrivateReferences } from "@resin/contracts";
+
 import type {
   RecordedWorkflow,
   WorkflowArgumentProvenance,
@@ -68,12 +70,6 @@ export interface RecordedCallObservation {
 
 export interface RecordedRecipe {
   workflow: RecordedWorkflow;
-  /**
-   * Inputs proposed by comparing demonstrations, with the argument each came from. They are a
-   * proposal: an established binding is never replaced by a caller input, and an input that a caller
-   * declines to supply leaves the workflow refusing rather than inventing a value.
-   */
-  proposedInputs?: Array<{ name: string; from: string }>;
   /** Values the workflow needs locally at execution time, addressed by reference only. */
   privateValues: Map<string, WorkflowJsonValue>;
   /** Calls the recorder could not represent, with the reason. Never silently dropped. */
@@ -349,13 +345,19 @@ function recordWorkflowRecipeInternal(
       }
       case "array":
         return { type: "array", items: template.items.map(sweep) };
-      // A program's text and every hole binding are swept like any other leaf: a private value inside
-      // a program is replaced by its reference wherever it sits.
+      // A projected source is already secret-redacted; sweeping its placeholders would hide the
+      // parser view again. The complete executable source stays behind sourceReference instead.
       case "program":
         return {
           type: "program",
           language: template.language,
-          source: sweep(template.source),
+          source: template.sourceReference === undefined ? sweep(template.source) : template.source,
+          ...(template.sourceReference === undefined
+            ? {}
+            : { sourceReference: template.sourceReference }),
+          ...(template.protectedTokens === undefined
+            ? {}
+            : { protectedTokens: [...template.protectedTokens] }),
           holes: template.holes.map((hole) => ({
             token: hole.token,
             binding: sweep(hole.binding),
@@ -391,6 +393,8 @@ function recordWorkflowRecipeInternal(
     // until a replay confirms a suggestion on inputs the recording never contained.
     ...(candidates === undefined || candidates.length === 0 ? {} : { candidates: [...candidates] }),
   };
+  const requiredReferences = collectWorkflowPrivateReferences(workflow);
+  if (requiredReferences.length > 0) workflow.privateReferences = requiredReferences;
   return { workflow, privateValues, skipped };
 }
 
@@ -402,79 +406,11 @@ export function recordWorkflowRecipe(
   return recordWorkflowRecipeInternal(workflowId, observations, candidates);
 }
 
-/**
- * Proposes parameterization from what varied between demonstrations.
- *
- * A proposal is not the workflow: nothing executable changes here. The proposal names the arguments
- * that took different values across recorded executions, with the values seen and the type they had,
- * so a caller (or an operator) can accept it deliberately. An established binding is never proposed
- * for replacement, and nothing the record marked private is ever proposed.
- */
 export interface InputProposal {
   name: string;
   from: string;
   type: "string" | "number" | "boolean" | "object" | "array";
   seenValues: WorkflowJsonValue[];
-}
-
-export interface InputProposalSet {
-  /** The recorded workflow, unchanged: accepting the proposals is a separate, deliberate step. */
-  workflow: RecordedWorkflow;
-  proposals: InputProposal[];
-}
-
-export function proposeInputsFromVariation(
-  recipes: readonly RecordedRecipe[],
-): InputProposalSet | undefined {
-  if (recipes.length === 0) return undefined;
-  const base = recipes[0]!;
-  const proposals: InputProposal[] = [];
-  if (recipes.length < 2) return { workflow: base.workflow, proposals };
-
-  const templateAt = (
-    recipe: RecordedRecipe,
-    stepIndex: number,
-    argumentName: string,
-  ): WorkflowValueTemplate | undefined => {
-    const argument = recipe.workflow.steps[stepIndex]?.arguments.find(
-      (entry) => entry.name === argumentName,
-    );
-    return argument?.source.kind === "template" ? argument.source.template : undefined;
-  };
-
-  for (let stepIndex = 0; stepIndex < base.workflow.steps.length; stepIndex += 1) {
-    const step = base.workflow.steps[stepIndex]!;
-    for (const argument of step.arguments) {
-      const first = templateAt(base, stepIndex, argument.name);
-      // Only a constant can be proposed as an input; a recorded binding stays a binding.
-      if (!first || first.type !== "literal") continue;
-      const values = recipes.map((recipe) => {
-        const candidate = templateAt(recipe, stepIndex, argument.name);
-        return candidate?.type === "literal" ? candidate.value : undefined;
-      });
-      if (values.some((entry) => entry === undefined)) continue;
-      if (new Set(values.map((entry) => JSON.stringify(entry))).size < 2) continue;
-      const seen = values as WorkflowJsonValue[];
-      const type: InputProposal["type"] = seen.every((entry) => typeof entry === "number")
-        ? "number"
-        : seen.every((entry) => typeof entry === "boolean")
-          ? "boolean"
-          : seen.every((entry) => Array.isArray(entry))
-            ? "array"
-            : seen.every(
-                  (entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry),
-                )
-              ? "object"
-              : "string";
-      proposals.push({
-        name: `${step.id}_${argument.name}`,
-        from: `${step.id}.${argument.name}`,
-        type,
-        seenValues: seen,
-      });
-    }
-  }
-  return { workflow: base.workflow, proposals };
 }
 
 /**

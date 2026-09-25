@@ -39,6 +39,10 @@ import {
 } from "./evidence-normalization.js";
 
 import {
+  RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY,
+  isLocalWorkflowResultSuppressed,
+} from "../normalization/local-workflow-payload.js";
+import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
   readWorkflowCallCarrier,
@@ -744,6 +748,10 @@ export function projectEventToMetadataOnly(
   if (event.type === "tool_call" || event.type === "tool_result" || event.type === "command_exec") {
     const codexCommand = readCodexCommandMetadata(event.metadata);
     if (codexCommand !== undefined) metadata[RESIN_CODEX_COMMAND_METADATA_KEY] = codexCommand;
+  }
+  // Keep only this bounded suppression signal; native status and output remain outside the allowlist.
+  if (event.type === "tool_result" && isLocalWorkflowResultSuppressed(event)) {
+    metadata[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY] = true;
   }
   // References the caller's program used, as opaque scoped identifiers with the field they addressed.
   // They carry no values, so they survive privacy filtering; anything malformed is dropped rather
