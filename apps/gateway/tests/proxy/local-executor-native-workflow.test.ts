@@ -357,8 +357,7 @@ describe("recorded workflows of ordinary calls", () => {
     });
 
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
-      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}\n` +
-        "Parameters (recorded values, used when omitted): month = 2025-01; text = EU zone",
+      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}\nParameters (recorded values, used when omitted): month = 2025-01; text = EU zone`,
     );
   });
 
