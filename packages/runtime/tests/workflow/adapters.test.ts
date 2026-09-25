@@ -204,6 +204,35 @@ describe("recorded program adapters", () => {
     expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
   });
 
+  it("keeps the inherited PATH in front when a login profile resets it", async () => {
+    // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
+    const workspace = await makeWorkspace();
+    const home = await makeWorkspace();
+    const bin = await makeWorkspace();
+    await writeFile(join(home, ".bash_profile"), "PATH=/usr/bin:/bin\n");
+    await writeFile(join(bin, "resin-path-probe"), "#!/bin/sh\necho found\n", { mode: 0o755 });
+    const adapter = createProcessAdapter({
+      isolateEnvironment: true,
+      env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+    });
+    const step = recordedStep({
+      id: "native-path",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: 'resin-path-probe; echo "${RESIN_INHERITED_PATH-unset}"',
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe("found\nunset\n");
+  });
+
   it("maps recorded shell cwd into a replay snapshot without touching source", async () => {
     const sourceRoot = await makeWorkspace();
     const snapshot = await makeWorkspace();

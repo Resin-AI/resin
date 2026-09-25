@@ -19,9 +19,13 @@ import {
   demonstrationEnvironment,
   validateAndConfirmCandidates,
 } from "../../src/workflow/binding-validation.js";
+import { createProcessAdapter } from "../../src/workflow/process-adapter.js";
 import { createProgramAdapter } from "../../src/workflow/program-adapter.js";
 import { RuntimeAdapterRegistry } from "../../src/workflow/recorded-workflow.js";
-import { RESIN_PROGRAM_RUNTIME } from "../../src/workflow/runtime-families.js";
+import {
+  RESIN_PROCESS_RUNTIME,
+  RESIN_PROGRAM_RUNTIME,
+} from "../../src/workflow/runtime-families.js";
 
 const TEST_RUNTIME = "test-transform";
 
@@ -755,6 +759,42 @@ describe("recorded program replay verification", () => {
 
     expect(confirmed.verification.status).toBe("failed");
     expect(confirmed.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
+  });
+
+  it("misses a command that exits 0 but no longer prints what the recording printed", async () => {
+    // `missing-tool | head` succeeds having done nothing; a replay must still produce output.
+    const plan: RecordedWorkflow = {
+      schemaVersion: 1,
+      workflowId: "wf-shell-baseline",
+      inputs: [],
+      steps: [
+        {
+          id: "search",
+          callId: "call-search",
+          callable: {
+            runtime: RESIN_PROCESS_RUNTIME,
+            name: "bash",
+            program: { kind: "shell", source: "", argument: "command" },
+          },
+          arguments: [
+            {
+              name: "command",
+              source: { kind: "literal", value: "resin-missing-tool 2>/dev/null | head -5" },
+            },
+          ],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "recorded" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    };
+    const environment = await environmentOf({ inputs: {}, observed: { search: "7: match\n" } });
+    environment.adapters.register(createProcessAdapter({ cwd: environment.workspaceDir }));
+
+    const confirmed = await confirmPromotedPlan({ plan, accepted: [], environment });
+
+    expect(confirmed.verification.status).toBe("failed");
+    expect(confirmed.verification.missed.map((entry) => entry.stepId)).toEqual(["search"]);
   });
 });
 

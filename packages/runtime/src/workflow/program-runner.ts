@@ -646,6 +646,15 @@ function resolveInterpreter(
   return undefined;
 }
 
+/**
+ * A login shell's profile may reset PATH (Debian's `/etc/profile` does for root), dropping
+ * directories the recorded command resolved programs from, such as an agent harness's bundled
+ * helpers. The inherited PATH goes back in front, on the script's first line so its line numbers
+ * are unchanged.
+ */
+const INHERITED_PATH_VARIABLE = "RESIN_INHERITED_PATH";
+const RESTORE_INHERITED_PATH = `if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then PATH="$${INHERITED_PATH_VARIABLE}:$PATH"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE}; `;
+
 function invocationFor(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions,
@@ -660,7 +669,7 @@ function invocationFor(
       // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
       // recorded call did, and exit status is the program's exit status.
       return options.shellInvocation === "bash-login"
-        ? { command: "/bin/bash", args: ["-lc", source] }
+        ? { command: "/bin/bash", args: ["-lc", `${RESTORE_INHERITED_PATH}${source}`] }
         : platform === "win32"
           ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
           : { command: "/bin/sh", args: ["-c", source] };
@@ -1399,7 +1408,12 @@ export async function runRecordedProgram(
       throw new Error("recorded Codex exec replay result channel was not prepared");
     }
     // The VM driver is trusted Node code, but source-module text must not be preloaded into it.
-    const childEnv = isCodexExec ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" } : env;
+    const bashLogin = runnable.kind === "shell" && options.shellInvocation === "bash-login";
+    const childEnv = isCodexExec
+      ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" }
+      : bashLogin && env.PATH !== undefined
+        ? { ...env, [INHERITED_PATH_VARIABLE]: env.PATH }
+        : env;
     const invocation = invocationFor(
       runnable,
       options,

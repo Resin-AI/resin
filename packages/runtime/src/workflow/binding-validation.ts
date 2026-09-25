@@ -141,15 +141,31 @@ function matchesObservedResult(
 /**
  * A recorded program or process is verified by running to successful completion again. Its output
  * may legitimately change with the workspace, the clock or ordering (tests, builds, listings,
- * queries), while a program that cannot run here still fails. Tool calls are compared by result.
+ * queries), while a program that cannot run here still fails. It must still produce output when the
+ * recording did: a pipeline such as `missing-tool | head` exits 0 having done nothing. Tool calls
+ * are compared by result.
  */
-function completionReproduces(step: WorkflowStep): boolean {
+function completionReproduces(
+  step: WorkflowStep,
+  observed: WorkflowJsonValue,
+  replayed: WorkflowJsonValue | undefined,
+): boolean {
   return (
     step.callable.program !== undefined &&
     (step.callable.runtime === RESIN_PROCESS_RUNTIME ||
-      step.callable.runtime === RESIN_PROGRAM_RUNTIME)
+      step.callable.runtime === RESIN_PROGRAM_RUNTIME) &&
+    (!hasContent(observed) || hasContent(replayed))
   );
 }
+
+function hasContent(value: WorkflowJsonValue | undefined): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */
 function pathText(path: WorkflowValuePath): string {
   const parts = path.map((part) =>
@@ -726,7 +742,7 @@ async function replayPlanOnce(
       continue;
     }
     if (
-      completionReproduces(step) ||
+      completionReproduces(step, observed, outcome.result) ||
       matchesObservedResult(outcome.result, observed, environment.observedComparisons?.[stepId])
     ) {
       reproduced.push(stepId);
