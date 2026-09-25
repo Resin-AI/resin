@@ -282,6 +282,86 @@ describe("recorded workflows of ordinary calls", () => {
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, other)).toBeUndefined();
   });
 
+  it("describes a parameterized recorded program with each parameter's recorded value", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const program = "python3 solve.py --month 2025-01 'EU zone'";
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:1", program, { workspaceId: context.workspaceId });
+    const installed = await installPlan(
+      {
+        id: "tool_process_parameterized",
+        name: "wf_process_parameterized",
+        version: "1.0.0",
+        description: "parameterized recorded process program",
+        parameters: {
+          type: "object",
+          properties: { month: { type: "string" }, text: { type: "string" } },
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_parameterized",
+        inputs: [
+          { name: "month", type: "string", recordedDefault: true },
+          { name: "text", type: "string", recordedDefault: true },
+        ],
+        privateReferences: ["private:sess:1"],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_1",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "program",
+                    language: "shell",
+                    source: { type: "private", reference: "private:sess:1" },
+                    holes: [
+                      { token: 3, binding: { type: "input", name: "month" } },
+                      { token: 4, binding: { type: "input", name: "text" } },
+                    ],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
+      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}\n` +
+        "Parameters (recorded values, used when omitted): month = 2025-01; text = EU zone",
+    );
+  });
+
   it("refuses to run a recorded program the manifest does not grant", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const context = resolveWorkspaceContext({ cwd: workspaceDir });

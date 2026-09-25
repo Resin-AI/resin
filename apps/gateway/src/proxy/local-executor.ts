@@ -13,8 +13,10 @@ import {
   ToolManifestSchema,
   type WorkflowJsonValue,
   type WorkflowValueSource,
+  type WorkflowValueTemplate,
   canonicalJson,
   normalizeSha256,
+  tokenizeProgram,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import {
@@ -512,16 +514,8 @@ export class LocalArtifactExecutor {
     }
     const declared = new Set(plan.privateReferences ?? []);
     const store = this.getPrivateValueStore();
-    const text = (source: WorkflowValueSource): string | undefined => {
-      if (source.kind === "literal")
-        return typeof source.value === "string" ? source.value : undefined;
-      const reference =
-        source.kind === "private"
-          ? source.reference
-          : source.kind === "template" && source.template.type === "private"
-            ? source.template.reference
-            : undefined;
-      if (reference === undefined || !declared.has(reference)) return undefined;
+    const resolveOwned = (reference: string): string | undefined => {
+      if (!declared.has(reference)) return undefined;
       const recorded = store.origin?.(reference)?.workspaceId;
       if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
         return undefined;
@@ -533,11 +527,56 @@ export class LocalArtifactExecutor {
         return undefined;
       }
     };
+    const templateText = (template: WorkflowValueTemplate): string | undefined =>
+      template.type === "literal"
+        ? typeof template.value === "string"
+          ? template.value
+          : undefined
+        : template.type === "private"
+          ? resolveOwned(template.reference)
+          : undefined;
+    const text = (source: WorkflowValueSource): string | undefined =>
+      source.kind === "literal"
+        ? typeof source.value === "string"
+          ? source.value
+          : undefined
+        : source.kind === "private"
+          ? resolveOwned(source.reference)
+          : source.kind === "template"
+            ? templateText(source.template)
+            : undefined;
+    /** A program whose tokens are bound to caller inputs: its recorded text and each input's value. */
+    const parameterized = (
+      source: WorkflowValueSource,
+    ): { text: string; parameters: string[] } | undefined => {
+      if (source.kind !== "template" || source.template.type !== "program") return undefined;
+      const template = source.template;
+      const recorded =
+        typeof template.sourceReference === "string"
+          ? resolveOwned(template.sourceReference)
+          : templateText(template.source);
+      if (recorded === undefined) return undefined;
+      let tokens: ReturnType<typeof tokenizeProgram>;
+      try {
+        tokens = tokenizeProgram(template.language, recorded);
+      } catch {
+        return { text: recorded, parameters: [] };
+      }
+      const parameters = template.holes.flatMap((hole) => {
+        const token = tokens[hole.token];
+        return hole.binding.type === "input" && token !== undefined
+          ? [`${hole.binding.name} = ${token.value ?? token.raw}`]
+          : [];
+      });
+      return { text: recorded, parameters: [...new Set(parameters)] };
+    };
     const steps: string[] = [];
     for (const [index, step] of plan.steps.entries()) {
       const program = step.callable.program;
       const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
-      const programText = program === undefined || source === undefined ? undefined : text(source);
+      const bound = source === undefined ? undefined : parameterized(source);
+      const programText =
+        program === undefined || source === undefined ? undefined : (bound?.text ?? text(source));
       if (program === undefined || programText === undefined || programText.length === 0) continue;
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
       const workdir = workdirSource === undefined ? undefined : text(workdirSource);
@@ -545,8 +584,12 @@ export class LocalArtifactExecutor {
         programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
           ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
           : programText;
+      const parameters =
+        bound === undefined || bound.parameters.length === 0
+          ? ""
+          : `\nParameters (recorded values, used when omitted): ${bound.parameters.join("; ")}`;
       steps.push(
-        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
+        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}${parameters}`,
       );
     }
     if (steps.length === 0) return undefined;

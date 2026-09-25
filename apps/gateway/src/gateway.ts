@@ -176,7 +176,7 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
  * and mandating verification of actual task effects.
  */
 export const DEFAULT_GATEWAY_INSTRUCTIONS =
-  "Before native project work, use live search_tools(query=<task>) -> get_tool_schema -> invoke_tool. If search is unavailable, use manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>). Honor user tool choices.\n" +
+  "Before native project work: search_tools(query=<task>) -> invoke_tool (results include inputSchema). Without search: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n" +
   "Reuse known tool IDs and schemas until delta change notices indicate updates; do not perform repeated full catalog listings.\n" +
   "When a matching tool may exist, search the live registry with a scoped query before using native tools for project work. " +
   'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"}), omitting toolId, name, and tool_name. ' +
@@ -187,7 +187,7 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS =
   "Honor the user's explicit tool choices and restrictions. Do not discover or invoke tools for arithmetic or other requests that need no tools. " +
   "Discovery is read-only: do not enable, pin, disable, roll back, or otherwise change tool state to complete this workflow.\n" +
   "Resin Autonomous MCP Gateway: Check listed Resin workflows before manually expanding repeated multi-step work. " +
-  "get_tool_schema provides inputs, capabilities, and limits. " +
+  "search_tools results include each tool's inputs; get_tool_schema adds output schema, capabilities, and limits. " +
   "Prefer an active matching workflow only when it performs exactly the user's authorized task; " +
   "do not expand scope or side effects merely to fit a tool. " +
   "When no suitable workflow is available, use native tools. " +

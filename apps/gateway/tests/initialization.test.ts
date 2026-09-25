@@ -287,8 +287,6 @@ describe("MCP Initialization & Capability Negotiation", () => {
       expect(instructions).toContain(
         "Check listed Resin workflows before manually expanding repeated multi-step work",
       );
-      // Explains that get_tool_schema provides inputs, capabilities and limits
-      expect(instructions).toContain("get_tool_schema provides inputs, capabilities, and limits");
       // Prefers an active matching workflow only when it performs exactly the user's authorized task
       expect(instructions).toContain(
         "Prefer an active matching workflow only when it performs exactly the user's authorized task",

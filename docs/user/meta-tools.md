@@ -79,7 +79,7 @@ For a learned tool that replays recorded programs, the description in `search_to
 
 `search_tools` lists workspace tools; Resin's own meta-tools appear only with `"scope": "system"`. Each match includes the tool's `inputSchema`, so a caller can invoke it without a separate `get_tool_schema` call.
 
-A learned tool may take optional parameters for values its recorded programs ran with, such as a file path or a flag's value. Omit a parameter to run the recorded value; pass one to substitute it at that position. Parameter names come from the flag (`--month` → `month`) or the value's shape (`path`, `number`, `text`); the recorded value itself stays on this machine.
+A learned tool may take optional parameters for values its recorded programs ran with, such as a file path or a flag's value. Omit a parameter to run the recorded value; pass one to substitute it at that position. Parameter names come from the flag (`--month` → `month`) or the value's shape (`path`, `number`, `text`). The tool's description on this machine lists each parameter's recorded value; that value is resolved locally and never uploaded.
 
 ---
 
