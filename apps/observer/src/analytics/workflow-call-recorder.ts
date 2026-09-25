@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { fileURLToPath } from "node:url";
 import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type AgentArgumentOrigin,
@@ -39,6 +40,7 @@ import {
   redactLocalWorkflowProgramSource,
   retainLocalWorkflowPayload,
 } from "../normalization/local-workflow-payload.js";
+import { isClosedCodexSource } from "./computation/codex-source-dependencies.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { deriveNativeCalls } from "./native-argument-derivation.js";
@@ -153,6 +155,13 @@ interface SessionDerivationState {
    */
   newExecutionPending: boolean;
   nativeOutputs: Map<string, { stdout: string; exitCode: number }>;
+  /**
+   * Audited single-command wrappers still awaiting their result. Such a result may still claim a
+   * command that completes now, so that command cannot be recorded as an independent execution.
+   */
+  openCodexWrappers: Set<string>;
+  /** Wrapper tracking exceeded its bound; claims can no longer be ruled out in this session. */
+  codexWrapperOverflow: boolean;
 }
 
 /** Observed calls kept per session for derivation. */
@@ -229,6 +238,8 @@ export class WorkflowCallRecorder {
       position: 0,
       executions: [],
       nativeOutputs: new Map(),
+      openCodexWrappers: new Set(),
+      codexWrapperOverflow: false,
       newExecutionPending: false,
     };
     this.sessions.set(sessionId, created);
@@ -343,8 +354,105 @@ export class WorkflowCallRecorder {
         state.nativeOutputs.delete(oldest.value);
       }
       const association = command.association;
-      if (association === undefined || association.nativeCommandId !== command.nativeId)
-        return event;
+      if (association === undefined) {
+        if (state.codexWrapperOverflow || state.openCodexWrappers.size > 0) return event;
+        const argv = raw.command === "/bin/bash" ? raw.args : undefined;
+        if (
+          argv?.length !== 2 ||
+          argv[0] !== "-lc" ||
+          typeof argv[1] !== "string" ||
+          typeof raw.cwd !== "string"
+        )
+          return event;
+        // Codex records the working directory as a file URL; execution needs the path it names.
+        let workdir: string;
+        try {
+          workdir = raw.cwd.startsWith("file:") ? fileURLToPath(raw.cwd) : raw.cwd;
+        } catch {
+          return event;
+        }
+        const callId = command.nativeId;
+        const parameters = {
+          cmd: argv[1],
+          workdir,
+          resinCodexShellProfile: "bash-login-native-v1",
+        };
+        const program: WorkflowRecordedProgram = { kind: "shell", source: "", argument: "cmd" };
+        const origins: WorkflowCallCarrier["origins"] = {};
+        const provenance: Record<string, WorkflowArgumentProvenance> = {};
+        for (const [argument, value] of Object.entries(parameters)) {
+          origins[argument] = this.launderOrigin(
+            { type: "literal", value },
+            event.sessionId,
+            callId,
+            [argument],
+          );
+          provenance[argument] = { standing: "derived", rule: "single-observation" };
+        }
+        // The session state above also retains native output for guarded outer results.
+        let call: LocalCall | undefined;
+        for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
+          call = state.executions[index]!.calls.find(
+            (entry) => entry.callId === callId && entry.toolName === "command_exec",
+          );
+        }
+        if (call === undefined) {
+          call = this.recordLocalCall(
+            state,
+            { sessionId: event.sessionId, callId, toolName: "command_exec" },
+            parameters,
+            program,
+          );
+        }
+        const carrier: WorkflowCallCarrier = {
+          runtime: RESIN_PROCESS_RUNTIME,
+          name: "command_exec",
+          origins,
+          inputs: [],
+          provenance,
+          program,
+          executionIndex: call.executionIndex,
+          baselineInputs: { ...call.argumentReferences },
+        };
+        const heldOut = this.heldOutSoFar(state, call);
+        if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
+        const relationships = this.relateLocalCall(state, call);
+        if (relationships.dependsOnCallIds.length > 0)
+          carrier.dependsOnCallIds = relationships.dependsOnCallIds;
+        if (relationships.candidates.length > 0) carrier.candidates = relationships.candidates;
+        const succeeded = raw.exitCode === 0;
+        call.result = raw.stdout;
+        call.resultReference = succeeded
+          ? this.localReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
+          : undefined;
+        call.resultComparison = undefined;
+        if (call.resultReference !== undefined && state.executions.length > 0) {
+          const execution = state.executions.find((entry) => entry.index === call!.executionIndex);
+          if (execution?.accumulatedHeldOut !== undefined) {
+            execution.accumulatedHeldOut.observed = [
+              ...execution.accumulatedHeldOut.observed.filter(
+                (entry) => entry.position !== call!.position,
+              ),
+              { position: call.position, reference: call.resultReference },
+            ];
+          }
+        }
+        const demonstration = this.demonstrationCarrier(event.sessionId, callId);
+        const result = {
+          ...(succeeded ? { baselineReference: call.resultReference } : {}),
+          output: { type: "string" as const, hasContent: raw.stdout.length > 0 },
+          ...(demonstration === undefined ? {} : { heldOut: demonstration }),
+        };
+        return {
+          ...event,
+          metadata: {
+            ...event.metadata,
+            [RESIN_WORKFLOW_CALL_METADATA_KEY]: carrier,
+            [RESIN_WORKFLOW_RESULT_METADATA_KEY]: result,
+          },
+        };
+      }
+      if (association.nativeCommandId !== command.nativeId) return event;
       const reference =
         raw.exitCode === 0
           ? this.localReference(
@@ -370,8 +478,16 @@ export class WorkflowCallRecorder {
         },
       };
     }
-    if (event.type === "tool_call") return this.observeCall(event);
+    if (event.type === "tool_call") {
+      if (event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call") {
+        const state = this.sessionState(event.sessionId);
+        if (state.openCodexWrappers.size >= MAX_LOCAL_CALLS) state.codexWrapperOverflow = true;
+        else state.openCodexWrappers.add(event.callId);
+      }
+      return this.observeCall(event);
+    }
     if (event.type === "tool_result") {
+      this.sessions.get(event.sessionId)?.openCodexWrappers.delete(event.callId);
       const source = original ?? event;
       const codex =
         source.type === "tool_result" && source.toolName === "exec"
@@ -786,7 +902,12 @@ export class WorkflowCallRecorder {
   /** Keeps the observed call locally, so the conclusions that need its values are reached here. */
   private recordLocalCall(
     state: SessionDerivationState,
-    event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    event:
+      | Extract<NormalizedSessionEvent, { type: "tool_call" }>
+      | Pick<
+          Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+          "sessionId" | "callId" | "toolName" | "connection"
+        >,
     parameters: Record<string, WorkflowJsonValue>,
     /** The program the record established for this call, when it established one. */
     program?: WorkflowRecordedProgram,
@@ -805,7 +926,8 @@ export class WorkflowCallRecorder {
       while (state.executions.length > MAX_EXECUTIONS) state.executions.shift();
     }
     const execution = state.executions[state.executions.length - 1]!;
-    const flow = declaredFlowOfToolCall(event);
+    const flow =
+      "type" in event && event.type === "tool_call" ? declaredFlowOfToolCall(event) : undefined;
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
     const call: LocalCall = {
       callId: event.callId,
@@ -1039,13 +1161,17 @@ export class WorkflowCallRecorder {
         frame.executionScope === "isolated" &&
         frame.language === "javascript" &&
         typeof parameters.raw === "string" &&
-        frame.source === parameters.raw;
+        frame.source === parameters.raw &&
+        isClosedCodexSource(frame.source);
       const evalInterfaceMatchesFrame =
         sourceInterface !== undefined &&
         frame.executionScope === "persistent" &&
         frame.source === parameters.code &&
         ((sourceInterface === "python-eval" && frame.language === "python") ||
           (sourceInterface === "javascript-eval" && frame.language === "javascript"));
+      // A Codex frame is a native harness call unless its entire source is executable in
+      // the isolated VM. Never recast a host-dependent wrapper as generic Node JavaScript.
+      if (frame.sourceInterface === "codex-exec" && !codexExecFrameMatches) continue;
       const program: WorkflowRecordedProgram = { kind: frame.language, source: "" };
       if (codexExecFrameMatches) {
         program.argument = "raw";

@@ -24,9 +24,16 @@ import {
   InMemoryPrivateValueStore,
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import { RESIN_PROGRAM_RUNTIME, RESIN_TOOL_PROTOCOL_RUNTIME, type ToolProtocolDispatchRequest } from "@resin/runtime";
+import {
+  RESIN_PROGRAM_RUNTIME,
+  RESIN_TOOL_PROTOCOL_RUNTIME,
+  type ToolProtocolDispatchRequest,
+} from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
-import { ReplayWorkspaceUnavailableError, createWorkspaceSnapshotValidator } from "../../src/proxy/replay-workspace-snapshot.js";
+import {
+  ReplayWorkspaceUnavailableError,
+  createWorkspaceSnapshotValidator,
+} from "../../src/proxy/replay-workspace-snapshot.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,

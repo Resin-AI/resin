@@ -1,5 +1,6 @@
 import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import {
   InMemoryPrivateValueStore,
   resolvePrivateReference,
@@ -235,6 +236,76 @@ describe("source-native output observation", () => {
     }
   });
 
+  it("never records a command its still-open audited wrapper later claims as a second step", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    const cmd = "printf actual";
+    const wrapper = event({
+      eventId: "wrapper-call",
+      type: "tool_call",
+      callId: "wrapper",
+      toolName: "exec",
+      parameters: {
+        cmd,
+        raw: `const r=await tools.exec_command({cmd:${JSON.stringify(cmd)}});text(r.output);`,
+      },
+      metadata: {
+        resinCodexCommandV1: { version: 1, kind: "call", form: "single-command-output" },
+      },
+      causalRef: { causalSequence: 2, parentId: null },
+    });
+    const command = event({
+      eventId: "early-command",
+      type: "command_exec",
+      command: "/bin/bash",
+      args: ["-lc", cmd],
+      exitCode: 0,
+      stdout: "redacted-display",
+      stderr: "",
+      cwd: "/tmp",
+      durationMs: 1,
+      metadata: { resinCodexCommandV1: { version: 1, kind: "command", nativeId: "early-native" } },
+      causalRef: { causalSequence: 3, parentId: null },
+    });
+    retainLocalWorkflowPayload(command, { stdout: "actual\n", stderr: "" });
+    const result = event({
+      eventId: "wrapper-result",
+      type: "tool_result",
+      callId: "wrapper",
+      toolName: "exec",
+      result: [{ text: "Script completed" }],
+      isError: false,
+      executionDurationMs: 1,
+      metadata: {
+        resinCodexCommandV1: {
+          version: 1,
+          kind: "result",
+          form: "single-command-output",
+          status: "completed",
+          association: {
+            kind: "derived",
+            rule: "codex-single-command-start-window-v1",
+            callId: "wrapper",
+            nativeCommandId: "early-native",
+            startedAtMs: 2,
+            callStartedAtMs: 1,
+            callCompletedAtMs: 3,
+          },
+        },
+      },
+      causalRef: { causalSequence: 4, parentId: null },
+    });
+    const recorded = [user(1), wrapper, command, result].map((entry) =>
+      recorder.observe(entry, { workspaceId: WORKSPACE }),
+    );
+    expect(recorded[2]?.metadata?.workflowCall).toBeUndefined();
+    const recipe = recordCallsFromEvents("early-claimed-native", recorded);
+    expect(recipe?.workflow.steps.map((step) => step.callId)).toEqual(["wrapper"]);
+    expect(resolvePrivateReference(store, recipe!.workflow.baseline!.observed[0]!.reference)).toBe(
+      "actual\n",
+    );
+  });
+
   it("never turns an unverified or failed native command into a successful baseline", () => {
     for (const exitCode of [1, 0]) {
       const store = new InMemoryPrivateValueStore();
@@ -290,6 +361,112 @@ describe("source-native output observation", () => {
         recorder.observe(entry, { workspaceId: WORKSPACE }),
       );
       expect(recorded[3]?.metadata?.workflowResult).toBeUndefined();
+    }
+  });
+
+  it("reconstructs independent native commands by their IDs with private exact stdout", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    const captured = [user(1)];
+    for (const [index, nativeId] of ["native_a", "native_b"].entries()) {
+      const command = event({
+        eventId: `event_${nativeId}`,
+        type: "command_exec",
+        command: "/bin/bash",
+        args: ["-lc", "printf ' exact\\n'"],
+        // Codex 0.156.1 records native cwd as a file URL; execution receives the path it names.
+        cwd: index === 0 ? "file:///tmp" : "/tmp",
+        exitCode: 0,
+        stdout: "display-redacted",
+        durationMs: 1,
+        metadata: { resinCodexCommandV1: { version: 1, kind: "command", nativeId } },
+        causalRef: { causalSequence: index + 2, parentId: null },
+      });
+      retainLocalWorkflowPayload(command, { stdout: " exact\n", stderr: "" });
+      captured.push(command);
+    }
+    const recorded = captured.map((entry) => recorder.observe(entry, { workspaceId: WORKSPACE }));
+    const repeated = recorder.observe(captured[1]!, { workspaceId: WORKSPACE });
+    const recipe = recordCallsFromEvents("native-independent", [...recorded, repeated]);
+    expect(recipe?.workflow.steps.map((step) => step.callId)).toEqual(["native_a", "native_b"]);
+    const projected = recorded.map((entry) =>
+      projectEventToMetadataOnly(entry, { enrichEvidence: false }),
+    );
+    const projectedRecipe = recordCallsFromEvents("native-projected", projected);
+    expect(projectedRecipe?.workflow.steps.map((step) => step.callId)).toEqual([
+      "native_a",
+      "native_b",
+    ]);
+    expect(projected[1]?.metadata?.workflowCall).toBeDefined();
+    expect(projected[1]?.metadata?.workflowResult).toBeDefined();
+    const missingExit = recordCallsFromEvents("native-missing-exit", [
+      projected[0]!,
+      { ...projected[1]!, exitCode: undefined },
+    ]);
+    expect(missingExit?.workflow.steps[0]?.observed.outcome).toBe("unknown");
+    expect(missingExit?.workflow.baseline?.observed).toBeUndefined();
+    expect(recorded[1]?.type).toBe("command_exec");
+    expect("callId" in recorded[1]!).toBe(false);
+    expect(recipe?.workflow.steps[0]?.callable.name).toBe("command_exec");
+    const carrier = recorded[1]?.metadata?.workflowCall;
+    if (!carrier || typeof carrier !== "object" || !("origins" in carrier))
+      throw new Error("missing carrier");
+    const origins = carrier.origins;
+    if (!origins || typeof origins !== "object" || !("cmd" in origins) || !("workdir" in origins))
+      throw new Error("missing private origins");
+    const cmd = origins.cmd;
+    const workdir = origins.workdir;
+    if (
+      !cmd ||
+      typeof cmd !== "object" ||
+      !("reference" in cmd) ||
+      typeof cmd.reference !== "string" ||
+      !workdir ||
+      typeof workdir !== "object" ||
+      !("reference" in workdir) ||
+      typeof workdir.reference !== "string"
+    )
+      throw new Error("missing private references");
+    expect(resolvePrivateReference(store, cmd.reference)).toBe("printf ' exact\\n'");
+    expect(resolvePrivateReference(store, workdir.reference)).toBe("/tmp");
+    expect(resolvePrivateReference(store, recipe!.workflow.baseline!.observed[0]!.reference)).toBe(
+      " exact\n",
+    );
+    expect(JSON.stringify(recorded)).not.toContain(" exact\n");
+  });
+
+  it("does not promote failed or unsupported native command evidence", () => {
+    const recorder = new WorkflowCallRecorder({ privateValues: new InMemoryPrivateValueStore() });
+    for (const [id, args, exitCode] of [
+      ["failed", ["-lc", "exit 8"], 8],
+      ["unsupported", ["-c", "printf not-login"], 0],
+    ] as const) {
+      const command = event({
+        eventId: `event_${id}`,
+        type: "command_exec",
+        command: "/bin/bash",
+        args,
+        cwd: "/tmp",
+        exitCode,
+        stdout: "output",
+        durationMs: 1,
+        causalRef: { causalSequence: 2, parentId: null },
+        metadata: { resinCodexCommandV1: { version: 1, kind: "command", nativeId: id } },
+      });
+      retainLocalWorkflowPayload(command, { stdout: "output" });
+      const observed = recorder.observe(command, { workspaceId: WORKSPACE });
+      const recipe = recordCallsFromEvents(id, [observed]);
+      const projected = projectEventToMetadataOnly(observed, { enrichEvidence: false });
+      const projectedRecipe = recordCallsFromEvents(`${id}-projected`, [projected]);
+      if (id === "failed") {
+        expect(recipe?.workflow.steps[0]?.observed.outcome).toBe("failed");
+        expect(recipe?.workflow.baseline?.observed).toBeUndefined();
+        expect(projectedRecipe?.workflow.steps[0]?.observed.outcome).toBe("failed");
+        expect(projectedRecipe?.workflow.baseline?.observed).toBeUndefined();
+      } else {
+        expect(observed.metadata?.workflowCall).toBeUndefined();
+        expect(recipe).toBeUndefined();
+      }
     }
   });
 });

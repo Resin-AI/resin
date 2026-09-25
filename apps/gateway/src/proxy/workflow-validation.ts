@@ -89,6 +89,8 @@ export interface LocalWorkflowValidatorOptions {
    * caller-owned.
    */
   workspaceDir?: string;
+  /** Trusted source root whose recorded working directories map into the disposable replay. */
+  recordedWorkspaceRoot?: string;
   /** Dispatches a tool-protocol step through the host's own routing. */
   dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
   /**
@@ -153,6 +155,7 @@ export function createLocalWorkflowValidator(
       // is bounded by its isolated environment and the host routing used for tool calls.
       const programOptions = {
         cwd: workspaceDir,
+        recordedWorkspaceRoot: options.recordedWorkspaceRoot ?? workspaceDir,
         isolateEnvironment: true,
         ...(options.environment === undefined ? {} : { env: options.environment }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),

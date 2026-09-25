@@ -106,6 +106,28 @@ The host could not write an RPC frame to the worker. Treat the invocation as fai
 
 ---
 
+### Recipe 7: Recorded Replay Exceeds Snapshot Limits
+
+A replay that exceeds the snapshot's file-size, total-size, file-count, or entry-count limits receives a failed validation decision instead of remaining pending indefinitely. No partial snapshot is validated, and the limits are not relaxed.
+
+Missing source workspaces or inputs that change during snapshotting remain deferred. Resolve oversized or unnecessary workspace artifacts before requesting a new validation.
+
+---
+
+### Recipe 8: Codex Source Depends On Harness APIs
+
+Codex `exec` bodies can reference APIs supplied by the Codex host. Resin's isolated JavaScript replay provides standard VM globals and the `text` output channel, not Codex's tool dispatcher or historical process sessions.
+
+Standalone capture checks lexical dependencies against that replay interface. Bodies with unresolved host dependencies remain native harness calls; they are not relabeled as ordinary JavaScript, and validation fails for them unless the host can replay that harness call.
+
+Each completed process Codex records is captured separately under its native execution ID, with the exact `/bin/bash -lc` command, working directory, and output kept on the recording machine. Such a process can be replayed without Codex, but only its own exact output counts; a wrapper's printed result object is never substituted. A process claimed by an audited single-command wrapper remains covered by that wrapper and is never replayed a second time.
+
+Replay copies the ready workspace and maps the recorded working directory into that copy; it never runs in the live workspace, and a directory outside the workspace fails validation. Output that depended on files changed or missing since recording also fails validation, as it should.
+
+A launch response or terminal poll containing a process handle is not the process's completed output. Reuse requires supported execution dependencies and independently verified command outcomes; connecting Resin MCP does not supply Codex's internal APIs to the replay VM.
+
+---
+
 ## 3. Diagnostics Without A Support-Bundle Flag
 
 `resin doctor --export-bundle` does not exist. Capture a sanitized machine report with:

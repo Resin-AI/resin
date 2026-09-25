@@ -1,6 +1,7 @@
 /** Frozen workflow carrier vocabulary shared by live capture, projection, and import reconstruction. */
 
 import {
+  readCodexCommandMetadata,
   validateWorkflowProgramProjection,
   validateWorkflowProgramSourceInterface,
 } from "@resin/contracts";
@@ -158,7 +159,41 @@ export interface RecordableEvent {
   content?: unknown;
   /** Whether the recorded result reported an error; absent means the record does not say. */
   isError?: boolean;
+  exitCode?: number;
   metadata?: Record<string, unknown>;
+}
+
+/** The identity fields normalized and recordable events share. */
+export type WorkflowIdentityEvent = Pick<
+  RecordableEvent,
+  "type" | "eventId" | "callId" | "toolCallId" | "metadata"
+>;
+
+/** Native command identity is authoritative only for validated command metadata. */
+export function workflowCallId(event: WorkflowIdentityEvent): string {
+  if (event.type === "command_exec") {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (native?.kind === "command") return native.nativeId;
+  }
+  return event.callId ?? event.toolCallId ?? event.eventId;
+}
+
+export function isWorkflowCallEvent(event: WorkflowIdentityEvent): boolean {
+  return (
+    event.type === "tool_call" ||
+    (event.type === "command_exec" &&
+      readCodexCommandMetadata(event.metadata)?.kind === "command" &&
+      isWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]))
+  );
+}
+
+export function isWorkflowResultEvent(event: WorkflowIdentityEvent): boolean {
+  return (
+    event.type === "tool_result" ||
+    (event.type === "command_exec" &&
+      readCodexCommandMetadata(event.metadata)?.kind === "command" &&
+      readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]) !== undefined)
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

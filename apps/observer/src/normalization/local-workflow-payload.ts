@@ -27,6 +27,10 @@ interface LocalWorkflowPayload {
   resultComparison?: LocalWorkflowResultComparison;
   stdout?: unknown;
   stderr?: unknown;
+  /** Exact native process originals: redacted fields cannot replay the process that ran. */
+  command?: unknown;
+  args?: unknown;
+  cwd?: unknown;
   resultSuppressed?: true;
   programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
@@ -44,7 +48,9 @@ export function retainLocalWorkflowPayload(
   const hasOriginalField = field !== undefined && Object.hasOwn(original, field);
   const commandFields =
     event.type === "command_exec"
-      ? (["stdout", "stderr"] as const).filter((name) => Object.hasOwn(original, name))
+      ? (["stdout", "stderr", "command", "args", "cwd"] as const).filter((name) =>
+          Object.hasOwn(original, name),
+        )
       : [];
   const hasNativeResult =
     event.type === "tool_result" &&
@@ -86,11 +92,11 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
   if (event.type === "command_exec") {
     if (!Object.hasOwn(payload, "stdout")) return undefined;
-    return {
-      ...event,
-      ...(Object.hasOwn(payload, "stdout") ? { stdout: payload.stdout } : {}),
-      ...(Object.hasOwn(payload, "stderr") ? { stderr: payload.stderr } : {}),
-    } as T;
+    const exact: Record<string, unknown> = {};
+    for (const name of ["stdout", "stderr", "command", "args", "cwd"] as const) {
+      if (Object.hasOwn(payload, name)) exact[name] = payload[name];
+    }
+    return { ...event, ...exact } as T;
   }
   if (field === undefined || !Object.hasOwn(payload, field)) return event;
   return { ...event, [field]: payload[field] } as T;

@@ -766,6 +766,56 @@ describe("native capture of ordinary calls", () => {
     ).toEqual(output.slice(1));
   });
 
+  it("only offers lexically closed native Codex sources as standalone programs", () => {
+    const cases = [
+      { source: "text(JSON.stringify({ answer: 42 }));", standalone: true },
+      { source: "const tools = { send: text }; tools.send('local');", standalone: true },
+      {
+        source: "const run = ({ tools }) => tools.send('bound'); run({ tools: { send: text } });",
+        standalone: true,
+      },
+      { source: "text({ tools: 'literal', label: 'tools.send' });", standalone: true },
+      {
+        source:
+          "const run = (globalThis) => globalThis.tools.send('local'); run({ tools: { send: text } });",
+        standalone: true,
+      },
+      { source: "tools.send({ value: 7 });", standalone: false },
+      { source: "hostApi.send({ value: 7 });", standalone: false },
+      { source: "globalThis['tools'].send({ value: 7 });", standalone: false },
+      { source: "text({ hostApi });", standalone: false },
+      { source: "console.log('not provided by the isolated VM');", standalone: false },
+      { source: "import value from 'example'; text(value);", standalone: false },
+    ];
+    for (const [index, { source, standalone }] of cases.entries()) {
+      const decoded = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: `call-closed-source-${index}`,
+              name: "exec",
+              input: source,
+            },
+          },
+        ],
+        { sessionId: `session-closed-source-${index}` },
+      );
+      const nativeCall = decoded.find((entry) => entry.type === "tool_call");
+      if (nativeCall?.type !== "tool_call") throw new Error("expected native exec call");
+      const observed = new WorkflowCallRecorder({
+        privateValues: new InMemoryPrivateValueStore(),
+      }).observe(nativeCall, { workspaceId: "ws_native" });
+      const carrier = carrierOf(observed);
+      expect(carrier?.runtime, source).toBe(
+        standalone ? RESIN_PROGRAM_RUNTIME : RESIN_HARNESS_TOOL_RUNTIME,
+      );
+      expect(carrier?.program?.sourceInterface, source).toBe(standalone ? "codex-exec" : undefined);
+      expect(carrier?.program?.kind, source).toBe(standalone ? "javascript" : undefined);
+    }
+  });
+
   it("does not establish workflow or computation success from a terminal truncated exec result", () => {
     const sessionId = "session-native-codex-exec-truncated";
     const decoded = decodeCodexTranscript(
@@ -2027,5 +2077,96 @@ describe("native Codex rollout workflow and computation capture", () => {
       ),
     ).toBe(false);
     expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+  });
+
+  it("captures an independent native command with its exact pre-redaction process inputs", async () => {
+    const sessionId = "codex-independent-native-command";
+    const store = new InMemoryPrivateValueStore();
+    const pipeline = new NormalizationPipeline({ privateValueStore: store });
+    pipeline.registerDecoder(new CodexRecordDecoder());
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_codex_native",
+    });
+    const timestamp = "2026-09-23T12:00:00.000Z";
+    const command = "python - <<'PY'\nprint('exact output')\nPY";
+    const native = [
+      {
+        type: "session_meta",
+        payload: { session_id: sessionId, id: sessionId, cwd: "/work/demo" },
+      },
+      { type: "turn_context", payload: { turn_id: "turn", cwd: "/work/demo", model: "gpt-6-sol" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "exec-independent",
+            command: ["/bin/bash", "-lc", command],
+            cwd: "file:///work/demo",
+            status: "completed",
+            stdout: "exact output\n",
+            stderr: "",
+            exit_code: 0,
+            duration: { secs: 0, nanos: 5_000_000 },
+          },
+          started_at_ms: 1_000,
+          completed_at_ms: 1_005,
+        },
+      },
+    ];
+    const events: NormalizedSessionEvent[] = [];
+    for (const [index, entry] of native.entries()) {
+      const ordinal = index + 1;
+      for (const result of await pipeline.processRecord(
+        {
+          recordId: `rec_${sessionId}_${ordinal}`,
+          sessionId,
+          harnessId: "codex-cli",
+          sequenceNumber: ordinal,
+          recordType: "transcript_line",
+          timestamp,
+          rawPayload: JSON.stringify({ timestamp, ordinal, ...entry }),
+          cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+          metadata: {},
+        },
+        { sessionId, harnessId: "codex-cli", workspaceId: "ws_codex_native" },
+      )) {
+        if (result.status !== "success" || result.isDuplicate) continue;
+        events.push(
+          projectEventToMetadataOnly(
+            recorder.observe(result.event, { workspaceId: "ws_codex_native" }),
+          ),
+        );
+      }
+    }
+    const commandEvent = events.find((entry) => entry.type === "command_exec");
+    expect(commandEvent?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
+    expect(JSON.stringify(events)).not.toContain("exact output");
+    const recipe = recordCallsFromEvents(sessionId, events);
+    const step = recipe?.workflow.steps[0];
+    expect(step?.callId).toBe("exec-independent");
+    const resolved = Object.fromEntries(
+      (step?.arguments ?? []).map((argument) => {
+        const source = argument.source;
+        const reference =
+          source.kind === "private"
+            ? source.reference
+            : source.kind === "template" && source.template.type === "private"
+              ? source.template.reference
+              : undefined;
+        return [argument.name, reference && resolvePrivateReference(store, reference)];
+      }),
+    );
+    // Normalization redacts the working directory; replay needs the directory the process used.
+    expect(resolved).toEqual({
+      cmd: command,
+      workdir: "/work/demo",
+      resinCodexShellProfile: "bash-login-native-v1",
+    });
+    expect(resolvePrivateReference(store, recipe!.workflow.baseline!.observed[0]!.reference)).toBe(
+      "exact output\n",
+    );
   });
 });

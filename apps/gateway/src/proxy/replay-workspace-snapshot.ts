@@ -80,7 +80,11 @@ export function createWorkspaceSnapshotValidator(
       throw new ReplayWorkspaceUnavailableError();
     }
     try {
-      return await createLocalWorkflowValidator({ ...options, workspaceDir })(plan);
+      return await createLocalWorkflowValidator({
+        ...options,
+        workspaceDir,
+        recordedWorkspaceRoot: source.root,
+      })(plan);
     } finally {
       await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -156,7 +160,9 @@ async function copyDirectory(
   for await (const entry of entries) {
     state.entries += 1;
     if (state.entries > MAX_SNAPSHOT_ENTRIES) {
-      throw new ReplaySnapshotLimitError("the ready workspace exceeds the replay snapshot entry-count limit");
+      throw new ReplaySnapshotLimitError(
+        "the ready workspace exceeds the replay snapshot entry-count limit",
+      );
     }
     if (entry.name.startsWith(".")) continue;
 
@@ -189,13 +195,19 @@ async function copyRegularFile(
   state: SnapshotState,
 ): Promise<void> {
   if (state.files >= MAX_SNAPSHOT_FILES) {
-    throw new ReplaySnapshotLimitError("the ready workspace exceeds the replay snapshot file-count limit");
+    throw new ReplaySnapshotLimitError(
+      "the ready workspace exceeds the replay snapshot file-count limit",
+    );
   }
   if (discoveredStat.size > MAX_SNAPSHOT_FILE_BYTES) {
-    throw new ReplaySnapshotLimitError("a ready workspace file exceeds the replay snapshot per-file size limit");
+    throw new ReplaySnapshotLimitError(
+      "a ready workspace file exceeds the replay snapshot per-file size limit",
+    );
   }
   if (state.bytes + discoveredStat.size > MAX_SNAPSHOT_BYTES) {
-    throw new ReplaySnapshotLimitError("the ready workspace exceeds the replay snapshot total size limit");
+    throw new ReplaySnapshotLimitError(
+      "the ready workspace exceeds the replay snapshot total size limit",
+    );
   }
 
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
@@ -212,10 +224,14 @@ async function copyRegularFile(
       throw new Error("a ready workspace file changed during replay snapshotting");
     }
     if (openedStat.size > MAX_SNAPSHOT_FILE_BYTES) {
-      throw new ReplaySnapshotLimitError("a ready workspace file exceeds the replay snapshot per-file size limit");
+      throw new ReplaySnapshotLimitError(
+        "a ready workspace file exceeds the replay snapshot per-file size limit",
+      );
     }
     if (state.bytes + openedStat.size > MAX_SNAPSHOT_BYTES) {
-      throw new ReplaySnapshotLimitError("the ready workspace exceeds the replay snapshot total size limit");
+      throw new ReplaySnapshotLimitError(
+        "the ready workspace exceeds the replay snapshot total size limit",
+      );
     }
 
     const realSourcePath = await fs.realpath(sourcePath);
@@ -232,7 +248,9 @@ async function copyRegularFile(
         copiedBytes + bytesRead > MAX_SNAPSHOT_FILE_BYTES ||
         state.bytes + copiedBytes + bytesRead > MAX_SNAPSHOT_BYTES
       ) {
-        throw new ReplaySnapshotLimitError("the ready workspace exceeds a replay snapshot size limit");
+        throw new ReplaySnapshotLimitError(
+          "the ready workspace exceeds a replay snapshot size limit",
+        );
       }
 
       let writtenBytes = 0;

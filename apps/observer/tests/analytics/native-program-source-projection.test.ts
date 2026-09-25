@@ -244,7 +244,8 @@ text("sa\x66e-credential", token);`;
       });
       const { carrier } = callAndCarrier(captured.observed, entry.callId);
       const origin = privateOrigin(carrier);
-      expect(carrier.program?.source).toBe("");
+      // Unparseable source is not even a standalone program; either way no source view is published.
+      expect(carrier.program?.source ?? "").toBe("");
       expect(resolvePrivateReference(captured.store, origin.reference)).toBe(entry.source);
       expect(JSON.stringify(captured.metadataOnly)).not.toContain(entry.source);
       expect(JSON.stringify(captured.metadataOnly)).not.toContain(entry.secret);

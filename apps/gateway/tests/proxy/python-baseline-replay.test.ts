@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { type RecordedWorkflow, workflowValidationPlanDigest } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
-import { RESIN_PROGRAM_RUNTIME, RESIN_TOOL_PROTOCOL_RUNTIME } from "@resin/runtime";
+import {
+  RESIN_PROCESS_RUNTIME,
+  RESIN_PROGRAM_RUNTIME,
+  RESIN_TOOL_PROTOCOL_RUNTIME,
+} from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   ReplayWorkspaceUnavailableError,
@@ -66,6 +70,38 @@ function recording(source: string, observed: string, setup?: string) {
     privateValues,
     validate: createLocalWorkflowValidator({ workspaceId, privateValues, timeoutMs: 5_000 }),
   };
+}
+
+function shellRecording(
+  workdir: string,
+  source: string,
+  observed: string,
+  profile: "bash-login-v1" | "bash-login-native-v1",
+) {
+  const { plan, privateValues } = recording(source, observed);
+  const step = plan.steps[0]!;
+  step.callable = {
+    runtime: RESIN_PROCESS_RUNTIME,
+    name: profile === "bash-login-v1" ? "exec" : "command_exec",
+    program: { kind: "shell", source: "", argument: "cmd" },
+  };
+  step.arguments = [
+    { name: "cmd", source: { kind: "private", reference: "private:source" } },
+    { name: "workdir", source: { kind: "literal", value: workdir } },
+    { name: "resinCodexShellProfile", source: { kind: "literal", value: profile } },
+    ...(profile === "bash-login-v1"
+      ? [
+          {
+            name: "raw",
+            source: {
+              kind: "literal" as const,
+              value: `const r=await tools.exec_command(${JSON.stringify({ cmd: source, workdir })});text(r.output);`,
+            },
+          },
+        ]
+      : []),
+  ];
+  return { plan, privateValues };
 }
 
 describe("fresh-process baseline replay", () => {
@@ -164,6 +200,64 @@ describe("fresh-process baseline replay", () => {
       expect(fs.readFileSync(path.join(projectDir, "package.json"), "utf8")).toBe(manifest);
       expect(fs.readFileSync(path.join(projectDir, "pnpm-lock.yaml"), "utf8")).toBe(lockfile);
       expect(fs.existsSync(path.join(sourceRoot, "replay-created.txt"))).toBe(false);
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("replays recorded shell working directories inside the snapshot, never the source", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shell-snapshot-"));
+    try {
+      const projectDir = path.join(sourceRoot, "nested");
+      fs.mkdirSync(projectDir);
+      fs.writeFileSync(path.join(projectDir, "input.txt"), "recorded input");
+      for (const profile of ["bash-login-v1", "bash-login-native-v1"] as const) {
+        const { plan, privateValues } = shellRecording(
+          projectDir,
+          "cat input.txt; printf mutated > input.txt; printf created > replay-only.txt",
+          "recorded input",
+          profile,
+        );
+        const result = await createWorkspaceSnapshotValidator(
+          () => ({ ready: true, root: sourceRoot }),
+          { workspaceId, privateValues, timeoutMs: 5_000 },
+        )(plan);
+        expect(result.verification).toMatchObject({
+          status: "verified",
+          reproduced: ["target"],
+          replay: { kind: "fresh-process", planDigest: workflowValidationPlanDigest(plan) },
+        });
+        expect(fs.readFileSync(path.join(projectDir, "input.txt"), "utf8")).toBe("recorded input");
+        expect(fs.existsSync(path.join(projectDir, "replay-only.txt"))).toBe(false);
+      }
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses recorded shell directories outside the trusted root or without one", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shell-root-"));
+    const outsideRoot = `${sourceRoot}-sibling`;
+    fs.mkdirSync(outsideRoot);
+    try {
+      fs.writeFileSync(path.join(outsideRoot, "marker.txt"), "original");
+      const { plan, privateValues } = shellRecording(
+        outsideRoot,
+        "printf mutated > marker.txt; printf done",
+        "done",
+        "bash-login-native-v1",
+      );
+      for (const source of [{ ready: true, root: sourceRoot }, { ready: true }] as const) {
+        const result = await createWorkspaceSnapshotValidator(() => source, {
+          workspaceId,
+          privateValues,
+          timeoutMs: 5_000,
+        })(plan);
+        expect(result.verification?.status).toBe("failed");
+        expect(result.verification?.replay).toBeUndefined();
+        expect(fs.readFileSync(path.join(outsideRoot, "marker.txt"), "utf8")).toBe("original");
+      }
     } finally {
       fs.rmSync(sourceRoot, { recursive: true, force: true });
       fs.rmSync(outsideRoot, { recursive: true, force: true });

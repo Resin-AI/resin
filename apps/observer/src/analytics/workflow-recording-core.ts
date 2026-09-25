@@ -33,8 +33,11 @@ import {
   type WorkflowCallCandidate,
   type WorkflowCallCarrier,
   type WorkflowCallHeldOut,
+  isWorkflowCallEvent,
+  isWorkflowResultEvent,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
+  workflowCallId,
 } from "./workflow-carrier.js";
 
 import {
@@ -62,8 +65,7 @@ export interface RecordedReferenceUse {
   path?: Array<string | number>;
 }
 
-const callIdOf = (event: RecordableEvent): string =>
-  event.callId ?? event.toolCallId ?? event.eventId;
+const callIdOf = workflowCallId;
 
 function scopedKey(scopeId: string, callId: string): string {
   return `${scopeId.length}:${scopeId}${callId}`;
@@ -188,11 +190,11 @@ export function reconstructWorkflowFromEvents(
   const allOrdered = [...events].sort(compareRecordedEvents);
   const firstExecutionCall = allOrdered.find(
     (event) =>
-      event.type === "tool_call" &&
+      isWorkflowCallEvent(event) &&
       readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
         ?.executionIndex !== undefined,
   );
-  const firstCall = allOrdered.find((event) => event.type === "tool_call");
+  const firstCall = allOrdered.find(isWorkflowCallEvent);
   const recordingSession = firstExecutionCall?.sessionId ?? firstCall?.sessionId;
   const ordered =
     options.carrierRequired && recordingSession !== undefined
@@ -220,18 +222,28 @@ export function reconstructWorkflowFromEvents(
    */
   const resultAliasByCallId = new Map<string, string>();
   for (const event of ordered) {
-    if (event.type !== "tool_result") continue;
-    const callId = event.callId ?? event.toolCallId;
+    if (!isWorkflowResultEvent(event)) continue;
+    const callId =
+      event.type === "command_exec" ? workflowCallId(event) : (event.callId ?? event.toolCallId);
     if (!callId) continue;
     const eventKey = scopedKey(event.sessionId, callId);
     const resultCarrier = readWorkflowResultCarrier(
       event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
     );
     resultsByCallId.set(eventKey, {
-      value: event.result ?? extractResultValue(event.content),
-      isError: event.isError,
+      value:
+        event.type === "tool_result"
+          ? (event.result ?? extractResultValue(event.content))
+          : undefined,
+      isError:
+        event.type === "command_exec"
+          ? event.exitCode === undefined
+            ? undefined
+            : event.exitCode !== 0
+          : event.isError,
       ...(resultCarrier?.output === undefined ? {} : { output: resultCarrier.output }),
-      ...(resultCarrier?.baselineReference === undefined
+      ...(resultCarrier?.baselineReference === undefined ||
+      (event.type === "command_exec" && event.exitCode !== 0)
         ? {}
         : { baselineReference: resultCarrier.baselineReference }),
       ...(resultCarrier?.baselineComparison === undefined
@@ -341,14 +353,14 @@ export function reconstructWorkflowFromEvents(
    * than a second step of it.
    */
   const claimCall = (event: RecordableEvent): string | undefined => {
-    if (event.type !== "tool_call") return undefined;
+    if (!isWorkflowCallEvent(event)) return undefined;
     const scopedCallKey = scopedKey(event.sessionId, callIdOf(event));
     if (seenCallIds.has(scopedCallKey)) return undefined;
     seenCallIds.add(scopedCallKey);
     return scopedCallKey;
   };
   for (const event of ordered) {
-    if (event.type !== "tool_call") continue;
+    if (!isWorkflowCallEvent(event)) continue;
     const callId = callIdOf(event);
     const scopedCallKey = claimCall(event);
     if (scopedCallKey === undefined) continue;
@@ -541,10 +553,10 @@ export function reconstructWorkflowFromEvents(
   // A selected workflow can be a slice of a larger execution. Match repetitions against the
   // complete original execution, then map only the selected call ids to steps. Unselected calls
   // remain supporting evidence; their proposals and effects never become extra executable steps.
-  const selectedSession = ordered.find((event) => event.type === "tool_call")?.sessionId;
+  const selectedSession = ordered.find(isWorkflowCallEvent)?.sessionId;
   const baselineCalls = new Map<string, RepeatCall>();
   for (const event of [...ordered, ...supporting].sort(compareRecordedEvents)) {
-    if (event.type !== "tool_call" || event.sessionId !== selectedSession) continue;
+    if (!isWorkflowCallEvent(event) || event.sessionId !== selectedSession) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     if (options.carrierRequired && carrier === undefined) continue;
     if (carrier?.executionIndex !== selectedExecutionIndex) continue;
@@ -687,7 +699,7 @@ export function reconstructWorkflowFromEvents(
 function selectedExecution(events: readonly RecordableEvent[]): number | undefined {
   const indices = new Set<number>();
   for (const event of events) {
-    if (event.type !== "tool_call") continue;
+    if (!isWorkflowCallEvent(event)) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     if (carrier?.executionIndex === undefined) continue;
     indices.add(carrier.executionIndex);
@@ -709,12 +721,11 @@ function demonstrationOf(
   if (target === undefined) return undefined;
   let demonstration: WorkflowCallHeldOut | undefined;
   for (const event of events) {
-    const candidate =
-      event.type === "tool_call"
+    const candidate = isWorkflowResultEvent(event)
+      ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
+      : isWorkflowCallEvent(event)
         ? readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])?.heldOut
-        : event.type === "tool_result"
-          ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
-          : undefined;
+        : undefined;
     if (candidate === undefined || candidate.repeats !== target) continue;
     if (
       demonstration === undefined ||

@@ -14,7 +14,7 @@ import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process"
 import { accessSync, constants as fsConstants } from "node:fs";
 import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { parse } from "@babel/parser";
 import {
@@ -39,6 +39,8 @@ export interface RecordedProgramRun {
 export interface ProgramRunnerOptions {
   /** Directory the program runs in. Defaults to the process cwd. */
   cwd?: string;
+  /** Trusted original workspace root; replay maps recorded shell cwd into cwd's snapshot. */
+  recordedWorkspaceRoot?: string;
   /** Fixed local process profile, selected only from a recorded process argument. */
   shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
@@ -1521,26 +1523,52 @@ export async function runRecordedCall(
   }
   const requestedWorkdir = request.arguments.workdir;
   const shellProfile = request.arguments.resinCodexShellProfile;
-  if (shellProfile === "bash-login-v1" && typeof requestedWorkdir !== "string") {
+  const nativeCodexShell = shellProfile === "bash-login-native-v1";
+  if (
+    (shellProfile === "bash-login-v1" || nativeCodexShell) &&
+    typeof requestedWorkdir !== "string"
+  ) {
     throw new Error(`step '${step.id}' cannot run: workdir must be a string`);
   }
   if (
     shellProfile !== undefined &&
-    (shellProfile !== "bash-login-v1" ||
-      step.callable.name !== "exec" ||
-      program.kind !== "shell" ||
-      program.argument !== "cmd" ||
-      typeof requestedWorkdir !== "string" ||
-      typeof request.arguments.raw !== "string")
+    !(
+      ((shellProfile === "bash-login-v1" &&
+        step.callable.name === "exec" &&
+        typeof request.arguments.raw === "string") ||
+        (nativeCodexShell && step.callable.name === "command_exec")) &&
+      program.kind === "shell" &&
+      program.argument === "cmd" &&
+      typeof requestedWorkdir === "string"
+    )
   ) {
     throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
   }
+  let replayWorkdir = requestedWorkdir;
+  if (
+    (shellProfile === "bash-login-v1" || nativeCodexShell) &&
+    typeof requestedWorkdir === "string" &&
+    options.recordedWorkspaceRoot !== undefined
+  ) {
+    if (options.cwd === undefined) {
+      throw new Error(`step '${step.id}' cannot run: replay workspace cwd is required`);
+    }
+    const originalRoot = resolve(options.recordedWorkspaceRoot);
+    const originalWorkdir = resolve(originalRoot, requestedWorkdir);
+    const subpath = relative(originalRoot, originalWorkdir);
+    if (subpath === ".." || subpath.startsWith(`..${sep}`) || isAbsolute(subpath)) {
+      throw new Error(`step '${step.id}' cannot run: recorded workdir is outside the workspace`);
+    }
+    replayWorkdir = join(options.cwd, subpath);
+  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
-    ...(shellProfile === "bash-login-v1" && typeof requestedWorkdir === "string"
-      ? { cwd: requestedWorkdir }
+    ...((shellProfile === "bash-login-v1" || nativeCodexShell) && typeof replayWorkdir === "string"
+      ? { cwd: replayWorkdir }
       : {}),
-    ...(shellProfile === "bash-login-v1" ? { shellInvocation: "bash-login" as const } : {}),
+    ...(shellProfile === "bash-login-v1" || nativeCodexShell
+      ? { shellInvocation: "bash-login" as const }
+      : {}),
     ...(options.resolvePrivate === undefined && request.resolvePrivate
       ? { resolvePrivate: request.resolvePrivate }
       : {}),

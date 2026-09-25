@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,6 +167,74 @@ describe("recorded program adapters", () => {
     // line is part of what the program printed and part of what the recorded call returned.
     expect(value).toBe("beta\nalpha\n");
     expect(await readFile(join(workspace, "redirect.txt"), "utf8")).toBe("done\n");
+  });
+
+  it("runs native Codex bash with its recorded cwd and exact output once", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter();
+    const source = "printf ' native\\n'; printf x >> native-count";
+    const step = recordedStep({
+      id: "native-command",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: source,
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe(" native\n");
+    expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
+    const rejected = await failureOf(() =>
+      adapter.call({
+        step: { ...step, callable: { ...step.callable, name: "exec" } },
+        arguments: {
+          cmd: source,
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    );
+    expect(rejected).toContain("unsupported recorded shell profile");
+    expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
+  });
+
+  it("maps recorded shell cwd into a replay snapshot without touching source", async () => {
+    const sourceRoot = await makeWorkspace();
+    const snapshot = await makeWorkspace();
+    await mkdir(join(sourceRoot, "nested"));
+    await mkdir(join(snapshot, "nested"));
+    const adapter = createProcessAdapter({
+      cwd: snapshot,
+      recordedWorkspaceRoot: sourceRoot,
+    });
+    const step = recordedStep({
+      id: "native-snapshot",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    const argumentsFor = (workdir: string) => ({
+      cmd: "printf x >> touched",
+      workdir,
+      resinCodexShellProfile: "bash-login-native-v1",
+    });
+    expect(await adapter.call({ step, arguments: argumentsFor(join(sourceRoot, "nested")) })).toBe(
+      "",
+    );
+    expect(await readFile(join(snapshot, "nested", "touched"), "utf8")).toBe("x");
+    await expect(readFile(join(sourceRoot, "nested", "touched"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const outside = await makeWorkspace();
+    const failure = await failureOf(() => adapter.call({ step, arguments: argumentsFor(outside) }));
+    expect(failure).toContain("recorded workdir is outside the workspace");
+    expect(await readFile(join(snapshot, "nested", "touched"), "utf8")).toBe("x");
   });
 
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {

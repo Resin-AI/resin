@@ -9,8 +9,11 @@ import { compareRecordedEvents } from "./recorded-event-order.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  isWorkflowCallEvent,
+  isWorkflowResultEvent,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
+  workflowCallId,
 } from "./workflow-carrier.js";
 import {
   type RecordableEvent,
@@ -31,7 +34,9 @@ export {
 
 type CaptureOptions = NonNullable<Parameters<typeof reconstructCalls>[2]>;
 const callIdOf = (event: RecordableEvent): string | undefined =>
-  event.callId ?? event.toolCallId ?? (event.type === "tool_call" ? event.eventId : undefined);
+  isWorkflowCallEvent(event) || isWorkflowResultEvent(event)
+    ? workflowCallId(event)
+    : (event.callId ?? event.toolCallId);
 
 export function recordCallsFromEvents(
   workflowId: string,
@@ -41,7 +46,7 @@ export function recordCallsFromEvents(
   const ordered = [...events].sort(compareRecordedEvents);
   const first = ordered.find(
     (event) =>
-      event.type === "tool_call" &&
+      isWorkflowCallEvent(event) &&
       readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
         ?.executionIndex !== undefined,
   );
@@ -52,7 +57,7 @@ export function recordCallsFromEvents(
   const session = first.sessionId;
   const ownCallIds = new Set<string>();
   for (const event of ordered) {
-    if (event.sessionId !== session || event.type !== "tool_call") continue;
+    if (event.sessionId !== session || !isWorkflowCallEvent(event)) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     if (carrier?.executionIndex === execution) ownCallIds.add(callIdOf(event)!);
   }
@@ -76,7 +81,7 @@ export function recordCallsFromEvents(
     const callId = callIdOf(event);
     if (callId === undefined) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
-    if (event.type === "tool_call" && carrier?.executionIndex !== undefined) {
+    if (isWorkflowCallEvent(event) && carrier?.executionIndex !== undefined) {
       const discovered = options.discoveryFor?.(carrier.name);
       calls.push({
         sessionId: event.sessionId,
@@ -94,10 +99,9 @@ export function recordCallsFromEvents(
     }
     // The last result often holds the ONLY snapshot with the final observation. Reading only
     // tool_call carriers leaves every normal one-call repetition without an observed output.
-    const snapshot =
-      event.type === "tool_result"
-        ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
-        : carrier?.heldOut;
+    const snapshot = isWorkflowResultEvent(event)
+      ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
+      : carrier?.heldOut;
     if (snapshot) observations.push({ sessionId: event.sessionId, callId, snapshot });
   }
   const byId = new Map(
