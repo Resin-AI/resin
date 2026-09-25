@@ -124,6 +124,8 @@ Specifically, the following data types are strictly prohibited from cloud egress
 - **File Paths & Directory Hierarchies**: Local filesystem paths, workspace layouts, directory trees, and environment path names.
 - **Secrets & Credentials**: Environment variables, private keys, authentication tokens, API credentials, and connection strings.
 
+Engine-redacted evidence is not raw session data: secret-scrubbed recorded-program views and native command lines, which can name files and directories, are uploaded as learned-tool evidence. The per-event allowlist is in [`docs/security/privacy-inventory.md`](docs/security/privacy-inventory.md).
+
 All local session logs, trajectory databases, and cached tool artifacts reside solely on the local filesystem (`~/.resin/` or workspace-local storage) under local user permissions.
 
 ---

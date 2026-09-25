@@ -12,6 +12,7 @@ import {
   type ToolManifest,
   ToolManifestSchema,
   type WorkflowJsonValue,
+  type WorkflowValueSource,
   canonicalJson,
   normalizeSha256,
   validateRecordedWorkflow,
@@ -148,6 +149,9 @@ function checkExecutable(filePath: string): boolean {
     return false;
   }
 }
+
+/** Enough of a recorded program for an agent to recognize it; the full text still executes. */
+const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 
 function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   try {
@@ -442,6 +446,8 @@ export class LocalArtifactExecutor {
   private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private readonly privateValueOwnerWorkspaceId?: string;
   private managedToolAccess?: ManagedToolAccess;
+  /** Resolved local descriptions by artifact and owning workspace; both are immutable inputs. */
+  private readonly recordedWorkflowDescriptions = new Map<string, string>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -476,6 +482,77 @@ export class LocalArtifactExecutor {
    */
   getPrivateValueStore(): PrivateValueStore {
     return this.privateValueStore ?? FilePrivateValueStore.default();
+  }
+
+  /**
+   * What a cached recorded workflow runs, for tool discovery on this machine. Program text stays
+   * private to the recording workspace: it resolves under the same declaration and ownership rules
+   * as execution and is returned only to the local caller, never uploaded.
+   */
+  describeRecordedWorkflow(artifactDigest: string, context: WorkspaceContext): string | undefined {
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    const key = `${artifactDigest}\u0000${owner}`;
+    const cached = this.recordedWorkflowDescriptions.get(key);
+    if (cached !== undefined) return cached;
+    if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
+      return undefined;
+    }
+    const artifactDir = this.cache.getArtifactPath(artifactDigest);
+    const entrypoint = [BUNDLE_FILE_ENTRYPOINT_TS, BUNDLE_FILE_ENTRYPOINT_JS]
+      .map((file) => path.join(artifactDir, file))
+      .find(isRegularFileWithoutFollowingSymlink);
+    if (entrypoint === undefined) return undefined;
+    let plan: RecordedWorkflow;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
+      if (!validateRecordedWorkflow(parsed).valid) return undefined;
+      plan = parsed as RecordedWorkflow;
+    } catch {
+      return undefined;
+    }
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    const text = (source: WorkflowValueSource): string | undefined => {
+      if (source.kind === "literal")
+        return typeof source.value === "string" ? source.value : undefined;
+      const reference =
+        source.kind === "private"
+          ? source.reference
+          : source.kind === "template" && source.template.type === "private"
+            ? source.template.reference
+            : undefined;
+      if (reference === undefined || !declared.has(reference)) return undefined;
+      const recorded = store.origin?.(reference)?.workspaceId;
+      if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
+        return undefined;
+      }
+      try {
+        const value = resolvePrivateReference(store, reference);
+        return typeof value === "string" ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const steps: string[] = [];
+    for (const [index, step] of plan.steps.entries()) {
+      const program = step.callable.program;
+      const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
+      const programText = program === undefined || source === undefined ? undefined : text(source);
+      if (program === undefined || programText === undefined || programText.length === 0) continue;
+      const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
+      const workdir = workdirSource === undefined ? undefined : text(workdirSource);
+      const shown =
+        programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
+          ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
+          : programText;
+      steps.push(
+        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
+      );
+    }
+    if (steps.length === 0) return undefined;
+    const description = `Recorded on this machine:\n${steps.join("\n")}`;
+    this.recordedWorkflowDescriptions.set(key, description);
+    return description;
   }
 
   setWorkspaceRoot(root: string): void {

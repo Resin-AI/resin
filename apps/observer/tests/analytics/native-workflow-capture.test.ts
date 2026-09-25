@@ -8,6 +8,7 @@ import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/a
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import {
   NormalizedSessionEventSchema,
+  RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   isSubstantiveComputationEvidence,
   readComputationEvidence,
@@ -2143,7 +2144,15 @@ describe("native Codex rollout workflow and computation capture", () => {
     }
     const commandEvent = events.find((entry) => entry.type === "command_exec");
     expect(commandEvent?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
-    expect(JSON.stringify(events)).not.toContain("exact output");
+    // The bash login wrapper is unwrapped: naming sees the script; the recorded output never leaves.
+    expect(commandEvent?.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: command,
+      truncated: false,
+    });
+    expect(JSON.stringify(events).replace(JSON.stringify(command), "")).not.toContain(
+      "exact output",
+    );
     const recipe = recordCallsFromEvents(sessionId, events);
     const step = recipe?.workflow.steps[0];
     expect(step?.callId).toBe("exec-independent");

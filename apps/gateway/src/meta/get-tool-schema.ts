@@ -9,7 +9,7 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
-import { isToolInScope } from "./search-tools.js";
+import { type LocalToolDescriber, describeToolLocally, isToolInScope } from "./search-tools.js";
 
 export interface ToolProvenance {
   manifestDigest: string;
@@ -46,7 +46,10 @@ export interface GetToolSchemaParams {
 /**
  * Factory for creating the get_tool_schema handler.
  */
-export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler {
+export function createGetToolSchemaHandler(
+  registry: ToolRegistry,
+  describer?: LocalToolDescriber,
+): ToolHandler {
   return async (context: WorkspaceContext, params: JsonRpcParams): Promise<CallToolResult> => {
     const toolIdOrName =
       (params.toolId && Object.prototype.toString.call(params.toolId) === "[object String]"
@@ -227,7 +230,7 @@ export function createGetToolSchemaHandler(registry: ToolRegistry): ToolHandler 
       version: resolvedTool.version,
       scope: resolvedTool.scope ?? "workspace",
       status: isDisabled ? "disabled" : resolvedTool.status || "active",
-      description: resolvedTool.description || resolvedTool.manifest?.description || "",
+      description: describeToolLocally(resolvedTool, context, describer),
       inputSchema,
       outputSchema,
       capabilities,

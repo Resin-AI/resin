@@ -68,13 +68,13 @@ Resin manages data through explicit state transitions for revocation, export, re
 
 Before any event or diagnostic metadata is written to cloud storage or diagnostic bundles:
 
-- **Secret & Token Redaction**: Scans for JWTs, Bearer tokens, GitHub PATs, AWS access keys, Anthropic/OpenAI API keys, and private key headers.
+- **Secret & Token Redaction**: Scans for JWTs, Bearer tokens, GitHub PATs, AWS access keys, Anthropic/OpenAI API keys, private key headers, credential assignments, and passwords passed as command-line arguments (`--password V`, `--token=V`, `sshpass -p V`, `docker login -p V`, `redis-cli -a V`, `mysql -pV`).
 - **Path & Username Redaction**: Normalizes local file paths (e.g. `/Users/alice/projects/app` → `~/app`) to prevent username leakage.
 - **High-Entropy Filtering**: Filters unstructured high-entropy strings exceeding Shannon entropy thresholds.
 
 ### Metadata-only evidence: what the cloud receives per event
 
-The default `metadata-only` redaction strategy is a deterministic projection, not a filter. Every uploaded event is rebuilt from an allowlist of operational fields; nothing else is copied. Most normalized fields use a value-free vocabulary (`apps/observer/src/analytics/evidence-normalization.ts`). Recorded-program source projections are an explicit exception: their engine-redacted views preserve non-secret code and literal values.
+The default `metadata-only` redaction strategy is a deterministic projection, not a filter. Every uploaded event is rebuilt from an allowlist of operational fields; nothing else is copied. Most normalized fields use a value-free vocabulary (`apps/observer/src/analytics/evidence-normalization.ts`). Recorded-program source projections and native command lines are explicit exceptions: their engine-redacted views preserve non-secret code and literal values.
 
 | Event | Kept verbatim | Normalized on device | Dropped |
 |---|---|---|---|
@@ -84,7 +84,7 @@ The default `metadata-only` redaction strategy is a deterministic projection, no
 | `tool_call` (recorded JavaScript, TypeScript, or Python program) | tool name | program source → engine-redacted, canonical-token-aligned view; local original → opaque `sourceReference`; changed token indexes → `protectedTokens` | original private source and store entries; source without trusted scanning, complete parsing, or token alignment |
 | `tool_call` (everything else) | tool name | parameter *shape* only (key names and primitive types) | all values |
 | `tool_result` | tool name, error flag, duration, output size | incomplete or unverified result → value-free suppression flag | result body, raw native outcome metadata |
-| `command_exec` | exit code, duration | `command` → command profile (as above) | args, cwd, stdout, stderr |
+| `command_exec` | exit code, duration | `command` → command profile (as above); the command line (a `bash -c`/`-lc` launcher's script, unwrapped) → engine-redacted naming text (`resinCommandTextV1`): secrets scrubbed, home directory → `~`, at most 2,000 characters, omitted when the redaction policy keeps `command` local | cwd, stdout, stderr, arguments outside the command line |
 | `file_edit` | operation, before/after hashes, diff line counts | `filePath` → path pattern | patch |
 | `error` | error type, recoverable flag | — | message, stack, details |
 
@@ -92,7 +92,7 @@ The suppression marker (`__resinLocalWorkflowResultSuppressedV1: true`) survives
 
 A projected program template carries both `sourceReference` and `protectedTokens` alongside its redacted literal `source`; the callable's source mirrors that view. The reference is declared in `privateReferences` and resolves to the complete original in the local workspace's private store. Runtime binding and program identity resolve and align the original before using canonical token indexes. Missing or non-string originals, changed alignment, or bindings to protected tokens fail closed: the scrubbed view is never an executable fallback. Shell programs remain opaque because their conservative lexer cannot establish the required parseability.
 
-Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. These command/path profiles disclose tool, flag, file, and directory names without their argument values. Recorded-program projections additionally disclose redacted code and non-secret literal values; raw prompts, outputs, original private source, and private store entries remain local. `redaction.redactionStrategy` records whether sensitive fields were `drop`ped or normalized (`mask`).
+Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. These command/path profiles disclose tool, flag, file, and directory names without their argument values. Recorded-program projections additionally disclose redacted code and non-secret literal values. A native command such as `bash -lc 'mysql -pS3cret -e "select 1" && python3 check.py'` additionally uploads its engine-redacted line, `mysql -p[REDACTED_CREDENTIAL:…] -e "select 1" && python3 check.py`; the cloud sends that text to the configured model provider to name and describe tools learned from the command. Raw prompts, outputs, original private source, and private store entries remain local. `redaction.redactionStrategy` records whether sensitive fields were `drop`ped or normalized (`mask`).
 
 ---
 
@@ -104,7 +104,7 @@ Resin transmits data only to third-party services configured and necessary for h
 |---|---|---|---|---|
 | **Google Identity Services** | Single Sign-On / Authentication | OpenID profile, email, authentication tokens | Global / US | Consented at user sign-in |
 | **GitHub OAuth** | Code repository identity & auth | GitHub user ID, username, email | Global / US | Consented at account linking |
-| **Model Inference Providers** (e.g. OpenRouter, OpenAI, Anthropic) | Model evaluation & tool synthesis | Sanitized prompts, structural capability schemas (no raw session files) | Selected per environment configuration | Consented on running evolution/synthesis tasks |
+| **Model Inference Providers** (e.g. OpenRouter, OpenAI, Anthropic) | Model evaluation, tool synthesis, and learned-tool naming | Sanitized prompts, structural capability schemas, engine-redacted recorded-program views and command lines (no raw session files) | Selected per environment configuration | Consented on running evolution/synthesis tasks |
 | **Cloud Storage Provider** (Configured S3-compatible / MinIO) | Cloud evidence & artifact store | Encrypted sanitized evidence bundles, qualified tool binaries | Configured deployment region | Required for cloud workspace synchronization |
 
 *Note: Enterprise or self-hosted deployments may substitute or disable external cloud subprocessors entirely.*

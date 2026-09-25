@@ -75,6 +75,8 @@ Search the active and canary tool catalog by keywords, semantic intent, tags, or
 }
 ```
 
+For a learned tool that replays recorded programs, the description in `search_tools` and `get_tool_schema` results ends with the program each step runs (up to 600 characters per step), and queries also match that text. The program is resolved on this machine from the local private store, only for the workspace that recorded it; it is never uploaded.
+
 ---
 
 ## 2. `get_tool_schema`

@@ -38,6 +38,7 @@ import {
   createToolProtocolAdapter,
 } from "@resin/runtime";
 import { composedResultValue } from "../meta/invoke-tool.js";
+import type { LocalToolDescriber } from "../meta/search-tools.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -169,6 +170,14 @@ function memoizedConnections(
     opening.set(name, attempt);
     return await attempt;
   };
+}
+
+/** Local discovery detail for cached learned tools: the recorded program each one runs. */
+function recordedProgramDescriber(executor: LocalArtifactExecutor): LocalToolDescriber {
+  return (tool, context) =>
+    tool.artifactDigest === undefined
+      ? undefined
+      : executor.describeRecordedWorkflow(tool.artifactDigest, context);
 }
 
 function workspaceRootFromContext(workspace: WorkspaceContext | undefined): string | undefined {
@@ -362,6 +371,7 @@ export async function createProductionProxyRuntime(
         },
       });
     executor.setManagedToolAccess(managedToolAccess);
+    options.registry?.setLocalToolDescriber(recordedProgramDescriber(executor));
     routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
@@ -670,6 +680,7 @@ export async function createProductionProxyRuntime(
       resinHome: paths.homeDir,
     });
   localExecutor.setManagedToolAccess(managedToolAccess);
+  options.registry?.setLocalToolDescriber(recordedProgramDescriber(localExecutor));
 
   // Persisted positive denial remains effective even if credentials are now unavailable.
   try {

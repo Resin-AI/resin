@@ -49,6 +49,7 @@ export * from "./deterministic-command-sequence.js";
 export * from "./tool-link-evidence.js";
 // Bounded assistant-turn completion metadata and correction envelope
 export * from "./codex-command.js";
+export * from "./command-text.js";
 export * from "./assistant-stop-reason.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {

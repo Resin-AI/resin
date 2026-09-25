@@ -53,6 +53,26 @@ export interface SearchToolsParams {
 }
 
 /**
+ * Local-only detail about what a tool runs, such as a learned tool's recorded program. It is
+ * resolved on this machine for the local agent's discovery and never uploaded.
+ */
+export type LocalToolDescriber = (
+  tool: RegistryTool,
+  context: WorkspaceContext,
+) => string | undefined;
+
+/** The description an agent sees: the catalog's, followed by any local detail. */
+export function describeToolLocally(
+  tool: RegistryTool,
+  context: WorkspaceContext,
+  describer?: LocalToolDescriber,
+): string {
+  const catalog = tool.description || tool.manifest.description || "";
+  const local = describer?.(tool, context);
+  return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
+}
+
+/**
  * Summarizes tool capability manifest into a human and agent-readable summary.
  */
 export function summarizeCapabilities(caps?: CapabilityManifest): CapabilitySummary {
@@ -202,6 +222,7 @@ export function isToolInScope(tool: RegistryTool, context: WorkspaceContext): bo
  */
 function computeToolScore(
   tool: RegistryTool,
+  description: string,
   queryLower: string,
   tags: string[],
   isPinned: boolean,
@@ -213,7 +234,7 @@ function computeToolScore(
   let score = 0;
   const nameLower = (tool.exposedName || tool.name).toLowerCase();
   const rawNameLower = tool.name.toLowerCase();
-  const descLower = (tool.description || tool.manifest.description || "").toLowerCase();
+  const descLower = description.toLowerCase();
 
   // Exact name match
   if (nameLower === queryLower || rawNameLower === queryLower) {
@@ -267,7 +288,10 @@ function computeToolScore(
 /**
  * Factory for creating the search_tools handler.
  */
-export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
+export function createSearchToolsHandler(
+  registry: ToolRegistry,
+  describer?: LocalToolDescriber,
+): ToolHandler {
   return async (
     context: WorkspaceContext,
     params: JsonRpcParams,
@@ -377,7 +401,8 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
         }
       }
 
-      const score = computeToolScore(tool, query, tags, isPinned);
+      const description = describeToolLocally(tool, context, describer);
+      const score = computeToolScore(tool, description, query, tags, isPinned);
 
       // If query was specified, exclude tools that didn't match at all
       if (query && score <= 0) {
@@ -390,7 +415,7 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
         version: tool.version,
         scope: tool.scope ?? "workspace",
         status: isDisabled ? "disabled" : tool.status || "active",
-        description: tool.description || tool.manifest.description || "",
+        description,
         tags,
         capabilities: capSummary,
         isPinned,

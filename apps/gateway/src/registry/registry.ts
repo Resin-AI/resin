@@ -27,6 +27,7 @@ import {
   type SafetyGateEvaluator,
 } from "@resin/runtime";
 import {
+  type LocalToolDescriber,
   type ToolInvocationRouter,
   createInvocationRecorder,
   createSystemMetaTools,
@@ -468,6 +469,7 @@ export class ToolRegistry {
   private readonly latestVersions = new Map<string, string>();
   private invocationRouter?: ToolInvocationRouter;
   private safetyGateEvaluator?: SafetyGateEvaluator;
+  private localToolDescriber?: LocalToolDescriber;
   // Scope activations: scopeKey -> Map<toolId, version>
   // System scope
   private readonly systemActiveTools = new Map<string, string>();
@@ -603,6 +605,12 @@ export class ToolRegistry {
     this.initSystemMetaTools();
   }
 
+  /** Installs local-only discovery detail, such as the recorded program a learned tool runs. */
+  setLocalToolDescriber(describer: LocalToolDescriber): void {
+    this.localToolDescriber = describer;
+    this.initSystemMetaTools();
+  }
+
   getSafetyGateEvaluator(): SafetyGateEvaluator | undefined {
     return this.safetyGateEvaluator;
   }
@@ -617,6 +625,7 @@ export class ToolRegistry {
       this.invocationRouter,
       this.safetyGateEvaluator,
       this.onInvocationRecorded,
+      this.localToolDescriber,
     );
     for (const tool of metaTools) {
       this.registerToolSync(tool);

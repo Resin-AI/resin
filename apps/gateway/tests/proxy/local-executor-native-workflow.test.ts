@@ -213,6 +213,75 @@ describe("recorded workflows of ordinary calls", () => {
     expect(result.content[0]?.text).toContain("3");
   });
 
+  it("describes a cached recorded program only to the workspace that recorded it", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const program = "python3 -m pytest tests/test_grouping.py -q";
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:0", program, { workspaceId: context.workspaceId });
+    const installed = await installPlan(
+      {
+        id: "tool_process_described",
+        name: "wf_process_described",
+        version: "1.0.0",
+        description: "recorded process program",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_described",
+        inputs: [],
+        privateReferences: ["private:sess:0"],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_1",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: { type: "private", reference: "private:sess:0" },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
+      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}`,
+    );
+    const otherDir = path.join(tempDir, "other-workspace");
+    fs.mkdirSync(otherDir);
+    const other = resolveWorkspaceContext({ cwd: otherDir });
+    expect(other.workspaceId).not.toBe(context.workspaceId);
+    expect(executor.describeRecordedWorkflow(installed.artifactDigest, other)).toBeUndefined();
+  });
+
   it("refuses to run a recorded program the manifest does not grant", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const context = resolveWorkspaceContext({ cwd: workspaceDir });

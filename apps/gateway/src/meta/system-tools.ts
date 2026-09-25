@@ -14,7 +14,7 @@ import { createGetToolSchemaHandler } from "./get-tool-schema.js";
 import { createInvokeToolHandler } from "./invoke-tool.js";
 import { createManageToolsHandler } from "./manage-tools.js";
 import { DefaultToolInvocationRouter, type ToolInvocationRouter } from "./router-contract.js";
-import { createSearchToolsHandler } from "./search-tools.js";
+import { type LocalToolDescriber, createSearchToolsHandler } from "./search-tools.js";
 
 export const SYSTEM_META_TOOL_IDS = {
   SEARCH_TOOLS: "sys_search_tools",
@@ -345,6 +345,7 @@ export function createSystemMetaTools(
   invocationRouter?: ToolInvocationRouter,
   safetyGateEvaluator?: SafetyGateEvaluator,
   onInvocationRecorded?: (record: InvocationRecord) => Promise<void>,
+  localToolDescriber?: LocalToolDescriber,
 ): RegistryTool[] {
   const router = invocationRouter ?? new DefaultToolInvocationRouter(registry);
 
@@ -359,7 +360,7 @@ export function createSystemMetaTools(
     // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
     parameters: SEARCH_TOOLS_MANIFEST.parameters as JsonRpcParams,
     manifest: SEARCH_TOOLS_MANIFEST,
-    handler: createSearchToolsHandler(registry),
+    handler: createSearchToolsHandler(registry, localToolDescriber),
     isSystem: true,
   };
 
@@ -374,7 +375,7 @@ export function createSystemMetaTools(
     // SAFETY: System tool manifest parameters conform to JSON-RPC parameter record structure.
     parameters: GET_TOOL_SCHEMA_MANIFEST.parameters as JsonRpcParams,
     manifest: GET_TOOL_SCHEMA_MANIFEST,
-    handler: createGetToolSchemaHandler(registry),
+    handler: createGetToolSchemaHandler(registry, localToolDescriber),
     isSystem: true,
   };
 

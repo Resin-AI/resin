@@ -16,6 +16,7 @@ import {
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   RESIN_CODEX_COMMAND_METADATA_KEY,
+  RESIN_COMMAND_TEXT_METADATA_KEY,
   nowIso,
   readCodexCommandMetadata,
 } from "@resin/contracts";
@@ -276,7 +277,7 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
   });
 
-  it("projects command_exec event: masks command into a value-free profile, drops args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
+  it("projects command_exec event: masks command into a value-free profile, carries the command line only as naming text, drops args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
     const original: NormalizedCommandExecEvent = {
       ...createBaseHeaders(6),
       type: "command_exec",
@@ -308,7 +309,16 @@ describe("projectEventToMetadataOnly", () => {
     expect(projected.redaction.redactedFields).toContain("cwd");
     expect(projected.redaction.redactedFields).toContain("stdout");
     expect(projected.redaction.redactedFields).toContain("stderr");
-    const serialized = JSON.stringify(projected);
+    // The command line (already secret-scrubbed by normalization) is the one value that leaves,
+    // and only as naming text; every other field stays value-free.
+    expect(projected.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: original.command,
+      truncated: false,
+    });
+    const { [RESIN_COMMAND_TEXT_METADATA_KEY]: _commandText, ...otherMetadata } =
+      projected.metadata ?? {};
+    const serialized = JSON.stringify({ ...projected, metadata: otherMetadata });
     for (const marker of [
       "hunter2secret",
       "SECRET_TOKEN_XYZ",
@@ -826,7 +836,20 @@ describe("projectEventToMetadataOnly", () => {
     ];
 
     const projected = events.map((e) => projectEventToMetadataOnly(e));
-    const serialized = JSON.stringify(projected);
+    // The command line is carried only as naming text; everything else must be value-free.
+    const commandEvent = projected.find((event) => event.type === "command_exec");
+    expect(commandEvent?.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: `${secretMarkers[5]} ${secretMarkers[5]}`,
+      truncated: false,
+    });
+    const serialized = JSON.stringify(
+      projected.map((event) => {
+        const { [RESIN_COMMAND_TEXT_METADATA_KEY]: _commandText, ...metadata } =
+          event.metadata ?? {};
+        return { ...event, metadata };
+      }),
+    );
 
     for (const marker of secretMarkers) {
       expect(serialized).not.toContain(marker);
