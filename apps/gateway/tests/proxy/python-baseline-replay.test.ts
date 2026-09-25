@@ -2,12 +2,22 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type RecordedWorkflow, workflowValidationPlanDigest } from "@resin/contracts";
-import { InMemoryPrivateValueStore } from "@resin/observer";
+import {
+  type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  type WorkflowJsonValue,
+  workflowValidationPlanDigest,
+} from "@resin/contracts";
+import { InMemoryPrivateValueStore, resolvePrivateReference } from "@resin/observer";
 import {
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
+  RuntimeAdapterRegistry,
+  applyConfirmedWorkflowBinding,
+  createProcessAdapter,
+  executeRecordedWorkflow,
+  recordedWorkflowInputSchema,
 } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -231,6 +241,58 @@ describe("fresh-process baseline replay", () => {
         expect(fs.readFileSync(path.join(projectDir, "input.txt"), "utf8")).toBe("recorded input");
         expect(fs.existsSync(path.join(projectDir, "replay-only.txt"))).toBe(false);
       }
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("confirms a program value as an optional input that keeps the recorded value when omitted", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shell-default-"));
+    try {
+      fs.writeFileSync(path.join(sourceRoot, "alpha.txt"), "alpha\n");
+      fs.writeFileSync(path.join(sourceRoot, "bravo.txt"), "bravo\n");
+      const { plan, privateValues } = shellRecording(
+        sourceRoot,
+        "cat alpha.txt",
+        "alpha\n",
+        "bash-login-native-v1",
+      );
+      const candidate: WorkflowBindingCandidate = {
+        stepId: "target",
+        argument: "cmd",
+        path: ["tokens", 1],
+        proposed: { kind: "input", name: "path", type: "string", recordedDefault: true },
+        reason: "native-data-argument",
+        missing: "one recording does not establish that this value varies",
+      };
+      plan.candidates = [candidate];
+
+      const result = await createWorkspaceSnapshotValidator(
+        () => ({ ready: true, root: sourceRoot }),
+        { workspaceId, privateValues, timeoutMs: 5_000 },
+      )(plan);
+      expect(result.verdicts.map(({ confirmed }) => confirmed)).toEqual([true]);
+
+      // The replay attests exactly the plan the cloud gets by applying the confirmed proposal.
+      const promoted = applyConfirmedWorkflowBinding(plan, candidate)!;
+      expect(result.verification?.replay?.planDigest).toBe(workflowValidationPlanDigest(promoted));
+      expect(recordedWorkflowInputSchema(promoted)).toMatchObject({
+        properties: { path: { type: "string" } },
+        required: [],
+      });
+
+      const adapters = new RuntimeAdapterRegistry();
+      adapters.register(createProcessAdapter({ cwd: sourceRoot }));
+      const run = (inputs: Record<string, WorkflowJsonValue>) =>
+        executeRecordedWorkflow(promoted, {
+          inputs,
+          adapters,
+          access: { workspaceId },
+          resolvePrivate: (reference) =>
+            resolvePrivateReference(privateValues, reference) as WorkflowJsonValue,
+        });
+      expect((await run({})).result).toBe("alpha\n");
+      expect((await run({ path: "bravo.txt" })).result).toBe("bravo\n");
     } finally {
       fs.rmSync(sourceRoot, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import type { NormalizedSessionEvent } from "@resin/contracts";
+import type { NormalizedSessionEvent, WorkflowBindingCandidate } from "@resin/contracts";
 import { NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { InMemoryPrivateValueStore } from "../../src/analytics/private-value-store.js";
@@ -75,7 +75,17 @@ describe("discovery describes the executor, not the generated workflow's inputs"
     });
   }
 
-  it("retains a schema-bearing repeat without suggesting a changing program token as input", () => {
+  /** Only optional recorded-default token proposals: nothing binds the command the schema names. */
+  function onlyRecordedDefaults(workflow: { candidates?: WorkflowBindingCandidate[] }): boolean {
+    return (workflow.candidates ?? []).every(
+      (candidate) =>
+        candidate.proposed.kind === "input" &&
+        candidate.proposed.recordedDefault === true &&
+        candidate.path[0] === "tokens",
+    );
+  }
+
+  it("retains a schema-bearing repeat without making the executor's command an input", () => {
     const { events } = record([
       executorDiscovery(),
       call(1, { command: RECORDED_PROGRAM }),
@@ -88,7 +98,8 @@ describe("discovery describes the executor, not the generated workflow's inputs"
       supportingEvents: events,
     })!.workflow;
     expect(workflow.steps.map((step) => step.callId)).toEqual(["call_1"]);
-    expect(workflow.candidates).toBeUndefined();
+    expect(onlyRecordedDefaults(workflow)).toBe(true);
+    expect(workflow.inputs).toEqual([]);
   });
 
   it("does not turn incompatible implementations into a full-command input fallback", () => {
@@ -103,7 +114,7 @@ describe("discovery describes the executor, not the generated workflow's inputs"
     const workflow = recordCallsFromEvents("different-programs", events.slice(1, 3), {
       supportingEvents: events,
     })!.workflow;
-    expect(workflow.candidates ?? []).toEqual([]);
+    expect(onlyRecordedDefaults(workflow)).toBe(true);
     expect(workflow.inputs).toEqual([]);
   });
 });

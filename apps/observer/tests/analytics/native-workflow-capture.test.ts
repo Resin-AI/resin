@@ -1157,8 +1157,9 @@ describe("a value embedded in a program an ordinary session ran", () => {
     // The record still says the call was a program, and which argument held its text.
     expect(carrier.program).toEqual({ kind: "shell", source: "", argument: "command" });
 
-    expect(carrier.candidates).toHaveLength(1);
-    const candidate = carrier.candidates![0]!;
+    const results = carrier.candidates!.filter((entry) => entry.proposed.kind === "result");
+    expect(results).toHaveLength(1);
+    const candidate = results[0]!;
     expect(candidate.argument).toBe("command");
     expect(candidate.path).toEqual(["tokens", 2]);
     expect(candidate.proposed).toEqual({ kind: "result", callId: "call_1", path: ["stdout"] });
@@ -1180,8 +1181,9 @@ describe("a value embedded in a program an ordinary session ran", () => {
 
     // The call the capture numbered `step1` keeps the position the capture gave the token: the
     // recording renumbers calls, and a token index is not a step identity.
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]).toMatchObject({
+    const results = workflow.candidates!.filter((entry) => entry.proposed.kind === "result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
       stepId: "step1",
       argument: "command",
       path: ["tokens", 2],

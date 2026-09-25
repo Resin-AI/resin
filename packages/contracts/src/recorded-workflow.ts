@@ -217,6 +217,11 @@ export type WorkflowBindingCandidate = {
         kind: "input";
         name: string;
         type: "string" | "number" | "boolean" | "object" | "array";
+        /**
+         * Promote as an optional input that defaults to the recorded token (see
+         * `RecordedWorkflow.inputs[].recordedDefault`). Only a program-token position qualifies.
+         */
+        recordedDefault?: true;
       };
   reason:
     | "equal-to-earlier-result"
@@ -306,6 +311,12 @@ export type RecordedWorkflow = {
     description?: string;
     /** The value to use when this caller input is omitted. */
     default?: WorkflowJsonValue;
+    /**
+     * The caller may omit this input, and then every program token it binds keeps the text the
+     * recording ran. One recording establishes this default, and the value stays in the local record:
+     * it never becomes part of the plan. Such an input is bound only by program-token holes.
+     */
+    recordedDefault?: true;
   }>;
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
@@ -732,6 +743,7 @@ export function validateRecordedWorkflow(value: unknown): {
   if (!inputs) errors.push("inputs must be an array");
   const inputNames = new Set<string>();
   const inputTypes = new Map<string, string>();
+  const recordedDefaults = new Set<string>();
   for (const input of inputs ?? []) {
     if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
       errors.push("every input needs a non-empty name");
@@ -754,6 +766,15 @@ export function validateRecordedWorkflow(value: unknown): {
           errors.push(`input ${input.name} default must be a JSON value`);
         } else if (!matchesWorkflowInputType(input.default, input.type)) {
           errors.push(`input ${input.name} default must match its recorded type '${input.type}'`);
+        }
+      }
+      if (Object.hasOwn(input, "recordedDefault")) {
+        if (input.recordedDefault !== true) {
+          errors.push(`input ${input.name} recordedDefault must be true when present`);
+        } else if (Object.hasOwn(input, "default")) {
+          errors.push(`input ${input.name} cannot have both a default and a recorded default`);
+        } else {
+          recordedDefaults.add(input.name);
         }
       }
     }
@@ -874,6 +895,10 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} argument ${argument.name} reads unknown input ${String(source.name)}`,
         );
+      } else if (source.kind === "input" && recordedDefaults.has(String(source.name))) {
+        errors.push(
+          `step ${step.id} argument ${argument.name} reads recorded-default input ${String(source.name)} outside a program token`,
+        );
       }
       if (source.kind === "result") {
         const stepRef = String(source.stepId);
@@ -902,7 +927,7 @@ export function validateRecordedWorkflow(value: unknown): {
       }
       if (source.kind === "template") {
         const problems: string[] = [];
-        const walk = (template: unknown, where: string): void => {
+        const walk = (template: unknown, where: string, holeBinding = false): void => {
           if (!isPlainObject(template)) {
             problems.push(`${where} is not a template node`);
             return;
@@ -914,6 +939,10 @@ export function validateRecordedWorkflow(value: unknown): {
             case "input":
               if (typeof template.name !== "string" || !inputNames.has(template.name)) {
                 problems.push(`${where} reads unknown input ${String(template.name)}`);
+              } else if (recordedDefaults.has(template.name) && !holeBinding) {
+                problems.push(
+                  `${where} reads recorded-default input ${template.name} outside a program token`,
+                );
               }
               return;
             case "result": {
@@ -1001,7 +1030,7 @@ export function validateRecordedWorkflow(value: unknown): {
                   problems.push(`${where} hole ${index} must name a recorded token index`);
                   continue;
                 }
-                walk(hole.binding, `${where}<token ${hole.token}>`);
+                walk(hole.binding, `${where}<token ${hole.token}>`, true);
               }
               return;
             }
@@ -1147,6 +1176,14 @@ export function validateRecordedWorkflow(value: unknown): {
         } else if (proposed.kind === "input") {
           if (typeof proposed.name !== "string" || proposed.name.length === 0) {
             errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
+          }
+          if (
+            Object.hasOwn(proposed, "recordedDefault") &&
+            (proposed.recordedDefault !== true || path[0] !== "tokens")
+          ) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} may propose a recorded default only for a program token`,
+            );
           }
           if (
             proposed.type !== "string" &&

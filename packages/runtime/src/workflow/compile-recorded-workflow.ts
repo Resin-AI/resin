@@ -19,6 +19,7 @@ import {
   type RecordedWorkflowExecution,
   type RuntimeAdapterRegistry,
   executeRecordedWorkflow,
+  recordedWorkflowInputSchema,
 } from "./recorded-workflow.js";
 
 export class RecordedWorkflowCompilationError extends Error {
@@ -167,33 +168,11 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
   const last = plan.steps[plan.steps.length - 1]!;
   const sinks = workflowSinkStepIds(plan);
 
-  const JSON_SCHEMA_TYPES: Record<string, string> = {
-    string: "string",
-    number: "number",
-    boolean: "boolean",
-    object: "object",
-    array: "array",
-  };
-  const properties: Record<string, unknown> = {};
-  for (const input of plan.inputs) {
-    properties[input.name] = {
-      type: JSON_SCHEMA_TYPES[input.type] ?? "string",
-      ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
-    };
-  }
-
   return {
     plan,
     digest: digestOf(plan),
     name: nameOf(plan),
-    inputSchema: {
-      type: "object",
-      properties,
-      required: plan.inputs
-        .filter((input) => !Object.hasOwn(input, "default"))
-        .map((input) => input.name),
-      additionalProperties: false,
-    },
+    inputSchema: recordedWorkflowInputSchema(plan),
     outputContract: {
       fromStep: last.id,
       callable: last.callable.name,

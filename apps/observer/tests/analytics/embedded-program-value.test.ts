@@ -168,7 +168,11 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates.filter((entry) => entry.stepId === "step2")).toEqual([]);
+    expect(
+      derivation.candidates.filter(
+        (entry) => entry.stepId === "step2" && entry.proposed.kind === "result",
+      ),
+    ).toEqual([]);
   });
 
   it("refuses a token no result ever produced", () => {
@@ -184,7 +188,48 @@ describe("a value embedded in a recorded program", () => {
       },
     ]);
 
-    expect(derivation.candidates.filter((entry) => entry.stepId === "step1")).toEqual([]);
+    expect(
+      derivation.candidates.filter(
+        (entry) => entry.stepId === "step1" && entry.proposed.kind === "result",
+      ),
+    ).toEqual([]);
+  });
+
+  it("offers a program's values as optional inputs named by flag or shape, never its structure", () => {
+    const shell = (callId: string, stepId: string, command: string) => ({
+      callId,
+      stepId,
+      toolName: "bash",
+      runtime: RESIN_PROCESS_RUNTIME,
+      arguments: { command },
+      program: { kind: "shell" as const, argument: "command" },
+    });
+    const derivation = deriveNativeCalls([
+      // python3(0) solve.py(1) --month(2) 2025-01(3) -v(4) 'EU zone'(5) status(6)
+      shell("call_1", "step0", "python3 solve.py --month 2025-01 -v 'EU zone' status"),
+      // wc(0) -l(1) solve.py(2), then a heredoc whose body is another program's text.
+      shell("call_2", "step1", "wc -l solve.py <<'EOF'\n--month 2030-12\nEOF"),
+    ]);
+
+    const offered = derivation.candidates.flatMap((candidate) =>
+      candidate.proposed.kind === "input"
+        ? [
+            [
+              candidate.stepId,
+              candidate.path[1],
+              candidate.proposed.name,
+              candidate.proposed.recordedDefault,
+            ],
+          ]
+        : [],
+    );
+    expect(offered).toEqual([
+      ["step0", 1, "path", true],
+      ["step0", 3, "month", true],
+      ["step0", 5, "text", true],
+      // The same value in a later call is the same input.
+      ["step1", 2, "path", true],
+    ]);
   });
 
   it("refuses a token shorter than the shortest candidate", () => {
@@ -265,7 +310,7 @@ describe("a value embedded in a recorded program", () => {
 
     expect(
       derivation.candidates
-        .filter((entry) => entry.stepId === "step1")
+        .filter((entry) => entry.stepId === "step1" && entry.proposed.kind === "result")
         .map((entry) => [entry.argument, entry.path]),
     ).toEqual([["command", ["tokens", 2]]]);
   });
@@ -335,25 +380,31 @@ it("keeps a repeated program's result-derived token binding without inferring an
     call(5, { command: REPEAT_PROGRAM }),
   ]);
 
+  // The repeat's changed token is explained by the earlier result, never inferred as a caller
+  // input; other values are offered only as optional inputs that keep the recorded text.
   const repeat = carrierOf(events[6]!)!;
-  expect(repeat.candidates?.map((candidate) => candidate.reason)).toEqual([
-    "equal-to-earlier-result",
+  expect(repeat.candidates?.filter((candidate) => candidate.path[1] === 2)).toMatchObject([
+    {
+      argument: "command",
+      path: ["tokens", 2],
+      proposed: { kind: "result", callId: "call_4", path: ["stdout"] },
+    },
   ]);
-  expect(repeat.candidates?.[0]).toMatchObject({
-    argument: "command",
-    path: ["tokens", 2],
-    proposed: { kind: "result", callId: "call_4", path: ["stdout"] },
-  });
+  expect(
+    repeat.candidates?.every(
+      (candidate) => candidate.proposed.kind === "result" || candidate.proposed.recordedDefault,
+    ),
+  ).toBe(true);
 
   const workflow = recordCallsFromEvents("wf_embedded_producer", events)!.workflow;
-  expect(workflow.candidates?.map((candidate) => candidate.reason)).toEqual([
-    "equal-to-earlier-result",
+  expect(workflow.candidates?.filter((candidate) => candidate.path[1] === 2)).toMatchObject([
+    {
+      stepId: "step1",
+      path: ["tokens", 2],
+      proposed: { kind: "result", stepId: "step0", path: ["stdout"] },
+    },
   ]);
-  expect(workflow.candidates?.[0]).toMatchObject({
-    stepId: "step1",
-    path: ["tokens", 2],
-    proposed: { kind: "result", stepId: "step0", path: ["stdout"] },
-  });
+  expect(workflow.inputs).toEqual([]);
 });
 
 it("reprojects Codex exec profiles through the frozen workflow carrier vocabulary", () => {

@@ -129,6 +129,8 @@ export interface WorkflowCallCandidate {
         kind: "input";
         name: string;
         type: "string" | "number" | "boolean" | "object" | "array";
+        /** Optional input that keeps the recorded token when omitted; token positions only. */
+        recordedDefault?: true;
       };
   reason:
     | "equal-to-earlier-result"
@@ -366,7 +368,12 @@ function readCandidate(value: unknown): WorkflowCallCandidate | undefined {
             : proposed.type === "array"
               ? "array"
               : "string";
-    read = { kind: "input", name: proposed.name, type };
+    read = {
+      kind: "input",
+      name: proposed.name,
+      type,
+      ...(proposed.recordedDefault === true ? { recordedDefault: true as const } : {}),
+    };
   }
   if (read === undefined) return undefined;
   const candidate: WorkflowCallCandidate = {

@@ -109,7 +109,14 @@ export function applyConfirmedWorkflowBinding(
     if (producer < 0 || producer >= stepIndex) return undefined;
   } else {
     const existing = plan.inputs.find((input) => input.name === proposed.name);
-    if (existing !== undefined && existing.type !== proposed.type) return undefined;
+    if (
+      existing !== undefined &&
+      (existing.type !== proposed.type ||
+        (existing.recordedDefault === true) !== (proposed.recordedDefault === true))
+    )
+      return undefined;
+    // A recorded default keeps the recorded token when omitted, so only a token can carry one.
+    if (proposed.recordedDefault === true && candidate.path[0] !== "tokens") return undefined;
   }
   const isToken = candidate.path[0] === "tokens";
   if (
@@ -152,7 +159,14 @@ export function applyConfirmedWorkflowBinding(
   steps[stepIndex] = { ...step, arguments: args };
   const inputs =
     proposed.kind === "input" && !plan.inputs.some((input) => input.name === proposed.name)
-      ? [...plan.inputs, { name: proposed.name, type: proposed.type }]
+      ? [
+          ...plan.inputs,
+          {
+            name: proposed.name,
+            type: proposed.type,
+            ...(proposed.recordedDefault === true ? { recordedDefault: true as const } : {}),
+          },
+        ]
       : plan.inputs;
   const candidates = plan.candidates?.filter(
     (entry) => candidateIdentity(entry) !== candidateIdentity(candidate),

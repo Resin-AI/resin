@@ -725,6 +725,21 @@ describe("recorded workflow validation", () => {
   });
 });
 
+describe("recorded-default inputs", () => {
+  it("are bound only inside program tokens and never also carry a default", () => {
+    const workflow = fourCallWorkflow();
+    // `fetch` reads `source` as its whole argument, which has no recorded token to keep.
+    workflow.inputs[0] = { name: "source", type: "string", recordedDefault: true };
+    expect(validateRecordedWorkflow(workflow).errors).toContain(
+      "step fetch argument source reads recorded-default input source outside a program token",
+    );
+    workflow.inputs[0] = { name: "source", type: "string", recordedDefault: true, default: "x" };
+    expect(validateRecordedWorkflow(workflow).errors).toContain(
+      "input source cannot have both a default and a recorded default",
+    );
+  });
+});
+
 describe("workflow sink steps", () => {
   it("returns a chain's final step but every output no later step consumes", () => {
     expect(workflowSinkStepIds(fourCallWorkflow())).toEqual(["upload"]);

@@ -37,6 +37,7 @@ import {
   RuntimeAdapterRegistry,
   type ToolProtocolDispatchRequest,
   type WorkflowPlanVerification,
+  applyConfirmedWorkflowBinding,
   createProcessAdapter,
   createProgramAdapter,
   createToolProtocolAdapter,
@@ -189,8 +190,25 @@ export function createLocalWorkflowValidator(
               step.callable.runtime === RESIN_PROCESS_RUNTIME),
         );
       const baselineOnly = plan.heldOut === undefined && plan.baseline !== undefined;
+      // One recording cannot show that a value varies, but it can offer the value as an optional
+      // input that keeps exactly what the recording ran when omitted. Those offers are applied first,
+      // in plan order as the cloud applies confirmed ones, and replaying that plan without them
+      // verifies the tool as a caller gets it by default.
+      let replayPlan = plan;
+      const recordedDefaults: WorkflowBindingCandidate[] = [];
+      if (baselineOnly) {
+        for (const candidate of candidates) {
+          if (candidate.proposed.kind !== "input" || candidate.proposed.recordedDefault !== true) {
+            continue;
+          }
+          const next = applyConfirmedWorkflowBinding(replayPlan, candidate);
+          if (next === undefined) continue;
+          replayPlan = next;
+          recordedDefaults.push(candidate);
+        }
+      }
       const environment = await demonstrationEnvironment({
-        plan: baselineOnly ? { ...plan, heldOut: plan.baseline } : plan,
+        plan: baselineOnly ? { ...replayPlan, heldOut: replayPlan.baseline } : plan,
         candidates: baselineOnly ? [] : candidates,
         adapters,
         workspaceId: replayWorkspaceId,
@@ -205,7 +223,7 @@ export function createLocalWorkflowValidator(
             "the selected workflow has no matching recorded demonstration; no replay or parameter decision was performed",
         };
       const decided = await validateAndConfirmCandidates({
-        plan,
+        plan: replayPlan,
         candidates: baselineOnly ? [] : candidates,
         environment,
       });
@@ -241,11 +259,17 @@ export function createLocalWorkflowValidator(
       }
       return {
         verdicts: (baselineOnly
-          ? candidates.map((candidate) => ({
-              candidate,
-              accepted: false,
-              reason: "the original baseline cannot establish a binding on different inputs",
-            }))
+          ? candidates.map((candidate) => {
+              const defaulted =
+                recordedDefaults.includes(candidate) && decided.verification?.status === "verified";
+              return {
+                candidate,
+                accepted: defaulted,
+                reason: recordedDefaults.includes(candidate)
+                  ? "the replay without this input did not reproduce the recording"
+                  : "the original baseline cannot establish a binding on different inputs",
+              };
+            })
           : decided.outcomes
         ).map((outcome) => ({
           candidate: {

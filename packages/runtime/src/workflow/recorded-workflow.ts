@@ -307,6 +307,10 @@ async function buildTemplate(
       }
       const values = new Map<number, string | number | boolean | null>();
       for (const hole of template.holes) {
+        // An omitted recorded-default input leaves the token exactly as the recording ran it.
+        if (hole.binding.type === "input" && !Object.hasOwn(options.inputs, hole.binding.name)) {
+          continue;
+        }
         const bound = await resolveLeaf(hole.binding);
         values.set(
           hole.token,
@@ -441,7 +445,7 @@ export async function executeRecordedWorkflow(
         );
       }
       inputs[input.name] = copyWorkflowJsonValue(input.default);
-    } else {
+    } else if (input.recordedDefault !== true) {
       throw new TypeError(`missing required workflow input '${input.name}'`);
     }
   }
@@ -543,7 +547,10 @@ export async function executeRecordedWorkflow(
   };
 }
 
-/** The input schema of a recorded workflow, with defaults optional and other inputs required. */
+/**
+ * The input schema of a recorded workflow. An input with a default, or one that defaults to the
+ * recorded token, is optional; every other input is required.
+ */
 export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<string, unknown> {
   const JSON_SCHEMA_TYPES: Record<string, string> = {
     string: "string",
@@ -554,9 +561,11 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
   };
   const properties: Record<string, unknown> = {};
   for (const input of workflow.inputs) {
+    const description =
+      input.description ?? (input.recordedDefault ? "Omit to use the recorded value." : undefined);
     properties[input.name] = {
       type: JSON_SCHEMA_TYPES[input.type] ?? "string",
-      ...(input.description ? { description: input.description } : {}),
+      ...(description ? { description } : {}),
       ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
     };
   }
@@ -564,7 +573,7 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
     type: "object",
     properties,
     required: workflow.inputs
-      .filter((input) => !Object.hasOwn(input, "default"))
+      .filter((input) => !Object.hasOwn(input, "default") && input.recordedDefault !== true)
       .map((input) => input.name),
     additionalProperties: false,
   };

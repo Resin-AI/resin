@@ -166,6 +166,7 @@ const ProposedBindingSchema = z.union([
     kind: z.literal("input"),
     name: NonEmptyString,
     type: z.enum(["string", "number", "boolean", "object", "array"]),
+    recordedDefault: z.literal(true).optional(),
   }),
 ]);
 

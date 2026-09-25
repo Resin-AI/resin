@@ -83,6 +83,12 @@ const MIN_CANDIDATE_STRING_LENGTH = 4;
 /** Distinct candidate bindings one recording may report, so a large session cannot explode. */
 const MAX_CANDIDATES = 256;
 
+/** Values one program call may offer as optional inputs, so a long command stays a short schema. */
+const MAX_PROGRAM_INPUTS_PER_CALL = 6;
+
+/** The longest program value offered as an input; longer text is program, not a parameter. */
+const MAX_PROGRAM_INPUT_LENGTH = 256;
+
 /** Bounded traversal of one argument or result, so a deep payload cannot stall capture. */
 const MAX_LEAF_DEPTH = 8;
 const MAX_LEAVES = 512;
@@ -122,6 +128,51 @@ function scalarKey(value: CandidateScalar): string {
 }
 
 /**
+ * Whether a program token is a value a caller may plausibly want to change: a quoted string, a
+ * flag's value, or a word shaped like a path or a number. Command names, flags and bare
+ * subcommands are structure, and never offered.
+ */
+function isProgramValue(
+  language: ProgramLanguage,
+  token: ProgramToken,
+  previous: ProgramToken | undefined,
+): token is ProgramToken & { value: string } {
+  if (!token.bindable || typeof token.value !== "string" || token.kind === "operator") return false;
+  const value = token.value;
+  if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH || value.startsWith("-")) {
+    return false;
+  }
+  if (value.startsWith("/dev/")) return false;
+  const shaped = /[/.\d]/.test(value);
+  if (language !== "shell") return token.kind === "string" && shaped;
+  return token.kind === "string" || shaped || longFlagName(previous) !== undefined;
+}
+
+function longFlagName(token: ProgramToken | undefined): string | undefined {
+  const flag = token?.kind === "word" ? /^--([A-Za-z][A-Za-z0-9-]{0,30})$/.exec(token.raw) : null;
+  return flag?.[1]?.toLowerCase().replace(/-/g, "_");
+}
+
+/** A readable input name for a program value: its flag's name, else what the value looks like. */
+function programInputBaseName(value: string, previous: ProgramToken | undefined): string {
+  const flag = longFlagName(previous);
+  if (flag !== undefined) return flag;
+  if (/^\d+(\.\d+)?$/.test(value)) return "number";
+  if (value.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(value)) return "path";
+  return "text";
+}
+
+/**
+ * The shell tokenizer does not establish heredoc-body syntax, so nothing from the first heredoc on
+ * is offered: body text is another program's source, not this command's arguments.
+ */
+function heredocStart(language: ProgramLanguage, text: string): number {
+  if (language !== "shell") return Number.POSITIVE_INFINITY;
+  const match = /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/.exec(text);
+  return match === null ? Number.POSITIVE_INFINITY : match.index;
+}
+
+/**
  * Derives, from a recorded call sequence, the dependencies and the candidate bindings it supports.
  *
  * The function is a pure function of what it is given: no clock, no filesystem, no execution, and
@@ -132,6 +183,12 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
   const candidates: WorkflowBindingCandidate[] = [];
   // Weak caller-input suggestions never consume slots reserved for result evidence.
   const inputCandidates: WorkflowBindingCandidate[] = [];
+  /**
+   * The input each program value was offered as, in order of first appearance, so the same value
+   * anywhere in the recording is one input and a name, once given, never changes as calls arrive.
+   */
+  const programInputs = new Map<string, string>();
+  const programInputNames = new Set<string>();
   /** Every typed primitive leaf shown before each call's result arrived. */
   const seenBeforeResult: Array<Set<string>> = [];
 
@@ -225,39 +282,72 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
     // position rather than the text the value happens to sit in. Only a word or a string is offered
     // — an operator denotes no value — and the same producer rule decides it, so a token that merely
     // repeats something the record already contained is not offered either.
-    if (call.program !== undefined && candidates.length < MAX_CANDIDATES) {
+    if (call.program !== undefined) {
       const text = call.arguments[call.program.argument];
-      if (typeof text === "string") {
-        let tokens: ProgramToken[];
-        try {
-          tokens = tokenizeProgram(call.program.kind, text);
-        } catch (error) {
-          if (error instanceof ProgramTokenizationError) continue;
-          throw error;
+      if (typeof text !== "string") continue;
+      let tokens: ProgramToken[];
+      try {
+        tokens = tokenizeProgram(call.program.kind, text);
+      } catch (error) {
+        if (error instanceof ProgramTokenizationError) continue;
+        throw error;
+      }
+      for (const [tokenIndex, token] of tokens.entries()) {
+        if (candidates.length >= MAX_CANDIDATES) break;
+        if (!token.bindable) continue;
+        const value = token.value;
+        if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
+        const producers = producersOfValue(value, index, calls, resultValues, seenBeforeResult);
+        if (producers.length === 0) continue;
+        const first = producers[0]!;
+        candidates.push({
+          stepId: call.stepId,
+          argument: call.program.argument,
+          path: ["tokens", tokenIndex],
+          proposed: { kind: "result", stepId: first.stepId, path: first.path },
+          reason: "equal-to-earlier-result",
+          // Structural only: how many tokens the program has, which one this is, and how many
+          // calls returned the value. The token's text never leaves the recording.
+          evidence: { tokens: tokens.length, token: tokenIndex, producers: producers.length },
+          missing:
+            producers.length > 1
+              ? `the record shows ${producers.length} earlier calls returning this value, so it does not establish which one this token came from`
+              : "the token's text first appeared after that call returned, but the record does not show this token was rendered from its result rather than written into the program as a literal",
+        });
+      }
+
+      // A value the program ran with can be offered as an optional input that defaults to exactly
+      // what the recording ran. One recording cannot show that the value varies, but omitting the
+      // input reproduces the recording, so the offer is safe to confirm by replaying it unchanged.
+      const bodyStart = heredocStart(call.program.kind, text);
+      const offered = new Set<string>();
+      for (const [tokenIndex, token] of tokens.entries()) {
+        if (inputCandidates.length >= MAX_CANDIDATES || token.start >= bodyStart) break;
+        const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
+        if (!isProgramValue(call.program.kind, token, previous)) continue;
+        const key = scalarKey(token.value);
+        let name = programInputs.get(key);
+        if (name === undefined) {
+          if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
+          const base = programInputBaseName(token.value, previous);
+          name = base;
+          for (let suffix = 2; programInputNames.has(name); suffix += 1) name = `${base}_${suffix}`;
+          programInputs.set(key, name);
+          programInputNames.add(name);
+        } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
+          continue;
         }
-        for (const [tokenIndex, token] of tokens.entries()) {
-          if (candidates.length >= MAX_CANDIDATES) break;
-          if (!token.bindable) continue;
-          const value = token.value;
-          if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
-          const producers = producersOfValue(value, index, calls, resultValues, seenBeforeResult);
-          if (producers.length === 0) continue;
-          const first = producers[0]!;
-          candidates.push({
-            stepId: call.stepId,
-            argument: call.program.argument,
-            path: ["tokens", tokenIndex],
-            proposed: { kind: "result", stepId: first.stepId, path: first.path },
-            reason: "equal-to-earlier-result",
-            // Structural only: how many tokens the program has, which one this is, and how many
-            // calls returned the value. The token's text never leaves the recording.
-            evidence: { tokens: tokens.length, token: tokenIndex, producers: producers.length },
-            missing:
-              producers.length > 1
-                ? `the record shows ${producers.length} earlier calls returning this value, so it does not establish which one this token came from`
-                : "the token's text first appeared after that call returned, but the record does not show this token was rendered from its result rather than written into the program as a literal",
-          });
-        }
+        offered.add(name);
+        inputCandidates.push({
+          stepId: call.stepId,
+          argument: call.program.argument,
+          path: ["tokens", tokenIndex],
+          proposed: { kind: "input", name, type: "string", recordedDefault: true },
+          reason: "native-data-argument",
+          evidence: { tokens: tokens.length, token: tokenIndex },
+          missing:
+            "one recording does not establish that this value varies; omitted, the input keeps the recorded value",
+        });
       }
     }
   }
