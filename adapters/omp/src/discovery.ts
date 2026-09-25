@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import os from "node:os";
@@ -1648,5 +1649,9 @@ export function createWorkspaceIdFromPath(workspacePath: string): string {
     .replace(/[^a-zA-Z0-9_-]/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
-  return clean || "workspace-root";
+  if (clean.length <= 128) return clean || "workspace-root";
+
+  // Preserve the readable prefix while distinguishing paths that differ beyond the limit.
+  const suffix = createHash("sha256").update(workspacePath).digest("hex").slice(0, 32);
+  return `${clean.slice(0, 128 - suffix.length - 1)}-${suffix}`;
 }
