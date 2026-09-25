@@ -77,6 +77,10 @@ Search the active and canary tool catalog by keywords, semantic intent, tags, or
 
 For a learned tool that replays recorded programs, the description in `search_tools` and `get_tool_schema` results ends with the program each step runs (up to 600 characters per step), and queries also match that text. The program is resolved on this machine from the local private store, only for the workspace that recorded it; it is never uploaded.
 
+`search_tools` lists workspace tools; Resin's own meta-tools appear only with `"scope": "system"`. Each match includes the tool's `inputSchema`, so a caller can invoke it without a separate `get_tool_schema` call.
+
+A learned tool may take optional parameters for values its recorded programs ran with, such as a file path or a flag's value. Omit a parameter to run the recorded value; pass one to substitute it at that position. Parameter names come from the flag (`--month` → `month`) or the value's shape (`path`, `number`, `text`); the recorded value itself stays on this machine.
+
 ---
 
 ## 2. `get_tool_schema`
@@ -168,6 +172,8 @@ Execute a registered tool inside an isolated worker sandbox subject to the activ
   }
 }
 ```
+
+When a tool's result is text, `invoke_tool` returns the text itself rather than an escaped JSON string. A learned tool that runs several independent commands returns every command's output in recorded order, one section per step (`--- step 1/3 ---`).
 
 ---
 

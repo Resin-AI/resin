@@ -94,6 +94,8 @@ A projected program template carries both `sourceReference` and `protectedTokens
 
 Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` uploads as `git commit -m $STR && pnpm test $TEST_FILE`; `/home/alice/work/repo/src/auth/login.ts` uploads as `…/repo/src/auth/login.ts`. These command/path profiles disclose tool, flag, file, and directory names without their argument values. Recorded-program projections additionally disclose redacted code and non-secret literal values. A native command such as `bash -lc 'mysql -pS3cret -e "select 1" && python3 check.py'` additionally uploads its engine-redacted line, `mysql -p[REDACTED_CREDENTIAL:…] -e "select 1" && python3 check.py`; the cloud sends that text to the configured model provider to name and describe tools learned from the command. Raw prompts, outputs, original private source, and private store entries remain local. `redaction.redactionStrategy` records whether sensitive fields were `drop`ped or normalized (`mask`).
 
+A learned tool's optional parameters are named from structure only: a long flag's name (`--month` → `month`) or the recorded value's shape (`path`, `number`, `text`). The value is never uploaded; its token position is, and an omitted parameter re-runs the recorded text from the local private store.
+
 ---
 
 ## 5. Configured Subprocessors & Consent Boundaries
