@@ -150,6 +150,7 @@ interface SessionDerivationState {
    * uniformly, and the turn index a transcript may carry is not set by every decoder.
    */
   newExecutionPending: boolean;
+  nativeOutputs: Map<string, { stdout: string; exitCode: number }>;
 }
 
 /** Observed calls kept per session for derivation. */
@@ -229,6 +230,7 @@ export class WorkflowCallRecorder {
       position: 0,
       executions: [],
       baseline: new Map(),
+      nativeOutputs: new Map(),
       newExecutionPending: false,
     };
     this.sessions.set(sessionId, created);
@@ -323,6 +325,51 @@ export class WorkflowCallRecorder {
       this.sessionState(event.sessionId).newExecutionPending = true;
       return event;
     }
+    if (event.type === "command_exec") {
+      const command = readCodexCommandMetadata(event.metadata);
+      if (command?.kind !== "command") return event;
+      const raw = localWorkflowEvent(event);
+      if (
+        raw?.type !== "command_exec" ||
+        typeof raw.stdout !== "string" ||
+        !Number.isInteger(raw.exitCode)
+      )
+        return event;
+      const state = this.sessionState(event.sessionId);
+      state.nativeOutputs.set(command.nativeId, { stdout: raw.stdout, exitCode: raw.exitCode });
+      while (state.nativeOutputs.size > MAX_LOCAL_CALLS) {
+        const oldest = state.nativeOutputs.keys().next();
+        if (oldest.done) break;
+        state.nativeOutputs.delete(oldest.value);
+      }
+      const association = command.association;
+      if (association === undefined || association.nativeCommandId !== command.nativeId)
+        return event;
+      const reference =
+        raw.exitCode === 0
+          ? this.localReference(
+              raw.stdout,
+              event.sessionId,
+              association.callId,
+              "native-result:v1:text-trim",
+            )
+          : undefined;
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          [RESIN_WORKFLOW_RESULT_METADATA_KEY]: {
+            ...(reference === undefined
+              ? {}
+              : {
+                  baselineReference: reference,
+                  baselineComparison: "text-trim",
+                }),
+            output: { type: "string", hasContent: raw.stdout.length > 0 },
+          },
+        },
+      };
+    }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
       const source = original ?? event;
@@ -330,32 +377,22 @@ export class WorkflowCallRecorder {
         source.type === "tool_result" && source.toolName === "exec"
           ? readCodexCommandMetadata(source.metadata)
           : undefined;
-      const parts =
-        source.type === "tool_result" && Array.isArray(source.result) ? source.result : undefined;
-      const first = parts?.[0];
-      const control =
-        first && typeof first === "object" && "text" in first ? first.text : undefined;
-      const printed = parts
-        ?.slice(1)
-        .map((part) =>
-          part && typeof part === "object" && "text" in part && typeof part.text === "string"
-            ? part.text
-            : "",
-        )
-        .join("");
+      const native =
+        codex?.kind === "result" && codex.association !== undefined
+          ? this.sessionState(event.sessionId).nativeOutputs.get(codex.association.nativeCommandId)
+          : undefined;
       const codexObservation =
         codex?.kind === "result" &&
         codex.form === "single-command-output" &&
         codex.status !== "yielded" &&
-        typeof control === "string" &&
-        (control.startsWith("Script completed") || control.startsWith("Script failed")) &&
-        printed !== undefined
-          ? { result: printed, comparison: "text-trim" as const }
+        native !== undefined
+          ? { result: native.stdout, comparison: "text-trim" as const }
           : undefined;
       const observed = this.observeResult(
         source,
         event,
-        codexObservation ?? localWorkflowResultObservation(event),
+        codex?.kind === "result" ? codexObservation : localWorkflowResultObservation(event),
+        codex?.kind === "result" && (native === undefined || native.exitCode !== 0),
       );
       return { ...event, metadata: observed.metadata };
     }
@@ -1038,9 +1075,13 @@ export class WorkflowCallRecorder {
     event: NormalizedSessionEvent,
     publicEvent: NormalizedSessionEvent = event,
     localResultObservation?: { result: string; comparison?: "text-trim" },
+    suppressResult = false,
   ): NormalizedSessionEvent {
     let baselineReference: string | undefined;
     let baselineComparison: "text-trim" | undefined;
+    let output:
+      | { type: "null" | "boolean" | "number" | "string" | "array" | "object"; hasContent: boolean }
+      | undefined;
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -1049,7 +1090,37 @@ export class WorkflowCallRecorder {
         const execution = state.executions[e]!;
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
-        call.result = extractResultValueOf(localResultObservation?.result ?? event.result);
+        call.result = suppressResult
+          ? undefined
+          : extractResultValueOf(localResultObservation?.result ?? event.result);
+        const actual = suppressResult
+          ? undefined
+          : (localResultObservation?.result ?? event.result);
+        if (actual !== undefined) {
+          const type = actual === null ? "null" : Array.isArray(actual) ? "array" : typeof actual;
+          if (
+            type === "null" ||
+            type === "boolean" ||
+            type === "number" ||
+            type === "string" ||
+            type === "array" ||
+            type === "object"
+          ) {
+            output = {
+              type,
+              hasContent:
+                type === "null"
+                  ? false
+                  : type === "string"
+                    ? (actual as string).length > 0
+                    : type === "array"
+                      ? (actual as unknown[]).length > 0
+                      : type === "object"
+                        ? Object.keys(actual as object).length > 0
+                        : true,
+            };
+          }
+        }
         call.resultComparison = localResultObservation?.comparison;
         call.resultReference =
           call.result === undefined
@@ -1062,7 +1133,7 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (event.isError === false) {
+        if (event.isError === false && !suppressResult) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
         }
@@ -1092,7 +1163,8 @@ export class WorkflowCallRecorder {
       handle === undefined &&
       heldOut === undefined &&
       baselineReference === undefined &&
-      baselineComparison === undefined
+      baselineComparison === undefined &&
+      output === undefined
     ) {
       return event;
     }
@@ -1101,6 +1173,7 @@ export class WorkflowCallRecorder {
       ...(handle === undefined ? {} : { handle }),
       ...(heldOut === undefined ? {} : { heldOut }),
       ...(baselineReference === undefined ? {} : { baselineReference }),
+      ...(output === undefined ? {} : { output }),
       ...(baselineComparison === undefined ? {} : { baselineComparison }),
     };
     return { ...event, metadata } as NormalizedSessionEvent;

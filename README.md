@@ -59,6 +59,10 @@ Search for tools that can inspect this repository's structure.
 
 With metadata sharing enabled, workflow links identify shared files or issues using temporary labels—not paths, repository names, issue numbers, contents, or hashes of those values. Only completed, successful steps count as workflow evidence. These links never grant tool permissions.
 
+Recorded output observations share only a JSON type and whether meaningful output was present; the values and program source stay local. Native command output is associated with its original call even when completion arrives late, without replacing a recorded failure or treating the child command as another call.
+
+A captured baseline can request replay, but it cannot prove correctness or establish new input bindings. Required replay compares every selected step against its local observation and binds the result to the exact plan digest. Process-only plans carry fresh-process proof; mixed plans identify which steps ran in fresh processes. Host replay does not imply remote-service isolation. Replay cancellation stops owned process groups and prevents later steps; external adapters must cooperate with cancellation.
+
 ## Coding agent compatibility
 
 Codex CLI uses four stable MCP tools: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Newly available tools are reached through these same routes, without restarting the session. Claude Code and Oh My Pi retain their native dynamic tool catalogs.

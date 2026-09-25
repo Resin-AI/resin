@@ -35,15 +35,23 @@ export function sourceAsTemplate(source: WorkflowValueSource): WorkflowValueTemp
   }
 }
 
-/** The template a step's argument resolves through, or undefined when it is not a template. */
-function templateOf(
-  plan: RecordedWorkflow,
-  stepId: string,
-  argumentName: string,
-): WorkflowValueTemplate | undefined {
-  const step = plan.steps.find((entry) => entry.id === stepId);
-  const argument = step?.arguments.find((entry) => entry.name === argumentName);
-  return argument?.source.kind === "template" ? argument.source.template : undefined;
+/** Expand a literal so validated paths inside arrays and objects are addressable. */
+function literalAsTemplate(
+  value: WorkflowValueTemplate & { type: "literal" },
+): WorkflowValueTemplate {
+  const expand = (item: typeof value.value): WorkflowValueTemplate => {
+    if (Array.isArray(item)) return { type: "array", items: item.map(expand) };
+    if (item !== null && typeof item === "object") {
+      return {
+        type: "object",
+        entries: Object.fromEntries(
+          Object.entries(item).map(([key, entry]) => [key, expand(entry)]),
+        ),
+      };
+    }
+    return { type: "literal", value: item };
+  };
+  return expand(value.value);
 }
 
 /** Canonical identity for a candidate, excluding its diagnostic reason and evidence. */
@@ -82,78 +90,85 @@ function withLeafAt(
   return { type: "object", entries: { ...template.entries, [head]: replaced } };
 }
 
-/**
- * Applies accepted candidates to a plan.
- *
- * A candidate that cannot be placed — an argument this step does not have, a path that addresses no
- * leaf — is left out rather than approximated: the recording stands where the promotion does not
- * apply, which is the behaviour the user actually performed.
- */
+/** Apply exactly one confirmed proposal, refusing invalid or unsafe placements atomically. */
+export function applyConfirmedWorkflowBinding(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+): RecordedWorkflow | undefined {
+  const stepIndex = plan.steps.findIndex((step) => step.id === candidate.stepId);
+  if (stepIndex < 0) return undefined;
+  const step = plan.steps[stepIndex]!;
+  const argumentIndex = step.arguments.findIndex(
+    (argument) => argument.name === candidate.argument,
+  );
+  if (argumentIndex < 0) return undefined;
+  const argument = step.arguments[argumentIndex]!;
+  const proposed = candidate.proposed;
+  if (proposed.kind === "result") {
+    const producer = plan.steps.findIndex((entry) => entry.id === proposed.stepId);
+    if (producer < 0 || producer >= stepIndex) return undefined;
+  } else {
+    const existing = plan.inputs.find((input) => input.name === proposed.name);
+    if (existing !== undefined && existing.type !== proposed.type) return undefined;
+  }
+  const isToken = candidate.path[0] === "tokens";
+  if (
+    proposed.kind === "input" &&
+    !isToken &&
+    candidate.path.length === 0 &&
+    step.callable.program?.argument === candidate.argument
+  ) {
+    return undefined;
+  }
+  const leaf: WorkflowValueTemplate =
+    proposed.kind === "result"
+      ? { type: "result", stepId: proposed.stepId, path: [...proposed.path] }
+      : { type: "input", name: proposed.name };
+  const source = sourceAsTemplate(argument.source);
+  const template = source.type === "literal" && !isToken ? literalAsTemplate(source) : source;
+  let replaced: WorkflowValueTemplate | undefined;
+  if (isToken) {
+    const token = candidate.path[1];
+    const program = step.callable.program;
+    if (
+      candidate.path.length !== 2 ||
+      program?.argument !== candidate.argument ||
+      typeof token !== "number" ||
+      !Number.isInteger(token) ||
+      token < 0
+    )
+      return undefined;
+    replaced = bindProgramToken(source, program.kind, token, leaf);
+  } else {
+    replaced = withLeafAt(template, candidate.path, leaf);
+  }
+  if (replaced === undefined) return undefined;
+  const steps = [...plan.steps];
+  const args = [...step.arguments];
+  args[argumentIndex] = {
+    ...argument,
+    source: { kind: "template", template: replaced },
+    provenance: { standing: "derived", rule: "replay-confirmed" },
+  };
+  steps[stepIndex] = { ...step, arguments: args };
+  const inputs =
+    proposed.kind === "input" && !plan.inputs.some((input) => input.name === proposed.name)
+      ? [...plan.inputs, { name: proposed.name, type: proposed.type }]
+      : plan.inputs;
+  const candidates = plan.candidates?.filter(
+    (entry) => candidateIdentity(entry) !== candidateIdentity(candidate),
+  );
+  return { ...plan, steps, inputs, ...(candidates === undefined ? {} : { candidates }) };
+}
+
+/** Apply only caller-confirmed candidates; rejected proposals remain recorded as proposals. */
 export function applyAcceptedBindings(
   plan: RecordedWorkflow,
   accepted: readonly WorkflowBindingCandidate[],
 ): RecordedWorkflow {
-  if (accepted.length === 0) return plan;
-  const next = JSON.parse(JSON.stringify(plan)) as RecordedWorkflow;
-  const inputs = new Map(next.inputs.map((input) => [input.name, input]));
-  const appliedCandidateIdentities = new Set<string>();
+  let current = plan;
   for (const candidate of accepted) {
-    const step = next.steps.find((entry) => entry.id === candidate.stepId);
-    const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
-    if (argument === undefined || step === undefined) continue;
-    // A validation verdict cannot turn the recorded implementation into a data input. Explicit
-    // inputs already in the plan and source bound to an earlier result are unaffected.
-    if (
-      candidate.proposed.kind === "input" &&
-      candidate.path.length === 0 &&
-      step.callable.program?.argument === candidate.argument
-    ) {
-      continue;
-    }
-    const template = templateOf(next, candidate.stepId, candidate.argument);
-    // A token binding names a position inside the program the step's own record holds in that
-    // argument, so it binds the recorded text into a program template rather than walking a path
-    // through a value.
-    const isTokenBinding = candidate.path[0] === "tokens";
-    const program = isTokenBinding ? step.callable.program : undefined;
-    if (isTokenBinding && program?.argument !== candidate.argument) continue;
-    if (!isTokenBinding && template === undefined) continue;
-    let leaf: WorkflowValueTemplate;
-    if (candidate.proposed.kind === "result") {
-      leaf = { type: "result", stepId: candidate.proposed.stepId, path: candidate.proposed.path };
-    } else {
-      leaf = { type: "input", name: candidate.proposed.name };
-    }
-    let replaced: WorkflowValueTemplate | undefined;
-    if (isTokenBinding) {
-      const token = candidate.path[1];
-      if (program === undefined) continue;
-      if (typeof token !== "number" || !Number.isInteger(token) || token < 0) continue;
-      replaced = bindProgramToken(
-        template ?? sourceAsTemplate(argument.source),
-        program.kind,
-        token,
-        leaf,
-      );
-    } else {
-      replaced = withLeafAt(template as WorkflowValueTemplate, candidate.path, leaf);
-    }
-    if (replaced === undefined) continue;
-    argument.source = { kind: "template", template: replaced };
-    argument.provenance = { standing: "derived", rule: "replay-confirmed" };
-    appliedCandidateIdentities.add(candidateIdentity(candidate));
-    if (candidate.proposed.kind === "input") {
-      inputs.set(candidate.proposed.name, {
-        name: candidate.proposed.name,
-        type: candidate.proposed.type,
-      });
-    }
+    current = applyConfirmedWorkflowBinding(current, candidate) ?? current;
   }
-  next.inputs = [...inputs.values()];
-  if (next.candidates !== undefined) {
-    next.candidates = next.candidates.filter(
-      (candidate) => !appliedCandidateIdentities.has(candidateIdentity(candidate)),
-    );
-  }
-  return next;
+  return current;
 }

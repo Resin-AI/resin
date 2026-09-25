@@ -30,6 +30,10 @@ export interface ProgramToken {
   raw: string;
   /** The value a word or string denotes once quoting is removed; operators denote none. */
   value?: string;
+  /** True only when this token denotes a known value and replacing its span remains data. */
+  bindable: boolean;
+  /** Language of this token, for rendering quoted script values without shell syntax. */
+  language?: ProgramLanguage;
 }
 
 /**
@@ -46,13 +50,17 @@ const SHELL_OPERATORS_LONG = ["&&", "||", ">>", "<<", ";;"] as const;
  * word a substitution would then be wrong about. */
 const SHELL_OPERATORS_SHORT = ["|", "&", ";", ">", "<", "(", ")"] as const;
 
-function readShellQuoted(source: string, start: number): { value: string; end: number } {
+function readShellQuoted(
+  source: string,
+  start: number,
+): { value: string; end: number; bindable: boolean } {
   const quote = source[start]!;
   let index = start + 1;
   let value = "";
+  let bindable = true;
   while (index < source.length) {
     const char = source[index]!;
-    if (char === quote) return { value, end: index + 1 };
+    if (char === quote) return { value, end: index + 1, bindable };
     if (quote === '"' && char === "\\" && index + 1 < source.length) {
       const next = source[index + 1]!;
       // Inside double quotes a backslash only escapes these characters; before anything else it is
@@ -63,11 +71,12 @@ function readShellQuoted(source: string, start: number): { value: string; end: n
         continue;
       }
     }
+    if (quote === '"' && (char === "$" || char === "`")) bindable = false;
     value += char;
     index += 1;
   }
   // Unterminated quote: the rest of the program is the token's content, exactly as recorded.
-  return { value, end: source.length };
+  return { value, end: source.length, bindable: false };
 }
 
 function matchShellOperator(source: string, index: number): string | undefined {
@@ -97,6 +106,9 @@ function matchFileDescriptorOperator(source: string, index: number): string | un
 function shellTokens(source: string): ProgramToken[] {
   const tokens: ProgramToken[] = [];
   let index = 0;
+  let substitutionDepth = 0;
+  let pendingSubstitution = false;
+  let backtickSubstitution = false;
   while (index < source.length) {
     const char = source[index]!;
     if (char === " " || char === "\t" || char === "\n" || char === "\r") {
@@ -115,23 +127,42 @@ function shellTokens(source: string): ProgramToken[] {
         start: index,
         end: index + descriptor.length,
         raw: descriptor,
+        bindable: false,
       });
       index += descriptor.length;
       continue;
     }
     const operator = matchShellOperator(source, index);
     if (operator !== undefined) {
-      tokens.push({ kind: "operator", start: index, end: index + operator.length, raw: operator });
+      if (operator === "(" && pendingSubstitution) {
+        substitutionDepth++;
+        pendingSubstitution = false;
+      } else if (operator === "(" && substitutionDepth > 0) {
+        substitutionDepth++;
+      } else if (operator === ")" && substitutionDepth > 0) {
+        substitutionDepth--;
+      } else if ((operator === "<" || operator === ">") && source[index + 1] === "(") {
+        pendingSubstitution = true;
+      }
+      tokens.push({
+        kind: "operator",
+        start: index,
+        end: index + operator.length,
+        raw: operator,
+        bindable: false,
+      });
       index += operator.length;
       continue;
     }
     const start = index;
     let value = "";
     let quotedFully = false;
+    let bindable = substitutionDepth === 0 && !backtickSubstitution;
     if (char === "'" || char === '"') {
       const quoted = readShellQuoted(source, index);
       value += quoted.value;
       index = quoted.end;
+      bindable &&= quoted.bindable;
       // A token that is exactly one quoted string keeps the string kind; a word with a quote inside
       // it stays a word.
       quotedFully = !isShellWordContinuation(source, index);
@@ -142,6 +173,7 @@ function shellTokens(source: string): ProgramToken[] {
       if (current === "'" || current === '"') {
         const quoted = readShellQuoted(source, index);
         value += quoted.value;
+        bindable &&= quoted.bindable;
         index = quoted.end;
         continue;
       }
@@ -151,6 +183,12 @@ function shellTokens(source: string): ProgramToken[] {
         continue;
       }
       if (matchShellOperator(source, index) !== undefined) break;
+      if ("$*?[]{}~".includes(current)) bindable = false;
+      if (current === "$" && source[index + 1] === "(") pendingSubstitution = true;
+      if (current === "`") {
+        bindable = false;
+        backtickSubstitution = !backtickSubstitution;
+      }
       if (matchFileDescriptorOperator(source, index) !== undefined) break;
       value += current;
       index += 1;
@@ -166,6 +204,18 @@ function shellTokens(source: string): ProgramToken[] {
       end: index,
       raw: source.slice(start, index),
       value,
+      bindable:
+        bindable &&
+        start !== 0 &&
+        tokens.at(-1)?.raw !== "-c" &&
+        tokens.at(-1)?.raw !== "-e" &&
+        !["&&", "||", ";", "|", "(", "&"].includes(tokens.at(-1)?.raw ?? "") &&
+        !(
+          tokens.at(-1)?.kind === "operator" &&
+          tokens.at(-1)?.raw !== "<" &&
+          tokens.at(-1)?.raw !== ">" &&
+          tokens.at(-1)?.raw !== ">>"
+        ),
     });
   }
   return tokens;
@@ -257,7 +307,25 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
       }
       if (!closed) continue;
       const raw = source.slice(start, index);
-      tokens.push({ kind: "string", start, end: index, raw, value: unescapeScript(raw, language) });
+      const prefix = language === "python" ? source.slice(Math.max(0, start - 2), start) : "";
+      const unsupported =
+        language === "python" && /[rRbBfF]/.test(prefix) && /[rRbBfF]$/.test(prefix);
+      const escapes = /\\(?:x|u|U|N|[1-9]|[abfv])/;
+      const bindable =
+        !unsupported &&
+        !escapes.test(raw) &&
+        !triple &&
+        !/\\(?![ntr0\\'"`\n])/.test(raw) &&
+        (language === "python" || !/\\(?:0[0-9]|[\r\u2028\u2029])/.test(raw));
+      tokens.push({
+        kind: "string",
+        start,
+        end: index,
+        raw,
+        value: unescapeScript(raw, language),
+        bindable,
+        language,
+      });
       continue;
     }
     if (char === "`" && language !== "python") {
@@ -284,8 +352,10 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
           kind: "string",
           start,
           end: index,
+          language,
           raw,
           value: unescapeScript(raw, language),
+          bindable: false,
         });
       }
       continue;
@@ -321,8 +391,25 @@ function quoteShellDouble(value: string): string {
  * was quoted, and quoted anyway when a bare word would not survive intact.
  */
 export function renderProgramTokenValue(token: ProgramToken, value: string): string {
-  if (token.kind === "operator") {
-    throw new Error("a program operator cannot carry a bound value");
+  if (!token.bindable || token.value === undefined || token.kind === "operator") {
+    throw new Error("the recorded program token is not safely bindable");
+  }
+  if (
+    token.language === "python" ||
+    token.language === "javascript" ||
+    token.language === "typescript"
+  ) {
+    const quote = token.raw[0] === '"' ? '"' : "'";
+    const escaped = value
+      .replaceAll("\\", "\\\\")
+      .replaceAll(quote, `\\${quote}`)
+      .replaceAll("\n", "\\n")
+      .replaceAll("\r", "\\r")
+      .replaceAll("\t", "\\t")
+      .replaceAll("\0", "\\0")
+      .replaceAll("\u2028", "\\u2028")
+      .replaceAll("\u2029", "\\u2029");
+    return `${quote}${escaped}${quote}`;
   }
   const quote = token.raw[0];
   if (token.kind === "string" && quote === "'") return quoteShellSingle(value);
@@ -354,6 +441,9 @@ export function applyProgramTokenValues(
         `the recorded program has no token ${tokenIndex}; its shape does not match the plan`,
       );
     }
+    if (source.slice(token.start, token.end) !== token.raw) {
+      throw new Error("the recorded program token does not match its source");
+    }
     replacements.push({
       start: token.start,
       end: token.end,
@@ -384,6 +474,16 @@ export function bindProgramToken(
   token: number,
   binding: WorkflowValueTemplate,
 ): WorkflowValueTemplate {
+  // Private sources remain opaque until host materialization; validate any available literal now.
+  const literal = source.type === "program" ? source.source : source;
+  if (
+    literal.type === "literal" &&
+    typeof literal.value === "string" &&
+    !tokenizeProgram(source.type === "program" ? source.language : language, literal.value)[token]
+      ?.bindable
+  ) {
+    throw new Error("the recorded program token is not safely bindable");
+  }
   if (source.type !== "program") {
     return { type: "program", language, source, holes: [{ token, binding }] };
   }

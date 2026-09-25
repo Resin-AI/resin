@@ -16,6 +16,7 @@ import type {
   RecordedWorkflow,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
+  WorkflowObservedOutput,
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
@@ -209,6 +210,7 @@ export function reconstructWorkflowFromEvents(
       value: WorkflowJsonValue | undefined;
       isError: boolean | undefined;
       baselineReference?: string;
+      output?: WorkflowObservedOutput;
       baselineComparison?: "text-trim";
     }
   >();
@@ -229,6 +231,7 @@ export function reconstructWorkflowFromEvents(
     resultsByCallId.set(eventKey, {
       value: event.result ?? extractResultValue(event.content),
       isError: event.isError,
+      ...(resultCarrier?.output === undefined ? {} : { output: resultCarrier.output }),
       ...(resultCarrier?.baselineReference === undefined
         ? {}
         : { baselineReference: resultCarrier.baselineReference }),
@@ -463,6 +466,7 @@ export function reconstructWorkflowFromEvents(
       ...(declaredFlow === undefined ? {} : { flow: declaredFlow }),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(isPrivateValue ? { isPrivateValue } : {}),
+      ...(recordedResult?.output === undefined ? {} : { output: recordedResult.output }),
       observed:
         recordedResult === undefined
           ? "unknown"

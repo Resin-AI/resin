@@ -5,6 +5,7 @@ import type {
   WorkflowArgumentProvenance,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
+  WorkflowObservedOutput,
   WorkflowRecordedProgram,
   WorkflowStep,
   WorkflowValueSource,
@@ -61,6 +62,7 @@ export interface RecordedCallObservation {
   recordedFailureControl?: "abort" | "continue";
   /** What the recording observed; never treated as the workflow's behavior. */
   observed?: "succeeded" | "failed" | "unknown";
+  output?: WorkflowObservedOutput;
   permissions?: WorkflowJsonValue;
 }
 
@@ -299,7 +301,10 @@ function recordWorkflowRecipeInternal(
         observation.recordedFailureControl === undefined
           ? { onError: "abort", policy: "default" as const }
           : { onError: observation.recordedFailureControl, policy: "recorded" as const },
-      observed: { outcome: observation.observed ?? "unknown" },
+      observed: {
+        outcome: observation.observed ?? "unknown",
+        ...(observation.output === undefined ? {} : { output: observation.output }),
+      },
       ...(observation.permissions === undefined ? {} : { permissions: observation.permissions }),
     });
     if (observation.baselineReference !== undefined) {

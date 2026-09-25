@@ -214,7 +214,8 @@ export type WorkflowBindingCandidate = {
     | "tracks-earlier-result-across-executions"
     | "varies-across-executions"
     | "declared-by-the-callable"
-    | "shares-value-with-declared-input";
+    | "shares-value-with-declared-input"
+    | "classified-source-value";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -237,9 +238,16 @@ export type WorkflowStepFailurePolicy = {
 /** What an observed demonstration result may project before comparison. */
 export type WorkflowObservedComparison = "text-trim";
 
+/** Value-free shape of an actual result; never contains the result itself. */
+export type WorkflowObservedOutput = {
+  type: "null" | "boolean" | "number" | "string" | "array" | "object";
+  hasContent: boolean;
+};
+
 /** What the recording observed about this step's execution, for diagnostics only. */
 export type WorkflowStepObservation = {
   outcome: "succeeded" | "failed" | "unknown";
+  output?: WorkflowObservedOutput;
 };
 
 export type WorkflowStep = {
@@ -679,6 +687,18 @@ export function validateRecordedWorkflow(value: unknown): {
     ) {
       errors.push(`step ${step.id} needs an observed outcome`);
     }
+    if (isPlainObject(observed) && observed.output !== undefined) {
+      const output = observed.output;
+      if (
+        !isPlainObject(output) ||
+        Object.keys(output).some((key) => key !== "type" && key !== "hasContent") ||
+        !["null", "boolean", "number", "string", "array", "object"].includes(
+          output.type as string,
+        ) ||
+        typeof output.hasContent !== "boolean"
+      )
+        errors.push(`step ${step.id} has an invalid observed output`);
+    }
     const permissions = (step as { permissions?: unknown }).permissions;
     if (permissions !== undefined && !isJsonValue(permissions)) {
       errors.push(`step ${step.id} permissions must be JSON`);
@@ -970,6 +990,15 @@ export function validateRecordedWorkflow(value: unknown): {
         } else {
           errors.push(`candidate ${stepId}.${candidate.argument} has an unknown proposal kind`);
         }
+        if (
+          candidate.reason !== "equal-to-earlier-result" &&
+          candidate.reason !== "tracks-earlier-result-across-executions" &&
+          candidate.reason !== "varies-across-executions" &&
+          candidate.reason !== "declared-by-the-callable" &&
+          candidate.reason !== "shares-value-with-declared-input" &&
+          candidate.reason !== "classified-source-value"
+        )
+          errors.push(`candidate ${stepId}.${candidate.argument} has an unknown reason`);
         if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
           errors.push(
             `candidate ${stepId}.${candidate.argument} must name the fact the record is missing`,

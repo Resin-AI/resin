@@ -9,6 +9,7 @@ import type {
   WorkflowRecordedProgram,
   WorkflowValuePath,
 } from "@resin/contracts";
+import type { WorkflowObservedOutput } from "@resin/contracts";
 
 export const RESIN_WORKFLOW_CALL_METADATA_KEY = "workflowCall";
 export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
@@ -124,7 +125,8 @@ export interface WorkflowCallCandidate {
     | "varies-across-executions"
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
-    | "tracks-earlier-result-across-executions";
+    | "tracks-earlier-result-across-executions"
+    | "classified-source-value";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
   missing: string;
@@ -289,6 +291,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "declared-by-the-callable": true,
   "shares-value-with-declared-input": true,
   "tracks-earlier-result-across-executions": true,
+  "classified-source-value": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -473,6 +476,7 @@ export interface WorkflowResultCarrier {
   baselineReference?: string;
   /** How the original baseline result may be projected before comparison. */
   baselineComparison?: "text-trim";
+  output?: WorkflowObservedOutput;
 }
 
 /** Re-reads a result carrier for projection. */
@@ -491,10 +495,25 @@ export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier
     if (value.baselineComparison !== "text-trim") return undefined;
     carrier.baselineComparison = value.baselineComparison;
   }
+  if (value.output !== undefined) {
+    const output = value.output;
+    if (
+      !isPlainObject(output) ||
+      Object.keys(output).some((key) => key !== "type" && key !== "hasContent") ||
+      !["null", "boolean", "number", "string", "array", "object"].includes(output.type as string) ||
+      typeof output.hasContent !== "boolean"
+    )
+      return undefined;
+    carrier.output = {
+      type: output.type as WorkflowObservedOutput["type"],
+      hasContent: output.hasContent,
+    };
+  }
   return carrier.handle === undefined &&
     carrier.heldOut === undefined &&
     carrier.baselineReference === undefined &&
-    carrier.baselineComparison === undefined
+    carrier.baselineComparison === undefined &&
+    carrier.output === undefined
     ? undefined
     : carrier;
 }

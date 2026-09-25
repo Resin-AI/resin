@@ -303,23 +303,23 @@ function buildCandidatePlans(
   return { kind: "plans", bound: all.plan, literal: without.plan };
 }
 
-/**
- * Bounds one replay. `executeRecordedWorkflow` exposes no cancellation, so a run that outlives the
- * bound keeps going in the background while the candidate is refused for being unproven.
- */
+/** Bound a replay and wait for its owned work to settle after cancelling at expiry. */
 async function withDeadline(
-  execution: Promise<RecordedWorkflowExecution>,
+  execute: (signal: AbortSignal) => Promise<RecordedWorkflowExecution>,
   timeoutMs: number | undefined,
 ): Promise<RecordedWorkflowExecution | undefined> {
-  if (timeoutMs === undefined) return await execution;
-  let timer: NodeJS.Timeout | undefined;
-  const expiry = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), timeoutMs);
-  });
+  const controller = new AbortController();
+  if (timeoutMs === undefined) return await execute(controller.signal);
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    return await Promise.race([execution, expiry]);
+    const result = await execute(controller.signal);
+    return expired ? undefined : result;
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }
 
@@ -362,10 +362,11 @@ async function replayStep(
   const options: RecordedWorkflowExecutionOptions = {
     inputs: environment.inputs,
     adapters: environment.adapters,
+    ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
   };
   const execution = await withDeadline(
-    executeRecordedWorkflow(plan, options),
+    (signal) => executeRecordedWorkflow(plan, { ...options, signal }),
     environment.timeoutMs,
   );
   if (!execution) {
@@ -636,10 +637,11 @@ async function replayPlanOnce(
   const options: RecordedWorkflowExecutionOptions = {
     inputs: environment.inputs,
     adapters: environment.adapters,
+    ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
   };
   const execution = await withDeadline(
-    executeRecordedWorkflow(plan, options),
+    (signal) => executeRecordedWorkflow(plan, { ...options, signal }),
     environment.timeoutMs,
   );
   const reproduced: string[] = [];
@@ -738,7 +740,12 @@ export async function confirmPromotedPlan(params: {
     replay = await replayPlanOnce(plan, params.environment);
   }
   const verification: WorkflowPlanVerification = {
-    status: replay.missed.length === 0 ? "verified" : unattributed ? "incomplete" : "failed",
+    status:
+      replay.missed.length === 0
+        ? "verified"
+        : unattributed && accepted.length > 0
+          ? "incomplete"
+          : "failed",
     reproduced: replay.reproduced,
     missed: replay.missed,
     dropped,
@@ -772,11 +779,14 @@ export async function validateAndConfirmCandidates(params: {
   plan: RecordedWorkflow;
   verification?: WorkflowPlanVerification;
 }> {
-  const decided = await validateBindingCandidates({
-    plan: params.plan,
-    candidates: params.candidates,
-    environment: params.environment,
-  });
+  const decided =
+    params.candidates.length === 0
+      ? []
+      : await validateBindingCandidates({
+          plan: params.plan,
+          candidates: params.candidates,
+          environment: params.environment,
+        });
   const accepted = decided
     .filter((outcome) => outcome.accepted)
     .map((outcome) => outcome.candidate);

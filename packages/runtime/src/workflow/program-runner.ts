@@ -43,6 +43,8 @@ export interface ProgramRunnerOptions {
   shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
   timeoutMs?: number;
+  /** Cancel only this replay-owned child process tree. */
+  signal?: AbortSignal;
   /** Cap on captured stdout bytes. */
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
@@ -894,7 +896,8 @@ function runChild(
   const stdout = new BoundedOutput(maxOutputBytes);
   const stderr = new BoundedOutput(maxOutputBytes);
   const cwd = options.cwd ?? process.cwd();
-
+  if (options.signal?.aborted)
+    return Promise.reject(new Error("recorded program replay was cancelled"));
   return new Promise<CapturedRun>((resolve, reject) => {
     const stdio: SpawnOptions["stdio"] =
       invocation.privateResultFd === undefined
@@ -914,19 +917,27 @@ function runChild(
       detached: process.platform !== "win32",
     });
     let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
+    let termination: string | undefined;
+    const terminate = (reason: string): void => {
+      if (settled || termination !== undefined) return;
+      termination = reason;
       killProcessTree(child);
-      reject(new Error(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`));
-    }, timeoutMs);
-
+    };
+    const onAbort = (): void => terminate("recorded program replay was cancelled");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    const timer = setTimeout(
+      () => terminate(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`),
+      timeoutMs,
+    );
     const finish = (run: CapturedRun): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(run);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (termination !== undefined) reject(new Error(termination));
+      else resolve(run);
     };
-
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.write(chunk);
     });
@@ -937,6 +948,7 @@ function runChild(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       reject(
         new Error(
           `recorded program could not be started (${invocation.command}): ${error.message}`,
@@ -1261,6 +1273,7 @@ export async function runRecordedCall(
       ? { resolvePrivate: request.resolvePrivate }
       : {}),
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
   };
   const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {

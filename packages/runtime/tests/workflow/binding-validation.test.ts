@@ -421,6 +421,51 @@ describe("the plan that results from accepting proposals", () => {
   });
 });
 
+describe("closed observed-output replay without proposals", () => {
+  it("executes a native plan once and reports every reproduced and missing observation", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-baseline-native-"));
+    workspaces.push(workspaceDir);
+    const invoked: string[] = [];
+    const adapters = new RuntimeAdapterRegistry();
+    adapters.register({
+      runtime: TEST_RUNTIME,
+      async call(request) {
+        invoked.push(request.step.id);
+        return request.step.id === "derive"
+          ? { token: `tok(${String(request.arguments.seed)})` }
+          : { echoed: request.arguments.text };
+      },
+    });
+    const environment = {
+      adapters,
+      workspaceDir,
+      inputs: { seed: "alpha" },
+      observed: { derive: { token: "tok(alpha)" }, consume: { echoed: "different" } },
+    };
+    const plan = recordedPlan({ type: "literal", value: "tok(alpha)" });
+    const mismatch = await validateAndConfirmCandidates({ plan, candidates: [], environment });
+    expect(invoked).toEqual(["derive", "consume"]);
+    expect(mismatch.outcomes).toEqual([]);
+    expect(mismatch.verification).toMatchObject({
+      status: "failed",
+      reproduced: ["derive"],
+      missed: [{ stepId: "consume" }],
+    });
+    invoked.length = 0;
+    const missing = await validateAndConfirmCandidates({
+      plan,
+      candidates: [],
+      environment: { ...environment, observed: { derive: { token: "tok(alpha)" } } },
+    });
+    expect(invoked).toEqual(["derive", "consume"]);
+    expect(missing.verification).toMatchObject({
+      status: "failed",
+      reproduced: ["derive"],
+      missed: [{ stepId: "consume" }],
+    });
+  });
+});
+
 describe("selected demonstration comparison projections", () => {
   it("uses the held-out result projection during whole-plan replay", async () => {
     const plan: RecordedWorkflow = {
@@ -499,7 +544,7 @@ describe("Python Eval baseline replay comparison", () => {
     });
 
     expect(exact.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
-    expect(different.verification.status).toBe("incomplete");
+    expect(different.verification.status).toBe("failed");
     expect(different.verification.missed.map((entry) => entry.stepId)).toEqual(["eval"]);
   });
 });

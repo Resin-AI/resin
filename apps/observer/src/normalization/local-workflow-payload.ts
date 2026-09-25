@@ -18,6 +18,8 @@ interface LocalWorkflowPayload {
   parameters?: unknown;
   result?: unknown;
   resultComparison?: LocalWorkflowResultComparison;
+  stdout?: unknown;
+  stderr?: unknown;
 }
 
 /** Exact payloads stay beside an event in this process, never in serialized metadata or storage. */
@@ -31,15 +33,21 @@ export function retainLocalWorkflowPayload(
   const field =
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
   const hasOriginalField = field !== undefined && Object.hasOwn(original, field);
+  const commandFields =
+    event.type === "command_exec"
+      ? (["stdout", "stderr"] as const).filter((name) => Object.hasOwn(original, name))
+      : [];
   const hasNativeResult =
     event.type === "tool_result" &&
     options.resultObservation !== undefined &&
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
-  if (!hasOriginalField && !hasNativeResult && !suppressResult) return;
+  if (!hasOriginalField && commandFields.length === 0 && !hasNativeResult && !suppressResult)
+    return;
 
   const payload: LocalWorkflowPayload = {};
   if (hasOriginalField) payload[field] = structuredClone(original[field]);
+  for (const name of commandFields) payload[name] = structuredClone(original[name]);
   if (hasNativeResult) {
     payload.result = structuredClone(options.resultObservation!.result);
     if (options.resultObservation!.comparison !== undefined) {
@@ -57,6 +65,14 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
   if (payload === undefined) return undefined;
   const field =
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
+  if (event.type === "command_exec") {
+    if (!Object.hasOwn(payload, "stdout")) return undefined;
+    return {
+      ...event,
+      ...(Object.hasOwn(payload, "stdout") ? { stdout: payload.stdout } : {}),
+      ...(Object.hasOwn(payload, "stderr") ? { stderr: payload.stderr } : {}),
+    } as T;
+  }
   if (field === undefined || !Object.hasOwn(payload, field)) return event;
   return { ...event, [field]: payload[field] } as T;
 }

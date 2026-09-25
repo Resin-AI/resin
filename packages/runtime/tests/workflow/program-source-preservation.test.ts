@@ -4,7 +4,10 @@ import { join } from "node:path";
 import type { RecordedWorkflow, WorkflowStep, WorkflowValueSource } from "@resin/contracts";
 import { expect, it } from "vitest";
 import { validateAndConfirmCandidates } from "../../src/workflow/binding-validation.js";
-import { applyAcceptedBindings } from "../../src/workflow/candidate-promotion.js";
+import {
+  applyAcceptedBindings,
+  applyConfirmedWorkflowBinding,
+} from "../../src/workflow/candidate-promotion.js";
 import { createProcessAdapter } from "../../src/workflow/process-adapter.js";
 import {
   RuntimeAdapterRegistry,
@@ -50,6 +53,79 @@ it("does not let a supplied whole-source verdict replace the recorded implementa
   ]);
   expect(promoted.inputs).toEqual([]);
   expect(promoted.steps).toEqual(plan.steps);
+});
+
+it("promotes confirmed scalar and nested literal inputs without changing neighboring values", () => {
+  const plain = (id: string, value: WorkflowValueSource): WorkflowStep => ({
+    ...step(id, value),
+    callable: { name: "ordinary_tool", runtime: "resin-tool-protocol" },
+    arguments: [{ name: "payload", source: value }],
+  });
+  const plan: RecordedWorkflow = {
+    schemaVersion: 1,
+    workflowId: "literal-bindings",
+    inputs: [],
+    steps: [
+      plain("zero", { kind: "literal", value: 0 }),
+      plain("false", { kind: "literal", value: false }),
+      plain("nested", { kind: "literal", value: { selected: false, unchanged: "keep" } }),
+    ],
+  };
+  const candidates = [
+    {
+      stepId: "zero",
+      argument: "payload",
+      path: [],
+      proposed: { kind: "input", name: "amount", type: "number" },
+      reason: "confirmed",
+      missing: "replay",
+    },
+    {
+      stepId: "false",
+      argument: "payload",
+      path: [],
+      proposed: { kind: "input", name: "enabled", type: "boolean" },
+      reason: "confirmed",
+      missing: "replay",
+    },
+    {
+      stepId: "nested",
+      argument: "payload",
+      path: ["selected"],
+      proposed: { kind: "input", name: "selected", type: "boolean" },
+      reason: "confirmed",
+      missing: "replay",
+    },
+  ] as const;
+  const promoted = applyAcceptedBindings(plan, candidates);
+  expect(promoted.inputs.map((input) => input.name)).toEqual(["amount", "enabled", "selected"]);
+  expect(promoted.steps.map((entry) => entry.arguments[0]?.source)).toEqual([
+    { kind: "template", template: { type: "input", name: "amount" } },
+    { kind: "template", template: { type: "input", name: "enabled" } },
+    {
+      kind: "template",
+      template: {
+        type: "object",
+        entries: {
+          selected: { type: "input", name: "selected" },
+          unchanged: { type: "literal", value: "keep" },
+        },
+      },
+    },
+  ]);
+  expect(plan.steps[0]?.arguments[0]?.source).toEqual({ kind: "literal", value: 0 });
+  expect(
+    applyConfirmedWorkflowBinding(promoted, {
+      ...candidates[0],
+      stepId: "absent",
+    }),
+  ).toBeUndefined();
+  expect(
+    applyConfirmedWorkflowBinding(promoted, {
+      ...candidates[0],
+      proposed: { kind: "input", name: "amount", type: "string" },
+    }),
+  ).toBeUndefined();
 });
 
 it("still verifies and executes source supplied by an earlier result", async () => {

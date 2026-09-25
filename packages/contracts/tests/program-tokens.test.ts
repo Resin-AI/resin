@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyProgramTokenValues,
+  bindProgramToken,
   renderProgramTokenValue,
   tokenizeProgram,
 } from "../src/program-tokens.js";
@@ -146,5 +147,50 @@ describe("applyProgramTokenValues", () => {
     expect(() => applyProgramTokenValues(RELEASE_PROGRAM, tokens, new Map([[999, "x"]]))).toThrow(
       /no token 999/,
     );
+  });
+});
+
+describe("safe token binding", () => {
+  it("refuses command positions, expansions, substitutions, and malformed quotes without shifting indices", () => {
+    const source =
+      "echo '$HOME' \"${HOME}\" \"$HOME\" $(printf secret) `printf hidden` && echo 'safe' 'unfinished";
+    const tokens = tokenizeProgram("shell", source);
+    expect(tokens.map((token) => token.raw)).toContain("'safe'");
+    for (const raw of ["echo", '"${HOME}"', '"$HOME"', "secret", "hidden`", "'unfinished"]) {
+      const token = tokens.find((entry) => entry.raw === raw)!;
+      expect(token.bindable).toBe(false);
+      expect(() =>
+        applyProgramTokenValues(source, tokens, new Map([[tokens.indexOf(token), "injected"]])),
+      ).toThrow();
+    }
+    const safe = tokens.find((token) => token.raw === "'safe'")!;
+    expect(safe.bindable).toBe(true);
+    expect(tokens.find((token) => token.raw === "'$HOME'")?.bindable).toBe(true);
+    expect(
+      applyProgramTokenValues(source, tokens, new Map([[tokens.indexOf(safe), "a; $(id)"]])),
+    ).toBe(source.replace("'safe'", "'a; $(id)'"));
+  });
+
+  it("retains script literal boundaries but refuses unsupported escape and interpolated forms", () => {
+    const python = tokenizeProgram("python", "name = 'safe' + f'{name}' + '\\x41'");
+    expect(python.map((token) => token.bindable)).toEqual([true, false, false]);
+    const js = tokenizeProgram("javascript", "const a = 'safe\\n'; const b = '\\x41'");
+    expect(js.map((token) => token.bindable)).toEqual([true, false]);
+    expect(renderProgramTokenValue(js[0]!, "new\n'quoted'")).toBe("'new\\n\\'quoted\\''");
+  });
+  it("keeps private source opaque until host materialization refuses an unsafe hole", () => {
+    const template = bindProgramToken({ type: "private", reference: "host-only" }, "shell", 0, {
+      type: "input",
+      name: "value",
+    });
+    expect(template.type).toBe("program");
+    const resolved = "echo harmless";
+    expect(() =>
+      applyProgramTokenValues(
+        resolved,
+        tokenizeProgram("shell", resolved),
+        new Map([[0, "attack"]]),
+      ),
+    ).toThrow(/not safely bindable/);
   });
 });
