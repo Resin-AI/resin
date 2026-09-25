@@ -48,6 +48,7 @@ export * from "./deterministic-command-sequence.js";
 // Tool Link Evidence (declared read/write data flow around one observed invocation)
 export * from "./tool-link-evidence.js";
 // Bounded assistant-turn completion metadata and correction envelope
+export * from "./codex-command.js";
 export * from "./assistant-stop-reason.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { type CodexCommandAssociation, RESIN_CODEX_COMMAND_METADATA_KEY } from "@resin/contracts";
 import type {
   CausalRef,
   DiscoveredToolEntry,
@@ -30,6 +32,11 @@ import {
   type RecordDecoderContext,
 } from "@resin/harness-contracts";
 import { z } from "zod";
+import {
+  type SingleCommandOutput,
+  extractSingleCommandOutput,
+  hasUnresolvedCodeModeEffects,
+} from "./code-command.js";
 
 export const DEFAULT_SCHEMA_VERSION = "1.0.0";
 
@@ -583,10 +590,26 @@ export class CodexSessionDecoder {
   };
   private currentMetadata?: CodexTranscriptPayload;
   private currentModel?: string;
+  private currentCwd?: string;
   private nativeCommands = new Map<
     string,
     { command: string; args: string[]; cwd?: string; completed?: boolean }
   >();
+  private wrappers = new Map<
+    string,
+    {
+      call: SingleCommandOutput;
+      started: number;
+      observedStarted: number;
+      completed?: number;
+      status?: "completed" | "failed" | "yielded";
+      matched?: string;
+      nativeStarted?: number;
+      blocked?: boolean;
+    }
+  >();
+  private nativeMatches = new Set<string>();
+  private unsafeCodeMode = false;
   private nativeUsageSeen = new Set<string>();
 
   constructor(options: CodexDecoderOptions = {}) {
@@ -596,6 +619,68 @@ export class CodexSessionDecoder {
       options.initialSequence !== undefined
         ? options.initialSequence - 1
         : (options.lastCausalSequence ?? 0);
+  }
+
+  private matchCommand(
+    nativeId: string,
+    startedAtMs: number | undefined,
+    argv: string[],
+    cwd: string | undefined,
+  ): CodexCommandAssociation | undefined {
+    if (
+      startedAtMs === undefined ||
+      !Number.isSafeInteger(startedAtMs) ||
+      startedAtMs < 0 ||
+      this.nativeMatches.has(nativeId)
+    )
+      return undefined;
+    const candidates = [...this.wrappers].filter(
+      ([, wrapper]) =>
+        wrapper.observedStarted <= startedAtMs &&
+        wrapper.started <= startedAtMs &&
+        (wrapper.completed === undefined || startedAtMs <= wrapper.completed),
+    );
+    if (candidates.length !== 1) {
+      for (const [, wrapper] of candidates) wrapper.blocked = true;
+      return undefined;
+    }
+    const [callId, wrapper] = candidates[0];
+    // Count all native starts, including incompatible commands and already-matched roots.
+    // A second child invalidates a pending root result; emitted events are never rewritten.
+    if (wrapper.matched || wrapper.blocked || wrapper.status === "yielded" || this.unsafeCodeMode) {
+      wrapper.blocked = true;
+      return undefined;
+    }
+    if (argv.length !== 3 || argv[0] !== "/bin/bash" || argv[1] !== "-lc" || cwd === undefined) {
+      wrapper.blocked = true;
+      return undefined;
+    }
+    let normalizedCwd: string;
+    try {
+      normalizedCwd = cwd.startsWith("file:") ? fileURLToPath(cwd) : cwd;
+    } catch {
+      wrapper.blocked = true;
+      return undefined;
+    }
+    if (wrapper.call.cmd !== argv[2] || wrapper.call.workdir !== normalizedCwd) {
+      wrapper.blocked = true;
+      return undefined;
+    }
+    if (this.nativeMatches.size >= 128)
+      this.nativeMatches.delete(this.nativeMatches.values().next().value!);
+    this.nativeMatches.add(nativeId);
+    wrapper.matched = nativeId;
+    wrapper.nativeStarted = startedAtMs;
+    if (wrapper.completed === undefined) return undefined;
+    return {
+      kind: "derived",
+      rule: "codex-single-command-start-window-v1",
+      callId,
+      nativeCommandId: nativeId,
+      startedAtMs,
+      callStartedAtMs: wrapper.observedStarted,
+      callCompletedAtMs: wrapper.completed,
+    };
   }
 
   private buildCausalRef(eventId: string): CausalRef {
@@ -728,6 +813,7 @@ export class CodexSessionDecoder {
       for (const key of ["id", "session_id", "cwd", "cli_version", "originator"]) {
         if (native[key] !== undefined) metadata[key] = native[key];
       }
+      this.currentCwd = asString(native.cwd);
       this.currentMetadata = { ...this.currentMetadata, ...metadata };
       return this.normalizePayload({
         type: "session_start",
@@ -737,6 +823,7 @@ export class CodexSessionDecoder {
     }
     if (native && asString(p.type) === "turn_context") {
       this.currentModel = asString(native.model) ?? this.currentModel;
+      if (native.cwd !== undefined) this.currentCwd = asString(native.cwd);
       return [];
     }
     if (native && asString(p.type) === "response_item") {
@@ -777,23 +864,119 @@ export class CodexSessionDecoder {
               cwd: asString(args.workdir) ?? asString(args.cwd),
             });
         }
-        return this.normalizePayload({
+        const nativeInput = native.arguments ?? native.input;
+        const extracted =
+          native.name === "exec" && typeof nativeInput === "string"
+            ? extractSingleCommandOutput(nativeInput)
+            : undefined;
+        const canonical = extracted
+          ? { cmd: extracted.cmd, workdir: extracted.workdir ?? this.currentCwd }
+          : undefined;
+        if (
+          native.name === "exec" &&
+          (typeof nativeInput !== "string" ||
+            (!extracted && hasUnresolvedCodeModeEffects(nativeInput)))
+        )
+          this.unsafeCodeMode = true;
+        const callTime = asNumber(
+          asObject(native.internal_chat_message_metadata_passthrough)?.create_time,
+        );
+        if (
+          callId &&
+          canonical &&
+          callTime !== undefined &&
+          Number.isSafeInteger(Math.round(callTime * 1000))
+        ) {
+          if (this.wrappers.size >= 128) this.wrappers.delete(this.wrappers.keys().next().value!);
+          this.wrappers.set(callId, {
+            call: canonical,
+            started: Math.round(callTime * 1000),
+            observedStarted: Date.parse(asString(p.timestamp) ?? ""),
+          });
+        }
+        const decoded = this.normalizePayload({
           ...base,
           type: "tool_call",
           name: native.name,
           call_id: native.call_id,
-          arguments: native.arguments ?? native.input,
+          arguments: nativeInput,
+          codex_extracted: canonical,
         });
+        if (extracted && callId && this.wrappers.has(callId))
+          for (const event of decoded)
+            if (event.type === "tool_call")
+              event.metadata = {
+                ...event.metadata,
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+                  version: 1,
+                  kind: "call",
+                  form: "single-command-output",
+                },
+              };
+        return decoded;
       }
       if (nativeType === "function_call_output" || nativeType === "custom_tool_call_output") {
         const result = native.output;
+        const callId = asString(native.call_id);
+        const wrapper = callId && this.wrappers.get(callId);
+        const rawResult = native.output;
+        const parts = asArray(rawResult);
+        const printed = parts
+          ?.slice(1)
+          .map((part) => asString(asObject(part)?.text) ?? "")
+          .join("");
+        const envelope = asString(asObject(parts?.[0])?.text);
+        const status = envelope?.startsWith("Script completed")
+          ? "completed"
+          : envelope?.startsWith("Script failed")
+            ? "failed"
+            : "yielded";
         const resultEvents = this.normalizePayload({
           ...base,
           type: "tool_result",
           call_id: native.call_id,
-          output: result,
+          output: rawResult,
+          is_error:
+            wrapper || (callId && this.callMap.get(callId)?.toolName === "exec")
+              ? status === "failed"
+              : undefined,
         });
-        const callId = asString(native.call_id);
+        if (wrapper && callId) {
+          wrapper.completed = Date.parse(asString(p.timestamp) ?? "");
+          if (status === "yielded") this.unsafeCodeMode = true;
+          wrapper.status = status;
+          const association =
+            wrapper.matched &&
+            !wrapper.blocked &&
+            wrapper.nativeStarted !== undefined &&
+            status !== "yielded" &&
+            Number.isFinite(wrapper.completed) &&
+            wrapper.observedStarted <= wrapper.nativeStarted &&
+            wrapper.nativeStarted <= wrapper.completed
+              ? {
+                  kind: "derived" as const,
+                  rule: "codex-single-command-start-window-v1" as const,
+                  callId,
+                  nativeCommandId: wrapper.matched,
+                  startedAtMs: wrapper.nativeStarted,
+                  callStartedAtMs: wrapper.observedStarted,
+                  callCompletedAtMs: wrapper.completed,
+                }
+              : undefined;
+          for (const event of resultEvents)
+            if (event.type === "tool_result") {
+              event.metadata = {
+                ...event.metadata,
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+                  version: 1,
+                  kind: "result",
+                  form: "single-command-output",
+                  status,
+                  ...(association ? { association } : {}),
+                },
+              };
+            }
+        }
         const command = callId && this.nativeCommands.get(callId);
         if (command && !command.completed) {
           const output = asString(result);
@@ -865,14 +1048,31 @@ export class CodexSessionDecoder {
         if (exitCode === undefined || !command?.length || asString(command[0]) === undefined)
           return this.nativeUnknown(p);
         const cwd = asString(item?.cwd);
-        const callId = asString(item?.id) ?? asString(item?.call_id);
-        const tracked = callId ? this.nativeCommands.get(callId) : undefined;
+        const nativeId = asString(item?.id) ?? asString(item?.call_id);
+        const tracked = nativeId ? this.nativeCommands.get(nativeId) : undefined;
         if (tracked?.completed) return [];
         if (tracked) tracked.completed = true;
         const duration = asObject(item?.duration);
         const seconds = asNumber(duration?.secs);
         const nanoseconds = asNumber(duration?.nanos);
-        return this.normalizePayload({
+        const startedAtMs = asNumber(native.started_at_ms);
+        const argv = command.map((part) => asString(part) ?? "");
+        if (
+          (!nativeId || tracked) &&
+          startedAtMs !== undefined &&
+          Number.isSafeInteger(startedAtMs)
+        ) {
+          for (const wrapper of this.wrappers.values())
+            if (
+              wrapper.observedStarted <= startedAtMs &&
+              wrapper.started <= startedAtMs &&
+              (wrapper.completed === undefined || startedAtMs <= wrapper.completed)
+            )
+              wrapper.blocked = true;
+        }
+        const association =
+          nativeId && !tracked ? this.matchCommand(nativeId, startedAtMs, argv, cwd) : undefined;
+        const decoded = this.normalizePayload({
           type: "command_exec",
           timestamp: p.timestamp,
           command: command[0],
@@ -886,6 +1086,24 @@ export class CodexSessionDecoder {
               ? seconds * 1000 + nanoseconds / 1_000_000
               : undefined,
         });
+        if (nativeId)
+          for (const event of decoded)
+            if (event.type === "command_exec")
+              event.metadata = {
+                ...event.metadata,
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+                  version: 1,
+                  kind: "command",
+                  nativeId,
+                  ...(startedAtMs !== undefined &&
+                  Number.isSafeInteger(startedAtMs) &&
+                  startedAtMs >= 0
+                    ? { startedAtMs }
+                    : {}),
+                  ...(association ? { association } : {}),
+                },
+              };
+        return decoded;
       }
       return this.nativeUnknown(p);
     }
@@ -1313,6 +1531,12 @@ export class CodexSessionDecoder {
       );
       const rawArgs = fnObj.arguments ?? fnObj.params ?? p.input ?? p.args ?? {};
       const parameters = parseToolParameters(rawArgs);
+      const extracted = this.wrappers.has(toolCallId) ? asObject(p.codex_extracted) : undefined;
+      if (extracted && typeof rawArgs === "string") {
+        parameters.raw = rawArgs;
+        parameters.cmd = extracted.cmd;
+        if (extracted.workdir !== undefined) parameters.workdir = extracted.workdir;
+      }
 
       const header = this.emitHeader("tool_call", timestamp, rawEventId);
       this.callMap.set(toolCallId, {

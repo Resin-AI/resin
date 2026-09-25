@@ -18,6 +18,7 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
@@ -26,6 +27,7 @@ import {
   estimatePayloadTokens,
   nowIso,
   parseAssistantStopReason,
+  readCodexCommandMetadata,
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
@@ -739,6 +741,10 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
+  if (event.type === "tool_call" || event.type === "tool_result" || event.type === "command_exec") {
+    const codexCommand = readCodexCommandMetadata(event.metadata);
+    if (codexCommand !== undefined) metadata[RESIN_CODEX_COMMAND_METADATA_KEY] = codexCommand;
+  }
   // References the caller's program used, as opaque scoped identifiers with the field they addressed.
   // They carry no values, so they survive privacy filtering; anything malformed is dropped rather
   // than guessed at.

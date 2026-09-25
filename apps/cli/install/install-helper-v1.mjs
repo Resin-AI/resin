@@ -8922,6 +8922,50 @@ var init_tool_link_evidence = __esm({
   }
 });
 
+// packages/contracts/dist/codex-command.js
+var Id, Time, AssociationFields, CodexCommandAssociationSchema, CodexCommandMetadataSchema;
+var init_codex_command = __esm({
+  "packages/contracts/dist/codex-command.js"() {
+    "use strict";
+    init_zod();
+    Id = external_exports.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/);
+    Time = external_exports.number().int().nonnegative().finite();
+    AssociationFields = {
+      callId: Id,
+      nativeCommandId: Id,
+      startedAtMs: Time,
+      callStartedAtMs: Time,
+      callCompletedAtMs: Time
+    };
+    CodexCommandAssociationSchema = external_exports.object({
+      kind: external_exports.literal("derived"),
+      rule: external_exports.literal("codex-single-command-start-window-v1"),
+      ...AssociationFields
+    }).strict();
+    CodexCommandMetadataSchema = external_exports.discriminatedUnion("kind", [
+      external_exports.object({
+        version: external_exports.literal(1),
+        kind: external_exports.literal("call"),
+        form: external_exports.literal("single-command-output")
+      }).strict(),
+      external_exports.object({
+        version: external_exports.literal(1),
+        kind: external_exports.literal("command"),
+        nativeId: Id,
+        startedAtMs: Time.optional(),
+        association: CodexCommandAssociationSchema.optional()
+      }).strict(),
+      external_exports.object({
+        version: external_exports.literal(1),
+        kind: external_exports.literal("result"),
+        form: external_exports.literal("single-command-output"),
+        status: external_exports.enum(["completed", "failed", "yielded"]),
+        association: CodexCommandAssociationSchema.optional()
+      }).strict()
+    ]);
+  }
+});
+
 // packages/contracts/dist/assistant-stop-reason.js
 var ASSISTANT_STOP_REASONS, AssistantStopReasonSchema, AssistantStopReasonCorrectionSchema;
 var init_assistant_stop_reason = __esm({
@@ -9562,6 +9606,7 @@ var init_dist = __esm({
     init_computation_evidence();
     init_deterministic_command_sequence();
     init_tool_link_evidence();
+    init_codex_command();
     init_assistant_stop_reason();
     init_recorded_workflow();
     init_program_tokens();
@@ -10184,14 +10229,23 @@ var init_adapter3 = __esm({
   }
 });
 
+// adapters/codex-cli/dist/code-command.js
+var init_code_command = __esm({
+  "adapters/codex-cli/dist/code-command.js"() {
+    "use strict";
+  }
+});
+
 // adapters/codex-cli/dist/decoder.js
 var CodexTranscriptValueSchema, CodexTranscriptPayloadSchema, CodexDecoderOptionsSchema;
 var init_decoder3 = __esm({
   "adapters/codex-cli/dist/decoder.js"() {
     "use strict";
     init_dist();
+    init_dist();
     init_dist2();
     init_zod();
+    init_code_command();
     CodexTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
       external_exports.string(),
       external_exports.number(),

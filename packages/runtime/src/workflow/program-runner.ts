@@ -39,6 +39,8 @@ export interface RecordedProgramRun {
 export interface ProgramRunnerOptions {
   /** Directory the program runs in. Defaults to the process cwd. */
   cwd?: string;
+  /** Fixed local process profile, selected only from a recorded process argument. */
+  shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
   timeoutMs?: number;
   /** Cap on captured stdout bytes. */
@@ -479,9 +481,11 @@ function invocationFor(
     case "shell":
       // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
       // recorded call did, and exit status is the program's exit status.
-      return platform === "win32"
-        ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
-        : { command: "/bin/sh", args: ["-c", source] };
+      return options.shellInvocation === "bash-login"
+        ? { command: "/bin/bash", args: ["-lc", source] }
+        : platform === "win32"
+          ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
+          : { command: "/bin/sh", args: ["-c", source] };
     case "python": {
       const interpreter = resolveInterpreter(["python3", "python"], env, platform);
       if (!interpreter) {
@@ -533,7 +537,11 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
   const interfaceErrors: string[] = [];
   validateWorkflowProgramSourceInterface(program, "recorded program", interfaceErrors);
   if (interfaceErrors.length > 0) throw new Error(interfaceErrors[0]);
-  if (program.source.length === 0 && (program.argv?.length ?? 0) === 0) {
+  if (
+    program.source.length === 0 &&
+    (program.argv?.length ?? 0) === 0 &&
+    !(program.kind === "shell" && program.argument !== undefined)
+  ) {
     throw new Error(
       "the record carries neither a program source nor an argv, so there is nothing to run",
     );
@@ -1214,13 +1222,41 @@ export async function runRecordedCall(
     );
   }
   const source = programTextFor(program, request.arguments);
-  if (source.length === 0) {
+  if (
+    source.length === 0 &&
+    !(
+      program.kind === "shell" &&
+      program.argument !== undefined &&
+      Object.hasOwn(request.arguments, program.argument) &&
+      request.arguments[program.argument] === ""
+    )
+  ) {
     throw new Error(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
+  const requestedWorkdir = request.arguments.workdir;
+  const shellProfile = request.arguments.resinCodexShellProfile;
+  if (shellProfile === "bash-login-v1" && typeof requestedWorkdir !== "string") {
+    throw new Error(`step '${step.id}' cannot run: workdir must be a string`);
+  }
+  if (
+    shellProfile !== undefined &&
+    (shellProfile !== "bash-login-v1" ||
+      step.callable.name !== "exec" ||
+      program.kind !== "shell" ||
+      program.argument !== "cmd" ||
+      typeof requestedWorkdir !== "string" ||
+      typeof request.arguments.raw !== "string")
+  ) {
+    throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
+  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
+    ...(shellProfile === "bash-login-v1" && typeof requestedWorkdir === "string"
+      ? { cwd: requestedWorkdir }
+      : {}),
+    ...(shellProfile === "bash-login-v1" ? { shellInvocation: "bash-login" as const } : {}),
     ...(options.resolvePrivate === undefined && request.resolvePrivate
       ? { resolvePrivate: request.resolvePrivate }
       : {}),

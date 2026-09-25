@@ -25,6 +25,7 @@ import {
   type WorkflowRecordedProgram,
   type WorkflowValuePath,
   analyzeAgentArguments,
+  readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
 import {
@@ -324,10 +325,37 @@ export class WorkflowCallRecorder {
     }
     if (event.type === "tool_call") return this.observeCall(event);
     if (event.type === "tool_result") {
+      const source = original ?? event;
+      const codex =
+        source.type === "tool_result" && source.toolName === "exec"
+          ? readCodexCommandMetadata(source.metadata)
+          : undefined;
+      const parts =
+        source.type === "tool_result" && Array.isArray(source.result) ? source.result : undefined;
+      const first = parts?.[0];
+      const control =
+        first && typeof first === "object" && "text" in first ? first.text : undefined;
+      const printed = parts
+        ?.slice(1)
+        .map((part) =>
+          part && typeof part === "object" && "text" in part && typeof part.text === "string"
+            ? part.text
+            : "",
+        )
+        .join("");
+      const codexObservation =
+        codex?.kind === "result" &&
+        codex.form === "single-command-output" &&
+        codex.status !== "yielded" &&
+        typeof control === "string" &&
+        (control.startsWith("Script completed") || control.startsWith("Script failed")) &&
+        printed !== undefined
+          ? { result: printed, comparison: "text-trim" as const }
+          : undefined;
       const observed = this.observeResult(
-        original ?? event,
+        source,
         event,
-        localWorkflowResultObservation(event),
+        codexObservation ?? localWorkflowResultObservation(event),
       );
       return { ...event, metadata: observed.metadata };
     }
@@ -470,7 +498,12 @@ export class WorkflowCallRecorder {
   private observeNativeCall(
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
   ): NormalizedSessionEvent {
-    const parameters = isPlainObject(event.parameters) ? event.parameters : {};
+    const observedParameters = isPlainObject(event.parameters) ? event.parameters : {};
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    const parameters =
+      codex?.kind === "call" && typeof observedParameters.cmd === "string"
+        ? { ...observedParameters, resinCodexShellProfile: "bash-login-v1" }
+        : observedParameters;
     const program = this.programOf(event, parameters);
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
@@ -933,6 +966,10 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     parameters: Record<string, WorkflowJsonValue>,
   ): WorkflowRecordedProgram | undefined {
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    if (codex?.kind === "call" && typeof parameters.cmd === "string") {
+      return { kind: "shell", source: "", argument: "cmd" };
+    }
     const command = extractRawCommandStringFromEvent(event);
     if (command !== null) {
       const program: WorkflowRecordedProgram = { kind: "shell", source: "" };

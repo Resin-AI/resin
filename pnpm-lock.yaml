@@ -56,6 +56,9 @@ importers:
 
   adapters/codex-cli:
     dependencies:
+      '@babel/parser':
+        specifier: 7.28.5
+        version: 7.28.5
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

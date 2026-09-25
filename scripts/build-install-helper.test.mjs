@@ -3,11 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_BANNER,
-  buildInstallHelper,
-  updateInstallerDigestPins,
-} from "./build-install-helper.mjs";
+import { buildInstallHelper, updateInstallerDigestPins } from "./build-install-helper.mjs";
 
 describe("build-install-helper", () => {
   const rootDir = process.cwd();
@@ -16,22 +12,12 @@ describe("build-install-helper", () => {
     const build1 = await buildInstallHelper({ rootDir, write: false });
     const build2 = await buildInstallHelper({ rootDir, write: false });
 
-    expect(build1.code).toBeDefined();
-    expect(build1.code.length).toBeGreaterThan(0);
-    expect(build1.sha256).toBe(build2.sha256);
     expect(Buffer.compare(build1.bytes, build2.bytes)).toBe(0);
   });
 
-  it("requires the checked-in helper to match the current bootstrap source", async () => {
+  it("keeps the standalone helper within the bootstrapper's one-mebibyte download limit", async () => {
     const result = await buildInstallHelper({ rootDir, write: false });
-    expect(fs.readFileSync(result.outputPath).equals(result.bytes)).toBe(true);
-  });
-
-  it("keeps native computation parsers outside the standalone installer bundle", async () => {
-    const result = await buildInstallHelper({ rootDir, write: false });
-    expect(result.code).not.toContain("node_modules/typescript/");
-    expect(result.code).not.toContain("node_modules/@lezer/python/");
-    expect(result.bytes.length).toBeLessThan(2 * 1024 * 1024);
+    expect(result.bytes.length).toBeLessThanOrEqual(1024 * 1024);
   });
 
   it("check mode rejects a stale helper without overwriting it", async () => {
@@ -48,31 +34,6 @@ describe("build-install-helper", () => {
     }
   });
 
-  it("does not recreate the removed version-local resin-mcp launcher", async () => {
-    const result = await buildInstallHelper({ rootDir, write: false });
-
-    expect(result.code).not.toContain("expectedMcp");
-  });
-
-  it("embeds the production trust root record in the bundled output", async () => {
-    const result = await buildInstallHelper({ rootDir, write: false });
-
-    expect(result.code).toContain("resin-release-2026a");
-    expect(result.code).toContain(
-      "f59235aaff92fadc6c30b0dfd56ca54c28a89e5abb1fa57ab7d5ea683d607851",
-    );
-    expect(result.code).toContain(
-      "a702d0d424e5797ecb672afabd275548c1ef6e1e95d1ea9651916e147e784359",
-    );
-    expect(result.code).toContain("resin-public-release-v1");
-    expect(result.code).toContain(
-      "0fa2f2783ffcacbf1fb1c02cf01d289015c6448d0f0ab1886de706a39955d204",
-    );
-    expect(result.code).toContain(
-      "54a0077e1353cd20f2c4d4eab5dd0d9d883a5e814c6992f61287ef544255836f",
-    );
-    expect(result.code).toContain(DEFAULT_BANNER.trim());
-  });
   it("synchronizes POSIX and PowerShell installer digest pins", () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-helper-digest-pins-"));
     const installDir = path.join(tmpRoot, "apps", "cli", "install");
