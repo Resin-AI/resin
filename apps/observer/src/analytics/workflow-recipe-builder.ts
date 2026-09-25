@@ -53,6 +53,8 @@ export interface RecordedCallObservation {
   result?: WorkflowJsonValue;
   /** Private reference to this original call's successful result for baseline replay. */
   baselineReference?: string;
+  /** Original arguments retained by the recorder as owner-scoped baseline references. */
+  baselineInputs?: Record<string, string>;
   /** Optional projection used only when comparing a textual baseline result. */
   baselineComparison?: "text-trim";
   /**
@@ -128,6 +130,7 @@ function recordWorkflowRecipeInternal(
     reference: string;
     comparison?: "text-trim";
   }> = [];
+  const baselineInputs: Array<{ stepId: string; argument: string; reference: string }> = [];
   const inputTypes = new Map<string, "string" | "number" | "boolean" | "object" | "array">();
   // A value may be classified private only after a later call is processed, so the union of every
   // predicate seen is applied to the finished workflow as well.
@@ -303,6 +306,9 @@ function recordWorkflowRecipeInternal(
       },
       ...(observation.permissions === undefined ? {} : { permissions: observation.permissions }),
     });
+    for (const [argument, reference] of Object.entries(observation.baselineInputs ?? {})) {
+      baselineInputs.push({ stepId, argument, reference });
+    }
     if (observation.baselineReference !== undefined) {
       baselineObserved.push({
         stepId,
@@ -380,13 +386,14 @@ function recordWorkflowRecipeInternal(
 
   const privateReferences = new Set(privateValues.keys());
   for (const entry of baselineObserved) privateReferences.add(entry.reference);
+  for (const entry of baselineInputs) privateReferences.add(entry.reference);
   const workflow: RecordedWorkflow = {
     schemaVersion: 1,
     workflowId,
     inputs: [...inputTypes.entries()].map(([name, type]) => ({ name, type })),
     steps,
     ...(baselineObserved.length === steps.length
-      ? { baseline: { inputs: [], observed: baselineObserved } }
+      ? { baseline: { inputs: baselineInputs, observed: baselineObserved } }
       : {}),
     ...(privateReferences.size > 0 ? { privateReferences: [...privateReferences] } : {}),
     // Candidates are reported, never executed: the steps above keep the values the record shows

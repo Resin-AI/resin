@@ -105,6 +105,7 @@ interface LocalCall {
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
+  resultHandle?: string;
   resultReference?: string;
   resultComparison?: "text-trim";
   reads?: string[];
@@ -499,7 +500,8 @@ export class WorkflowCallRecorder {
               : undefined;
     if (routedName === undefined) return event;
     const inner = parameters.parameters ?? parameters.arguments;
-    const analysis = analyzeAgentArguments(isPlainObject(inner) ? inner : {});
+    const argumentsAtCall = isPlainObject(inner) ? inner : {};
+    const analysis = analyzeAgentArguments(argumentsAtCall);
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
@@ -523,15 +525,66 @@ export class WorkflowCallRecorder {
     // recorded for the callable. Nothing else: not the harness, never a guess from the name.
     const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
-    // The invocation envelope establishes the routed call but does not expose resolved input or
-    // reference values. Track its occurrence without inventing argument values; its actual result
-    // can then be recorded by observeResult through the same owner-scoped private store.
+    const state = this.sessionState(event.sessionId);
+    const actualArguments: Record<string, WorkflowJsonValue> = {};
+    for (const [argument, envelope] of Object.entries(argumentsAtCall)) {
+      try {
+        const resolved = analyzeAgentArguments(
+          { [argument]: envelope },
+          {
+            resolveReference: (reference, path) => {
+              let producer: LocalCall | undefined;
+              for (
+                let index = state.executions.length - 1;
+                index >= 0 && producer === undefined;
+                index--
+              ) {
+                const calls = state.executions[index]!.calls;
+                for (let position = calls.length - 1; position >= 0; position--) {
+                  if (calls[position]!.resultHandle === reference) {
+                    producer = calls[position];
+                    break;
+                  }
+                }
+              }
+              if (producer?.result === undefined) throw new Error("unobserved reference");
+              let value: WorkflowJsonValue = producer.result;
+              for (const part of path) {
+                if (typeof part === "number") {
+                  if (
+                    !Number.isInteger(part) ||
+                    part < 0 ||
+                    !Array.isArray(value) ||
+                    part >= value.length
+                  ) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                } else {
+                  if (!isPlainObject(value) || !Object.hasOwn(value, part)) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                }
+              }
+              return value;
+            },
+          },
+        ).resolved;
+        if (resolved !== undefined) actualArguments[argument] = resolved[argument]!;
+      } catch {
+        // An unresolved reference supplies no demonstration or baseline value.
+      }
+    }
     const local = this.recordLocalCall(
-      this.sessionState(event.sessionId),
-      { ...event, toolName: routedName, parameters: {} },
-      {},
+      state,
+      { ...event, toolName: routedName, parameters: actualArguments },
+      actualArguments,
     );
     carrier.executionIndex = local.executionIndex;
+    carrier.baselineInputs = { ...local.argumentReferences };
+    const heldOut = this.heldOutSoFar(state, local);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     return this.withCallCarrier(event, carrier);
   }
 
@@ -604,6 +657,7 @@ export class WorkflowCallRecorder {
     const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call);
     carrier.executionIndex = call.executionIndex;
+    carrier.baselineInputs = { ...call.argumentReferences };
     const heldOut = this.heldOutSoFar(state, call);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
@@ -1094,12 +1148,20 @@ export class WorkflowCallRecorder {
         const execution = state.executions[e]!;
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
-        call.result = suppressResult
-          ? undefined
-          : extractResultValueOf(localResultObservation?.result ?? event.result);
+        const wrappedComposedResult =
+          isInvokeToolCallName(event.toolName) &&
+          this.resultHandle(publicEvent) !== undefined &&
+          isPlainObject(event.result) &&
+          Object.hasOwn(event.result, "result");
         const actual = suppressResult
           ? undefined
-          : (localResultObservation?.result ?? event.result);
+          : localResultObservation !== undefined
+            ? localResultObservation.result
+            : wrappedComposedResult
+              ? (event.result as Record<string, WorkflowJsonValue>).result
+              : event.result;
+        call.result = extractResultValueOf(actual);
+        call.resultHandle = call.result === undefined ? undefined : this.resultHandle(publicEvent);
         if (actual !== undefined) {
           const type = actual === null ? "null" : Array.isArray(actual) ? "array" : typeof actual;
           if (

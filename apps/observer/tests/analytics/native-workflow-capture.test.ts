@@ -226,6 +226,47 @@ describe("native capture of ordinary calls", () => {
     expect(JSON.stringify(projected.metadata)).not.toContain("meaningful-observed-private");
   });
 
+  it("records original explicit arguments for baseline replay without independent evidence", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const events = [
+      recorder.observe(
+        call(1, "invoke_tool", {
+          toolName: "local.fetch",
+          parameters: { source: { value: "original-private-source" } },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+      recorder.observe(
+        result(1, "invoke_tool", {
+          handle: "ref:session-native-capture:call_1",
+          result: { source: "original-private-source" },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+    ];
+    const recipe = recordCallsFromEvents("original-input-baseline", events);
+    expect(recipe?.workflow.inputs).toEqual([{ name: "source", type: "string" }]);
+    expect(recipe?.workflow.heldOut).toBeUndefined();
+    const baseline = recipe!.workflow.baseline!;
+    expect(baseline.observed).toHaveLength(1);
+    expect(resolvePrivateReference(store, baseline.observed[0]!.reference)).toEqual({
+      source: "original-private-source",
+    });
+    const source = baseline.inputs.find(
+      (entry) => entry.stepId === "step0" && entry.argument === "source",
+    );
+    expect(source).toBeDefined();
+    expect(resolvePrivateReference(store, source!.reference)).toBe("original-private-source");
+    expect(store.origin(source!.reference)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(events.map((entry) => entry.metadata))).not.toContain(
+      "original-private-source",
+    );
+  });
+
   it("never puts a recorded value into the projected metadata of an ordinary call", () => {
     const { events } = record([
       discovery([{ name: "vendor.fetch", provider: "vendor-srv" }]),
@@ -381,7 +422,6 @@ describe("native capture of ordinary calls", () => {
     ]);
 
     expect(recipe?.workflow.steps).toHaveLength(1);
-    expect(recipe?.workflow.baseline?.inputs).toEqual([]);
     expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
@@ -960,7 +1000,6 @@ describe("the recording an ordinary session produces", () => {
     const storedArgument = workflow.steps[1]!.arguments.find((entry) => entry.name === "token")!;
     expect(storedArgument.source.kind).toBe("template");
 
-    expect(workflow.baseline?.inputs).toEqual([]);
     expect(workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0", "step1"]);
     expect(
       workflow.baseline?.observed.every((entry) =>
@@ -1188,7 +1227,6 @@ describe("a recording and the demonstrations read beside it", () => {
       "step0",
       "step1",
     ]);
-    expect(recipe!.workflow.baseline?.inputs).toEqual([]);
     expect(recipe!.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual([
       "step0",
       "step1",

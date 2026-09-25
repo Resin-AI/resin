@@ -446,6 +446,7 @@ export function reconstructWorkflowFromEvents(
         ...(carrier?.program === undefined ? {} : { program: carrier.program }),
       },
       arguments: carrier !== undefined ? callArguments : (event.parameters ?? {}),
+      ...(carrier?.baselineInputs === undefined ? {} : { baselineInputs: carrier.baselineInputs }),
       ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
       ...(Object.keys(argumentTypes).length > 0 ? { argumentTypes } : {}),
       ...(carrier?.provenance === undefined ? {} : { argumentProvenance: carrier.provenance }),
