@@ -204,6 +204,27 @@ describe("recorded program adapters", () => {
     expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
   });
 
+  it("replays a Codex command with stderr merged into its output, as Codex recorded it", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter();
+    const step = recordedStep({
+      id: "native-streams",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    const run = (cmd: string) =>
+      adapter.call({
+        step,
+        arguments: { cmd, workdir: workspace, resinCodexShellProfile: "bash-login-native-v1" },
+      });
+
+    expect(await run("echo out; echo warning >&2; echo done")).toBe("out\nwarning\ndone\n");
+    expect(await failureOf(() => run("echo 'Traceback: boom' >&2; exit 3"))).toContain(
+      "exited with code 3: Traceback: boom",
+    );
+  });
+
   it("keeps the inherited PATH in front when a login profile resets it", async () => {
     // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
     const workspace = await makeWorkspace();

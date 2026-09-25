@@ -647,13 +647,15 @@ function resolveInterpreter(
 }
 
 /**
- * A login shell's profile may reset PATH (Debian's `/etc/profile` does for root), dropping
- * directories the recorded command resolved programs from, such as an agent harness's bundled
- * helpers. The inherited PATH goes back in front, on the script's first line so its line numbers
- * are unchanged.
+ * Codex records a command's stderr inside its stdout, so a replay of a Codex-recorded command
+ * merges the two the same way: a quiet `pip install` that only warned on stderr still produced
+ * the output it recorded. A login shell's profile may also reset PATH (Debian's `/etc/profile`
+ * does for root), dropping directories the recorded command resolved programs from, such as an
+ * agent harness's bundled helpers; the inherited PATH goes back in front. Both happen on the
+ * script's first line so its line numbers are unchanged.
  */
 const INHERITED_PATH_VARIABLE = "RESIN_INHERITED_PATH";
-const RESTORE_INHERITED_PATH = `if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then PATH="$${INHERITED_PATH_VARIABLE}:$PATH"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE}; `;
+const CODEX_SHELL_PRELUDE = `exec 2>&1; if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then PATH="$${INHERITED_PATH_VARIABLE}:$PATH"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE}; `;
 
 function invocationFor(
   program: WorkflowRecordedProgram,
@@ -669,7 +671,7 @@ function invocationFor(
       // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
       // recorded call did, and exit status is the program's exit status.
       return options.shellInvocation === "bash-login"
-        ? { command: "/bin/bash", args: ["-lc", `${RESTORE_INHERITED_PATH}${source}`] }
+        ? { command: "/bin/bash", args: ["-lc", `${CODEX_SHELL_PRELUDE}${source}`] }
         : platform === "win32"
           ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
           : { command: "/bin/sh", args: ["-c", source] };
@@ -1591,8 +1593,9 @@ export async function runRecordedCall(
   };
   const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {
-    const tail = stderrTail(run.stderr);
-    const detail = tail.length > 0 ? `: ${tail}` : " (no stderr)";
+    // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
+    const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);
+    const detail = tail.length > 0 ? `: ${tail}` : " (no output)";
     throw new Error(
       `step '${step.id}' failed: recorded ${program.kind} program exited with code ${run.exitCode}${detail}`,
     );
