@@ -105,11 +105,14 @@ describe("invoke_tool Meta-Tool", () => {
 
     const single = await invoke('{\n  "rows": [1, 2]\n}\n');
     const sequence = await invoke(["a.txt\nb.txt\n", "# Design\n"]);
+    const silent = await invoke("");
 
     expect(single.content).toEqual([{ type: "text", text: '{\n  "rows": [1, 2]\n}\n' }]);
     expect(sequence.content).toEqual([
       { type: "text", text: "--- step 1/2 ---\na.txt\nb.txt\n\n--- step 2/2 ---\n# Design\n" },
     ]);
+    // A command that printed nothing still reports that it ran.
+    expect(silent.content).toEqual([{ type: "text", text: "(completed with no output)" }]);
   });
 
   it("validates parameter types, enums, and bounds strictly", async () => {

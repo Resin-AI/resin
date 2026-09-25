@@ -100,7 +100,9 @@ function presentedResult(result: CallToolResult): CallToolResult {
   const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
   const presented =
     typeof value === "string"
-      ? value
+      ? value.length > 0
+        ? value
+        : "(completed with no output)"
       : Array.isArray(value) &&
           value.length > 1 &&
           value.every((item) => typeof item === "string" || item === null)
