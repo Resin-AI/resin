@@ -113,7 +113,6 @@ export function applyConfirmedWorkflowBinding(
   }
   const isToken = candidate.path[0] === "tokens";
   if (
-    proposed.kind === "input" &&
     !isToken &&
     candidate.path.length === 0 &&
     step.callable.program?.argument === candidate.argument

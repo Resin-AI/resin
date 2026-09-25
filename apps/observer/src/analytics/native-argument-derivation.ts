@@ -173,6 +173,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       if (typeof leaf.value === "string" && leaf.value.length < MIN_CANDIDATE_STRING_LENGTH)
         continue;
       const argumentName = leaf.path[0];
+      if (call.program?.argument === argumentName) continue;
       if (typeof argumentName !== "string") continue;
       const producers = producersOfValue(leaf.value, index, calls, resultValues, seenBeforeResult);
       if (producers.length === 0) continue;
