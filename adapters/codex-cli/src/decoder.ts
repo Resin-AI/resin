@@ -255,7 +255,7 @@ function parseDurationMs(raw: CodexTranscriptPayload): number | undefined {
 type NativeOutcome = "completed" | "failed" | "unknown" | "running" | "truncated";
 
 interface NativeShellOutput {
-  result: CodexTranscriptValue;
+  result?: CodexTranscriptValue;
   exitCode?: number;
   durationMs?: number;
   outcome: NativeOutcome;
@@ -346,7 +346,7 @@ function parseNativeShellOutput(
                 rawRecord.completed === true
               ? "completed"
               : undefined;
-  let result: CodexTranscriptValue = rawOutput ?? null;
+  let result: CodexTranscriptValue | undefined = rawOutput;
   if (outputObject) {
     const stdout = asString(outputObject.stdout);
     const stderr = asString(outputObject.stderr);
@@ -414,7 +414,7 @@ function parseNativeShellOutput(
 }
 
 interface NativeCodeModeExecOutput {
-  result: CodexTranscriptValue;
+  result?: CodexTranscriptValue;
   outcome: NativeOutcome;
 }
 
@@ -537,7 +537,7 @@ function parseNativeCodeModeExecOutput(
   }
 
   return {
-    result: body ?? rawOutput ?? null,
+    result: body ?? rawOutput,
     outcome,
   };
 }
@@ -1823,12 +1823,7 @@ export class CodexSessionDecoder {
         : undefined;
     const structuredContent = successResult?.structured_content ?? successResult?.structuredContent;
     const result =
-      errorText ??
-      textContent ??
-      structuredContent ??
-      successResult?.content ??
-      successResult ??
-      {};
+      errorText ?? textContent ?? structuredContent ?? successResult?.content ?? successResult;
     const isError =
       errorText !== undefined ||
       successResult?.is_error === true ||
@@ -2118,7 +2113,7 @@ export class CodexSessionDecoder {
         const resultEvents = this.normalizePayload(
           {
             ...base,
-            type: "tool_result",
+            type: nativeType,
             call_id: native.call_id,
             output: rawResult,
             is_error:
@@ -2841,7 +2836,16 @@ export class CodexSessionDecoder {
           cached?.toolName ??
           "unknown_tool",
       );
-      const rawResult = p.result ?? p.output ?? p.content ?? p.data ?? p.response;
+      const rawResult =
+        p.result !== undefined
+          ? p.result
+          : p.output !== undefined
+            ? p.output
+            : p.content !== undefined
+              ? p.content
+              : p.data !== undefined
+                ? p.data
+                : p.response;
       const pairedNativeExec = asObject(
         exactCached?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
       );
@@ -2942,7 +2946,7 @@ export class CodexSessionDecoder {
         type: "tool_result",
         callId,
         toolName,
-        result: nativeCodeModeOutput?.result ?? terminalOutput?.result ?? rawResult ?? {},
+        result: nativeCodeModeOutput?.result ?? terminalOutput?.result ?? rawResult,
         isError,
         executionDurationMs: durationMs,
         isShadow: false,
@@ -2966,6 +2970,7 @@ export class CodexSessionDecoder {
       const command = String(asString(p.command) ?? asString(p.cmd) ?? "");
       const argsArray = asArray(p.args);
       const args = argsArray ? argsArray.map((a) => asString(a) ?? String(a)) : [];
+      const cwd = asString(p.cwd);
       const exitCode = asNumber(p.exitCode) ?? asNumber(p.exit_code) ?? -1;
       const stdout = asString(p.stdout) ?? asString(p.output);
       const stderr = asString(p.stderr);
@@ -2977,10 +2982,10 @@ export class CodexSessionDecoder {
         type: "command_exec",
         command,
         args,
-        cwd: asString(p.cwd),
+        ...(cwd === undefined ? {} : { cwd }),
         exitCode,
-        stdout,
-        stderr,
+        ...(stdout === undefined ? {} : { stdout }),
+        ...(stderr === undefined ? {} : { stderr }),
         durationMs,
         providerUsage: cmdUsage,
       });

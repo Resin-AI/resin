@@ -26,12 +26,15 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import {
   RESIN_HARNESS_TOOL_RUNTIME,
+  RESIN_INVOKE_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
   WorkflowCallRecorder,
   readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 import {
@@ -181,6 +184,46 @@ describe("native capture of ordinary calls", () => {
     expect(JSON.stringify(events[1]!.parameters)).toBe(
       JSON.stringify({ source: "alpha-feed", page: 2 }),
     );
+  });
+
+  it("retains a zero-input composed call's meaningful result as an owned baseline", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const observedCall = recorder.observe(
+      call(1, "invoke_tool", { toolName: "local.render_result", parameters: {} }),
+      { workspaceId: "ws_native" },
+    );
+    const observedResult = recorder.observe(
+      result(1, "invoke_tool", { result: "meaningful-observed-private" }),
+      { workspaceId: "ws_native" },
+    );
+    expect(carrierOf(observedCall)).toMatchObject({
+      runtime: RESIN_INVOKE_TOOL_RUNTIME,
+      name: "local.render_result",
+      executionIndex: 0,
+    });
+    const projected = projectEventToMetadataOnly(observedResult);
+    const carrier = readWorkflowResultCarrier(
+      projected.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+    );
+    expect(carrier?.output).toEqual({ type: "object", hasContent: true });
+    expect(carrier?.baselineReference).toEqual(expect.any(String));
+    expect(resolvePrivateReference(store, carrier!.baselineReference!)).toEqual({
+      result: "meaningful-observed-private",
+    });
+    const recipe = recordCallsFromEvents("composed-zero-input", [observedCall, observedResult]);
+    expect(recipe?.workflow.steps[0]?.observed.output).toEqual({
+      type: "object",
+      hasContent: true,
+    });
+    expect(recipe?.workflow.baseline?.observed).toMatchObject([
+      { stepId: "step0", reference: carrier!.baselineReference },
+    ]);
+    expect(store.origin(carrier!.baselineReference!)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(projected.metadata)).not.toContain("meaningful-observed-private");
   });
 
   it("never puts a recorded value into the projected metadata of an ordinary call", () => {

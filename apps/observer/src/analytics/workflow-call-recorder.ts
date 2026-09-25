@@ -383,7 +383,7 @@ export class WorkflowCallRecorder {
       const codexObservation =
         codex?.kind === "result" &&
         codex.form === "single-command-output" &&
-        codex.status !== "yielded" &&
+        codex.status === "completed" &&
         native !== undefined
           ? { result: native.stdout, comparison: "text-trim" as const }
           : undefined;
@@ -392,7 +392,7 @@ export class WorkflowCallRecorder {
       const suppressResult =
         isLocalWorkflowResultSuppressed(event) ||
         (codex?.kind === "result" &&
-          (codex.status === "yielded" || native === undefined || native.exitCode !== 0));
+          (codex.status !== "completed" || native === undefined || native.exitCode !== 0));
       const observed = this.observeResult(source, event, resultObservation, suppressResult);
       const resultEvent = { ...event, metadata: observed.metadata };
       if (suppressResult) {
@@ -523,6 +523,15 @@ export class WorkflowCallRecorder {
     // recorded for the callable. Nothing else: not the harness, never a guess from the name.
     const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
+    // The invocation envelope establishes the routed call but does not expose resolved input or
+    // reference values. Track its occurrence without inventing argument values; its actual result
+    // can then be recorded by observeResult through the same owner-scoped private store.
+    const local = this.recordLocalCall(
+      this.sessionState(event.sessionId),
+      { ...event, toolName: routedName, parameters: {} },
+      {},
+    );
+    carrier.executionIndex = local.executionIndex;
     return this.withCallCarrier(event, carrier);
   }
 
@@ -541,7 +550,15 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     normalizedEvent: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
   ): NormalizedSessionEvent {
-    const observedParameters = isPlainObject(event.parameters) ? event.parameters : {};
+    // Optional arguments omitted by a producer have no JSON value to reference locally.
+    const rawParameters = isPlainObject(event.parameters) ? event.parameters : {};
+    let observedParameters = rawParameters;
+    for (const argument in rawParameters) {
+      if (!Object.hasOwn(rawParameters, argument) || rawParameters[argument] !== undefined)
+        continue;
+      if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
+      delete observedParameters[argument];
+    }
     const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
     const parameters =
       codex?.kind === "call" && typeof observedParameters.cmd === "string"

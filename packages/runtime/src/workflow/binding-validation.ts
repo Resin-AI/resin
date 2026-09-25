@@ -753,11 +753,14 @@ export async function confirmPromotedPlan(params: {
     plan = applyAcceptedBindings(params.plan, accepted);
     replay = await replayPlanOnce(plan, params.environment);
   }
+  const missingObservation = replay.missed.some(
+    ({ stepId }) => !Object.hasOwn(params.environment.observed, stepId),
+  );
   const verification: WorkflowPlanVerification = {
     status:
       replay.missed.length === 0
         ? "verified"
-        : unattributed && accepted.length > 0
+        : missingObservation || (unattributed && accepted.length > 0)
           ? "incomplete"
           : "failed",
     reproduced: replay.reproduced,

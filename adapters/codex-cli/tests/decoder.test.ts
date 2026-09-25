@@ -1894,7 +1894,7 @@ describe("Codex CLI Session Decoder", () => {
         toolName: "read_text",
         output: undefined,
         fields: {},
-        result: {},
+        result: undefined,
         outcome: "unknown",
         isError: false,
       },

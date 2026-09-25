@@ -371,6 +371,8 @@ export class RedactionEngine {
       if (objectParsed.success) {
         const result: JsonObject = {};
         for (const [key, val] of Object.entries(objectParsed.data)) {
+          // An optional field with no value is absent evidence, not a private JSON leaf.
+          if (val === undefined) continue;
           const fieldPath = currentPath ? `${currentPath}.${key}` : key;
 
           // Preserved identifier / keyword field check

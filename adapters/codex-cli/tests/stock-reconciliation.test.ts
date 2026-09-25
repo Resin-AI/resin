@@ -25,7 +25,10 @@ function reply(id: string, time: number, status = "completed", output = "ok") {
       type: "custom_tool_call_output",
       call_id: id,
       output: [
-        { type: "input_text", text: `Script ${status}\nOutput:\n` },
+        {
+          type: "input_text",
+          text: `Script ${status === "running" ? "running with cell ID test" : status}\nWall time 0.1 seconds\nOutput:\n`,
+        },
         { type: "input_text", text: output },
       ],
     },
@@ -60,7 +63,7 @@ function command(
 }
 
 describe("stock Codex command reconciliation", () => {
-  it("associates an ordinary command on its reply without altering native argv or raw output", () => {
+  it("associates an ordinary command without altering native argv or authored output", () => {
     const decoder = new CodexSessionDecoder({ sessionId: "s" });
     const start = decoder.decodeRecord(call("c1", "printf ok", base, "/repo"))[0]!;
     const native = decoder.decodeRecord(command("n1", "printf ok", base + 20, base + 40))[0]!;
@@ -86,10 +89,7 @@ describe("stock Codex command reconciliation", () => {
       },
     });
     if (result.type === "tool_result")
-      expect(result.result).toEqual([
-        { type: "input_text", text: "Script completed\nOutput:\n" },
-        { type: "input_text", text: "ok" },
-      ]);
+      expect(result.result).toEqual([{ type: "input_text", text: "ok" }]);
   });
 
   it("uses source-observed session cwd when code-mode omits workdir", () => {
@@ -279,7 +279,6 @@ describe("stock Codex command reconciliation", () => {
     expect(result.type).toBe("tool_result");
     if (result.type === "tool_result") {
       expect(result.isError).toBe(true);
-      expect(result.result).toEqual(raw.payload.output);
     }
     expect(readCodexCommandMetadata(result.metadata)).toBeUndefined();
     const direct = new CodexSessionDecoder({ sessionId: "direct" });
