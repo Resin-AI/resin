@@ -205,8 +205,13 @@ describe("a value embedded in a recorded program", () => {
       program: { kind: "shell" as const, argument: "command" },
     });
     const derivation = deriveNativeCalls([
-      // python3(0) solve.py(1) --month(2) 2025-01(3) -v(4) 'EU zone'(5) status(6)
-      shell("call_1", "step0", "python3 solve.py --month 2025-01 -v 'EU zone' status"),
+      // ERP_USER=planner(0) ERP_PASS='Pl4n'(1) python3(2) solve.py(3) --month(4) 2025-01(5)
+      // --password(6) s3cret(7) -v(8) 'EU zone'(9) status(10)
+      shell(
+        "call_1",
+        "step0",
+        "ERP_USER=planner ERP_PASS='Pl4n' python3 solve.py --month 2025-01 --password s3cret -v 'EU zone' status",
+      ),
       // wc(0) -l(1) solve.py(2), then a heredoc whose body is another program's text.
       shell("call_2", "step1", "wc -l solve.py <<'EOF'\n--month 2030-12\nEOF"),
     ]);
@@ -223,12 +228,30 @@ describe("a value embedded in a recorded program", () => {
           ]
         : [],
     );
+    // Assignments and a credential flag's value are configuration, never parameters.
     expect(offered).toEqual([
-      ["step0", 1, "path", true],
-      ["step0", 3, "month", true],
-      ["step0", 5, "text", true],
+      ["step0", 3, "path", true],
+      ["step0", 5, "month", true],
+      ["step0", 9, "text", true],
       // The same value in a later call is the same input.
       ["step1", 2, "path", true],
+    ]);
+  });
+
+  it("names a recording's parameters from its own values, not the session's numbering", () => {
+    const { events } = record([
+      call(1, { command: "cat /app/a.txt" }),
+      result(1, { stdout: "a" }),
+      call(2, { command: "cat /app/b.txt" }),
+      result(2, { stdout: "b" }),
+    ]);
+    // Across the session the second path is `path_2`; recorded alone, it is the tool's `path`.
+    expect(carrierOf(events[2]!)?.candidates?.[0]?.proposed).toMatchObject({ name: "path_2" });
+    const workflow = recordCallsFromEvents("second-read", events.slice(2), {
+      supportingEvents: events,
+    })!.workflow;
+    expect(workflow.candidates?.map((candidate) => candidate.proposed)).toEqual([
+      { kind: "input", name: "path", type: "string", recordedDefault: true },
     ]);
   });
 

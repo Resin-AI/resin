@@ -129,8 +129,9 @@ function scalarKey(value: CandidateScalar): string {
 
 /**
  * Whether a program token is a value a caller may plausibly want to change: a quoted string, a
- * flag's value, or a word shaped like a path or a number. Command names, flags and bare
- * subcommands are structure, and never offered.
+ * flag's value, or a word shaped like a path or a number. Command names, flags, bare subcommands
+ * and variable assignments are structure or configuration, and a credential flag's value is never
+ * offered: a shell command carries no redaction projection to protect it.
  */
 function isProgramValue(
   language: ProgramLanguage,
@@ -143,9 +144,12 @@ function isProgramValue(
     return false;
   }
   if (value.startsWith("/dev/")) return false;
+  const flag = longFlagName(previous);
+  if (flag !== undefined && /pass|secret|token|key|auth|cred/.test(flag)) return false;
   const shaped = /[/.\d]/.test(value);
   if (language !== "shell") return token.kind === "string" && shaped;
-  return token.kind === "string" || shaped || longFlagName(previous) !== undefined;
+  if (token.kind === "word" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) return false;
+  return token.kind === "string" || shaped || flag !== undefined;
 }
 
 function longFlagName(token: ProgramToken | undefined): string | undefined {
@@ -321,9 +325,23 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       // input reproduces the recording, so the offer is safe to confirm by replaying it unchanged.
       const bodyStart = heredocStart(call.program.kind, text);
       const offered = new Set<string>();
+      // A shell word at command position — the first word of a simple command after any leading
+      // assignments — names the program to run, never a value it runs with.
+      let commandPosition = call.program.kind === "shell";
       for (const [tokenIndex, token] of tokens.entries()) {
         if (inputCandidates.length >= MAX_CANDIDATES || token.start >= bodyStart) break;
         const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
+        if (call.program.kind === "shell") {
+          if (token.kind === "operator") {
+            commandPosition = ["&&", "||", ";", "|", "|&", "(", "&", "\n"].includes(token.raw);
+            continue;
+          }
+          const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw);
+          if (commandPosition) {
+            if (!assignment) commandPosition = false;
+            continue;
+          }
+        }
         if (!isProgramValue(call.program.kind, token, previous)) continue;
         const key = scalarKey(token.value);
         let name = programInputs.get(key);

@@ -674,7 +674,14 @@ export function reconstructWorkflowFromEvents(
   );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
-    recipe.workflow.candidates = [...(recipe.workflow.candidates ?? []), ...carrierCandidates];
+    const reserved = new Set([
+      ...recipe.workflow.inputs.map((input) => input.name),
+      ...recordedInputTypes.keys(),
+    ]);
+    recipe.workflow.candidates = [
+      ...(recipe.workflow.candidates ?? []),
+      ...withRecordingInputNames(carrierCandidates, reserved),
+    ];
   }
   const privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
   if (privateReferences.length > 0) recipe.workflow.privateReferences = privateReferences;
@@ -686,6 +693,46 @@ export function reconstructWorkflowFromEvents(
   }
   recipe.workflow.inputs = [...declared.values()];
   return recipe;
+}
+
+/** Optional program-value inputs one recorded workflow may expose, so its schema stays short. */
+const MAX_RECORDED_DEFAULT_INPUTS = 8;
+
+/**
+ * Program values were named across the whole session as they first appeared (`path_12`). Within one
+ * recording, the first value of each kind takes the bare name (`path`), the next `path_2`, and only
+ * the first few distinct values are offered at all.
+ */
+function withRecordingInputNames(
+  candidates: readonly WorkflowBindingCandidate[],
+  reserved: ReadonlySet<string>,
+): WorkflowBindingCandidate[] {
+  const used = new Set(reserved);
+  for (const candidate of candidates) {
+    if (candidate.proposed.kind === "input" && candidate.proposed.recordedDefault !== true) {
+      used.add(candidate.proposed.name);
+    }
+  }
+  const renamed = new Map<string, string>();
+  const named: WorkflowBindingCandidate[] = [];
+  for (const candidate of candidates) {
+    const proposed = candidate.proposed;
+    if (proposed.kind !== "input" || proposed.recordedDefault !== true) {
+      named.push(candidate);
+      continue;
+    }
+    let name = renamed.get(proposed.name);
+    if (name === undefined) {
+      if (renamed.size >= MAX_RECORDED_DEFAULT_INPUTS) continue;
+      const base = proposed.name.replace(/_\d+$/, "");
+      name = base;
+      for (let suffix = 2; used.has(name); suffix += 1) name = `${base}_${suffix}`;
+      renamed.set(proposed.name, name);
+      used.add(name);
+    }
+    named.push({ ...candidate, proposed: { ...proposed, name } });
+  }
+  return named;
 }
 
 /** The execution a recording is built from, and the demonstration a later one offers for it. */
