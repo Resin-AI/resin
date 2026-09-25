@@ -501,7 +501,14 @@ export class WorkflowCallRecorder {
     if (routedName === undefined) return event;
     const inner = parameters.parameters ?? parameters.arguments;
     const argumentsAtCall = isPlainObject(inner) ? inner : {};
-    const analysis = analyzeAgentArguments(argumentsAtCall);
+    const state = this.sessionState(event.sessionId);
+    const position =
+      state.executions.length === 0 || state.newExecutionPending ? 0 : state.position;
+    // Input identity follows the selected workflow step, not a session-global call id.
+    // Repeated executions have new call ids but the same logical positions.
+    const nameInput = (argument: string, path: WorkflowValuePath): string =>
+      `step${position}_${argument}${path.length === 0 ? "" : `.${path.map(String).join(".")}`}`;
+    const analysis = analyzeAgentArguments(argumentsAtCall, { nameInput });
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
@@ -525,7 +532,6 @@ export class WorkflowCallRecorder {
     // recorded for the callable. Nothing else: not the harness, never a guess from the name.
     const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
-    const state = this.sessionState(event.sessionId);
     const actualArguments: Record<string, WorkflowJsonValue> = {};
     for (const [argument, envelope] of Object.entries(argumentsAtCall)) {
       try {

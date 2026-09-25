@@ -249,7 +249,7 @@ describe("native capture of ordinary calls", () => {
       ),
     ];
     const recipe = recordCallsFromEvents("original-input-baseline", events);
-    expect(recipe?.workflow.inputs).toEqual([{ name: "source", type: "string" }]);
+    expect(recipe?.workflow.inputs).toEqual([{ name: "step0_source", type: "string" }]);
     expect(recipe?.workflow.heldOut).toBeUndefined();
     const baseline = recipe!.workflow.baseline!;
     expect(baseline.observed).toHaveLength(1);
@@ -265,6 +265,47 @@ describe("native capture of ordinary calls", () => {
     expect(JSON.stringify(events.map((entry) => entry.metadata))).not.toContain(
       "original-private-source",
     );
+  });
+
+  it("distinguishes two caller inputs named echo across independent complete executions", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const captured = [
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
+      call(2, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-1" } } }),
+      result(2, "invoke_tool", { handle: "ref:scope:call_2", result: { echo: "ping-1" } }),
+      userTurn(3),
+      call(3, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-9" } },
+      }),
+      result(3, "invoke_tool", { handle: "ref:scope:call_3", result: { echo: "release-9" } }),
+      call(4, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-2" } } }),
+      result(4, "invoke_tool", { handle: "ref:scope:call_4", result: { echo: "ping-2" } }),
+    ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
+    const recipe = recordCallsFromEvents("two-echo-inputs", captured);
+    expect(recipe?.workflow.inputs).toEqual([
+      { name: "step0_echo", type: "string" },
+      { name: "step1_echo", type: "string" },
+    ]);
+    expect(recipe?.workflow.heldOut?.observed).toHaveLength(2);
+    expect(
+      recipe?.workflow.heldOut?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-9", "ping-2"]);
+    expect(
+      recipe?.workflow.baseline?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-7", "ping-1"]);
   });
 
   it("never puts a recorded value into the projected metadata of an ordinary call", () => {
