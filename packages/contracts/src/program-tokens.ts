@@ -168,7 +168,7 @@ function shellTokens(source: string): ProgramToken[] {
     const start = index;
     let value = "";
     let quotedFully = false;
-    let bindable = commandSubstitutionDepth === 0 && !insideBacktickSubstitution;
+    let bindable = !insideBacktickSubstitution;
     if (char === "'" || char === '"') {
       const quoted = readShellQuoted(source, index);
       value += quoted.value;
@@ -231,6 +231,137 @@ function shellTokens(source: string): ProgramToken[] {
           tokens.at(-1)?.raw !== ">>"
         ),
     });
+  }
+  // Inner words already have their original spans. Admit only arguments of a complete,
+  // ordinary command substitution; never reinterpret arithmetic or incomplete syntax.
+  const frames: Array<{
+    arithmetic: boolean;
+    eligible: boolean;
+    invalid: boolean;
+    command: boolean;
+    redirect: boolean;
+    firstCandidate: number;
+  }> = [];
+  let awaitingSubstitution = false;
+  let awaitingArithmetic = false;
+  const nestedCandidates = new Set<number>();
+  const pendingCandidates: number[] = [];
+  let previousEnd = 0;
+  let opaqueFrom = tokens.length;
+  for (let position = 0; position < tokens.length; position += 1) {
+    const token = tokens[position]!;
+    const newline = source.indexOf("\n", previousEnd);
+    if (newline !== -1 && newline < token.start) {
+      const current = frames.at(-1);
+      if (current) {
+        current.command = false;
+        current.redirect = false;
+      }
+    }
+    previousEnd = token.end;
+    if (token.raw === "(") {
+      const parent = frames.at(-1);
+      const arithmetic = awaitingArithmetic || (parent?.arithmetic ?? false);
+      if (parent && !awaitingSubstitution && !arithmetic) {
+        parent.invalid = true;
+        opaqueFrom = Math.min(opaqueFrom, position);
+      }
+      const eligible = !arithmetic && awaitingSubstitution && (parent?.eligible ?? true);
+      frames.push({
+        arithmetic,
+        eligible,
+        invalid: false,
+        command: false,
+        redirect: false,
+        firstCandidate: pendingCandidates.length,
+      });
+      awaitingSubstitution = false;
+      awaitingArithmetic = false;
+      continue;
+    }
+    if (token.raw === ")") {
+      const frame = frames.pop();
+      if (frame) {
+        if (frame.invalid) {
+          const parent = frames.at(-1);
+          if (parent) parent.invalid = true;
+        }
+        if (frame.eligible && !frame.invalid && frames.length === 0) {
+          for (const candidate of pendingCandidates) nestedCandidates.add(candidate);
+          pendingCandidates.length = 0;
+        } else if (!frame.eligible || frame.invalid) {
+          pendingCandidates.length = frame.firstCandidate;
+        }
+      }
+      awaitingSubstitution = false;
+      continue;
+    }
+    const frame = frames.at(-1);
+    if (frame) {
+      if (
+        token.kind === "word" &&
+        ([
+          "if",
+          "then",
+          "elif",
+          "else",
+          "fi",
+          "for",
+          "while",
+          "until",
+          "do",
+          "done",
+          "case",
+          "esac",
+          "in",
+          "function",
+          "{",
+          "}",
+        ].includes(token.raw) ||
+          (token.raw === "!" && !frame.command))
+      ) {
+        frame.invalid = true;
+        opaqueFrom = Math.min(opaqueFrom, position);
+      }
+      if ([";", "&&", "||", "|", "&"].includes(token.raw)) {
+        frame.command = false;
+        frame.redirect = false;
+      } else if (token.kind === "operator") {
+        if (["<", ">", ">>"].includes(token.raw) || /^[0-9]+[<>]/.test(token.raw)) {
+          frame.redirect = true;
+        }
+      } else if (frame.redirect) {
+        frame.redirect = false;
+      } else if (!frame.command) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) frame.command = true;
+      } else if (
+        token.bindable &&
+        frame.eligible &&
+        !awaitingSubstitution &&
+        (token.kind === "string" || (!token.raw.includes("'") && !token.raw.includes('"'))) &&
+        !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)
+      ) {
+        pendingCandidates.push(position);
+      }
+    }
+    if (token.raw.endsWith("$") && tokens[position + 1]?.raw === "(") {
+      awaitingSubstitution = true;
+      awaitingArithmetic = tokens[position + 2]?.raw === "(";
+    }
+  }
+  let depth = 0;
+  for (let position = 0; position < tokens.length; position += 1) {
+    const token = tokens[position]!;
+    if (token.raw === ")") depth -= 1;
+    if (depth > 0 && !nestedCandidates.has(position)) {
+      token.bindable = false;
+      delete token.value;
+    }
+    if (token.raw === "(") depth += 1;
+  }
+  for (let position = opaqueFrom; position < tokens.length; position += 1) {
+    tokens[position]!.bindable = false;
+    delete tokens[position]!.value;
   }
   return tokens;
 }

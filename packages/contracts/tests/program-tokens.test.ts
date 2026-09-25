@@ -190,8 +190,74 @@ describe("tokenizeProgram", () => {
     expect(tokens.find((token) => token.raw === "*.txt")?.bindable).toBe(false);
     const substitutions = tokenizeProgram("shell", "echo $(printf x) `whoami`");
     expect(substitutions.find((token) => token.raw === "printf")?.bindable).toBe(false);
-    expect(substitutions.find((token) => token.raw === "x")?.bindable).toBe(false);
+    expect(substitutions.find((token) => token.raw === "x")?.bindable).toBe(true);
     expect(substitutions.find((token) => token.raw === "`whoami`")?.bindable).toBe(false);
+  });
+
+  it("binds only static arguments in complete ordinary command substitutions", () => {
+    const source = "D=$(printf '%s' '/old/path') && A=$(printf '%s' '/old/path')";
+    const tokens = tokenizeProgram("shell", source);
+    const indices = tokens.flatMap((token, index) =>
+      token.value === "/old/path" && token.bindable ? [index] : [],
+    );
+    expect(indices).toHaveLength(2);
+    for (const index of indices) {
+      expect(tokens[index]?.start).toBe(
+        source.indexOf("'/old/path'", index === indices[0] ? 0 : source.indexOf("&&")),
+      );
+    }
+    const hostile = "new'; echo injected; $(id) `whoami`";
+    const rewritten = applyProgramTokenValues(source, tokens, new Map([[indices[0]!, hostile]]));
+    expect(rewritten).toBe(
+      source.replace("'/old/path'", renderProgramTokenValue(tokens[indices[0]!]!, hostile)),
+    );
+    expect(rewritten).toContain("&& A=$(printf '%s' '/old/path')");
+    const commands = tokenizeProgram("shell", "D=$(printf a\nprintf b)");
+    expect(commands.find((token) => token.raw === "b")?.bindable).toBe(true);
+    expect(commands.find((token) => token.raw === "printf" && token.start > 10)?.bindable).toBe(
+      false,
+    );
+  });
+
+  it("excludes arithmetic, executable positions, dynamic words and incomplete substitutions", () => {
+    for (const source of [
+      "D=$((printf + 4))",
+      "D=$(printf '%s' \"$HOME\")",
+      "D=$(printf '%s' pre'old')",
+      "D=$(printf '%s' 'old'",
+      "D=$(X=old printf '%s')",
+      "D=$(printf '%s' > old)",
+      "D=$(sh -c 'old')",
+      "D=$(old)",
+      "D=$(printf a\nold)",
+      "D=$(printf >\nold)",
+      "D=$(X=old\nold)",
+    ]) {
+      expect(
+        tokenizeProgram("shell", source)
+          .filter((token) => token.value === "old" && token.bindable)
+          .map((token) => token.raw),
+        source,
+      ).toEqual([]);
+    }
+  });
+
+  it("keeps shell control constructs and negated commands opaque inside substitutions", () => {
+    for (const source of [
+      "D=$(if true; then printf '%s' 'old'; fi)",
+      "D=$(for item in one; do printf '%s' 'old'; done)",
+      "D=$(case x in x) printf '%s' 'old';; esac)",
+      "D=$(function work { printf '%s' 'old'; }; work)",
+      "D=$(work() { printf '%s' 'old'; }; work)",
+      "D=$(! printf '%s' 'old')",
+    ]) {
+      expect(
+        tokenizeProgram("shell", source).filter((token) => token.bindable),
+        source,
+      ).toEqual([]);
+    }
+    const nested = tokenizeProgram("shell", "D=$(printf '%s' $(printf '%s' 'old'))");
+    expect(nested.find((token) => token.value === "old")?.bindable).toBe(true);
   });
 });
 
@@ -296,7 +362,7 @@ describe("safe token binding", () => {
       "echo '$HOME' \"${HOME}\" \"$HOME\" $(printf secret) `printf hidden` && echo 'safe' 'unfinished";
     const tokens = tokenizeProgram("shell", source);
     expect(tokens.map((token) => token.raw)).toContain("'safe'");
-    for (const raw of ["echo", '"${HOME}"', '"$HOME"', "secret", "hidden`", "'unfinished"]) {
+    for (const raw of ["echo", '"${HOME}"', '"$HOME"', "hidden`", "'unfinished"]) {
       const token = tokens.find((entry) => entry.raw === raw)!;
       expect(token.bindable).toBe(false);
       expect(() =>
