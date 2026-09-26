@@ -12,6 +12,8 @@ import {
 } from "@resin/observer/client";
 
 export const resolveDaemonPaths = resolvePaths;
+import type { HarnessId } from "@resin/contracts";
+import { isSupportedHarnessId } from "../harness-registry.js";
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
@@ -49,8 +51,6 @@ import {
   selectPlatformAsset,
   verifyChannelMetadata,
 } from "./channel-verifier.js";
-import type { HarnessId } from "@resin/contracts";
-import { isSupportedHarnessId } from "../harness-registry.js";
 import { HarnessConfigOrchestrator, type HarnessConfigResult } from "./harness-config.js";
 import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
