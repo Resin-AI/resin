@@ -61,6 +61,7 @@
     "docs/adr/0007-capability-envelope-and-security.md",
     "docs/adr/0009-nfr-and-performance-targets.md",
     "docs/adr/0010-adr-governance.md",
+    "docs/adr/0012-validate-learned-tools-against-local-recordings.md",
     ".github/workflows/ci.yml",
     ".github/workflows/platform-qualification.yml",
     ".github/workflows/release-candidate.yml",

@@ -61,56 +61,55 @@ Resin is designed with a strict local-first architecture where the local develop
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                              HOST MACHINE                                 │
 │                                                                           │
-│  ┌─────────────────────────┐        Localhost IPC / Domain Sockets        │
+│  ┌─────────────────────────┐   session files (read locally)               │
 │  │    AI Coding Harness    │ ───────────────────────────────────────────┐ │
 │  │ (Claude / Codex / OMP)  │                                            │ │
 │  └─────────────────────────┘                                            │ │
-│               │ (tool calls)                                            ▼ │
+│               │ (MCP tool calls over stdio)                             ▼ │
 │               ▼                                               ┌─────────┐ │
-│  ┌─────────────────────────┐        Authenticated IPC         │ Observer│ │
-│  │      Gateway Process    │ ───────────────────────────────► │ Process │ │
+│  ┌─────────────────────────┐   Unix socket / named pipe       │ Observer│ │
+│  │      Gateway Process    │ ───────────────────────────────► │ Daemon  │ │
 │  └─────────────────────────┘                                  └─────────┘ │
 │               │                                                           │
-│               ▼ (unprivileged fork)                                       │
-│  ┌─────────────────────────┐        Strict Sandbox Envelope               │
-│  │ Isolated Worker Runtime │ ◄──────────────────────────────────────────  │
-│  └─────────────────────────┘                                              │
-│               │                                                           │
-│               ▼ (local storage only)                                      │
+│               ├─► Deno worker (generated tool code; Deno permission flags)│
+│               ├─► Deno + Pyodide (derivation steps; read-only assets)     │
+│               └─► recorded commands (published tools; run directly)       │
+│                                                                           │
 │  ┌─────────────────────────┐                                              │
 │  │ Local SQLite / Vault DB │                                              │
 │  └─────────────────────────┘                                              │
 └───────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ Network Boundary (HTTPS / TLS 1.3)
-                                    │ Strictly Sanitized DTOs Only
+                                    │ Network Boundary (HTTPS)
+                                    │ Redacted, allowlisted payloads only
                                     ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                           REMOTE CLOUD SERVICES                           │
 │                                                                           │
-│  - Tool Qualification Sync (@resin/contracts schemas only)                │
-│  - Anonymous Aggregated Metric Signals                                    │
-│  - Signed Activation Certificates & Entitlements                          │
+│  - Redacted evidence events and validation decisions                      │
+│  - Tool artifacts with signatures and activation certificates             │
+│  - Account and workspace identity                                         │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Trust & Isolation Guarantees
 
-1. **Daemon & Worker Isolation (ADR 0002):**
-   - Worker runtimes execute inside unprivileged child processes with restricted capabilities.
+1. **Worker Isolation (ADR 0002):**
+   - Generated tool code runs in a Deno child process started as the same OS user, with network, environment, subprocess and FFI access denied, reads limited to its bundle, import map and a scratch directory, and writes limited to that scratch directory. Its JavaScript heap is capped (128 MB by default) and it is stopped after a wall-clock timeout (30 s by default). There is no CPU quota.
+   - Derivation steps run in a separate Deno process with Pyodide; see [Derivation steps](#derivation-steps).
    - Capability envelopes (ADR 0007) are a manifest policy check: a tool's declared capabilities are checked against workspace policy before activation and dispatch. The envelope does not isolate processes. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
 2. **Local Authority & Fail-Closed Enforcement:**
    - The local Gateway and Runtime are authoritative. Cloud-sent workflow validation executes nothing recorded (see [Workflow Validation](#workflow-validation)); the only cloud-authored code it runs is sandboxed derivation steps.
-   - All external inputs, activation certificates, and cloud sync responses are validated against strict schemas; unverified or signature-mismatched data is immediately rejected and fails closed.
-3. **Localhost IPC Security:**
-   - Inter-process communication between Gateway, Observer, and Worker runtimes uses local domain sockets or named pipes with OS-level file permissions.
-   - All IPC messages are strictly serialized via typed contracts (`@resin/protocol`) and validated against schema invariants.
+   - Tool manifests, safety attestations, artifact signatures and activation certificates from the cloud are checked before a tool is activated; a failed check rejects the tool.
+3. **Local IPC:**
+   - The gateway talks to the observer daemon over a Unix domain socket (named pipe on Windows). On POSIX the socket is created in a directory with mode `0700` and set to mode `0600`, so only the owning user can connect; there is no additional authentication. Workers exchange messages with the gateway over their stdio pipes.
+   - IPC frames are length-framed JSON typed by `@resin/protocol`.
 
 ---
 
 ## Privacy Boundary: Zero Raw Data Upload Policy
 
-Resin enforces an absolute, fail-closed privacy boundary. The core local engine compiles and executes tools on-device.
+Resin enforces a fail-closed privacy boundary: raw session data stays on the device, and only redacted, allowlisted evidence is uploaded.
 
 ### Explicit V1 Data Privacy Guarantee
 
@@ -119,9 +118,9 @@ Resin enforces an absolute, fail-closed privacy boundary. The core local engine 
 Specifically, the following data types are strictly prohibited from cloud egress and remain strictly on the local host:
 - **Raw Conversation Transcripts & Prompts**: Full agent-user interaction history, interactive prompt text, thought traces, and model inputs.
 - **Raw Model Outputs**: Direct completions, raw generation tokens, and untruncated model responses.
-- **Local Source Code & File Contents**: Project repository files, edited buffers, local patches, diffs, and source text.
+- **Local Source Code & File Contents**: Project repository files, edited buffers, local patches and diffs. (Secret-scrubbed views of short recorded programs are the exception below.)
 - **Abstract Syntax Trees & Symbols**: Private codebase AST representations, symbol tables, and semantic index structures.
-- **File Paths & Directory Hierarchies**: Local filesystem paths, workspace layouts, directory trees, and environment path names.
+- **Full File Paths**: Absolute paths and home-directory names. Path patterns (at most the last four segments, home directory removed) and command profiles that name files and directories are uploaded.
 - **Secrets & Credentials**: Environment variables, private keys, authentication tokens, API credentials, and connection strings.
 
 Engine-redacted evidence is not raw session data: secret-scrubbed recorded-program views and native command lines, which can name files and directories, are uploaded as learned-tool evidence. The per-event allowlist is in [`docs/security/privacy-inventory.md`](docs/security/privacy-inventory.md).
@@ -132,26 +131,27 @@ All local session logs, trajectory databases, and cached tool artifacts reside s
 
 ## Sanitized Cloud Sync Data Inventory
 
-When cloud connectivity is configured, data transmitted across the network boundary is strictly constrained to sanitized, allowlisted Data Transfer Objects (DTOs) defined in `@resin/contracts`:
+When cloud connectivity is configured, what crosses the network boundary is defined per event in [`docs/security/privacy-inventory.md`](docs/security/privacy-inventory.md) and summarized for users in [`docs/user/what-leaves-your-machine.md`](docs/user/what-leaves-your-machine.md):
 
-| Data Category | Data Elements | Classification | Transport Boundary | Schema / Contract |
-| ------------- | ------------- | -------------- | ------------------ | ----------------- |
-| **Tool Qualification Evidence** | Aggregated latency savings, token reduction percentages, execution counts, qualification status, tool signature hash | Sanitized / Non-sensitive | Outbound HTTPS (TLS 1.3) | `@resin/contracts` (Analytics & Qualification DTOs) |
-| **Anonymous Usage Signals** | Tool invocation frequency, session completion counters, aggregate error category codes (no error strings containing paths or code) | Anonymous / Non-sensitive | Outbound HTTPS (TLS 1.3) | `@resin/contracts` (Telemetry DTOs) |
-| **Activation & Entitlements** | Cryptographically signed public key IDs, workspace identifier, plan entitlement flags | Identity / Non-sensitive | Bidirectional HTTPS (TLS 1.3) | `@resin/contracts` (Activation Certificate DTOs) |
+| Data Category | Data Elements | Transport |
+| ------------- | ------------- | --------- |
+| **Evidence events** | Tool names, success/error flags, durations, output sizes, token counts, command profiles, path patterns, secret-scrubbed command lines and recorded-program views, opaque private references, harness call ids | Outbound HTTPS |
+| **Validation decisions** | Step ids, verdicts, fixed reason strings, `{ kind: "recording", planDigest }` | Outbound HTTPS |
+| **Tools & activation** | Signed tool artifacts, activation certificates, active-tool lists | Inbound HTTPS |
+| **Account & workspace** | Sign-in identity, workspace and project identifiers | Bidirectional HTTPS |
 
 ### Pre-Dispatch Local Validation
 
-Every payload destined for cloud synchronization is validated against its corresponding schema in `@resin/contracts` before network dispatch. Any payload containing unrecognized fields, raw source fragments, or unallowlisted properties is rejected and logged locally with a privacy violation fault.
+Every observation batch is checked before it is sent: payloads containing prohibited raw fields (transcripts, prompts, source, outputs and similar) or matching secret patterns in their serialized form are rejected with an error and not transmitted.
 
 ---
 
 ## Hostile Cloud Authority Rejection
 
 The local Resin installation does not trust remote cloud endpoints as an execution authority:
-- **No Remote Code Execution**: Cloud services cannot instruct the local runtime to execute arbitrary scripts, alter capability envelopes, or disable security gates. Validation asks are answered from local recordings without running recorded programs or dispatching tool calls; derivation steps run only in a sandbox. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
-- **Certificate Verification**: All activation certificates and plan updates from cloud endpoints must carry valid Ed25519 cryptographic signatures from recognized root keys.
-- **Fail-Closed on Tampering**: Expired, revoked, signature-mismatched, or unrecognized certificates immediately drop to local unentitled/safe mode without interruption of local tool compilation and execution.
+- **Limited Remote Code**: Cloud services cannot instruct the local runtime to run arbitrary scripts or recorded commands, alter capability envelopes, or disable security gates. Validation asks are answered from local recordings without running recorded programs or dispatching tool calls. Model-written derivation steps do run on the device, at validation and at invocation, but only inside the Deno + Pyodide sandbox described below. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
+- **Signature & Certificate Verification**: Downloaded tool artifacts must carry an Ed25519 signature from a known, unrevoked, trusted signing key, and their activation certificate must match the tool's id, name, version, project and digests.
+- **Fail-Closed on Tampering**: An artifact or certificate that fails verification is rejected and the tool is not activated.
 
 ---
 
