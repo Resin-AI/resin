@@ -10,7 +10,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
 | **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
 | **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
-| **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
+| **Oh My Pi (OMP)** | `18.3.2` (other versions run and are reported as untested) | `~/.omp/agent/mcp.json` (`$OMP_HOME/agent/mcp.json`; legacy `~/.omp/config.json`) | MCP over Stdio | JSONL Session Tailing (main and subagent transcripts) | Native ListChanged Notification |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
@@ -107,27 +107,55 @@ Every candidate stays the recorded value until local validation confirms it. Val
 
 ## 3. Oh My Pi (OMP) Integration
 
+### Tested versions
+
+Resin qualifies OMP against real sessions recorded with that release (`adapters/omp/tests/fixtures/recorded/<version>/`). OMP `18.3.2` is tested. Any other installed version still registers and is captured, but `resin status` reports it as untested.
+
 ### Automated Registration
 
-For OMP environments, Resin updates `~/.omp/agent/mcp.json`:
+`resin init` adds Resin's stdio entry to `~/.omp/agent/mcp.json` (or `$OMP_HOME/agent/mcp.json`) and preserves every other server and setting:
 
 ```json
 {
-  "$schema": "https://json.schemastore.org/mcp-server-config.json",
   "mcpServers": {
     "resin": {
       "type": "stdio",
-      "command": "resin-gateway",
-      "args": ["--stdio"],
-      "env": {}
+      "command": "/home/you/.resin/bin/resin",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-### In-Process Hub Integration
+Resin keeps its catalog guidance in a managed block of `~/.omp/agent/APPEND_SYSTEM.md`. `resin uninstall` removes the entry from the active config and from the legacy `~/.omp/config.json`.
 
-OMP sessions connect directly to the Gateway's SSE endpoint and receive real-time tool catalog updates. When a new tool completes its canary evaluation and is promoted, an SSE `notifications/tools/list_changed` message is dispatched immediately to active OMP agents.
+### Session Observation
+
+OMP writes each session to `~/.omp/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl`. A subagent started with the `task` tool writes its own transcript to `<timestamp>_<parentId>/<AgentName>.jsonl`, whose header names the parent in `parentSession`. Resin captures both kinds.
+
+OMP reaches MCP tools through its device surface (`write xd://mcp__<server>_<tool>`). Resin records such a call as the tool it reached, on the server that owns the path in OMP's own configuration, with the tool's own arguments.
+
+When an Eval cell prints more than OMP shows inline, OMP keeps the full output in `<timestamp>_<id>/<n>.eval.log` and marks the result as truncated. Resin reads that file as the call's result. If the file is missing or does not match what the transcript declares, the result is treated as unavailable rather than taken from the truncated display.
+
+A call to a tool the session does not have (OMP answers `Tool <name> not found`) is recorded as a failed call with no result.
+
+### Subagents and learning
+
+Subagent calls are not counted as part of the parent's execution. Each subagent is learned as its own session, with the `task` prompt as its request, and the parent's `task` call is one step of the parent. The reasons:
+
+- A subagent runs in its own context with its own prompt, and the parent only sees the text the subagent returns. The parent's workflow does not depend on the individual calls the subagent made.
+- Subagents started by one `task` call run concurrently and finish in any order. Merging their calls into the parent would give a sequence that no single run produced.
+- Replaying the parent's work means starting the subagent again, which is what the `task` step already records.
+
+As a result, a workflow whose steps are split between a parent and its subagents is not learned as one tool.
+
+### Built-in tool replay
+
+Learned tools can repeat OMP built-ins (`read`, `write`, `edit`, `bash`, `eval`, and others) by running them from the OMP SDK that Resin pins to the tested version (`@oh-my-pi/pi-coding-agent` `18.3.2`), under Bun. A step that names a built-in the SDK does not export fails with `OMP native tool '<name>' is not available in the installed harness SDK`, followed by the list of built-ins it does export. For example, earlier 18.x sessions recorded a `search` built-in that `18.3.2` exports as `grep`.
+
+### Shared decoder with Pi (decision)
+
+Pi (`pi` 0.87.x) and OMP both write version-3 JSONL sessions with `message` entries whose assistant content carries `toolCall` blocks and whose `toolResult` messages carry `toolCallId`. They still get separate decoders that share only the harness contracts. OMP adds entry types Pi does not have (`session_init`, `mode_change`, `credential_pin`, `ttsr_injection`, `service_tier_change`, `mcp_tool_selection`). OMP also puts subagents in nested directories, calls MCP tools through `xd://` device paths, and spills Eval output to artifacts. Pi has entry types OMP does not have (`usage`, `context_edit`, `label`, `session_info`), records forks as new files with `parentSession`, and has no subagent directories. A shared decoder would need a branch for each of these differences, and a format change in either harness could break the other. The two harnesses release independently, so each decoder is qualified against its own recorded sessions. We would revisit this if the two formats converge again.
 
 ---
 
