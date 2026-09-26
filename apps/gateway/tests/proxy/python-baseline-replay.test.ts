@@ -21,6 +21,7 @@ import {
 } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
+  MAX_SNAPSHOT_FILE_BYTES,
   ReplayWorkspaceUnavailableError,
   type WorkspaceSnapshotSource,
   createWorkspaceSnapshotValidator,
@@ -448,7 +449,7 @@ describe("fresh-process baseline replay", () => {
     const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-python-oversize-"));
     try {
       fs.closeSync(fs.openSync(path.join(sourceRoot, "too-large.bin"), "w"));
-      fs.truncateSync(path.join(sourceRoot, "too-large.bin"), 10 * 1024 * 1024 + 1);
+      fs.truncateSync(path.join(sourceRoot, "too-large.bin"), MAX_SNAPSHOT_FILE_BYTES + 1);
       const { plan, privateValues } = recording("print('unused')", "unused\n");
       const validate = createWorkspaceSnapshotValidator(() => ({ ready: true, root: sourceRoot }), {
         workspaceId,

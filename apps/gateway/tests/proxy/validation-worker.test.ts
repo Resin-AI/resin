@@ -31,6 +31,7 @@ import {
 } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
+  MAX_SNAPSHOT_FILE_BYTES,
   ReplayWorkspaceUnavailableError,
   createWorkspaceSnapshotValidator,
 } from "../../src/proxy/replay-workspace-snapshot.js";
@@ -381,7 +382,7 @@ describe("WorkflowValidationWorker", () => {
     try {
       const oversized = path.join(sourceRoot, "oversized.bin");
       fs.closeSync(fs.openSync(oversized, "w"));
-      fs.truncateSync(oversized, 10 * 1024 * 1024 + 1);
+      fs.truncateSync(oversized, MAX_SNAPSHOT_FILE_BYTES + 1);
       const plan = recordedPlan();
       plan.steps[0]!.callable = {
         runtime: RESIN_PROGRAM_RUNTIME,

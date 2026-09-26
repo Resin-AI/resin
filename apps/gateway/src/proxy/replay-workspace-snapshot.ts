@@ -11,8 +11,10 @@ import {
   createLocalWorkflowValidator,
 } from "./workflow-validation.js";
 
-const MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
-const MAX_SNAPSHOT_FILE_BYTES = 10 * 1024 * 1024;
+// Data workspaces routinely hold inputs of tens of megabytes (a CSV the recorded job reads); a
+// replay that cannot copy them cannot validate the job at all.
+const MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024;
+export const MAX_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES = 10_000;
 const MAX_SNAPSHOT_ENTRIES = 20_000;
 const COPY_CHUNK_BYTES = 64 * 1024;
