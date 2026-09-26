@@ -1075,6 +1075,51 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       ),
     ).toBe(true);
   });
+  it("still offers inputs for a program call after harness-tool offers exhaust their budget", () => {
+    const reads = Array.from({ length: 300 }, (_, position) => ({
+      callId: `read${position}`,
+      stepId: `step${position}`,
+      toolName: position % 2 === 0 ? "read" : "edit",
+      runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+      arguments: { path: `src/file-${position}.ts` },
+    }));
+    const derivation = deriveNativeCalls(
+      [
+        ...reads,
+        {
+          callId: "bash",
+          stepId: "stepBash",
+          toolName: "bash",
+          runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+          arguments: { command: "wc -l 'reports/emea-summary.csv'" },
+          program: { kind: "shell", argument: "command" },
+        },
+      ],
+      new Set(["emea"]),
+    );
+    const harness = derivation.candidates.filter((entry) => entry.stepId !== "stepBash");
+    expect(harness).toHaveLength(256);
+    expect(
+      derivation.candidates.filter(
+        (entry) => entry.stepId === "stepBash" && entry.proposed.kind === "input",
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+  it("caps one program family's offers on its own", () => {
+    const commands = Array.from({ length: 300 }, (_, position) => ({
+      callId: `bash${position}`,
+      stepId: `step${position}`,
+      toolName: "bash",
+      runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+      arguments: { command: `wc -l 'reports/file-${position}.csv'` },
+      program: { kind: "shell" as const, argument: "command" },
+    }));
+    const derivation = deriveNativeCalls(commands);
+    expect(derivation.candidates).toHaveLength(256);
+    expect(derivation.candidates.map((entry) => entry.stepId)).toEqual(
+      commands.slice(0, 256).map((command) => command.stepId),
+    );
+  });
 });
 
 describe("the recording an ordinary session produces", () => {
