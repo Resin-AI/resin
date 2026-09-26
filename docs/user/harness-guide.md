@@ -6,13 +6,23 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 
 ## Supported Coding Harnesses
 
-| Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
-|---------|-----------------|-------------------|-----------------|------------------|-------------------|
-| **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | MCP over Stdio | Local JSONL Session Tailing (incl. subagents) | Native ListChanged Notification |
-| **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | MCP over Stdio | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
-| **Oh My Pi (OMP)** | `18.3.2` (other versions run and are reported as untested) | `~/.omp/agent/mcp.json` (`$OMP_HOME/agent/mcp.json`; legacy `~/.omp/config.json`) | MCP over Stdio | JSONL Session Tailing (main and subagent transcripts) | Native ListChanged Notification |
-| **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `~/.pi/agent/extensions/resin.ts` (Resin-owned Pi extension; `$PI_CODING_AGENT_DIR` honored) | MCP over Stdio via the extension | Local JSONL Session Tailing | Native ListChanged via the extension |
-| **Cursor CLI** (`cursor-agent`) | none yet (targets `2026.09.26-dd393fe`; reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.cursor/rules/resin.mdc` | MCP over Stdio | Hook spool tailing (`~/.resin/capture/cursor-cli/`) | Next session |
+Every harness below is registered by `resin init` and removed by `resin uninstall`. Resin's MCP entry is always a stdio command (`<resin home>/bin/resin mcp`). Learn/invoke conformance is being re-run for every harness; results replace "pending conformance run" when they land.
+
+| Harness | Tested versions | Config Resin writes | Guidance file | Capture source | Capture method | Catalog refresh | Learn/invoke conformance |
+|---------|-----------------|---------------------|---------------|----------------|----------------|-----------------|--------------------------|
+| **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`) | `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR/CLAUDE.md`) | `~/.claude/projects/<project>/<session>.jsonl` + `<session>/subagents/agent-<id>.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | pending conformance run |
+| **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | `$CODEX_HOME/AGENTS.md` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` | JSONL rollout tailing | Stable meta-tools + response catalog notices | pending conformance run |
+| **Oh My Pi (OMP)** | `18.3.2` | `$OMP_HOME/agent/mcp.json` (`~/.omp/agent/mcp.json`; legacy `~/.omp/config.json` cleaned on uninstall) | `~/.omp/agent/APPEND_SYSTEM.md` | `~/.omp/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl` + subagent dirs | JSONL transcript tailing | Native `tools/list_changed` | pending conformance run |
+| **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `<agent-dir>/extensions/resin.ts` (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) | `<agent-dir>/AGENTS.md` (or the first existing context file) | `<agent-dir>/sessions/--<cwd>--/*.jsonl`, `$PI_CODING_AGENT_SESSION_DIR`, `sessionDir` setting | JSONL transcript tailing | Native `tools/list_changed` via the extension | pending conformance run |
+| **Cursor CLI** (`cursor-agent`) | none yet: no fixtures until `cursor-agent login` (reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | `~/.cursor/rules/resin.mdc` | `~/.resin/capture/cursor-cli/<conversation_id>.jsonl` | Hook spool (`~/.resin/hooks/cursor-capture.mjs`) | Next session (list_changed unverified) | pending conformance run |
+| **Grok Build** (`grok`) | `1.0.13` | `$GROK_HOME/config.toml` (`~/.grok/config.toml`) | `$GROK_HOME/AGENTS.md` | `~/.grok/sessions/<encoded cwd>/<id>/updates.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | pending conformance run |
+| **Muse Code** (`muse`) | `1.4.0` | `$XDG_CONFIG_HOME/muse/settings.json` (`~/.config/muse/settings.json`) | `$XDG_CONFIG_HOME/muse/AGENTS.md` | `$XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` + `subagent/<child>/session.jsonl` | JSONL session-log tailing | Next session | pending conformance run |
+| **OpenCode** (`opencode`) | `1.18.32`, `1.1.65` | `$XDG_CONFIG_HOME/opencode/opencode.json` (`mcp.resin`) | `$XDG_CONFIG_HOME/opencode/AGENTS.md` | `$XDG_DATA_HOME/opencode/opencode.db` (`OPENCODE_DB`); legacy `storage/` JSON tree | SQLite store / legacy JSON reads | Next session | pending conformance run |
+| **GitHub Copilot CLI** (`copilot`) | `1.0.88` | `$COPILOT_HOME/mcp-config.json` (`~/.copilot/mcp-config.json`) | `$COPILOT_HOME/copilot-instructions.md` | `~/.copilot/session-state/<id>/events.jsonl` | JSONL event-log tailing | Native `tools/list_changed` | pending conformance run |
+
+### Tested, untested, and unknown versions
+
+Each harness definition lists the exact versions Resin recorded real sessions with (`testedVersions`). `resin status` compares the installed version against that list and shows it as tested, `(untested)`, or unknown (when the harness does not report a version). Untested and unknown versions are still registered and observed; a record whose shape changed is kept as an unrecognized record rather than decoded by guesswork.
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
@@ -55,7 +65,12 @@ Resin follows session transcripts in `~/.claude/projects/<encoded-project>/<sess
 
 A successful `Edit` or `Write` becomes a patch step, the same representation as a Codex `apply_patch`: the diff Claude recorded as applied, confined to the session's working directory and stored only on this device. An edit Claude cannot restate exactly as a unified diff (for example a file without a final newline) is not learned.
 
-Only the version listed above is qualified with recorded sessions; `resin status` reports other versions as untested.
+Only the version listed above is qualified with recorded sessions; `resin status` reports other versions as untested, and they still register.
+
+### Known Limits
+
+- Only user-scope MCP registration (`.claude.json`) is managed; project `.mcp.json` files are left alone.
+- Edit/Write steps are learned only when Claude recorded the resulting patch (`toolUseResult.structuredPatch` or created-file content).
 
 ---
 
@@ -114,6 +129,12 @@ Native source reads are serialized, and delayed acknowledgements do not rewind u
 Explicit turn usage takes precedence over duplicate last-response snapshots. Unique response reports are summed when turn totals are absent; a last-response-only fallback is marked partial, not claimed as complete turn usage. Missing billing amounts are not invented.
 
 Only a confirmed completed native shell result can establish a successful local baseline. Running, explicitly truncated, or unclassified results are withheld from baseline and computation-success evidence without being relabeled as execution errors. Raw source and result values remain local.
+
+### Known Limits
+
+- No native-tool invoker: learned tools replay Codex built-in steps only as shell commands and `apply_patch` edits; web search and multi-agent steps are recorded but not replayable.
+- Multi-agent child threads are separate rollouts, bound to the parent's project through their own `session_meta` cwd.
+- Compaction boundaries are captured, but Codex does not record the token count after compaction.
 
 ### What a learned tool can vary
 
@@ -182,7 +203,31 @@ Pi (`pi` 0.87.x) and OMP both write version-3 JSONL sessions with `message` entr
 
 ---
 
-## Cursor CLI Integration
+## 4. Pi Integration
+
+### Tested versions
+
+Pi `0.87.1` is tested (`adapters/pi/tests/fixtures/recorded/0.87.1/`). Other versions are reported as untested and still register.
+
+### Why an extension
+
+Pi has no MCP client: its model sees built-in tools plus tools that Pi extensions register. `resin init` therefore writes a Resin-owned extension to `<agent-dir>/extensions/resin.ts` (`<agent-dir>` is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`). Pi loads it automatically; it starts `resin mcp` over stdio and registers every gateway tool as a Pi tool named `mcp__resin__<tool>`. It follows `notifications/tools/list_changed`, so learned tools appear in running sessions without a restart. `resin init` also adds a marked guidance block to the agent directory's context file (the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` that exists, else a new `AGENTS.md`). `resin uninstall` deletes the extension (only if Resin wrote it) and removes the block. Resin never overwrites a `resin.ts` it did not write.
+
+### Session Observation
+
+Resin reads Pi's JSONL session files (format versions 1–3) from `<agent-dir>/sessions/--<cwd>--/`, `$PI_CODING_AGENT_SESSION_DIR`, and the `sessionDir` setting (global or project `.pi/settings.json`). Sessions belong to the workspace named by the file header's `cwd`. In-file `/tree` rewinds and branch summaries are captured as branch forks, so calls from the abandoned and new branches stay separate; `/fork` and `--fork` sessions link to their parent and skip the copied parent history.
+
+### Known Limits
+
+Runs with `--no-session` write nothing and cannot be captured; runs with `--no-extensions` do not load the Resin extension; sessions stored with `--session-dir` are found only when that directory is also configured through `PI_CODING_AGENT_SESSION_DIR` or `sessionDir`; Pi has no built-in subagents.
+
+---
+
+## 5. Cursor CLI Integration
+
+### Tested versions
+
+No version is tested yet. **Blocker:** real fixtures need an authenticated `cursor-agent login`; until they are recorded the tested list stays empty and `resin status` reports every installed cursor-agent (built against `2026.09.26`) as untested. Registration and hook capture still work.
 
 ### Automated Registration
 
@@ -213,32 +258,112 @@ Each payload is checked against the field contract pinned in `adapters/cursor-cl
 
 - Sessions from before `resin init`, or from while the hooks were missing, are listed as uncaptured (`listUncapturedSessions`, reason `no-hook-capture`) and are not decoded.
 - Cloud Agents that run on Cursor's machines leave nothing on this device and cannot be captured. cursor-agent 2026.09.26 removed the CLI's `--cloud`/`--background` flags. Self-hosted `cursor-agent worker` sessions are captured and flagged `isBackgroundAgent`.
-- Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete.
+- Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete; calls still running when a session is killed are not recorded.
+- Usage is per generation (input, output, cache-read tokens) from `afterAgentResponse`; cursor-agent reports no totals and Resin does not synthesize them.
 - Two things are unverified: whether cursor-agent reacts to MCP `list_changed`, and whether it applies user rules from `~/.cursor/rules`. For now, new tools are assumed to reach the next session.
 
 ---
 
-## Pi Integration
+## 6. Grok Build Integration
 
-### Why an extension
+### Tested versions
 
-Pi has no MCP client: its model sees built-in tools plus tools that Pi extensions register. `resin init` therefore writes a Resin-owned extension to `<agent-dir>/extensions/resin.ts` (`<agent-dir>` is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`). Pi loads it automatically; it starts `resin mcp` over stdio and registers every gateway tool as a Pi tool named `mcp__resin__<tool>`. It follows `notifications/tools/list_changed`, so learned tools appear in running sessions without a restart. `resin init` also adds a marked guidance block to the agent directory's context file (the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` that exists, else a new `AGENTS.md`). `resin uninstall` deletes the extension (only if Resin wrote it) and removes the block. Resin never overwrites a `resin.ts` it did not write.
+Grok Build `1.0.13` is tested (`adapters/grok-build/tests/fixtures/recorded/1.0.13/`). Other versions register and are captured, and `resin status` reports them as untested.
+
+### Automated Registration
+
+`resin init` adds `[mcp_servers.resin]` (`command = "<resin shim>"`, `args = ["mcp"]`) to `$GROK_HOME/config.toml` (`~/.grok/config.toml` by default) and a guidance block between `<!-- resin:grok-guidance:start -->` and `<!-- resin:grok-guidance:end -->` in `$GROK_HOME/AGENTS.md`. A project `.grok/config.toml` overrides the user config for the same server name, as in Grok's own loader. `resin uninstall` removes both and keeps everything else.
 
 ### Session Observation
 
-Resin reads Pi's JSONL session files (format versions 1–3) from `<agent-dir>/sessions/--<cwd>--/`, `$PI_CODING_AGENT_SESSION_DIR`, and the `sessionDir` setting (global or project `.pi/settings.json`). Sessions belong to the workspace named by the file header's `cwd`. In-file `/tree` rewinds and branch summaries are captured as branch forks, so calls from the abandoned and new branches stay separate; `/fork` and `--fork` sessions link to their parent and skip the copied parent history.
+Grok writes each session to `~/.grok/sessions/<encoded cwd>/<id>/`. Resin tails `updates.jsonl` and reads `summary.json` and subagent `subagents/<child>/meta.json`. Headless (`grok -p`), `--resume`, `--fork-session`, ACP (`grok agent stdio`) and background subagents are captured. Because headless runs exit immediately and `--resume` appends to old sessions, capture follows transcript activity rather than session creation time. Grok re-lists Resin's tools when the gateway sends `notifications/tools/list_changed`, so its `search_tool`/`use_tool` meta-tools see new tools in a running session.
 
-Limits: runs with `--no-session` write nothing and cannot be captured; runs with `--no-extensions` do not load the Resin extension; sessions stored with `--session-dir` are found only when that directory is also configured through `PI_CODING_AGENT_SESSION_DIR` or `sessionDir`; Pi has no built-in subagents.
+### Known Limits
+
+- A rewind keeps the abandoned turns in the captured trajectory; the rewind is recorded as a branch point before the replacement turns.
+- Sessions continued from another harness (`/resume-claude`, `/resume-codex`, `/resume-cursor`) capture only Grok's new work; the original transcript is captured by that harness's adapter.
+- A fork whose parent session was deleted is captured in full.
+- Grok also starts MCP servers from `~/.claude.json`, `~/.cursor/mcp.json` and `.mcp.json`; a Resin entry there under a name other than `resin` starts a second gateway.
 
 ---
 
-## 4. Real-Time Tool Catalog Refresh
+## 7. Muse Code Integration
+
+### Tested versions
+
+Muse Code `1.4.0` is tested (`adapters/muse-code/tests/fixtures/recorded/1.4.0/`). The muse launcher updates itself hourly; set `MUSE_NO_AUTO_UPDATE=1` to stay on a tested version. Other versions are reported as untested and still register.
+
+**Blocker:** the fixtures were recorded with the real `muse` 1.4.0 binary pointed (`--base-url`) at a scripted local stand-in for the model endpoint, because `muse login` is an interactive browser login that was not available. Tool execution, MCP calls, subagents, observers, cancellation and resume are written by muse itself; only model choices and token counts are scripted. Fixtures will be re-recorded against the real endpoint once `muse login` is done.
+
+### Automated Registration
+
+`resin init` adds the Resin stdio entry to `$XDG_CONFIG_HOME/muse/settings.json` (`~/.config/muse/settings.json`), keeping other settings and servers, and a marked guidance block in `$XDG_CONFIG_HOME/muse/AGENTS.md`. `resin uninstall` removes only the entry and the block.
+
+### Session Observation
+
+Muse keeps one append-only log per session at `${XDG_DATA_HOME:-~/.local/share}/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`, with spawned subagents and persisted background observers at `<id>/subagent/<child>/session.jsonl`. Resin tails these logs; resumed sessions append to the same log, so any log that changes is captured. Shell, file reads/edits/writes, MCP calls, subagents, per-call usage, cancelled calls, and the reconciliation muse writes on resume are decoded.
+
+### Known Limits
+
+- Background skill-reminder observer model calls are not written to muse 1.4.0 session logs, so their token usage cannot be counted; the verify-reminder observer's calls are.
+- Sessions run with `--no-session-log` leave no log and are not captured.
+- Resin catalog changes reach muse at the next session start (`tools/list_changed` support is unverified).
+- Context compaction is not decoded: no muse 1.4.0 compaction record was captured.
+
+---
+
+## 8. OpenCode Integration
+
+### Tested versions
+
+OpenCode `1.18.32` (SQLite store) and `1.1.65` (legacy JSON store) are tested (`adapters/opencode/tests/fixtures/recorded/<version>/`). Other versions are reported as untested and still register.
+
+### Automated Registration
+
+`resin init` adds `mcp.resin` to `$XDG_CONFIG_HOME/opencode/opencode.json` (`~/.config/opencode/opencode.json`) and a marked guidance block in `$XDG_CONFIG_HOME/opencode/AGENTS.md`. Other config keys and servers are preserved; `resin uninstall` removes only Resin's entry and block.
+
+### Session Observation
+
+Current OpenCode releases (tested: 1.18.32) store sessions in SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`~/.local/share/opencode/opencode.db`; `OPENCODE_DB` overrides it). Older releases (tested: 1.1.65) write a JSON tree under `$XDG_DATA_HOME/opencode/storage/{session,message,part,project}`. Resin reads both, including subagent (child) sessions.
+
+### Known Limits
+
+- MCP tool list changes are picked up by the next OpenCode session.
+- Only the default release-channel database (`opencode.db`, or `OPENCODE_DB`) is observed.
+
+---
+
+## 9. GitHub Copilot CLI Integration
+
+### Tested versions
+
+Copilot CLI (`@github/copilot`) `1.0.88` is tested (`adapters/copilot-cli/tests/fixtures/recorded/1.0.88/`). Other versions are reported as untested and still register.
+
+### Automated Registration
+
+`resin init` adds `mcpServers.resin` to `$COPILOT_HOME/mcp-config.json` (`~/.copilot/mcp-config.json`) and a marked guidance block in `$COPILOT_HOME/copilot-instructions.md`. Workspace `.mcp.json` and `.github/mcp.json` files are not touched. `resin uninstall` removes only Resin's entry and block.
+
+### Session Observation
+
+Copilot writes every session, including ones started before Resin was installed, to `~/.copilot/session-state/<id>/events.jsonl` with `workspace.yaml` beside it. Resin tails the event log for exact tool arguments and results, subagents, compaction and aborts. On 1.0.88 a tool added through `notifications/tools/list_changed` is usable in the next assistant step of the same interaction, so no restart is needed.
+
+### Known Limits
+
+- Token usage is recorded per Copilot process run (`session.shutdown`), not per model call: per-call usage events are ephemeral and never written to disk.
+- A Copilot process killed outright (not Ctrl+C, which still shuts down cleanly) writes no `session.shutdown`, so that run's token usage is not captured.
+- File edits are decoded from `apply_patch` (the tool GPT-family models use); other models' edit tools are captured as exact tool calls and results without file-edit events.
+
+---
+
+## 10. Real-Time Tool Catalog Refresh
 
 ### Native Dynamic Catalogs
 
-Claude Code and Oh My Pi retain their native dynamic tool catalogs. For clients that support catalog refresh, the Gateway sends `notifications/tools/list_changed`; the harness can invalidate its tool cache and request the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`.
+Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot CLI keep their native dynamic tool catalogs. The Gateway sends `notifications/tools/list_changed`; the harness invalidates its tool cache and requests the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`.
 
 Codex instead uses the stable gateway described above. Its four advertised tools do not change when the underlying catalog changes, so newly available tools do not depend on native tool-list refresh.
+
+Cursor CLI, Muse Code and OpenCode pick up catalog changes at the next session start; mid-session `list_changed` handling is unverified for them.
 
 ### Catalog Notices in Tool Responses
 
@@ -252,7 +377,33 @@ These notices complement native catalog refresh; they are not unsolicited messag
 
 ---
 
-## 5. Troubleshooting Harness Connections
+## 11. Recorded Transcript Corpus
+
+Every decoder is tested against transcripts recorded from a real install of the harness, one directory per tested version:
+
+| Harness | Recorded fixtures | Capture notes |
+|---------|-------------------|---------------|
+| Claude Code | `adapters/claude-code/tests/fixtures/recorded/2.1.283/` | `adapters/claude-code/tests/fixtures/recorded/CAPTURE.md` |
+| Codex CLI | `adapters/codex-cli/tests/fixtures/recorded/{0.156.1,0.157.1}/` | `adapters/codex-cli/tests/fixtures/recorded/CAPTURE.md` (+ `capture.sh`) |
+| OMP | `adapters/omp/tests/fixtures/recorded/18.3.2/` | `adapters/omp/tests/fixtures/recorded/CAPTURE.md` |
+| Pi | `adapters/pi/tests/fixtures/recorded/0.87.1/` | `adapters/pi/tests/fixtures/recorded/CAPTURE.md` |
+| Cursor CLI | none yet (blocked on `cursor-agent login`) | `adapters/cursor-cli/tests/fixtures/recorded/CAPTURE.md` |
+| Grok Build | `adapters/grok-build/tests/fixtures/recorded/1.0.13/` | `adapters/grok-build/tests/fixtures/recorded/CAPTURE.md` |
+| Muse Code | `adapters/muse-code/tests/fixtures/recorded/1.4.0/` | `adapters/muse-code/tests/fixtures/recorded/CAPTURE.md` (+ `capture/`) |
+| OpenCode | `adapters/opencode/tests/fixtures/recorded/{1.18.32,1.1.65}/` | `adapters/opencode/tests/fixtures/recorded/CAPTURE.md` |
+| Copilot CLI | `adapters/copilot-cli/tests/fixtures/recorded/1.0.88/` | `adapters/copilot-cli/tests/fixtures/recorded/CAPTURE.md` |
+
+Regeneration policy, for a new or changed harness version:
+
+1. Install the real harness release and run it against a throwaway project and an isolated home or XDG directories, so the user's own sessions, hooks and servers stay out of the capture. Follow that adapter's `CAPTURE.md` for the exact commands and scenarios.
+2. Scrub every captured file with the shared scrubber before committing it:
+   `node scripts/harness-fixtures/scrub.mjs <input> <output> --project <capture-cwd> [--replace <from>=<to> ...]`. It rewrites home, user, host and project paths to placeholders, replaces secrets and opaque provider blobs, and fails if a secret rule still matches.
+3. Store the result in `tests/fixtures/recorded/<version>/`, keeping earlier version directories while those versions stay tested.
+4. Add the exact version to the adapter's `testedVersions` only after its decoder tests pass on the new recordings.
+
+---
+
+## 12. Troubleshooting Harness Connections
 
 If a harness fails to communicate with Resin:
 

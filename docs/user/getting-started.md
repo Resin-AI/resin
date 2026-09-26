@@ -1,6 +1,6 @@
 # Getting Started with Resin
 
-Resin finds recurring patterns in sessions from Claude Code, Codex CLI, and Oh My Pi. It compiles stable work into qualified tools that use less inference, lower inference cost, and complete matching work faster, then activates eligible versions automatically within each project's Capability Envelope.
+Resin finds recurring patterns in sessions from Claude Code, Codex CLI, Oh My Pi, Pi, Cursor CLI, Grok Build, Muse Code, OpenCode, and GitHub Copilot CLI. It compiles stable work into qualified tools that use less inference, lower inference cost, and complete matching work faster, then activates eligible versions automatically within each project's Capability Envelope.
 
 ---
 
@@ -17,6 +17,7 @@ Before installing Resin, ensure your environment meets the following requirement
   - [Claude Code CLI](https://claude.ai/code)
   - [Codex CLI](https://github.com/openai/codex)
   - [Oh My Pi (OMP)](https://github.com/canary-laboratories/omp)
+  - Pi, Cursor CLI, Grok Build, Muse Code, OpenCode, or GitHub Copilot CLI (see the [Harness Integration Guide](harness-guide.md))
 - **Optional**: [Deno runtime](https://deno.com) (`>= 2.0.0`) for hardened worker isolation (falls back to Node.js subprocess sandbox if unavailable).
 
 ---
@@ -42,7 +43,7 @@ During a fresh interactive installation, Resin automatically initiates **machine
 3. Creates local state, daemon configuration, and logs under `~/.resin/` (e.g. `~/.resin/config/`, `~/.resin/logs/`, `~/.resin/state/`).
 4. Automatically approves the default least-privilege capability envelope and local-only privacy plan for the installation. Raw transcripts, prompts, and code are never uploaded.
 5. **Automatically opens the browser for device linking** (RFC 8628) to pair your machine with Resin Cloud (unless `--local-only` or running non-interactively). Sign in or review your machine pairing in the Resin Console.
-6. Discovers installed coding harnesses (Claude Code, Codex CLI, Oh My Pi).
+6. Discovers installed coding harnesses (see the [Harness Integration Guide](harness-guide.md) for the full list).
 7. Configures harness MCP registrations globally.
 8. Installs, starts, and health-checks the **non-root user service**.
 9. Records the install journal (no secrets).
