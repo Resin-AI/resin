@@ -2,7 +2,7 @@ import type { HarnessId } from "@resin/contracts";
 import type { HarnessAdapter } from "./adapter.js";
 import type { ConfigFsBridge } from "./config.js";
 import type { HarnessRecordDecoder } from "./decoder.js";
-import type { ManagedBlockMarkers } from "./managed-block.js";
+import type { ManagedBlockMarkers, ManagedBlockResult } from "./managed-block.js";
 import type { ConfigMutationPlan, HarnessInstallation, HarnessWorkspace } from "./types.js";
 
 /**
@@ -48,6 +48,30 @@ export interface HarnessRegistrationContext {
   readonly fsBridge: ConfigFsBridge;
 }
 
+/** Context for checking or removing Resin's registration outside the planning path. */
+export interface HarnessRegistrationCheckContext {
+  readonly targetPath: string;
+  /** Absolute Resin shim command the harness should spawn. */
+  readonly command: string;
+  readonly fsBridge: ConfigFsBridge;
+}
+
+export interface HarnessInstallContext {
+  readonly home: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly fsBridge: ConfigFsBridge;
+  readonly dryRun?: boolean;
+}
+
+/**
+ * How the harness stores its MCP registration:
+ * - `json`: a JSON object whose server map lives under one of `jsonContainerKeys`.
+ * - `codex-toml`: Codex-style TOML (`[mcp_servers.<key>]`); a path ending in `.json` is `json`.
+ * - `owned-file`: a file wholly owned by Resin (e.g. an extension bridging `resin mcp`); the CLI
+ *   never parses it, so `verifyRegistration` and `removeRegistration` are required.
+ */
+export type HarnessMcpConfigFormat = "json" | "codex-toml" | "owned-file";
+
 /**
  * Where and how a harness stores MCP servers, so the CLI can plan, verify, and remove
  * Resin's stdio entry without per-harness branches.
@@ -57,15 +81,38 @@ export interface HarnessMcpConfigSurface {
   resolvePath(home: string, env: NodeJS.ProcessEnv): string;
   /** Every path `resin uninstall` cleans: the active path plus legacy locations. */
   uninstallPaths(home: string, env: NodeJS.ProcessEnv): readonly string[];
+  readonly format: HarnessMcpConfigFormat;
   /** Server key Resin registers under. */
   readonly serverKey: string;
-  /** JSON object keys that may hold the server map, in lookup order. */
+  /** JSON object keys that may hold the server map, in lookup order (`json` format). */
   readonly jsonContainerKeys: readonly string[];
-  /** Paths not ending in `.json` hold Codex-style TOML (`[mcp_servers.<key>]`). */
-  readonly toml: boolean;
   /** MCP transports the harness can use to reach Resin (support matrix). */
   readonly transports: readonly string[];
   planRegistration(context: HarnessRegistrationContext): Promise<ConfigMutationPlan>;
+  /**
+   * Whether `targetPath` holds Resin's expected registration for `command`. Omit to use the
+   * generic check: the entry under `serverKey` is `{ command, args: ["mcp"] }` with no `url`
+   * and `type` absent or "stdio". Required for `owned-file` or any other entry shape.
+   */
+  verifyRegistration?(context: HarnessRegistrationCheckContext): Promise<boolean>;
+  /**
+   * Removes Resin's registration for `resin uninstall`; resolves true when anything changed.
+   * Omit to use the generic removal of recognized Resin entries under `jsonContainerKeys` (and
+   * Codex TOML sections) in every `uninstallPaths` file. Required for `owned-file`.
+   */
+  removeRegistration?(context: HarnessInstallContext): Promise<boolean>;
+}
+
+/**
+ * An additional Resin-owned install artifact (e.g. capture hooks) managed next to the MCP
+ * registration: installed by `resin init`/reconcile after registration, removed by uninstall.
+ */
+export interface HarnessInstallExtension {
+  /** Short label used in diagnostics, e.g. "capture hooks". */
+  readonly name: string;
+  install(context: HarnessInstallContext): Promise<readonly ManagedBlockResult[]>;
+  uninstall(context: HarnessInstallContext): Promise<readonly ManagedBlockResult[]>;
+  verify(context: Omit<HarnessInstallContext, "dryRun">): Promise<boolean>;
 }
 
 /** A static instruction block installed alongside the MCP registration. */
@@ -124,6 +171,8 @@ export interface HarnessDefinition {
   probeInstallation(context: HarnessProbeContext): Promise<HarnessInstallation | null>;
   readonly mcpConfig: HarnessMcpConfigSurface;
   readonly guidance?: HarnessGuidanceSurface;
+  /** Extra Resin-owned artifacts installed after registration and removed on uninstall. */
+  readonly installExtensions?: readonly HarnessInstallExtension[];
   /** Session discovery adapter used by the observer (historical sessions included). */
   createAdapter(): HarnessAdapter;
   createDecoder(): HarnessRecordDecoder;
