@@ -1,4 +1,5 @@
 import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resin/contracts/common";
+import { HarnessIdSchema } from "@resin/contracts/harness-ids";
 import { z } from "zod";
 
 /**
@@ -49,7 +50,8 @@ export const ControlPlaneConfigurationStateSchema = z
   .strict();
 export type ControlPlaneConfigurationState = z.infer<typeof ControlPlaneConfigurationStateSchema>;
 
-export const ControlPlaneHarnessIdSchema = z.enum(["claude-code", "codex-cli", "omp"]);
+/** Harness ids this protocol revision knows (the shared `HARNESS_IDS` list). */
+export const ControlPlaneHarnessIdSchema = HarnessIdSchema;
 export type ControlPlaneHarnessId = z.infer<typeof ControlPlaneHarnessIdSchema>;
 
 export const ControlPlaneHarnessStateSchema = z
@@ -114,7 +116,10 @@ export const ControlPlaneDesiredStateSchema = z
   .object({
     privacy: ControlPlanePrivacyStateSchema.optional(),
     configuration: ControlPlaneConfigurationStateSchema.optional(),
-    harnesses: z.record(ControlPlaneHarnessIdSchema, ControlPlaneHarnessStateSchema).optional(),
+    // Keyed by any identifier, not only `ControlPlaneHarnessIdSchema`: a peer on a newer revision
+    // may know harnesses this one does not, and one unknown key must not reject the whole state.
+    // Devices apply only the harnesses they support.
+    harnesses: z.record(IdentifierSchema, ControlPlaneHarnessStateSchema).optional(),
     tools: z.record(IdentifierSchema, ControlPlaneToolStateSchema).optional(),
     updates: ControlPlaneUpdateStateSchema.optional(),
     recovery: ControlPlaneRecoveryStateSchema.optional(),

@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
+import { SUPPORTED_HARNESS_IDS } from "../harness-registry.js";
 import { resolveInstalledResinMcpCommand } from "../installer/harness-config.js";
 import {
   HarnessHealthCoordinator,
@@ -171,7 +172,7 @@ Options:
                              Run resin-daemon --foreground or manage the daemon externally.
                              RESIN_NO_SERVICE=1 also disables user service management.
   --cloud-url <url>          Resin Cloud origin (default: https://api.resin.sh).
-  --harness <name>           Limit harness registration to one of: claude-code, codex-cli, omp.
+  --harness <name>           Limit harness registration to one of: ${SUPPORTED_HARNESS_IDS.join(", ")}.
   --workspace <dir>          Target project workspace directory.
   --capabilities-file <path> Pre-approved capabilities grant file.
   --privacy-config <path>    Pre-approved privacy configuration file.
