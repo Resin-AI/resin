@@ -1,4 +1,4 @@
-import { decodeCodexTranscript } from "@resin/adapter-codex";
+import { CodexRecordDecoder, decodeCodexTranscript } from "@resin/adapter-codex";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { tokenizeProgram } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
@@ -250,5 +250,115 @@ text("sa\x66e-credential", token);`;
       expect(JSON.stringify(captured.metadataOnly)).not.toContain(entry.source);
       expect(JSON.stringify(captured.metadataOnly)).not.toContain(entry.secret);
     }
+  });
+
+  it("projects a native Codex shell command with its credential protected and its original kept local", async () => {
+    const sessionId = "codex-native-shell-projection";
+    const secret = "sk-live-abc123XYZ";
+    const command = `curl -H 'Authorization: Bearer ${secret}' https://x/y --out data/a.json`;
+    const store = new InMemoryPrivateValueStore();
+    const pipeline = new NormalizationPipeline({
+      privateValueStore: store,
+      redactionConfig: { customSecrets: [secret], sensitiveEnvVars: [] },
+    });
+    pipeline.registerDecoder(new CodexRecordDecoder());
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    const timestamp = "2026-09-23T12:00:00.000Z";
+    const native = [
+      { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: "/work" } },
+      { type: "turn_context", payload: { turn_id: "turn", cwd: "/work", model: "gpt-6-sol" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "download https://x/y into data/a.json" }],
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "exec-shell-projection",
+            command: ["/bin/bash", "-lc", command],
+            cwd: "file:///work",
+            status: "completed",
+            stdout: "ok\n",
+            stderr: "",
+            exit_code: 0,
+            duration: { secs: 0, nanos: 5_000_000 },
+          },
+          started_at_ms: 1_000,
+          completed_at_ms: 1_005,
+        },
+      },
+    ];
+    const observed: NormalizedSessionEvent[] = [];
+    for (const [index, entry] of native.entries()) {
+      const ordinal = index + 1;
+      for (const result of await pipeline.processRecord(
+        {
+          recordId: `rec_${sessionId}_${ordinal}`,
+          sessionId,
+          harnessId: "codex-cli",
+          sequenceNumber: ordinal,
+          recordType: "transcript_line",
+          timestamp,
+          rawPayload: JSON.stringify({ timestamp, ordinal, ...entry }),
+          cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+          metadata: {},
+        },
+        { sessionId, harnessId: "codex-cli", workspaceId: WORKSPACE },
+      )) {
+        if (result.status !== "success" || result.isDuplicate) continue;
+        observed.push(recorder.observe(result.event, { workspaceId: WORKSPACE }));
+      }
+    }
+    const commandEvent = observed.find((entry) => entry.type === "command_exec");
+    const carrier = readWorkflowCallCarrier(
+      commandEvent?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+    );
+    if (carrier === undefined) throw new Error("expected a native command carrier");
+    console.log("CANDS", JSON.stringify(carrier.candidates), JSON.stringify(carrier.origins));
+    const origin = carrier.origins.cmd;
+    if (origin?.type !== "program" || origin.source.type !== "literal") {
+      throw new Error("expected a projected shell program origin");
+    }
+    const scrubbed = origin.source.value;
+    if (typeof scrubbed !== "string") throw new Error("expected literal scrubbed source");
+    expect(origin.language).toBe("shell");
+    expect(scrubbed).not.toContain(secret);
+    const sourceTokens = tokenizeProgram("shell", command);
+    const secretIndex = sourceTokens.findIndex((token) => token.raw.includes(secret));
+    expect(origin.protectedTokens).toEqual([secretIndex]);
+    expect(tokenizeProgram("shell", scrubbed).map((token) => token.raw)).toEqual(
+      sourceTokens.map((token, index) =>
+        index === secretIndex ? tokenizeProgram("shell", scrubbed)[index]!.raw : token.raw,
+      ),
+    );
+    if (origin.sourceReference === undefined) throw new Error("expected a source reference");
+    expect(resolvePrivateReference(store, origin.sourceReference)).toBe(command);
+    expect(carrier.program?.source).toBe(scrubbed);
+
+    // Deterministic candidates keep addressing the original command's token positions.
+    const outIndex = sourceTokens.findIndex((token) => token.raw === "data/a.json");
+    const candidateTokens = (carrier.candidates ?? []).flatMap((candidate) =>
+      candidate.argument === "cmd" && candidate.path[0] === "tokens" ? [candidate.path[1]] : [],
+    );
+    expect(candidateTokens).toContain(outIndex);
+    // A redacted token is never proposed as a binding hole.
+    expect(candidateTokens).not.toContain(secretIndex);
+
+    const publicEvents = observed.map((entry) => projectEventToMetadataOnly(entry));
+    expect(JSON.stringify(publicEvents)).not.toContain(secret);
+    const recipe = recordCallsFromEvents(sessionId, publicEvents);
+    const argument = recipe?.workflow.steps[0]?.arguments.find((entry) => entry.name === "cmd");
+    const template = argument?.source.kind === "template" ? argument.source.template : undefined;
+    if (template?.type !== "program") throw new Error("expected a shell program template");
+    expect(template.sourceReference).toBe(origin.sourceReference);
+    expect(template.protectedTokens).toEqual([secretIndex]);
+    expect(JSON.stringify(recipe?.workflow)).not.toContain(secret);
   });
 });

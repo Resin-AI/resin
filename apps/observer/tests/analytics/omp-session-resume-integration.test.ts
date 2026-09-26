@@ -42,7 +42,7 @@ function commandTurn(callId: string, timestamp: string, isError: boolean): JsonO
       data: {
         toolCallId: callId,
         toolName: "bash",
-        args: { command: "printf PRIVATE_COMMAND_OUTPUT" },
+        args: { command: "cat ./notes.txt" },
       },
     },
     {

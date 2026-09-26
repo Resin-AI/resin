@@ -2152,7 +2152,7 @@ describe("native Codex rollout workflow and computation capture", () => {
       text: command,
       truncated: false,
     });
-    expect(JSON.stringify(events).replace(JSON.stringify(command), "")).not.toContain(
+    expect(JSON.stringify(events).replaceAll(JSON.stringify(command), "")).not.toContain(
       "exact output",
     );
     const recipe = recordCallsFromEvents(sessionId, events);
@@ -2166,7 +2166,9 @@ describe("native Codex rollout workflow and computation capture", () => {
             ? source.reference
             : source.kind === "template" && source.template.type === "private"
               ? source.template.reference
-              : undefined;
+              : source.kind === "template" && source.template.type === "program"
+                ? source.template.sourceReference
+                : undefined;
         return [argument.name, reference && resolvePrivateReference(store, reference)];
       }),
     );

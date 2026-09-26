@@ -58,7 +58,8 @@ export function retainLocalWorkflowPayload(
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
   const hasProgramSourceRedactor =
-    event.type === "tool_call" && options.programSourceRedactor !== undefined;
+    (event.type === "tool_call" || event.type === "command_exec") &&
+    options.programSourceRedactor !== undefined;
   if (
     !hasOriginalField &&
     commandFields.length === 0 &&

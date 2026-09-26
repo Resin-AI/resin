@@ -410,6 +410,7 @@ export class WorkflowCallRecorder {
           );
           provenance[argument] = { standing: "derived", rule: "single-observation" };
         }
+        this.projectProgramSource(event, parameters, program, origins);
         // The session state above also retains native output for guarded outer results.
         let call: LocalCall | undefined;
         for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
@@ -440,7 +441,8 @@ export class WorkflowCallRecorder {
         const relationships = this.relateLocalCall(state, call);
         if (relationships.dependsOnCallIds.length > 0)
           carrier.dependsOnCallIds = relationships.dependsOnCallIds;
-        if (relationships.candidates.length > 0) carrier.candidates = relationships.candidates;
+        const candidates = unprotectedCandidates(relationships.candidates, program, origins);
+        if (candidates.length > 0) carrier.candidates = candidates;
         const succeeded = raw.exitCode === 0;
         call.result = raw.stdout;
         call.resultReference = succeeded
@@ -815,22 +817,8 @@ export class WorkflowCallRecorder {
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
-    if (relationships.candidates.length > 0) {
-      const projected = program?.argument === undefined ? undefined : origins[program.argument];
-      const protectedTokens = projected?.type === "program" ? projected.protectedTokens : undefined;
-      const candidates =
-        protectedTokens === undefined || protectedTokens.length === 0
-          ? relationships.candidates
-          : relationships.candidates.filter(
-              (candidate) =>
-                candidate.argument !== program?.argument ||
-                candidate.path.length !== 2 ||
-                candidate.path[0] !== "tokens" ||
-                typeof candidate.path[1] !== "number" ||
-                !protectedTokens.includes(candidate.path[1]),
-            );
-      if (candidates.length > 0) carrier.candidates = candidates;
-    }
+    const candidates = unprotectedCandidates(relationships.candidates, program, origins);
+    if (candidates.length > 0) carrier.candidates = candidates;
     return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
   }
 
@@ -1214,14 +1202,12 @@ export class WorkflowCallRecorder {
 
   /** Exposes a source view only when the real redactor and canonical parser both accept it. */
   private projectProgramSource(
-    event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    event: Extract<NormalizedSessionEvent, { type: "tool_call" | "command_exec" }>,
     parameters: Record<string, WorkflowJsonValue>,
     program: WorkflowRecordedProgram,
     origins: WorkflowCallCarrier["origins"],
   ): void {
-    // The shell tokenizer is a conservative lexer, not a syntax parser. It cannot attest to a
-    // parseable source projection; retain its existing private-source representation.
-    if (program.argument === undefined || program.kind === "shell") return;
+    if (program.argument === undefined) return;
     const original = parameters[program.argument];
     const origin = origins[program.argument];
     if (typeof original !== "string" || origin?.type !== "private") return;
@@ -1442,6 +1428,25 @@ export class WorkflowCallRecorder {
     const handle = event.result.handle;
     return typeof handle === "string" && handle.startsWith("ref:") ? handle : undefined;
   }
+}
+
+/** A redacted token can never become a binding hole, so it is not proposed as one either. */
+function unprotectedCandidates(
+  candidates: readonly WorkflowCallCandidate[],
+  program: WorkflowRecordedProgram | undefined,
+  origins: WorkflowCallCarrier["origins"],
+): WorkflowCallCandidate[] {
+  const projected = program?.argument === undefined ? undefined : origins[program.argument];
+  const protectedTokens = projected?.type === "program" ? projected.protectedTokens : undefined;
+  if (protectedTokens === undefined || protectedTokens.length === 0) return [...candidates];
+  return candidates.filter(
+    (candidate) =>
+      candidate.argument !== program?.argument ||
+      candidate.path.length !== 2 ||
+      candidate.path[0] !== "tokens" ||
+      typeof candidate.path[1] !== "number" ||
+      !protectedTokens.includes(candidate.path[1]),
+  );
 }
 
 /** A tool result as a comparable value: its text when it is text, its own value otherwise. */

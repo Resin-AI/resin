@@ -22,9 +22,33 @@ describe("analyzeProgramSourceProjection", () => {
     expect(projection.tokens[callIndex]?.start).not.toBe(redacted.indexOf("call"));
   });
 
-  it("rejects unsupported shell projections instead of approximating shell syntax", () => {
+  it("projects a shell command whose secret flag value was redacted in place", () => {
+    const original = "curl -H 'Authorization: Bearer sk-live-abc123' https://x/y --out data/a.json";
+    const redacted =
+      "curl -H 'Authorization: Bearer [REDACTED_KEY:ab12]' https://x/y --out data/a.json";
+    const projection = analyzeProgramSourceProjection("shell", original, redacted);
+    expect(projection.protectedTokens).toEqual([2]);
+    expect(projection.tokens[2]?.raw).toBe("'Authorization: Bearer sk-live-abc123'");
+    expect(projection.tokens[5]?.raw).toBe("data/a.json");
+  });
+
+  it("rejects a shell redaction that splits, merges, or reshapes words", () => {
+    for (const redacted of [
+      "deploy --token [REDACTED] now extra",
+      "deploy --token now",
+      "deploy --token 'REDACTED' now",
+      "deploy --token $SECRET now",
+    ]) {
+      expect(() =>
+        analyzeProgramSourceProjection("shell", "deploy --token abc123 now", redacted),
+      ).toThrow(ProgramSourceProjectionError);
+    }
     expect(() =>
-      analyzeProgramSourceProjection("shell", "echo secret", "echo REDACTED", [1]),
+      analyzeProgramSourceProjection(
+        "shell",
+        "cat <<EOF\nkey=abc123\nEOF",
+        "cat <<EOF\nkey=[REDACTED KEY]\nEOF",
+      ),
     ).toThrow(ProgramSourceProjectionError);
   });
 
