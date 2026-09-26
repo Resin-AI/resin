@@ -86,22 +86,53 @@ describe("a subagent transcript forked from its parent", () => {
   });
   // The parent's history, as OMP writes it and as it copies it verbatim into a forked file.
   const inherited = [
-    { type: "thinking_level_change", id: "e1", parentId: null, timestamp: "2026-09-26T10:00:00.100Z", thinkingLevel: "high" },
+    {
+      type: "thinking_level_change",
+      id: "e1",
+      parentId: null,
+      timestamp: "2026-09-26T10:00:00.100Z",
+      thinkingLevel: "high",
+    },
     entry("e2", "e1", "2026-09-26T10:00:01.000Z", { role: "user", content: "survey the repo" }),
-    entry("e3", "e2", "2026-09-26T10:00:02.000Z", call("call_parent|fc_1", "read", { path: "a.ts" })),
+    entry(
+      "e3",
+      "e2",
+      "2026-09-26T10:00:02.000Z",
+      call("call_parent|fc_1", "read", { path: "a.ts" }),
+    ),
     entry("e4", "e3", "2026-09-26T10:00:03.000Z", result("call_parent|fc_1", "read", "a")),
     entry("e5", "e4", "2026-09-26T10:00:04.000Z", call("call_task|fc_2", "task", { tasks: [] })),
   ];
   const parent = [
-    { type: "session", version: 3, id: "parent-session", timestamp: "2026-09-26T10:00:00.000Z", cwd: "/repo", title: "parent" },
+    {
+      type: "session",
+      version: 3,
+      id: "parent-session",
+      timestamp: "2026-09-26T10:00:00.000Z",
+      cwd: "/repo",
+      title: "parent",
+    },
     ...inherited,
     entry("e9", "e5", "2026-09-26T10:05:00.000Z", result("call_task|fc_2", "task", "done")),
   ];
   const child = [
-    { type: "session", version: 3, id: "child-session", timestamp: "2026-09-26T10:00:05.000Z", cwd: "/repo", parentSession: "parent-session", title: "child" },
+    {
+      type: "session",
+      version: 3,
+      id: "child-session",
+      timestamp: "2026-09-26T10:00:05.000Z",
+      cwd: "/repo",
+      parentSession: "parent-session",
+      title: "child",
+    },
     ...inherited,
     entry("c1", "e5", "2026-09-26T10:00:06.000Z", { role: "user", content: "subtask" }),
-    entry("c2", "c1", "2026-09-26T10:00:07.000Z", call("call_child|fc_3", "bash", { command: "ls" })),
+    entry(
+      "c2",
+      "c1",
+      "2026-09-26T10:00:07.000Z",
+      call("call_child|fc_3", "bash", { command: "ls" }),
+    ),
     entry("c3", "c2", "2026-09-26T10:00:08.000Z", result("call_child|fc_3", "bash", "a.ts")),
   ];
 
@@ -139,7 +170,8 @@ describe("a subagent transcript forked from its parent", () => {
       const parentPath = path.join(tmpDir, "parent.jsonl");
       const childPath = path.join(tmpDir, "parent", "child.jsonl");
       await fsp.mkdir(path.dirname(childPath));
-      const jsonl = (lines: unknown[]) => `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`;
+      const jsonl = (lines: unknown[]) =>
+        `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`;
       await fsp.writeFile(parentPath, jsonl(parent));
       await fsp.writeFile(childPath, jsonl(child));
 
