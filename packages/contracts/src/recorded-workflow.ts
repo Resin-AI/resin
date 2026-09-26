@@ -234,7 +234,7 @@ export type WorkflowArgument = {
  * A binding the capture proposes but has not established.
  *
  * A candidate is deliberately NOT executable: the plan keeps the recorded value until a caller
- * validates the proposed behaviour on different inputs in a disposable environment. Every candidate
+ * validates the proposed behaviour against a recorded demonstration of different inputs. Every candidate
  * names the fact the record is missing, so a refusal is reportable instead of silent.
  */
 export type WorkflowBindingCandidate = {
@@ -396,7 +396,7 @@ export type RecordedWorkflow = {
   /**
    * Bindings the capture proposes but has not established. They are diagnostic, never executable:
    * the steps above keep the recorded values until a validator confirms a candidate on different
-   * inputs in a disposable environment.
+   * inputs recorded on this device.
    */
   candidates?: WorkflowBindingCandidate[];
   /**

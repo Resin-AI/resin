@@ -7,6 +7,8 @@ export interface DemonstrationSnapshot {
     reference: string;
     comparison?: "text-trim";
   }>;
+  /** The repeat's own call at each position, from which the validator re-derives its references. */
+  calls?: Array<{ position: number; callId: string }>;
 }
 
 export interface DemonstrationCall {
@@ -138,7 +140,12 @@ export function selectDemonstration(
       continue;
     observedCount = observed.length;
     inputCount = inputs.length;
-    chosen = { repeats: snapshot.repeats, inputs, observed };
+    // The repeat's calls come from the recorded execution itself, not from the snapshot.
+    const calls = [...selectedRepeatPositions].map(([position, ordinal]) => ({
+      position: ordinal,
+      callId: members[position]!.callId,
+    }));
+    chosen = { repeats: snapshot.repeats, inputs, observed, calls };
   }
   return chosen;
 }

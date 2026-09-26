@@ -112,6 +112,8 @@ export interface WorkflowCallHeldOut {
     reference: string;
     comparison?: "text-trim";
   }>;
+  /** The call that performed each repeated position, so a validator re-derives its own references. */
+  calls?: Array<{ position: number; callId: string }>;
 }
 
 /**
@@ -528,7 +530,21 @@ function readHeldOut(value: unknown): WorkflowCallHeldOut | undefined {
       ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
     });
   }
-  return { repeats: value.repeats as number, inputs, observed };
+  if (value.calls === undefined) return { repeats: value.repeats as number, inputs, observed };
+  if (!Array.isArray(value.calls)) return undefined;
+  const calls: NonNullable<WorkflowCallHeldOut["calls"]> = [];
+  for (const entry of value.calls) {
+    if (
+      !isPlainObject(entry) ||
+      !Number.isInteger(entry.position) ||
+      typeof entry.callId !== "string" ||
+      entry.callId.length === 0
+    ) {
+      return undefined;
+    }
+    calls.push({ position: entry.position as number, callId: entry.callId });
+  }
+  return { repeats: value.repeats as number, inputs, observed, calls };
 }
 
 /**

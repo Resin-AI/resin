@@ -817,7 +817,16 @@ function demonstratedWorkflow(
     });
   }
   if (inputs.length === 0 && observed.length === 0) return undefined;
-  return { inputs, observed };
+  // Each step's own local calls, in execution order, so a validator recomputes every recorded value.
+  const calls: NonNullable<NonNullable<RecordedWorkflow["heldOut"]>["calls"]> = [];
+  for (const entry of [...(demonstration.calls ?? [])].sort((a, b) => a.position - b.position)) {
+    const stepId = stepIdByPosition.get(entry.position);
+    if (stepId === undefined) continue;
+    const existing = calls.find((call) => call.stepId === stepId);
+    if (existing === undefined) calls.push({ stepId, callIds: [entry.callId] });
+    else existing.callIds.push(entry.callId);
+  }
+  return calls.length === 0 ? { inputs, observed } : { inputs, observed, calls };
 }
 
 /**

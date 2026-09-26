@@ -19,7 +19,7 @@
  *     argument, and a value inside it is not a leaf of that argument;
  *
  * Candidates are not executable. They exist so that a later, deliberate step can confirm them by
- * replay on different inputs in a disposable environment, and so that a refusal can name the exact
+ * checking against a recording of different inputs, and so that a refusal can name the exact
  * fact the record is missing.
  */
 

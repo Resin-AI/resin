@@ -112,7 +112,7 @@ export interface WorkflowValidationDecision {
   attempt: string;
   planDigest: string;
   evidenceDigest: string;
-  /** Identity of the disposable environment the replay ran in. */
+  /** Identity of the device whose recording the plan was checked against. */
   environment: string;
   verdicts: WorkflowValidationVerdict[];
   verification?: WorkflowValidationPlanVerification;

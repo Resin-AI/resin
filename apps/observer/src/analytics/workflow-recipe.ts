@@ -124,6 +124,14 @@ export function recordCallsFromEvents(
         reference: entry.reference,
         ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
       })),
+      ...(demonstration.calls === undefined || demonstration.calls.length === 0
+        ? {}
+        : {
+            calls: demonstration.calls.map((entry) => ({
+              stepId: recipe.workflow.steps[entry.position]!.id,
+              callIds: [entry.callId],
+            })),
+          }),
     };
   }
   recipe.workflow.privateReferences = collectWorkflowPrivateReferences(recipe.workflow);

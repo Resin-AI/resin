@@ -57,7 +57,11 @@ import {
   containsRedactionPlaceholder,
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
-import { workflowPrivateReference } from "./workflow-private-reference.js";
+import {
+  WORKFLOW_CALL_IDENTITY_SLOT,
+  workflowCallArgumentSlot,
+  workflowPrivateReference,
+} from "./workflow-private-reference.js";
 
 import {
   type DiscoveredCallable,
@@ -1102,7 +1106,12 @@ export class WorkflowCallRecorder {
       argumentReferences: Object.fromEntries(
         Object.entries(parameters).map(([argument, value]) => [
           argument,
-          this.localReference(value, event.sessionId, event.callId, `argument:${argument}`),
+          this.localReference(
+            value,
+            event.sessionId,
+            event.callId,
+            workflowCallArgumentSlot(argument),
+          ),
         ]),
       ),
       // Only a program whose text arrived in a named argument can be read as a program here: with
@@ -1126,6 +1135,21 @@ export class WorkflowCallRecorder {
             writes: flow.writes.map((resource) => `${resource.kind}:${resource.identity}`),
           }),
     };
+    // The call's own identity, so a validator can compare a plan's callable with the recording
+    // under a reference it computes itself, never one the plan carries.
+    this.localReference(
+      {
+        name: call.toolName,
+        ...(call.connection === undefined ? {} : { connection: call.connection }),
+        ...(call.program === undefined
+          ? {}
+          : { program: { kind: call.program.kind, argument: call.program.argument } }),
+        arguments: Object.keys(parameters),
+      },
+      event.sessionId,
+      event.callId,
+      WORKFLOW_CALL_IDENTITY_SLOT,
+    );
     state.position += 1;
     execution.calls.push(call);
     return call;
@@ -1177,9 +1201,11 @@ export class WorkflowCallRecorder {
     }
     const inputs: WorkflowCallHeldOut["inputs"] = [];
     const observed: WorkflowCallHeldOut["observed"] = [];
+    const calls: NonNullable<WorkflowCallHeldOut["calls"]> = [];
     for (const mine of execution.calls) {
       const theirs = earlier.calls.find((entry) => entry.position === mine.position);
       if (theirs === undefined || mine.toolName !== theirs.toolName) break;
+      calls.push({ position: mine.position, callId: mine.callId });
       for (const [argument, reference] of Object.entries(mine.argumentReferences)) {
         // Nested arguments are part of an ordinary call too. Keep the complete value by local
         // reference; validation selects the candidate's nested path without uploading the value.
@@ -1197,7 +1223,7 @@ export class WorkflowCallRecorder {
       }
     }
     if (inputs.length === 0 && observed.length === 0) return undefined;
-    execution.accumulatedHeldOut = { repeats: earlier.index, inputs, observed };
+    execution.accumulatedHeldOut = { repeats: earlier.index, inputs, observed, calls };
     return execution.accumulatedHeldOut;
   }
 
@@ -1603,6 +1629,7 @@ export class WorkflowCallRecorder {
         repeats: heldOut.repeats,
         inputs: [...heldOut.inputs],
         observed: [...heldOut.observed],
+        ...(heldOut.calls === undefined ? {} : { calls: [...heldOut.calls] }),
       };
     }
     return undefined;
