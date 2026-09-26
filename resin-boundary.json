@@ -11,7 +11,13 @@
     "@resin/db",
     "@resin/adapter-claude-code",
     "@resin/adapter-codex",
-    "@resin/adapter-omp"
+    "@resin/adapter-omp",
+    "@resin/adapter-pi",
+    "@resin/adapter-cursor-cli",
+    "@resin/adapter-grok-build",
+    "@resin/adapter-muse-code",
+    "@resin/adapter-opencode",
+    "@resin/adapter-copilot-cli"
   ],
   "privatePackages": ["@resin/cloud", "@resin/web", "@resin/cloud-contracts", "@resin/e2e"],
   "publicReleasePackages": [
@@ -26,7 +32,13 @@
     "@resin/db",
     "@resin/adapter-claude-code",
     "@resin/adapter-codex",
-    "@resin/adapter-omp"
+    "@resin/adapter-omp",
+    "@resin/adapter-pi",
+    "@resin/adapter-cursor-cli",
+    "@resin/adapter-grok-build",
+    "@resin/adapter-muse-code",
+    "@resin/adapter-opencode",
+    "@resin/adapter-copilot-cli"
   ],
   "cloudOnlyPaths": [
     "apps/cloud",

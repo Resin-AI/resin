@@ -185,7 +185,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
             artifactBaseUrl: testBaseUrl,
             outputDir: tempOutputDir,
           }),
-        ).toThrow(/Unexpected public package count: expected 13, found 1/);
+        ).toThrow(/Unexpected public package count: expected 19, found 1/);
       } finally {
         fs.rmSync(fakeDir, { recursive: true, force: true });
       }
@@ -194,7 +194,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
     it("rejects root workspace package in publicPackageManifests", () => {
       const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-fake-root-"));
       try {
-        const fakeManifests = Array(13).fill("package.json");
+        const fakeManifests = Array(PUBLIC_PACKAGE_COUNT).fill("package.json");
         fs.writeFileSync(
           path.join(fakeDir, "repository-split.json"),
           JSON.stringify({ publicPackageManifests: fakeManifests }),
@@ -232,6 +232,12 @@ describe("Public Package Packager (pack-public-packages)", () => {
           "adapters/claude-code/package.json",
           "adapters/codex-cli/package.json",
           "adapters/omp/package.json",
+          "adapters/pi/package.json",
+          "adapters/cursor-cli/package.json",
+          "adapters/grok-build/package.json",
+          "adapters/muse-code/package.json",
+          "adapters/opencode/package.json",
+          "adapters/copilot-cli/package.json",
           "apps/cloud/package.json", // private!
         ];
         fs.writeFileSync(
@@ -297,13 +303,13 @@ describe("Public Package Packager (pack-public-packages)", () => {
       });
     }, 120_000);
 
-    it("produces exactly 13 audited public tarballs", () => {
+    it("produces exactly PUBLIC_PACKAGE_COUNT audited public tarballs", () => {
       expect(packResult.success).toBe(true);
-      expect(packResult.count).toBe(13);
-      expect(packResult.packages).toHaveLength(13);
+      expect(packResult.count).toBe(PUBLIC_PACKAGE_COUNT);
+      expect(packResult.packages).toHaveLength(PUBLIC_PACKAGE_COUNT);
 
       const tgzFiles = fs.readdirSync(outputDir).filter((f) => f.endsWith(".tgz"));
-      expect(tgzFiles).toHaveLength(13);
+      expect(tgzFiles).toHaveLength(PUBLIC_PACKAGE_COUNT);
 
       const expectedTarballs = [
         "resin-1.0.0.tgz",
@@ -333,8 +339,8 @@ describe("Public Package Packager (pack-public-packages)", () => {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
       expect(manifest.version).toBe("1.0.0");
       expect(manifest.artifactBaseUrl).toBe(testBaseUrl);
-      expect(manifest.count).toBe(13);
-      expect(manifest.packages).toHaveLength(13);
+      expect(manifest.count).toBe(PUBLIC_PACKAGE_COUNT);
+      expect(manifest.packages).toHaveLength(PUBLIC_PACKAGE_COUNT);
 
       for (const entry of manifest.packages) {
         expect(entry.name).toBeDefined();
@@ -437,7 +443,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.count).toBe(13);
+      expect(result.count).toBe(PUBLIC_PACKAGE_COUNT);
       expect(fs.existsSync(path.join(specialOutputDir, "resin-1.0.0.tgz"))).toBe(true);
       expect(fs.existsSync(path.join(specialOutputDir, "packages-manifest.json"))).toBe(true);
     }, 30_000);

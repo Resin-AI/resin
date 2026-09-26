@@ -385,10 +385,16 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
         "@resin/adapter-claude-code",
         "@resin/adapter-codex",
         "@resin/adapter-omp",
+        "@resin/adapter-pi",
+        "@resin/adapter-cursor-cli",
+        "@resin/adapter-grok-build",
+        "@resin/adapter-muse-code",
+        "@resin/adapter-opencode",
+        "@resin/adapter-copilot-cli",
       ];
       const actualNames = PUBLIC_RELEASE_PACKAGES.map((p) => p.name);
       expect(actualNames).toEqual(expectedPublicPackages);
-      expect(PUBLIC_RELEASE_PACKAGES).toHaveLength(12);
+      expect(PUBLIC_RELEASE_PACKAGES).toHaveLength(18);
     });
 
     it("ensures no private package is included in PUBLIC_RELEASE_PACKAGES", () => {

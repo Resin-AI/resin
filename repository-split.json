@@ -13,6 +13,12 @@
     "@resin/adapter-claude-code",
     "@resin/adapter-codex",
     "@resin/adapter-omp",
+    "@resin/adapter-pi",
+    "@resin/adapter-cursor-cli",
+    "@resin/adapter-grok-build",
+    "@resin/adapter-muse-code",
+    "@resin/adapter-opencode",
+    "@resin/adapter-copilot-cli",
     "@resin/test-fixtures"
   ],
   "privatePackages": ["@resin/cloud", "@resin/web", "@resin/cloud-contracts", "@resin/e2e"],
@@ -29,6 +35,12 @@
     "adapters/claude-code/package.json",
     "adapters/codex-cli/package.json",
     "adapters/omp/package.json",
+    "adapters/pi/package.json",
+    "adapters/cursor-cli/package.json",
+    "adapters/grok-build/package.json",
+    "adapters/muse-code/package.json",
+    "adapters/opencode/package.json",
+    "adapters/copilot-cli/package.json",
     "fixtures/test-fixtures/package.json"
   ],
   "privatePackageManifests": [
