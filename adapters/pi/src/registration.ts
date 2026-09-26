@@ -61,7 +61,11 @@ export async function verifyPiRegistration(options: {
   return (
     content !== null &&
     content ===
-      renderPiResinExtension({ name: PI_RESIN_SERVER_NAME, command: options.command, args: ["mcp"] })
+      renderPiResinExtension({
+        name: PI_RESIN_SERVER_NAME,
+        command: options.command,
+        args: ["mcp"],
+      })
   );
 }
 
@@ -101,7 +105,13 @@ Resin learned tools from earlier work in this workspace. They are tools named \`
 - Their output is the commands' current output: use it instead of running those commands yourself.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
-const PI_CONTEXT_FILE_NAMES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+const PI_CONTEXT_FILE_NAMES = [
+  "AGENTS.override.md",
+  "AGENTS.md",
+  "AGENTS.MD",
+  "CLAUDE.md",
+  "CLAUDE.MD",
+];
 
 /**
  * Pi loads exactly one context file from its agent directory (the first that exists, see

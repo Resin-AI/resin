@@ -43,7 +43,11 @@ export const piHarness: HarnessDefinition = {
     verifyRegistration: ({ targetPath, command, fsBridge }) =>
       verifyPiRegistration({ targetPath, command, fsBridge }),
     removeRegistration: ({ home, env, fsBridge, dryRun }) =>
-      removePiRegistration({ paths: piHarness.mcpConfig.uninstallPaths(home, env), fsBridge, dryRun }),
+      removePiRegistration({
+        paths: piHarness.mcpConfig.uninstallPaths(home, env),
+        fsBridge,
+        dryRun,
+      }),
   },
   guidance: {
     resolvePath: resolvePiGuidancePath,

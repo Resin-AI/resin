@@ -226,7 +226,10 @@ export class PiSessionEventSource implements SessionEventSource {
     } catch {
       return [];
     }
-    if (stat.size < this.cursor.offset || (this.lastInode !== null && stat.ino !== this.lastInode)) {
+    if (
+      stat.size < this.cursor.offset ||
+      (this.lastInode !== null && stat.ino !== this.lastInode)
+    ) {
       this.cursor = { offset: 0, line: 1, sequence: 0, timestamp: new Date().toISOString() };
       this.state = null;
     }
@@ -257,7 +260,8 @@ export class PiSessionEventSource implements SessionEventSource {
       if (!entry || !observed) return true;
 
       this.cursor.sequence += 1;
-      const entryTime = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+      const entryTime =
+        typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
       const metadata: PiRecordMetadata = {
         transcriptPath: filePath,
         lineNumber,

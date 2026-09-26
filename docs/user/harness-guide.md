@@ -11,6 +11,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 | **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
 | **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
+| **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `~/.pi/agent/extensions/resin.ts` (Resin-owned Pi extension; `$PI_CODING_AGENT_DIR` honored) | MCP over Stdio via the extension | Local JSONL Session Tailing | Native ListChanged via the extension |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
@@ -128,6 +129,20 @@ For OMP environments, Resin updates `~/.omp/agent/mcp.json`:
 ### In-Process Hub Integration
 
 OMP sessions connect directly to the Gateway's SSE endpoint and receive real-time tool catalog updates. When a new tool completes its canary evaluation and is promoted, an SSE `notifications/tools/list_changed` message is dispatched immediately to active OMP agents.
+
+---
+
+## Pi Integration
+
+### Why an extension
+
+Pi has no MCP client: its model sees built-in tools plus tools that Pi extensions register. `resin init` therefore writes a Resin-owned extension to `<agent-dir>/extensions/resin.ts` (`<agent-dir>` is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`). Pi loads it automatically; it starts `resin mcp` over stdio and registers every gateway tool as a Pi tool named `mcp__resin__<tool>`. It follows `notifications/tools/list_changed`, so learned tools appear in running sessions without a restart. `resin init` also adds a marked guidance block to the agent directory's context file (the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` that exists, else a new `AGENTS.md`). `resin uninstall` deletes the extension (only if Resin wrote it) and removes the block. Resin never overwrites a `resin.ts` it did not write.
+
+### Session Observation
+
+Resin reads Pi's JSONL session files (format versions 1–3) from `<agent-dir>/sessions/--<cwd>--/`, `$PI_CODING_AGENT_SESSION_DIR`, and the `sessionDir` setting (global or project `.pi/settings.json`). Sessions belong to the workspace named by the file header's `cwd`. In-file `/tree` rewinds and branch summaries are captured as branch forks, so calls from the abandoned and new branches stay separate; `/fork` and `--fork` sessions link to their parent and skip the copied parent history.
+
+Limits: runs with `--no-session` write nothing and cannot be captured; runs with `--no-extensions` do not load the Resin extension; sessions stored with `--session-dir` are found only when that directory is also configured through `PI_CODING_AGENT_SESSION_DIR` or `sessionDir`; Pi has no built-in subagents.
 
 ---
 

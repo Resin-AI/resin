@@ -90,7 +90,9 @@ async function loadBridge(serverScript: string) {
     extensionPath,
     renderPiResinExtension({ name: "resin", command: process.execPath, args: [serverPath] }),
   );
-  const module: { default: (pi: unknown) => void } = await import(pathToFileURL(extensionPath).href);
+  const module: { default: (pi: unknown) => void } = await import(
+    pathToFileURL(extensionPath).href
+  );
   const pi = fakePi();
   module.default(pi.api);
   return pi;

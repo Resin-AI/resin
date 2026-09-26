@@ -7,8 +7,8 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
-import { parsePiMcpToolName } from "./extension.js";
 import { piSessionIdFromPath, toPiSessionId } from "./discovery.js";
+import { parsePiMcpToolName } from "./extension.js";
 import { PI_HARNESS_ID } from "./paths.js";
 
 export const PI_ACCOUNTING_VERSION = "pi-v1";
@@ -76,7 +76,9 @@ export function piProviderUsage(
     availability: totalTokens === undefined ? "partial" : "complete",
     costProvenance: costUsd === undefined ? "unpriced" : "harness_estimate",
     ...(model ? { model } : {}),
-    ...(nonNegativeInt(usage.input) === undefined ? {} : { inputTokens: nonNegativeInt(usage.input) }),
+    ...(nonNegativeInt(usage.input) === undefined
+      ? {}
+      : { inputTokens: nonNegativeInt(usage.input) }),
     ...(nonNegativeInt(usage.output) === undefined
       ? {}
       : { outputTokens: nonNegativeInt(usage.output) }),
@@ -94,7 +96,10 @@ export function piProviderUsage(
 }
 
 /** Unified-diff-like text for Pi `edit` arguments `{ path, edits: [{ oldText, newText }] }`. */
-function editDiff(filePath: string, edits: unknown): { diff: string; added: number; removed: number } {
+function editDiff(
+  filePath: string,
+  edits: unknown,
+): { diff: string; added: number; removed: number } {
   const lines = [`--- ${filePath}`, `+++ ${filePath}`];
   let added = 0;
   let removed = 0;
@@ -336,7 +341,12 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
         return this.decodeSystem(message, ctx);
       case "user":
         return [
-          { ...this.base(ctx), type: "message", role: "user", content: contentText(message.content) },
+          {
+            ...this.base(ctx),
+            type: "message",
+            role: "user",
+            content: contentText(message.content),
+          },
         ];
       case "assistant":
         return this.decodeAssistant(message, ctx);

@@ -1,13 +1,13 @@
 import * as fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { NormalizedSessionEventSchema } from "@resin/contracts";
 import type {
   HarnessSession,
   IntermediateSessionEvent,
   RawHarnessRecord,
   SourceCursor,
 } from "@resin/harness-contracts";
-import { NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { PiRecordDecoder } from "../src/decoder.js";
 import { PiSessionEventSource } from "../src/source.js";
@@ -89,7 +89,11 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     expect(mcpResult).toMatchObject({ result: "words: 3", isError: false });
 
     expect(events.filter((event) => event.type === "command_exec")).toEqual([
-      expect.objectContaining({ command: "./greet.sh world", stdout: "hello, world\n", exitCode: 0 }),
+      expect.objectContaining({
+        command: "./greet.sh world",
+        stdout: "hello, world\n",
+        exitCode: 0,
+      }),
     ]);
     expect(
       events.flatMap((event) =>
@@ -101,9 +105,9 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     ]);
 
     const discovery = events.find((event) => event.type === "tool_discovery");
-    expect(discovery?.type === "tool_discovery" && discovery.tools.map((tool) => tool.name)).toEqual(
-      ["read", "bash", "edit", "write", "mcp__fixture__word_count"],
-    );
+    expect(
+      discovery?.type === "tool_discovery" && discovery.tools.map((tool) => tool.name),
+    ).toEqual(["read", "bash", "edit", "write", "mcp__fixture__word_count"]);
     expect(
       discovery?.type === "tool_discovery" &&
         discovery.tools.find((tool) => tool.name === "mcp__fixture__word_count")?.provider,
@@ -300,7 +304,11 @@ describe("PiRecordDecoder on older session formats", () => {
   it("treats a v1 file as one linear branch and decodes the pre-v3 hookMessage role", async () => {
     const events = await decodeLines([
       { type: "session", id: "legacy", timestamp: "2025-01-01T00:00:00.000Z", cwd: "/w" },
-      { type: "message", timestamp: "2025-01-01T00:00:01.000Z", message: { role: "user", content: "hi" } },
+      {
+        type: "message",
+        timestamp: "2025-01-01T00:00:01.000Z",
+        message: { role: "user", content: "hi" },
+      },
       {
         type: "message",
         timestamp: "2025-01-01T00:00:02.000Z",
@@ -316,7 +324,13 @@ describe("PiRecordDecoder on older session formats", () => {
       {
         type: "message",
         timestamp: "2025-01-01T00:00:03.000Z",
-        message: { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "a" }], isError: false },
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          toolName: "bash",
+          content: [{ type: "text", text: "a" }],
+          isError: false,
+        },
       },
       {
         type: "message",

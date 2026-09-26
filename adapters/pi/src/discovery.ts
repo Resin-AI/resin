@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import * as fsp from "node:fs/promises";
 import path from "node:path";
@@ -108,7 +108,8 @@ async function listJsonlFiles(dir: string, depth: number): Promise<string[]> {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(full);
-    else if (entry.isDirectory() && depth > 0) files.push(...(await listJsonlFiles(full, depth - 1)));
+    else if (entry.isDirectory() && depth > 0)
+      files.push(...(await listJsonlFiles(full, depth - 1)));
   }
   return files;
 }

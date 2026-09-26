@@ -2,9 +2,9 @@ import * as fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  NodeConfigFsBridge,
   applyConfigMutation,
   applyManagedBlock,
-  NodeConfigFsBridge,
 } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { piHarness } from "../src/harness.js";
@@ -74,10 +74,18 @@ describe("Pi installer surface", () => {
     expect(extension).toContain('"command": "/opt/resin/bin/resin"');
     expect(first.block.action).toBe("updated");
     await expect(
-      piHarness.mcpConfig.verifyRegistration!({ targetPath: first.targetPath, command: "/opt/resin/bin/resin", fsBridge }),
+      piHarness.mcpConfig.verifyRegistration!({
+        targetPath: first.targetPath,
+        command: "/opt/resin/bin/resin",
+        fsBridge,
+      }),
     ).resolves.toBe(true);
     await expect(
-      piHarness.mcpConfig.verifyRegistration!({ targetPath: first.targetPath, command: "/other/resin", fsBridge }),
+      piHarness.mcpConfig.verifyRegistration!({
+        targetPath: first.targetPath,
+        command: "/other/resin",
+        fsBridge,
+      }),
     ).resolves.toBe(false);
 
     const agentsAfterFirst = await fsp.readFile(path.join(agentDir, "AGENTS.md"), "utf8");
@@ -87,10 +95,15 @@ describe("Pi installer surface", () => {
     expect(await fsp.readFile(path.join(agentDir, "AGENTS.md"), "utf8")).toBe(agentsAfterFirst);
 
     const removed = await uninstall(env);
-    expect(removed).toEqual({ removed: true, block: expect.objectContaining({ action: "removed" }) });
+    expect(removed).toEqual({
+      removed: true,
+      block: expect.objectContaining({ action: "removed" }),
+    });
     await expect(fsp.access(first.targetPath)).rejects.toThrow();
     expect(await fsp.readdir(path.join(agentDir, "extensions"))).toEqual([]);
-    expect(await fsp.readFile(path.join(agentDir, "AGENTS.md"), "utf8")).toBe("# Mine\n\nKeep this.\n");
+    expect(await fsp.readFile(path.join(agentDir, "AGENTS.md"), "utf8")).toBe(
+      "# Mine\n\nKeep this.\n",
+    );
 
     expect(await uninstall(env)).toEqual({
       removed: false,

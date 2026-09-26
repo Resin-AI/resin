@@ -3,15 +3,12 @@ import path from "node:path";
 import {
   type AdapterCapabilities,
   AmbiguousActiveSessionError,
-  applyConfigMutation,
   CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   type CatalogChangeSummary,
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMutationPlan,
-  createRefreshResult,
-  defaultFsBridge,
   type HarnessInstallation,
   type HarnessSession,
   type HarnessWorkspace,
@@ -20,6 +17,9 @@ import {
   type SessionEventSource,
   type SourceCursor,
   type StrictHarnessAdapter,
+  applyConfigMutation,
+  createRefreshResult,
+  defaultFsBridge,
 } from "@resin/harness-contracts";
 import {
   PI_TESTED_VERSIONS,
@@ -120,7 +120,10 @@ export class PiHarnessAdapter implements StrictHarnessAdapter {
     return active[0] ?? null;
   }
 
-  async openEventSource(session: HarnessSession, cursor?: SourceCursor): Promise<SessionEventSource> {
+  async openEventSource(
+    session: HarnessSession,
+    cursor?: SourceCursor,
+  ): Promise<SessionEventSource> {
     return new PiSessionEventSource(session, cursor);
   }
 

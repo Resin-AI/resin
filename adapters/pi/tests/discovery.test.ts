@@ -25,7 +25,13 @@ afterEach(async () => {
 });
 
 /** Writes a recorded fixture with its scrubbed cwd and parent path rebound to this machine. */
-async function placeFixture(fixture: string, dir: string, fileName: string, cwd: string, parentPath?: string) {
+async function placeFixture(
+  fixture: string,
+  dir: string,
+  fileName: string,
+  cwd: string,
+  parentPath?: string,
+) {
   let content = await fsp.readFile(path.join(RECORDED, fixture), "utf8");
   const [header, ...rest] = content.split("\n");
   const parsed = JSON.parse(header!);
@@ -106,7 +112,10 @@ describe("PiHarnessAdapter discovery", () => {
     expect((await adapter.listSessions(b)).map((session) => session.transcriptPath).sort()).toEqual(
       [
         path.join(flagDir, "2026-09-26T22-59-28-000Z_gateway.jsonl"),
-        path.join(settingsDir, "2026-09-26T23-07-33-000Z_01a0dff9-50d6-73f5-9239-3c1f948f9a0f.jsonl"),
+        path.join(
+          settingsDir,
+          "2026-09-26T23-07-33-000Z_01a0dff9-50d6-73f5-9239-3c1f948f9a0f.jsonl",
+        ),
       ],
     );
   });
@@ -139,9 +148,18 @@ describe("PiHarnessAdapter discovery", () => {
 
   it("reports a session written within the last minute as active", async () => {
     const dir = path.join(home, ".pi", "agent", "sessions", encodePiSessionDirName(projectA));
-    const file = await placeFixture("rpc-tree-rewind.jsonl", dir, "2026-09-26T23-07-33-000Z_x.jsonl", projectA);
+    const file = await placeFixture(
+      "rpc-tree-rewind.jsonl",
+      dir,
+      "2026-09-26T23-07-33-000Z_x.jsonl",
+      projectA,
+    );
     const { mtimeMs } = await fsp.stat(file);
-    const adapter = new PiHarnessAdapter({ home, env: { HOME: home }, now: () => mtimeMs + 30_000 });
+    const adapter = new PiHarnessAdapter({
+      home,
+      env: { HOME: home },
+      now: () => mtimeMs + 30_000,
+    });
     const [workspace] = await adapter.listWorkspaces();
     expect((await adapter.resolveActiveSession(workspace!))?.transcriptPath).toBe(file);
   });
