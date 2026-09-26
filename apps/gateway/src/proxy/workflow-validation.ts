@@ -247,20 +247,8 @@ export function createLocalWorkflowValidator(
       });
       if (decided.verification?.status === "verified") {
         decided.verification.replay = {
-          kind: entirelyFreshProcess ? "fresh-process" : "host-replay",
+          kind: "recording",
           planDigest: workflowValidationPlanDigest(decided.plan),
-          ...(!entirelyFreshProcess && hasRecordedProgram
-            ? {
-                freshProcessStepIds: decided.plan.steps
-                  .filter(
-                    (step) =>
-                      step.callable.program !== undefined &&
-                      (step.callable.runtime === RESIN_PROGRAM_RUNTIME ||
-                        step.callable.runtime === RESIN_PROCESS_RUNTIME),
-                  )
-                  .map((step) => step.id),
-              }
-            : {}),
         };
       }
       if (hasRecordedProgram && decided.verification !== undefined) {
