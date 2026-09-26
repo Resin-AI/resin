@@ -9,6 +9,7 @@ import {
   renderCursorHookCommand,
   resolveCursorHookScriptPath,
   resolveCursorHooksPath,
+  resolveCursorMcpServer,
   resolveCursorSpoolDir,
   uninstallCursorCaptureHooks,
   verifyCursorCaptureHooks,
@@ -173,5 +174,33 @@ describe("MCP registration and guidance", () => {
       "removed",
     );
     expect(fs.existsSync(rulePath)).toBe(false);
+  });
+});
+
+describe("declared MCP servers", () => {
+  it("prefers the project's .cursor/mcp.json over the user-level file", () => {
+    const home = tempHome();
+    const project = tempHome();
+    for (const [dir, command] of [
+      [path.join(home, ".cursor"), "user-echo"],
+      [path.join(project, ".cursor"), "project-echo"],
+    ] as const) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "mcp.json"),
+        JSON.stringify({
+          mcpServers: { demo: { command, args: ["--x"] }, remote: { url: "http://h/mcp" } },
+        }),
+      );
+    }
+    expect(resolveCursorMcpServer("demo", project, home)).toEqual({
+      name: "demo",
+      transport: { kind: "stdio", command: "project-echo", args: ["--x"] },
+    });
+    expect(resolveCursorMcpServer("remote", tempHome(), home)).toEqual({
+      name: "remote",
+      transport: { kind: "http", url: "http://h/mcp" },
+    });
+    expect(resolveCursorMcpServer("missing", project, home)).toBeUndefined();
   });
 });
