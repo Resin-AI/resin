@@ -135,6 +135,12 @@ export interface ProductionProxyRuntime {
    */
   validationWorker?: WorkflowValidationWorker;
   onWorkspaceReady(workspace: WorkspaceContext): Promise<void>;
+  /**
+   * Resolves once the catalog sync that workspace-ready started in the background has settled, or
+   * after `timeoutMs`, whichever is first. A client that reads its tool list once at startup
+   * otherwise never sees tools a fresh install has not synced yet.
+   */
+  catalogSettled?(timeoutMs: number): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   sync(options?: { force?: boolean }): Promise<CatalogSnapshotResponse | null>;
@@ -659,6 +665,18 @@ export async function createProductionProxyRuntime(
           await Promise.allSettled([...backgroundTasks]);
           backgroundTasks.clear();
         }
+      },
+      async catalogSettled(timeoutMs: number): Promise<void> {
+        if (backgroundTasks.size === 0) return;
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          Promise.allSettled([...backgroundTasks]),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+            timer.unref?.();
+          }),
+        ]);
+        clearTimeout(timer);
       },
       async sync(_syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
         await Promise.all([...backgroundTasks]);

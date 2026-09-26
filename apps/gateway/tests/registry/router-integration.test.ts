@@ -10,6 +10,7 @@ import {
   type ListToolsResult,
   RESIN_LEARNED_TOOL_META,
 } from "../../src/protocol/types.js";
+import type { ProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest, computeSha256 } from "../../src/registry/validator.js";
 import { createRegistryGatewayRouter } from "../../src/router.js";
@@ -203,6 +204,54 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     const greetTool = listRes.result.tools.find((t) => t.name === "greet");
     expect(greetTool).toBeDefined();
     expect(greetTool?.description).toBe("Greets a user");
+  });
+
+  it("waits once for a fresh install's catalog sync before the first tool list", async () => {
+    const registry = new ToolRegistry();
+    const router = createRegistryGatewayRouter(registry);
+    let waits = 0;
+    let workspaceId = "";
+    // A fresh install learns its catalog in the background after initialize; the tool it syncs
+    // must be in the client's one startup tool list.
+    const runtime = {
+      async onWorkspaceReady() {},
+      async catalogSettled() {
+        waits += 1;
+        await registry.registerTool(
+          makeManifest({ id: "tool_synced", name: "synced_tool" }),
+          undefined,
+          { workspaceId },
+        );
+      },
+      async stop() {},
+    } as unknown as ProductionProxyRuntime;
+    const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+    const conn = gateway.createConnection();
+    await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test-client", version: "1.0.0" },
+        rootUri: "file:///test/project-fresh",
+      },
+    });
+    workspaceId = conn.workspaceContext.workspaceId;
+    const list = async (id: number) =>
+      (
+        (await gateway.handleMessage(conn.connectionId, {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/list",
+          params: {},
+        })) as JsonRpcSuccessResponse<ListToolsResult>
+      ).result.tools.map((tool) => tool.name);
+
+    expect(await list(2)).toContain("synced_tool");
+    await list(3);
+    expect(waits).toBe(1);
   });
 
   it("calls an active tool with custom handler via tools/call", async () => {

@@ -30,6 +30,7 @@ import {
   type McpImplementationInfo,
   type McpTool,
   type ProgressNotificationParams,
+  RESIN_LEARNED_TOOL_META,
 } from "./protocol/types.js";
 import type { ProductionProxyRuntime } from "./proxy/runtime.js";
 import { CatalogResponseNotices } from "./refresh/catalog-response-notices.js";
@@ -169,6 +170,9 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
   return "generic-mcp";
 }
 
+/** How long a connection's first tool list waits for a fresh install's initial catalog sync. */
+export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
+
 /**
  * Static initialization instructions returned to MCP clients during capability negotiation.
  *
@@ -237,6 +241,7 @@ export class LocalMcpGateway {
   readonly cloudRuntime?: ProductionProxyRuntime;
 
   private readonly connections = new Map<string, McpConnection>();
+  private readonly listedConnections = new WeakSet<McpConnection>();
   private readonly messageWriters = new Map<string, (msg: JsonRpcMessage) => void>();
   private isClosed = false;
   private unsubscribeRouterListener?: () => void;
@@ -633,8 +638,22 @@ export class LocalMcpGateway {
     }
 
     const context = connection.workspaceContext;
-    const tools = await (this.router.listCatalogNoticeTools?.(context) ??
-      this.router.listTools(context));
+    const list = async () =>
+      await (this.router.listCatalogNoticeTools?.(context) ?? this.router.listTools(context));
+    let tools = await list();
+    // A fresh install syncs its catalog in the background after initialize, and many clients read
+    // the tool list only once. When nothing learned for this workspace is available locally yet,
+    // the first list per connection waits briefly for that sync, so the learned tools are in it.
+    if (!this.listedConnections.has(connection)) {
+      this.listedConnections.add(connection);
+      if (
+        this.cloudRuntime?.catalogSettled !== undefined &&
+        !tools.some((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true)
+      ) {
+        await this.cloudRuntime.catalogSettled(FIRST_TOOL_LIST_CATALOG_WAIT_MS);
+        tools = await list();
+      }
+    }
     this.catalogNotices.observeList(connection, context, tools, signal);
     this.refreshCoordinator?.recordToolsListObserved(
       connection.connectionId,
