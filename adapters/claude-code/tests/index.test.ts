@@ -15,7 +15,6 @@ describe("@resin/adapter-claude-code exports", () => {
     expect(ClaudeCodePkg.detectClaudeWorkspaces).toBeDefined();
     expect(ClaudeCodePkg.ClaudeSessionEventSource).toBeDefined();
     expect(ClaudeCodePkg.getClaudeRefreshCapability).toBeDefined();
-    expect(ClaudeCodePkg.generateClaudeContextNotice).toBeDefined();
     expect(ClaudeCodePkg.notifyClaudeCatalogRefresh).toBeDefined();
   });
 });

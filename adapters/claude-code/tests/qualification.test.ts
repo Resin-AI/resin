@@ -24,7 +24,6 @@ import {
 } from "../src/config-planner.js";
 import { ClaudeRecordDecoder, decodeClaudeTranscriptLine } from "../src/decoder.js";
 import { detectClaudeWorkspaces, probeClaudeInstallation } from "../src/discovery.js";
-import { getClaudeRefreshCapability, notifyClaudeCatalogRefresh } from "../src/refresh.js";
 import { ClaudeSessionEventSource } from "../src/source.js";
 
 describe("Claude Code Harness Qualification Suite [REM-017]", () => {
@@ -448,42 +447,6 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
     });
   });
 
-  describe("6. Dynamic Catalog Refresh and Context Nudge Qualification", () => {
-    it("reports supported refresh capability: context nudge enabled, native list-change disabled", () => {
-      const capability = getClaudeRefreshCapability();
-      expect(capability.supportsNativeListChange).toBe(false);
-      expect(capability.supportsContextNudge).toBe(true);
-      expect(capability.requiresSessionRestart).toBe(false);
-    });
-
-    it("generates catalog refresh result containing context nudge for active session", async () => {
-      const workspace: HarnessWorkspace = {
-        workspaceId: "ws-claude",
-        name: "project",
-        rootPath: "/workspace",
-        harnessId: "claude-code",
-        configPath: "/workspace/.claude.json",
-        mcpConfigPath: "/workspace/.claude.json",
-        activeSessionId: "session-active-123",
-        metadata: {},
-      };
-
-      const result = await notifyClaudeCatalogRefresh(workspace, {
-        catalogVersion: "1.2.0",
-        timestamp: nowIso(),
-        addedToolIds: ["resin-fast-lint"],
-        updatedToolIds: [],
-        removedToolIds: [],
-      });
-
-      expect(result.outcome).toBe("context_nudge");
-      expect(result.requiresRestart).toBe(false);
-      expect(result.message).toContain("resin-fast-lint");
-      expect(result.affectedToolCount).toBe(1);
-      expect(result.catalogVersion).toBe("1.2.0");
-    });
-  });
-
   describe("7. Strict Harness Adapter Contract Conformance", () => {
     it("implements StrictHarnessAdapter interface completely", () => {
       const adapter = new ClaudeHarnessAdapter();
@@ -494,7 +457,7 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
       const caps = adapter.getCapabilities();
       expect(caps.fidelity.toolCallVisibility).toBe("full");
       expect(caps.supportedTransports).toContain("sse");
-      expect(caps.refresh.supportsContextNudge).toBe(true);
+      expect(caps.refresh.supportsNativeListChange).toBe(true);
       expect(caps.features.atomicRollback).toBe(true);
     });
   });

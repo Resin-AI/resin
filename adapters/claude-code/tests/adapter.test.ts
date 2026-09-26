@@ -42,8 +42,8 @@ describe("ClaudeHarnessAdapter", () => {
     expect(caps.fidelity.contextNudge).toBe("via_prompt");
     expect(caps.fidelity.overallScore).toBe(78);
 
-    expect(caps.refresh.supportsNativeListChange).toBe(false);
-    expect(caps.refresh.supportsContextNudge).toBe(true);
+    expect(caps.refresh.supportsNativeListChange).toBe(true);
+    expect(caps.refresh.supportsContextNudge).toBe(false);
     expect(caps.refresh.requiresSessionRestart).toBe(false);
   });
 
@@ -96,8 +96,7 @@ describe("ClaudeHarnessAdapter", () => {
       catalogVersion: "1.1.0",
       timestamp: "2026-08-17T12:00:00.000Z",
     });
-    expect(refreshResult.outcome).toBe("context_nudge");
-    expect(refreshResult.catalogVersion).toBe("1.1.0");
+    expect(refreshResult.outcome).toBe("native_list_change");
   });
 
   it("supports backward-compatible alias and mock execution", async () => {

@@ -1,0 +1,8 @@
+{
+  "agentType": "general-purpose",
+  "description": "Read README.md and report first line",
+  "toolUseId": "toolu_01XZcqwLKdzwvtkV4SCgu2d4",
+  "spawnDepth": 1,
+  "requestShape": "background",
+  "requestNonInteractive": true
+}
