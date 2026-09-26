@@ -32,6 +32,7 @@ import type {
   McpToolAnnotations,
   McpToolInput,
 } from "./protocol/types.js";
+import { RESIN_LEARNED_TOOL_META } from "./protocol/types.js";
 import { CanaryRouter } from "./registry/canary-router.js";
 import {
   type CatalogSnapshotRecord,
@@ -230,16 +231,35 @@ export class RegistryGatewayRouter implements GatewayRouter {
   async listCatalogNoticeTools(context: WorkspaceContext): Promise<CatalogNoticeTool[]> {
     const snapshot = await this.registry.resolveCatalog(context.workspaceId, context.sessionId);
     const mcpTools: CatalogNoticeTool[] = [];
+    // A tool learned for this workspace is listed with what it runs here, and marked so a
+    // facade that hides the rest of the catalog still offers it by name.
+    const learnedDetail = (
+      tool: CatalogEntry | RegistryTool,
+    ): { local?: string; _meta?: Record<string, unknown> } => {
+      if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) return {};
+      const local = this.registry.describeLocally(tool, context);
+      return {
+        ...(local === undefined ? {} : { local }),
+        _meta: { [RESIN_LEARNED_TOOL_META]: true },
+      };
+    };
+    const describe = (catalog: string, local: string | undefined) =>
+      local === undefined ? catalog : catalog ? `${catalog}\n\n${local}` : local;
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
         const schema = toMcpInputSchema(entry.parameters ?? entry.manifest?.parameters);
+        const { local, _meta } = learnedDetail(entry);
         mcpTools.push({
           name: entry.exposedName,
-          description: entry.description || entry.manifest?.description || `Tool ${entry.name}`,
+          description: describe(
+            entry.description || entry.manifest?.description || `Tool ${entry.name}`,
+            local,
+          ),
           inputSchema: schema,
           catalogOutputSchema: entry.outputSchema ?? entry.manifest?.outputSchema,
           annotations: discoveryAnnotations(entry),
+          ...(_meta === undefined ? {} : { _meta }),
         });
       }
     } else {
@@ -251,12 +271,17 @@ export class RegistryGatewayRouter implements GatewayRouter {
         );
         if (tool) {
           const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
+          const { local, _meta } = learnedDetail(tool);
           mcpTools.push({
             name: tool.exposedName || tool.name,
-            description: tool.description || tool.manifest?.description || `Tool ${tool.name}`,
+            description: describe(
+              tool.description || tool.manifest?.description || `Tool ${tool.name}`,
+              local,
+            ),
             inputSchema: schema,
             catalogOutputSchema: tool.outputSchema ?? tool.manifest?.outputSchema,
             annotations: discoveryAnnotations(tool),
+            ...(_meta === undefined ? {} : { _meta }),
           });
         }
       }

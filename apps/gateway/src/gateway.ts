@@ -176,7 +176,7 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
  * and mandating verification of actual task effects.
  */
 export const DEFAULT_GATEWAY_INSTRUCTIONS =
-  "Before native project work: search_tools(query=<task>) -> invoke_tool (results include inputSchema). Without search: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n" +
+  "Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: search_tools(query=<task>) -> invoke_tool, or manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool.\n" +
   "Reuse known tool IDs and schemas until delta change notices indicate updates; do not perform repeated full catalog listings.\n" +
   "When a matching tool may exist, search the live registry with a scoped query before using native tools for project work. " +
   'If search_tools is unavailable, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"}), omitting toolId, name, and tool_name. ' +
@@ -199,7 +199,7 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS =
  * Directs clients to read-only tool discovery using manage_tools instead of search_tools.
  */
 export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS =
-  "Before native project work, use manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool. Native search_tools is disabled for this connection. Honor user tool choices.\n" +
+  "Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n" +
   "Reuse known tool IDs and schemas until delta change notices indicate updates; do not perform repeated full catalog listings.\n" +
   'When a matching tool may exist, check for matching tools with manage_tools({"action":"list_versions","scope":"workspace","compact":true,"query":"<keyword>"}), omitting toolId, name, and tool_name. ' +
   "These stable meta-tools resolve the current registry at call time, including tools added after the initial tools/list; " +

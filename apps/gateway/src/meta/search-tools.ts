@@ -59,7 +59,7 @@ export interface SearchToolsParams {
  * resolved on this machine for the local agent's discovery and never uploaded.
  */
 export type LocalToolDescriber = (
-  tool: RegistryTool,
+  tool: Pick<RegistryTool, "artifactDigest">,
   context: WorkspaceContext,
 ) => string | undefined;
 
@@ -78,11 +78,11 @@ export function toolInputSchema(tool: RegistryTool): ToolParameterSchema | JsonR
 
 /** The description an agent sees: the catalog's, followed by any local detail. */
 export function describeToolLocally(
-  tool: RegistryTool,
+  tool: Pick<RegistryTool, "artifactDigest" | "description" | "manifest">,
   context: WorkspaceContext,
   describer?: LocalToolDescriber,
 ): string {
-  const catalog = tool.description || tool.manifest.description || "";
+  const catalog = tool.description || tool.manifest?.description || "";
   const local = describer?.(tool, context);
   return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
 }

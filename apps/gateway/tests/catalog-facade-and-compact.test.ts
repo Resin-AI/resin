@@ -15,7 +15,12 @@ import {
 } from "../src/gateway.js";
 import { createManageToolsHandler } from "../src/meta/manage-tools.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../src/protocol/framing.js";
-import type { JsonRpcMessage, JsonRpcParams, JsonRpcResponse } from "../src/protocol/types.js";
+import {
+  type JsonRpcMessage,
+  type JsonRpcParams,
+  type JsonRpcResponse,
+  RESIN_LEARNED_TOOL_META,
+} from "../src/protocol/types.js";
 import { ToolRegistry } from "../src/registry/registry.js";
 import { computeManifestDigest } from "../src/registry/validator.js";
 import {
@@ -195,6 +200,42 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
       }
     },
   );
+
+  it("lists this workspace's learned tools by name, but not the rest of the catalog", async () => {
+    const client = createTestClient();
+    try {
+      await client.initialize("codex-mcp-client");
+      const listPromise = client.request("tools/list");
+      client.respond({
+        jsonrpc: "2.0",
+        id: 2,
+        result: {
+          tools: [
+            ...representativeTools,
+            {
+              name: "read_design_document",
+              inputSchema: { type: "object" },
+              _meta: { [RESIN_LEARNED_TOOL_META]: true },
+            },
+          ],
+        },
+      });
+      const names = z
+        .object({ tools: z.array(z.object({ name: z.string() })) })
+        .parse((await listPromise).result)
+        .tools.map((tool) => tool.name)
+        .sort();
+      expect(names).toEqual([
+        "get_tool_schema",
+        "invoke_tool",
+        "manage_tools",
+        "read_design_document",
+        "search_tools",
+      ]);
+    } finally {
+      client.close();
+    }
+  });
 
   it.each([
     { harness: "omp-agent", enableSearch: false },

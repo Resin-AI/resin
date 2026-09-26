@@ -2,12 +2,13 @@ import type { ToolManifest } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
-import type {
-  CallToolResult,
-  JsonRpcErrorResponse,
-  JsonRpcNotification,
-  JsonRpcSuccessResponse,
-  ListToolsResult,
+import {
+  type CallToolResult,
+  type JsonRpcErrorResponse,
+  type JsonRpcNotification,
+  type JsonRpcSuccessResponse,
+  type ListToolsResult,
+  RESIN_LEARNED_TOOL_META,
 } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest, computeSha256 } from "../../src/registry/validator.js";
@@ -126,6 +127,38 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         context,
       }),
     );
+  });
+
+  it("lists a workspace's learned tool with what it runs here, marked for native listing", async () => {
+    const registry = new ToolRegistry();
+    registry.setLocalToolDescriber(() => "Recorded on this machine:\nStep 1 runs: cat design.md");
+    const router = createRegistryGatewayRouter(registry);
+    const context = {
+      workspaceId: "ws-learned",
+      projectId: "ws-learned",
+      projectRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      startupPath: "/tmp",
+      isReadOnly: false,
+      name: "learned-test",
+      source: "cwd_fallback" as const,
+      roots: [],
+    };
+    await registry.registerTool(
+      makeManifest({ id: "learned-tool-id", name: "read_design" }),
+      undefined,
+      {
+        workspaceId: context.workspaceId,
+      },
+    );
+
+    const tools = await router.listTools(context);
+    const learned = tools.find((tool) => tool.name === "read_design");
+    expect(learned?._meta).toEqual({ [RESIN_LEARNED_TOOL_META]: true });
+    expect(learned?.description).toBe(
+      "Test tool description\n\nRecorded on this machine:\nStep 1 runs: cat design.md",
+    );
+    expect(tools.find((tool) => tool.name === "invoke_tool")?._meta).toBeUndefined();
   });
 
   it("lists active catalog tools via tools/list", async () => {
