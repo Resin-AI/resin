@@ -11,6 +11,7 @@ import {
   parseStatusFlags,
   statusCommand,
 } from "../src/commands/status.js";
+import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -115,7 +116,7 @@ describe("status command & collector", () => {
     expect(summary.ipc).toBeDefined();
     expect(summary.cloud).toBeDefined();
     expect(summary.tools.metaToolsCount).toBeGreaterThanOrEqual(4);
-    expect(summary.harnesses.length).toBe(3);
+    expect(summary.harnesses.map((h) => h.id)).toEqual(SUPPORTED_HARNESS_IDS);
 
     const claudeHarness = summary.harnesses.find((h) => h.id === "claude-code");
     expect(claudeHarness?.configured).toBe(true);
