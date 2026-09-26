@@ -1,10 +1,10 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { StrictHarnessAdapter } from "@resin/harness-contracts";
+import { type StrictHarnessAdapter, classifyHarnessVersion } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
 import * as discoveryModule from "../src/discovery.js";
-import { OmpAdapter, OmpHarnessAdapter } from "../src/index.js";
+import { OmpAdapter, OmpHarnessAdapter, ompHarness } from "../src/index.js";
 
 describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
   it("satisfies StrictHarnessAdapter interface contract and metadata", () => {
@@ -12,8 +12,16 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
     expect(adapter.id).toBe("omp");
     expect(adapter.name).toBe("omp");
     expect(adapter.version).toBe("0.1.0");
+    expect(adapter.supportedHarnessVersions).toEqual(ompHarness.testedVersions);
 
     expect(OmpAdapter).toBe(OmpHarnessAdapter);
+  });
+
+  it("reports OMP releases without recorded fixtures as untested", () => {
+    expect(classifyHarnessVersion("18.3.2", ompHarness.testedVersions)).toBe("tested");
+    expect(classifyHarnessVersion("18.3.3", ompHarness.testedVersions)).toBe("untested");
+    expect(classifyHarnessVersion("17.3.8", ompHarness.testedVersions)).toBe("untested");
+    expect(classifyHarnessVersion("0.0.0", ompHarness.testedVersions)).toBe("unknown");
   });
 
   it("reports Tier 1 High Fidelity observation capabilities", () => {

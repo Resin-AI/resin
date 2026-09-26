@@ -50,7 +50,10 @@ export const ompHarness: HarnessDefinition = {
   shortName: "Oh My Pi",
   adapterPackage: "@resin/adapter-omp",
   testedVersions: OMP_TESTED_VERSIONS,
-  knownLimits: [],
+  knownLimits: [
+    "Subagent sessions are learned as their own sessions; a workflow split between a parent and its subagents is not learned as one tool.",
+    "Built-in tool replay runs the OMP SDK Resin pins (18.3.2) under Bun; a built-in that SDK does not export fails with an explicit error.",
+  ],
   probeInstallation: ({ targetPath, home, env }) =>
     probeOmpInstallation({ customConfigPath: targetPath, env, homeDir: home }),
   mcpConfig: {

@@ -11,13 +11,15 @@ interface Request {
 const chunks: Buffer[] = [];
 for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Request;
-const factory = (BUILTIN_TOOLS as Record<string, ((session: ToolSession) => unknown) | undefined>)[
-  request.name
-];
-if (!factory)
-  throw new Error(
-    `OMP native tool '${request.name}' is not available in the installed harness SDK`,
+const builtins = BUILTIN_TOOLS as Record<string, ((session: ToolSession) => unknown) | undefined>;
+const factory = Object.hasOwn(builtins, request.name) ? builtins[request.name] : undefined;
+if (!factory) {
+  // A missing or renamed built-in is reported as one line, not a host stack trace.
+  process.stderr.write(
+    `OMP native tool '${request.name}' is not available in the installed harness SDK (built-in tools: ${Object.keys(builtins).sort().join(", ")})\n`,
   );
+  process.exit(2);
+}
 
 const settings = Settings.isolated({
   "tools.xdev": false,
@@ -40,7 +42,10 @@ if (
   !("execute" in tool) ||
   typeof tool.execute !== "function"
 ) {
-  throw new Error(`OMP native tool '${request.name}' is disabled by the installed harness SDK`);
+  process.stderr.write(
+    `OMP native tool '${request.name}' is disabled by the installed harness SDK\n`,
+  );
+  process.exit(2);
 }
 const result = await tool.execute(`resin-${randomUUID()}`, request.parameters);
 const content: Array<{ type: "text"; text: string }> = [];

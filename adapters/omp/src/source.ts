@@ -288,7 +288,9 @@ async function populateOmpProgramObservation(
   }
   if (!unrecognizedTruncation && meta) {
     for (const [key, value] of Object.entries(meta)) {
-      if (key === "limits" || !key.toLowerCase().includes("truncat")) continue;
+      if (key === "limits" || key === "truncation" || !key.toLowerCase().includes("truncat")) {
+        continue;
+      }
       if (value !== undefined && value !== null && value !== false) {
         unrecognizedTruncation = true;
         break;
@@ -305,16 +307,27 @@ async function populateOmpProgramObservation(
     }
   }
 
+  // OMP 18.x spills an eval's full output stream to `<session>/<artifactId>.eval.log` and records
+  // the spill either as a byte truncation (`meta.truncation`) or as column truncation
+  // (`meta.limits.columnTruncated`). Both name the same artifact; the display text is never the result.
+  const truncation = meta?.truncation;
+  const truncationDeclared = truncation !== undefined && truncation !== null && truncation !== false;
   const columnTruncationDeclared =
     columnTruncated !== undefined && columnTruncated !== null && columnTruncated !== false;
   if (unrecognizedTruncation) {
     ompProgramObservations.set(record, { callId: native.callId, unavailable: true });
     return;
   }
-  if (columnTruncationDeclared) {
-    const columnMeta = asRecord(columnTruncated);
-    const artifactId = columnMeta?.artifactId;
-    if (!validArtifactId(artifactId)) {
+  if (truncationDeclared || columnTruncationDeclared) {
+    const artifactIds = [
+      ...(truncationDeclared ? [asRecord(truncation)?.artifactId] : []),
+      ...(columnTruncationDeclared ? [asRecord(columnTruncated)?.artifactId] : []),
+    ];
+    const artifactId = artifactIds[0];
+    if (
+      !validArtifactId(artifactId) ||
+      artifactIds.some((candidate) => candidate !== artifactId)
+    ) {
       ompProgramObservations.set(record, { callId: native.callId, unavailable: true });
       return;
     }
