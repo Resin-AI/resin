@@ -4,6 +4,7 @@ import * as claudeAdapter from "@resin/adapter-claude-code";
 import * as codexAdapter from "@resin/adapter-codex";
 import * as ompAdapter from "@resin/adapter-omp";
 import { type DaemonHealthReport, IpcClient } from "@resin/observer";
+import type { ActionableNotification } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin/cli.js";
 import * as statusCommands from "../src/commands/status.js";
@@ -1305,6 +1306,197 @@ describe("unified status schema", () => {
         exitCode: 2,
       });
       expect(chunks.join("")).not.toContain("--unknown-private-flag");
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+});
+
+describe("automatic update status", () => {
+  const STATE_FILE = path.join(RESIN_HOME, "updates", "auto-update-state.json");
+  const NOTICE_FILE = path.join(RESIN_HOME, "updates", "auto-update-notice.json");
+
+  function autoUpdateState(overrides: JsonObject = {}) {
+    return {
+      schemaVersion: 1,
+      scheduler: {
+        lastSuccessfulCheckAtMs: NOW - 60_000,
+        offlineFailureCount: 0,
+        offlineRetryAtMs: null,
+      },
+      lastCheck: {
+        at: "2027-01-05T00:00:00.000Z",
+        outcome: "already-current",
+        targetVersion: "1.2.3",
+        error: null,
+      },
+      nextCheckAt: "2027-01-05T06:00:00.000Z",
+      lastWorkerLaunchAt: null,
+      ...overrides,
+    };
+  }
+
+  const NOTICE = {
+    schemaVersion: 1,
+    fromVersion: "1.2.2",
+    toVersion: "1.2.3",
+    activatedAt: "2027-01-04T12:00:00.000Z",
+  };
+
+  it("reports default policy, scheduler state, and the one-time notice", async () => {
+    const files = healthyFiles();
+    files[STATE_FILE] = JSON.stringify(autoUpdateState());
+    files[NOTICE_FILE] = JSON.stringify(NOTICE);
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update.automatic).toEqual({
+      enabled: true,
+      channel: "stable",
+      checkIntervalMinutes: 360,
+      maintenanceWindow: null,
+      lastCheckAt: "2027-01-05T00:00:00.000Z",
+      lastOutcome: "already-current",
+      hasError: false,
+      nextCheckAt: "2027-01-05T06:00:00.000Z",
+      offlineFailureCount: 0,
+      stateError: false,
+    });
+    expect(summary.update.lastAutomaticUpdate).toEqual({
+      fromVersion: "1.2.2",
+      toVersion: "1.2.3",
+      activatedAt: "2027-01-04T12:00:00.000Z",
+    });
+    expect(summary.status).toBe("healthy");
+
+    const verbose = formatStatusForTerminal(summary, { verbose: true });
+    expect(verbose).toContain("Automatic:  on (every 360m, stable)");
+    expect(verbose).toContain("Next check: 2027-01-05T06:00:00.000Z");
+    expect(verbose).toContain("Last auto:  already-current at 2027-01-05T00:00:00.000Z");
+    expect(verbose).toContain(
+      "Updated automatically: v1.2.2 -> v1.2.3 (at 2027-01-04T12:00:00.000Z)",
+    );
+    expect(formatStatusForTerminal(summary)).toContain("Updated automatically: v1.2.2 -> v1.2.3");
+  });
+
+  it("reports disabled updates and a configured maintenance window", async () => {
+    const files = healthyFiles();
+    files[CONFIG_FILE] = JSON.stringify({
+      telemetryEnabled: true,
+      updates: {
+        autoUpdate: false,
+        channel: "beta",
+        checkIntervalMinutes: 60,
+        maintenanceWindow: { start: "02:00", end: "05:00", timeZone: "Europe/Berlin" },
+      },
+    });
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update.automatic).toMatchObject({
+      enabled: false,
+      channel: "beta",
+      checkIntervalMinutes: 60,
+      maintenanceWindow: { start: "02:00", end: "05:00", timeZone: "Europe/Berlin" },
+    });
+    expect(summary.update.lastAutomaticUpdate).toBeNull();
+    const verbose = formatStatusForTerminal(summary, { verbose: true });
+    expect(verbose).toContain("Automatic:  off (updates.autoUpdate=false)");
+    expect(verbose).toContain("Window:     02:00-05:00 Europe/Berlin");
+    expect(verbose).not.toContain("Updated automatically");
+  });
+
+  it("flags unreadable state and invalid policy without failing or leaking errors", async () => {
+    const files = healthyFiles();
+    files[CONFIG_FILE] = JSON.stringify({ telemetryEnabled: true, updates: { channel: "bogus" } });
+    files[STATE_FILE] = "{AUTO_UPDATE_STATE_PRIVATE_DETAIL";
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update.automatic).toMatchObject({ enabled: null, stateError: true });
+    const verbose = formatStatusForTerminal(summary, { verbose: true });
+    expect(verbose).toContain("Automatic:  unknown");
+    expect(verbose).toContain("Auto state: ERROR (auto_update_state_unreadable)");
+    expect(`${JSON.stringify(summary)}\n${verbose}`).not.toContain(
+      "AUTO_UPDATE_STATE_PRIVATE_DETAIL",
+    );
+  });
+
+  it("never exposes raw automatic check errors", async () => {
+    const files = healthyFiles();
+    files[STATE_FILE] = JSON.stringify(
+      autoUpdateState({
+        lastCheck: {
+          at: "2027-01-05T00:00:00.000Z",
+          outcome: "failed",
+          targetVersion: null,
+          error: `AUTO_UPDATE_ERROR_SECRET at ${HOME}/private`,
+        },
+      }),
+    );
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update.automatic).toMatchObject({ lastOutcome: "failed", hasError: true });
+    const verbose = formatStatusForTerminal(summary, { verbose: true });
+    expect(verbose).toContain("Last auto:  failed at 2027-01-05T00:00:00.000Z (error");
+    expect(`${JSON.stringify(summary)}\n${verbose}`).not.toContain("AUTO_UPDATE_ERROR_SECRET");
+  });
+
+  it.each([
+    { label: "terminal", args: [] as string[] },
+    { label: "JSON", args: ["--json"] },
+  ])("acknowledges the notice after printing $label output", async ({ args }) => {
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    const files = healthyFiles();
+    files[NOTICE_FILE] = JSON.stringify(NOTICE);
+    const fsBridge = createMockFsBridge(files);
+    const options = {
+      cwd: "/workspace/packages/app",
+      env: ENV,
+      now: () => NOW,
+      fsBridge,
+      notificationConsumer: async (active: readonly ActionableNotification[]) => active,
+    };
+    try {
+      expect(await statusCommand([...args, "--home", HOME], options)).toBe(0);
+      const first = chunks.join("");
+      if (args.includes("--json")) {
+        expect(JSON.parse(first).update.lastAutomaticUpdate).toMatchObject({
+          fromVersion: "1.2.2",
+          toVersion: "1.2.3",
+        });
+      } else {
+        expect(first).toContain("Updated automatically: v1.2.2 -> v1.2.3");
+      }
+      expect(fsBridge.files.has(NOTICE_FILE)).toBe(false);
+
+      chunks.length = 0;
+      expect(await statusCommand([...args, "--home", HOME], options)).toBe(0);
+      expect(chunks.join("")).not.toContain("Updated automatically");
+      if (args.includes("--json")) {
+        expect(JSON.parse(chunks.join("")).update.lastAutomaticUpdate).toBeNull();
+      }
     } finally {
       stdout.mockRestore();
     }

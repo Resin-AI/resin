@@ -48,6 +48,19 @@ import {
   runVerificationSuite,
   verifyDaemonReadiness,
 } from "../service/verification.js";
+import {
+  type AutoUpdateState,
+  acknowledgeAutoUpdateNotice,
+  readAutoUpdateState,
+  resolveAutoUpdateStatePath,
+} from "../updates/auto-update-state.js";
+import {
+  UpdateEngine,
+  type UpdateStatusSnapshot,
+  readUpdateStatusSnapshot,
+} from "../updates/engine.js";
+import type { UpdatePolicy } from "../updates/policy.js";
+import { formatAutomaticUpdateNotice, readLastAutomaticUpdate } from "./status.js";
 
 export interface DoctorCommandFlags {
   fix?: boolean;
@@ -71,7 +84,8 @@ export interface DoctorDiagnosticItem {
     | "harness"
     | "auth"
     | "runtime"
-    | "security";
+    | "security"
+    | "updates";
   status: "pass" | "warn" | "fail";
   message: string;
   remediation?: string;
@@ -89,6 +103,7 @@ export interface DoctorReport {
   items: DoctorDiagnosticItem[];
   actionsTaken: string[];
   notifications?: ActionableNotification[];
+  lastAutomaticUpdate?: { fromVersion: string; toVersion: string; activatedAt: string } | null;
   timestamp: string;
 }
 
@@ -659,7 +674,138 @@ export async function runDiagnostics(options: {
       fixable: true,
     });
   }
+
+  // 7. Automatic Updates
+  items.push(
+    await diagnoseAutomaticUpdates({
+      home: customHome,
+      resinHome,
+      configPath: daemonPaths.configFile,
+      env,
+      fsBridge,
+    }),
+  );
   return items;
+}
+
+const AUTOMATIC_UPDATES_NAME = "Automatic Updates";
+const AUTOMATIC_UPDATES_RETRY_REMEDIATION =
+  "Run `resin upgrade` to retry, or `resin status --verbose` for details.";
+
+function sameReleaseVersion(left: string, right: string): boolean {
+  return left.replace(/^v/u, "") === right.replace(/^v/u, "");
+}
+
+async function diagnoseAutomaticUpdates(options: {
+  home: string;
+  resinHome: string;
+  configPath: string;
+  env: NodeJS.ProcessEnv;
+  fsBridge: ConfigFsBridge;
+}): Promise<DoctorDiagnosticItem> {
+  const { resinHome, fsBridge } = options;
+  const base = {
+    id: "automatic_updates",
+    name: AUTOMATIC_UPDATES_NAME,
+    category: "updates",
+    fixable: false,
+  } as const;
+
+  let policy: UpdatePolicy;
+  try {
+    policy = await new UpdateEngine({
+      homeDir: options.home,
+      resinHome,
+      configPath: options.configPath,
+      env: options.env,
+      fsBridge,
+    }).readPolicy();
+  } catch (error) {
+    return {
+      ...base,
+      status: "warn",
+      message: `Update configuration is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      remediation: `Fix the \`updates\` section in ${options.configPath}.`,
+    };
+  }
+
+  let state: AutoUpdateState | null;
+  try {
+    state = await readAutoUpdateState({ resinHome, fsBridge });
+  } catch {
+    return {
+      ...base,
+      status: "warn",
+      message: `Automatic update state is unreadable (${resolveAutoUpdateStatePath(resinHome)}).`,
+      remediation: `Delete ${resolveAutoUpdateStatePath(resinHome)}; the background service recreates it on its next check.`,
+    };
+  }
+
+  let journal: UpdateStatusSnapshot | null;
+  try {
+    journal = await readUpdateStatusSnapshot({ resinHome, fsBridge });
+  } catch {
+    return {
+      ...base,
+      status: "warn",
+      message: "The local update journal is unreadable.",
+      remediation: AUTOMATIC_UPDATES_RETRY_REMEDIATION,
+    };
+  }
+
+  if (journal) {
+    const target = journal.targetVersion;
+    const targetQuarantined =
+      target !== null &&
+      journal.quarantine.some(
+        (entry) => entry.channel === policy.channel && sameReleaseVersion(entry.version, target),
+      );
+    // A manual `resin upgrade --rollback` records "rolled-back" without an error.
+    const automaticRollback = journal.lastResult === "rolled-back" && journal.lastError !== null;
+    if (
+      automaticRollback ||
+      journal.lastResult === "failed" ||
+      journal.lastResult === "quarantined" ||
+      targetQuarantined
+    ) {
+      const rollback = journal.lastRollback;
+      const detail =
+        automaticRollback && rollback
+          ? `v${rollback.fromVersion} was rolled back to v${rollback.toVersion}`
+          : journal.lastResult === "failed"
+            ? "the last update attempt failed"
+            : `release v${target ?? "unknown"} is quarantined after a failed activation`;
+      return {
+        ...base,
+        status: "warn",
+        message: `Automatic update needs attention on ${journal.channel}: ${detail}.`,
+        remediation: AUTOMATIC_UPDATES_RETRY_REMEDIATION,
+      };
+    }
+  }
+
+  if (!policy.autoUpdate) {
+    return {
+      ...base,
+      status: "pass",
+      message:
+        "Automatic updates are disabled (updates.autoUpdate=false); run `resin upgrade` to update manually.",
+    };
+  }
+
+  const lastCheck = state?.lastCheck?.at ?? journal?.lastCheckAt ?? "never";
+  const lastOutcome = state?.lastCheck
+    ? ` (${state.lastCheck.outcome}${state.lastCheck.error ? `: ${state.lastCheck.error}` : ""})`
+    : "";
+  const nextCheck = state?.nextCheckAt ?? "pending";
+  const window = policy.maintenanceWindow
+    ? `, window ${policy.maintenanceWindow.start}-${policy.maintenanceWindow.end} ${policy.maintenanceWindow.timeZone ?? "UTC"}`
+    : "";
+  return {
+    ...base,
+    status: "pass",
+    message: `Automatic updates are on (${policy.channel}, every ${policy.checkIntervalMinutes}m${window}); last check ${lastCheck}${lastOutcome}, next check ${nextCheck}.`,
+  };
 }
 
 export async function repairState(options: {
@@ -958,6 +1104,8 @@ export async function repairState(options: {
 export function formatDoctorForTerminal(report: DoctorReport): string {
   const notificationHeader = formatActionableNotificationsForTerminal(report.notifications ?? []);
   const lines: string[] = [];
+  const automaticUpdateNotice = formatAutomaticUpdateNotice(report.lastAutomaticUpdate);
+  if (automaticUpdateNotice) lines.push(automaticUpdateNotice, "");
 
   lines.push("┌────────────────────────────────────────────────────────┐");
   lines.push("│               RESIN DOCTOR REPORT               │");
@@ -1104,11 +1252,18 @@ export async function doctorCommand(
       timestamp: new Date(now).toISOString(),
       notifications,
     };
+    const resinHome = path.join(customHome, ".resin");
+    const lastAutomaticUpdate = await readLastAutomaticUpdate(fsBridge, resinHome);
+    if (lastAutomaticUpdate) report.lastAutomaticUpdate = lastAutomaticUpdate;
 
     if (flags.json) {
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     } else {
       process.stdout.write(formatDoctorForTerminal(report));
+    }
+    if (lastAutomaticUpdate) {
+      // The notice was shown once; acknowledging it is best-effort.
+      await acknowledgeAutoUpdateNotice({ resinHome, fsBridge }).catch(() => undefined);
     }
 
     if (flags.strict && (failCount > 0 || warnCount > 0)) {

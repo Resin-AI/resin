@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { invokeOmpNativeTool, readConfiguredOmpServers } from "@resin/adapter-omp";
@@ -6,6 +8,7 @@ import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
+import { registerRunningGateway } from "../updates/gateway-registry.js";
 
 const PackageJsonSchema = z.object({
   version: z.string().min(1),
@@ -195,6 +198,8 @@ export interface McpCommandOptions {
   home?: string;
   env?: NodeJS.ProcessEnv;
   shimFactory?: (options: McpStdioShimOptions) => McpShimRunner;
+  /** Records the running gateway version so `resin status` can report stale gateways. */
+  registerGateway?: (version: string) => () => void;
 }
 
 export async function mcpCommand(args: string[], options: McpCommandOptions = {}): Promise<number> {
@@ -239,6 +244,23 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     process.exit(0);
   };
 
+  let unregisterGateway = (): void => undefined;
+  if (!process.env.VITEST || options.registerGateway) {
+    try {
+      const register =
+        options.registerGateway ??
+        ((version: string) =>
+          registerRunningGateway({
+            resinHome: path.join(options.home ?? os.homedir(), ".resin"),
+            version,
+          }));
+      unregisterGateway = register(VERSION);
+      process.once("exit", unregisterGateway);
+    } catch {
+      // Version tracking is diagnostic only and must never block the MCP gateway.
+    }
+  }
+
   try {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
@@ -246,6 +268,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
 
     const status = await shim.start();
     if (status && typeof status === "object" && "mode" in status && status.mode === "failed") {
+      unregisterGateway();
       return 1;
     }
     if (
@@ -265,6 +288,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     }
     return 0;
   } catch (err) {
+    unregisterGateway();
     const message = err instanceof Error ? err.message : String(err);
     stderr.write(`Fatal MCP error: ${message}\n`);
     return 1;

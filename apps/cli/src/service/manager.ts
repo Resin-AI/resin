@@ -89,6 +89,11 @@ export interface ServiceSupervisorOptions {
   harnessHealthSchedulerFactory?: (
     options: HarnessHealthSchedulerOptions,
   ) => HarnessHealthScheduler;
+  /**
+   * Starts resident automatic updates. Injected by the CLI entrypoint so the
+   * service layer does not depend on the update engine.
+   */
+  autoUpdateFactory?: (options: { resinHome: string }) => { stop(): void } | undefined;
 }
 
 export interface ServiceSupervisorResult {
@@ -153,6 +158,15 @@ export async function runServiceSupervisor(
     } catch {
       // Health automation cannot disrupt the resident service or its supervised child.
     }
+  }
+
+  let autoUpdate: { stop(): void } | undefined;
+  try {
+    autoUpdate = options.autoUpdateFactory?.({ resinHome });
+  } catch (error: unknown) {
+    report(
+      `automatic updates unavailable: ${sanitizeCrashDiagnostic(error instanceof Error ? error.message : String(error))}`,
+    );
   }
 
   let childExitCount = 0;
@@ -249,6 +263,11 @@ export async function runServiceSupervisor(
       harnessHealthScheduler?.stop();
     } catch {
       // Scheduler cleanup is best-effort during supervisor shutdown.
+    }
+    try {
+      autoUpdate?.stop();
+    } catch {
+      // Update automation cleanup is best-effort during supervisor shutdown.
     }
   }
 }
