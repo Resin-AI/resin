@@ -23,3 +23,9 @@ export * from "./errors.js";
 export * from "./decoder.js";
 
 export const HARNESS_CONTRACTS_VERSION = "0.1.0";
+
+// Harness Definitions (registry entries) & Version Classification
+export * from "./definition.js";
+
+// Managed instruction-file blocks
+export * from "./managed-block.js";

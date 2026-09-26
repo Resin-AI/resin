@@ -17,7 +17,12 @@
     "access": "public",
     "provenance": true
   },
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
@@ -32,6 +37,11 @@
       "types": "./dist/common.d.ts",
       "import": "./dist/common.js",
       "default": "./dist/common.js"
+    },
+    "./harness-ids": {
+      "types": "./dist/harness-ids.d.ts",
+      "import": "./dist/harness-ids.js",
+      "default": "./dist/harness-ids.js"
     },
     "./canonical": {
       "types": "./dist/canonical.d.ts",
