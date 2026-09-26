@@ -84,7 +84,9 @@ function safeRealpath(target) {
 }
 
 function secretPatterns() {
-  return SECRET_RULES.map((rule) => new RegExp(rule.pattern.source, `${rule.pattern.flags.replace("g", "")}g`));
+  return SECRET_RULES.map(
+    (rule) => new RegExp(rule.pattern.source, `${rule.pattern.flags.replace("g", "")}g`),
+  );
 }
 
 /**
@@ -162,7 +164,9 @@ function parseArgs(argv) {
     } else positional.push(arg);
   }
   if (positional.length !== 2) {
-    throw new Error("usage: scrub.mjs <input> <output> --project <capture-cwd> [--replace from=to ...]");
+    throw new Error(
+      "usage: scrub.mjs <input> <output> --project <capture-cwd> [--replace from=to ...]",
+    );
   }
   return { input: positional[0], output: positional[1], project, extra };
 }
@@ -179,7 +183,9 @@ function main() {
   }
   for (const [from] of replacements) {
     if (from.length >= 3 && scrubbed.includes(from)) {
-      throw new Error(`scrubbed output still contains a machine-identifying value (${from.length} chars)`);
+      throw new Error(
+        `scrubbed output still contains a machine-identifying value (${from.length} chars)`,
+      );
     }
   }
   fs.mkdirSync(path.dirname(output), { recursive: true });
