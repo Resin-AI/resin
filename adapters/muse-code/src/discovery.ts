@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import { nowIso } from "@resin/contracts";
+import { nowIso } from "@resin/contracts/common";
 import {
   type HarnessInstallation,
   type HarnessSession,
@@ -67,12 +67,26 @@ export type MuseVersionExecutor = (executable: string, env: Env) => Promise<stri
 const execFileAsync = promisify(execFile);
 
 const defaultVersionExecutor: MuseVersionExecutor = async (executable, env) => {
-  // The launcher self-updates unless told not to; a probe must never download a release.
-  const { stdout } = await execFileAsync(executable, ["--version"], {
-    env: { ...env, MUSE_NO_AUTO_UPDATE: "1" },
-    timeout: 10_000,
-  });
-  return String(stdout);
+  // The launcher self-updates unless told not to; a probe must never download a release. It also
+  // runs against a throwaway home so nothing is written into the user's.
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "resin-muse-probe-"));
+  try {
+    const { stdout } = await execFileAsync(executable, ["--version"], {
+      env: {
+        ...env,
+        MUSE_NO_AUTO_UPDATE: "1",
+        HOME: scratch,
+        XDG_CONFIG_HOME: path.join(scratch, "config"),
+        XDG_DATA_HOME: path.join(scratch, "data"),
+        XDG_CACHE_HOME: path.join(scratch, "cache"),
+        XDG_STATE_HOME: path.join(scratch, "state"),
+      },
+      timeout: 5_000,
+    });
+    return String(stdout);
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
+  }
 };
 
 async function isExecutableFile(filePath: string): Promise<boolean> {
@@ -110,7 +124,10 @@ export async function readMuseVersion(
   executor: MuseVersionExecutor = defaultVersionExecutor,
 ): Promise<string> {
   try {
-    const recorded = await fs.readFile(path.join(path.dirname(executable), ".muse-version"), "utf8");
+    const recorded = await fs.readFile(
+      path.join(path.dirname(executable), ".muse-version"),
+      "utf8",
+    );
     const version = parseMuseVersion(recorded);
     if (version) return version;
   } catch {
@@ -237,7 +254,8 @@ async function scanLeadSession(filePath: string): Promise<LeadSessionScan> {
       bytes += Buffer.byteLength(line) + 1;
       const wantsRoot = scan.workspaceRoot === null && bytes <= HEAD_INSPECTION_BYTES;
       const wantsChild =
-        line.includes("child_session_bound") || line.includes("memory_reminder_child_session_linked");
+        line.includes("child_session_bound") ||
+        line.includes("memory_reminder_child_session_linked");
       if (!wantsRoot && !wantsChild) continue;
       let parsed: unknown;
       try {

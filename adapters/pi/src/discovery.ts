@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import * as fsp from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
   type HarnessInstallation,
   type HarnessSession,
@@ -198,8 +196,6 @@ export function toPiSession(
   };
 }
 
-const execFileAsync = promisify(execFile);
-
 async function findOnPath(name: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   for (const dir of (env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue;
@@ -214,20 +210,27 @@ async function findOnPath(name: string, env: NodeJS.ProcessEnv): Promise<string 
   return undefined;
 }
 
+/** npm package names Pi has shipped under; the executable belongs to one of them. */
+const PI_PACKAGE_NAMES: ReadonlySet<string> = new Set([
+  "@earendil-works/pi-coding-agent",
+  "@mariozechner/pi-coding-agent",
+]);
+
 /**
- * Reads the version of the `@earendil-works/pi-coding-agent` package that owns the executable,
- * falling back to `pi --version`.
+ * Reads the version of the Pi npm package that owns the (symlink-resolved) executable. The
+ * binary is never run: probing must stay cheap and side-effect free.
  */
-async function readPiVersion(executablePath: string): Promise<string | undefined> {
+export async function readPiVersion(executablePath: string): Promise<string | undefined> {
   let dir = path.dirname(await fsp.realpath(executablePath).catch(() => executablePath));
-  for (let depth = 0; depth < 5; depth++) {
+  for (let depth = 0; depth < 6; depth++) {
     try {
       const pkg: unknown = JSON.parse(await fsp.readFile(path.join(dir, "package.json"), "utf8"));
       if (
         pkg &&
         typeof pkg === "object" &&
         "name" in pkg &&
-        pkg.name === "@earendil-works/pi-coding-agent" &&
+        typeof pkg.name === "string" &&
+        PI_PACKAGE_NAMES.has(pkg.name) &&
         "version" in pkg &&
         typeof pkg.version === "string"
       ) {
@@ -236,14 +239,11 @@ async function readPiVersion(executablePath: string): Promise<string | undefined
     } catch {
       // not the package root
     }
-    dir = path.dirname(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  try {
-    const { stdout } = await execFileAsync(executablePath, ["--version"], { timeout: 10_000 });
-    return /\d+\.\d+\.\d+(?:[-+][\w.]+)?/.exec(stdout)?.[0];
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 export interface ProbePiInstallationOptions {

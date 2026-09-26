@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
+import { type Stats, constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import {
   type HarnessInstallation,
   type HarnessSession,
@@ -11,8 +9,6 @@ import {
   type SessionStatus,
   UNKNOWN_HARNESS_VERSION,
 } from "@resin/harness-contracts";
-
-const execFileAsync = promisify(execFile);
 
 export const COPILOT_HARNESS_ID = "copilot-cli";
 export const COPILOT_DISPLAY_NAME = "GitHub Copilot CLI";
@@ -55,55 +51,77 @@ export function resolveCopilotInstructionsPath(home: string, env: NodeJS.Process
   return path.join(resolveCopilotHome(home, env), COPILOT_INSTRUCTIONS_FILENAME);
 }
 
-/** Parses `copilot --version` output, e.g. "GitHub Copilot CLI 1.0.88.". */
-export function parseCopilotVersion(output: string): string | null {
-  const match = output.match(/Copilot CLI\s+v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
-  return match?.[1] ?? null;
+const COPILOT_PACKAGE_NAME = "@github/copilot";
+
+/** Finds `copilot` on PATH; an explicit path is used as-is when it is executable. */
+async function findCopilotExecutable(
+  executable: string | undefined,
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const candidates =
+    executable && executable.includes(path.sep)
+      ? [executable]
+      : (env.PATH ?? "")
+          .split(path.delimiter)
+          .filter(Boolean)
+          .map((dir) => path.join(dir, executable ?? "copilot"));
+  for (const candidate of candidates) {
+    try {
+      if (!(await fs.stat(candidate)).isFile()) continue;
+      await fs.access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Keep looking.
+    }
+  }
+  return null;
 }
 
-export type CopilotExec = (
-  file: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-) => Promise<{ stdout: string; stderr: string }>;
-
-const defaultExec: CopilotExec = (file, args, env) =>
-  execFileAsync(file, args, { env, timeout: 15_000, encoding: "utf8" });
+/**
+ * Reads the version of the `@github/copilot` npm package owning the (symlink-resolved)
+ * executable. The CLI is never run: `copilot --version` unpacks its runtime into the user's
+ * cache directory, which a probe must not do.
+ */
+export async function readCopilotVersion(executablePath: string): Promise<string | null> {
+  let dir = path.dirname(await fs.realpath(executablePath).catch(() => executablePath));
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const pkg = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8")) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+      // Not the package root.
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
 
 export interface ProbeCopilotOptions {
   home: string;
   env: NodeJS.ProcessEnv;
   executable?: string;
-  exec?: CopilotExec;
 }
 
 /**
- * Detects Copilot CLI by running `copilot --version` (with `--no-auto-update` so probing never
- * downloads) and by the presence of its data root. Returns null when neither is found.
+ * Detects Copilot CLI by the `copilot` executable on PATH (version read from its npm package
+ * metadata) and by the presence of its data root. Returns null when neither is found.
  */
 export async function probeCopilotInstallation(
   options: ProbeCopilotOptions,
 ): Promise<HarnessInstallation | null> {
   const copilotHome = resolveCopilotHome(options.home, options.env);
-  const executable = options.executable ?? "copilot";
-  const exec = options.exec ?? defaultExec;
-
-  let version: string | null = null;
-  let executableFound = false;
-  try {
-    const { stdout, stderr } = await exec(
-      executable,
-      ["--version", "--no-auto-update"],
-      options.env,
-    );
-    executableFound = true;
-    version = parseCopilotVersion(`${stdout}\n${stderr}`);
-  } catch (err) {
-    executableFound = !(err instanceof Error && "code" in err && err.code === "ENOENT");
-  }
+  const executable = await findCopilotExecutable(options.executable, options.env);
+  const version = executable ? await readCopilotVersion(executable) : null;
 
   const homeExists = await isDirectory(copilotHome);
-  if (!executableFound && !homeExists) {
+  if (!executable && !homeExists) {
     return null;
   }
 
@@ -111,11 +129,11 @@ export async function probeCopilotInstallation(
     harnessId: COPILOT_HARNESS_ID,
     displayName: COPILOT_DISPLAY_NAME,
     version: version ?? UNKNOWN_HARNESS_VERSION,
-    executablePath: executableFound ? executable : undefined,
+    executablePath: executable ?? undefined,
     configPath: path.join(copilotHome, COPILOT_MCP_CONFIG_FILENAME),
     homePath: copilotHome,
-    isInstalled: executableFound,
-    status: executableFound ? "ready" : "missing_executable",
+    isInstalled: executable !== null,
+    status: executable ? "ready" : "missing_executable",
     detectedAt: new Date().toISOString(),
     metadata: { copilotHome },
   };

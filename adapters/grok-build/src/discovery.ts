@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { HarnessInstallation } from "@resin/harness-contracts";
@@ -15,13 +14,15 @@ export function parseGrokVersion(output: string): string | null {
   return /\bgrok\s+v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/.exec(output)?.[1] ?? null;
 }
 
-// The workspace targets ES2022, which has no `Promise.withResolvers`.
-export const readGrokVersion: GrokVersionReader = (executablePath) =>
-  new Promise((resolve) => {
-    execFile(executablePath, ["--version"], { timeout: 10_000 }, (error, stdout) => {
-      resolve(error ? null : parseGrokVersion(String(stdout)));
-    });
-  });
+/**
+ * Reads the version from the installed binary's file name: the installer keeps each release as
+ * `<GROK_HOME>/bin/grok-<version>` and points `grok` at it. The binary is never run, so probing
+ * stays cheap and side-effect free.
+ */
+export const readGrokVersion: GrokVersionReader = async (executablePath) => {
+  const target = await fs.realpath(executablePath).catch(() => executablePath);
+  return /^grok-v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/.exec(path.basename(target))?.[1] ?? null;
+};
 
 async function isExecutable(filePath: string): Promise<boolean> {
   try {

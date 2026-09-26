@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import path from "node:path";
-import { type RawHarnessRecord, classifyHarnessVersion } from "@resin/harness-contracts";
+import {
+  type RawHarnessRecord,
+  UNKNOWN_HARNESS_VERSION,
+  classifyHarnessVersion,
+} from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
   CURSOR_TARGET_VERSION,
@@ -10,6 +14,7 @@ import {
   cursorProjectSlug,
   inspectCursorHookPayload,
   normalizeCursorVersion,
+  probeCursorInstallation,
   resolveCursorProjectsDir,
 } from "../src/index.js";
 import { conversationPayloads, installedHook, tempHome } from "./helpers.js";
@@ -227,5 +232,38 @@ describe("version pinning", () => {
     expect(classify("2026.09.26-dd393fe")).toBe("tested");
     expect(classify("2026.10.02-abc1234")).toBe("untested");
     expect(classify("garbage")).toBe("unknown");
+  });
+});
+
+describe("cursor-agent installation probe", () => {
+  it("reads the version from the versioned install directory without running the binary", async () => {
+    const home = await tempHome();
+    const versionDir = path.join(
+      home,
+      ".local",
+      "share",
+      "cursor-agent",
+      "versions",
+      "2026.09.26-dd393fe",
+    );
+    const bin = path.join(home, "bin");
+    fs.mkdirSync(versionDir, { recursive: true });
+    fs.mkdirSync(bin);
+    // A binary that fails if executed proves the probe read the layout instead.
+    fs.writeFileSync(path.join(versionDir, "cursor-agent"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    fs.symlinkSync(path.join(versionDir, "cursor-agent"), path.join(bin, "cursor-agent"));
+    const installation = await probeCursorInstallation({ home, env: { PATH: bin } });
+    expect(installation).toMatchObject({
+      version: "2026.9.26-dd393fe",
+      executablePath: path.join(bin, "cursor-agent"),
+      metadata: { rawVersion: "2026.09.26-dd393fe" },
+    });
+
+    fs.rmSync(path.join(bin, "cursor-agent"));
+    fs.writeFileSync(path.join(bin, "cursor-agent"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    expect(await probeCursorInstallation({ home, env: { PATH: bin } })).toMatchObject({
+      version: UNKNOWN_HARNESS_VERSION,
+      metadata: { rawVersion: null },
+    });
   });
 });

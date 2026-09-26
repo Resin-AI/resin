@@ -1,9 +1,10 @@
 import * as fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { UNKNOWN_HARNESS_VERSION } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiHarnessAdapter } from "../src/adapter.js";
-import { piWorkspaceId } from "../src/discovery.js";
+import { piWorkspaceId, probePiInstallation } from "../src/discovery.js";
 import { encodePiSessionDirName } from "../src/paths.js";
 
 const RECORDED = path.join(import.meta.dirname, "fixtures", "recorded", "0.87.1");
@@ -162,5 +163,39 @@ describe("PiHarnessAdapter discovery", () => {
     });
     const [workspace] = await adapter.listWorkspaces();
     expect((await adapter.resolveActiveSession(workspace!))?.transcriptPath).toBe(file);
+  });
+});
+
+describe("pi installation probe", () => {
+  it("reads the version from the npm package owning the executable without running it", async () => {
+    const pkgDir = path.join(
+      home,
+      "prefix",
+      "lib",
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    const bin = path.join(home, "prefix", "bin");
+    await fsp.mkdir(path.join(pkgDir, "dist", "bundle"), { recursive: true });
+    await fsp.mkdir(bin, { recursive: true });
+    await fsp.writeFile(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.87.1" }),
+    );
+    // A CLI that fails if executed proves the probe read the package metadata instead.
+    const cli = path.join(pkgDir, "dist", "bundle", "cli.js");
+    await fsp.writeFile(cli, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await fsp.symlink(cli, path.join(bin, "pi"));
+    const probe = () =>
+      probePiInstallation({ env: { PATH: bin }, configPath: "/c", homePath: "/h" });
+    expect(await probe()).toMatchObject({
+      version: "0.87.1",
+      executablePath: path.join(bin, "pi"),
+      status: "ready",
+    });
+
+    await fsp.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+    expect(await probe()).toMatchObject({ version: UNKNOWN_HARNESS_VERSION, status: "unknown" });
   });
 });

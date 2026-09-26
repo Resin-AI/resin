@@ -45,7 +45,9 @@ function ofType<T extends IntermediateSessionEvent["type"]>(
   events: IntermediateSessionEvent[],
   type: T,
 ): Extract<IntermediateSessionEvent, { type: T }>[] {
-  return events.filter((event): event is Extract<IntermediateSessionEvent, { type: T }> => event.type === type);
+  return events.filter(
+    (event): event is Extract<IntermediateSessionEvent, { type: T }> => event.type === type,
+  );
 }
 
 function usageEvents(events: IntermediateSessionEvent[]) {
@@ -57,7 +59,10 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
     const logs = await discoverMuseSessionLogs(path.join(RECORDED, "full", "sessions"));
     const byId = new Map(logs.map((log) => [log.sessionId, log]));
     expect([...byId.keys()].sort()).toEqual([FULL_ID, EXPLORER_ID, VERIFY_OBSERVER_ID].sort());
-    expect(byId.get(FULL_ID)).toMatchObject({ workspaceRoot: "/workspace/project", childKind: null });
+    expect(byId.get(FULL_ID)).toMatchObject({
+      workspaceRoot: "/workspace/project",
+      childKind: null,
+    });
     expect(byId.get(EXPLORER_ID)).toMatchObject({
       parentSessionId: FULL_ID,
       childKind: "subagent",
@@ -69,7 +74,9 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       childAgentId: "verify-reminder",
     });
 
-    const adapter = new MuseHarnessAdapter({ sessionRoot: path.join(RECORDED, "full", "sessions") });
+    const adapter = new MuseHarnessAdapter({
+      sessionRoot: path.join(RECORDED, "full", "sessions"),
+    });
     const [workspace] = await adapter.listWorkspaces();
     expect(workspace?.rootPath).toBe("/workspace/project");
     const sessions = await adapter.listSessions(workspace!);
@@ -91,7 +98,9 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       ["subagent_spawn", null],
       ["subagent_wait", null],
     ]);
-    const results = new Map(ofType(events, "tool_result").map((result) => [result.toolName, result]));
+    const results = new Map(
+      ofType(events, "tool_result").map((result) => [result.toolName, result]),
+    );
     expect(ofType(events, "tool_result")).toHaveLength(8);
     expect(results.get("add")).toMatchObject({ result: "5", isError: false });
     expect(ofType(events, "tool_discovery")[0]?.tools).toEqual([{ name: "add", provider: "demo" }]);
@@ -105,24 +114,38 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       ["exit 3", 3],
     ]);
     expect(
-      ofType(events, "file_edit").map((edit) => [edit.filePath, edit.operation, edit.linesAdded, edit.linesRemoved]),
+      ofType(events, "file_edit").map((edit) => [
+        edit.filePath,
+        edit.operation,
+        edit.linesAdded,
+        edit.linesRemoved,
+      ]),
     ).toEqual([
       ["README.md", "update", 1, 1],
       ["hello.py", "create", 1, 0],
     ]);
-    expect(ofType(events, "message").filter((message) => message.role === "user")[0]?.content).toContain(
-      "Inspect the repo",
-    );
+    expect(
+      ofType(events, "message").filter((message) => message.role === "user")[0]?.content,
+    ).toContain("Inspect the repo");
   });
 
   it("links the spawned subagent and background observers to the lead session", async () => {
     const events = await decodeLog(logPath("full", FULL_ID), FULL_ID);
     const lifecycle = ofType(events, "subagent_lifecycle");
     expect(lifecycle).toContainEqual(
-      expect.objectContaining({ subagentId: EXPLORER_ID, lifecycleType: "spawn", role: "subagent", parentId: FULL_ID }),
+      expect.objectContaining({
+        subagentId: EXPLORER_ID,
+        lifecycleType: "spawn",
+        role: "subagent",
+        parentId: FULL_ID,
+      }),
     );
     expect(lifecycle).toContainEqual(
-      expect.objectContaining({ subagentId: VERIFY_OBSERVER_ID, lifecycleType: "spawn", role: "observer:verify-reminder" }),
+      expect.objectContaining({
+        subagentId: VERIFY_OBSERVER_ID,
+        lifecycleType: "spawn",
+        role: "observer:verify-reminder",
+      }),
     );
     expect(lifecycle.some((event) => event.role === "observer:skill-reminder")).toBe(true);
     expect(lifecycle.some((event) => event.lifecycleType === "settle")).toBe(true);
@@ -137,7 +160,11 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       const usage = usageEvents(await decodeLog(filePath, sessionId));
       expect(usage).toHaveLength(modelCalls);
       for (const entry of usage) {
-        expect(entry).toMatchObject({ provider: "meta", model: "fake-model", availability: "complete" });
+        expect(entry).toMatchObject({
+          provider: "meta",
+          model: "fake-model",
+          availability: "complete",
+        });
         expect(entry.totalTokens).toBe((entry.inputTokens ?? 0) + (entry.outputTokens ?? 0));
       }
     }
@@ -155,7 +182,10 @@ describe("muse 1.4.0 interrupted side effects are never successes", () => {
   });
 
   it("a call in flight when the process was killed stays unresolved, then resolves to unknown on resume", async () => {
-    const before = await decodeLog(path.join(RECORDED, "kill", "session.before-resume.jsonl"), KILL_ID);
+    const before = await decodeLog(
+      path.join(RECORDED, "kill", "session.before-resume.jsonl"),
+      KILL_ID,
+    );
     expect(ofType(before, "tool_call").map((call) => call.toolName)).toEqual(["bash"]);
     expect(ofType(before, "tool_result")).toHaveLength(0);
 
@@ -165,6 +195,8 @@ describe("muse 1.4.0 interrupted side effects are never successes", () => {
     expect(result?.isError).toBeUndefined();
     expect(result?.metadata?.museOutcome).toBe("unknown");
     expect(ofType(after, "command_exec")).toHaveLength(0);
-    expect(ofType(after, "session_lifecycle").map((event) => event.lifecycleType)).toContain("resume");
+    expect(ofType(after, "session_lifecycle").map((event) => event.lifecycleType)).toContain(
+      "resume",
+    );
   });
 });

@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { promisify } from "node:util";
-import { nowIso } from "@resin/contracts";
+import { nowIso } from "@resin/contracts/common";
 import {
   type HarnessInstallation,
   type HarnessMcpServerDescriptor,
@@ -17,22 +15,62 @@ import {
   resolveOpencodeMcpConfigPath,
 } from "./paths.js";
 
-const execFileAsync = promisify(execFile);
-
 /** Exact OpenCode versions qualified with recorded fixtures (`tests/fixtures/recorded/`). */
 export const OPENCODE_TESTED_VERSIONS: readonly string[] = ["1.18.32", "1.1.65"];
-
-export type OpencodeExecFunction = (
-  file: string,
-  args: string[],
-) => Promise<{ stdout: string; stderr: string }>;
-
-const defaultExec: OpencodeExecFunction = async (file, args) =>
-  await execFileAsync(file, args, { timeout: 15_000, encoding: "utf8" });
 
 /** Extracts `1.18.32` from `opencode --version` output. */
 export function parseOpencodeVersion(output: string): string | null {
   return output.match(/\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/)?.[1] ?? null;
+}
+
+const OPENCODE_PACKAGE_NAME = "opencode-ai";
+
+function isExecutableFile(file: string): boolean {
+  try {
+    if (!fs.statSync(file).isFile()) return false;
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Finds `opencode` on PATH; an explicit path is used as-is when it is executable. */
+function findOpencodeExecutable(
+  executable: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const candidates =
+    executable && executable.includes(path.sep)
+      ? [executable]
+      : (env.PATH ?? "")
+          .split(path.delimiter)
+          .filter(Boolean)
+          .map((dir) => path.join(dir, executable ?? "opencode"));
+  return candidates.find(isExecutableFile) ?? null;
+}
+
+/**
+ * Reads the version of the `opencode-ai` npm package owning the (symlink-resolved) executable.
+ * The binary is never run: probing must stay cheap and side-effect free.
+ */
+export function readOpencodeVersion(executablePath: string): string | null {
+  let dir: string;
+  try {
+    dir = path.dirname(fs.realpathSync(executablePath));
+  } catch {
+    dir = path.dirname(executablePath);
+  }
+  for (let depth = 0; depth < 6; depth++) {
+    const pkg = readJsonObject(path.join(dir, "package.json"));
+    if (pkg?.name === OPENCODE_PACKAGE_NAME && typeof pkg.version === "string") {
+      return parseOpencodeVersion(pkg.version);
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 export interface ProbeOpencodeOptions {
@@ -41,27 +79,19 @@ export interface ProbeOpencodeOptions {
   /** MCP config path the installation is registered through. */
   configPath?: string;
   executablePath?: string;
-  exec?: OpencodeExecFunction;
 }
 
 /**
- * Detects an OpenCode install by running `opencode --version` and looking for its data and
- * config directories. Returns `null` when neither the binary nor any OpenCode state exists.
+ * Detects an OpenCode install by the `opencode` executable on PATH (version read from its npm
+ * package metadata) and by its data and config directories. Returns `null` when neither the
+ * binary nor any OpenCode state exists.
  */
 export async function probeOpencodeInstallation(
   options: ProbeOpencodeOptions,
 ): Promise<HarnessInstallation | null> {
-  const exec = options.exec ?? defaultExec;
-  const executable = options.executablePath ?? "opencode";
-  let version: string | null = null;
-  let executableFound = false;
-  try {
-    const { stdout, stderr } = await exec(executable, ["--version"]);
-    executableFound = true;
-    version = parseOpencodeVersion(`${stdout}\n${stderr}`);
-  } catch (err) {
-    executableFound = !(err instanceof Error && "code" in err && err.code === "ENOENT");
-  }
+  const executable = findOpencodeExecutable(options.executablePath, options.env);
+  const executableFound = executable !== null;
+  const version = executable ? readOpencodeVersion(executable) : null;
   const dbPath = resolveOpencodeDbPath(options.home, options.env);
   const legacyDir = resolveOpencodeLegacyStorageDir(options.home, options.env);
   const configDir = resolveOpencodeConfigDir(options.home, options.env);
@@ -72,7 +102,7 @@ export async function probeOpencodeInstallation(
     harnessId: "opencode",
     displayName: "OpenCode",
     version: resolvedVersion,
-    executablePath: executableFound ? executable : undefined,
+    executablePath: executable ?? undefined,
     configPath: options.configPath ?? resolveOpencodeMcpConfigPath(options.home, options.env),
     homePath: path.dirname(dbPath),
     isInstalled: executableFound,

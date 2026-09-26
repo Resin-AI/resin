@@ -1,9 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { HarnessSession } from "@resin/harness-contracts";
+import { type HarnessSession, UNKNOWN_HARNESS_VERSION } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseCopilotVersion, parseCopilotWorkspaceYaml } from "../src/discovery.js";
+import { parseCopilotWorkspaceYaml, probeCopilotInstallation } from "../src/discovery.js";
 import { CopilotSessionEventSource } from "../src/source.js";
 
 let dir: string;
@@ -69,9 +69,34 @@ describe("CopilotSessionEventSource", () => {
 });
 
 describe("Copilot discovery parsing", () => {
-  it("reads the version printed by `copilot --version`", () => {
-    expect(parseCopilotVersion("GitHub Copilot CLI 1.0.88.\nRun 'copilot update'")).toBe("1.0.88");
-    expect(parseCopilotVersion("something else")).toBeNull();
+  it("resolves the version from the npm package owning the PATH executable, without running it", async () => {
+    const pkgDir = path.join(dir, "lib", "node_modules", "@github", "copilot");
+    const binDir = path.join(dir, "bin");
+    await fs.mkdir(pkgDir, { recursive: true });
+    await fs.mkdir(binDir);
+    await fs.writeFile(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "@github/copilot", version: "1.0.88" }),
+    );
+    // Running this loader would fail the probe; only its location is read.
+    await fs.writeFile(path.join(pkgDir, "npm-loader.js"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await fs.symlink(path.join(pkgDir, "npm-loader.js"), path.join(binDir, "copilot"));
+    const home = path.join(dir, "home");
+
+    const installation = await probeCopilotInstallation({ home, env: { PATH: binDir } });
+    expect(installation).toMatchObject({
+      version: "1.0.88",
+      executablePath: path.join(binDir, "copilot"),
+      status: "ready",
+    });
+    expect(await fs.stat(home).catch(() => null)).toBeNull();
+
+    await fs.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+    expect(await probeCopilotInstallation({ home, env: { PATH: binDir } })).toMatchObject({
+      version: UNKNOWN_HARNESS_VERSION,
+      status: "ready",
+    });
+    expect(await probeCopilotInstallation({ home, env: { PATH: "" } })).toBeNull();
   });
 
   it("reads single-quoted workspace.yaml scalars", () => {

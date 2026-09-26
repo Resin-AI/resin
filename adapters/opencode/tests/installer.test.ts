@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   NodeConfigFsBridge,
+  UNKNOWN_HARNESS_VERSION,
   applyConfigMutation,
   applyManagedBlock,
   classifyHarnessVersion,
@@ -167,24 +168,33 @@ describe("OpenCode version pinning", () => {
     expect(classifyHarnessVersion("1.18.33", opencodeHarness.testedVersions)).toBe("untested");
   });
 
-  it("probes the installed version from `opencode --version`", async () => {
-    const installation = await probeOpencodeInstallation({
-      home,
-      env,
-      exec: async () => ({ stdout: "1.18.32\n", stderr: "" }),
+  it("probes the version from the npm package owning the executable without running it", async () => {
+    const pkgDir = path.join(home, "prefix", "lib", "node_modules", "opencode-ai");
+    const bin = path.join(home, "prefix", "bin");
+    fs.mkdirSync(path.join(pkgDir, "bin"), { recursive: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "opencode-ai", version: "1.18.32" }),
+    );
+    // A binary that fails if executed proves the probe read the package metadata instead.
+    fs.writeFileSync(path.join(pkgDir, "bin", "opencode.exe"), "#!/bin/sh\nexit 1\n", {
+      mode: 0o755,
     });
+    fs.symlinkSync(path.join(pkgDir, "bin", "opencode.exe"), path.join(bin, "opencode"));
+    const installation = await probeOpencodeInstallation({ home, env: { PATH: bin } });
     expect(installation).toMatchObject({
       version: "1.18.32",
+      executablePath: path.join(bin, "opencode"),
       status: "ready",
       metadata: { versionClassification: "tested", store: "none" },
     });
-    const missing = await probeOpencodeInstallation({
-      home,
-      env,
-      exec: async () => {
-        throw Object.assign(new Error("not found"), { code: "ENOENT" });
-      },
+
+    fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+    expect(await probeOpencodeInstallation({ home, env: { PATH: bin } })).toMatchObject({
+      version: UNKNOWN_HARNESS_VERSION,
+      status: "ready",
     });
-    expect(missing).toBeNull();
+    expect(await probeOpencodeInstallation({ home, env: { PATH: "" } })).toBeNull();
   });
 });

@@ -23,11 +23,7 @@ import {
   defaultFsBridge,
 } from "@resin/harness-contracts";
 import { planOpencodeMcpConfig, verifyOpencodeMcpConfig } from "./config-planner.js";
-import {
-  OPENCODE_TESTED_VERSIONS,
-  type OpencodeExecFunction,
-  probeOpencodeInstallation,
-} from "./discovery.js";
+import { OPENCODE_TESTED_VERSIONS, probeOpencodeInstallation } from "./discovery.js";
 import {
   resolveOpencodeDbPath,
   resolveOpencodeLegacyStorageDir,
@@ -45,7 +41,6 @@ export interface OpencodeHarnessAdapterOptions {
   /** Overrides store discovery (tests, or a store at a custom location). */
   store?: OpencodeStore;
   fsBridge?: ConfigFsBridge;
-  exec?: OpencodeExecFunction;
   pollingIntervalMs?: number;
   now?: () => number;
 }
@@ -90,7 +85,6 @@ export class OpencodeHarnessAdapter implements StrictHarnessAdapter {
       env: options?.env ?? this.env,
       configPath: options?.customConfigPath,
       executablePath: options?.customExecutablePath ?? options?.executablePath,
-      exec: this.options.exec,
     });
   }
 

@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
   type HarnessInstallation,
   type HarnessSession,
@@ -21,8 +19,6 @@ import {
   resolveCursorProjectsDir,
   resolveCursorSpoolDir,
 } from "./paths.js";
-
-const execFileAsync = promisify(execFile);
 
 /** A spool file untouched this long, without `sessionEnd`, is idle rather than active. */
 const ACTIVE_WINDOW_MS = 60_000;
@@ -96,8 +92,21 @@ async function findExecutable(options: CursorProbeOptions, home: string): Promis
 }
 
 /**
- * Probes for cursor-agent. The version comes from `cursor-agent --version` and is normalized to
- * semver; an unreadable version reports {@link UNKNOWN_HARNESS_VERSION}.
+ * Reads the raw version from the install layout: the installer unpacks each release into
+ * `.../cursor-agent/versions/<version>/` and symlinks `cursor-agent` to the binary inside it.
+ * The binary is never run, so probing stays cheap and side-effect free.
+ */
+export async function readCursorRawVersion(executablePath: string): Promise<string | null> {
+  const target = await fsp.realpath(executablePath).catch(() => executablePath);
+  const versionDir = path.dirname(target);
+  if (path.basename(path.dirname(versionDir)) !== "versions") return null;
+  const raw = path.basename(versionDir);
+  return normalizeCursorVersion(raw) ? raw : null;
+}
+
+/**
+ * Probes for cursor-agent. The version comes from the versioned install directory and is
+ * normalized to semver; an unreadable version reports {@link UNKNOWN_HARNESS_VERSION}.
  */
 export async function probeCursorInstallation(
   options: CursorProbeOptions = {},
@@ -106,16 +115,7 @@ export async function probeCursorInstallation(
   const executablePath = await findExecutable(options, home);
   const configPath = options.configPath ?? resolveCursorMcpConfigPath(home);
   if (executablePath === null) return null;
-  let rawVersion: string | null = null;
-  try {
-    const { stdout } = await execFileAsync(executablePath, ["--version"], {
-      timeout: 10_000,
-      env: options.env ?? process.env,
-    });
-    rawVersion = stdout.trim();
-  } catch {
-    rawVersion = null;
-  }
+  const rawVersion = await readCursorRawVersion(executablePath);
   const version = (rawVersion && normalizeCursorVersion(rawVersion)) || UNKNOWN_HARNESS_VERSION;
   return {
     harnessId: CURSOR_HARNESS_ID,

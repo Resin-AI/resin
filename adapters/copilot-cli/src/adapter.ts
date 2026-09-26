@@ -24,7 +24,6 @@ import {
   COPILOT_DISPLAY_NAME,
   COPILOT_HARNESS_ID,
   COPILOT_TESTED_VERSIONS,
-  type CopilotExec,
   listCopilotSessionEntries,
   probeCopilotInstallation,
   resolveCopilotHome,
@@ -39,7 +38,6 @@ export interface CopilotHarnessAdapterOptions {
   home?: string;
   env?: NodeJS.ProcessEnv;
   fsBridge?: ConfigFsBridge;
-  exec?: CopilotExec;
   /** Resin command written into mcp-config.json (absolute shim path in production). */
   resinCommand?: string;
   pollingIntervalMs?: number;
@@ -73,7 +71,6 @@ export class CopilotHarnessAdapter implements StrictHarnessAdapter {
       home: this.home,
       env: options?.env ?? this.env,
       executable: options?.customExecutablePath ?? options?.executablePath,
-      exec: this.options.exec,
     });
   }
 

@@ -24,9 +24,17 @@ afterEach(async () => {
 describe("muse settings.json registration", () => {
   it("creates a settings file muse accepts, with Resin under mcp_servers", () => {
     const rendered = JSON.parse(
-      renderMuseSettings({ currentContent: null, targetPath: "settings.json", command: "/opt/resin", args: ["mcp"] }),
+      renderMuseSettings({
+        currentContent: null,
+        targetPath: "settings.json",
+        command: "/opt/resin",
+        args: ["mcp"],
+      }),
     );
-    expect(rendered).toEqual({ schema_version: 1, mcp_servers: { resin: { command: "/opt/resin", args: ["mcp"] } } });
+    expect(rendered).toEqual({
+      schema_version: 1,
+      mcp_servers: { resin: { command: "/opt/resin", args: ["mcp"] } },
+    });
   });
 
   it("preserves the user's other settings and servers and is idempotent", () => {
@@ -35,8 +43,18 @@ describe("muse settings.json registration", () => {
       model: "x",
       mcp_servers: { demo: { command: "python3", args: ["server.py"] } },
     });
-    const once = renderMuseSettings({ currentContent: current, targetPath: "s", command: "/opt/resin", args: ["mcp"] });
-    const twice = renderMuseSettings({ currentContent: once, targetPath: "s", command: "/opt/resin", args: ["mcp"] });
+    const once = renderMuseSettings({
+      currentContent: current,
+      targetPath: "s",
+      command: "/opt/resin",
+      args: ["mcp"],
+    });
+    const twice = renderMuseSettings({
+      currentContent: once,
+      targetPath: "s",
+      command: "/opt/resin",
+      args: ["mcp"],
+    });
     expect(twice).toBe(once);
     expect(JSON.parse(once)).toEqual({
       schema_version: 1,
@@ -49,14 +67,18 @@ describe("muse settings.json registration", () => {
   });
 
   it("refuses to overwrite a settings file it cannot parse", () => {
-    expect(() => renderMuseSettings({ currentContent: "{not json", targetPath: "s" })).toThrow(MuseSettingsError);
+    expect(() => renderMuseSettings({ currentContent: "{not json", targetPath: "s" })).toThrow(
+      MuseSettingsError,
+    );
   });
 
   it("honours XDG_CONFIG_HOME for the settings and rules paths", () => {
     const env = { XDG_CONFIG_HOME: "/x/cfg" };
     expect(museCodeHarness.mcpConfig.resolvePath(home, env)).toBe("/x/cfg/muse/settings.json");
     expect(museCodeHarness.guidance?.resolvePath(home, env)).toBe("/x/cfg/muse/AGENTS.md");
-    expect(museCodeHarness.mcpConfig.resolvePath(home, {})).toBe(path.join(home, ".config/muse/settings.json"));
+    expect(museCodeHarness.mcpConfig.resolvePath(home, {})).toBe(
+      path.join(home, ".config/muse/settings.json"),
+    );
   });
 });
 
@@ -67,8 +89,18 @@ describe("muse machine-wide guidance", () => {
     await fs.mkdir(path.dirname(rulesPath), { recursive: true });
     await fs.writeFile(rulesPath, "My own rule.\n");
 
-    const first = await applyManagedBlock(defaultFsBridge, rulesPath, guidance.markers, guidance.body);
-    const second = await applyManagedBlock(defaultFsBridge, rulesPath, guidance.markers, guidance.body);
+    const first = await applyManagedBlock(
+      defaultFsBridge,
+      rulesPath,
+      guidance.markers,
+      guidance.body,
+    );
+    const second = await applyManagedBlock(
+      defaultFsBridge,
+      rulesPath,
+      guidance.markers,
+      guidance.body,
+    );
     expect([first.action, second.action]).toEqual(["updated", "unchanged"]);
     const installed = await fs.readFile(rulesPath, "utf8");
     expect(installed).toContain("My own rule.");
@@ -105,7 +137,11 @@ describe("muse version pinning", () => {
       env: { PATH: bin },
       fsBridge: defaultFsBridge,
     });
-    expect(installation).toMatchObject({ version: "1.4.0", executablePath: launcher, status: "ready" });
+    expect(installation).toMatchObject({
+      version: "1.4.0",
+      executablePath: launcher,
+      status: "ready",
+    });
   });
 });
 
