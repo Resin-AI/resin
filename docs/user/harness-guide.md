@@ -11,6 +11,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 | **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
 | **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
+| **Cursor CLI** (`cursor-agent`) | none yet (targets `2026.09.26-dd393fe`; reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.cursor/rules/resin.mdc` | MCP over Stdio | Hook spool tailing (`~/.resin/capture/cursor-cli/`) | Next session |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
@@ -128,6 +129,42 @@ For OMP environments, Resin updates `~/.omp/agent/mcp.json`:
 ### In-Process Hub Integration
 
 OMP sessions connect directly to the Gateway's SSE endpoint and receive real-time tool catalog updates. When a new tool completes its canary evaluation and is promoted, an SSE `notifications/tools/list_changed` message is dispatched immediately to active OMP agents.
+
+---
+
+## Cursor CLI Integration
+
+### Automated Registration
+
+`resin init` makes three idempotent changes, all removed by `resin uninstall`:
+
+- Adds `mcpServers.resin` (`{ "command": "<resin shim>", "args": ["mcp"] }`) to `~/.cursor/mcp.json`. cursor-agent reads this user-level file for every project; other servers are kept.
+- Installs `~/.resin/hooks/cursor-capture.mjs` and registers it in `~/.cursor/hooks.json` for the observe-only events `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `afterAgentThought`, `afterAgentResponse`, `postToolUse`, `postToolUseFailure`, `afterFileEdit`, `preCompact`, `subagentStart`, `subagentStop` and `stop`. The script prints nothing and always exits 0. cursor-agent only blocks a step when a hook explicitly answers `continue: false` or denies permission, so the hook changes nothing about what Cursor allows. Resin never registers the permission hooks (`preToolUse`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`). Other hooks in the file are kept.
+- Writes the user rule `~/.cursor/rules/resin.mdc` (`alwaysApply: true`), which describes Resin's learned tools.
+
+cursor-agent reads these paths from `os.homedir()/.cursor`. `CURSOR_CONFIG_DIR` only moves `cli-config.json`.
+
+### Session Observation
+
+Resin captures sessions through hooks, not transcript files. cursor-agent writes `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`, with subagents under `<id>/subagents/`. Those files keep only message text and tool-call arguments: they have no tool results, call ids, token usage, timestamps or cwd, and the writer rewrites them after summarization. Hook payloads carry all of these fields. The capture script appends each payload to `~/.resin/capture/cursor-cli/<conversation_id>.jsonl`, adding `resin_received_at` and dropping `user_email`. Each session is bound to the `workspace_roots` its hooks recorded. Subagents are linked to their parent through `subagentStart`.
+
+Resin decodes:
+
+- prompts and responses;
+- per-generation usage (input, output and cache-read tokens);
+- tool calls and their results, with `tool_use_id`;
+- shell commands and file edits (old/new strings);
+- compaction and subagents;
+- aborted or failed turns.
+
+Each payload is checked against the field contract pinned in `adapters/cursor-cli/src/hook-records.ts`. An unknown hook event or a changed field is recorded as drift and never decoded by guesswork.
+
+### Known Limits
+
+- Sessions from before `resin init`, or from while the hooks were missing, are listed as uncaptured (`listUncapturedSessions`, reason `no-hook-capture`) and are not decoded.
+- Cloud Agents that run on Cursor's machines leave nothing on this device and cannot be captured. cursor-agent 2026.09.26 removed the CLI's `--cloud`/`--background` flags. Self-hosted `cursor-agent worker` sessions are captured and flagged `isBackgroundAgent`.
+- Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete.
+- Two things are unverified: whether cursor-agent reacts to MCP `list_changed`, and whether it applies user rules from `~/.cursor/rules`. For now, new tools are assumed to reach the next session.
 
 ---
 
