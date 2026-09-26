@@ -50,6 +50,9 @@
     },
     {
       "path": "../../adapters/cursor-cli"
+    },
+    {
+      "path": "../../adapters/opencode"
     }
   ]
 }

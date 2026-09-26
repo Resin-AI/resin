@@ -1,0 +1,27 @@
+{
+  "id": "prt_0dff3d58600133Cd73EwIvs6MW",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "messageID": "msg_0dff3c59e001ZrVYjevkJXFPM4",
+  "type": "tool",
+  "callID": "call_DrA8RxoTEDvK1Yn5Pza7rqFd",
+  "tool": "bash",
+  "state": {
+    "status": "completed",
+    "input": {
+      "command": "node greet.js",
+      "description": "Runs the greet.js Node script"
+    },
+    "output": "hello from greet\n",
+    "title": "Runs the greet.js Node script",
+    "metadata": {
+      "output": "hello from greet\n",
+      "exit": 0,
+      "description": "Runs the greet.js Node script",
+      "truncated": false
+    },
+    "time": {
+      "start": 1790463694225,
+      "end": 1790463694287
+    }
+  }
+}

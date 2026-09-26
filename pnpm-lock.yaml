@@ -114,6 +114,15 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  adapters/opencode:
+    dependencies:
+      '@resin/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@resin/harness-contracts':
+        specifier: workspace:*
+        version: link:../../packages/harness-contracts
+
   apps/cli:
     dependencies:
       '@resin/adapter-claude-code':
@@ -134,6 +143,9 @@ importers:
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
+      '@resin/adapter-opencode':
+        specifier: workspace:*
+        version: link:../../adapters/opencode
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -219,6 +231,9 @@ importers:
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
+      '@resin/adapter-opencode':
+        specifier: workspace:*
+        version: link:../../adapters/opencode
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

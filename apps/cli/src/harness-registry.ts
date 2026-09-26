@@ -4,6 +4,7 @@ import { cursorHarness } from "@resin/adapter-cursor-cli";
 import { grokBuildHarness } from "@resin/adapter-grok-build";
 import { museCodeHarness } from "@resin/adapter-muse-code";
 import { ompHarness } from "@resin/adapter-omp";
+import { opencodeHarness } from "@resin/adapter-opencode";
 import type { HarnessId } from "@resin/contracts";
 import type { HarnessDefinition } from "@resin/harness-contracts";
 
@@ -18,6 +19,7 @@ export const HARNESS_DEFINITIONS: readonly HarnessDefinition[] = [
   cursorHarness,
   grokBuildHarness,
   museCodeHarness,
+  opencodeHarness,
 ];
 
 export const SUPPORTED_HARNESS_IDS: readonly HarnessId[] = HARNESS_DEFINITIONS.map(
