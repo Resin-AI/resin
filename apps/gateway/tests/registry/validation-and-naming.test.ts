@@ -359,8 +359,8 @@ describe("Naming & Collision Resolution", () => {
   });
 
   it("formats names with namespaces and suffixes", () => {
-    expect(formatMcpToolName("build", { namespace: "cargo" })).toBe("cargo__build");
-    expect(formatMcpToolName("test", { suffix: "canary" })).toBe("test__canary");
+    expect(formatMcpToolName("build", { namespace: "cargo" })).toBe("cargo_build");
+    expect(formatMcpToolName("test", { suffix: "canary" })).toBe("test_canary");
   });
 
   it("resolves name collisions with scope precedence and uniqueness guarantees", () => {

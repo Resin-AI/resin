@@ -1414,11 +1414,22 @@ export class ToolRegistry {
 
       const boundLock = this.workspaceLocks.get(workspaceId);
       if (boundLock) {
+        // A listed (exposed) name resolves to its own locked tool first; the lock may record a
+        // manifest name that differs from it, and a raw name must not shadow another listing.
+        const lockEntries = Object.values(boundLock.tools);
+        const catalog = await this.resolveCatalog(workspaceId, sessionId);
+        const listed =
+          "entries" in catalog
+            ? Object.values((catalog as CatalogSnapshotRecord).entries ?? {}).find(
+                (e) => e.exposedName === toolIdOrName,
+              )
+            : undefined;
         const lockedEntry =
+          (listed
+            ? lockEntries.find((e) => e.toolId === listed.toolId && e.version === listed.version)
+            : undefined) ??
           boundLock.tools[toolIdOrName] ??
-          Object.values(boundLock.tools).find(
-            (e) => e.toolId === toolIdOrName || e.name === toolIdOrName,
-          );
+          lockEntries.find((e) => e.toolId === toolIdOrName || e.name === toolIdOrName);
 
         if (!lockedEntry) {
           const systemTool = this.systemActiveTools.get(toolIdOrName);
@@ -1490,17 +1501,19 @@ export class ToolRegistry {
       // SAFETY: 'entries' property indicates catalog conforms to CatalogSnapshotRecord structure.
       const record = "entries" in catalog ? (catalog as CatalogSnapshotRecord) : undefined;
       if (record && record.entries) {
-        for (const e of Object.values(record.entries)) {
-          if (
-            e.exposedName === toolIdOrName ||
-            e.name === toolIdOrName ||
-            e.toolId === toolIdOrName
-          ) {
-            const found = this.registeredTools.get(e.toolId)?.get(e.version);
-            if (found) {
-              return { ...found, isDisabled: false };
-            }
-          }
+        // A listed (exposed) name always resolves to its own entry. A raw manifest name is
+        // accepted only when no entry exposes it and exactly one entry carries it, so it can
+        // never shadow another tool's listed name.
+        const entries = Object.values(record.entries);
+        const byExposed = entries.find((e) => e.exposedName === toolIdOrName);
+        const byRawName = entries.filter((e) => e.name === toolIdOrName);
+        const e =
+          byExposed ??
+          entries.find((candidate) => candidate.toolId === toolIdOrName) ??
+          (byRawName.length === 1 ? byRawName[0] : undefined);
+        const found = e ? this.registeredTools.get(e.toolId)?.get(e.version) : undefined;
+        if (found) {
+          return { ...found, isDisabled: false };
         }
       }
 

@@ -51,14 +51,20 @@ export function formatMcpToolName(name: string, options?: FormatMcpToolNameOptio
 
   let formatted = base;
 
+  // Parts join with one underscore: MCP clients such as Codex expose tools as
+  // `mcp__<server>__<tool>`, so a `__` inside a tool name breaks their name mapping.
   if (options.namespace) {
     const ns = sanitizeToolName(options.namespace);
-    formatted = `${ns}__${formatted}`;
+    formatted = `${ns}_${formatted}`;
   }
 
   if (options.suffix) {
     const suf = sanitizeToolName(options.suffix);
-    formatted = `${formatted}__${suf}`;
+    // Shorten the head, never the suffix, so disambiguated names stay distinct.
+    const head = formatted
+      .slice(0, Math.max(1, MAX_MCP_NAME_LENGTH - suf.length - 1))
+      .replace(/[_-]+$/, "");
+    formatted = `${head}_${suf}`;
   }
 
   if (formatted.length > MAX_MCP_NAME_LENGTH) {
@@ -134,7 +140,7 @@ export function resolveNameCollision(tools: CandidateToolForNaming[]): Map<strin
     const shortId = tool.toolId.replace(/[^a-zA-Z0-9]/g, "").slice(-6) || "x";
     const scopeTag = tool.scope ? sanitizeToolName(tool.scope) : "";
 
-    // Strategy 1: try `${baseName}__${scopeTag}`
+    // Strategy 1: try `${baseName}_${scopeTag}`
     if (scopeTag) {
       const candidate1 = formatMcpToolName(baseName, { suffix: scopeTag });
       if (!usedNames.has(candidate1)) {
@@ -142,7 +148,7 @@ export function resolveNameCollision(tools: CandidateToolForNaming[]): Map<strin
       }
     }
 
-    // Strategy 2: try `${baseName}__${shortId}`
+    // Strategy 2: try `${baseName}_${shortId}`
     if (!disambiguatedName) {
       const candidate2 = formatMcpToolName(baseName, { suffix: shortId });
       if (!usedNames.has(candidate2)) {
