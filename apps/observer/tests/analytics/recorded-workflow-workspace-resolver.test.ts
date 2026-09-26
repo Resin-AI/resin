@@ -311,6 +311,64 @@ describe("recorded workflow workspace resolution", () => {
     expect(await resolveWorkspace(unknownProject)).toBeUndefined();
   });
 
+  it("binds a plan with a model-written derivation step by its recorded steps alone", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorded = programPlan(store, "session-derive", "derive");
+    const derivationSource = 'inputs = {"merchant": ""}\n{"mcc": 5942}\n';
+    const derivation: RecordedWorkflow["steps"][number] = {
+      id: "derive",
+      callId: "derivation:derive",
+      origin: "derivation",
+      callable: {
+        runtime: "resin-program",
+        name: "python",
+        program: {
+          kind: "python",
+          sourceInterface: "python-eval",
+          source: derivationSource,
+          argument: "code",
+        },
+      },
+      arguments: [
+        {
+          name: "code",
+          source: {
+            kind: "template",
+            template: {
+              type: "program",
+              language: "python",
+              source: { type: "literal", value: derivationSource },
+              holes: [{ token: 2, binding: { type: "input", name: "merchant" } }],
+            },
+          },
+        },
+      ],
+      dependsOn: [],
+      failurePolicy: { onError: "abort", policy: "default" },
+      observed: { outcome: "unknown" },
+    };
+    const withDerivation: RecordedWorkflow = {
+      ...recorded,
+      steps: [derivation, ...recorded.steps],
+    };
+    const derivationOnly: RecordedWorkflow = { ...recorded, steps: [derivation] };
+    const discovery = discoveredAdapter([
+      {
+        localWorkspaceId: "local-derive",
+        rootPath: path.resolve("/projects/derive"),
+        sessionIds: ["session-derive"],
+      },
+    ]);
+    const resolveWorkspace = createRecordedWorkflowWorkspaceResolver({
+      workspaceId: ownerWorkspaceId,
+      privateValues: store,
+      adapters: [discovery.adapter],
+    });
+
+    expect(await resolveWorkspace(withDerivation)).toBe(path.resolve("/projects/derive"));
+    expect(await resolveWorkspace(derivationOnly)).toBeUndefined();
+  });
+
   it("defers when a V2 source ref is missing or owned by another cloud workspace", async () => {
     const missingStore = new InMemoryPrivateValueStore();
     const missingPlan = programPlan(missingStore, "session-project", "missing-source", {

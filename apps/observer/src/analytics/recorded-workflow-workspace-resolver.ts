@@ -203,7 +203,12 @@ export function createRecordedWorkflowWorkspaceResolver(options: {
     ) {
       return undefined;
     }
-    const programSteps = plan.steps.filter((step) => step.callable?.program !== undefined);
+    // A derivation step is model-written, never recorded: it has no recording to bind to a
+    // project, so the recorded program steps alone decide the root. A plan with none resolves
+    // nothing.
+    const programSteps = plan.steps.filter(
+      (step) => step.callable?.program !== undefined && step.origin !== "derivation",
+    );
     if (programSteps.length === 0) return undefined;
 
     const sessionRoots = await getSessionRoots();
