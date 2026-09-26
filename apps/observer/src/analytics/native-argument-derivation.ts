@@ -137,6 +137,7 @@ function isProgramValue(
   language: ProgramLanguage,
   token: ProgramToken,
   previous: ProgramToken | undefined,
+  shared: boolean,
 ): token is ProgramToken & { value: string } {
   if (!token.bindable || typeof token.value !== "string" || token.kind === "operator") return false;
   const value = token.value;
@@ -149,7 +150,65 @@ function isProgramValue(
   const shaped = /[/.\d]/.test(value);
   if (language !== "shell") return token.kind === "string" && shaped;
   if (token.kind === "word" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) return false;
-  return token.kind === "string" || shaped || flag !== undefined;
+  return token.kind === "string" || shaped || flag !== undefined || shared;
+}
+
+/** Operators after which a shell word is at command position again. */
+const SHELL_COMMAND_SEPARATORS = ["&&", "||", ";", "|", "|&", "(", "&", "\n"];
+
+/**
+ * Each shell token's place in its simple command: 0 at command position (leading assignments and
+ * the program's name), 1 for the first argument (where a subcommand sits), 2 and on for the rest,
+ * and undefined for an operator.
+ */
+function shellArgumentPositions(tokens: readonly ProgramToken[]): Array<number | undefined> {
+  let commandPosition = true;
+  let argumentIndex = 0;
+  return tokens.map((token) => {
+    if (token.kind === "operator") {
+      commandPosition = SHELL_COMMAND_SEPARATORS.includes(token.raw);
+      if (commandPosition) argumentIndex = 0;
+      return undefined;
+    }
+    if (commandPosition) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) commandPosition = false;
+      return 0;
+    }
+    argumentIndex += 1;
+    return argumentIndex;
+  });
+}
+
+/**
+ * Bare words two or more calls ran with past their subcommand position. The steps of one job share
+ * the value they work on (`./release test alpha`, `./release build alpha`) while each step's
+ * subcommand names its own action, so a shared word is data even without a path, number or flag
+ * shape.
+ */
+function sharedShellWords(calls: readonly DerivationCall[]): Set<string> {
+  const callsByWord = new Map<string, number>();
+  for (const call of calls) {
+    if (call.program?.kind !== "shell") continue;
+    const text = call.arguments[call.program.argument];
+    if (typeof text !== "string") continue;
+    let tokens: ProgramToken[];
+    try {
+      tokens = tokenizeProgram("shell", text);
+    } catch (error) {
+      if (error instanceof ProgramTokenizationError) continue;
+      throw error;
+    }
+    const bodyStart = heredocStart("shell", text);
+    const positions = shellArgumentPositions(tokens);
+    const words = new Set<string>();
+    for (const [index, token] of tokens.entries()) {
+      if (token.start >= bodyStart) break;
+      if ((positions[index] ?? 0) >= 2 && token.kind === "word" && typeof token.value === "string")
+        words.add(token.value);
+    }
+    for (const word of words) callsByWord.set(word, (callsByWord.get(word) ?? 0) + 1);
+  }
+  return new Set([...callsByWord].flatMap(([word, count]) => (count >= 2 ? [word] : [])));
 }
 
 function longFlagName(token: ProgramToken | undefined): string | undefined {
@@ -199,6 +258,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
   /** Typed primitive leaves each call's own result contributed. */
   const resultValues: Array<Set<string>> = [];
   const seen = new Set<string>();
+  const sharedWords = sharedShellWords(calls);
 
   for (const [index, call] of calls.entries()) {
     const argumentLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
@@ -326,23 +386,20 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
       const bodyStart = heredocStart(call.program.kind, text);
       const offered = new Set<string>();
       // A shell word at command position — the first word of a simple command after any leading
-      // assignments — names the program to run, never a value it runs with.
-      let commandPosition = call.program.kind === "shell";
+      // assignments — names the program to run, never a value it runs with. A bare word past the
+      // subcommand's position is a value when other calls ran with it too.
+      const positions = call.program.kind === "shell" ? shellArgumentPositions(tokens) : undefined;
       for (const [tokenIndex, token] of tokens.entries()) {
         if (inputCandidates.length >= MAX_CANDIDATES || token.start >= bodyStart) break;
         const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
-        if (call.program.kind === "shell") {
-          if (token.kind === "operator") {
-            commandPosition = ["&&", "||", ";", "|", "|&", "(", "&", "\n"].includes(token.raw);
-            continue;
-          }
-          const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw);
-          if (commandPosition) {
-            if (!assignment) commandPosition = false;
-            continue;
-          }
-        }
-        if (!isProgramValue(call.program.kind, token, previous)) continue;
+        const position = positions?.[tokenIndex];
+        if (positions !== undefined && (position === undefined || position === 0)) continue;
+        const shared =
+          position !== undefined &&
+          position >= 2 &&
+          typeof token.value === "string" &&
+          sharedWords.has(token.value);
+        if (!isProgramValue(call.program.kind, token, previous, shared)) continue;
         const key = scalarKey(token.value);
         let name = programInputs.get(key);
         if (name === undefined) {

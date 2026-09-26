@@ -238,6 +238,35 @@ describe("a value embedded in a recorded program", () => {
     ]);
   });
 
+  it("offers a bare word the steps share as one input, never a subcommand they share", () => {
+    const shell = (stepId: string, command: string) => ({
+      callId: `call_${stepId}`,
+      stepId,
+      toolName: "bash",
+      runtime: RESIN_PROCESS_RUNTIME,
+      arguments: { command },
+      program: { kind: "shell" as const, argument: "command" },
+    });
+    const derivation = deriveNativeCalls([
+      // ./release(0) test(1) alpha(2): the project every step of the release works on.
+      shell("step0", "./release test alpha"),
+      shell("step1", "./release build alpha && ./release checksum alpha"),
+      // build(1) recurs only as a subcommand; beta(2) appears once.
+      shell("step2", "./release build beta"),
+    ]);
+
+    const offered = derivation.candidates.flatMap((candidate) =>
+      candidate.proposed.kind === "input"
+        ? [[candidate.stepId, candidate.path[1], candidate.proposed.name]]
+        : [],
+    );
+    expect(offered).toEqual([
+      ["step0", 2, "text"],
+      ["step1", 2, "text"],
+      ["step1", 6, "text"],
+    ]);
+  });
+
   it("names a recording's parameters from its own values, not the session's numbering", () => {
     const { events } = record([
       call(1, { command: "cat /app/a.txt" }),

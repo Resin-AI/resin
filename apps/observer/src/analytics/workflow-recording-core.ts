@@ -696,7 +696,7 @@ export function reconstructWorkflowFromEvents(
 }
 
 /** Optional program-value inputs one recorded workflow may expose, so its schema stays short. */
-const MAX_RECORDED_DEFAULT_INPUTS = 8;
+const MAX_RECORDED_DEFAULT_INPUTS = 12;
 
 /**
  * Program values were named across the whole session as they first appeared (`path_12`). Within one
