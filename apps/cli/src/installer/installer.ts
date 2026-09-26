@@ -49,11 +49,9 @@ import {
   selectPlatformAsset,
   verifyChannelMetadata,
 } from "./channel-verifier.js";
-import {
-  HarnessConfigOrchestrator,
-  type HarnessConfigResult,
-  type SupportedHarnessId,
-} from "./harness-config.js";
+import type { HarnessId } from "@resin/contracts";
+import { isSupportedHarnessId } from "../harness-registry.js";
+import { HarnessConfigOrchestrator, type HarnessConfigResult } from "./harness-config.js";
 import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
 import {
@@ -613,20 +611,17 @@ export class ResinInstaller {
       this.journal.startStep("harness_discovery");
       this.log("==> Step 7/11: Discovering AI coding harnesses in workspace...");
       const orchestrator = new HarnessConfigOrchestrator();
-      let requestedHarnesses: SupportedHarnessId[] | undefined;
+      let requestedHarnesses: HarnessId[] | undefined;
       if (options.harness) {
         const values = (Array.isArray(options.harness) ? options.harness : [options.harness])
           .flatMap((value) => value.split(","))
           .map((value) => value.trim())
           .filter(Boolean);
-        const supportedHarnesses: readonly string[] = ["claude-code", "codex-cli", "omp"];
-        const unsupported = values.find((value) => !supportedHarnesses.includes(value));
+        const unsupported = values.find((value) => !isSupportedHarnessId(value));
         if (unsupported) {
           throw new Error(`Unsupported harness '${unsupported}'`);
         }
-        requestedHarnesses = values.filter(
-          (h): h is SupportedHarnessId => h === "claude-code" || h === "codex-cli" || h === "omp",
-        );
+        requestedHarnesses = values.filter(isSupportedHarnessId);
       }
 
       this.journal.completeStep("harness_discovery", {

@@ -2,9 +2,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { probeClaudeInstallation, verifyClaudeMcpConfig } from "@resin/adapter-claude-code";
-import { probeCodexInstallation, verifyCodexMcpConfig } from "@resin/adapter-codex";
-import { probeOmpInstallation, verifyOmpMcpConfig } from "@resin/adapter-omp";
 import { z } from "zod";
 export const SYSTEM_META_TOOL_NAMES = [
   "search_tools",
@@ -16,6 +13,7 @@ import { SecretManager } from "@resin/crypto";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
 import { IpcClient, type PathResolutionOptions, resolvePaths } from "@resin/observer/client";
 import { areClaimsExpired } from "@resin/protocol";
+import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 import { DeviceAuthClient } from "./auth-bootstrap.js";
 import {
   type UserServiceManager,
@@ -544,28 +542,32 @@ export class VerificationSuite {
     remediation?: string;
     details?: VerificationDetails;
   }> {
-    const [claudeInstalled, codexInstalled, ompInstalled] = await Promise.all([
-      probeClaudeInstallation(),
-      probeCodexInstallation(),
-      probeOmpInstallation(),
-    ]);
-
-    const adaptersFound: string[] = [];
-    if (claudeInstalled.status === "ready" || claudeInstalled.status === "unknown") {
-      adaptersFound.push("Claude Code");
-    }
-    if (codexInstalled.status === "ready" || codexInstalled.status === "unknown") {
-      adaptersFound.push("Codex CLI");
-    }
-    if (ompInstalled && (ompInstalled.status === "ready" || ompInstalled.status === "unknown")) {
-      adaptersFound.push("Oh My Pi (OMP)");
-    }
+    const home = os.homedir();
+    const env = process.env;
+    const probes = await Promise.all(
+      HARNESS_DEFINITIONS.map(async (definition) => ({
+        definition,
+        installation: await definition.probeInstallation({
+          targetPath: definition.mcpConfig.resolvePath(home, env),
+          home,
+          env,
+          fsBridge: this.fsBridge,
+        }),
+      })),
+    );
+    const adaptersFound = probes
+      .filter(
+        ({ installation }) =>
+          installation !== null &&
+          (installation.status === "ready" || installation.status === "unknown"),
+      )
+      .map(({ definition }) => definition.displayName);
 
     if (adaptersFound.length === 0) {
       return {
         status: "warn",
         message: "No supported AI agent harnesses detected in standard paths.",
-        remediation: "Install Claude Code, Codex CLI, or OMP, then run `resin init`.",
+        remediation: `Install a supported harness (${HARNESS_DEFINITIONS.map((definition) => definition.displayName).join(", ")}), then run \`resin init\`.`,
       };
     }
 

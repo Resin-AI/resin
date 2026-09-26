@@ -250,6 +250,8 @@ describe("status command & collector", () => {
           name: "Claude Code",
           installed: true,
           configured: true,
+          version: "2.1.283",
+          versionStatus: "untested",
           configPath: "/home/user/.claude.json",
         },
       ],
@@ -276,6 +278,7 @@ describe("status command & collector", () => {
     expect(terminalOutput).toContain("[Tools & MCP Catalog]");
     expect(terminalOutput).toContain("[Agent Harness Connections]");
     expect(terminalOutput).toContain("Claude Code");
+    expect(terminalOutput).toContain("[Installed 2.1.283, untested]");
     expect(terminalOutput).toContain("ACTION REQUIRED");
     expect(terminalOutput).toContain("[WARNING] Cloud sync is degraded");
   });

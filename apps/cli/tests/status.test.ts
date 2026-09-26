@@ -1,8 +1,9 @@
 import path from "node:path";
 import process from "node:process";
-import * as claudeAdapter from "@resin/adapter-claude-code";
-import * as codexAdapter from "@resin/adapter-codex";
-import * as ompAdapter from "@resin/adapter-omp";
+import { claudeCodeHarness } from "@resin/adapter-claude-code";
+import { codexHarness } from "@resin/adapter-codex";
+import { ompHarness } from "@resin/adapter-omp";
+import type { HarnessInstallation } from "@resin/harness-contracts";
 import { type DaemonHealthReport, IpcClient } from "@resin/observer";
 import type { ActionableNotification } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -93,17 +94,18 @@ vi.spyOn(IpcClient.prototype, "getHealth").mockImplementation(async () => {
 
 vi.spyOn(IpcClient.prototype, "close").mockImplementation(async () => {});
 
-vi.spyOn(claudeAdapter, "probeClaudeInstallation").mockImplementation(async () => ({
-  isInstalled: runtime.installedHarnesses["claude-code"],
-}));
-
-vi.spyOn(codexAdapter, "probeCodexInstallation").mockImplementation(async () => ({
-  isInstalled: runtime.installedHarnesses["codex-cli"],
-}));
-
-vi.spyOn(ompAdapter, "probeOmpInstallation").mockImplementation(async () => ({
-  isInstalled: runtime.installedHarnesses.omp,
-}));
+// SAFETY: Status reads only `isInstalled` and `version` from probe results.
+const probeResult = (isInstalled: boolean, version: string) =>
+  ({ isInstalled, version }) as HarnessInstallation;
+vi.spyOn(claudeCodeHarness, "probeInstallation").mockImplementation(async () =>
+  probeResult(runtime.installedHarnesses["claude-code"], "0.0.0"),
+);
+vi.spyOn(codexHarness, "probeInstallation").mockImplementation(async () =>
+  probeResult(runtime.installedHarnesses["codex-cli"], codexHarness.testedVersions[0] ?? "0.0.0"),
+);
+vi.spyOn(ompHarness, "probeInstallation").mockImplementation(async () =>
+  probeResult(runtime.installedHarnesses.omp, "999.0.0"),
+);
 
 const NOW = 1_800_000_000_000;
 const HOME = "/home/status-user";
