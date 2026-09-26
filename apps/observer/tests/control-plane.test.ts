@@ -246,6 +246,7 @@ describe("observer desired-state reconciliation", () => {
       },
     ];
     const conditionalEtags: Array<string | null> = [];
+    const harnessKeyHeaders: Array<string | null> = [];
     const reports: ControlPlaneDeviceReport[] = [];
     const fetchImpl: typeof fetch = async (_input, init) => {
       if (init?.method === "POST") {
@@ -253,6 +254,7 @@ describe("observer desired-state reconciliation", () => {
         return new Response(null, { status: 200 });
       }
       conditionalEtags.push(new Headers(init?.headers).get("if-none-match"));
+      harnessKeyHeaders.push(new Headers(init?.headers).get("resin-control-plane-harness-keys"));
       const reply = replies.shift();
       if (!reply) throw new Error("Unexpected desired-state request");
       return new Response(
@@ -313,6 +315,8 @@ describe("observer desired-state reconciliation", () => {
 
     expect(appliedTokens).toEqual(["w:5:d:5", "w:6:d:6"]);
     expect(conditionalEtags).toEqual([null, '"w:5:d:5"', '"w:5:d:5"', '"w:5:d:5"']);
+    // Desired state may name harnesses this device does not support; it asks for them anyway.
+    expect(new Set(harnessKeyHeaders)).toEqual(new Set(["open-v1"]));
     expect(reports.map((report) => report.revisionToken)).toEqual([
       "w:5:d:5",
       "w:5:d:5",
