@@ -626,6 +626,57 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(coordinator.getActiveSessionCount()).toBe(0);
     });
 
+    it("sends a generic buffer larger than the cloud per-batch limit in bounded chunks and acknowledges once all are accepted", async () => {
+      const pipeline = new NormalizationPipeline();
+      const batches: Array<Array<{ eventId: string }>> = [];
+      let failSecondChunk = true;
+      const sendObservationBatch = vi.fn(async (input: { observations: Array<{ eventId: string }> }) => {
+        if (input.observations.length > 1000) throw new Error("oversized batch reached the client");
+        if (batches.length === 1 && failSecondChunk) {
+          failSecondChunk = false;
+          throw new Error("transient failure on the second chunk");
+        }
+        batches.push(input.observations);
+        return {
+          batchId: `batch_${batches.length}`,
+          status: "accepted",
+          acceptedCount: input.observations.length,
+          rejectedCount: 0,
+          errors: [],
+        };
+      });
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline,
+        observationClient: createMockObservationClient({
+          sendTrajectoryObservationBatch: vi.fn(),
+          sendObservationBatch,
+        }),
+        attributionResolver: vi.fn(async () => null),
+        coalesceDwellMs: 0,
+      });
+      const session = createMockHarnessSession("sess_oversized_generic");
+      const records = Array.from({ length: 1203 }, (_, index) =>
+        createPromptRecord(session.sessionId, index + 1),
+      );
+      const ack = vi.fn(async () => {});
+      try {
+        await expect(coordinator.handleRecords(session, records, ack)).rejects.toThrow(
+          "transient failure on the second chunk",
+        );
+        expect(ack).not.toHaveBeenCalled();
+
+        await coordinator.flush(session.sessionId);
+        expect(ack).toHaveBeenCalledTimes(1);
+        const sizes = batches.map((batch) => batch.length);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
+        // The retry resends the whole buffer; every event arrives, the first chunk idempotently twice.
+        expect(sizes).toEqual([1000, 1000, 203]);
+        expect(new Set(batches.flat().map((event) => event.eventId)).size).toBe(1203);
+      } finally {
+        coordinator.dispose();
+      }
+    });
+
     it("restartable evidence clearing preserves session event sinks while terminal dispose detaches them", async () => {
       const pipeline = new NormalizationPipeline();
       const mockObservationClient = createMockObservationClient({
