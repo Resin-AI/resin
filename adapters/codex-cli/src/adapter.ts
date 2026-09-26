@@ -30,6 +30,7 @@ import {
 import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
+  CODEX_TESTED_VERSIONS,
   type CodexTranscriptInspection,
   type CommandExecutor,
   type PathLookupFn,
@@ -160,6 +161,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   readonly id: string = CODEX_HARNESS_ID;
   readonly name: string = CODEX_DISPLAY_NAME;
   readonly version = "0.1.0";
+  readonly supportedHarnessVersions = CODEX_TESTED_VERSIONS;
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly customExecutablePath?: string;

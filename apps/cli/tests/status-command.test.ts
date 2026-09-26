@@ -11,6 +11,7 @@ import {
   parseStatusFlags,
   statusCommand,
 } from "../src/commands/status.js";
+import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -115,7 +116,7 @@ describe("status command & collector", () => {
     expect(summary.ipc).toBeDefined();
     expect(summary.cloud).toBeDefined();
     expect(summary.tools.metaToolsCount).toBeGreaterThanOrEqual(4);
-    expect(summary.harnesses.length).toBe(3);
+    expect(summary.harnesses.map((h) => h.id)).toEqual(SUPPORTED_HARNESS_IDS);
 
     const claudeHarness = summary.harnesses.find((h) => h.id === "claude-code");
     expect(claudeHarness?.configured).toBe(true);
@@ -250,6 +251,8 @@ describe("status command & collector", () => {
           name: "Claude Code",
           installed: true,
           configured: true,
+          version: "2.1.283",
+          versionStatus: "untested",
           configPath: "/home/user/.claude.json",
         },
       ],
@@ -276,6 +279,7 @@ describe("status command & collector", () => {
     expect(terminalOutput).toContain("[Tools & MCP Catalog]");
     expect(terminalOutput).toContain("[Agent Harness Connections]");
     expect(terminalOutput).toContain("Claude Code");
+    expect(terminalOutput).toContain("[Installed 2.1.283, untested]");
     expect(terminalOutput).toContain("ACTION REQUIRED");
     expect(terminalOutput).toContain("[WARNING] Cloud sync is degraded");
   });

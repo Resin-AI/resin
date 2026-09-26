@@ -4,8 +4,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { HarnessId } from "@resin/contracts";
 import {
   LEGACY_RESIN_MCP_SERVER_ALIASES,
+  applyManagedBlock,
   computeConfigHash,
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
@@ -14,19 +16,14 @@ import type {
   ConfigFsBridge,
   ConfigMutationPlan,
   HarnessInstallation,
+  ManagedBlockResult,
 } from "@resin/harness-contracts";
 import { z } from "zod";
-import {
-  type CodexGuidanceResult,
-  applyCodexGuidance,
-  resolveCodexAgentsPath,
-} from "./codex-instructions.js";
+import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../harness-registry.js";
 import {
   DEFAULT_GATEWAY_URL,
-  HARNESS_DISPLAY_NAMES,
-  RESIN_MCP_SERVER_KEYS,
-  SUPPORTED_HARNESS_IDS,
   findCodexTomlServerConfig,
+  isTomlRegistrationPath,
   parseCodexTomlConfig,
   planHarnessRegistration,
   probeHarnessInstallation,
@@ -35,7 +32,7 @@ import {
   resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "./harness-config.js";
-import type { HarnessProbeOptions, SupportedHarnessId } from "./harness-config.js";
+import type { HarnessProbeOptions } from "./harness-config.js";
 
 export const DEFAULT_HARNESS_AUTO_REPAIR = true;
 export const HARNESS_BACKUP_RETENTION = 5;
@@ -119,8 +116,8 @@ export type HarnessInstallationProbe = (
 export interface HarnessReconcileOptions {
   readonly autoRepair?: boolean;
   readonly dryRun?: boolean;
-  readonly harnesses?: readonly SupportedHarnessId[];
-  readonly installedHarnesses?: readonly SupportedHarnessId[];
+  readonly harnesses?: readonly HarnessId[];
+  readonly installedHarnesses?: readonly HarnessId[];
   readonly customHome?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly resinCommand?: string;
@@ -134,7 +131,7 @@ export interface HarnessReconcileOptions {
 }
 
 export interface HarnessReconciliationResult {
-  readonly harnessId: SupportedHarnessId;
+  readonly harnessId: HarnessId;
   readonly displayName: string;
   readonly installed: boolean;
   readonly targetPath: string;
@@ -146,8 +143,10 @@ export interface HarnessReconciliationResult {
   readonly rolledBack?: boolean;
   readonly diagnostic?: string;
   readonly plan?: ConfigMutationPlan;
-  /** Codex AGENTS.md guidance block outcome; with dryRun, the action that would be taken. */
-  readonly guidance?: CodexGuidanceResult;
+  /** Instruction-file guidance block outcome; with dryRun, the action that would be taken. */
+  readonly guidance?: ManagedBlockResult;
+  /** Install-extension artifact outcomes (e.g. capture hooks), in definition order. */
+  readonly extensions?: readonly ManagedBlockResult[];
   readonly error?: string;
 }
 
@@ -162,7 +161,7 @@ export interface HarnessReconciliationReport {
 interface ResolvedReconcileOptions {
   readonly autoRepair: boolean;
   readonly dryRun: boolean;
-  readonly installedHarnesses: ReadonlySet<SupportedHarnessId>;
+  readonly installedHarnesses: ReadonlySet<HarnessId>;
   readonly customHome: string;
   readonly env: NodeJS.ProcessEnv;
   readonly resinCommand: string;
@@ -1269,11 +1268,7 @@ export class HarnessReconciler {
     const results: HarnessReconciliationResult[] = [];
     for (const harnessId of harnesses) {
       const result = await this.reconcileHarness(harnessId, resolved);
-      results.push(
-        harnessId === "codex-cli" && result.configured
-          ? await reconcileCodexGuidance(result, resolved)
-          : result,
-      );
+      results.push(result.configured ? await reconcileInstallArtifacts(result, resolved) : result);
     }
 
     return {
@@ -1318,11 +1313,11 @@ export class HarnessReconciler {
   }
 
   private async reconcileHarness(
-    harnessId: SupportedHarnessId,
+    harnessId: HarnessId,
     options: ResolvedReconcileOptions,
   ): Promise<HarnessReconciliationResult> {
     const targetPath = resolveHarnessConfigPath(harnessId, options.customHome, options.env);
-    const displayName = HARNESS_DISPLAY_NAMES[harnessId];
+    const displayName = getHarnessDefinition(harnessId).displayName;
     let configExists: boolean;
 
     try {
@@ -1571,7 +1566,7 @@ export class HarnessReconciler {
     plan: ConfigMutationPlan,
     originalContent: string | null,
     adapterOptions: {
-      readonly harnessId: SupportedHarnessId;
+      readonly harnessId: HarnessId;
       readonly targetPath: string;
       readonly workspacePath: string;
       readonly gatewayUrl: string;
@@ -1603,7 +1598,7 @@ export class HarnessReconciler {
     plan: ConfigMutationPlan,
     originalContent: string | null,
     adapterOptions: {
-      readonly harnessId: SupportedHarnessId;
+      readonly harnessId: HarnessId;
       readonly targetPath: string;
       readonly workspacePath: string;
       readonly gatewayUrl: string;
@@ -2029,7 +2024,7 @@ export async function reconcileHarnessConfigs(
 }
 
 function validateHarnessConfig(
-  harnessId: SupportedHarnessId,
+  harnessId: HarnessId,
   targetPath: string,
   content: string | null,
 ): string | null {
@@ -2037,8 +2032,11 @@ function validateHarnessConfig(
     return null;
   }
 
-  const isJson = harnessId !== "codex-cli" || targetPath.endsWith(".json");
-  if (isJson) {
+  const { mcpConfig } = getHarnessDefinition(harnessId);
+  if (mcpConfig.format === "owned-file") {
+    return null;
+  }
+  if (!isTomlRegistrationPath(mcpConfig, targetPath)) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
@@ -2050,9 +2048,7 @@ function validateHarnessConfig(
     if (!configResult.success) {
       return `Corrupt ${harnessId} configuration at ${targetPath}: expected a JSON object`;
     }
-    const serverContainerKeys =
-      harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
-    for (const key of serverContainerKeys) {
+    for (const key of mcpConfig.jsonContainerKeys) {
       if (
         key in configResult.data &&
         !HarnessJsonObjectSchema.safeParse(configResult.data[key]).success
@@ -2067,12 +2063,12 @@ function validateHarnessConfig(
     parseCodexTomlConfig(content);
     return null;
   } catch (error: unknown) {
-    return `Corrupt codex-cli TOML configuration at ${targetPath}: ${describeError(error)}`;
+    return `Corrupt ${harnessId} TOML configuration at ${targetPath}: ${describeError(error)}`;
   }
 }
 
 function hasResinRegistration(
-  harnessId: SupportedHarnessId,
+  harnessId: HarnessId,
   targetPath: string,
   content: string | null,
 ): boolean {
@@ -2080,12 +2076,14 @@ function hasResinRegistration(
     return false;
   }
 
-  const serverName = RESIN_MCP_SERVER_KEYS[harnessId];
-  if (harnessId !== "codex-cli" || targetPath.endsWith(".json")) {
+  const { mcpConfig } = getHarnessDefinition(harnessId);
+  if (mcpConfig.format === "owned-file") {
+    return true;
+  }
+  const serverName = mcpConfig.serverKey;
+  if (!isTomlRegistrationPath(mcpConfig, targetPath)) {
     const parsed = HarnessJsonObjectSchema.parse(JSON.parse(content));
-    const containerKeys =
-      harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
-    return containerKeys.some((key) => {
+    return mcpConfig.jsonContainerKeys.some((key) => {
       const serversResult = HarnessJsonObjectSchema.safeParse(parsed[key]);
       return serversResult.success && serverName in serversResult.data;
     });
@@ -2095,7 +2093,7 @@ function hasResinRegistration(
 }
 
 function preserveUserOwnedServerFields(
-  harnessId: SupportedHarnessId,
+  harnessId: HarnessId,
   targetPath: string,
   currentContent: string | null,
   plan: ConfigMutationPlan,
@@ -2103,16 +2101,16 @@ function preserveUserOwnedServerFields(
   if (currentContent === null || currentContent.trim().length === 0) {
     return plan;
   }
-  if (harnessId === "codex-cli" && !targetPath.endsWith(".json")) {
+  const { mcpConfig } = getHarnessDefinition(harnessId);
+  if (mcpConfig.format === "owned-file" || isTomlRegistrationPath(mcpConfig, targetPath)) {
     return plan;
   }
 
-  const serverName = RESIN_MCP_SERVER_KEYS[harnessId];
+  const serverName = mcpConfig.serverKey;
   const currentConfig = HarnessJsonObjectSchema.parse(JSON.parse(currentContent));
   const plannedConfig = HarnessJsonObjectSchema.parse(JSON.parse(plan.plannedContent));
-  const containerKeys = harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
 
-  for (const key of containerKeys) {
+  for (const key of mcpConfig.jsonContainerKeys) {
     const currentServersResult = HarnessJsonObjectSchema.safeParse(currentConfig[key]);
     const plannedServersResult = HarnessJsonObjectSchema.safeParse(plannedConfig[key]);
     if (!currentServersResult.success || !plannedServersResult.success) {
@@ -2157,7 +2155,7 @@ function preserveUserOwnedServerFields(
 }
 
 function validateMutationPlan(
-  harnessId: SupportedHarnessId,
+  harnessId: HarnessId,
   targetPath: string,
   currentContent: string | null,
   plan: ConfigMutationPlan,
@@ -2174,9 +2172,13 @@ function validateMutationPlan(
     return null;
   }
 
-  if (harnessId === "codex-cli" && !targetPath.endsWith(".json")) {
-    const before = projectCodexTomlUserConfig(currentContent, RESIN_MCP_SERVER_KEYS[harnessId]);
-    const after = projectCodexTomlUserConfig(plan.plannedContent, RESIN_MCP_SERVER_KEYS[harnessId]);
+  const { mcpConfig } = getHarnessDefinition(harnessId);
+  if (mcpConfig.format === "owned-file") {
+    return null;
+  }
+  if (isTomlRegistrationPath(mcpConfig, targetPath)) {
+    const before = projectCodexTomlUserConfig(currentContent, mcpConfig.serverKey);
+    const after = projectCodexTomlUserConfig(plan.plannedContent, mcpConfig.serverKey);
     return isDeepStrictEqual(before, after)
       ? null
       : "Adapter mutation would modify user-owned Codex settings";
@@ -2189,12 +2191,11 @@ function validateMutationPlan(
     : `Adapter mutation would modify user-owned ${harnessId} settings`;
 }
 
-function projectUserOwnedJson(content: string, harnessId: SupportedHarnessId): HarnessJsonObject {
+function projectUserOwnedJson(content: string, harnessId: HarnessId): HarnessJsonObject {
   const projected = HarnessJsonObjectSchema.parse(JSON.parse(content));
-  const serverName: string = RESIN_MCP_SERVER_KEYS[harnessId];
-  const containerKeys = harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
+  const { serverKey: serverName, jsonContainerKeys } = getHarnessDefinition(harnessId).mcpConfig;
 
-  for (const key of containerKeys) {
+  for (const key of jsonContainerKeys) {
     const serversResult = HarnessJsonObjectSchema.safeParse(projected[key]);
     if (!serversResult.success) {
       continue;
@@ -2303,23 +2304,66 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause ?? "");
 }
 
-/** Codex code mode shows MCP tools to the model only when its instructions mention them. */
-async function reconcileCodexGuidance(
+/**
+ * Installs the harness's static guidance block and install extensions once its registration is
+ * configured. Codex code mode, for one, shows MCP tools to the model only when its instructions
+ * mention them.
+ */
+async function reconcileInstallArtifacts(
   result: HarnessReconciliationResult,
   options: ResolvedReconcileOptions,
 ): Promise<HarnessReconciliationResult> {
-  try {
-    const guidance = await applyCodexGuidance(
-      resolveCodexAgentsPath(options.customHome, options.env),
-      options.fsBridge,
-      { install: true, dryRun: options.dryRun },
-    );
-    return {
-      ...result,
-      guidance,
-      changed: result.changed || (!options.dryRun && guidance.action !== "unchanged"),
-    };
-  } catch (error: unknown) {
-    return { ...result, error: `Codex guidance update failed: ${describeError(error)}` };
+  const definition = getHarnessDefinition(result.harnessId);
+  let next = result;
+  const { guidance } = definition;
+  if (guidance !== undefined) {
+    try {
+      const outcome = await applyManagedBlock(
+        options.fsBridge,
+        guidance.resolvePath(options.customHome, options.env),
+        guidance.markers,
+        guidance.body,
+        { dryRun: options.dryRun },
+      );
+      next = {
+        ...next,
+        guidance: outcome,
+        changed: next.changed || (!options.dryRun && outcome.action !== "unchanged"),
+      };
+    } catch (error: unknown) {
+      return {
+        ...next,
+        error: `${definition.shortName} guidance update failed: ${describeError(error)}`,
+      };
+    }
   }
+  const outcomes: ManagedBlockResult[] = [];
+  for (const extension of definition.installExtensions ?? []) {
+    try {
+      outcomes.push(
+        ...(await extension.install({
+          home: options.customHome,
+          env: options.env,
+          fsBridge: options.fsBridge,
+          dryRun: options.dryRun,
+        })),
+      );
+    } catch (error: unknown) {
+      return {
+        ...next,
+        extensions: outcomes,
+        error: `${definition.shortName} ${extension.name} install failed: ${describeError(error)}`,
+      };
+    }
+  }
+  if (outcomes.length === 0) {
+    return next;
+  }
+  return {
+    ...next,
+    extensions: outcomes,
+    changed:
+      next.changed ||
+      (!options.dryRun && outcomes.some((outcome) => outcome.action !== "unchanged")),
+  };
 }

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
-import { defaultFsBridge } from "@resin/harness-contracts";
+import { classifyHarnessVersion, defaultFsBridge } from "@resin/harness-contracts";
 import {
   type DaemonConfig,
   DaemonConfigSchema,
@@ -12,6 +12,8 @@ import {
 } from "@resin/observer/client";
 
 export const resolveDaemonPaths = resolvePaths;
+import type { HarnessId } from "@resin/contracts";
+import { findHarnessDefinition, isSupportedHarnessId } from "../harness-registry.js";
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
@@ -49,11 +51,7 @@ import {
   selectPlatformAsset,
   verifyChannelMetadata,
 } from "./channel-verifier.js";
-import {
-  HarnessConfigOrchestrator,
-  type HarnessConfigResult,
-  type SupportedHarnessId,
-} from "./harness-config.js";
+import { HarnessConfigOrchestrator, type HarnessConfigResult } from "./harness-config.js";
 import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
 import {
@@ -613,20 +611,17 @@ export class ResinInstaller {
       this.journal.startStep("harness_discovery");
       this.log("==> Step 7/11: Discovering AI coding harnesses in workspace...");
       const orchestrator = new HarnessConfigOrchestrator();
-      let requestedHarnesses: SupportedHarnessId[] | undefined;
+      let requestedHarnesses: HarnessId[] | undefined;
       if (options.harness) {
         const values = (Array.isArray(options.harness) ? options.harness : [options.harness])
           .flatMap((value) => value.split(","))
           .map((value) => value.trim())
           .filter(Boolean);
-        const supportedHarnesses: readonly string[] = ["claude-code", "codex-cli", "omp"];
-        const unsupported = values.find((value) => !supportedHarnesses.includes(value));
+        const unsupported = values.find((value) => !isSupportedHarnessId(value));
         if (unsupported) {
           throw new Error(`Unsupported harness '${unsupported}'`);
         }
-        requestedHarnesses = values.filter(
-          (h): h is SupportedHarnessId => h === "claude-code" || h === "codex-cli" || h === "omp",
-        );
+        requestedHarnesses = values.filter(isSupportedHarnessId);
       }
 
       this.journal.completeStep("harness_discovery", {
@@ -659,6 +654,7 @@ export class ResinInstaller {
       if (!orchestrationResult.success) {
         throw new Error(orchestrationResult.error || "Failed to configure agent harnesses.");
       }
+      await this.reportUntestedHarnessVersions(orchestrationResult.results, customHome, harnessEnv);
 
       // Record rollback action in journal
       this.journal.addRollbackAction(
@@ -1001,6 +997,38 @@ export class ResinInstaller {
       harnesses: [],
       journal: loadedJournal.toJSON(),
     };
+  }
+
+  /** Registration proceeds for untested harness versions; say so, naming the tested ones. */
+  private async reportUntestedHarnessVersions(
+    results: readonly HarnessConfigResult[],
+    home: string,
+    env: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    for (const result of results) {
+      const definition = findHarnessDefinition(result.harnessId);
+      if (definition === undefined || !result.installed) continue;
+      const installation = await definition
+        .probeInstallation({
+          targetPath: result.targetPath ?? definition.mcpConfig.resolvePath(home, env),
+          home,
+          env,
+          fsBridge: this.fsBridge,
+        })
+        .catch(() => null);
+      const versionStatus = classifyHarnessVersion(
+        installation?.version,
+        definition.testedVersions,
+      );
+      if (versionStatus === "tested") continue;
+      const tested =
+        definition.testedVersions.length > 0 ? definition.testedVersions.join(", ") : "none";
+      this.log(
+        versionStatus === "unknown"
+          ? `    ${definition.displayName}: installed version unknown (tested: ${tested}); registered anyway.`
+          : `    ${definition.displayName} ${installation?.version} is untested (tested: ${tested}); registered anyway.`,
+      );
+    }
   }
 
   private log(message: string): void {

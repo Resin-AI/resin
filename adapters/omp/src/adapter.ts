@@ -26,6 +26,7 @@ import {
   verifyOmpMcpConfig,
 } from "./config-planner.js";
 import {
+  OMP_TESTED_VERSIONS,
   type OmpDiscoveryCatalog,
   type OmpDiscoveryOptions,
   type ParsedTranscript,
@@ -118,7 +119,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "omp";
   readonly name = "omp";
   readonly version = "0.1.0";
-  readonly supportedHarnessVersions: readonly string[] = ["^0.1.0", ">=0.1.0", ">=0.0.1", "*"];
+  readonly supportedHarnessVersions = OMP_TESTED_VERSIONS;
 
   private readonly fsBridge?: ConfigFsBridge;
   private discoveryOptions?: OmpDiscoveryOptions;

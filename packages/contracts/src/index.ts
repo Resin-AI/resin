@@ -67,3 +67,6 @@ export * from "./derivation-steps.js";
 export * from "./program-source-projection.js";
 export * from "./workflow-validation.js";
 export * from "./agent-arguments.js";
+
+// Harness id list (single source of truth)
+export * from "./harness-ids.js";

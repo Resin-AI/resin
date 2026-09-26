@@ -3,11 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { invokeOmpNativeTool, readConfiguredOmpServers } from "@resin/adapter-omp";
 import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
+import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-registry.js";
 import { registerRunningGateway } from "../updates/gateway-registry.js";
 
 const PackageJsonSchema = z.object({
@@ -164,29 +164,15 @@ function harnessMcpConnections(
   harnessId: string | undefined,
   cwd: string | undefined,
 ): ((name: string) => McpServerDescriptor | undefined) | undefined {
-  if (harnessId !== undefined && harnessId !== "omp") return undefined;
+  // A shim started without --harness serves whichever registered harness declares its servers.
+  const definition =
+    harnessId === undefined
+      ? HARNESS_DEFINITIONS.find((candidate) => candidate.resolveMcpServer !== undefined)
+      : findHarnessDefinition(harnessId);
+  const resolveMcpServer = definition?.resolveMcpServer;
+  if (resolveMcpServer === undefined) return undefined;
   const workspaceRoot = cwd ?? process.cwd();
-  return (name) => {
-    const server = readConfiguredOmpServers({ workspaceRoot }).find((entry) => entry.name === name);
-    if (server === undefined) return undefined;
-    const { entry } = server;
-    const transport = entry.transport ?? entry.type;
-    if (entry.command !== undefined && (transport === undefined || transport === "stdio")) {
-      return {
-        name: server.name,
-        transport: {
-          kind: "stdio",
-          command: entry.command,
-          ...(entry.args === undefined ? {} : { args: entry.args }),
-          ...(entry.env === undefined ? {} : { env: entry.env }),
-        },
-      };
-    }
-    if (entry.url !== undefined && (transport === "http" || transport === "sse")) {
-      return { name: server.name, transport: { kind: "http", url: entry.url } };
-    }
-    return undefined;
-  };
+  return (name) => resolveMcpServer(name, workspaceRoot);
 }
 
 export interface McpCommandOptions {
@@ -212,6 +198,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     return 0;
   }
 
+  const nativeToolInvoker = findHarnessDefinition(parsedArgs.harnessId)?.nativeToolInvoker;
   const shimOptions: McpStdioShimOptions = {
     standaloneFallback: parsedArgs.standaloneFallback,
     enableToolSearch: parsedArgs.enableToolSearch,
@@ -227,7 +214,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
     recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
-    ...(parsedArgs.harnessId === "omp" ? { recordedHarnessToolInvoker: invokeOmpNativeTool } : {}),
+    ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
   };
 
   const shim = options.shimFactory

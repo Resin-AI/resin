@@ -3,14 +3,15 @@ import { type Stats, constants as fsConstants, realpathSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { HarnessId } from "@resin/contracts";
 import { NodeConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
 import {
-  HARNESS_DISPLAY_NAMES,
   SUPPORTED_HARNESS_IDS,
-  type SupportedHarnessId,
-  resolveHarnessConfigPath,
-} from "./harness-config.js";
+  getHarnessDefinition,
+  isSupportedHarnessId,
+} from "../harness-registry.js";
+import { resolveHarnessConfigPath } from "./harness-config.js";
 import {
   DEFAULT_HARNESS_AUTO_REPAIR,
   type HarnessInstallationProbe,
@@ -54,20 +55,13 @@ export interface HarnessConfigHealthCache {
   readonly mtimeMs: number | null;
 }
 
-export interface HarnessHealthConfigFiles {
-  readonly "claude-code": HarnessConfigHealthCache;
-  readonly "codex-cli": HarnessConfigHealthCache;
-  readonly omp: HarnessConfigHealthCache;
-}
-
-export interface HarnessHealthConfigFileCache {
-  "claude-code": HarnessConfigHealthCache;
-  "codex-cli": HarnessConfigHealthCache;
-  omp: HarnessConfigHealthCache;
-}
+/** Config-file fingerprints keyed by harness id; a missing id reads as absent. */
+export type HarnessHealthConfigFiles = Readonly<
+  Partial<Record<HarnessId, HarnessConfigHealthCache>>
+>;
 
 export interface HarnessHealthHarnessSnapshot {
-  readonly harnessId: SupportedHarnessId;
+  readonly harnessId: HarnessId;
   readonly displayName: string;
   readonly installed: boolean;
   readonly configured: boolean;
@@ -130,8 +124,8 @@ export interface HarnessHealthCoordinatorOptions {
   readonly fsBridge?: HarnessReconcileFsBridge;
   readonly reconciler?: HarnessHealthReconciler;
   readonly probeHarness?: HarnessInstallationProbe;
-  readonly installedHarnesses?: readonly SupportedHarnessId[];
-  readonly harnesses?: readonly SupportedHarnessId[];
+  readonly installedHarnesses?: readonly HarnessId[];
+  readonly harnesses?: readonly HarnessId[];
   readonly now?: () => Date;
   readonly statFile?: HarnessConfigStatReader;
 }
@@ -140,8 +134,8 @@ export interface HarnessHealthRunOptions {
   readonly trigger?: HarnessHealthTrigger;
   readonly force?: boolean;
   readonly autoRepair?: boolean;
-  readonly installedHarnesses?: readonly SupportedHarnessId[];
-  readonly harnesses?: readonly SupportedHarnessId[];
+  readonly installedHarnesses?: readonly HarnessId[];
+  readonly harnesses?: readonly HarnessId[];
 }
 
 export type HarnessHealthRunStatus = "checked" | "debounced" | "failed";
@@ -184,7 +178,7 @@ export interface HarnessHealthScheduler {
   stop(): void;
 }
 
-const HarnessIdSchema = z.enum(SUPPORTED_HARNESS_IDS);
+const HarnessIdSchema = z.custom<HarnessId>(isSupportedHarnessId);
 const HarnessRegistrationStatusSchema = z.enum([
   "registered",
   "unregistered",
@@ -245,13 +239,7 @@ const HarnessHealthSnapshotSchema = z
     settingsDiagnostic: HarnessHealthSettingsDiagnosticSchema.optional(),
     success: z.boolean(),
     hasDrift: z.boolean(),
-    configFiles: z
-      .object({
-        "claude-code": HarnessConfigHealthCacheSchema,
-        "codex-cli": HarnessConfigHealthCacheSchema,
-        omp: HarnessConfigHealthCacheSchema,
-      })
-      .strict(),
+    configFiles: z.record(z.string(), HarnessConfigHealthCacheSchema),
     harnesses: z.array(HarnessHealthHarnessSnapshotSchema),
     lastFailure: z
       .object({
@@ -269,11 +257,11 @@ const HarnessHealthSettingsSchema = z
   })
   .strict();
 
-const EMPTY_CONFIG_CACHE = {
-  "claude-code": { present: false, mtimeMs: null },
-  "codex-cli": { present: false, mtimeMs: null },
-  omp: { present: false, mtimeMs: null },
-} as const satisfies HarnessHealthConfigFiles;
+const ABSENT_CONFIG_FILE: HarnessConfigHealthCache = { present: false, mtimeMs: null };
+
+const EMPTY_CONFIG_CACHE: HarnessHealthConfigFiles = Object.fromEntries(
+  SUPPORTED_HARNESS_IDS.map((harnessId) => [harnessId, ABSENT_CONFIG_FILE]),
+);
 
 export function resolveHarnessHealthStatePath(home = os.homedir()): string {
   return path.join(path.resolve(home), ".resin", "state", HARNESS_HEALTH_STATE_FILENAME);
@@ -311,7 +299,7 @@ export async function loadHarnessHealthSnapshot(
       ...parsed.data,
       harnesses: parsed.data.harnesses.map((snapshot) => ({
         ...snapshot,
-        displayName: HARNESS_DISPLAY_NAMES[snapshot.harnessId],
+        displayName: getHarnessDefinition(snapshot.harnessId).displayName,
       })),
     };
   } catch {
@@ -596,8 +584,8 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private readonly fsBridge: HarnessReconcileFsBridge;
   private readonly reconciler: HarnessHealthReconciler;
   private readonly probeHarness: HarnessInstallationProbe | undefined;
-  private readonly installedHarnesses: readonly SupportedHarnessId[] | undefined;
-  private readonly harnesses: readonly SupportedHarnessId[];
+  private readonly installedHarnesses: readonly HarnessId[] | undefined;
+  private readonly harnesses: readonly HarnessId[];
   private readonly now: () => Date;
   private readonly statFile: HarnessConfigStatReader;
   private inFlight: Promise<HarnessHealthRunResult> | null = null;
@@ -757,7 +745,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
         const configPath = resolveHarnessConfigPath(harnessId, this.home, this.env);
         const present = await this.fsBridge.exists(configPath);
         if (!present) {
-          return [harnessId, { present: false, mtimeMs: null }] as const;
+          return [harnessId, ABSENT_CONFIG_FILE] as const;
         }
 
         const fileStat = await this.statFile(configPath);
@@ -772,15 +760,7 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
       }),
     );
 
-    const cacheRecord: HarnessHealthConfigFileCache = {
-      "claude-code": { present: false, mtimeMs: null },
-      "codex-cli": { present: false, mtimeMs: null },
-      omp: { present: false, mtimeMs: null },
-    };
-    for (const [id, cache] of entries) {
-      cacheRecord[id] = cache;
-    }
-    return cacheRecord;
+    return Object.fromEntries(entries);
   }
 
   private async persistSnapshot(snapshot: HarnessHealthSnapshot): Promise<void> {
@@ -921,7 +901,7 @@ function sanitizeHarnessResults(
     previous?.harnesses.map((snapshot) => [snapshot.harnessId, snapshot] as const) ?? [],
   );
   const snapshots: HarnessHealthHarnessSnapshot[] = [];
-  const seen = new Set<SupportedHarnessId>();
+  const seen = new Set<HarnessId>();
 
   for (const result of report.results) {
     if (!isSupportedHarnessId(result.harnessId) || seen.has(result.harnessId)) {
@@ -946,7 +926,7 @@ function sanitizeHarnessResults(
 
     const snapshot: HarnessHealthHarnessSnapshot = {
       harnessId: result.harnessId,
-      displayName: HARNESS_DISPLAY_NAMES[result.harnessId],
+      displayName: getHarnessDefinition(result.harnessId).displayName,
       installed: result.installed,
       configured: result.configured,
       status: result.status,
@@ -963,7 +943,7 @@ function sanitizeHarnessResults(
 
 function isHarnessHealthCheckDue(
   previous: HarnessHealthSnapshot,
-  configFiles: Readonly<Record<SupportedHarnessId, HarnessConfigHealthCache>>,
+  configFiles: HarnessHealthConfigFiles,
   autoRepair: boolean,
   settingsDiagnostic: HarnessHealthSettingsDiagnostic | undefined,
   nowMs: number,
@@ -988,14 +968,10 @@ function configFilesChanged(
   current: HarnessHealthConfigFiles,
 ): boolean {
   return SUPPORTED_HARNESS_IDS.some((harnessId) => {
-    const before = previous[harnessId];
-    const after = current[harnessId];
+    const before = previous[harnessId] ?? ABSENT_CONFIG_FILE;
+    const after = current[harnessId] ?? ABSENT_CONFIG_FILE;
     return before.present !== after.present || before.mtimeMs !== after.mtimeMs;
   });
-}
-
-function isSupportedHarnessId(value: string): value is SupportedHarnessId {
-  return value === "claude-code" || value === "codex-cli" || value === "omp";
 }
 
 async function readNodeFileStat(filePath: string): Promise<HarnessConfigFileStat | null> {
