@@ -239,3 +239,88 @@ describe("literals inside an embedded program", () => {
     ).not.toContain(secret);
   });
 });
+
+const REPORT_COMMAND =
+  "report build --region emea --month 2025-03 --out out/emea-2025-03/summary.csv";
+const REPORT_INSTRUCTION = "Build the monthly report for region emea, month 2025-03";
+
+/** Each input candidate as `name@path`, with a span shown as the recorded text it covers. */
+function inputOffers(command: string, candidates: readonly WorkflowBindingCandidate[]) {
+  const tokens = tokenizeProgram("shell", command);
+  return candidates.flatMap((candidate) => {
+    if (candidate.proposed.kind !== "input") return [];
+    const address = programTokenPath(candidate.path);
+    if (address === undefined || address.embedded !== undefined) return [];
+    const value = String(tokens[address.token]?.value);
+    return [
+      address.span === undefined
+        ? `${candidate.proposed.name}=${value}`
+        : `${candidate.proposed.name}=${value}[${value.slice(address.span.start, address.span.end)}]`,
+    ];
+  });
+}
+
+describe("spans inside one token", () => {
+  it("offers the parts of a path that carry the command's inputs, under those inputs' names", async () => {
+    const { carrier, observed } = await recordCodexCommand(
+      "codex-span-report",
+      REPORT_INSTRUCTION,
+      REPORT_COMMAND,
+    );
+    expect(inputOffers(REPORT_COMMAND, carrier.candidates ?? []).sort()).toEqual([
+      "month=2025-03",
+      "month=out/emea-2025-03/summary.csv[2025-03]",
+      "region=emea",
+      "region=out/emea-2025-03/summary.csv[emea]",
+    ]);
+    // A span candidate names positions and inputs, never the text it covers.
+    const spans = (carrier.candidates ?? []).filter((candidate) => candidate.path.includes("span"));
+    expect(spans).toHaveLength(2);
+    expect(JSON.stringify(spans)).not.toMatch(/emea|2025/);
+
+    // The published recording carries the spans, and binding them renders a command the shell runs.
+    const recipe = recordCallsFromEvents(
+      "codex-span-report",
+      observed.map((entry) => projectEventToMetadataOnly(entry)),
+    );
+    const published = (recipe?.workflow.candidates ?? []).filter((candidate) =>
+      candidate.path.includes("span"),
+    );
+    expect(published).toHaveLength(2);
+    const tokens = tokenizeProgram("shell", REPORT_COMMAND);
+    const values: Record<string, string> = { region: "apac", month: "2026-11" };
+    const rendered = applyProgramTokenValues(
+      REPORT_COMMAND,
+      tokens,
+      new Map(),
+      "shell",
+      undefined,
+      published.map((candidate) => {
+        const address = programTokenPath(candidate.path)!;
+        return {
+          token: address.token,
+          span: address.span!,
+          value: candidate.proposed.kind === "input" ? values[candidate.proposed.name]! : "",
+        };
+      }),
+    );
+    expect(
+      spawnSync("sh", ["-c", `printf '%s\\n' ${rendered}`], { encoding: "utf8" }).stdout,
+    ).toContain("out/apac-2026-11/summary.csv\n");
+  });
+
+  it("offers no span inside a token that carries a secret", async () => {
+    const secret = "ghp_Z8r2kQ9vX4mN7pL1sT6wY3bC5dF0gH2jK8nR";
+    const command = `report build --region emea --out out/emea-${secret}/summary.csv`;
+    const { carrier } = await recordCodexCommand("codex-span-secret", REPORT_INSTRUCTION, command, [
+      secret,
+    ]);
+    const tokens = tokenizeProgram("shell", command);
+    const secretToken = tokens.findIndex((token) => token.raw.includes(secret));
+    expect(
+      (carrier.candidates ?? []).filter(
+        (candidate) => programTokenPath(candidate.path)?.token === secretToken,
+      ),
+    ).toEqual([]);
+  });
+});

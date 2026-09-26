@@ -444,6 +444,92 @@ describe("recorded workflows of ordinary calls", () => {
     expect(description).toContain("text = Belles_cookbook_store");
   });
 
+  it("shows input placeholders at span positions inside a recorded token", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const program =
+      "report build --region emea --out out/emea-2025-03/summary.csv --copy 'out/emea-2025-03/copy.csv'";
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:3", program, { workspaceId: context.workspaceId });
+    const region = { type: "input" as const, name: "region" };
+    const month = { type: "input" as const, name: "month" };
+    const installed = await installPlan(
+      {
+        id: "tool_process_span",
+        name: "wf_process_span",
+        version: "1.0.0",
+        description: "recorded program with span holes",
+        parameters: {
+          type: "object",
+          properties: { region: { type: "string" }, month: { type: "string" } },
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_span",
+        inputs: [
+          { name: "region", type: "string", recordedDefault: true },
+          { name: "month", type: "string", recordedDefault: true },
+        ],
+        privateReferences: ["private:sess:3"],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_1",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "program",
+                    language: "shell",
+                    source: { type: "private", reference: "private:sess:3" },
+                    holes: [
+                      { token: 3, binding: region },
+                      { token: 5, span: { start: 4, end: 8 }, binding: region },
+                      { token: 5, span: { start: 9, end: 16 }, binding: month },
+                      { token: 7, span: { start: 9, end: 16 }, binding: month },
+                    ],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toContain(
+      "report build --region {region} --out out/{region}-{month}/summary.csv --copy 'out/emea-{month}/copy.csv'",
+    );
+    expect(description).toContain("month = 2025-03");
+  });
+
   it("refuses to run a recorded program the manifest does not grant", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const context = resolveWorkspaceContext({ cwd: workspaceDir });

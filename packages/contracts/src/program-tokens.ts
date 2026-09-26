@@ -503,7 +503,11 @@ function pythonStringParts(
   };
 }
 
-function decodePythonString(raw: string): { value?: string; quote: string; bindable: boolean } {
+function decodePythonString(raw: string): {
+  value?: string;
+  quote: string;
+  bindable: boolean;
+} {
   const parts = pythonStringParts(raw);
   if (parts === undefined || parts.prefix.includes("b")) {
     return { quote: parts?.quote ?? "'", bindable: false };
@@ -597,9 +601,10 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
   if (parseError !== undefined) throw new ProgramTokenizationError(language, parseError.from);
 
   const tokens: ProgramToken[] = [];
-  const pending: Array<{ node: ProgramSyntaxNode; parent: ProgramSyntaxNode | null }> = [
-    { node: tree.topNode, parent: null },
-  ];
+  const pending: Array<{
+    node: ProgramSyntaxNode;
+    parent: ProgramSyntaxNode | null;
+  }> = [{ node: tree.topNode, parent: null }];
   while (pending.length > 0) {
     const { node, parent } = pending.pop()!;
     const raw = source.slice(node.from, node.to);
@@ -1223,29 +1228,104 @@ export type EmbeddedProgramTokenValues = ReadonlyMap<
   ReadonlyMap<number, ProgramTokenValue>
 >;
 
+/** Half-open UTF-16 offsets into a token's decoded `value`; never the whole value. */
+export interface ProgramTokenSpan {
+  start: number;
+  end: number;
+}
+
+/** A token a hole or candidate addresses, optionally narrowed to a span of its decoded value. */
+export interface ProgramTokenAddress {
+  token: number;
+  embedded?: number;
+  span?: ProgramTokenSpan;
+}
+
+/** A value bound to a span of one recorded string token (top-level, or embedded with `embedded`). */
+export interface ProgramTokenSpanValue {
+  token: number;
+  embedded?: number;
+  span: ProgramTokenSpan;
+  value: ProgramTokenValue;
+}
+
 /**
  * The program token a candidate path addresses: `["tokens", token]` for a top-level token, or
- * `["tokens", anchor, "embedded", index]` for a token of the program embedded at `anchor`.
+ * `["tokens", anchor, "embedded", index]` for a token of the program embedded at `anchor`, either
+ * optionally followed by `"span", start, end` to address part of the token's decoded value.
  * Undefined for any other shape.
  */
 export function programTokenPath(
   path: ReadonlyArray<string | number>,
-): { token: number; embedded?: number } | undefined {
+): ProgramTokenAddress | undefined {
   const index = (part: unknown): part is number =>
     typeof part === "number" && Number.isInteger(part) && part >= 0;
   if (path[0] !== "tokens" || !index(path[1])) return undefined;
-  if (path.length === 2) return { token: path[1] };
-  if (path.length === 4 && path[2] === "embedded" && index(path[3])) {
-    return { token: path[1], embedded: path[3] };
+  let rest = path.slice(2);
+  let embedded: number | undefined;
+  if (rest[0] === "embedded") {
+    if (!index(rest[1])) return undefined;
+    embedded = rest[1];
+    rest = rest.slice(2);
   }
-  return undefined;
+  let span: ProgramTokenSpan | undefined;
+  if (rest.length > 0) {
+    if (rest.length !== 3 || rest[0] !== "span" || !index(rest[1]) || !index(rest[2])) {
+      return undefined;
+    }
+    if (rest[1] >= rest[2]) return undefined;
+    span = { start: rest[1], end: rest[2] };
+  }
+  return {
+    token: path[1],
+    ...(embedded === undefined ? {} : { embedded }),
+    ...(span === undefined ? {} : { span }),
+  };
+}
+
+/** Whether `span` is a proper, in-range part of a recorded token value of `length` characters. */
+export function programTokenSpanFits(span: ProgramTokenSpan, length: number): boolean {
+  return (
+    Number.isInteger(span.start) &&
+    Number.isInteger(span.end) &&
+    span.start >= 0 &&
+    span.start < span.end &&
+    span.end <= length &&
+    !(span.start === 0 && span.end === length)
+  );
+}
+
+/**
+ * The recorded token value with each span replaced by its bound value as text. Spans must fit the
+ * value, never cover all of it, and never overlap; only strings and finite numbers become text.
+ */
+export function composeProgramTokenSpans(
+  recorded: string,
+  spans: ReadonlyArray<{ span: ProgramTokenSpan; value: ProgramTokenValue }>,
+): string {
+  const ordered = [...spans].sort((left, right) => right.span.start - left.span.start);
+  let composed = recorded;
+  let limit = recorded.length;
+  for (const { span, value } of ordered) {
+    if (!programTokenSpanFits(span, recorded.length)) {
+      throw new Error("a span hole does not fit inside the recorded token value");
+    }
+    if (span.end > limit) throw new Error("the span holes of one token overlap");
+    limit = span.start;
+    let text: string;
+    if (typeof value === "string") text = value;
+    else if (typeof value === "number" && Number.isFinite(value)) text = String(value);
+    else throw new TypeError("a span hole requires a string or finite number");
+    composed = composed.slice(0, span.start) + text + composed.slice(span.end);
+  }
+  return composed;
 }
 
 /** The value a token address reads in a program text, when that token is safely bindable. */
 export function programTokenValueAt(
   language: ProgramLanguage,
   source: string,
-  address: { token: number; embedded?: number },
+  address: ProgramTokenAddress,
 ): ProgramTokenValue | undefined {
   const token =
     address.embedded === undefined
@@ -1255,7 +1335,42 @@ export function programTokenValueAt(
             address.embedded
           ]
         : undefined;
-  return token?.bindable ? token.value : undefined;
+  if (!token?.bindable) return undefined;
+  if (address.span === undefined) return token.value;
+  if (typeof token.value !== "string" || !programTokenSpanFits(address.span, token.value.length)) {
+    return undefined;
+  }
+  return token.value.slice(address.span.start, address.span.end);
+}
+
+/**
+ * The value a demonstration supplied for a span hole: the held-out token at the same address must
+ * keep the recorded token's text before `start` and after `end`, and the text between them is the
+ * demonstrated value. Undefined when the demonstration cannot decide it (other prefix or suffix, a
+ * missing or non-string token, or an address without a span).
+ */
+export function demonstratedProgramTokenSpanValue(
+  language: ProgramLanguage,
+  recordedSource: string,
+  demonstratedSource: string,
+  address: ProgramTokenAddress,
+): string | undefined {
+  if (address.span === undefined) return undefined;
+  const whole = { token: address.token, embedded: address.embedded };
+  const recorded = programTokenValueAt(language, recordedSource, whole);
+  const demonstrated = programTokenValueAt(language, demonstratedSource, whole);
+  if (typeof recorded !== "string" || typeof demonstrated !== "string") return undefined;
+  if (!programTokenSpanFits(address.span, recorded.length)) return undefined;
+  const prefix = recorded.slice(0, address.span.start);
+  const suffix = recorded.slice(address.span.end);
+  if (
+    demonstrated.length <= prefix.length + suffix.length ||
+    !demonstrated.startsWith(prefix) ||
+    !demonstrated.endsWith(suffix)
+  ) {
+    return undefined;
+  }
+  return demonstrated.slice(prefix.length, demonstrated.length - suffix.length);
 }
 
 /**
@@ -1282,6 +1397,10 @@ export function embeddedProgramIsProtected(
  * A token index outside the tokenized program, an unknown anchor, or replacements that overlap are
  * refused rather than approximated: a plan that does not describe the program it is run against
  * must fail, never run something else.
+ *
+ * `spans` binds parts of recorded string tokens: each (token, embedded) group becomes the recorded
+ * value with its spans replaced, rendered exactly as a whole-token value would be. A token bound both
+ * whole and by span is refused.
  */
 export function applyProgramTokenValues(
   source: string,
@@ -1289,7 +1408,48 @@ export function applyProgramTokenValues(
   values: ReadonlyMap<number, ProgramTokenValue>,
   language: ProgramLanguage = "shell",
   embedded?: EmbeddedProgramTokenValues,
+  spans?: readonly ProgramTokenSpanValue[],
 ): string {
+  if (spans !== undefined && spans.length > 0) {
+    const groups = new Map<string, ProgramTokenSpanValue[]>();
+    for (const span of spans) {
+      const key = `${span.token}.${span.embedded ?? ""}`;
+      groups.set(key, [...(groups.get(key) ?? []), span]);
+    }
+    const topLevel = new Map(values);
+    const nested = new Map<number, Map<number, ProgramTokenValue>>(
+      [...(embedded ?? [])].map(([anchor, each]) => [anchor, new Map(each)]),
+    );
+    const programs = spans.some((span) => span.embedded !== undefined)
+      ? language === "shell"
+        ? embeddedPrograms(source)
+        : undefined
+      : [];
+    if (programs === undefined) throw new Error("only a shell program embeds other programs");
+    for (const group of groups.values()) {
+      const { token: tokenIndex, embedded: embeddedIndex } = group[0]!;
+      const token =
+        embeddedIndex === undefined
+          ? tokens[tokenIndex]
+          : programs.find((each) => each.anchor === tokenIndex)?.tokens[embeddedIndex];
+      if (token === undefined) {
+        throw new Error(
+          `the recorded program has no token ${tokenIndex}; its shape does not match the plan`,
+        );
+      }
+      if (!token.bindable || typeof token.value !== "string") {
+        throw new Error("only a bindable string token can take span holes");
+      }
+      const target =
+        embeddedIndex === undefined
+          ? topLevel
+          : (nested.get(tokenIndex) ?? nested.set(tokenIndex, new Map()).get(tokenIndex)!);
+      const index = embeddedIndex ?? tokenIndex;
+      if (target.has(index)) throw new Error("a token is bound both whole and by span");
+      target.set(index, composeProgramTokenSpans(token.value, group));
+    }
+    return applyProgramTokenValues(source, tokens, topLevel, language, nested);
+  }
   const replacements: Array<{ start: number; end: number; text: string }> = [];
   for (const [tokenIndex, value] of values) {
     const token = tokens[tokenIndex];
@@ -1356,6 +1516,8 @@ export function applyProgramTokenValues(
  * will render it.
  *
  * With `embedded`, the bound token is token `embedded` of the program anchored at top-level `token`.
+ * With `span`, only that part of the (string) token's recorded value is bound; a span that overlaps
+ * another span hole of the token, or a span and a whole-token hole on one token, is refused.
  */
 export function bindProgramToken(
   source: WorkflowValueTemplate,
@@ -1363,6 +1525,7 @@ export function bindProgramToken(
   token: number,
   binding: WorkflowValueTemplate,
   embedded?: number,
+  span?: ProgramTokenSpan,
 ): WorkflowValueTemplate {
   // Private sources remain opaque until host materialization; validate any available literal now.
   const literal = source.type === "program" ? source.source : source;
@@ -1370,38 +1533,78 @@ export function bindProgramToken(
   if (embedded !== undefined && recordedLanguage !== "shell") {
     throw new Error("only a shell program embeds other programs");
   }
+  if (
+    span !== undefined &&
+    (!Number.isInteger(span.start) ||
+      !Number.isInteger(span.end) ||
+      span.start < 0 ||
+      span.start >= span.end)
+  ) {
+    throw new Error("a span hole needs integer offsets with start before end");
+  }
   if (literal.type === "literal" && typeof literal.value === "string") {
     const topLevel = tokenizeProgram(recordedLanguage, literal.value);
+    let recorded: ProgramToken | undefined;
     if (embedded === undefined) {
-      if (!topLevel[token]?.bindable) {
+      recorded = topLevel[token];
+      if (!recorded?.bindable) {
         throw new Error("the recorded program token is not safely bindable");
       }
     } else {
       const program = embeddedPrograms(literal.value).find((each) => each.anchor === token);
+      recorded = program?.tokens[embedded];
       if (
         program === undefined ||
-        !program.tokens[embedded]?.bindable ||
+        !recorded?.bindable ||
         (source.type === "program" &&
           embeddedProgramIsProtected(program, topLevel, source.protectedTokens ?? []))
       ) {
         throw new Error("the embedded program token is not safely bindable");
       }
     }
+    if (
+      span !== undefined &&
+      (typeof recorded.value !== "string" || !programTokenSpanFits(span, recorded.value.length))
+    ) {
+      throw new Error("a span hole does not fit inside the recorded token value");
+    }
   }
+  const hole =
+    embedded === undefined
+      ? { token, ...(span === undefined ? {} : { span: { ...span } }), binding }
+      : {
+          token,
+          embedded,
+          ...(span === undefined ? {} : { span: { ...span } }),
+          binding,
+        };
   if (source.type !== "program") {
-    return {
-      type: "program",
-      language,
-      source,
-      holes: [embedded === undefined ? { token, binding } : { token, embedded, binding }],
-    };
+    return { type: "program", language, source, holes: [hole] };
   }
   // A program template already carries the language its record established; a caller that disagrees
   // would be describing another program, so the recorded one wins.
-  const holes = source.holes.filter((hole) => hole.token !== token || hole.embedded !== embedded);
-  holes.push(embedded === undefined ? { token, binding } : { token, embedded, binding });
+  const holes = source.holes.filter(
+    (each) =>
+      each.token !== token ||
+      each.embedded !== embedded ||
+      each.span?.start !== span?.start ||
+      each.span?.end !== span?.end,
+  );
+  for (const each of holes) {
+    if (each.token !== token || each.embedded !== embedded) continue;
+    if (span === undefined || each.span === undefined) {
+      throw new Error("a token cannot carry both a whole-token hole and span holes");
+    }
+    if (each.span.start < span.end && span.start < each.span.end) {
+      throw new Error("the span holes of one token overlap");
+    }
+  }
+  holes.push(hole);
   holes.sort(
-    (left, right) => left.token - right.token || (left.embedded ?? -1) - (right.embedded ?? -1),
+    (left, right) =>
+      left.token - right.token ||
+      (left.embedded ?? -1) - (right.embedded ?? -1) ||
+      (left.span?.start ?? -1) - (right.span?.start ?? -1),
   );
   return { ...source, holes };
 }

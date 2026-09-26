@@ -8,6 +8,7 @@
 
 import {
   type ProgramToken,
+  type ProgramTokenSpanValue,
   type RecordedWorkflow,
   type WorkflowJsonValue,
   type WorkflowProgramIdentity,
@@ -116,7 +117,19 @@ async function identityForProgram(
   const programs = template.holes.some((hole) => hole.embedded !== undefined)
     ? embeddedPrograms(source)
     : [];
+  const spans: ProgramTokenSpanValue[] = [];
   for (const hole of template.holes) {
+    if (hole.span !== undefined) {
+      // The span is part of the identity: the sentinel names the token and both offsets.
+      const at = hole.embedded === undefined ? `${hole.token}` : `${hole.token}_${hole.embedded}`;
+      spans.push({
+        token: hole.token,
+        ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
+        span: hole.span,
+        value: `__resin_program_hole_${at}_${hole.span.start}_${hole.span.end}__`,
+      });
+      continue;
+    }
     if (hole.embedded === undefined) {
       values.set(hole.token, sentinel(tokens[hole.token], String(hole.token)));
       continue;
@@ -127,7 +140,14 @@ async function identityForProgram(
     program.set(hole.embedded, sentinel(token, `${hole.token}_${hole.embedded}`));
     embedded.set(hole.token, program);
   }
-  const rendered = applyProgramTokenValues(source, tokens, values, template.language, embedded);
+  const rendered = applyProgramTokenValues(
+    source,
+    tokens,
+    values,
+    template.language,
+    embedded,
+    spans,
+  );
   return {
     stepId,
     argument,

@@ -33,6 +33,7 @@ import {
   embeddedProgramIsProtected,
   embeddedPrograms,
   programTokenPath,
+  programTokenValueAt,
   readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -1511,12 +1512,34 @@ function unprotectedCandidates(
     safeEmbedded.set(anchor, safe);
     return safe;
   };
+  // A span keeps the rest of its token as recorded text, so a token that held a secret (or its
+  // redaction placeholder) is never split, whatever the projection says about the whole token.
+  const spanTokenIsSafe = (address: { token: number; embedded?: number }): boolean => {
+    if (program === undefined || typeof original !== "string") return false;
+    let value: unknown;
+    try {
+      value = programTokenValueAt(program.kind, original, address);
+    } catch {
+      return false;
+    }
+    if (typeof value !== "string" || containsRedactionPlaceholder(value)) return false;
+    const scrubbed = redactLocalWorkflowProgramSource(event, value);
+    return scrubbed !== undefined && !scrubbed.changed;
+  };
   return candidates.filter((candidate) => {
     if (candidate.argument !== program?.argument) return true;
     const address = programTokenPath(candidate.path);
     if (address === undefined) return true;
     if (protectedTokens.includes(address.token)) return false;
-    return address.embedded === undefined || embeddedIsSafe(address.token);
+    if (address.embedded !== undefined && !embeddedIsSafe(address.token)) return false;
+    return (
+      address.span === undefined ||
+      spanTokenIsSafe(
+        address.embedded === undefined
+          ? { token: address.token }
+          : { token: address.token, embedded: address.embedded },
+      )
+    );
   });
 }
 

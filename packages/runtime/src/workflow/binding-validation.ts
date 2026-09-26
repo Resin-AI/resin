@@ -26,6 +26,7 @@ import {
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   bindProgramToken,
+  demonstratedProgramTokenSpanValue,
   programTokenPath,
   programTokenValueAt,
 } from "@resin/contracts";
@@ -220,6 +221,7 @@ function bindCandidateLeaf(
         address.token,
         proposedTemplate(candidate),
         address.embedded,
+        address.span,
       ),
     };
     return true;
@@ -276,7 +278,10 @@ function bindEveryCandidate(
   plan: RecordedWorkflow,
   candidates: readonly WorkflowBindingCandidate[],
   environment: CandidateValidationEnvironment,
-): { plan: RecordedWorkflow; unaddressable: Map<WorkflowBindingCandidate, string> } {
+): {
+  plan: RecordedWorkflow;
+  unaddressable: Map<WorkflowBindingCandidate, string>;
+} {
   const bound = structuredClone(plan);
   const unaddressable = new Map<WorkflowBindingCandidate, string>();
   for (const candidate of candidates) {
@@ -516,17 +521,47 @@ async function evaluateCandidate(
  * outside it. The candidate is then left without a value and refused for exactly that reason,
  * rather than bound to a guess.
  */
-function demonstratedTokenValue(
+async function demonstratedTokenValue(
   plan: RecordedWorkflow,
   candidate: WorkflowBindingCandidate,
   supplied: WorkflowJsonValue,
-): ProgramTokenValue | undefined {
+  resolve: (reference: string) => Promise<WorkflowJsonValue>,
+): Promise<ProgramTokenValue | undefined> {
   const address = programTokenPath(candidate.path);
   if (address === undefined) return undefined;
-  const program = plan.steps.find((entry) => entry.id === candidate.stepId)?.callable.program;
+  const step = plan.steps.find((entry) => entry.id === candidate.stepId);
+  const program = step?.callable.program;
   if (program === undefined || program.argument !== candidate.argument) return undefined;
   if (typeof supplied !== "string") return undefined;
-  return programTokenValueAt(program.kind, supplied, address);
+  if (address.span === undefined) return programTokenValueAt(program.kind, supplied, address);
+  // A span is read against the recorded token: the demonstration decides it only when it keeps
+  // the recorded text around the span.
+  const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
+  const recorded =
+    argument === undefined ? undefined : await recordedProgramText(argument.source, resolve);
+  if (typeof recorded !== "string") return undefined;
+  return demonstratedProgramTokenSpanValue(program.kind, recorded, supplied, address);
+}
+
+/** The recorded program text an argument holds, resolving private text locally. */
+async function recordedProgramText(
+  source: WorkflowValueSource | WorkflowValueTemplate,
+  resolve: (reference: string) => Promise<WorkflowJsonValue>,
+): Promise<WorkflowJsonValue | undefined> {
+  if ("kind" in source) {
+    if (source.kind === "literal") return source.value;
+    if (source.kind === "private") return resolve(source.reference);
+    if (source.kind === "template") return recordedProgramText(source.template, resolve);
+    return undefined;
+  }
+  if (source.type === "literal") return source.value;
+  if (source.type === "private") return resolve(source.reference);
+  if (source.type === "program") {
+    return source.sourceReference === undefined
+      ? recordedProgramText(source.source, resolve)
+      : resolve(source.sourceReference);
+  }
+  return undefined;
 }
 
 /**
@@ -652,7 +687,7 @@ export async function demonstrationEnvironment(params: {
     const supplied = await resolveOnce(entry.reference);
     const value =
       candidate.path[0] === "tokens"
-        ? demonstratedTokenValue(params.plan, candidate, supplied)
+        ? await demonstratedTokenValue(params.plan, candidate, supplied, resolveOnce)
         : demonstratedValueAtPath(supplied, candidate.path);
     const name = candidate.proposed.name;
     if (
@@ -783,7 +818,10 @@ export async function confirmPromotedPlan(params: {
 }> {
   const rounds = params.maxRounds ?? Math.max(1, params.accepted.length);
   let accepted = [...params.accepted];
-  const dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }> = [];
+  const dropped: Array<{
+    candidate: WorkflowBindingCandidate;
+    reason: string;
+  }> = [];
   let plan = applyAcceptedBindings(params.plan, accepted);
   let replay = await replayPlanOnce(plan, params.environment);
   // True when the replay missed a step no accepted proposal decided, so nothing withdrawn here

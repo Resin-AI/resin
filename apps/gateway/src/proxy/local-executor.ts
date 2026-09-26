@@ -576,17 +576,44 @@ export class LocalArtifactExecutor {
             : programs.find((program) => program.anchor === hole.token)?.tokens[hole.embedded];
         return hole.binding.type === "input" &&
           token !== undefined &&
-          recorded.slice(token.start, token.end) === token.raw
-          ? [{ token, name: hole.binding.name }]
+          recorded.slice(token.start, token.end) === token.raw &&
+          (hole.span === undefined ||
+            (typeof token.value === "string" && hole.span.end <= token.value.length))
+          ? [{ token, name: hole.binding.name, span: hole.span }]
           : [];
       });
+      // Span holes show `{input}` inside their token's recorded text: at the same offsets of the
+      // raw text when the value appears there verbatim, else inside the decoded value.
+      const shownTokens = new Map<(typeof tokens)[number], string>();
+      for (const { token, name, span } of bound) {
+        if (span === undefined) {
+          shownTokens.set(token, `{${name}}`);
+          continue;
+        }
+        const value = token.value as string;
+        const spans = bound
+          .filter((each) => each.token === token && each.span !== undefined)
+          .sort((left, right) => right.span!.start - left.span!.start);
+        if (shownTokens.has(token)) continue;
+        const offset = token.raw.indexOf(value);
+        let shown = offset >= 0 ? token.raw : value;
+        const base = offset >= 0 ? offset : 0;
+        for (const each of spans) {
+          shown = `${shown.slice(0, base + each.span!.start)}{${each.name}}${shown.slice(base + each.span!.end)}`;
+        }
+        shownTokens.set(token, shown);
+      }
       let text = recorded;
-      for (const { token, name } of [...bound].sort((a, b) => b.token.start - a.token.start)) {
-        text = `${text.slice(0, token.start)}{${name}}${text.slice(token.end)}`;
+      for (const [token, shown] of [...shownTokens].sort((a, b) => b[0].start - a[0].start)) {
+        text = `${text.slice(0, token.start)}${shown}${text.slice(token.end)}`;
       }
       return {
         text,
-        parameters: bound.map(({ token, name }) => `${name} = ${token.value ?? token.raw}`),
+        parameters: bound.map(({ token, name, span }) =>
+          span === undefined
+            ? `${name} = ${token.value ?? token.raw}`
+            : `${name} = ${(token.value as string).slice(span.start, span.end)}`,
+        ),
       };
     };
     const steps: string[] = [];
@@ -638,7 +665,11 @@ export class LocalArtifactExecutor {
     });
   }
 
-  canExecute(entry: { toolId: string; version?: string; artifactDigest?: string }): boolean {
+  canExecute(entry: {
+    toolId: string;
+    version?: string;
+    artifactDigest?: string;
+  }): boolean {
     if (!entry || !entry.artifactDigest) {
       return false;
     }
@@ -718,7 +749,11 @@ export class LocalArtifactExecutor {
     const maxBytes = DEFAULT_BUNDLE_LIMITS.maxBundleSizeBytes ?? 50 * 1024 * 1024;
     const maxSingleFileBytes = DEFAULT_BUNDLE_LIMITS.maxFileSizeBytes ?? 10 * 1024 * 1024;
 
-    const filesToArchive: Array<{ path: string; content: Buffer; executable: boolean }> = [];
+    const filesToArchive: Array<{
+      path: string;
+      content: Buffer;
+      executable: boolean;
+    }> = [];
     let totalSizeBytes = 0;
 
     const collectFiles = (currentDir: string, relBase = ""): boolean => {
@@ -976,7 +1011,10 @@ export class LocalArtifactExecutor {
     if (fs.existsSync(metaPath)) {
       try {
         const metaContent = fs.readFileSync(metaPath, "utf8");
-        const meta = JSON.parse(metaContent) as { digest?: string; verified?: boolean };
+        const meta = JSON.parse(metaContent) as {
+          digest?: string;
+          verified?: boolean;
+        };
         if (meta.digest) {
           const normMeta = normalizeSha256(meta.digest, false);
           const normEntry = normalizeSha256(entry.artifactDigest, false);

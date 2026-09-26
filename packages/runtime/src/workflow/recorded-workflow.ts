@@ -19,6 +19,7 @@ import {
 } from "@resin/contracts";
 import type {
   ProgramToken,
+  ProgramTokenSpanValue,
   RecordedWorkflow,
   WorkflowJsonValue,
   WorkflowStep,
@@ -309,12 +310,29 @@ async function buildTemplate(
       }
       const values = new Map<number, string | number | boolean | null>();
       const embedded = new Map<number, Map<number, string | number | boolean | null>>();
+      const spans: ProgramTokenSpanValue[] = [];
       for (const hole of template.holes) {
         // An omitted recorded-default input leaves the token exactly as the recording ran it.
         if (hole.binding.type === "input" && !Object.hasOwn(options.inputs, hole.binding.name)) {
           continue;
         }
         const bound = await resolveLeaf(hole.binding);
+        if (hole.span !== undefined) {
+          if (typeof bound !== "string" && typeof bound !== "number") {
+            throw new WorkflowBindingError(
+              "a span hole needs a string or number value",
+              step.id,
+              argumentName,
+            );
+          }
+          spans.push({
+            token: hole.token,
+            ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
+            span: hole.span,
+            value: bound,
+          });
+          continue;
+        }
         const value =
           typeof bound === "string" ||
           typeof bound === "number" ||
@@ -331,11 +349,15 @@ async function buildTemplate(
         }
       }
       const shellTokens = tokens ?? tokenizeProgram(template.language, text);
-      if (embedded.size > 0 && template.protectedTokens !== undefined) {
+      const embeddedAnchors = new Set([
+        ...embedded.keys(),
+        ...spans.flatMap((span) => (span.embedded === undefined ? [] : [span.token])),
+      ]);
+      if (embeddedAnchors.size > 0 && template.protectedTokens !== undefined) {
         const protectedTokens = template.protectedTokens;
         for (const program of embeddedPrograms(text)) {
           if (
-            embedded.has(program.anchor) &&
+            embeddedAnchors.has(program.anchor) &&
             embeddedProgramIsProtected(program, shellTokens, protectedTokens)
           ) {
             throw new WorkflowBindingError(
@@ -346,7 +368,7 @@ async function buildTemplate(
           }
         }
       }
-      return applyProgramTokenValues(text, shellTokens, values, template.language, embedded);
+      return applyProgramTokenValues(text, shellTokens, values, template.language, embedded, spans);
     }
     default: {
       const exhaustive: never = template;

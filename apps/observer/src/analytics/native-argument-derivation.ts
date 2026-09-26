@@ -31,6 +31,7 @@ import {
   type WorkflowJsonValue,
   type WorkflowValuePath,
   embeddedPrograms,
+  programTokenPath,
   tokenizeProgram,
 } from "@resin/contracts";
 
@@ -86,6 +87,8 @@ const MAX_CANDIDATES = 256;
 
 /** Values one program call may offer as optional inputs, so a long command stays a short schema. */
 const MAX_PROGRAM_INPUTS_PER_CALL = 6;
+/** Span candidates offered inside one token. */
+const MAX_SPAN_CANDIDATES_PER_TOKEN = 3;
 
 /** The longest program value offered as an input; longer text is program, not a parameter. */
 const MAX_PROGRAM_INPUT_LENGTH = 256;
@@ -289,14 +292,20 @@ export function deriveNativeCalls(
   const sharedEmbedded = sharedEmbeddedStrings(calls);
 
   for (const [index, call] of calls.entries()) {
-    const argumentLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+    const argumentLeaves: Array<{
+      path: WorkflowValuePath;
+      value: CandidateScalar;
+    }> = [];
     for (const [argument, value] of Object.entries(call.arguments)) {
       scalarLeaves(value, [argument], argumentLeaves);
     }
     for (const leaf of argumentLeaves) seen.add(scalarKey(leaf.value));
     seenBeforeResult.push(new Set(seen));
 
-    const resultLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+    const resultLeaves: Array<{
+      path: WorkflowValuePath;
+      value: CandidateScalar;
+    }> = [];
     scalarLeaves(call.result, [], resultLeaves);
     resultValues.push(new Set(resultLeaves.map((leaf) => scalarKey(leaf.value))));
     for (const leaf of resultLeaves) seen.add(scalarKey(leaf.value));
@@ -492,6 +501,141 @@ export function deriveNativeCalls(
           }
         }
       }
+
+      // Part of a token can carry an input: `out/emea-2025-03/summary.csv` holds the region and
+      // month the command also ran with. A span is offered at segment boundaries for a value this
+      // workflow already offers as an input (the token then follows that input instead of being an
+      // input of its own), or for a request word, when nothing offers the token whole.
+      const spanTargets: Array<{
+        token: ProgramToken & { value: string };
+        path: WorkflowValuePath;
+      }> = [];
+      for (const [tokenIndex, token] of tokens.entries()) {
+        if (token.start >= bodyStart) break;
+        const position = positions?.[tokenIndex];
+        if (positions !== undefined && (position === undefined || position === 0)) continue;
+        if (!isProgramValue(call.program.kind, token, tokens[tokenIndex - 1], true)) continue;
+        spanTargets.push({ token, path: ["tokens", tokenIndex] });
+      }
+      if (call.program.kind === "shell") {
+        for (const program of embeddedPrograms(text)) {
+          for (const [embeddedIndex, token] of program.tokens.entries()) {
+            if (!token.bindable || token.kind !== "string" || typeof token.value !== "string") {
+              continue;
+            }
+            spanTargets.push({
+              token: token as ProgramToken & { value: string },
+              path: ["tokens", program.anchor, "embedded", embeddedIndex],
+            });
+          }
+        }
+      }
+      const inputValues = [...programInputs.keys()].flatMap((key) => {
+        const [type, value] = JSON.parse(key) as [string, unknown];
+        return type === "string" && typeof value === "string" && value.length > 0 ? [value] : [];
+      });
+      for (const target of spanTargets) {
+        if (inputCandidates.length >= MAX_CANDIDATES) break;
+        const value = target.token.value;
+        const pathKey = JSON.stringify(target.path);
+        const wholeIndex = inputCandidates.findIndex(
+          (candidate) =>
+            candidate.stepId === call.stepId &&
+            candidate.argument === call.program!.argument &&
+            JSON.stringify(candidate.path) === pathKey,
+        );
+        const needles = [
+          ...inputValues.map((needle) => ({ needle, input: true })),
+          ...[...requestWords]
+            .filter((word) => word.length >= 3)
+            .map((needle) => ({ needle, input: false })),
+        ];
+        const matches: Array<{
+          start: number;
+          end: number;
+          needle: string;
+          input: boolean;
+        }> = [];
+        for (const { needle, input } of needles) {
+          if (needle.length >= value.length) continue;
+          for (let at = value.indexOf(needle); at >= 0; at = value.indexOf(needle, at + 1)) {
+            const end = at + needle.length;
+            // A segment ends at the token's edge or at a character outside identifiers: `_` joins
+            // words (`day_of_year`), so it never separates a segment.
+            if (/\w/.test(value[at - 1] ?? "") || /\w/.test(value[end] ?? "")) {
+              continue;
+            }
+            matches.push({ start: at, end, needle, input });
+          }
+        }
+        // Inputs first, then longer values; overlapping occurrences keep the first chosen.
+        matches.sort(
+          (left, right) =>
+            Number(right.input) - Number(left.input) ||
+            right.end - right.start - (left.end - left.start) ||
+            left.start - right.start,
+        );
+        const chosen: typeof matches = [];
+        for (const match of matches) {
+          if (chosen.length >= MAX_SPAN_CANDIDATES_PER_TOKEN) break;
+          if (chosen.some((other) => other.start < match.end && match.start < other.end)) continue;
+          chosen.push(match);
+        }
+        if (chosen.length === 0) continue;
+        // A token a result may have produced is decided by that evidence, not split into parts.
+        if (
+          candidates.some(
+            (candidate) =>
+              candidate.stepId === call.stepId && JSON.stringify(candidate.path) === pathKey,
+          )
+        ) {
+          continue;
+        }
+        // A token offered whole stays whole unless an input it carries says where it came from.
+        if (wholeIndex >= 0) {
+          if (!chosen.some((match) => match.input)) continue;
+          inputCandidates.splice(wholeIndex, 1);
+        }
+        chosen.sort((left, right) => left.start - right.start);
+        for (const match of chosen) {
+          if (inputCandidates.length >= MAX_CANDIDATES) break;
+          const key = scalarKey(match.needle);
+          let name = programInputs.get(key);
+          if (name === undefined) {
+            if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
+            const base = programInputBaseName(match.needle, undefined);
+            name = base;
+            for (let suffix = 2; programInputNames.has(name); suffix += 1)
+              name = `${base}_${suffix}`;
+            programInputs.set(key, name);
+            programInputNames.add(name);
+          } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
+            continue;
+          }
+          offered.add(name);
+          const address = programTokenPath(target.path)!;
+          inputCandidates.push({
+            stepId: call.stepId,
+            argument: call.program.argument,
+            path: [...target.path, "span", match.start, match.end],
+            proposed: {
+              kind: "input",
+              name,
+              type: "string",
+              recordedDefault: true,
+            },
+            reason: "native-data-argument",
+            evidence: {
+              tokens: tokens.length,
+              token: address.token,
+              ...(address.embedded === undefined ? {} : { embedded: address.embedded }),
+              span: [match.start, match.end],
+            },
+            missing:
+              "one recording does not establish that this part of the value varies; omitted, the input keeps the recorded value",
+          });
+        }
+      }
     }
   }
 
@@ -527,7 +671,10 @@ function producersOfValue(
   for (let producerIndex = 0; producerIndex < before; producerIndex += 1) {
     if (!resultValues[producerIndex]!.has(key)) continue;
     if (seenBeforeResult[producerIndex]!.has(key)) continue;
-    const produceLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+    const produceLeaves: Array<{
+      path: WorkflowValuePath;
+      value: CandidateScalar;
+    }> = [];
     scalarLeaves(calls[producerIndex]!.result, [], produceLeaves);
     for (const produced of produceLeaves) {
       if (produced.value !== value || typeof produced.value !== typeof value) continue;

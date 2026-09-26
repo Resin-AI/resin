@@ -11,9 +11,12 @@
  */
 
 import {
+  type ProgramLanguage,
   embeddedProgramIsProtected,
   embeddedPrograms,
   programTokenPath,
+  programTokenSpanFits,
+  programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
 
@@ -64,9 +67,15 @@ export type WorkflowValueTemplate =
       /**
        * `token` is a top-level token index. With `embedded`, the hole addresses token `embedded` of
        * the program embedded in the shell source whose anchor is `token` (a heredoc body or a
-       * `-c`/`-e` code string).
+       * `-c`/`-e` code string). With `span`, the hole binds only UTF-16 offsets [start, end) of the
+       * addressed string token's decoded value, never all of it.
        */
-      holes: Array<{ token: number; embedded?: number; binding: WorkflowValueTemplate }>;
+      holes: Array<{
+        token: number;
+        embedded?: number;
+        span?: { start: number; end: number };
+        binding: WorkflowValueTemplate;
+      }>;
       /** Whole original program source, kept in a local private resource. */
       sourceReference?: string;
       /** Sorted canonical token indexes changed by secret redaction; never binding holes. */
@@ -1051,6 +1060,7 @@ export function validateRecordedWorkflow(value: unknown): {
                 problems.push(`${where} program holes must be an array`);
                 return;
               }
+              const spansByToken = new Map<string, Array<{ start: number; end: number } | null>>();
               for (const [index, hole] of template.holes.entries()) {
                 if (
                   !isPlainObject(hole) ||
@@ -1070,6 +1080,57 @@ export function validateRecordedWorkflow(value: unknown): {
                 ) {
                   problems.push(`${where} hole ${index} must name an embedded token index`);
                   continue;
+                }
+                if (
+                  hole.span !== undefined &&
+                  (!isPlainObject(hole.span) ||
+                    typeof hole.span.start !== "number" ||
+                    typeof hole.span.end !== "number" ||
+                    !Number.isInteger(hole.span.start) ||
+                    !Number.isInteger(hole.span.end) ||
+                    hole.span.start < 0 ||
+                    hole.span.start >= hole.span.end)
+                ) {
+                  problems.push(`${where} hole ${index} must name a span of its token value`);
+                  continue;
+                }
+                const key = `${hole.token}.${String(hole.embedded ?? "")}`;
+                const span =
+                  hole.span === undefined
+                    ? null
+                    : {
+                        start: hole.span.start as number,
+                        end: hole.span.end as number,
+                      };
+                const siblings = spansByToken.get(key) ?? [];
+                if (
+                  siblings.some(
+                    (other) =>
+                      other === null ||
+                      span === null ||
+                      (other.start < span.end && span.start < other.end),
+                  )
+                ) {
+                  problems.push(`${where} hole ${index} overlaps another hole of its token`);
+                }
+                spansByToken.set(key, [...siblings, span]);
+                if (
+                  span !== null &&
+                  isPlainObject(template.source) &&
+                  template.source.type === "literal" &&
+                  typeof template.source.value === "string" &&
+                  typeof template.language === "string"
+                ) {
+                  const value = programTokenValueAt(
+                    template.language as ProgramLanguage,
+                    template.source.value,
+                    typeof hole.embedded === "number"
+                      ? { token: hole.token, embedded: hole.embedded }
+                      : { token: hole.token },
+                  );
+                  if (typeof value !== "string" || !programTokenSpanFits(span, value.length)) {
+                    problems.push(`${where} hole ${index} span does not fit its token value`);
+                  }
                 }
                 walk(
                   hole.binding,

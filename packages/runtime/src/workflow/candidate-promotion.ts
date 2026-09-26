@@ -138,7 +138,14 @@ export function applyConfirmedWorkflowBinding(
     const address = programTokenPath(candidate.path);
     const program = step.callable.program;
     if (address === undefined || program?.argument !== candidate.argument) return undefined;
-    replaced = bindProgramToken(source, program.kind, address.token, leaf, address.embedded);
+    replaced = bindProgramToken(
+      source,
+      program.kind,
+      address.token,
+      leaf,
+      address.embedded,
+      address.span,
+    );
   } else {
     replaced = withLeafAt(template, candidate.path, leaf);
   }
