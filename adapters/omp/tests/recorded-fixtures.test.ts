@@ -1,0 +1,109 @@
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
+import type { IntermediateSessionEvent, RawHarnessRecord } from "@resin/harness-contracts";
+import { describe, expect, it } from "vitest";
+import { OmpRecordDecoder } from "../src/decoder.js";
+import { classifyTranscriptSessionKind } from "../src/discovery.js";
+import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.js";
+import { OMP_TESTED_VERSIONS } from "../src/versions.js";
+
+// Scrubbed sessions recorded with `omp -p` on the release named by the directory; see CAPTURE.md.
+const RECORDED = path.join(__dirname, "fixtures", "recorded");
+const MAIN = "2026-09-26T23-01-05-051Z_01a0dff3-639b-700f-bb45-3939a09bf46a";
+const SUBAGENT = `${MAIN}/HumanBlackbird.jsonl`;
+const EVAL_SPILL = "2026-09-26T23-04-33-426Z_01a0dff6-9192-74b3-9bc2-e25cb0b7f7ab";
+const ABORTED = "2026-09-26T23-04-49-530Z_01a0dff6-d07a-73d4-9e72-d5d7c7eeedff.jsonl";
+
+interface Decoded {
+  records: RawHarnessRecord[];
+  events: IntermediateSessionEvent[];
+}
+
+async function decode(version: string, relative: string): Promise<Decoded> {
+  const transcriptPath = path.join(RECORDED, version, "sessions", relative);
+  const source = new OmpSessionEventSource({
+    sessionId: relative,
+    workspaceId: "recorded",
+    harnessId: "omp",
+    transcriptPath,
+    status: "completed",
+    createdAt: "2026-09-26T23:00:00.000Z",
+    updatedAt: "2026-09-26T23:00:00.000Z",
+    metadata: {},
+  });
+  const records = await source.readNext(10_000);
+  await source.close();
+  const decoder = new OmpRecordDecoder({ deviceSurfaceServers: () => ["fixture-echo", "resin"] });
+  return { records, events: records.flatMap((record) => [decoder.decode(record) ?? []].flat()) };
+}
+
+function toolEvents(events: IntermediateSessionEvent[], type: "tool_call" | "tool_result") {
+  return events.flatMap((event) => (event.type === type ? [event] : []));
+}
+
+describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
+  it("pairs every recorded tool call with its result", async () => {
+    const root = path.join(RECORDED, version, "sessions");
+    const transcripts = (await fsp.readdir(root, { recursive: true }))
+      .map(String)
+      .filter((file) => file.endsWith(".jsonl"));
+    expect(transcripts).toHaveLength(4);
+    let calls = 0;
+    for (const transcript of transcripts) {
+      const { events } = await decode(version, transcript);
+      const resultIds = new Set(toolEvents(events, "tool_result").map((event) => event.callId));
+      for (const call of toolEvents(events, "tool_call")) {
+        expect(resultIds, `${transcript} ${call.toolName}`).toContain(call.callId);
+        calls += 1;
+      }
+    }
+    expect(calls).toBe(13);
+  });
+
+  it("records the built-in and MCP tools a headless session ran", async () => {
+    const { events } = await decode(version, `${MAIN}.jsonl`);
+    const calls = toolEvents(events, "tool_call");
+    expect(calls.map((call) => call.toolName)).toEqual([
+      "bash",
+      "read",
+      "read",
+      "edit",
+      "write",
+      "shout",
+      "task",
+      "wait",
+    ]);
+    // The MCP call went through OMP's device surface; it is recorded as the tool it reached.
+    const shout = calls.find((call) => call.toolName === "shout");
+    expect(shout?.connection).toBe("fixture-echo");
+    expect(shout?.parameters).toEqual({ text: "resin fixture" });
+  });
+
+  it("keeps a subagent transcript as its own agent session under the parent", async () => {
+    const root = path.join(RECORDED, version, "sessions");
+    expect(classifyTranscriptSessionKind(path.join(root, `${MAIN}.jsonl`))).toBe("user");
+    expect(classifyTranscriptSessionKind(path.join(root, SUBAGENT))).toBe("agent");
+    const { events } = await decode(version, SUBAGENT);
+    expect(toolEvents(events, "tool_call").map((call) => call.toolName)).toEqual(["bash", "yield"]);
+  });
+
+  it("recovers the full output of an Eval whose display OMP truncated", async () => {
+    const { records, events } = await decode(version, `${EVAL_SPILL}.jsonl`);
+    const spilled = await fsp.readFile(
+      path.join(RECORDED, version, "sessions", EVAL_SPILL, "0.eval.log"),
+      "utf8",
+    );
+    const observations = records.flatMap((record) => getOmpProgramObservation(record) ?? []);
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ result: spilled });
+    const evalResult = toolEvents(events, "tool_result").find((event) => event.toolName === "eval");
+    expect(evalResult?.callId).toBe(observations[0]?.callId);
+  });
+
+  it("records a command aborted by the session deadline as a failed result", async () => {
+    const { events } = await decode(version, ABORTED);
+    const [result] = toolEvents(events, "tool_result");
+    expect(result?.toolName).toBe("bash");
+    expect(result?.isError).toBe(true);
+  });
+});
