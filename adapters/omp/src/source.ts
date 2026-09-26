@@ -340,6 +340,49 @@ async function populateOmpProgramObservation(
   ompProgramObservations.set(record, observation);
 }
 
+const FORK_HEADER_SCAN_BYTES = 64 * 1024;
+const FORK_HEADER_SCAN_LINES = 8;
+
+/**
+ * The start of a forked transcript, read from its session header: epoch ms when the header names a
+ * parent session, null when the file is not a fork, undefined when the header is not written yet.
+ */
+async function readOmpForkStart(filePath: string): Promise<number | null | undefined> {
+  let head: string;
+  try {
+    const fd = await fsp.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(FORK_HEADER_SCAN_BYTES);
+      const { bytesRead } = await fd.read(buffer, 0, FORK_HEADER_SCAN_BYTES, 0);
+      head = buffer.toString("utf8", 0, bytesRead);
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    return undefined;
+  }
+  const lines = head.split("\n");
+  // Only newline-terminated lines are complete; the header precedes every entry but a title.
+  const complete = lines.slice(0, -1).slice(0, FORK_HEADER_SCAN_LINES);
+  for (const line of complete) {
+    if (line.trim().length === 0) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (!(entry instanceof Object) || Array.isArray(entry)) return null;
+    const header = entry as { type?: unknown; parentSession?: unknown; timestamp?: unknown };
+    if (header.type === "title") continue;
+    if (header.type !== "session") return null;
+    if (typeof header.parentSession !== "string" || header.parentSession.length === 0) return null;
+    const at = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : Number.NaN;
+    return Number.isFinite(at) ? at : null;
+  }
+  return complete.length >= FORK_HEADER_SCAN_LINES ? null : undefined;
+}
+
 /**
  * Event source tailing append-only JSONL transcript files produced by Oh My Pi.
  */
@@ -353,6 +396,12 @@ export class OmpSessionEventSource implements SessionEventSource {
   private isClosed = false;
   private lastInode: number | null = null;
   private lastFileSize = 0;
+  /**
+   * When this transcript was forked from a parent session, the fork's own start: OMP copies the
+   * parent's history into the new file verbatim (same entry ids, earlier timestamps), and those
+   * calls were executed, and are recorded, by the parent. Null when the file is not a fork.
+   */
+  private forkedAt: number | null | undefined;
 
   constructor(
     session: HarnessSession,
@@ -417,7 +466,9 @@ export class OmpSessionEventSource implements SessionEventSource {
       this.currentCursor.offset = 0;
       this.currentCursor.line = 1;
       this.currentCursor.sequence = 0;
+      this.forkedAt = undefined;
     }
+    if (this.forkedAt === undefined) this.forkedAt = await readOmpForkStart(filePath);
 
     const bytesAvailable = stat.size - this.currentCursor.offset;
     if (bytesAvailable <= 0) {
@@ -458,7 +509,7 @@ export class OmpSessionEventSource implements SessionEventSource {
       this.currentCursor.timestamp = new Date().toISOString();
 
       const trimmed = line.trim();
-      if (trimmed.length > 0) {
+      if (trimmed.length > 0 && !this.isInheritedEntry(trimmed)) {
         const recordId = `${this.session.sessionId}-rec-${this.currentCursor.sequence}`;
         let parsedPayload: unknown = trimmed;
         let timestamp = new Date().toISOString();
@@ -516,6 +567,23 @@ export class OmpSessionEventSource implements SessionEventSource {
     }
 
     return records;
+  }
+
+  /** A copied parent entry: a non-header record timestamped before this fork began. */
+  private isInheritedEntry(line: string): boolean {
+    if (this.forkedAt === null || this.forkedAt === undefined) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    if (!(parsed instanceof Object) || Array.isArray(parsed)) return false;
+    const entry = parsed as { type?: unknown; timestamp?: unknown };
+    if (entry.type === "session" || entry.type === "title") return false;
+    if (typeof entry.timestamp !== "string") return false;
+    const at = Date.parse(entry.timestamp);
+    return Number.isFinite(at) && at < this.forkedAt;
   }
 
   /**
