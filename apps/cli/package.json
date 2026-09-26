@@ -91,6 +91,7 @@
     "@resin/adapter-copilot-cli": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
     "@resin/adapter-opencode": "workspace:*",
+    "@resin/adapter-pi": "workspace:*",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
     "@resin/db": "workspace:*",

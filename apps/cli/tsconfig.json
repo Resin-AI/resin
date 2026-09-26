@@ -56,6 +56,9 @@
     },
     {
       "path": "../../adapters/opencode"
+    },
+    {
+      "path": "../../adapters/pi"
     }
   ]
 }

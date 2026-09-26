@@ -1,6 +1,6 @@
 # Resin
 
-Resin turns repeated coding-agent workflows into reusable tools. It works with Claude Code, Codex CLI, and Oh My Pi through a local MCP gateway.
+Resin turns repeated coding-agent workflows into reusable tools. It works with Claude Code, Codex CLI, Oh My Pi, and Pi through a local MCP gateway.
 
 ## Features
 
@@ -111,7 +111,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development commands, package bounda
 ```text
 apps/       CLI, gateway, observer, and web applications
 packages/   Runtime, protocol, contracts, crypto, and shared libraries
-adapters/   Claude Code, Codex CLI, and Oh My Pi integrations
+adapters/   Claude Code, Codex CLI, Oh My Pi, and Pi integrations
 fixtures/   Conformance and end-to-end fixtures
 docs/       User, architecture, security, and operations documentation
 scripts/    Build, verification, release, and repository tooling

@@ -8,10 +8,17 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 
 | Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
+<<<<<<< HEAD
 | **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | MCP over Stdio | Local JSONL Session Tailing (incl. subagents) | Native ListChanged Notification |
 | **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | MCP over Stdio | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `18.3.2` (other versions run and are reported as untested) | `~/.omp/agent/mcp.json` (`$OMP_HOME/agent/mcp.json`; legacy `~/.omp/config.json`) | MCP over Stdio | JSONL Session Tailing (main and subagent transcripts) | Native ListChanged Notification |
 | **Cursor CLI** (`cursor-agent`) | none yet (targets `2026.09.26-dd393fe`; reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.cursor/rules/resin.mdc` | MCP over Stdio | Hook spool tailing (`~/.resin/capture/cursor-cli/`) | Next session |
+=======
+| **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
+| **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
+| **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
+| **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `~/.pi/agent/extensions/resin.ts` (Resin-owned Pi extension; `$PI_CODING_AGENT_DIR` honored) | MCP over Stdio via the extension | Local JSONL Session Tailing | Native ListChanged via the extension |
+>>>>>>> feat/harness-pi
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
@@ -214,6 +221,20 @@ Each payload is checked against the field contract pinned in `adapters/cursor-cl
 - Cloud Agents that run on Cursor's machines leave nothing on this device and cannot be captured. cursor-agent 2026.09.26 removed the CLI's `--cloud`/`--background` flags. Self-hosted `cursor-agent worker` sessions are captured and flagged `isBackgroundAgent`.
 - Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete.
 - Two things are unverified: whether cursor-agent reacts to MCP `list_changed`, and whether it applies user rules from `~/.cursor/rules`. For now, new tools are assumed to reach the next session.
+
+---
+
+## Pi Integration
+
+### Why an extension
+
+Pi has no MCP client: its model sees built-in tools plus tools that Pi extensions register. `resin init` therefore writes a Resin-owned extension to `<agent-dir>/extensions/resin.ts` (`<agent-dir>` is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`). Pi loads it automatically; it starts `resin mcp` over stdio and registers every gateway tool as a Pi tool named `mcp__resin__<tool>`. It follows `notifications/tools/list_changed`, so learned tools appear in running sessions without a restart. `resin init` also adds a marked guidance block to the agent directory's context file (the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` that exists, else a new `AGENTS.md`). `resin uninstall` deletes the extension (only if Resin wrote it) and removes the block. Resin never overwrites a `resin.ts` it did not write.
+
+### Session Observation
+
+Resin reads Pi's JSONL session files (format versions 1–3) from `<agent-dir>/sessions/--<cwd>--/`, `$PI_CODING_AGENT_SESSION_DIR`, and the `sessionDir` setting (global or project `.pi/settings.json`). Sessions belong to the workspace named by the file header's `cwd`. In-file `/tree` rewinds and branch summaries are captured as branch forks, so calls from the abandoned and new branches stay separate; `/fork` and `--fork` sessions link to their parent and skip the copied parent history.
+
+Limits: runs with `--no-session` write nothing and cannot be captured; runs with `--no-extensions` do not load the Resin extension; sessions stored with `--session-dir` are found only when that directory is also configured through `PI_CODING_AGENT_SESSION_DIR` or `sessionDir`; Pi has no built-in subagents.
 
 ---
 

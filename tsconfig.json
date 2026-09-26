@@ -53,6 +53,9 @@
       "path": "./adapters/opencode"
     },
     {
+      "path": "./adapters/pi"
+    },
+    {
       "path": "./fixtures/test-fixtures"
     }
   ]
