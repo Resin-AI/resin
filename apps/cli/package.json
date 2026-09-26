@@ -85,6 +85,7 @@
   "dependencies": {
     "@resin/adapter-claude-code": "workspace:*",
     "@resin/adapter-codex": "workspace:*",
+    "@resin/adapter-copilot-cli": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
