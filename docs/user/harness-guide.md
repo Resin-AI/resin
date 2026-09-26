@@ -8,7 +8,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 
 | Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
-| **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
+| **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | MCP over Stdio | Local JSONL Session Tailing (incl. subagents) | Native ListChanged Notification |
 | **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
 
@@ -18,22 +18,24 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 
 ### Automated Registration
 
-When you run `npx resin init`, Resin automatically patches `~/.claude.json` or `~/.claude/claude.json` with the gateway URL from `--gateway-url` (default `http://127.0.0.1:9400/mcp/sse` only when omitted):
+`npx resin init` adds Resin as a user-scope stdio server in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set — the file `claude mcp add -s user` writes). Other servers and settings in the file are preserved:
 
 ```json
 {
   "mcpServers": {
     "resin": {
-      "type": "sse",
-      "url": "http://127.0.0.1:9400/mcp/sse"
+      "command": "/home/you/.resin/bin/resin",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-### Manual Verification
+It also installs a short guidance block in Claude's user memory, `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR/CLAUDE.md`), between `<!-- resin:claude-guidance:start -->` and `<!-- resin:claude-guidance:end -->`. Claude Code defers MCP tools behind its tool search, so the block tells it that Resin's learned tools are `mcp__resin__<name>` and to look them up. Running `init` again leaves both unchanged; `npx resin uninstall` removes the entry and the block and keeps everything else in those files.
 
-To verify that Claude Code recognizes Resin:
+Project-scope `.mcp.json` files are not touched.
+
+### Manual Verification
 
 ```bash
 claude mcp list
@@ -42,12 +44,16 @@ claude mcp list
 Expected output:
 
 ```text
-✓ resin (SSE: http://127.0.0.1:9400/mcp/sse) - 4 tools enabled
+resin: /home/you/.resin/bin/resin mcp - ✔ Connected
 ```
 
 ### Session Observation
 
-Resin monitors Claude Code sessions locally by following active session files in `~/.claude/projects/`. Only normalized structural telemetry (tool names, execution status, latencies) is processed; raw prompt context and assistant reasoning are strictly kept on localhost.
+Resin follows session transcripts in `~/.claude/projects/<encoded-project>/<session-id>.jsonl` and the subagent transcripts Claude writes beside them (`<session-id>/subagents/agent-<id>.jsonl`). A subagent is attributed to its parent session's project, identified by the `sessionId` and `agentId` its transcript records. Shell commands, reads, edits, writes, MCP calls, subagent launches, compactions (`/compact`), interrupts, and per-response token usage are decoded.
+
+A successful `Edit` or `Write` becomes a patch step, the same representation as a Codex `apply_patch`: the diff Claude recorded as applied, confined to the session's working directory and stored only on this device. An edit Claude cannot restate exactly as a unified diff (for example a file without a final newline) is not learned.
+
+Only the version listed above is qualified with recorded sessions; `resin status` reports other versions as untested.
 
 ---
 

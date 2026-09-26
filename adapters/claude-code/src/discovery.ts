@@ -588,7 +588,10 @@ export async function listClaudeSubagentTranscripts(
     }
     for (const subagentsDir of sessionDirs) {
       try {
-        for (const entry of await fs.readdir(subagentsDir, { recursive: true, withFileTypes: true })) {
+        for (const entry of await fs.readdir(subagentsDir, {
+          recursive: true,
+          withFileTypes: true,
+        })) {
           if (entry.isFile()) addCandidate(path.join(entry.parentPath, entry.name));
         }
       } catch {
@@ -621,7 +624,9 @@ export async function listClaudeSubagentTranscripts(
     if (head === undefined) continue;
     const metaPath = candidate.transcriptPath.replace(/\.jsonl$/, ".meta.json");
     try {
-      const meta = subagentMetaSchema.safeParse(JSON.parse((await fsBridge.readFile(metaPath)) ?? ""));
+      const meta = subagentMetaSchema.safeParse(
+        JSON.parse((await fsBridge.readFile(metaPath)) ?? ""),
+      );
       if (meta.success) {
         if (meta.data.agentType) head.agentType = meta.data.agentType;
         if (meta.data.toolUseId) head.parentToolCallId = meta.data.toolUseId;

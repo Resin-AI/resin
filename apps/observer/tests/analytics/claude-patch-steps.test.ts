@@ -60,10 +60,7 @@ function patchSteps(recipe: RecordedRecipe | undefined): WorkflowStep[] {
   return (recipe?.workflow.steps ?? []).filter((step) => step.callable.name === "apply_patch");
 }
 
-function privatePatch(
-  step: WorkflowStep,
-  store: InMemoryPrivateValueStore,
-): unknown {
+function privatePatch(step: WorkflowStep, store: InMemoryPrivateValueStore): unknown {
   const argument = step.arguments.find((entry) => entry.name === "patch");
   if (argument?.source.kind !== "template" || argument.source.template.type !== "program") {
     return undefined;

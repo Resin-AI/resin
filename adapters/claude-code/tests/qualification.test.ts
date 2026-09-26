@@ -23,10 +23,7 @@ import {
   verifyClaudeMcpConfig,
 } from "../src/config-planner.js";
 import { ClaudeRecordDecoder, decodeClaudeTranscriptLine } from "../src/decoder.js";
-import {
-  detectClaudeWorkspaces,
-  probeClaudeInstallation,
-} from "../src/discovery.js";
+import { detectClaudeWorkspaces, probeClaudeInstallation } from "../src/discovery.js";
 import { ClaudeSessionEventSource } from "../src/source.js";
 
 describe("Claude Code Harness Qualification Suite [REM-017]", () => {

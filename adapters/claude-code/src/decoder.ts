@@ -1,10 +1,10 @@
 import {
   type CausalRef,
   type DiscoveredToolEntry,
-  RESIN_CODEX_COMMAND_METADATA_KEY,
   type MessageContentPart,
   type ProviderReportedUsage,
   ProviderReportedUsageSchema,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   type RedactionMeta,
 } from "@resin/contracts";
 import type {
@@ -28,8 +28,8 @@ import type {
   RawHarnessRecord,
   RecordDecoderContext,
 } from "@resin/harness-contracts";
-import { claudeFileEdit } from "./file-change.js";
 import { z } from "zod";
+import { claudeFileEdit } from "./file-change.js";
 
 export const CLAUDE_PROVIDER = "anthropic";
 export const CLAUDE_ACCOUNTING_VERSION = "claude-code-transcript-v1";
@@ -693,7 +693,11 @@ export function decodeClaudeTranscriptLine(
       // step. It is identified by its tool call so the workflow recorder can place it.
       const edit = toolResultIds.length === 1 ? claudeFileEdit(payload.toolUseResult) : undefined;
       const nativeId = toolResultIds[0];
-      if (edit !== undefined && nativeId !== undefined && /^[A-Za-z0-9_-]{1,256}$/u.test(nativeId)) {
+      if (
+        edit !== undefined &&
+        nativeId !== undefined &&
+        /^[A-Za-z0-9_-]{1,256}$/u.test(nativeId)
+      ) {
         events.push(
           withBaseFields<IntermediateFileEditEvent>(
             {
