@@ -40,6 +40,13 @@ describe("HarnessConfigOrchestrator", () => {
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
     expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+
+    // Verify Muse Code settings were written with the schema version muse requires
+    const museContent = await bridge.readFile(`${home}/.config/muse/settings.json`);
+    expect(JSON.parse(museContent ?? "{}")).toEqual({
+      schema_version: 1,
+      mcp_servers: { resin: { command: resinCommand, args: ["mcp"] } },
+    });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {

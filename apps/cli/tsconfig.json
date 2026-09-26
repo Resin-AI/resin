@@ -43,6 +43,9 @@
       "path": "../../adapters/grok-build"
     },
     {
+      "path": "../../adapters/muse-code"
+    },
+    {
       "path": "../../adapters/omp"
     },
     {
