@@ -73,8 +73,14 @@ describe("recorded grok 1.0.13 sessions", () => {
     expect(calls.find((c) => c.toolName === "resin__manage_tools")?.connection).toBe("resin");
     expect(calls.find((c) => c.toolName === "read_file")?.connection).toBeUndefined();
 
-    const echoResult = events.find((e) => e.type === "tool_result" && e.toolCallId === echo?.toolCallId);
-    expect(echoResult).toMatchObject({ toolName: "fixture__echo", output: "echo: ping", isError: false });
+    const echoResult = events.find(
+      (e) => e.type === "tool_result" && e.toolCallId === echo?.toolCallId,
+    );
+    expect(echoResult).toMatchObject({
+      toolName: "fixture__echo",
+      output: "echo: ping",
+      isError: false,
+    });
 
     expect(events.find((e) => e.type === "command_exec")).toMatchObject({
       command: "ls",
@@ -89,15 +95,15 @@ describe("recorded grok 1.0.13 sessions", () => {
     // Every result follows its call.
     const order = new Map(events.map((e, i) => [e, i]));
     for (const call of calls) {
-      const result = events.find((e) => e.type === "tool_result" && e.toolCallId === call.toolCallId);
+      const result = events.find(
+        (e) => e.type === "tool_result" && e.toolCallId === call.toolCallId,
+      );
       expect(order.get(result as IntermediateSessionEvent)).toBeGreaterThan(order.get(call) ?? -1);
     }
   });
 
   it("reports each turn's provider usage once", async () => {
-    const turns = (await capture(MAIN)).flatMap((e) =>
-      e.type === "session_lifecycle" ? [e] : [],
-    );
+    const turns = (await capture(MAIN)).flatMap((e) => (e.type === "session_lifecycle" ? [e] : []));
     expect(turns).toHaveLength(2);
     expect(turns[0]?.providerUsage).toMatchObject({
       provider: "xai",
@@ -141,7 +147,9 @@ describe("recorded grok 1.0.13 sessions", () => {
       "Append a new line 'forked' to NOTES.md, then reply 'done'.",
       "/compact",
     ]);
-    const parentCallIds = new Set(parent.flatMap((e) => (e.type === "tool_call" ? [e.toolCallId] : [])));
+    const parentCallIds = new Set(
+      parent.flatMap((e) => (e.type === "tool_call" ? [e.toolCallId] : [])),
+    );
     const forkCalls = fork.flatMap((e) => (e.type === "tool_call" ? [e.toolCallId] : []));
     expect(forkCalls).toHaveLength(2);
     expect(forkCalls.filter((id) => parentCallIds.has(id))).toEqual([]);

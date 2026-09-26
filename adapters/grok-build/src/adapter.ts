@@ -194,7 +194,10 @@ export class GrokHarnessAdapter implements HarnessAdapter {
     return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
   }
 
-  async openEventSource(session: HarnessSession, cursor?: SourceCursor): Promise<SessionEventSource> {
+  async openEventSource(
+    session: HarnessSession,
+    cursor?: SourceCursor,
+  ): Promise<SessionEventSource> {
     const entry = this.entries.get(session.sessionId);
     const parentId = entry?.summary?.parentSessionId;
     let startOffset = 0;

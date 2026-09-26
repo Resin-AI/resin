@@ -93,7 +93,10 @@ export async function listGrokProjects(
   return projects.sort((a, b) => a.cwd.localeCompare(b.cwd));
 }
 
-export async function listGrokSessions(projectDir: string, cwd: string): Promise<GrokSessionEntry[]> {
+export async function listGrokSessions(
+  projectDir: string,
+  cwd: string,
+): Promise<GrokSessionEntry[]> {
   let entries: Dirent[];
   try {
     entries = await fs.readdir(projectDir, { withFileTypes: true });

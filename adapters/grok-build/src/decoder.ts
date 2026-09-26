@@ -124,7 +124,9 @@ function turnUsage(update: Json): ProviderReportedUsage | undefined {
   const outputTokens = asCount(usage.outputTokens);
   const totalTokens =
     asCount(usage.totalTokens) ??
-    (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
+    (inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens
+      : undefined);
   // Grok reports cost in "ticks" of 1e-10 USD (`total_cost_usd_ticks` = `total_cost_usd` * 1e10).
   const ticks = asCount(usage.costUsdTicks);
   return {
@@ -190,13 +192,17 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         const content = contentText(update.content);
         const metadata: DecoderMetadataRecord = {};
         if (meta?.hostTurn === true) metadata.hostTurn = true;
-        if (asCount(meta?.promptIndex) !== undefined) metadata.promptIndex = meta?.promptIndex as number;
+        if (asCount(meta?.promptIndex) !== undefined)
+          metadata.promptIndex = meta?.promptIndex as number;
         const resume = /^\/resume-(claude|codex|cursor)\s+(\S+)/.exec(content.trim());
         const foreignHarness = resume ? FOREIGN_RESUME_HARNESS[resume[1] ?? ""] : undefined;
         if (resume && foreignHarness) {
           // The foreign transcript stays with its own harness adapter; this session only records
           // Grok's new work after the resume request.
-          metadata.foreignResume = { harnessId: foreignHarness, nativeSessionId: resume[2] ?? null };
+          metadata.foreignResume = {
+            harnessId: foreignHarness,
+            nativeSessionId: resume[2] ?? null,
+          };
         }
         return [
           {
@@ -282,7 +288,9 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
             type: "compaction",
             tokensBefore: asCount(update.tokens_before),
             tokensAfter: asCount(update.tokens_after),
-            ...(asString(update.summary_preview) ? { summary: asString(update.summary_preview) } : {}),
+            ...(asString(update.summary_preview)
+              ? { summary: asString(update.summary_preview) }
+              : {}),
           },
         ];
       case "subagent_spawned":

@@ -81,7 +81,11 @@ export class GrokSessionEventSource implements SessionEventSource {
     return next;
   }
 
-  private makeRecord(rawPayload: unknown, recordType: RecordType, timestamp: string): RawHarnessRecord {
+  private makeRecord(
+    rawPayload: unknown,
+    recordType: RecordType,
+    timestamp: string,
+  ): RawHarnessRecord {
     this.cursor.sequence++;
     this.cursor.timestamp = timestamp;
     return {

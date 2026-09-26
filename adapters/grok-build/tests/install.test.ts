@@ -47,7 +47,12 @@ async function install(home: string, command: string): Promise<void> {
   await applyConfigMutation(plan, fsBridge);
   const guidance = grokBuildHarness.guidance;
   if (!guidance) throw new Error("no guidance surface");
-  await applyManagedBlock(fsBridge, guidance.resolvePath(home, env), guidance.markers, guidance.body);
+  await applyManagedBlock(
+    fsBridge,
+    guidance.resolvePath(home, env),
+    guidance.markers,
+    guidance.body,
+  );
 }
 
 describe("Grok config.toml registration", () => {
@@ -82,7 +87,9 @@ describe("Grok config.toml registration", () => {
         "",
       ].join("\n"),
     );
-    expect(updateGrokTomlServer(after, "resin", { command: "/new/resin", args: ["mcp"] })).toBe(after);
+    expect(updateGrokTomlServer(after, "resin", { command: "/new/resin", args: ["mcp"] })).toBe(
+      after,
+    );
     expect(readGrokTomlServer(after, "resin")).toEqual({ command: "/new/resin", args: ["mcp"] });
     expect(readGrokTomlServer(after, "other")).toEqual({ command: "other" });
     expect(updateGrokTomlServer(after, "resin", null)).toBe(
@@ -113,7 +120,9 @@ describe("Grok config.toml registration", () => {
       await fs.mkdir(project);
       await fs.writeFile(
         path.join(home, ".claude.json"),
-        JSON.stringify({ mcpServers: { resin: { command: "/opt/resin/bin/resin", args: ["mcp"] } } }),
+        JSON.stringify({
+          mcpServers: { resin: { command: "/opt/resin/bin/resin", args: ["mcp"] } },
+        }),
       );
       const inspect = () =>
         JSON.parse(

@@ -55,7 +55,7 @@ export const grokBuildHarness: HarnessDefinition = {
     "A rewind keeps the abandoned turns in the captured trajectory; the rewind is recorded as a branch point before the replacement turns.",
     "Sessions continued from another harness with /resume-claude, /resume-codex or /resume-cursor capture only Grok's new work; the original transcript is captured by that harness's adapter.",
     "A fork whose parent session was deleted is captured in full.",
-    "Grok also starts MCP servers from ~/.claude.json, ~/.cursor/mcp.json and .mcp.json; a Resin entry there under a name other than \"resin\" starts a second gateway.",
+    'Grok also starts MCP servers from ~/.claude.json, ~/.cursor/mcp.json and .mcp.json; a Resin entry there under a name other than "resin" starts a second gateway.',
   ],
   probeInstallation: ({ targetPath, home, env }) =>
     probeGrokInstallation({ home, env, configPath: targetPath }),
