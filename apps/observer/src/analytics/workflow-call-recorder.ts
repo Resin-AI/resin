@@ -15,7 +15,7 @@
  * stay in the local value store.
  */
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
@@ -658,7 +658,13 @@ export class WorkflowCallRecorder {
     const relationships = this.relateLocalCall(state, call, event.sessionId);
     if (relationships.dependsOnCallIds.length > 0)
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
-    const scrubbed = redactLocalWorkflowProgramSource(event, raw.patch);
+    // The diff names its files by absolute path, so the scan reads them relative to the working
+    // directory: where the project lives must not decide which values are offered.
+    const root = resolve(workdir);
+    const scrubbed = redactLocalWorkflowProgramSource(
+      event,
+      raw.patch.replaceAll(root.endsWith(sep) ? root : `${root}${sep}`, ""),
+    );
     const candidates = scrubbed === undefined || scrubbed.changed ? [] : relationships.candidates;
     if (candidates.length > 0) carrier.candidates = candidates;
     call.result = WORKFLOW_PATCH_STEP_RESULT;
