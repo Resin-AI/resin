@@ -78,11 +78,13 @@ import attributes are not. Ordinary JavaScript process recordings still return s
 This interface does not capture a live JavaScript kernel or make unresolved state and host-prelude
 operations replayable. Qualification still requires the replayed result to match the recording.
 
-Derivation steps (model-written Python) run in an audit-hook jail: read-only access to the working
-directory, a fixed module allowlist, no `eval`/`exec`/`compile`, no processes or network. Derivations
-that need `collections.namedtuple`, `dataclasses.dataclass` creation, lazily imported submodules, or
-any other module fail. The jail is an in-process audit hook, not an OS sandbox: raw writes to file
-descriptors the process already holds (`os.write` has no audit event) are not refused.
+Derivation steps (model-written Python) run in Pyodide inside Deno and see only their inputs: they
+cannot read any file (project data included), use the network, or read the environment, and may
+import only a fixed allowlist of pure standard-library modules. Lookups that need project data
+cannot be expressed as a derivation. `numpy`, `pandas`, and other third-party packages are not
+available. Each derivation starts a fresh Deno process and loads Pyodide, which takes about a
+second, and derivations need Deno (bundled with Resin, or `RESIN_DENO_EXECUTABLE`); without it the
+step fails.
 
 ### Generated code imports
 

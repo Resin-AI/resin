@@ -16,6 +16,7 @@ import {
 import { CloudCredentialStore } from "@resin/observer";
 import { PROTOCOL_VERSION, ProtocolError } from "@resin/protocol";
 import { ArtifactCache, encodeDeterministicTar } from "@resin/runtime";
+import { resolveDenoExecutable } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
@@ -23,7 +24,6 @@ import { ProjectLockManager } from "../../src/project/lock-manager.js";
 import { CloudCatalogCache } from "../../src/proxy/cache.js";
 import { CloudCircuitBreaker } from "../../src/proxy/circuit-breaker.js";
 import { CloudCatalogClient } from "../../src/proxy/client.js";
-import { resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { ToolRegistry } from "../../src/registry/registry.js";

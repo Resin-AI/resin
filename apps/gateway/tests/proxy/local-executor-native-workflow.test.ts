@@ -552,15 +552,11 @@ describe("recorded workflows of ordinary calls", () => {
     expect(description).not.toContain("5942");
   });
 
-  it("runs a learned tool's derivation step jailed when the tool is invoked", async () => {
-    fs.writeFileSync(
-      path.join(workspaceDir, "merchants.json"),
-      JSON.stringify({ Crossfit_Hanna: { account_type: "R", mcc: 5942 } }),
-    );
+  it("runs a learned tool's derivation step sandboxed when the tool is invoked", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const context = resolveWorkspaceContext({ cwd: workspaceDir });
     const lookup =
-      'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
+      'merchants = {"Crossfit_Hanna": {"account_type": "R", "mcc": 5942}}\nm = merchants[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
     const invoke = async (body: string, name: string) => {
       const code = `${derivationHeader([{ name: "merchant", value: "" }])}${body}`;
       const [merchantToken] = derivationInputTokenIndexes(code, ["merchant"]);
@@ -627,12 +623,13 @@ describe("recorded workflows of ordinary calls", () => {
     const allowed = await invoke(lookup, "wf_derive_ok");
     expect(allowed.isError, String(allowed.content[0]?.text)).toBeUndefined();
     expect(allowed.content[0]?.text).toContain("5942");
+    const escaped = path.join(workspaceDir, "escaped.txt");
     const writing = await invoke(
-      `open("escaped.txt", "w").write("x")\n${lookup}`,
+      `open(${JSON.stringify(escaped)}, "w").write("x")\n${lookup}`,
       "wf_derive_write",
     );
     expect(writing.isError).toBe(true);
-    expect(fs.existsSync(path.join(workspaceDir, "escaped.txt"))).toBe(false);
+    expect(fs.existsSync(escaped)).toBe(false);
   });
 
   it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {
