@@ -26,7 +26,8 @@ import {
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   bindProgramToken,
-  tokenizeProgram,
+  programTokenPath,
+  programTokenValueAt,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
 import { computeWorkflowProgramIdentities } from "./program-identity.js";
@@ -207,14 +208,19 @@ function bindCandidateLeaf(
   // and the proposal is bound at that token.
   if (path[0] === "tokens") {
     const program = step.callable.program;
-    const token = path[1];
+    const address = programTokenPath(path);
     if (program === undefined || program.argument !== candidate.argument) return false;
-    if (typeof token !== "number" || !Number.isInteger(token) || token < 0) return false;
-    if (path.length !== 2) return false;
+    if (address === undefined) return false;
     const recorded = sourceAsTemplate(argument.source);
     argument.source = {
       kind: "template",
-      template: bindProgramToken(recorded, program.kind, token, proposedTemplate(candidate)),
+      template: bindProgramToken(
+        recorded,
+        program.kind,
+        address.token,
+        proposedTemplate(candidate),
+        address.embedded,
+      ),
     };
     return true;
   }
@@ -515,14 +521,12 @@ function demonstratedTokenValue(
   candidate: WorkflowBindingCandidate,
   supplied: WorkflowJsonValue,
 ): ProgramTokenValue | undefined {
-  const index = candidate.path[1];
-  if (candidate.path.length !== 2) return undefined;
-  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return undefined;
+  const address = programTokenPath(candidate.path);
+  if (address === undefined) return undefined;
   const program = plan.steps.find((entry) => entry.id === candidate.stepId)?.callable.program;
   if (program === undefined || program.argument !== candidate.argument) return undefined;
   if (typeof supplied !== "string") return undefined;
-  const token = tokenizeProgram(program.kind, supplied)[index];
-  return token?.bindable ? token.value : undefined;
+  return programTokenValueAt(program.kind, supplied, address);
 }
 
 /**

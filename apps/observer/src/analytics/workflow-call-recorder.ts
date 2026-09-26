@@ -30,6 +30,9 @@ import {
   analyzeAgentArguments,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  embeddedProgramIsProtected,
+  embeddedPrograms,
+  programTokenPath,
   readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -182,12 +185,18 @@ const MAX_REQUEST_WORDS = 256;
 
 /** Adds an instruction's words, keeping only the most recent when the bound is reached. */
 function addRequestWords(words: Set<string>, content: string): void {
-  for (const match of content.matchAll(/[A-Za-z0-9][A-Za-z0-9_.:@+-]*/g)) {
-    const word = match[0].replace(/[.:]+$/, "");
-    if (word.length < 2 || word.length > 64) continue;
+  const add = (word: string): void => {
     words.delete(word);
     words.add(word);
     if (words.size > MAX_REQUEST_WORDS) words.delete(words.values().next().value!);
+  };
+  for (const match of content.matchAll(/[A-Za-z0-9][A-Za-z0-9_.:@+-]*/g)) {
+    const word = match[0].replace(/[.:]+$/, "");
+    if (word.length < 2 || word.length > 64) continue;
+    add(word);
+    // An ordinal names its number: `the 12th day` runs with `12`.
+    const ordinal = /^(\d+)(?:st|nd|rd|th)$/i.exec(word);
+    if (ordinal) add(ordinal[1]!);
   }
 }
 /**
@@ -441,7 +450,13 @@ export class WorkflowCallRecorder {
         const relationships = this.relateLocalCall(state, call);
         if (relationships.dependsOnCallIds.length > 0)
           carrier.dependsOnCallIds = relationships.dependsOnCallIds;
-        const candidates = unprotectedCandidates(relationships.candidates, program, origins);
+        const candidates = unprotectedCandidates(
+          event,
+          parameters,
+          relationships.candidates,
+          program,
+          origins,
+        );
         if (candidates.length > 0) carrier.candidates = candidates;
         const succeeded = raw.exitCode === 0;
         call.result = raw.stdout;
@@ -817,7 +832,13 @@ export class WorkflowCallRecorder {
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
-    const candidates = unprotectedCandidates(relationships.candidates, program, origins);
+    const candidates = unprotectedCandidates(
+      event,
+      parameters,
+      relationships.candidates,
+      program,
+      origins,
+    );
     if (candidates.length > 0) carrier.candidates = candidates;
     return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
   }
@@ -1442,23 +1463,61 @@ export class WorkflowCallRecorder {
   }
 }
 
-/** A redacted token can never become a binding hole, so it is not proposed as one either. */
+/**
+ * A redacted token can never become a binding hole, so it is not proposed as one either; nor is any
+ * token of an embedded program that carries a secret: one a redacted top-level token touches, or
+ * whose own text the redaction engine would change.
+ */
 function unprotectedCandidates(
+  event: NormalizedSessionEvent,
+  parameters: Record<string, WorkflowJsonValue>,
   candidates: readonly WorkflowCallCandidate[],
   program: WorkflowRecordedProgram | undefined,
   origins: WorkflowCallCarrier["origins"],
 ): WorkflowCallCandidate[] {
   const projected = program?.argument === undefined ? undefined : origins[program.argument];
-  const protectedTokens = projected?.type === "program" ? projected.protectedTokens : undefined;
-  if (protectedTokens === undefined || protectedTokens.length === 0) return [...candidates];
-  return candidates.filter(
-    (candidate) =>
-      candidate.argument !== program?.argument ||
-      candidate.path.length !== 2 ||
-      candidate.path[0] !== "tokens" ||
-      typeof candidate.path[1] !== "number" ||
-      !protectedTokens.includes(candidate.path[1]),
-  );
+  const protectedTokens = projected?.type === "program" ? (projected.protectedTokens ?? []) : [];
+  const sanitized =
+    projected?.type === "program" &&
+    projected.language === "shell" &&
+    projected.source.type === "literal" &&
+    typeof projected.source.value === "string"
+      ? projected.source.value
+      : undefined;
+  const original = program?.argument === undefined ? undefined : parameters[program.argument];
+  const safeEmbedded = new Map<number, boolean>();
+  const embeddedIsSafe = (anchor: number): boolean => {
+    const known = safeEmbedded.get(anchor);
+    if (known !== undefined) return known;
+    let safe = false;
+    if (program?.kind === "shell" && typeof original === "string") {
+      const embedded = embeddedPrograms(original).find((each) => each.anchor === anchor);
+      const scrubbed =
+        embedded === undefined
+          ? undefined
+          : redactLocalWorkflowProgramSource(event, original.slice(embedded.start, embedded.end));
+      safe = scrubbed !== undefined && !scrubbed.changed;
+      if (safe && sanitized !== undefined && protectedTokens.length > 0) {
+        const projectedProgram = embeddedPrograms(sanitized).find((each) => each.anchor === anchor);
+        safe =
+          projectedProgram !== undefined &&
+          !embeddedProgramIsProtected(
+            projectedProgram,
+            tokenizeProgram("shell", sanitized),
+            protectedTokens,
+          );
+      }
+    }
+    safeEmbedded.set(anchor, safe);
+    return safe;
+  };
+  return candidates.filter((candidate) => {
+    if (candidate.argument !== program?.argument) return true;
+    const address = programTokenPath(candidate.path);
+    if (address === undefined) return true;
+    if (protectedTokens.includes(address.token)) return false;
+    return address.embedded === undefined || embeddedIsSafe(address.token);
+  });
 }
 
 /** A tool result as a comparable value: its text when it is text, its own value otherwise. */

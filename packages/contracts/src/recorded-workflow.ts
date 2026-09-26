@@ -10,6 +10,13 @@
  * a workflow that uses it needs no compiler change.
  */
 
+import {
+  embeddedProgramIsProtected,
+  embeddedPrograms,
+  programTokenPath,
+  tokenizeProgram,
+} from "./program-tokens.js";
+
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
 export const MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
@@ -54,7 +61,12 @@ export type WorkflowValueTemplate =
       type: "program";
       language: WorkflowRecordedProgram["kind"];
       source: WorkflowValueTemplate;
-      holes: Array<{ token: number; binding: WorkflowValueTemplate }>;
+      /**
+       * `token` is a top-level token index. With `embedded`, the hole addresses token `embedded` of
+       * the program embedded in the shell source whose anchor is `token` (a heredoc body or a
+       * `-c`/`-e` code string).
+       */
+      holes: Array<{ token: number; embedded?: number; binding: WorkflowValueTemplate }>;
       /** Whole original program source, kept in a local private resource. */
       sourceReference?: string;
       /** Sorted canonical token indexes changed by secret redaction; never binding holes. */
@@ -449,6 +461,25 @@ export function validateWorkflowProgramProjection(
       protectedTokens.has(hole.token)
     ) {
       errors.push(`${path} hole ${hole.token} targets a protected token index`);
+    }
+  }
+  const sanitized =
+    template.language === "shell" &&
+    isPlainObject(template.source) &&
+    typeof template.source.value === "string"
+      ? template.source.value
+      : undefined;
+  const embeddedHoles = template.holes.filter(
+    (hole): hole is { token: number; embedded: number } =>
+      isPlainObject(hole) && typeof hole.token === "number" && typeof hole.embedded === "number",
+  );
+  if (sanitized === undefined || embeddedHoles.length === 0 || protectedTokens.size === 0) return;
+  const shellTokens = tokenizeProgram("shell", sanitized);
+  const programs = embeddedPrograms(sanitized);
+  for (const hole of embeddedHoles) {
+    const program = programs.find((each) => each.anchor === hole.token);
+    if (program && embeddedProgramIsProtected(program, shellTokens, [...protectedTokens])) {
+      errors.push(`${path} hole ${hole.token}.${hole.embedded} is inside a protected program`);
     }
   }
 }
@@ -1030,7 +1061,23 @@ export function validateRecordedWorkflow(value: unknown): {
                   problems.push(`${where} hole ${index} must name a recorded token index`);
                   continue;
                 }
-                walk(hole.binding, `${where}<token ${hole.token}>`, true);
+                if (
+                  hole.embedded !== undefined &&
+                  (typeof hole.embedded !== "number" ||
+                    !Number.isInteger(hole.embedded) ||
+                    hole.embedded < 0 ||
+                    template.language !== "shell")
+                ) {
+                  problems.push(`${where} hole ${index} must name an embedded token index`);
+                  continue;
+                }
+                walk(
+                  hole.binding,
+                  hole.embedded === undefined
+                    ? `${where}<token ${hole.token}>`
+                    : `${where}<token ${hole.token}.${hole.embedded}>`,
+                  true,
+                );
               }
               return;
             }
@@ -1154,7 +1201,15 @@ export function validateRecordedWorkflow(value: unknown): {
         // points anywhere else would be applied to a value no tokenizer has read.
         const path = Array.isArray(candidate.path) ? candidate.path : [];
         if (path[0] === "tokens") {
-          if (!Number.isInteger(path[1]) || (path[1] as number) < 0 || path.length !== 2) {
+          const address = programTokenPath(path);
+          if (
+            address === undefined ||
+            (address.embedded !== undefined &&
+              isPlainObject(step) &&
+              isPlainObject(step.callable) &&
+              isPlainObject(step.callable.program) &&
+              step.callable.program.kind !== "shell")
+          ) {
             errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
           }
           const program = isPlainObject(step) ? step.callable : undefined;

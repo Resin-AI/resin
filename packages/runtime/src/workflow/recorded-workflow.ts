@@ -11,6 +11,8 @@
 import {
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  embeddedProgramIsProtected,
+  embeddedPrograms,
   tokenizeProgram,
   validateWorkflowProgramProjection,
   workflowSinkStepIds,
@@ -306,28 +308,45 @@ async function buildTemplate(
         ).tokens;
       }
       const values = new Map<number, string | number | boolean | null>();
+      const embedded = new Map<number, Map<number, string | number | boolean | null>>();
       for (const hole of template.holes) {
         // An omitted recorded-default input leaves the token exactly as the recording ran it.
         if (hole.binding.type === "input" && !Object.hasOwn(options.inputs, hole.binding.name)) {
           continue;
         }
         const bound = await resolveLeaf(hole.binding);
-        values.set(
-          hole.token,
+        const value =
           typeof bound === "string" ||
-            typeof bound === "number" ||
-            typeof bound === "boolean" ||
-            bound === null
+          typeof bound === "number" ||
+          typeof bound === "boolean" ||
+          bound === null
             ? bound
-            : JSON.stringify(bound),
-        );
+            : JSON.stringify(bound);
+        if (hole.embedded === undefined) {
+          values.set(hole.token, value);
+        } else {
+          const program = embedded.get(hole.token) ?? new Map();
+          program.set(hole.embedded, value);
+          embedded.set(hole.token, program);
+        }
       }
-      return applyProgramTokenValues(
-        text,
-        tokens ?? tokenizeProgram(template.language, text),
-        values,
-        template.language,
-      );
+      const shellTokens = tokens ?? tokenizeProgram(template.language, text);
+      if (embedded.size > 0 && template.protectedTokens !== undefined) {
+        const protectedTokens = template.protectedTokens;
+        for (const program of embeddedPrograms(text)) {
+          if (
+            embedded.has(program.anchor) &&
+            embeddedProgramIsProtected(program, shellTokens, protectedTokens)
+          ) {
+            throw new WorkflowBindingError(
+              "an embedded program hole is inside a protected program",
+              step.id,
+              argumentName,
+            );
+          }
+        }
+      }
+      return applyProgramTokenValues(text, shellTokens, values, template.language, embedded);
     }
     default: {
       const exhaustive: never = template;

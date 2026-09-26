@@ -15,6 +15,7 @@ import {
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   canonicalJson,
+  embeddedPrograms,
   normalizeSha256,
   tokenizeProgram,
   validateRecordedWorkflow,
@@ -565,8 +566,14 @@ export class LocalArtifactExecutor {
       } catch {
         return { text: recorded, parameters: [] };
       }
+      const programs = template.holes.some((hole) => hole.embedded !== undefined)
+        ? embeddedPrograms(recorded)
+        : [];
       const bound = template.holes.flatMap((hole) => {
-        const token = tokens[hole.token];
+        const token =
+          hole.embedded === undefined
+            ? tokens[hole.token]
+            : programs.find((program) => program.anchor === hole.token)?.tokens[hole.embedded];
         return hole.binding.type === "input" &&
           token !== undefined &&
           recorded.slice(token.start, token.end) === token.raw

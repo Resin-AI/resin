@@ -15,6 +15,7 @@ import {
   type WorkflowValueTemplate,
   bindProgramToken,
   hashCanonical,
+  programTokenPath,
 } from "@resin/contracts";
 
 /** The template a recorded source resolves through, so a binding can be placed inside it. */
@@ -134,17 +135,10 @@ export function applyConfirmedWorkflowBinding(
   const template = source.type === "literal" && !isToken ? literalAsTemplate(source) : source;
   let replaced: WorkflowValueTemplate | undefined;
   if (isToken) {
-    const token = candidate.path[1];
+    const address = programTokenPath(candidate.path);
     const program = step.callable.program;
-    if (
-      candidate.path.length !== 2 ||
-      program?.argument !== candidate.argument ||
-      typeof token !== "number" ||
-      !Number.isInteger(token) ||
-      token < 0
-    )
-      return undefined;
-    replaced = bindProgramToken(source, program.kind, token, leaf);
+    if (address === undefined || program?.argument !== candidate.argument) return undefined;
+    replaced = bindProgramToken(source, program.kind, address.token, leaf, address.embedded);
   } else {
     replaced = withLeafAt(template, candidate.path, leaf);
   }

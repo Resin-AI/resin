@@ -30,6 +30,7 @@ import {
   type WorkflowBindingCandidate,
   type WorkflowJsonValue,
   type WorkflowValuePath,
+  embeddedPrograms,
   tokenizeProgram,
 } from "@resin/contracts";
 
@@ -211,6 +212,26 @@ function sharedShellWords(calls: readonly DerivationCall[]): Set<string> {
   return new Set([...callsByWord].flatMap(([word, count]) => (count >= 2 ? [word] : [])));
 }
 
+/** String literals of embedded programs that two or more shell calls ran with. */
+function sharedEmbeddedStrings(calls: readonly DerivationCall[]): Set<string> {
+  const callsByValue = new Map<string, number>();
+  for (const call of calls) {
+    if (call.program?.kind !== "shell") continue;
+    const text = call.arguments[call.program.argument];
+    if (typeof text !== "string") continue;
+    const values = new Set<string>();
+    for (const program of embeddedPrograms(text)) {
+      for (const token of program.tokens) {
+        if (token.bindable && token.kind === "string" && typeof token.value === "string") {
+          values.add(token.value);
+        }
+      }
+    }
+    for (const value of values) callsByValue.set(value, (callsByValue.get(value) ?? 0) + 1);
+  }
+  return new Set([...callsByValue].flatMap(([value, count]) => (count >= 2 ? [value] : [])));
+}
+
 function longFlagName(token: ProgramToken | undefined): string | undefined {
   const flag = token?.kind === "word" ? /^--([A-Za-z][A-Za-z0-9-]{0,30})$/.exec(token.raw) : null;
   return flag?.[1]?.toLowerCase().replace(/-/g, "_");
@@ -265,6 +286,7 @@ export function deriveNativeCalls(
   const resultValues: Array<Set<string>> = [];
   const seen = new Set<string>();
   const sharedWords = sharedShellWords(calls);
+  const sharedEmbedded = sharedEmbeddedStrings(calls);
 
   for (const [index, call] of calls.entries()) {
     const argumentLeaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
@@ -429,6 +451,46 @@ export function deriveNativeCalls(
           missing:
             "one recording does not establish that this value varies; omitted, the input keeps the recorded value",
         });
+      }
+
+      // A literal inside a program the command embeds (a heredoc body or a `-c` string) is offered
+      // when the request named it or other calls ran with it too: the script is written around the
+      // task's inputs, and its address stays inside that program so top-level indexes never move.
+      if (call.program.kind === "shell") {
+        for (const program of embeddedPrograms(text)) {
+          for (const [embeddedIndex, token] of program.tokens.entries()) {
+            if (inputCandidates.length >= MAX_CANDIDATES) break;
+            const value = token.value;
+            if (!token.bindable || token.kind !== "string" || typeof value !== "string") continue;
+            if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH) continue;
+            if (!requestWords.has(value) && !sharedEmbedded.has(value)) continue;
+            const key = scalarKey(value);
+            let name = programInputs.get(key);
+            if (name === undefined) {
+              if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
+              const base = programInputBaseName(value, program.tokens[embeddedIndex - 1]);
+              name = base;
+              for (let suffix = 2; programInputNames.has(name); suffix += 1) {
+                name = `${base}_${suffix}`;
+              }
+              programInputs.set(key, name);
+              programInputNames.add(name);
+            } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
+              continue;
+            }
+            offered.add(name);
+            inputCandidates.push({
+              stepId: call.stepId,
+              argument: call.program.argument,
+              path: ["tokens", program.anchor, "embedded", embeddedIndex],
+              proposed: { kind: "input", name, type: "string", recordedDefault: true },
+              reason: "native-data-argument",
+              evidence: { tokens: tokens.length, token: program.anchor, embedded: embeddedIndex },
+              missing:
+                "one recording does not establish that this value varies; omitted, the input keeps the recorded value",
+            });
+          }
+        }
       }
     }
   }

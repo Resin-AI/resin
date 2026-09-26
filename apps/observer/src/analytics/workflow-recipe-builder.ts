@@ -366,6 +366,7 @@ function recordWorkflowRecipeInternal(
             : { protectedTokens: [...template.protectedTokens] }),
           holes: template.holes.map((hole) => ({
             token: hole.token,
+            ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
             binding: sweep(hole.binding),
           })),
         };

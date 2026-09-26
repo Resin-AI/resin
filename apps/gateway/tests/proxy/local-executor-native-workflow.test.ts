@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ToolManifest } from "@resin/contracts";
+import { embeddedPrograms } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
   ArtifactCache,
@@ -360,6 +361,87 @@ describe("recorded workflows of ordinary calls", () => {
     // Each bound token reads as its input, and each input's recorded value is listed once.
     expect(description).toContain("python3 solve.py --month {month} {text}\n");
     expect(description).toContain("month = 2025-01; text = EU zone");
+  });
+
+  it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const program = "python3 - <<'PY'\nprint('Belles_cookbook_store')\nPY";
+    const heredoc = embeddedPrograms(program)[0]!;
+    const embedded = heredoc.tokens.findIndex((token) => token.raw === "'Belles_cookbook_store'");
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:2", program, { workspaceId: context.workspaceId });
+    const installed = await installPlan(
+      {
+        id: "tool_process_embedded",
+        name: "wf_process_embedded",
+        version: "1.0.0",
+        description: "recorded python heredoc with a bound literal",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_embedded",
+        inputs: [{ name: "text", type: "string", recordedDefault: true }],
+        privateReferences: ["private:sess:2"],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_1",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "program",
+                    language: "shell",
+                    source: { type: "private", reference: "private:sess:2" },
+                    holes: [
+                      {
+                        token: heredoc.anchor,
+                        embedded,
+                        binding: { type: "input", name: "text" },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toContain("python3 - <<'PY'\nprint({text})\nPY");
+    expect(description).toContain("text = Belles_cookbook_store");
   });
 
   it("refuses to run a recorded program the manifest does not grant", async () => {

@@ -15,6 +15,7 @@ import {
   type WorkflowValueTemplate,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  embeddedPrograms,
   hashCanonical,
   tokenizeProgram,
   validateWorkflowProgramProjection,
@@ -102,15 +103,31 @@ async function identityForProgram(
     ).tokens;
   }
 
+  const sentinel = (token: ProgramToken | undefined, name: string) =>
+    token?.kind === "number"
+      ? 0
+      : token?.kind === "boolean"
+        ? false
+        : token?.kind === "null"
+          ? null
+          : `__resin_program_hole_${name}__`;
   const values = new Map<number, string | number | boolean | null>();
+  const embedded = new Map<number, Map<number, string | number | boolean | null>>();
+  const programs = template.holes.some((hole) => hole.embedded !== undefined)
+    ? embeddedPrograms(source)
+    : [];
   for (const hole of template.holes) {
-    const token = tokens[hole.token];
-    if (token?.kind === "number") values.set(hole.token, 0);
-    else if (token?.kind === "boolean") values.set(hole.token, false);
-    else if (token?.kind === "null") values.set(hole.token, null);
-    else values.set(hole.token, `__resin_program_hole_${hole.token}__`);
+    if (hole.embedded === undefined) {
+      values.set(hole.token, sentinel(tokens[hole.token], String(hole.token)));
+      continue;
+    }
+    // The embedded index is part of the identity: the sentinel names both addresses.
+    const token = programs.find((program) => program.anchor === hole.token)?.tokens[hole.embedded];
+    const program = embedded.get(hole.token) ?? new Map();
+    program.set(hole.embedded, sentinel(token, `${hole.token}_${hole.embedded}`));
+    embedded.set(hole.token, program);
   }
-  const rendered = applyProgramTokenValues(source, tokens, values, template.language);
+  const rendered = applyProgramTokenValues(source, tokens, values, template.language, embedded);
   return {
     stepId,
     argument,
