@@ -1,6 +1,7 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { IdentifierSchema } from "@resin/contracts";
 import type { HarnessWorkspace } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -1403,6 +1404,19 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
   it("creates clean workspace IDs from paths", () => {
     expect(createWorkspaceIdFromPath("/home/user/project-1")).toBe("home-user-project-1");
     expect(createWorkspaceIdFromPath("C:\\Users\\User\\Workspace")).toBe("C-Users-User-Workspace");
+  });
+
+  it("bounds long workspace IDs without conflating paths with the same prefix", () => {
+    const prefix = `/workspace/${"long-directory/".repeat(12)}`;
+    const first = createWorkspaceIdFromPath(`${prefix}one`);
+    const second = createWorkspaceIdFromPath(`${prefix}two`);
+
+    expect(IdentifierSchema.parse(first)).toBe(first);
+    expect(IdentifierSchema.parse(second)).toBe(second);
+    expect(first).toHaveLength(128);
+    expect(first).not.toBe(second);
+    expect(createWorkspaceIdFromPath(`${prefix}one`)).toBe(first);
+    expect(first.startsWith("workspace-long-directory-")).toBe(true);
   });
 
   it("collects nested directories, ignores cycles/aliases, respects max depth, and preserves deterministic ordering and catalog dedupe", async () => {

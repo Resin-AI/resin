@@ -204,7 +204,11 @@ export const McpToolSchema = z.object({
   inputSchema: McpToolInputSchema,
   outputSchema: z.record(z.unknown()).optional(),
   annotations: McpToolAnnotationsSchema.optional(),
+  _meta: z.record(z.unknown()).optional(),
 });
+
+/** `_meta` key marking a tool Resin learned for this workspace, which facades list natively. */
+export const RESIN_LEARNED_TOOL_META = "resin/learned";
 export type McpTool = z.infer<typeof McpToolSchema>;
 
 /**

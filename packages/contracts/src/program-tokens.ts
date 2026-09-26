@@ -38,11 +38,11 @@ export interface ProgramToken {
   end: number;
   /** The token exactly as it appeared in the program. */
   raw: string;
-  /** The statically known value, when the source represents one. */
+  /** Statically known value, only when safe to bind. */
   value?: ProgramTokenValue;
-  /** Whether the token can safely be substituted as a value in its recorded program. */
+  /** True only when this token denotes a known value and replacing its span remains data. */
   bindable: boolean;
-  /** Original string delimiter; used for syntax-aware rendering of a replacement. */
+  /** Original string delimiter for syntax-aware replacement. */
   quote?: string;
 }
 
@@ -168,7 +168,7 @@ function shellTokens(source: string): ProgramToken[] {
     const start = index;
     let value = "";
     let quotedFully = false;
-    let bindable = commandSubstitutionDepth === 0 && !insideBacktickSubstitution;
+    let bindable = !insideBacktickSubstitution;
     if (char === "'" || char === '"') {
       const quoted = readShellQuoted(source, index);
       value += quoted.value;
@@ -218,8 +218,150 @@ function shellTokens(source: string): ProgramToken[] {
       end: index,
       raw: source.slice(start, index),
       ...(bindable ? { value } : {}),
-      bindable,
+      bindable:
+        bindable &&
+        start !== 0 &&
+        tokens.at(-1)?.raw !== "-c" &&
+        tokens.at(-1)?.raw !== "-e" &&
+        !["&&", "||", ";", "|", "(", "&"].includes(tokens.at(-1)?.raw ?? "") &&
+        !(
+          tokens.at(-1)?.kind === "operator" &&
+          tokens.at(-1)?.raw !== "<" &&
+          tokens.at(-1)?.raw !== ">" &&
+          tokens.at(-1)?.raw !== ">>"
+        ),
     });
+  }
+  // Inner words already have their original spans. Admit only arguments of a complete,
+  // ordinary command substitution; never reinterpret arithmetic or incomplete syntax.
+  const frames: Array<{
+    arithmetic: boolean;
+    eligible: boolean;
+    invalid: boolean;
+    command: boolean;
+    redirect: boolean;
+    firstCandidate: number;
+  }> = [];
+  let awaitingSubstitution = false;
+  let awaitingArithmetic = false;
+  const nestedCandidates = new Set<number>();
+  const pendingCandidates: number[] = [];
+  let previousEnd = 0;
+  let opaqueFrom = tokens.length;
+  for (let position = 0; position < tokens.length; position += 1) {
+    const token = tokens[position]!;
+    const newline = source.indexOf("\n", previousEnd);
+    if (newline !== -1 && newline < token.start) {
+      const current = frames.at(-1);
+      if (current) {
+        current.command = false;
+        current.redirect = false;
+      }
+    }
+    previousEnd = token.end;
+    if (token.raw === "(") {
+      const parent = frames.at(-1);
+      const arithmetic = awaitingArithmetic || (parent?.arithmetic ?? false);
+      if (parent && !awaitingSubstitution && !arithmetic) {
+        parent.invalid = true;
+        opaqueFrom = Math.min(opaqueFrom, position);
+      }
+      const eligible = !arithmetic && awaitingSubstitution && (parent?.eligible ?? true);
+      frames.push({
+        arithmetic,
+        eligible,
+        invalid: false,
+        command: false,
+        redirect: false,
+        firstCandidate: pendingCandidates.length,
+      });
+      awaitingSubstitution = false;
+      awaitingArithmetic = false;
+      continue;
+    }
+    if (token.raw === ")") {
+      const frame = frames.pop();
+      if (frame) {
+        if (frame.invalid) {
+          const parent = frames.at(-1);
+          if (parent) parent.invalid = true;
+        }
+        if (frame.eligible && !frame.invalid && frames.length === 0) {
+          for (const candidate of pendingCandidates) nestedCandidates.add(candidate);
+          pendingCandidates.length = 0;
+        } else if (!frame.eligible || frame.invalid) {
+          pendingCandidates.length = frame.firstCandidate;
+        }
+      }
+      awaitingSubstitution = false;
+      continue;
+    }
+    const frame = frames.at(-1);
+    if (frame) {
+      if (
+        token.kind === "word" &&
+        ([
+          "if",
+          "then",
+          "elif",
+          "else",
+          "fi",
+          "for",
+          "while",
+          "until",
+          "do",
+          "done",
+          "case",
+          "esac",
+          "in",
+          "function",
+          "{",
+          "}",
+        ].includes(token.raw) ||
+          (token.raw === "!" && !frame.command))
+      ) {
+        frame.invalid = true;
+        opaqueFrom = Math.min(opaqueFrom, position);
+      }
+      if ([";", "&&", "||", "|", "&"].includes(token.raw)) {
+        frame.command = false;
+        frame.redirect = false;
+      } else if (token.kind === "operator") {
+        if (["<", ">", ">>"].includes(token.raw) || /^[0-9]+[<>]/.test(token.raw)) {
+          frame.redirect = true;
+        }
+      } else if (frame.redirect) {
+        frame.redirect = false;
+      } else if (!frame.command) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) frame.command = true;
+      } else if (
+        token.bindable &&
+        frame.eligible &&
+        !awaitingSubstitution &&
+        (token.kind === "string" || (!token.raw.includes("'") && !token.raw.includes('"'))) &&
+        !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)
+      ) {
+        pendingCandidates.push(position);
+      }
+    }
+    if (token.raw.endsWith("$") && tokens[position + 1]?.raw === "(") {
+      awaitingSubstitution = true;
+      awaitingArithmetic = tokens[position + 2]?.raw === "(";
+    }
+  }
+  let depth = 0;
+  for (let position = 0; position < tokens.length; position += 1) {
+    const token = tokens[position]!;
+    if (token.raw === ")") depth -= 1;
+    if (depth > 0 && !nestedCandidates.has(position)) {
+      token.bindable = false;
+      delete token.value;
+    }
+    if (token.raw === "(") depth += 1;
+  }
+  for (let position = opaqueFrom; position < tokens.length; position += 1) {
+    tokens[position]!.bindable = false;
+    delete tokens[position]!.value;
   }
   return tokens;
 }
@@ -361,7 +503,11 @@ function pythonStringParts(
   };
 }
 
-function decodePythonString(raw: string): { value?: string; quote: string; bindable: boolean } {
+function decodePythonString(raw: string): {
+  value?: string;
+  quote: string;
+  bindable: boolean;
+} {
   const parts = pythonStringParts(raw);
   if (parts === undefined || parts.prefix.includes("b")) {
     return { quote: parts?.quote ?? "'", bindable: false };
@@ -455,9 +601,10 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
   if (parseError !== undefined) throw new ProgramTokenizationError(language, parseError.from);
 
   const tokens: ProgramToken[] = [];
-  const pending: Array<{ node: ProgramSyntaxNode; parent: ProgramSyntaxNode | null }> = [
-    { node: tree.topNode, parent: null },
-  ];
+  const pending: Array<{
+    node: ProgramSyntaxNode;
+    parent: ProgramSyntaxNode | null;
+  }> = [{ node: tree.topNode, parent: null }];
   while (pending.length > 0) {
     const { node, parent } = pending.pop()!;
     const raw = source.slice(node.from, node.to);
@@ -689,7 +836,334 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
  * partial token list.
  */
 export function tokenizeProgram(language: ProgramLanguage, source: string): ProgramToken[] {
+  if (language === "patch") return patchTokens(source);
   return language === "shell" ? shellTokens(source) : scriptTokens(source, language);
+}
+
+/** A maximal run of characters a patch token may carry: identifiers, numbers, paths, hosts. */
+const PATCH_WORD = /[A-Za-z0-9_.@/+-]+/g;
+
+/**
+ * A unified diff for one file: only the lines it ADDS carry values a caller may choose. Context and
+ * removed lines must match the file being edited, and headers name what is edited, so neither is
+ * ever a token. Each maximal word of an added line is a bindable word whose value is its text.
+ */
+function patchTokens(source: string): ProgramToken[] {
+  const tokens: ProgramToken[] = [];
+  let offset = 0;
+  for (const line of source.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      for (const match of line.slice(1).matchAll(PATCH_WORD)) {
+        const start = offset + 1 + match.index;
+        tokens.push({
+          kind: "word",
+          start,
+          end: start + match[0].length,
+          raw: match[0],
+          value: match[0],
+          bindable: true,
+        });
+      }
+    }
+    offset += line.length + 1;
+  }
+  return tokens;
+}
+
+/** A program embedded in a shell command: a heredoc body or a `-c`/`-e` code string. */
+export interface EmbeddedProgram {
+  /** Top-level shell token that anchors it: the -c/-e code string token, or the heredoc delimiter token. */
+  anchor: number;
+  language: "python" | "javascript";
+  /** Half-open span of the embedded source inside the shell text. */
+  start: number;
+  end: number;
+  /** How the embedded text sits in the shell source; decides the escaping a rendered value needs. */
+  context: "literal-heredoc" | "expanding-heredoc" | "single-quoted" | "double-quoted";
+  /** tokenizeProgram(language, embeddedSource) with offsets made absolute in the shell text. */
+  tokens: ProgramToken[];
+}
+
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const SHELL_COMMAND_SEPARATORS: Record<string, true> = {
+  ";": true,
+  "&&": true,
+  "||": true,
+  "|": true,
+  "&": true,
+  "(": true,
+  ")": true,
+  ";;": true,
+};
+
+function interpreterLanguage(word: ProgramToken): EmbeddedProgram["language"] | undefined {
+  // Only a plain word names a program; quoting or expansion in it is never guessed through.
+  if (word.kind !== "word" || word.value === undefined || word.value !== word.raw) return undefined;
+  const base = word.raw.slice(word.raw.lastIndexOf("/") + 1);
+  if (/^python(?:3(?:\.[0-9]+)?)?$/.test(base)) return "python";
+  if (base === "node") return "javascript";
+  return undefined;
+}
+
+interface ShellSimpleCommand {
+  /** Word tokens of the command in order: no operators, redirection targets or heredoc delimiters. */
+  words: number[];
+}
+
+interface PendingHeredoc {
+  command: ShellSimpleCommand;
+  delimiterToken: number;
+  delimiter: string;
+  quoted: boolean;
+  stripTabs: boolean;
+}
+
+/** The heredoc delimiter a token spells, or undefined when its quoting is not plain. */
+function heredocDelimiter(raw: string): { delimiter: string; quoted: boolean } | undefined {
+  if (/^[A-Za-z0-9_.-]+$/.test(raw)) return { delimiter: raw, quoted: false };
+  const quoted = /^'([A-Za-z0-9_.-]+)'$/.exec(raw) ?? /^"([A-Za-z0-9_.-]+)"$/.exec(raw);
+  if (quoted) return { delimiter: quoted[1]!, quoted: true };
+  const escaped = /^\\([A-Za-z0-9_.-]+)$/.exec(raw);
+  if (escaped) return { delimiter: escaped[1]!, quoted: true };
+  return undefined;
+}
+
+/** Words after the interpreter, before `-`, that the interpreter reads as options (none of them code). */
+function interpreterReadsStandardInput(
+  tokens: readonly ProgramToken[],
+  command: ShellSimpleCommand,
+  interpreter: number,
+): boolean {
+  for (const index of command.words.slice(interpreter + 1)) {
+    const raw = tokens[index]!.raw;
+    if (raw === "-") return true;
+    if (!/^-[A-Za-z]+$/.test(raw)) return false;
+    if (/[cempi]/.test(raw.slice(1))) return false;
+  }
+  return true;
+}
+
+function embeddedTokens(
+  language: EmbeddedProgram["language"],
+  source: string,
+  start: number,
+  end: number,
+): ProgramToken[] | undefined {
+  try {
+    return tokenizeProgram(language, source.slice(start, end)).map((token) => ({
+      ...token,
+      start: token.start + start,
+      end: token.end + start,
+    }));
+  } catch {
+    return undefined;
+  }
+}
+
+function commandInterpreter(
+  tokens: readonly ProgramToken[],
+  command: ShellSimpleCommand,
+): { position: number; language: EmbeddedProgram["language"] } | undefined {
+  const position = command.words.findIndex((index) => !SHELL_ASSIGNMENT.test(tokens[index]!.raw));
+  if (position === -1) return undefined;
+  const language = interpreterLanguage(tokens[command.words[position]!]!);
+  return language === undefined ? undefined : { position, language };
+}
+
+function inlineProgram(
+  source: string,
+  tokens: readonly ProgramToken[],
+  command: ShellSimpleCommand,
+): EmbeddedProgram | undefined {
+  const interpreter = commandInterpreter(tokens, command);
+  if (interpreter === undefined) return undefined;
+  const flags = interpreter.language === "python" ? ["-c"] : ["-e", "--eval"];
+  for (let position = interpreter.position + 1; position < command.words.length; position += 1) {
+    const raw = tokens[command.words[position]!]!.raw;
+    if (flags.includes(raw)) {
+      const anchor = command.words[position + 1];
+      if (anchor === undefined || anchor !== command.words[position]! + 1) return undefined;
+      const code = tokens[anchor]!;
+      if (code.kind !== "string" || code.raw.length < 2) return undefined;
+      const quote = code.raw[0]!;
+      const content = code.raw.slice(1, -1);
+      if (code.raw.at(-1) !== quote || content.includes(quote)) return undefined;
+      if (quote === '"' && /[\\$`]/.test(content)) return undefined;
+      if (quote !== "'" && quote !== '"') return undefined;
+      const programTokens = embeddedTokens(
+        interpreter.language,
+        source,
+        code.start + 1,
+        code.end - 1,
+      );
+      if (programTokens === undefined) return undefined;
+      return {
+        anchor,
+        language: interpreter.language,
+        start: code.start + 1,
+        end: code.end - 1,
+        context: quote === "'" ? "single-quoted" : "double-quoted",
+        tokens: programTokens,
+      };
+    }
+    // Anything but an option before the code flag is a script path or its arguments.
+    if (!/^-[A-Za-z]+$/.test(raw)) return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The programs embedded in a shell command: heredoc bodies fed to python or node, and their
+ * `-c`/`-e` code strings. Detection fails closed: a construct whose quoting, expansion or
+ * interpreter is not certain yields nothing, and a heredoc whose body cannot be delimited ends the
+ * scan (everything after it would be guessed).
+ *
+ * Top-level tokens are untouched; embedded tokens carry absolute offsets into `shellSource`.
+ */
+export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
+  const tokens = shellTokens(shellSource);
+  const programs: EmbeddedProgram[] = [];
+  const commands: ShellSimpleCommand[] = [];
+  let command: ShellSimpleCommand = { words: [] };
+  let pending: PendingHeredoc[] = [];
+  let scanFrom = 0;
+  const closeCommand = (): void => {
+    if (command.words.length > 0) commands.push(command);
+    command = { words: [] };
+  };
+  let position = 0;
+  scan: while (position < tokens.length) {
+    const token = tokens[position]!;
+    const newline = shellSource.indexOf("\n", scanFrom);
+    if (newline !== -1 && newline < token.start) {
+      closeCommand();
+      let bodyStart = newline + 1;
+      for (const heredoc of pending) {
+        let lineStart = bodyStart;
+        let terminator: { start: number; end: number } | undefined;
+        let tabbedBody = false;
+        while (lineStart <= shellSource.length) {
+          const lineBreak = shellSource.indexOf("\n", lineStart);
+          const lineEnd = lineBreak === -1 ? shellSource.length : lineBreak;
+          const line = shellSource.slice(lineStart, lineEnd);
+          const compared = heredoc.stripTabs ? line.replace(/^\t+/, "") : line;
+          if (compared === heredoc.delimiter) {
+            terminator = { start: lineStart, end: lineEnd };
+            break;
+          }
+          if (heredoc.stripTabs && line.startsWith("\t")) tabbedBody = true;
+          if (lineBreak === -1) break;
+          lineStart = lineBreak + 1;
+        }
+        if (terminator === undefined) break scan;
+        const interpreter = commandInterpreter(tokens, heredoc.command);
+        const body = shellSource.slice(bodyStart, terminator.start);
+        const context = heredoc.quoted
+          ? "literal-heredoc"
+          : /[$`\\]/.test(body)
+            ? undefined
+            : "expanding-heredoc";
+        if (
+          interpreter !== undefined &&
+          context !== undefined &&
+          // `<<-` removes leading tabs, so the text the interpreter reads is not a span of the shell.
+          !tabbedBody &&
+          interpreterReadsStandardInput(tokens, heredoc.command, interpreter.position)
+        ) {
+          const programTokens = embeddedTokens(
+            interpreter.language,
+            shellSource,
+            bodyStart,
+            terminator.start,
+          );
+          if (programTokens !== undefined) {
+            programs.push({
+              anchor: heredoc.delimiterToken,
+              language: interpreter.language,
+              start: bodyStart,
+              end: terminator.start,
+              context,
+              tokens: programTokens,
+            });
+          }
+        }
+        bodyStart = terminator.end + 1;
+        scanFrom = terminator.end;
+      }
+      if (pending.length > 0) {
+        pending = [];
+        while (position < tokens.length && tokens[position]!.start < scanFrom) {
+          // A body token the shell lexer read past the terminator (an unmatched quote in the body)
+          // leaves the rest of the text without a trustworthy command boundary.
+          if (tokens[position]!.end > scanFrom) break scan;
+          position += 1;
+        }
+        continue;
+      }
+      scanFrom = newline + 1;
+      continue;
+    }
+    scanFrom = token.end;
+    if (token.kind === "operator") {
+      if (SHELL_COMMAND_SEPARATORS[token.raw]) {
+        closeCommand();
+        position += 1;
+        continue;
+      }
+      const next = tokens[position + 1];
+      if (token.raw === "<<") {
+        if (next === undefined || next.kind === "operator") break;
+        // `<<-` needs the dash glued to the operator; `<< -X` is a delimiter spelled `-X`.
+        const stripTabs = next.start === token.end && next.raw.startsWith("-");
+        const delimiter = heredocDelimiter(stripTabs ? next.raw.slice(1) : next.raw);
+        if (delimiter === undefined) break;
+        pending.push({ command, delimiterToken: position + 1, ...delimiter, stripTabs });
+        position += 2;
+        continue;
+      }
+      // Any other redirection: its target is not a command word.
+      if (/[<>]&?$/.test(token.raw) && next !== undefined && next.kind !== "operator") {
+        position += 2;
+        continue;
+      }
+      // A `<` followed by more operators (`<<<`, `0<<`, `<(`) is syntax this reader does not delimit.
+      if (token.raw.endsWith("<")) break;
+      position += 1;
+      continue;
+    }
+    command.words.push(position);
+    position += 1;
+  }
+  closeCommand();
+  for (const each of commands) {
+    const inline = inlineProgram(shellSource, tokens, each);
+    if (inline !== undefined) programs.push(inline);
+  }
+  return programs.sort((left, right) => left.start - right.start);
+}
+
+/**
+ * Renders a bound value for a token of an embedded program, escaped for the shell context the
+ * program's text sits in. A heredoc value may not carry a newline: it could end the heredoc early.
+ */
+export function renderEmbeddedProgramTokenValue(
+  program: EmbeddedProgram,
+  token: ProgramToken,
+  value: ProgramTokenValue,
+): string {
+  const rendered = renderProgramTokenValue(token, value, program.language);
+  switch (program.context) {
+    case "single-quoted":
+      return rendered.replaceAll("'", "'\\''");
+    case "double-quoted":
+      return rendered.replace(/[\\"$`]/g, (char) => `\\${char}`);
+    case "expanding-heredoc":
+      if (rendered.includes("\n")) throw new Error("a heredoc value cannot contain a newline");
+      return rendered.replace(/[\\$`]/g, (char) => `\\${char}`);
+    case "literal-heredoc":
+      if (rendered.includes("\n")) throw new Error("a heredoc value cannot contain a newline");
+      return rendered;
+  }
 }
 
 /** Escapes a value for a single-quoted shell string: `'` becomes `'\''`. */
@@ -751,6 +1225,13 @@ export function renderProgramTokenValue(
   if (token.kind === "operator" || token.kind === "unsupported") {
     throw new Error("this program token cannot carry a bound value");
   }
+  if (language === "patch") {
+    const text = typeof value === "string" ? value : String(value);
+    if (/[\r\n]/u.test(text)) {
+      throw new Error("a patch token value cannot span lines");
+    }
+    return text;
+  }
   if (token.kind === "number") {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new TypeError("a numeric program token requires a finite number");
@@ -779,19 +1260,234 @@ export function renderProgramTokenValue(
   return quoteShellSingle(text);
 }
 
+/** Values bound inside embedded programs: anchor top-level token → embedded token index → value. */
+export type EmbeddedProgramTokenValues = ReadonlyMap<
+  number,
+  ReadonlyMap<number, ProgramTokenValue>
+>;
+
+/** Half-open UTF-16 offsets into a token's decoded `value`; never the whole value. */
+export interface ProgramTokenSpan {
+  start: number;
+  end: number;
+}
+
+/** A token a hole or candidate addresses, optionally narrowed to a span of its decoded value. */
+export interface ProgramTokenAddress {
+  token: number;
+  embedded?: number;
+  span?: ProgramTokenSpan;
+}
+
+/** A value bound to a span of one recorded string token (top-level, or embedded with `embedded`). */
+export interface ProgramTokenSpanValue {
+  token: number;
+  embedded?: number;
+  span: ProgramTokenSpan;
+  value: ProgramTokenValue;
+}
+
+/**
+ * The program token a candidate path addresses: `["tokens", token]` for a top-level token, or
+ * `["tokens", anchor, "embedded", index]` for a token of the program embedded at `anchor`, either
+ * optionally followed by `"span", start, end` to address part of the token's decoded value.
+ * Undefined for any other shape.
+ */
+export function programTokenPath(
+  path: ReadonlyArray<string | number>,
+): ProgramTokenAddress | undefined {
+  const index = (part: unknown): part is number =>
+    typeof part === "number" && Number.isInteger(part) && part >= 0;
+  if (path[0] !== "tokens" || !index(path[1])) return undefined;
+  let rest = path.slice(2);
+  let embedded: number | undefined;
+  if (rest[0] === "embedded") {
+    if (!index(rest[1])) return undefined;
+    embedded = rest[1];
+    rest = rest.slice(2);
+  }
+  let span: ProgramTokenSpan | undefined;
+  if (rest.length > 0) {
+    if (rest.length !== 3 || rest[0] !== "span" || !index(rest[1]) || !index(rest[2])) {
+      return undefined;
+    }
+    if (rest[1] >= rest[2]) return undefined;
+    span = { start: rest[1], end: rest[2] };
+  }
+  return {
+    token: path[1],
+    ...(embedded === undefined ? {} : { embedded }),
+    ...(span === undefined ? {} : { span }),
+  };
+}
+
+/** Whether `span` is a proper, in-range part of a recorded token value of `length` characters. */
+export function programTokenSpanFits(span: ProgramTokenSpan, length: number): boolean {
+  return (
+    Number.isInteger(span.start) &&
+    Number.isInteger(span.end) &&
+    span.start >= 0 &&
+    span.start < span.end &&
+    span.end <= length &&
+    !(span.start === 0 && span.end === length)
+  );
+}
+
+/**
+ * The recorded token value with each span replaced by its bound value as text. Spans must fit the
+ * value, never cover all of it, and never overlap; only strings and finite numbers become text.
+ */
+export function composeProgramTokenSpans(
+  recorded: string,
+  spans: ReadonlyArray<{ span: ProgramTokenSpan; value: ProgramTokenValue }>,
+): string {
+  const ordered = [...spans].sort((left, right) => right.span.start - left.span.start);
+  let composed = recorded;
+  let limit = recorded.length;
+  for (const { span, value } of ordered) {
+    if (!programTokenSpanFits(span, recorded.length)) {
+      throw new Error("a span hole does not fit inside the recorded token value");
+    }
+    if (span.end > limit) throw new Error("the span holes of one token overlap");
+    limit = span.start;
+    let text: string;
+    if (typeof value === "string") text = value;
+    else if (typeof value === "number" && Number.isFinite(value)) text = String(value);
+    else throw new TypeError("a span hole requires a string or finite number");
+    composed = composed.slice(0, span.start) + text + composed.slice(span.end);
+  }
+  return composed;
+}
+
+/** The value a token address reads in a program text, when that token is safely bindable. */
+export function programTokenValueAt(
+  language: ProgramLanguage,
+  source: string,
+  address: ProgramTokenAddress,
+): ProgramTokenValue | undefined {
+  const token =
+    address.embedded === undefined
+      ? tokenizeProgram(language, source)[address.token]
+      : language === "shell"
+        ? embeddedPrograms(source).find((program) => program.anchor === address.token)?.tokens[
+            address.embedded
+          ]
+        : undefined;
+  if (!token?.bindable) return undefined;
+  if (address.span === undefined) return token.value;
+  if (typeof token.value !== "string" || !programTokenSpanFits(address.span, token.value.length)) {
+    return undefined;
+  }
+  return token.value.slice(address.span.start, address.span.end);
+}
+
+/**
+ * The value a demonstration supplied for a span hole: the held-out token at the same address must
+ * keep the recorded token's text before `start` and after `end`, and the text between them is the
+ * demonstrated value. Undefined when the demonstration cannot decide it (other prefix or suffix, a
+ * missing or non-string token, or an address without a span).
+ */
+export function demonstratedProgramTokenSpanValue(
+  language: ProgramLanguage,
+  recordedSource: string,
+  demonstratedSource: string,
+  address: ProgramTokenAddress,
+): string | undefined {
+  if (address.span === undefined) return undefined;
+  const whole = { token: address.token, embedded: address.embedded };
+  const recorded = programTokenValueAt(language, recordedSource, whole);
+  const demonstrated = programTokenValueAt(language, demonstratedSource, whole);
+  if (typeof recorded !== "string" || typeof demonstrated !== "string") return undefined;
+  if (!programTokenSpanFits(address.span, recorded.length)) return undefined;
+  const prefix = recorded.slice(0, address.span.start);
+  const suffix = recorded.slice(address.span.end);
+  if (
+    demonstrated.length <= prefix.length + suffix.length ||
+    !demonstrated.startsWith(prefix) ||
+    !demonstrated.endsWith(suffix)
+  ) {
+    return undefined;
+  }
+  return demonstrated.slice(prefix.length, demonstrated.length - suffix.length);
+}
+
+/**
+ * Whether a top-level protected token (one secret redaction changed) touches an embedded program:
+ * its anchor, or any span inside its text. Such a program carries a secret and is never bindable.
+ */
+export function embeddedProgramIsProtected(
+  program: EmbeddedProgram,
+  shellTokens: readonly ProgramToken[],
+  protectedTokens: readonly number[],
+): boolean {
+  return protectedTokens.some((index) => {
+    if (index === program.anchor) return true;
+    const token = shellTokens[index];
+    return token !== undefined && token.start < program.end && program.start < token.end;
+  });
+}
+
 /**
  * Rewrites a program by replacing the tokens named in `values`, leaving every other byte — quoting,
  * spacing, redirections, control flow and comments — exactly as it was recorded.
  *
- * A token index outside the tokenized program is refused rather than approximated: a plan that does
- * not describe the program it is run against must fail, never run something else.
+ * `embedded` binds tokens of programs embedded in a shell source, found in this same `source`.
+ * A token index outside the tokenized program, an unknown anchor, or replacements that overlap are
+ * refused rather than approximated: a plan that does not describe the program it is run against
+ * must fail, never run something else.
+ *
+ * `spans` binds parts of recorded string tokens: each (token, embedded) group becomes the recorded
+ * value with its spans replaced, rendered exactly as a whole-token value would be. A token bound both
+ * whole and by span is refused.
  */
 export function applyProgramTokenValues(
   source: string,
   tokens: readonly ProgramToken[],
   values: ReadonlyMap<number, ProgramTokenValue>,
   language: ProgramLanguage = "shell",
+  embedded?: EmbeddedProgramTokenValues,
+  spans?: readonly ProgramTokenSpanValue[],
 ): string {
+  if (spans !== undefined && spans.length > 0) {
+    const groups = new Map<string, ProgramTokenSpanValue[]>();
+    for (const span of spans) {
+      const key = `${span.token}.${span.embedded ?? ""}`;
+      groups.set(key, [...(groups.get(key) ?? []), span]);
+    }
+    const topLevel = new Map(values);
+    const nested = new Map<number, Map<number, ProgramTokenValue>>(
+      [...(embedded ?? [])].map(([anchor, each]) => [anchor, new Map(each)]),
+    );
+    const programs = spans.some((span) => span.embedded !== undefined)
+      ? language === "shell"
+        ? embeddedPrograms(source)
+        : undefined
+      : [];
+    if (programs === undefined) throw new Error("only a shell program embeds other programs");
+    for (const group of groups.values()) {
+      const { token: tokenIndex, embedded: embeddedIndex } = group[0]!;
+      const token =
+        embeddedIndex === undefined
+          ? tokens[tokenIndex]
+          : programs.find((each) => each.anchor === tokenIndex)?.tokens[embeddedIndex];
+      if (token === undefined) {
+        throw new Error(
+          `the recorded program has no token ${tokenIndex}; its shape does not match the plan`,
+        );
+      }
+      if (!token.bindable || typeof token.value !== "string") {
+        throw new Error("only a bindable string token can take span holes");
+      }
+      const target =
+        embeddedIndex === undefined
+          ? topLevel
+          : (nested.get(tokenIndex) ?? nested.set(tokenIndex, new Map()).get(tokenIndex)!);
+      const index = embeddedIndex ?? tokenIndex;
+      if (target.has(index)) throw new Error("a token is bound both whole and by span");
+      target.set(index, composeProgramTokenSpans(token.value, group));
+    }
+    return applyProgramTokenValues(source, tokens, topLevel, language, nested);
+  }
   const replacements: Array<{ start: number; end: number; text: string }> = [];
   for (const [tokenIndex, value] of values) {
     const token = tokens[tokenIndex];
@@ -800,13 +1496,46 @@ export function applyProgramTokenValues(
         `the recorded program has no token ${tokenIndex}; its shape does not match the plan`,
       );
     }
+    if (source.slice(token.start, token.end) !== token.raw) {
+      throw new Error("the recorded program token does not match its source");
+    }
     replacements.push({
       start: token.start,
       end: token.end,
       text: renderProgramTokenValue(token, value, language),
     });
   }
+  if (embedded !== undefined && embedded.size > 0) {
+    if (language !== "shell") throw new Error("only a shell program embeds other programs");
+    const programs = embeddedPrograms(source);
+    for (const [anchor, embeddedValues] of embedded) {
+      const program = programs.find((each) => each.anchor === anchor);
+      if (program === undefined) {
+        throw new Error(
+          `the recorded program embeds no program at token ${anchor}; its shape does not match the plan`,
+        );
+      }
+      for (const [tokenIndex, value] of embeddedValues) {
+        const token = program.tokens[tokenIndex];
+        if (token === undefined) {
+          throw new Error(
+            `the embedded program has no token ${tokenIndex}; its shape does not match the plan`,
+          );
+        }
+        replacements.push({
+          start: token.start,
+          end: token.end,
+          text: renderEmbeddedProgramTokenValue(program, token, value),
+        });
+      }
+    }
+  }
   replacements.sort((left, right) => right.start - left.start);
+  for (let index = 1; index < replacements.length; index += 1) {
+    if (replacements[index]!.end > replacements[index - 1]!.start) {
+      throw new Error("the bound program tokens overlap");
+    }
+  }
   let rewritten = source;
   for (const replacement of replacements) {
     rewritten =
@@ -823,20 +1552,260 @@ export function applyProgramTokenValues(
  * is already there. Both the local replay and the compiler of the published artifact call this one
  * function, so a binding confirmed in a replay is written into the plan exactly as the artifact
  * will render it.
+ *
+ * With `embedded`, the bound token is token `embedded` of the program anchored at top-level `token`.
+ * With `span`, only that part of the (string) token's recorded value is bound; a span that overlaps
+ * another span hole of the token, or a span and a whole-token hole on one token, is refused.
  */
 export function bindProgramToken(
   source: WorkflowValueTemplate,
   language: ProgramLanguage,
   token: number,
   binding: WorkflowValueTemplate,
+  embedded?: number,
+  span?: ProgramTokenSpan,
 ): WorkflowValueTemplate {
+  // Private sources remain opaque until host materialization; validate any available literal now.
+  const literal = source.type === "program" ? source.source : source;
+  const recordedLanguage = source.type === "program" ? source.language : language;
+  if (embedded !== undefined && recordedLanguage !== "shell") {
+    throw new Error("only a shell program embeds other programs");
+  }
+  if (
+    span !== undefined &&
+    (!Number.isInteger(span.start) ||
+      !Number.isInteger(span.end) ||
+      span.start < 0 ||
+      span.start >= span.end)
+  ) {
+    throw new Error("a span hole needs integer offsets with start before end");
+  }
+  if (literal.type === "literal" && typeof literal.value === "string") {
+    const topLevel = tokenizeProgram(recordedLanguage, literal.value);
+    let recorded: ProgramToken | undefined;
+    if (embedded === undefined) {
+      recorded = topLevel[token];
+      if (!recorded?.bindable) {
+        throw new Error("the recorded program token is not safely bindable");
+      }
+    } else {
+      const program = embeddedPrograms(literal.value).find((each) => each.anchor === token);
+      recorded = program?.tokens[embedded];
+      if (
+        program === undefined ||
+        !recorded?.bindable ||
+        (source.type === "program" &&
+          embeddedProgramIsProtected(program, topLevel, source.protectedTokens ?? []))
+      ) {
+        throw new Error("the embedded program token is not safely bindable");
+      }
+    }
+    if (
+      span !== undefined &&
+      (typeof recorded.value !== "string" || !programTokenSpanFits(span, recorded.value.length))
+    ) {
+      throw new Error("a span hole does not fit inside the recorded token value");
+    }
+  }
+  const hole =
+    embedded === undefined
+      ? { token, ...(span === undefined ? {} : { span: { ...span } }), binding }
+      : {
+          token,
+          embedded,
+          ...(span === undefined ? {} : { span: { ...span } }),
+          binding,
+        };
   if (source.type !== "program") {
-    return { type: "program", language, source, holes: [{ token, binding }] };
+    return { type: "program", language, source, holes: [hole] };
   }
   // A program template already carries the language its record established; a caller that disagrees
   // would be describing another program, so the recorded one wins.
-  const holes = source.holes.filter((hole) => hole.token !== token);
-  holes.push({ token, binding });
-  holes.sort((left, right) => left.token - right.token);
+  const holes = source.holes.filter(
+    (each) =>
+      each.token !== token ||
+      each.embedded !== embedded ||
+      each.span?.start !== span?.start ||
+      each.span?.end !== span?.end,
+  );
+  for (const each of holes) {
+    if (each.token !== token || each.embedded !== embedded) continue;
+    if (span === undefined || each.span === undefined) {
+      throw new Error("a token cannot carry both a whole-token hole and span holes");
+    }
+    if (each.span.start < span.end && span.start < each.span.end) {
+      throw new Error("the span holes of one token overlap");
+    }
+  }
+  holes.push(hole);
+  holes.sort(
+    (left, right) =>
+      left.token - right.token ||
+      (left.embedded ?? -1) - (right.embedded ?? -1) ||
+      (left.span?.start ?? -1) - (right.span?.start ?? -1),
+  );
   return { ...source, holes };
+}
+
+/** Words a script never uses as a value's name: keywords and constants. */
+const SCRIPT_NAME_EXCLUDED: Record<string, true> = {
+  and: true,
+  or: true,
+  not: true,
+  in: true,
+  is: true,
+  None: true,
+  True: true,
+  False: true,
+  null: true,
+  undefined: true,
+  this: true,
+  self: true,
+};
+
+/** The offset of the `{` that opens the innermost brace pair around `offset`, skipping strings. */
+function enclosingBrace(
+  source: string,
+  tokens: readonly ProgramToken[],
+  offset: number,
+): number | undefined {
+  let depth = 0;
+  let tokenIndex = tokens.length - 1;
+  for (let at = offset - 1; at >= 0; at -= 1) {
+    while (tokenIndex >= 0 && tokens[tokenIndex]!.start > at) tokenIndex -= 1;
+    const token = tokenIndex >= 0 ? tokens[tokenIndex] : undefined;
+    if (token !== undefined && token.kind === "string" && at < token.end) {
+      at = token.start;
+      continue;
+    }
+    const char = source[at];
+    if (char === "}") depth += 1;
+    else if (char === "{") {
+      if (depth === 0) return at;
+      depth -= 1;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Indexes of string tokens that name a record's fields rather than carry data: keys a record is
+ * subscripted with (`x['merchant']`, `x['year']` — at least two distinct keys on one base) and the
+ * keys of a dict/object literal with at least two string keys. Token offsets index `source`.
+ */
+export function scriptRecordFieldKeys(
+  source: string,
+  tokens: readonly ProgramToken[],
+): Set<number> {
+  const subscripts = new Map<string, { indexes: number[]; keys: Set<string> }>();
+  const dicts = new Map<number, number[]>();
+  for (const [index, token] of tokens.entries()) {
+    if (token.kind !== "string" || typeof token.value !== "string") continue;
+    const after = source.slice(token.end);
+    const previous = index > 0 ? tokens[index - 1] : undefined;
+    if (
+      previous?.kind === "word" &&
+      /^\s*\[\s*$/.test(source.slice(previous.end, token.start)) &&
+      /^\s*\]/.test(after)
+    ) {
+      const entry = subscripts.get(previous.raw) ?? {
+        indexes: [],
+        keys: new Set<string>(),
+      };
+      entry.indexes.push(index);
+      entry.keys.add(token.value);
+      subscripts.set(previous.raw, entry);
+      continue;
+    }
+    if (/^\s*:(?!:)/.test(after)) {
+      const brace = enclosingBrace(source, tokens, token.start);
+      if (brace === undefined) continue;
+      const keys = dicts.get(brace) ?? [];
+      keys.push(index);
+      dicts.set(brace, keys);
+    }
+  }
+  const fields = new Set<number>();
+  for (const entry of subscripts.values()) {
+    if (entry.keys.size >= 2) for (const index of entry.indexes) fields.add(index);
+  }
+  for (const keys of dicts.values()) {
+    if (keys.length >= 2) for (const index of keys) fields.add(index);
+  }
+  return fields;
+}
+
+/** A code identifier or record key as an input name, or undefined when it cannot be one. */
+function normalizeScriptName(text: string): string | undefined {
+  const name = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return /^[a-z][a-z0-9_]{1,29}$/.test(name) ? name : undefined;
+}
+
+/**
+ * A readable input name for the script literal at `index`, taken from the code around it — the
+ * record field it is compared with or stored under, or the identifier it is compared with or
+ * assigned to — never from the value itself. Undefined when the code names nothing.
+ */
+export function scriptTokenContextName(
+  source: string,
+  tokens: readonly ProgramToken[],
+  index: number,
+): string | undefined {
+  const token = tokens[index];
+  if (token === undefined) return undefined;
+  const previous = index > 0 ? tokens[index - 1] : undefined;
+  const next = tokens[index + 1];
+  const gap = (left: ProgramToken, right: ProgramToken) => source.slice(left.end, right.start);
+  const identifier = (candidate: ProgramToken | undefined) =>
+    candidate?.kind === "word" && SCRIPT_NAME_EXCLUDED[candidate.raw] !== true
+      ? candidate.raw
+      : undefined;
+  let fields: Set<number> | undefined;
+  const isField = (at: number) => (fields ??= scriptRecordFieldKeys(source, tokens)).has(at);
+  const comparison = /^\s*(===?|!==?|<=|>=|<|>)\s*$/;
+  const names: Array<() => string | undefined> = [
+    // a. B['k'] OP V
+    () =>
+      previous !== undefined &&
+      /^\s*\]\s*(===?|!==?|<=|>=|<|>)\s*$/.test(gap(previous, token)) &&
+      isField(index - 1)
+        ? (previous.value as string)
+        : undefined,
+    // b. V OP B['k']
+    () => {
+      const key = tokens[index + 2];
+      return next?.kind === "word" &&
+        key !== undefined &&
+        /^\s*(===?|!==?)\s*$/.test(gap(token, next)) &&
+        /^\s*\[\s*$/.test(gap(next, key)) &&
+        isField(index + 2)
+        ? (key.value as string)
+        : undefined;
+    },
+    // c. ident OP V / V OP ident
+    () =>
+      (previous !== undefined && comparison.test(gap(previous, token))
+        ? identifier(previous)
+        : undefined) ??
+      (next !== undefined && comparison.test(gap(token, next)) ? identifier(next) : undefined),
+    // d. ident = V (assignment, keyword argument, declaration)
+    () =>
+      previous !== undefined && /^\s*=\s*$/.test(gap(previous, token))
+        ? identifier(previous)
+        : undefined,
+    // e. 'k': V in a record literal
+    () =>
+      previous !== undefined && /^\s*:\s*$/.test(gap(previous, token)) && isField(index - 1)
+        ? (previous.value as string)
+        : undefined,
+  ];
+  for (const rule of names) {
+    const raw = rule();
+    const name = raw === undefined ? undefined : normalizeScriptName(raw);
+    if (name !== undefined) return name;
+  }
+  return undefined;
 }

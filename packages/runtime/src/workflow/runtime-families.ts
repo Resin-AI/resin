@@ -30,4 +30,5 @@ export const RESIN_PROGRAM_LANGUAGES: Record<string, true> = {
   python: true,
   javascript: true,
   typescript: true,
+  patch: true,
 };

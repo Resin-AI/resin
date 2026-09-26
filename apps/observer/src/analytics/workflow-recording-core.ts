@@ -15,6 +15,7 @@ import type {
   RecordedWorkflow,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
+  WorkflowObservedOutput,
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
@@ -32,8 +33,11 @@ import {
   type WorkflowCallCandidate,
   type WorkflowCallCarrier,
   type WorkflowCallHeldOut,
+  isWorkflowCallEvent,
+  isWorkflowResultEvent,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
+  workflowCallId,
 } from "./workflow-carrier.js";
 
 import {
@@ -61,8 +65,7 @@ export interface RecordedReferenceUse {
   path?: Array<string | number>;
 }
 
-const callIdOf = (event: RecordableEvent): string =>
-  event.callId ?? event.toolCallId ?? event.eventId;
+const callIdOf = workflowCallId;
 
 function scopedKey(scopeId: string, callId: string): string {
   return `${scopeId.length}:${scopeId}${callId}`;
@@ -187,11 +190,11 @@ export function reconstructWorkflowFromEvents(
   const allOrdered = [...events].sort(compareRecordedEvents);
   const firstExecutionCall = allOrdered.find(
     (event) =>
-      event.type === "tool_call" &&
+      isWorkflowCallEvent(event) &&
       readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
         ?.executionIndex !== undefined,
   );
-  const firstCall = allOrdered.find((event) => event.type === "tool_call");
+  const firstCall = allOrdered.find(isWorkflowCallEvent);
   const recordingSession = firstExecutionCall?.sessionId ?? firstCall?.sessionId;
   const ordered =
     options.carrierRequired && recordingSession !== undefined
@@ -208,6 +211,7 @@ export function reconstructWorkflowFromEvents(
       value: WorkflowJsonValue | undefined;
       isError: boolean | undefined;
       baselineReference?: string;
+      output?: WorkflowObservedOutput;
       baselineComparison?: "text-trim";
     }
   >();
@@ -218,17 +222,32 @@ export function reconstructWorkflowFromEvents(
    */
   const resultAliasByCallId = new Map<string, string>();
   for (const event of ordered) {
-    if (event.type !== "tool_result") continue;
-    const callId = event.callId ?? event.toolCallId;
+    if (!isWorkflowResultEvent(event)) continue;
+    const callId =
+      event.type === "command_exec" || event.type === "file_edit"
+        ? workflowCallId(event)
+        : (event.callId ?? event.toolCallId);
     if (!callId) continue;
     const eventKey = scopedKey(event.sessionId, callId);
     const resultCarrier = readWorkflowResultCarrier(
       event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
     );
     resultsByCallId.set(eventKey, {
-      value: event.result ?? extractResultValue(event.content),
-      isError: event.isError,
-      ...(resultCarrier?.baselineReference === undefined
+      value:
+        event.type === "tool_result"
+          ? (event.result ?? extractResultValue(event.content))
+          : undefined,
+      isError:
+        event.type === "command_exec"
+          ? event.exitCode === undefined
+            ? undefined
+            : event.exitCode !== 0
+          : event.type === "file_edit"
+            ? false
+            : event.isError,
+      ...(resultCarrier?.output === undefined ? {} : { output: resultCarrier.output }),
+      ...(resultCarrier?.baselineReference === undefined ||
+      (event.type === "command_exec" && event.exitCode !== 0)
         ? {}
         : { baselineReference: resultCarrier.baselineReference }),
       ...(resultCarrier?.baselineComparison === undefined
@@ -338,14 +357,14 @@ export function reconstructWorkflowFromEvents(
    * than a second step of it.
    */
   const claimCall = (event: RecordableEvent): string | undefined => {
-    if (event.type !== "tool_call") return undefined;
+    if (!isWorkflowCallEvent(event)) return undefined;
     const scopedCallKey = scopedKey(event.sessionId, callIdOf(event));
     if (seenCallIds.has(scopedCallKey)) return undefined;
     seenCallIds.add(scopedCallKey);
     return scopedCallKey;
   };
   for (const event of ordered) {
-    if (event.type !== "tool_call") continue;
+    if (!isWorkflowCallEvent(event)) continue;
     const callId = callIdOf(event);
     const scopedCallKey = claimCall(event);
     if (scopedCallKey === undefined) continue;
@@ -443,6 +462,7 @@ export function reconstructWorkflowFromEvents(
         ...(carrier?.program === undefined ? {} : { program: carrier.program }),
       },
       arguments: carrier !== undefined ? callArguments : (event.parameters ?? {}),
+      ...(carrier?.baselineInputs === undefined ? {} : { baselineInputs: carrier.baselineInputs }),
       ...(Object.keys(argumentOrigins).length > 0 ? { argumentOrigins } : {}),
       ...(Object.keys(argumentTypes).length > 0 ? { argumentTypes } : {}),
       ...(carrier?.provenance === undefined ? {} : { argumentProvenance: carrier.provenance }),
@@ -462,6 +482,7 @@ export function reconstructWorkflowFromEvents(
       ...(declaredFlow === undefined ? {} : { flow: declaredFlow }),
       ...(recordedResult?.value === undefined ? {} : { result: recordedResult.value }),
       ...(isPrivateValue ? { isPrivateValue } : {}),
+      ...(recordedResult?.output === undefined ? {} : { output: recordedResult.output }),
       observed:
         recordedResult === undefined
           ? "unknown"
@@ -485,11 +506,16 @@ export function reconstructWorkflowFromEvents(
     // The observation was just pushed, so this call's step is the last one.
     const ownStepId = `step${observations.length - 1}`;
     stepIdByCallId.set(scopedCallKey, ownStepId);
-    // Steps are numbered in the order the calls arrived, which is the order the demonstration used.
-    if (executionIndex !== undefined) stepIdByPosition.set(observations.length - 1, ownStepId);
+    // A demonstration lists each repeated call under its place in the execution, and a recording
+    // may keep only some of an execution's calls: a step is addressed by the place the capture
+    // recorded for its own call, never by where it falls among this recording's steps. A call with
+    // no recorded place names no demonstration position.
+    if (executionIndex !== undefined && carrier?.executionPosition !== undefined) {
+      stepIdByPosition.set(carrier.executionPosition, ownStepId);
+    }
     if (carrier?.candidates !== undefined) {
       for (const candidate of carrier.candidates) {
-        if (candidate.proposed.kind !== "result") {
+        if (candidate.proposed.kind !== "result" && candidate.proposed.kind !== "extract") {
           carrierCandidates.push({
             stepId: ownStepId,
             argument: candidate.argument,
@@ -511,7 +537,10 @@ export function reconstructWorkflowFromEvents(
           stepId: ownStepId,
           argument: candidate.argument,
           path: candidate.path,
-          proposed: { kind: "result", stepId: producingStepId, path: candidate.proposed.path },
+          proposed:
+            candidate.proposed.kind === "extract"
+              ? { kind: "extract", stepId: producingStepId, locator: candidate.proposed.locator }
+              : { kind: "result", stepId: producingStepId, path: candidate.proposed.path },
           reason: candidate.reason,
           ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
           missing: candidate.missing,
@@ -536,10 +565,10 @@ export function reconstructWorkflowFromEvents(
   // A selected workflow can be a slice of a larger execution. Match repetitions against the
   // complete original execution, then map only the selected call ids to steps. Unselected calls
   // remain supporting evidence; their proposals and effects never become extra executable steps.
-  const selectedSession = ordered.find((event) => event.type === "tool_call")?.sessionId;
+  const selectedSession = ordered.find(isWorkflowCallEvent)?.sessionId;
   const baselineCalls = new Map<string, RepeatCall>();
   for (const event of [...ordered, ...supporting].sort(compareRecordedEvents)) {
-    if (event.type !== "tool_call" || event.sessionId !== selectedSession) continue;
+    if (!isWorkflowCallEvent(event) || event.sessionId !== selectedSession) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     if (options.carrierRequired && carrier === undefined) continue;
     if (carrier?.executionIndex !== selectedExecutionIndex) continue;
@@ -554,10 +583,13 @@ export function reconstructWorkflowFromEvents(
   }
   const baseline = [...baselineCalls.values()];
   for (const calls of repeats.values()) {
-    if (calls.length !== baseline.length) continue;
+    // A repeat runs the baseline's calls once per item, so it holds one or more whole iterations.
+    if (baseline.length === 0 || calls.length === 0 || calls.length % baseline.length !== 0) {
+      continue;
+    }
     if (
       calls.some((call, ordinal) => {
-        const original = baseline[ordinal]!;
+        const original = baseline[ordinal % baseline.length]!;
         return (
           call.name !== original.name ||
           call.runtime !== original.runtime ||
@@ -568,7 +600,7 @@ export function reconstructWorkflowFromEvents(
       continue;
     const stepIdByRepeatCallId = new Map<string, string>();
     for (const [ordinal, call] of calls.entries()) {
-      const original = baseline[ordinal]!;
+      const original = baseline[ordinal % baseline.length]!;
       const stepId = stepIdByCallId.get(scopedKey(selectedSession!, original.callId));
       if (stepId !== undefined) stepIdByRepeatCallId.set(call.callId, stepId);
     }
@@ -577,20 +609,29 @@ export function reconstructWorkflowFromEvents(
       if (stepId === undefined) continue;
       for (const candidate of call.candidates) {
         const producingStepId =
-          candidate.proposed.kind === "result"
+          candidate.proposed.kind === "result" || candidate.proposed.kind === "extract"
             ? stepIdByRepeatCallId.get(candidate.proposed.callId)
             : undefined;
-        if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
-        if (
-          carrierCandidates.some(
-            (entry) =>
-              entry.stepId === stepId &&
-              entry.argument === candidate.argument &&
-              entry.path.length === candidate.path.length &&
-              entry.path.every((part, index) => part === candidate.path[index]),
-          )
-        )
-          continue;
+        if (candidate.proposed.kind !== "input" && producingStepId === undefined) continue;
+        const priorIndex = carrierCandidates.findIndex(
+          (entry) =>
+            entry.stepId === stepId &&
+            entry.argument === candidate.argument &&
+            entry.path.length === candidate.path.length &&
+            entry.path.every((part, index) => part === candidate.path[index]),
+        );
+        if (priorIndex >= 0) {
+          // A later repeat can establish a result-shaped proposal at a position that
+          // the earlier repeat only offered as an unconstrained caller input.
+          if (
+            carrierCandidates[priorIndex]!.proposed.kind === "input" &&
+            candidate.proposed.kind === "result"
+          ) {
+            carrierCandidates.splice(priorIndex, 1);
+          } else {
+            continue;
+          }
+        }
         carrierCandidates.push({
           stepId,
           argument: candidate.argument,
@@ -598,7 +639,9 @@ export function reconstructWorkflowFromEvents(
           proposed:
             candidate.proposed.kind === "result"
               ? { kind: "result", stepId: producingStepId!, path: candidate.proposed.path }
-              : candidate.proposed,
+              : candidate.proposed.kind === "extract"
+                ? { kind: "extract", stepId: producingStepId!, locator: candidate.proposed.locator }
+                : candidate.proposed,
           reason: candidate.reason,
           ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
           missing: candidate.missing,
@@ -632,7 +675,14 @@ export function reconstructWorkflowFromEvents(
     }
   }
 
-  const recipe = recordWorkflowRecipe(workflowId, observations, derivation?.candidates);
+  const derivedCandidates = derivation?.candidates.filter(
+    (candidate) =>
+      candidate.proposed.kind !== "input" ||
+      observations[Number(candidate.stepId.slice("step".length))]?.argumentOrigins?.[
+        candidate.argument
+      ] === undefined,
+  );
+  const recipe = recordWorkflowRecipe(workflowId, observations, derivedCandidates);
   if (!recipe) return undefined;
   recipe.skipped.push(...skipped);
   const heldOut = demonstratedWorkflow(
@@ -641,7 +691,14 @@ export function reconstructWorkflowFromEvents(
   );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
-    recipe.workflow.candidates = [...(recipe.workflow.candidates ?? []), ...carrierCandidates];
+    const reserved = new Set([
+      ...recipe.workflow.inputs.map((input) => input.name),
+      ...recordedInputTypes.keys(),
+    ]);
+    recipe.workflow.candidates = [
+      ...(recipe.workflow.candidates ?? []),
+      ...withRecordingInputNames(carrierCandidates, reserved),
+    ];
   }
   const privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
   if (privateReferences.length > 0) recipe.workflow.privateReferences = privateReferences;
@@ -655,6 +712,46 @@ export function reconstructWorkflowFromEvents(
   return recipe;
 }
 
+/** Optional program-value inputs one recorded workflow may expose, so its schema stays short. */
+const MAX_RECORDED_DEFAULT_INPUTS = 12;
+
+/**
+ * Program values were named across the whole session as they first appeared (`path_12`). Within one
+ * recording, the first value of each kind takes the bare name (`path`), the next `path_2`, and only
+ * the first few distinct values are offered at all.
+ */
+function withRecordingInputNames(
+  candidates: readonly WorkflowBindingCandidate[],
+  reserved: ReadonlySet<string>,
+): WorkflowBindingCandidate[] {
+  const used = new Set(reserved);
+  for (const candidate of candidates) {
+    if (candidate.proposed.kind === "input" && candidate.proposed.recordedDefault !== true) {
+      used.add(candidate.proposed.name);
+    }
+  }
+  const renamed = new Map<string, string>();
+  const named: WorkflowBindingCandidate[] = [];
+  for (const candidate of candidates) {
+    const proposed = candidate.proposed;
+    if (proposed.kind !== "input" || proposed.recordedDefault !== true) {
+      named.push(candidate);
+      continue;
+    }
+    let name = renamed.get(proposed.name);
+    if (name === undefined) {
+      if (renamed.size >= MAX_RECORDED_DEFAULT_INPUTS) continue;
+      const base = proposed.name.replace(/_\d+$/, "");
+      name = base;
+      for (let suffix = 2; used.has(name); suffix += 1) name = `${base}_${suffix}`;
+      renamed.set(proposed.name, name);
+      used.add(name);
+    }
+    named.push({ ...candidate, proposed: { ...proposed, name } });
+  }
+  return named;
+}
+
 /** The execution a recording is built from, and the demonstration a later one offers for it. */
 /**
  * The execution a recording is built from: the earliest piece of work the events themselves name.
@@ -666,7 +763,7 @@ export function reconstructWorkflowFromEvents(
 function selectedExecution(events: readonly RecordableEvent[]): number | undefined {
   const indices = new Set<number>();
   for (const event of events) {
-    if (event.type !== "tool_call") continue;
+    if (!isWorkflowCallEvent(event)) continue;
     const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
     if (carrier?.executionIndex === undefined) continue;
     indices.add(carrier.executionIndex);
@@ -688,12 +785,11 @@ function demonstrationOf(
   if (target === undefined) return undefined;
   let demonstration: WorkflowCallHeldOut | undefined;
   for (const event of events) {
-    const candidate =
-      event.type === "tool_call"
+    const candidate = isWorkflowResultEvent(event)
+      ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
+      : isWorkflowCallEvent(event)
         ? readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])?.heldOut
-        : event.type === "tool_result"
-          ? readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])?.heldOut
-          : undefined;
+        : undefined;
     if (candidate === undefined || candidate.repeats !== target) continue;
     if (
       demonstration === undefined ||
@@ -729,7 +825,16 @@ function demonstratedWorkflow(
     });
   }
   if (inputs.length === 0 && observed.length === 0) return undefined;
-  return { inputs, observed };
+  // Each step's own local calls, in execution order, so a validator recomputes every recorded value.
+  const calls: NonNullable<NonNullable<RecordedWorkflow["heldOut"]>["calls"]> = [];
+  for (const entry of [...(demonstration.calls ?? [])].sort((a, b) => a.position - b.position)) {
+    const stepId = stepIdByPosition.get(entry.position);
+    if (stepId === undefined) continue;
+    const existing = calls.find((call) => call.stepId === stepId);
+    if (existing === undefined) calls.push({ stepId, callIds: [entry.callId] });
+    else existing.callIds.push(entry.callId);
+  }
+  return calls.length === 0 ? { inputs, observed } : { inputs, observed, calls };
 }
 
 /**

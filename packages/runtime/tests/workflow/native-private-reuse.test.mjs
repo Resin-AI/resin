@@ -129,15 +129,13 @@ it.skipIf(process.platform === "win32")(
         createProcessAdapter({
           cwd: root,
           env: { PATH: process.env.PATH },
-          isolateEnvironment: true,
           timeoutMs: 5000,
         }),
       );
       const environment = await demonstrationEnvironment({
         plan: recipe.workflow,
         candidates,
-        adapters,
-        workspaceDir: root,
+        adapters: () => adapters,
         resolvePrivate: resolve,
         timeoutMs: 10000,
       });

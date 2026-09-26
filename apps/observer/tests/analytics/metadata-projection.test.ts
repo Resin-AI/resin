@@ -15,7 +15,10 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
+  RESIN_COMMAND_TEXT_METADATA_KEY,
   nowIso,
+  readCodexCommandMetadata,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -274,7 +277,7 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
   });
 
-  it("projects command_exec event: masks command into a value-free profile, drops args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
+  it("projects command_exec event: masks command into a value-free profile, carries the command line only as naming text, drops args, cwd, stdout, stderr while preserving exitCode and durationMs", () => {
     const original: NormalizedCommandExecEvent = {
       ...createBaseHeaders(6),
       type: "command_exec",
@@ -306,7 +309,16 @@ describe("projectEventToMetadataOnly", () => {
     expect(projected.redaction.redactedFields).toContain("cwd");
     expect(projected.redaction.redactedFields).toContain("stdout");
     expect(projected.redaction.redactedFields).toContain("stderr");
-    const serialized = JSON.stringify(projected);
+    // The command line (already secret-scrubbed by normalization) is the one value that leaves,
+    // and only as naming text; every other field stays value-free.
+    expect(projected.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: original.command,
+      truncated: false,
+    });
+    const { [RESIN_COMMAND_TEXT_METADATA_KEY]: _commandText, ...otherMetadata } =
+      projected.metadata ?? {};
+    const serialized = JSON.stringify({ ...projected, metadata: otherMetadata });
     for (const marker of [
       "hunter2secret",
       "SECRET_TOKEN_XYZ",
@@ -320,6 +332,94 @@ describe("projectEventToMetadataOnly", () => {
     }
 
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+  });
+
+  it("retains only strict Codex command association IDs and times, never source values", () => {
+    const association = {
+      kind: "derived",
+      rule: "codex-single-command-start-window-v1",
+      callId: "call_1",
+      nativeCommandId: "exec_1",
+      startedAtMs: 20,
+      callStartedAtMs: 10,
+      callCompletedAtMs: 30,
+    };
+    const events: NormalizedSessionEvent[] = [
+      {
+        ...createBaseHeaders(21),
+        type: "tool_call",
+        callId: "call_1",
+        toolName: "exec",
+        parameters: {
+          raw: "const r = await tools.exec_command({cmd:'echo private-secret'}); text(r.output);",
+          cmd: "echo private-secret",
+          workdir: "/repo",
+        },
+        isShadow: false,
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "call",
+            form: "single-command-output",
+          },
+        },
+      },
+      {
+        ...createBaseHeaders(22),
+        type: "command_exec",
+        command: "/bin/bash",
+        args: ["-lc", "echo private-secret"],
+        cwd: "/repo",
+        exitCode: 0,
+        stdout: "private-secret",
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "command",
+            nativeId: "exec_1",
+            startedAtMs: 20,
+          },
+        },
+      },
+      {
+        ...createBaseHeaders(23),
+        type: "tool_result",
+        callId: "call_1",
+        toolName: "exec",
+        result: [
+          { type: "input_text", text: "Script completed" },
+          { type: "input_text", text: "private-secret" },
+        ],
+        executionDurationMs: 20,
+        isError: false,
+        isShadow: false,
+        metadata: {
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "result",
+            form: "single-command-output",
+            status: "completed",
+            association,
+          },
+        },
+      },
+    ];
+    for (const event of events) {
+      const projected = projectEventToMetadataOnly(event, { enrichEvidence: false });
+      expect(readCodexCommandMetadata(projected.metadata)).toBeDefined();
+      expect(JSON.stringify(projected)).not.toContain("private-secret");
+      expect(JSON.stringify(projected.metadata)).not.toContain("/repo");
+    }
+    expect(
+      readCodexCommandMetadata({
+        [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+          version: 1,
+          kind: "command",
+          nativeId: "exec_1",
+          cmd: "echo private-secret",
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it("projects command_exec event with enrichment disabled: drops the command entirely", () => {
@@ -736,7 +836,20 @@ describe("projectEventToMetadataOnly", () => {
     ];
 
     const projected = events.map((e) => projectEventToMetadataOnly(e));
-    const serialized = JSON.stringify(projected);
+    // The command line is carried only as naming text; everything else must be value-free.
+    const commandEvent = projected.find((event) => event.type === "command_exec");
+    expect(commandEvent?.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: `${secretMarkers[5]} ${secretMarkers[5]}`,
+      truncated: false,
+    });
+    const serialized = JSON.stringify(
+      projected.map((event) => {
+        const { [RESIN_COMMAND_TEXT_METADATA_KEY]: _commandText, ...metadata } =
+          event.metadata ?? {};
+        return { ...event, metadata };
+      }),
+    );
 
     for (const marker of secretMarkers) {
       expect(serialized).not.toContain(marker);

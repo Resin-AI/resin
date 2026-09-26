@@ -65,20 +65,39 @@ function makeContext(workspaceId = "ws-alpha", sessionId?: string): WorkspaceCon
 }
 
 describe("search_tools Meta-Tool", () => {
-  it("returns invariant system meta-tools by default", async () => {
+  it("lists the always-exposed meta-tools only when the system scope is requested", async () => {
     const registry = new ToolRegistry();
     const handler = createSearchToolsHandler(registry);
     const context = makeContext("ws-alpha");
 
-    const result = await handler(context, {});
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].type).toBe("text");
+    expect(parseSearchResponse(await handler(context, {})).total).toBe(0);
+    expect(parseSearchResponse(await handler(context, { query: "tool" })).total).toBe(0);
 
-    const data = parseSearchResponse(result);
-    expect(data.total).toBe(4);
-    expect(data.tools.map((t) => t.name)).toEqual(
+    const system = parseSearchResponse(await handler(context, { scope: "system" }));
+    expect(system.tools.map((t) => t.name)).toEqual(
       expect.arrayContaining(["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"]),
     );
+  });
+
+  it("returns each tool's input schema so it can be invoked without a schema lookup", async () => {
+    const registry = new ToolRegistry();
+    const handler = createSearchToolsHandler(registry);
+    const context = makeContext("ws-schema");
+    await registry.registerTool(
+      makeManifest({ id: "tool_schema", name: "schema_tool" }),
+      undefined,
+      {
+        workspaceId: "ws-schema",
+      },
+    );
+
+    const [tool] = parseSearchResponse(await handler(context, { query: "schema_tool" })).tools;
+
+    expect(tool?.inputSchema).toMatchObject({
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+    });
   });
 
   it("strictly enforces workspace isolation and never leaks other workspaces' tools", async () => {
@@ -164,7 +183,7 @@ describe("search_tools Meta-Tool", () => {
     // Page 1: limit 5, offset 0
     const page1Res = await handler(context, { limit: 5, offset: 0 });
     const page1Data = parseSearchResponse(page1Res);
-    expect(page1Data.total).toBe(14); // 10 custom + 4 system
+    expect(page1Data.total).toBe(10);
     expect(page1Data.tools).toHaveLength(5);
     expect(page1Data.limit).toBe(5);
     expect(page1Data.offset).toBe(0);
@@ -175,13 +194,7 @@ describe("search_tools Meta-Tool", () => {
     const page2Data = parseSearchResponse(page2Res);
     expect(page2Data.tools).toHaveLength(5);
     expect(page2Data.offset).toBe(5);
-    expect(page2Data.hasMore).toBe(true);
-
-    // Page 3: limit 5, offset 10
-    const page3Res = await handler(context, { limit: 5, offset: 10 });
-    const page3Data = parseSearchResponse(page3Res);
-    expect(page3Data.tools).toHaveLength(4);
-    expect(page3Data.hasMore).toBe(false);
+    expect(page2Data.hasMore).toBe(false);
   });
 
   it("ranks exact name match highest, followed by prefix and substring", async () => {

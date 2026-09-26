@@ -58,6 +58,8 @@ resin repair
 
 Do not run `resin init --auto-approve` as a restart shortcut. That re-enters install/pairing. Use `resin repair`.
 
+An explicitly standalone connection (`resin mcp --standalone`) does not require a daemon. It initializes its owner-only local state database, including invocation records, even after `init --no-service`; database initialization errors stop startup rather than silently disabling recording.
+
 ---
 
 ### Recipe 3: Pairing, Login, Or Expired Cloud Credentials
@@ -93,6 +95,34 @@ Stay inside the authorized workspace root. Denied paths include `.git`, `.ssh`, 
 **Symptom**: Cloud is down or you signed out; the harness still needs tools.
 
 The locked local meta-tools stay on the gateway: `search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`. Confirm IPC `CONNECTED` with `resin status`. There is no `resin status --all-tools` or `resin repair --promote-tool` flag; catalog promotion is a `manage_tools` MCP action, not a CLI repair flag.
+
+---
+
+### Recipe 6: Worker IPC Failure
+
+**Symptom**: A tool invocation returns `write_error`, possibly mentioning `EPIPE`.
+
+The host could not write an RPC frame to the worker. Treat the invocation as failed, not as evidence of success; inspect execution receipts before retrying because side effects may already have occurred. Worker disposal closes IPC before termination. Late pipe errors do not replace an already-settled result such as `OUTPUT_LIMIT_EXCEEDED` or a timeout.
+
+---
+
+### Recipe 7: Validation Reports A Step As Missed
+
+Validation compares each plan step's resolved call with the call this device recorded for it; it runs nothing recorded. A step whose callable or any argument differs, or that has no locally recorded call, is missed and the plan is not verified. A plan whose step still carries, as literal text, a value the recording shows came from an earlier step's output is also refused until that position is bound to the earlier result. A demonstration that ran the tool once per item (for example several items handled in one request, as `for_each` does) is checked one item at a time: each item's run must match that item's recorded calls in order, and a step whose number of recorded calls differs from the number of items is missed.
+
+Recordings captured before Resin stored per-call identity entries cannot be validated; record the workflow again. If this device's harness sessions cannot be discovered, the ask is deferred; if its calls cannot be identified locally, the result is unavailable, never verified.
+
+---
+
+### Recipe 8: Codex Source Depends On Harness APIs
+
+Codex `exec` bodies can reference APIs supplied by the Codex host. Resin's JavaScript runtime provides standard VM globals and the `text` output channel, not Codex's tool dispatcher or historical process sessions.
+
+Standalone capture checks lexical dependencies against that interface. Bodies with unresolved host dependencies remain native harness calls; they are not relabeled as ordinary JavaScript.
+
+Each completed process Codex records is captured separately under its native execution ID, with the exact `/bin/bash -lc` command, working directory, and output kept on the recording machine. Only a process's own exact output answers its step; a wrapper's printed result object is never substituted. A process claimed by an audited single-command wrapper remains covered by that wrapper and is not a separate step.
+
+A launch response or terminal poll containing a process handle is not the process's completed output. Reuse requires supported execution dependencies and independently verified command outcomes; connecting Resin MCP does not supply Codex's internal APIs.
 
 ---
 

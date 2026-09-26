@@ -10,12 +10,23 @@
  * a workflow that uses it needs no compiler change.
  */
 
+import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
+import {
+  type ProgramLanguage,
+  embeddedProgramIsProtected,
+  embeddedPrograms,
+  programTokenPath,
+  programTokenSpanFits,
+  programTokenValueAt,
+  tokenizeProgram,
+} from "./program-tokens.js";
+
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
 export const MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
 /** Maximum UTF-8 bytes for one captured Python source cell. */
 export const MAX_WORKFLOW_PYTHON_SOURCE_BYTES = 262_144;
-/** Maximum UTF-8 bytes for the complete fresh-process Python replay source. */
+/** Maximum UTF-8 bytes for the complete Python program source. */
 export const MAX_WORKFLOW_PYTHON_REPLAY_BYTES = 1_048_576;
 
 /** Values the schema validator accepts without importing a JSON library. */
@@ -36,6 +47,12 @@ export type WorkflowValueTemplate =
   | { type: "input"; name: string }
   | { type: "result"; stepId: string; path: WorkflowValuePath }
   | { type: "private"; reference: string }
+  /**
+   * The value an earlier step printed, found in its string result by a locator. `locator` is a
+   * private reference whose value is the JSON text of an `ExtractLocator`; it is resolved locally
+   * and never uploaded, because the text around the value came from tool output.
+   */
+  | { type: "extract"; stepId: string; locator: string }
   /** Origin the record does not establish: preserved as such, never guessed. */
   | { type: "unresolved"; reason: string }
   | { type: "object"; entries: Record<string, WorkflowValueTemplate> }
@@ -54,7 +71,18 @@ export type WorkflowValueTemplate =
       type: "program";
       language: WorkflowRecordedProgram["kind"];
       source: WorkflowValueTemplate;
-      holes: Array<{ token: number; binding: WorkflowValueTemplate }>;
+      /**
+       * `token` is a top-level token index. With `embedded`, the hole addresses token `embedded` of
+       * the program embedded in the shell source whose anchor is `token` (a heredoc body or a
+       * `-c`/`-e` code string). With `span`, the hole binds only UTF-16 offsets [start, end) of the
+       * addressed string token's decoded value, never all of it.
+       */
+      holes: Array<{
+        token: number;
+        embedded?: number;
+        span?: { start: number; end: number };
+        binding: WorkflowValueTemplate;
+      }>;
       /** Whole original program source, kept in a local private resource. */
       sourceReference?: string;
       /** Sorted canonical token indexes changed by secret redaction; never binding holes. */
@@ -117,8 +145,11 @@ export type WorkflowPythonState = {
  * family of runtime, not reconstructing an equivalent one.
  */
 export type WorkflowRecordedProgram = {
-  /** How the program runs: the family of shell or interpreter the record establishes. */
-  kind: "shell" | "python" | "javascript" | "typescript";
+  /**
+   * How the program runs: the family of shell or interpreter the record establishes. A `patch` is
+   * one file's unified diff, applied in-process to the file its header names.
+   */
+  kind: "shell" | "python" | "javascript" | "typescript" | "patch";
   /** Program text as recorded, or sanitized source metadata in a projected capture. */
   source: string;
   /**
@@ -140,6 +171,12 @@ export type WorkflowRecordedProgram = {
    */
   pythonState?: WorkflowPythonState;
 };
+
+/**
+ * What a `patch` program returns when applied. It is fixed and value-free: the edit's effect is the
+ * file, which later steps observe, and a recording records the same text so a replay compares equal.
+ */
+export const WORKFLOW_PATCH_STEP_RESULT = "patched";
 
 /** How a step is called again: the original callable and the connection it was reached through. */
 export type WorkflowCallable = {
@@ -197,7 +234,7 @@ export type WorkflowArgument = {
  * A binding the capture proposes but has not established.
  *
  * A candidate is deliberately NOT executable: the plan keeps the recorded value until a caller
- * validates the proposed behaviour on different inputs in a disposable environment. Every candidate
+ * validates the proposed behaviour against a recorded demonstration of different inputs. Every candidate
  * names the fact the record is missing, so a refusal is reportable instead of silent.
  */
 export type WorkflowBindingCandidate = {
@@ -213,17 +250,31 @@ export type WorkflowBindingCandidate = {
   path: WorkflowValuePath;
   proposed:
     | { kind: "result"; stepId: string; path: WorkflowValuePath }
+    | { kind: "extract"; stepId: string; locator: string }
     | {
         kind: "input";
         name: string;
         type: "string" | "number" | "boolean" | "object" | "array";
+        /**
+         * Promote as an optional input that defaults to the recorded token (see
+         * `RecordedWorkflow.inputs[].recordedDefault`). Only a program-token position qualifies.
+         */
+        recordedDefault?: true;
       };
   reason:
     | "equal-to-earlier-result"
     | "tracks-earlier-result-across-executions"
     | "varies-across-executions"
     | "declared-by-the-callable"
-    | "shares-value-with-declared-input";
+    | "shares-value-with-declared-input"
+    | "classified-source-value"
+    | "native-data-argument"
+    | "printed-by-earlier-step"
+    /**
+     * The token is computed from the caller inputs by an `origin: "derivation"` step; `proposed` is
+     * `{kind: "result", stepId: <that step>, path: [<name>]}`. Accepted only after local replay.
+     */
+    | "derived-from-inputs";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -246,9 +297,16 @@ export type WorkflowStepFailurePolicy = {
 /** What an observed demonstration result may project before comparison. */
 export type WorkflowObservedComparison = "text-trim";
 
+/** Value-free shape of an actual result; never contains the result itself. */
+export type WorkflowObservedOutput = {
+  type: "null" | "boolean" | "number" | "string" | "array" | "object";
+  hasContent: boolean;
+};
+
 /** What the recording observed about this step's execution, for diagnostics only. */
 export type WorkflowStepObservation = {
   outcome: "succeeded" | "failed" | "unknown";
+  output?: WorkflowObservedOutput;
 };
 
 export type WorkflowStep = {
@@ -266,6 +324,28 @@ export type WorkflowStep = {
   observed: WorkflowStepObservation;
   /** Execution permissions the recorded call used, for reporting and for the runtime to enforce. */
   permissions?: WorkflowJsonValue;
+  /**
+   * The step is a caller toggle: when the named boolean input resolves to `false`, the step is
+   * skipped. The input defaults to `true`, so an omitted toggle keeps the recorded behavior. No
+   * other step may consume an optional step's result.
+   */
+  optional?: { input: string };
+  /**
+   * Where this step came from. Absent or `recorded`: a call the recording executed. `derivation`:
+   * a small Python program a model wrote to compute values from the caller inputs (see
+   * `derivation-steps.ts`).
+   *
+   * Only a derivation step may carry program source that no recording produced. A derivation must
+   * run as a Python Eval program in the program runtime, carry its source as a literal that equals
+   * `callable.program.source`, bind only caller inputs in its holes (at least one), reference no
+   * private value, depend on nothing, observe nothing, and be absent from `baseline`/`heldOut`.
+   *
+   * The structural validator cannot prove a recorded step's source was recorded: it can only reject
+   * a projected recorded program whose literal differs from its recorded `program.source`, and any
+   * step that claims the derivation origin without meeting the rules above. Whether recorded source
+   * came from the recording is established by the observer that builds the plan, not here.
+   */
+  origin?: "recorded" | "derivation";
 };
 
 /**
@@ -285,6 +365,12 @@ export type WorkflowHeldOutDemonstration = {
     /** An explicit projection for textual output whose trailing whitespace is incidental. */
     comparison?: WorkflowObservedComparison;
   }>;
+  /**
+   * The local calls that performed each recorded (non-derivation) step in this demonstration, in
+   * execution order; more than one only for `for_each` iterations. The host recomputes every
+   * recorded value from these call ids and its own sessions, so a plan never carries the recording.
+   */
+  calls?: Array<{ stepId: string; callIds: string[] }>;
 };
 
 export type RecordedWorkflow = {
@@ -297,6 +383,12 @@ export type RecordedWorkflow = {
     description?: string;
     /** The value to use when this caller input is omitted. */
     default?: WorkflowJsonValue;
+    /**
+     * The caller may omit this input, and then every program token it binds keeps the text the
+     * recording ran. One recording establishes this default, and the value stays in the local record:
+     * it never becomes part of the plan. Such an input is bound only by program-token holes.
+     */
+    recordedDefault?: true;
   }>;
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
@@ -304,7 +396,7 @@ export type RecordedWorkflow = {
   /**
    * Bindings the capture proposes but has not established. They are diagnostic, never executable:
    * the steps above keep the recorded values until a validator confirms a candidate on different
-   * inputs in a disposable environment.
+   * inputs recorded on this device.
    */
   candidates?: WorkflowBindingCandidate[];
   /**
@@ -429,6 +521,25 @@ export function validateWorkflowProgramProjection(
       protectedTokens.has(hole.token)
     ) {
       errors.push(`${path} hole ${hole.token} targets a protected token index`);
+    }
+  }
+  const sanitized =
+    template.language === "shell" &&
+    isPlainObject(template.source) &&
+    typeof template.source.value === "string"
+      ? template.source.value
+      : undefined;
+  const embeddedHoles = template.holes.filter(
+    (hole): hole is { token: number; embedded: number } =>
+      isPlainObject(hole) && typeof hole.token === "number" && typeof hole.embedded === "number",
+  );
+  if (sanitized === undefined || embeddedHoles.length === 0 || protectedTokens.size === 0) return;
+  const shellTokens = tokenizeProgram("shell", sanitized);
+  const programs = embeddedPrograms(sanitized);
+  for (const hole of embeddedHoles) {
+    const program = programs.find((each) => each.anchor === hole.token);
+    if (program && embeddedProgramIsProtected(program, shellTokens, [...protectedTokens])) {
+      errors.push(`${path} hole ${hole.token}.${hole.embedded} is inside a protected program`);
     }
   }
 }
@@ -612,6 +723,71 @@ function validateDemonstration(
       }
     }
   }
+  if (demonstration.calls === undefined) return;
+  if (!Array.isArray(demonstration.calls)) {
+    errors.push(`${label}.calls must be an array when present`);
+    return;
+  }
+  const seen = new Set<string>();
+  for (const entry of demonstration.calls) {
+    if (!isPlainObject(entry)) {
+      errors.push(`every ${label}.calls entry must be an object`);
+      continue;
+    }
+    const stepId = String(entry.stepId);
+    if (!order.has(stepId)) errors.push(`every ${label}.calls entry names unknown step ${stepId}`);
+    if (seen.has(stepId)) errors.push(`${label}.calls names step ${stepId} twice`);
+    seen.add(stepId);
+    if (
+      !Array.isArray(entry.callIds) ||
+      entry.callIds.length === 0 ||
+      !entry.callIds.every((callId) => typeof callId === "string" && callId.length > 0)
+    ) {
+      errors.push(`${label}.calls entry for step ${stepId} needs non-empty call ids`);
+    }
+  }
+}
+
+/**
+ * The steps whose results a recorded workflow returns, in recorded order: those no later step
+ * consumes through a bound result, a declared dependency or Python setup. A chain returns its final
+ * result; a run of independent steps returns every step's output.
+ */
+export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
+  const consumed = new Set<string>();
+  const stepByCall = new Map(workflow.steps.map((step) => [step.callId, step.id]));
+  const walkTemplate = (template: WorkflowValueTemplate): void => {
+    switch (template.type) {
+      case "result":
+      case "extract":
+        consumed.add(template.stepId);
+        return;
+      case "object":
+        for (const entry of Object.values(template.entries)) walkTemplate(entry);
+        return;
+      case "array":
+        for (const entry of template.items) walkTemplate(entry);
+        return;
+      case "program":
+        walkTemplate(template.source);
+        for (const hole of template.holes) walkTemplate(hole.binding);
+        return;
+      default:
+        return;
+    }
+  };
+  for (const step of workflow.steps) {
+    for (const dependency of step.dependsOn) consumed.add(dependency);
+    for (const argument of step.arguments) {
+      if (argument.source.kind === "result") consumed.add(argument.source.stepId);
+      if (argument.source.kind === "template") walkTemplate(argument.source.template);
+    }
+    for (const descriptor of step.callable.program?.pythonState?.setup ?? []) {
+      const producer = stepByCall.get(descriptor.callId);
+      if (producer !== undefined) consumed.add(producer);
+    }
+  }
+  return workflow.steps.filter((step) => !consumed.has(step.id)).map((step) => step.id);
 }
 
 /**
@@ -627,6 +803,9 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
     switch (template.type) {
       case "private":
         references.add(template.reference);
+        return;
+      case "extract":
+        references.add(template.locator);
         return;
       case "object":
         for (const entry of Object.values(template.entries)) walkTemplate(entry);
@@ -656,7 +835,187 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
     for (const entry of demonstration.inputs) references.add(entry.reference);
     for (const entry of demonstration.observed) references.add(entry.reference);
   }
+  // A proposed extract names its locator by reference; it must be declared so a replay can resolve
+  // it, and the reference is never the locator text.
+  for (const candidate of workflow.candidates ?? []) {
+    if (candidate.proposed.kind === "extract") references.add(candidate.proposed.locator);
+  }
   return [...references];
+}
+
+/**
+ * An optional step is toggled by exactly one boolean input that defaults to `true` and is used
+ * nowhere else; no other step (argument, hole, or candidate proposal) may read its result, so
+ * skipping it can never leave a later binding without a value.
+ */
+function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors: string[]): void {
+  const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  const inputs = Array.isArray(workflow.inputs) ? workflow.inputs.filter(isPlainObject) : [];
+  const toggles = new Map<string, string>();
+  for (const step of steps) {
+    if (!Object.hasOwn(step, "optional")) continue;
+    const optional = step.optional;
+    const stepId = String(step.id);
+    if (
+      !isPlainObject(optional) ||
+      !hasOnlyKeys(optional, ["input"]) ||
+      typeof optional.input !== "string" ||
+      optional.input.length === 0
+    ) {
+      errors.push(`step ${stepId} optional must name exactly one toggle input`);
+      continue;
+    }
+    const name = optional.input;
+    const input = inputs.find((entry) => entry.name === name);
+    if (input === undefined) {
+      errors.push(`step ${stepId} is toggled by unknown input ${name}`);
+    } else if (input.type !== "boolean" || input.default !== true) {
+      errors.push(`step ${stepId} toggle input ${name} must be a boolean defaulting to true`);
+    }
+    const other = toggles.get(name);
+    if (other !== undefined) {
+      errors.push(`input ${name} toggles both step ${other} and step ${stepId}`);
+    } else {
+      toggles.set(name, stepId);
+    }
+  }
+  if (toggles.size === 0) return;
+  const optionalSteps = new Set(toggles.values());
+  const optionalCalls = new Set(
+    steps
+      .filter((step) => optionalSteps.has(String(step.id)) && typeof step.callId === "string")
+      .map((step) => String(step.callId)),
+  );
+  const reported = new Set<string>();
+  const report = (message: string): void => {
+    if (reported.has(message)) return;
+    reported.add(message);
+    errors.push(message);
+  };
+  // A structural walk over every binding shape: templates (`type`) and sources/proposals (`kind`).
+  const walk = (node: unknown, where: string): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, where);
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    const shape = typeof node.type === "string" ? node.type : node.kind;
+    // Recorded literal values are data, not bindings.
+    if (shape === "literal") return;
+    if ((shape === "result" || shape === "extract") && typeof node.stepId === "string") {
+      if (optionalSteps.has(node.stepId)) {
+        report(`${where} binds the result of optional step ${node.stepId}`);
+      }
+    }
+    if (shape === "input" && typeof node.name === "string" && toggles.has(node.name)) {
+      report(`${where} uses toggle input ${node.name} outside its toggle`);
+    }
+    for (const entry of Object.values(node)) walk(entry, where);
+  };
+  for (const step of steps) {
+    walk(step.arguments, `step ${String(step.id)}`);
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    const state = isPlainObject(program?.pythonState) ? program.pythonState : undefined;
+    for (const descriptor of Array.isArray(state?.setup) ? state.setup : []) {
+      if (isPlainObject(descriptor) && optionalCalls.has(String(descriptor.callId))) {
+        report(`step ${String(step.id)} replays setup from an optional step`);
+      }
+    }
+  }
+  if (Array.isArray(workflow.candidates)) {
+    for (const candidate of workflow.candidates) {
+      if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
+    }
+  }
+}
+
+/**
+ * The rules only a derivation step obeys (see `WorkflowStep.origin`). Input names and hole shapes
+ * are also checked by the general argument walk; this adds what makes model-authored source safe to
+ * carry: nothing private, nothing recorded, nothing but caller inputs flowing in.
+ */
+function validateDerivationStep(step: Record<string, unknown>, errors: string[]): void {
+  const where = `derivation step ${String(step.id)}`;
+  const callable = isPlainObject(step.callable) ? step.callable : undefined;
+  const program = isPlainObject(callable?.program) ? callable.program : undefined;
+  if (
+    callable?.runtime !== WORKFLOW_DERIVATION_RUNTIME ||
+    program === undefined ||
+    program.kind !== "python" ||
+    program.sourceInterface !== "python-eval" ||
+    typeof program.argument !== "string" ||
+    typeof program.source !== "string" ||
+    program.source.length === 0 ||
+    program.argv !== undefined ||
+    program.pythonState !== undefined
+  ) {
+    errors.push(
+      `${where} must be a Python Eval program in the ${WORKFLOW_DERIVATION_RUNTIME} runtime, carried in a named argument`,
+    );
+    return;
+  }
+  const observed = isPlainObject(step.observed) ? step.observed : undefined;
+  if (observed?.outcome !== "unknown" || observed.output !== undefined) {
+    errors.push(`${where} must not claim an observed outcome`);
+  }
+  if (!Array.isArray(step.dependsOn) || step.dependsOn.length !== 0) {
+    errors.push(`${where} must not depend on other steps`);
+  }
+  const args = Array.isArray(step.arguments) ? step.arguments : [];
+  for (const argument of args) {
+    if (!isPlainObject(argument)) continue;
+    const source = isPlainObject(argument.source) ? argument.source : undefined;
+    if (argument.name !== program.argument) {
+      if (source?.kind !== "literal") {
+        errors.push(`${where} argument ${String(argument.name)} must be a literal`);
+      }
+      continue;
+    }
+    const template = source?.kind === "template" ? source.template : undefined;
+    if (
+      !isPlainObject(template) ||
+      template.type !== "program" ||
+      template.language !== "python" ||
+      template.sourceReference !== undefined ||
+      template.protectedTokens !== undefined ||
+      !isPlainObject(template.source) ||
+      template.source.type !== "literal" ||
+      template.source.value !== program.source ||
+      !Array.isArray(template.holes)
+    ) {
+      errors.push(
+        `${where} must carry its source as a literal program template equal to its program source`,
+      );
+      continue;
+    }
+    const holes = template.holes;
+    if (holes.length === 0) {
+      errors.push(`${where} must read at least one caller input`);
+    }
+    for (const hole of holes) {
+      if (
+        !isPlainObject(hole) ||
+        hole.embedded !== undefined ||
+        hole.span !== undefined ||
+        !isPlainObject(hole.binding) ||
+        hole.binding.type !== "input"
+      ) {
+        errors.push(`${where} may bind only whole tokens to caller inputs`);
+      }
+    }
+  }
+  if (
+    !args.some(
+      (argument) =>
+        isPlainObject(argument) &&
+        argument.name === program.argument &&
+        isPlainObject(argument.source) &&
+        argument.source.kind === "template",
+    )
+  ) {
+    errors.push(`${where} must carry its source in argument ${program.argument}`);
+  }
 }
 
 /**
@@ -682,6 +1041,7 @@ export function validateRecordedWorkflow(value: unknown): {
   if (!inputs) errors.push("inputs must be an array");
   const inputNames = new Set<string>();
   const inputTypes = new Map<string, string>();
+  const recordedDefaults = new Set<string>();
   for (const input of inputs ?? []) {
     if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
       errors.push("every input needs a non-empty name");
@@ -704,6 +1064,15 @@ export function validateRecordedWorkflow(value: unknown): {
           errors.push(`input ${input.name} default must be a JSON value`);
         } else if (!matchesWorkflowInputType(input.default, input.type)) {
           errors.push(`input ${input.name} default must match its recorded type '${input.type}'`);
+        }
+      }
+      if (Object.hasOwn(input, "recordedDefault")) {
+        if (input.recordedDefault !== true) {
+          errors.push(`input ${input.name} recordedDefault must be true when present`);
+        } else if (Object.hasOwn(input, "default")) {
+          errors.push(`input ${input.name} cannot have both a default and a recorded default`);
+        } else {
+          recordedDefaults.add(input.name);
         }
       }
     }
@@ -768,9 +1137,28 @@ export function validateRecordedWorkflow(value: unknown): {
     ) {
       errors.push(`step ${step.id} needs an observed outcome`);
     }
+    if (isPlainObject(observed) && observed.output !== undefined) {
+      const output = observed.output;
+      if (
+        !isPlainObject(output) ||
+        Object.keys(output).some((key) => key !== "type" && key !== "hasContent") ||
+        !["null", "boolean", "number", "string", "array", "object"].includes(
+          output.type as string,
+        ) ||
+        typeof output.hasContent !== "boolean"
+      )
+        errors.push(`step ${step.id} has an invalid observed output`);
+    }
     const permissions = (step as { permissions?: unknown }).permissions;
     if (permissions !== undefined && !isJsonValue(permissions)) {
       errors.push(`step ${step.id} permissions must be JSON`);
+    }
+    const origin = step.origin;
+    if (origin !== undefined && origin !== "recorded" && origin !== "derivation") {
+      errors.push(`step ${step.id} has an unknown origin ${String(origin)}`);
+    }
+    if (origin === "derivation") {
+      validateDerivationStep(step, errors);
     }
   }
   // Dependencies and bindings may only address steps that exist and come earlier.
@@ -778,6 +1166,12 @@ export function validateRecordedWorkflow(value: unknown): {
   (steps ?? []).forEach((step, index) => {
     if (isPlainObject(step) && typeof step.id === "string") order.set(step.id, index);
   });
+  const derivationIds = new Set<string>();
+  for (const step of steps ?? []) {
+    if (isPlainObject(step) && typeof step.id === "string" && step.origin === "derivation") {
+      derivationIds.add(step.id);
+    }
+  }
   for (const step of steps ?? []) {
     if (!isPlainObject(step) || typeof step.id !== "string") continue;
     const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn : null;
@@ -812,6 +1206,10 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} argument ${argument.name} reads unknown input ${String(source.name)}`,
         );
+      } else if (source.kind === "input" && recordedDefaults.has(String(source.name))) {
+        errors.push(
+          `step ${step.id} argument ${argument.name} reads recorded-default input ${String(source.name)} outside a program token`,
+        );
       }
       if (source.kind === "result") {
         const stepRef = String(source.stepId);
@@ -840,7 +1238,7 @@ export function validateRecordedWorkflow(value: unknown): {
       }
       if (source.kind === "template") {
         const problems: string[] = [];
-        const walk = (template: unknown, where: string): void => {
+        const walk = (template: unknown, where: string, holeBinding = false): void => {
           if (!isPlainObject(template)) {
             problems.push(`${where} is not a template node`);
             return;
@@ -852,6 +1250,10 @@ export function validateRecordedWorkflow(value: unknown): {
             case "input":
               if (typeof template.name !== "string" || !inputNames.has(template.name)) {
                 problems.push(`${where} reads unknown input ${String(template.name)}`);
+              } else if (recordedDefaults.has(template.name) && !holeBinding) {
+                problems.push(
+                  `${where} reads recorded-default input ${template.name} outside a program token`,
+                );
               }
               return;
             case "result": {
@@ -879,6 +1281,20 @@ export function validateRecordedWorkflow(value: unknown): {
                 );
               }
               return;
+            case "extract": {
+              const stepRef = typeof template.stepId === "string" ? template.stepId : "";
+              if (!order.has(stepRef))
+                problems.push(`${where} extracts from unknown step ${stepRef}`);
+              else if ((order.get(stepRef) ?? 0) >= (order.get(String(step.id)) ?? 0)) {
+                problems.push(`${where} extracts from ${stepRef}, which does not come earlier`);
+              }
+              if (typeof template.locator !== "string" || !declaredPrivates.has(template.locator)) {
+                problems.push(
+                  `${where} reads undeclared private reference ${String(template.locator)}`,
+                );
+              }
+              return;
+            }
             case "unresolved":
               if (typeof template.reason !== "string") problems.push(`${where} needs a reason`);
               return;
@@ -905,7 +1321,8 @@ export function validateRecordedWorkflow(value: unknown): {
                 template.language !== "shell" &&
                 template.language !== "python" &&
                 template.language !== "javascript" &&
-                template.language !== "typescript"
+                template.language !== "typescript" &&
+                template.language !== "patch"
               ) {
                 problems.push(`${where} program needs the language it runs in`);
               }
@@ -929,6 +1346,7 @@ export function validateRecordedWorkflow(value: unknown): {
                 problems.push(`${where} program holes must be an array`);
                 return;
               }
+              const spansByToken = new Map<string, Array<{ start: number; end: number } | null>>();
               for (const [index, hole] of template.holes.entries()) {
                 if (
                   !isPlainObject(hole) ||
@@ -939,7 +1357,74 @@ export function validateRecordedWorkflow(value: unknown): {
                   problems.push(`${where} hole ${index} must name a recorded token index`);
                   continue;
                 }
-                walk(hole.binding, `${where}<token ${hole.token}>`);
+                if (
+                  hole.embedded !== undefined &&
+                  (typeof hole.embedded !== "number" ||
+                    !Number.isInteger(hole.embedded) ||
+                    hole.embedded < 0 ||
+                    template.language !== "shell")
+                ) {
+                  problems.push(`${where} hole ${index} must name an embedded token index`);
+                  continue;
+                }
+                if (
+                  hole.span !== undefined &&
+                  (!isPlainObject(hole.span) ||
+                    typeof hole.span.start !== "number" ||
+                    typeof hole.span.end !== "number" ||
+                    !Number.isInteger(hole.span.start) ||
+                    !Number.isInteger(hole.span.end) ||
+                    hole.span.start < 0 ||
+                    hole.span.start >= hole.span.end)
+                ) {
+                  problems.push(`${where} hole ${index} must name a span of its token value`);
+                  continue;
+                }
+                const key = `${hole.token}.${String(hole.embedded ?? "")}`;
+                const span =
+                  hole.span === undefined
+                    ? null
+                    : {
+                        start: hole.span.start as number,
+                        end: hole.span.end as number,
+                      };
+                const siblings = spansByToken.get(key) ?? [];
+                if (
+                  siblings.some(
+                    (other) =>
+                      other === null ||
+                      span === null ||
+                      (other.start < span.end && span.start < other.end),
+                  )
+                ) {
+                  problems.push(`${where} hole ${index} overlaps another hole of its token`);
+                }
+                spansByToken.set(key, [...siblings, span]);
+                if (
+                  span !== null &&
+                  isPlainObject(template.source) &&
+                  template.source.type === "literal" &&
+                  typeof template.source.value === "string" &&
+                  typeof template.language === "string"
+                ) {
+                  const value = programTokenValueAt(
+                    template.language as ProgramLanguage,
+                    template.source.value,
+                    typeof hole.embedded === "number"
+                      ? { token: hole.token, embedded: hole.embedded }
+                      : { token: hole.token },
+                  );
+                  if (typeof value !== "string" || !programTokenSpanFits(span, value.length)) {
+                    problems.push(`${where} hole ${index} span does not fit its token value`);
+                  }
+                }
+                walk(
+                  hole.binding,
+                  hole.embedded === undefined
+                    ? `${where}<token ${hole.token}>`
+                    : `${where}<token ${hole.token}.${hole.embedded}>`,
+                  true,
+                );
               }
               return;
             }
@@ -985,7 +1470,8 @@ export function validateRecordedWorkflow(value: unknown): {
         (program.kind !== "shell" &&
           program.kind !== "python" &&
           program.kind !== "javascript" &&
-          program.kind !== "typescript") ||
+          program.kind !== "typescript" &&
+          program.kind !== "patch") ||
         typeof program.source !== "string"
       ) {
         errors.push(`step ${step.id} has an invalid recorded program`);
@@ -1063,7 +1549,15 @@ export function validateRecordedWorkflow(value: unknown): {
         // points anywhere else would be applied to a value no tokenizer has read.
         const path = Array.isArray(candidate.path) ? candidate.path : [];
         if (path[0] === "tokens") {
-          if (!Number.isInteger(path[1]) || (path[1] as number) < 0 || path.length !== 2) {
+          const address = programTokenPath(path);
+          if (
+            address === undefined ||
+            (address.embedded !== undefined &&
+              isPlainObject(step) &&
+              isPlainObject(step.callable) &&
+              isPlainObject(step.callable.program) &&
+              step.callable.program.kind !== "shell")
+          ) {
             errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
           }
           const program = isPlainObject(step) ? step.callable : undefined;
@@ -1082,9 +1576,31 @@ export function validateRecordedWorkflow(value: unknown): {
           if (!order.has(stepRef)) {
             errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
           }
+        } else if (proposed.kind === "extract") {
+          const stepRef = String(proposed.stepId);
+          if (!order.has(stepRef)) {
+            errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
+          } else if ((order.get(stepRef) ?? 0) >= (order.get(stepId) ?? 0)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} extracts from ${stepRef}, which does not come earlier`,
+            );
+          }
+          if (typeof proposed.locator !== "string" || !declaredPrivates.has(proposed.locator)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} reads undeclared private reference ${String(proposed.locator)}`,
+            );
+          }
         } else if (proposed.kind === "input") {
           if (typeof proposed.name !== "string" || proposed.name.length === 0) {
             errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
+          }
+          if (
+            Object.hasOwn(proposed, "recordedDefault") &&
+            (proposed.recordedDefault !== true || path[0] !== "tokens")
+          ) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} may propose a recorded default only for a program token`,
+            );
           }
           if (
             proposed.type !== "string" &&
@@ -1097,6 +1613,54 @@ export function validateRecordedWorkflow(value: unknown): {
           }
         } else {
           errors.push(`candidate ${stepId}.${candidate.argument} has an unknown proposal kind`);
+        }
+        if (
+          candidate.reason !== "equal-to-earlier-result" &&
+          candidate.reason !== "tracks-earlier-result-across-executions" &&
+          candidate.reason !== "varies-across-executions" &&
+          candidate.reason !== "declared-by-the-callable" &&
+          candidate.reason !== "shares-value-with-declared-input" &&
+          candidate.reason !== "classified-source-value" &&
+          candidate.reason !== "printed-by-earlier-step" &&
+          candidate.reason !== "native-data-argument" &&
+          candidate.reason !== "derived-from-inputs"
+        )
+          errors.push(`candidate ${stepId}.${candidate.argument} has an unknown reason`);
+        // A derivation's output binds only recorded program tokens, only under its own reason, by
+        // one top-level name; nothing is ever bound into a derivation's own code.
+        const readsDerivation =
+          isPlainObject(proposed) &&
+          proposed.kind === "result" &&
+          derivationIds.has(String(proposed.stepId));
+        if (derivationIds.has(stepId)) {
+          errors.push(`candidate ${stepId}.${candidate.argument} binds into a derivation step`);
+        }
+        if (readsDerivation !== (candidate.reason === "derived-from-inputs")) {
+          errors.push(
+            `candidate ${stepId}.${candidate.argument} must read a derivation step exactly when its reason is derived-from-inputs`,
+          );
+        } else if (readsDerivation && isPlainObject(proposed)) {
+          const stepRef = String(proposed.stepId);
+          if ((order.get(stepRef) ?? 0) >= (order.get(stepId) ?? 0)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} reads derivation ${stepRef}, which does not come earlier`,
+            );
+          }
+          if (
+            !Array.isArray(proposed.path) ||
+            proposed.path.length !== 1 ||
+            typeof proposed.path[0] !== "string" ||
+            proposed.path[0].length === 0
+          ) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} must read one named value of its derivation`,
+            );
+          }
+          if (path[0] !== "tokens") {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} may bind a derived value only to a program token`,
+            );
+          }
         }
         if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
           errors.push(
@@ -1112,6 +1676,20 @@ export function validateRecordedWorkflow(value: unknown): {
   }
   if (value.heldOut !== undefined) {
     validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
+  }
+  validateWorkflowOptionalSteps(value, errors);
+  // A derivation was never executed by the recording, so no demonstration can have observed it.
+  for (const label of ["baseline", "heldOut"] as const) {
+    const demonstration = value[label];
+    if (!isPlainObject(demonstration)) continue;
+    for (const list of [demonstration.inputs, demonstration.observed, demonstration.calls]) {
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (isPlainObject(entry) && derivationIds.has(String(entry.stepId))) {
+          errors.push(`${label} references derivation step ${String(entry.stepId)}`);
+        }
+      }
+    }
   }
   return { valid: errors.length === 0, errors };
 }

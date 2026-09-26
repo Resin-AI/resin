@@ -1,4 +1,4 @@
-import type { CapabilityManifest } from "@resin/contracts";
+import type { CapabilityManifest, ToolParameterSchema } from "@resin/contracts";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -27,6 +27,8 @@ export interface SearchToolsResultItem {
   scope: string;
   status: string;
   description: string;
+  /** The tool's input schema, so a caller can invoke it without a separate schema lookup. */
+  inputSchema: ToolParameterSchema | JsonRpcParams;
   tags: string[];
   capabilities: CapabilitySummary;
   isPinned: boolean;
@@ -50,6 +52,39 @@ export interface SearchToolsParams {
   status?: "active" | "draft" | "deprecated" | "revoked" | "all";
   limit?: number;
   offset?: number;
+}
+
+/**
+ * Local-only detail about what a tool runs, such as a learned tool's recorded program. It is
+ * resolved on this machine for the local agent's discovery and never uploaded.
+ */
+export type LocalToolDescriber = (
+  tool: Pick<RegistryTool, "artifactDigest">,
+  context: WorkspaceContext,
+) => string | undefined;
+
+/** The input schema a tool is invoked with; a tool without declared inputs takes none. */
+export function toolInputSchema(tool: RegistryTool): ToolParameterSchema | JsonRpcParams {
+  return (
+    tool.parameters ??
+    tool.manifest?.parameters ?? {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    }
+  );
+}
+
+/** The description an agent sees: the catalog's, followed by any local detail. */
+export function describeToolLocally(
+  tool: Pick<RegistryTool, "artifactDigest" | "description" | "manifest">,
+  context: WorkspaceContext,
+  describer?: LocalToolDescriber,
+): string {
+  const catalog = tool.description || tool.manifest?.description || "";
+  const local = describer?.(tool, context);
+  return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
 }
 
 /**
@@ -202,6 +237,7 @@ export function isToolInScope(tool: RegistryTool, context: WorkspaceContext): bo
  */
 function computeToolScore(
   tool: RegistryTool,
+  description: string,
   queryLower: string,
   tags: string[],
   isPinned: boolean,
@@ -213,7 +249,7 @@ function computeToolScore(
   let score = 0;
   const nameLower = (tool.exposedName || tool.name).toLowerCase();
   const rawNameLower = tool.name.toLowerCase();
-  const descLower = (tool.description || tool.manifest.description || "").toLowerCase();
+  const descLower = description.toLowerCase();
 
   // Exact name match
   if (nameLower === queryLower || rawNameLower === queryLower) {
@@ -267,7 +303,10 @@ function computeToolScore(
 /**
  * Factory for creating the search_tools handler.
  */
-export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
+export function createSearchToolsHandler(
+  registry: ToolRegistry,
+  describer?: LocalToolDescriber,
+): ToolHandler {
   return async (
     context: WorkspaceContext,
     params: JsonRpcParams,
@@ -301,6 +340,10 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
     for (const tool of allRegistered) {
       // Check scope visibility strictly
       if (!isToolInScope(tool, context)) {
+        continue;
+      }
+      // The meta-tools are always exposed directly; searching lists them only when asked for.
+      if (tool.isSystem && requestedScope !== "system") {
         continue;
       }
 
@@ -377,7 +420,8 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
         }
       }
 
-      const score = computeToolScore(tool, query, tags, isPinned);
+      const description = describeToolLocally(tool, context, describer);
+      const score = computeToolScore(tool, description, query, tags, isPinned);
 
       // If query was specified, exclude tools that didn't match at all
       if (query && score <= 0) {
@@ -390,7 +434,8 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
         version: tool.version,
         scope: tool.scope ?? "workspace",
         status: isDisabled ? "disabled" : tool.status || "active",
-        description: tool.description || tool.manifest.description || "",
+        description,
+        inputSchema: toolInputSchema(tool),
         tags,
         capabilities: capSummary,
         isPinned,
@@ -433,7 +478,7 @@ export function createSearchToolsHandler(registry: ToolRegistry): ToolHandler {
       content: [
         {
           type: "text",
-          text: JSON.stringify(response, null, 2),
+          text: JSON.stringify(response),
         },
       ],
     };

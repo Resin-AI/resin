@@ -15,3 +15,4 @@ export * from "./process.js";
 
 // Tool runtime facade and deterministic sandbox
 export * from "./runner.js";
+export * from "./deno-executable.js";

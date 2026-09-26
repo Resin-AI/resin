@@ -5,7 +5,6 @@ import type {
   V1ProjectMetadata,
   V1RevocationMetadata,
   V1ToolLock,
-  WorkflowJsonValue,
 } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import {
@@ -14,7 +13,7 @@ import {
   CloudCredentialStore,
   type CloudCredentialStoreOptions,
   type CloudRequestIdentity,
-  createRecordedWorkflowWorkspaceResolver,
+  createLocalCallIdentity,
   resolvePaths,
 } from "@resin/observer";
 import {
@@ -31,13 +30,13 @@ import {
   RESIN_HARNESS_TOOL_RUNTIME,
   type RuntimeAdapter,
   type RuntimeTrustStore,
-  type ToolProtocolDispatchRequest,
   connectMcpServer,
   createProcessAdapter,
   createProgramAdapter,
   createToolProtocolAdapter,
 } from "@resin/runtime";
 import { composedResultValue } from "../meta/invoke-tool.js";
+import type { LocalToolDescriber } from "../meta/search-tools.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -47,10 +46,6 @@ import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
 import { loadLocalArtifactTrust } from "./local-artifact-trust.js";
 import { LocalArtifactExecutor } from "./local-executor.js";
-import {
-  type WorkspaceSnapshotSource,
-  createWorkspaceSnapshotValidator,
-} from "./replay-workspace-snapshot.js";
 import { CloudInvocationRouter } from "./router.js";
 import {
   type ArtifactBytesDownloader,
@@ -134,6 +129,12 @@ export interface ProductionProxyRuntime {
    */
   validationWorker?: WorkflowValidationWorker;
   onWorkspaceReady(workspace: WorkspaceContext): Promise<void>;
+  /**
+   * Resolves once the catalog sync that workspace-ready started in the background has settled, or
+   * after `timeoutMs`, whichever is first. A client that reads its tool list once at startup
+   * otherwise never sees tools a fresh install has not synced yet.
+   */
+  catalogSettled?(timeoutMs: number): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   sync(options?: { force?: boolean }): Promise<CatalogSnapshotResponse | null>;
@@ -169,6 +170,14 @@ function memoizedConnections(
     opening.set(name, attempt);
     return await attempt;
   };
+}
+
+/** Local discovery detail for cached learned tools: the recorded program each one runs. */
+function recordedProgramDescriber(executor: LocalArtifactExecutor): LocalToolDescriber {
+  return (tool, context) =>
+    tool.artifactDigest === undefined
+      ? undefined
+      : executor.describeRecordedWorkflow(tool.artifactDigest, context);
 }
 
 function workspaceRootFromContext(workspace: WorkspaceContext | undefined): string | undefined {
@@ -362,6 +371,7 @@ export async function createProductionProxyRuntime(
         },
       });
     executor.setManagedToolAccess(managedToolAccess);
+    options.registry?.setLocalToolDescriber(recordedProgramDescriber(executor));
     routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
@@ -373,99 +383,20 @@ export async function createProductionProxyRuntime(
       ...(resolveConnection === undefined ? {} : { connectionResolver: resolveConnection }),
     });
     routerBox.current.setManagedToolAccess(managedToolAccess);
-    // The validation worker resolves private references from the executor's store and routes tool
-    // calls through the host. Recorded programs receive only a disposable snapshot of safe project
-    // inputs from the latest trusted workspace context.
-    const readyWorkspace: { current?: WorkspaceContext } = {};
-    const validationDispatch = async (
-      request: ToolProtocolDispatchRequest,
-    ): Promise<WorkflowJsonValue> => {
-      const router = routerBox.current;
-      if (router === undefined) throw new Error("Step dispatcher is not ready");
-      const workspace = readyWorkspace.current;
-      if (workspace === undefined) {
-        throw new Error(
-          "the workspace is not ready, so a recorded tool step cannot be routed through this host",
-        );
-      }
-      const result = await router.invoke({
-        toolId: request.name,
-        name: request.name,
-        version: "",
-        ...(request.connection ? { connection: request.connection } : {}),
-        parameters: request.arguments as JsonRpcParams,
-        context: workspace,
-      });
-      if (result.isError) {
-        const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
-        throw new Error(text ?? `callable '${request.name}' answered with an error`);
-      }
-      return composedResultValue(result);
-    };
-    const validationRuntimeAdapters:
-      | ((workspaceDir: string) => readonly RuntimeAdapter[])
-      | undefined =
-      options.recordedHarnessToolInvoker === undefined
-        ? undefined
-        : (workspaceDir) => [
-            {
-              runtime: RESIN_HARNESS_TOOL_RUNTIME,
-              call: async (request) => {
-                const result = await options.recordedHarnessToolInvoker!({
-                  name: request.step.callable.name,
-                  parameters: request.arguments as Record<string, unknown>,
-                  cwd: workspaceDir,
-                });
-                if (result.isError) {
-                  throw new Error(
-                    result.content[0]?.text ??
-                      `harness tool '${request.step.callable.name}' answered with an error`,
-                  );
-                }
-                return composedResultValue(result);
-              },
-            },
-          ];
-    const resolveRecordedWorkspace = createRecordedWorkflowWorkspaceResolver({
-      workspaceId: identity.workspaceId,
-      privateValues: executor.getPrivateValueStore(),
-    });
     const validationWorker = new WorkflowValidationWorker({
       client: new WorkflowValidationClient({
         identityProvider,
         fetchImpl: fetchWithLifecycle,
       }),
       identity: { workspaceId: identity.workspaceId, deviceId: identity.deviceId },
-      createValidator: () =>
-        createWorkspaceSnapshotValidator(
-          async (plan): Promise<WorkspaceSnapshotSource> => {
-            const workspace = readyWorkspace.current;
-            if (workspace === undefined) return { ready: false };
-            if (!plan.steps.some((step) => step.callable.program !== undefined)) {
-              return { ready: true };
-            }
-            const root = await resolveRecordedWorkspace(plan);
-            if (root === undefined) return { ready: false };
-            // A mixed replay still dispatches tool-protocol calls through this host's project.
-            if (plan.steps.some((step) => step.callable.program === undefined)) {
-              const hostRoot = workspaceRootFromContext(workspace);
-              if (hostRoot === undefined || path.resolve(hostRoot) !== path.resolve(root)) {
-                return { ready: false };
-              }
-            }
-            return { ready: true, root };
-          },
-          {
-            workspaceId: identity.workspaceId,
-            privateValues: executor.getPrivateValueStore(),
-            dispatch: validationDispatch,
-            ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
-            ...(validationRuntimeAdapters === undefined
-              ? {}
-              : { runtimeAdapters: validationRuntimeAdapters }),
-            timeoutMs: DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
-          },
-        ),
+      // Validation checks plans against this device's own recording: it reads the executor's store
+      // and discovers local sessions, and never runs a recorded program or dispatches a tool call.
+      privateValues: executor.getPrivateValueStore(),
+      localCalls: createLocalCallIdentity({
+        workspaceId: identity.workspaceId,
+        privateValues: executor.getPrivateValueStore(),
+      }),
+      timeoutMs: DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });
 
@@ -516,7 +447,6 @@ export async function createProductionProxyRuntime(
       registry: options.registry,
       lockManager: options.lockManager,
       async onWorkspaceReady(workspace: WorkspaceContext): Promise<void> {
-        readyWorkspace.current = workspace;
         const workspaceRoot = workspaceRootFromContext(workspace);
         if (workspaceRoot) {
           executor.setWorkspaceRoot(workspaceRoot);
@@ -650,6 +580,18 @@ export async function createProductionProxyRuntime(
           backgroundTasks.clear();
         }
       },
+      async catalogSettled(timeoutMs: number): Promise<void> {
+        if (backgroundTasks.size === 0) return;
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          Promise.allSettled([...backgroundTasks]),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+            timer.unref?.();
+          }),
+        ]);
+        clearTimeout(timer);
+      },
       async sync(_syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
         await Promise.all([...backgroundTasks]);
         return await coordinator.sync();
@@ -670,6 +612,7 @@ export async function createProductionProxyRuntime(
       resinHome: paths.homeDir,
     });
   localExecutor.setManagedToolAccess(managedToolAccess);
+  options.registry?.setLocalToolDescriber(recordedProgramDescriber(localExecutor));
 
   // Persisted positive denial remains effective even if credentials are now unavailable.
   try {

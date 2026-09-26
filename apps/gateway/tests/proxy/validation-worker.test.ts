@@ -1,10 +1,10 @@
 /**
  * The gateway's answer side of a recorded workflow's validation.
  *
- * These tests drive the real client over a fake connection and the real local validator over a plan
- * whose calls are dispatched to a stand-in, so what is exercised is the wiring: which ask is
- * answered, under which identity, with which digests, and what happens when an ask cannot be
- * substantiated or an answer is refused.
+ * These tests drive the real client over a fake connection and the real recording check over a plan
+ * captured by the real recorder, so what is exercised is the wiring: which ask is answered, under
+ * which identity, with which digests, and what happens when an ask cannot be substantiated or an
+ * answer is refused.
  */
 
 import fs from "node:fs";
@@ -13,7 +13,6 @@ import path from "node:path";
 import {
   type RecordedWorkflow,
   WORKFLOW_VALIDATION_SCHEMA_VERSION,
-  type WorkflowBindingCandidate,
   type WorkflowValidationDecision,
   type WorkflowValidationRequest,
   workflowValidationPlanDigest,
@@ -22,11 +21,10 @@ import {
   CloudCredentialStore,
   type CloudRequestIdentity,
   InMemoryPrivateValueStore,
+  LocalSessionDiscoveryUnavailableError,
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import { RESIN_TOOL_PROTOCOL_RUNTIME, type ToolProtocolDispatchRequest } from "@resin/runtime";
 import { describe, expect, it, vi } from "vitest";
-import { ReplayWorkspaceUnavailableError } from "../../src/proxy/replay-workspace-snapshot.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,
@@ -36,10 +34,12 @@ import {
   type WorkflowValidationTransport,
   WorkflowValidationWorker,
 } from "../../src/proxy/validation-worker.js";
+import { localCallsFor, recordSession } from "./recorded-sessions.js";
 
 const WORKSPACE_ID = "ws_recorder_a1";
 const OTHER_WORKSPACE_ID = "ws_recorder_b2";
 const DEVICE_ID = "dev_validation_01";
+const SESSION_ID = "validation-worker-session";
 const INSTALLATION_ID = "install_validation_01";
 const ACCOUNT_ID = "acct_validation_01";
 const ATTEMPT = "attempt-01";
@@ -94,104 +94,48 @@ function postedDecision(calls: RecordedCall[]): WorkflowValidationDecision {
 }
 
 /**
- * The two tools the recording calls. `produce` turns the seed into a token, `consume` acts on the
- * text it is handed; both are deterministic, so a replay's outcome depends only on what bound.
+ * One session that produced a token from a seed and handed it on, twice: the first run is the plan,
+ * the second the held-out demonstration. Its values are kept where every recording's values are
+ * kept — locally, stamped with the workspace that recorded them.
  */
-function dispatchStub() {
-  return vi.fn(async (request: ToolProtocolDispatchRequest) => {
-    if (request.name === "vendor.produce") {
-      return { token: `tok(${String(request.arguments.seed ?? "")})` };
-    }
-    if (request.name === "vendor.consume") {
-      return { echoed: request.arguments.text ?? null };
-    }
-    throw new Error(`unexpected callable '${request.name}'`);
-  });
-}
-
-/**
- * The demonstration's values, kept where every value of a recording is kept: locally, and stamped
- * with the workspace that recorded them — which is what lets a replay resolve them and nothing
- * else.
- */
-function privateValues(workspaceId: string = WORKSPACE_ID): InMemoryPrivateValueStore {
+function recording(workspaceId: string = WORKSPACE_ID): {
+  plan: RecordedWorkflow;
+  store: InMemoryPrivateValueStore;
+} {
   const store = new InMemoryPrivateValueStore();
-  store.set("private:replay:seed", "held-out-seed", { workspaceId });
-  store.set("private:replay:produced", { token: "tok(held-out-seed)" }, { workspaceId });
-  store.set("private:replay:consumed", { echoed: "tok(held-out-seed)" }, { workspaceId });
-  return store;
+  const plan = recordSession(
+    store,
+    { workspaceId, sessionId: SESSION_ID, workflowId: "wf_validation_worker" },
+    ["recorded-seed", "held-out-seed"].flatMap((seed, round) => [
+      { user: `Produce and hand on a token for ${seed}` },
+      {
+        callId: `produce-${round}`,
+        toolName: "produce",
+        connection: "vendor",
+        parameters: { seed },
+        result: JSON.stringify({ token: `tok(${seed})` }),
+      },
+      {
+        callId: `consume-${round}`,
+        toolName: "consume",
+        connection: "vendor",
+        parameters: { text: `tok(${seed})` },
+        result: JSON.stringify({ echoed: `tok(${seed})` }),
+      },
+    ]),
+  );
+  return { plan, store };
 }
 
-const inputCandidate: WorkflowBindingCandidate = {
-  stepId: "produce",
-  argument: "seed",
-  path: [],
-  proposed: { kind: "input", name: "seed", type: "string" },
-  reason: "declared-by-the-callable",
-  missing: "the recording never showed which caller-supplied value reached the call",
-};
-
-const tokenCandidate: WorkflowBindingCandidate = {
-  stepId: "consume",
-  argument: "text",
-  path: [],
-  proposed: { kind: "result", stepId: "produce", path: ["token"] },
-  reason: "tracks-earlier-result-across-executions",
-  missing: "the recording never showed the text moving with the earlier result",
-};
-
-/**
- * A recording whose second step froze the first one's token as a literal, with a demonstration on
- * a different seed that shows the text moving with the result.
- */
 function recordedPlan(): RecordedWorkflow {
+  return recording().plan;
+}
+
+/** Worker options that check asks against `recorded`'s store and session on this device. */
+function checkedAgainst(recorded: { store: InMemoryPrivateValueStore }) {
   return {
-    schemaVersion: 1,
-    workflowId: "wf_validation_worker",
-    inputs: [{ name: "seed", type: "string" }],
-    privateReferences: [
-      "private:replay:seed",
-      "private:replay:produced",
-      "private:replay:consumed",
-    ],
-    candidates: [inputCandidate, tokenCandidate],
-    heldOut: {
-      inputs: [{ stepId: "produce", argument: "seed", reference: "private:replay:seed" }],
-      observed: [
-        { stepId: "produce", reference: "private:replay:produced" },
-        { stepId: "consume", reference: "private:replay:consumed" },
-      ],
-    },
-    steps: [
-      {
-        id: "produce",
-        callId: "call_produce",
-        callable: { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name: "vendor.produce" },
-        arguments: [
-          {
-            name: "seed",
-            source: { kind: "template", template: { type: "literal", value: "recorded-seed" } },
-          },
-        ],
-        dependsOn: [],
-        failurePolicy: { onError: "abort", policy: "recorded" },
-        observed: { outcome: "succeeded" },
-      },
-      {
-        id: "consume",
-        callId: "call_consume",
-        callable: { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name: "vendor.consume" },
-        arguments: [
-          {
-            name: "text",
-            source: { kind: "template", template: { type: "literal", value: "frozen-text" } },
-          },
-        ],
-        dependsOn: ["produce"],
-        failurePolicy: { onError: "abort", policy: "recorded" },
-        observed: { outcome: "succeeded" },
-      },
-    ],
+    privateValues: recorded.store,
+    localCalls: localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]),
   };
 }
 
@@ -287,8 +231,8 @@ describe("WorkflowValidationClient", () => {
 
 describe("WorkflowValidationWorker", () => {
   it("validates a pending ask locally and posts the decision with the ask's digests and this identity's headers", async () => {
-    const plan = recordedPlan();
-    const dispatch = dispatchStub();
+    const recorded = recording();
+    const { plan } = recorded;
     const { calls, fetchImpl } = recordingFetch((url) =>
       url.includes("/pending")
         ? jsonResponse({ requests: [requestFor(plan)] })
@@ -297,8 +241,7 @@ describe("WorkflowValidationWorker", () => {
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(),
-      dispatch,
+      ...checkedAgainst(recorded),
       now: () => new Date(DECIDED_AT),
     });
 
@@ -332,18 +275,17 @@ describe("WorkflowValidationWorker", () => {
     // Both proposals held on inputs the recording never contained.
     expect(decision.verdicts.map((verdict) => verdict.confirmed)).toEqual([true, true]);
     expect(decision.accepted).toEqual([
-      { stepId: "produce", argument: "seed", path: [] },
-      { stepId: "consume", argument: "text", path: [] },
+      { stepId: "step0", argument: "seed", path: [] },
+      { stepId: "step1", argument: "text", path: [] },
     ]);
     expect(decision.verification?.status).toBe("verified");
-    expect(dispatch).toHaveBeenCalled();
   });
 
-  it("records an explicit failed decision when a replay cannot resolve its references", async () => {
+  it("records an explicit failed decision when the check cannot resolve its references", async () => {
     // The same recording, but its values were recorded by a different workspace: a reference is a
-    // name, not a capability, so the replay must not resolve them even though the strings match.
-    const plan = recordedPlan();
-    const dispatch = dispatchStub();
+    // name, not a capability, so the check must not resolve them even though the strings match.
+    const recorded = recording(OTHER_WORKSPACE_ID);
+    const { plan } = recorded;
     const logs: string[] = [];
     const { calls, fetchImpl } = recordingFetch((url) =>
       url.includes("/pending")
@@ -353,8 +295,7 @@ describe("WorkflowValidationWorker", () => {
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(OTHER_WORKSPACE_ID),
-      dispatch,
+      ...checkedAgainst(recorded),
       now: () => new Date(DECIDED_AT),
       log: (message) => logs.push(message),
     });
@@ -365,30 +306,25 @@ describe("WorkflowValidationWorker", () => {
     const decision = postedDecision(calls);
     expect(decision.verification?.status).toBe("failed");
     expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(logs.join("\n")).toContain("replay failed");
   });
 
-  it("does not submit a decision before its trusted workspace is ready", async () => {
+  it("does not submit a decision while local session discovery is unavailable", async () => {
     const plan = recordedPlan();
     const { calls, fetchImpl } = recordingFetch(() =>
       jsonResponse({ requests: [requestFor(plan)] }),
     );
-    const logs: string[] = [];
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       createValidator: () => async () => {
-        throw new ReplayWorkspaceUnavailableError();
+        throw new LocalSessionDiscoveryUnavailableError();
       },
-      log: (message) => logs.push(message),
     });
 
     const summary = await worker.runOnce();
 
-    expect(summary).toMatchObject({ pending: 1, answered: 0, refused: 1 });
+    expect(summary).toMatchObject({ pending: 1, answered: 0 });
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
-    expect(logs.join(" ")).toContain("deferred because trusted replay inputs are unavailable");
   });
 
   it("refuses an ask that names another workspace, without posting anything", async () => {
@@ -443,8 +379,8 @@ describe("WorkflowValidationWorker", () => {
   });
 
   it("tolerates a duplicate delivery", async () => {
-    const plan = recordedPlan();
-    const dispatch = dispatchStub();
+    const recorded = recording();
+    const { plan } = recorded;
     const { calls, fetchImpl } = recordingFetch((url) =>
       url.includes("/pending")
         ? jsonResponse({ requests: [requestFor(plan)] })
@@ -453,8 +389,7 @@ describe("WorkflowValidationWorker", () => {
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(),
-      dispatch,
+      ...checkedAgainst(recorded),
     });
 
     const summary = await worker.runOnce();
@@ -487,8 +422,7 @@ describe("WorkflowValidationWorker", () => {
       const worker = new WorkflowValidationWorker({
         client: clientOver(fetchImpl),
         identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-        privateValues: privateValues(),
-        dispatch: dispatchStub(),
+        ...checkedAgainst(recording()),
         log: (message) => logs.push(message),
       });
 
@@ -520,8 +454,7 @@ describe("WorkflowValidationWorker", () => {
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: privateValues(),
-      dispatch: dispatchStub(),
+      ...checkedAgainst(recording()),
       log: (message) => logs.push(message),
     });
 
@@ -564,55 +497,6 @@ describe("WorkflowValidationWorker", () => {
 
     expect(a).toEqual(b);
     expect(listPending).toHaveBeenCalledTimes(1);
-  });
-
-  it("bounds the replay so a slow callable is refused rather than run on", async () => {
-    vi.useFakeTimers();
-    try {
-      const plan = recordedPlan();
-      const dispatch = vi.fn(async () => {
-        const held = Promise.withResolvers<void>();
-        setTimeout(held.resolve, 200);
-        await held.promise;
-        return { token: "tok(never-returned-in-time)" };
-      });
-      const { calls, fetchImpl } = recordingFetch((url) =>
-        url.includes("/pending")
-          ? jsonResponse({ requests: [requestFor(plan)] })
-          : jsonResponse({ status: "recorded" }),
-      );
-      const worker = new WorkflowValidationWorker({
-        client: clientOver(fetchImpl),
-        identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-        privateValues: privateValues(),
-        dispatch,
-        timeoutMs: 20,
-      });
-
-      const pass = worker.runOnce();
-      // The replay's own bound, not a guessed wait: advance until every run has been refused.
-      let settled = false;
-      void pass.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
-      while (!settled) await vi.advanceTimersByTimeAsync(25);
-      const summary = await pass;
-
-      expect(summary.answered).toBe(1);
-      const decision = postedDecision(calls);
-      expect(decision.verdicts.every((verdict) => verdict.confirmed)).toBe(false);
-      expect(decision.verdicts.some((verdict) => verdict.reason?.includes("20ms bound"))).toBe(
-        true,
-      );
-      expect(decision.accepted).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("polls on the interval, spread by jitter, and stops when stopped", async () => {

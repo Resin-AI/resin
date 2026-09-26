@@ -48,6 +48,8 @@ export * from "./deterministic-command-sequence.js";
 // Tool Link Evidence (declared read/write data flow around one observed invocation)
 export * from "./tool-link-evidence.js";
 // Bounded assistant-turn completion metadata and correction envelope
+export * from "./codex-command.js";
+export * from "./command-text.js";
 export * from "./assistant-stop-reason.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {
@@ -60,6 +62,8 @@ export interface ToolSpec {
 export const CONTRACTS_VERSION = "1.0.0";
 export * from "./recorded-workflow.js";
 export * from "./program-tokens.js";
+export * from "./extract-locator.js";
+export * from "./derivation-steps.js";
 export * from "./program-source-projection.js";
 export * from "./workflow-validation.js";
 export * from "./agent-arguments.js";

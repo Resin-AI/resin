@@ -44,7 +44,7 @@ This document presents the comprehensive Threat Model for the Resin V1 platform,
 | **THREAT-01** | **Sandbox Escape via Arbitrary Shell Execution** | Critical | Prohibit raw shell execution (`/bin/sh`, `execSync`). Subprocesses are spawned only via explicit parameter arrays with binary allowlisting. |
 | **THREAT-02** | **Secret / Credential Theft** | Critical | Enforce strict file deny paths (`**/.ssh/**`, `**/.aws/**`, `**/.env*`). Secrets are mediated via env vars; direct disk reads are blocked. |
 | **THREAT-03** | **Malicious Tool Distribution** | High | All tool bundles must be cryptographically signed with trusted Ed25519 keys. Unsigned or corrupted bundles are quarantined immediately. |
-| **THREAT-04** | **Prompt Injection into Tool Synthesis** | High | Autonomous synthesis candidates undergo multi-stage static analysis, security vetting, and historical replay testing before canary evaluation. |
+| **THREAT-04** | **Prompt Injection into Tool Synthesis** | High | Autonomous synthesis candidates undergo multi-stage static analysis, security vetting, and on-device recording validation before canary evaluation. |
 | **THREAT-05** | **Loopback Port Hijacking** | Medium | The Gateway binds strictly to `127.0.0.1`. Non-loopback interfaces are rejected. Authorization tokens guard API endpoints. |
 | **THREAT-06** | **Denial of Service via Worker Exhaustion** | Medium | Hard caps on execution timeouts (30s default), memory limits (512MB), and worker pool concurrency (4 workers default). |
 

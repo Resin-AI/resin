@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@resin/contracts": "workspace:*",
+    "@babel/parser": "7.28.5",
     "@resin/harness-contracts": "workspace:*",
     "zod": "^3.25.76"
   }

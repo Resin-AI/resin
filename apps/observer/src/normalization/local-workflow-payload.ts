@@ -25,6 +25,15 @@ interface LocalWorkflowPayload {
   parameters?: unknown;
   result?: unknown;
   resultComparison?: LocalWorkflowResultComparison;
+  stdout?: unknown;
+  stderr?: unknown;
+  /** Exact native process originals: redacted fields cannot replay the process that ran. */
+  command?: unknown;
+  args?: unknown;
+  cwd?: unknown;
+  /** Exact native file edit: the recorded path and diff the redacted event may have rewritten. */
+  filePath?: unknown;
+  patch?: unknown;
   resultSuppressed?: true;
   programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
@@ -40,17 +49,34 @@ export function retainLocalWorkflowPayload(
   const field =
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
   const hasOriginalField = field !== undefined && Object.hasOwn(original, field);
+  const commandFields =
+    event.type === "command_exec"
+      ? (["stdout", "stderr", "command", "args", "cwd"] as const).filter((name) =>
+          Object.hasOwn(original, name),
+        )
+      : event.type === "file_edit"
+        ? (["filePath", "patch"] as const).filter((name) => Object.hasOwn(original, name))
+        : [];
   const hasNativeResult =
     event.type === "tool_result" &&
     options.resultObservation !== undefined &&
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
   const hasProgramSourceRedactor =
-    event.type === "tool_call" && options.programSourceRedactor !== undefined;
-  if (!hasOriginalField && !hasNativeResult && !suppressResult && !hasProgramSourceRedactor) return;
+    (event.type === "tool_call" || event.type === "command_exec" || event.type === "file_edit") &&
+    options.programSourceRedactor !== undefined;
+  if (
+    !hasOriginalField &&
+    commandFields.length === 0 &&
+    !hasNativeResult &&
+    !suppressResult &&
+    !hasProgramSourceRedactor
+  )
+    return;
 
   const payload: LocalWorkflowPayload = {};
   if (hasOriginalField) payload[field] = structuredClone(original[field]);
+  for (const name of commandFields) payload[name] = structuredClone(original[name]);
   if (hasProgramSourceRedactor) payload.programSourceRedactor = options.programSourceRedactor;
   if (hasNativeResult) {
     payload.result = structuredClone(options.resultObservation!.result);
@@ -70,6 +96,18 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
   if (payload === undefined) return undefined;
   const field =
     event.type === "tool_call" ? "parameters" : event.type === "tool_result" ? "result" : undefined;
+  if (event.type === "command_exec") {
+    if (!Object.hasOwn(payload, "stdout")) return undefined;
+    const exact: Record<string, unknown> = {};
+    for (const name of ["stdout", "stderr", "command", "args", "cwd"] as const) {
+      if (Object.hasOwn(payload, name)) exact[name] = payload[name];
+    }
+    return { ...event, ...exact } as T;
+  }
+  if (event.type === "file_edit") {
+    if (typeof payload.patch !== "string" || typeof payload.filePath !== "string") return undefined;
+    return { ...event, filePath: payload.filePath, patch: payload.patch } as T;
+  }
   if (field === undefined || !Object.hasOwn(payload, field)) return event;
   return { ...event, [field]: payload[field] } as T;
 }

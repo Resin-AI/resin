@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,9 +11,14 @@ import {
   type ToolManifest,
   ToolManifestSchema,
   type WorkflowJsonValue,
+  type WorkflowValueSource,
+  type WorkflowValueTemplate,
   canonicalJson,
+  embeddedPrograms,
   normalizeSha256,
+  tokenizeProgram,
   validateRecordedWorkflow,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import {
   FilePrivateValueStore,
@@ -44,6 +48,7 @@ import {
   encodeDeterministicTar,
   inspectArtifactImports,
   instantiateRecordedWorkflow,
+  resolveDenoExecutable,
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
@@ -53,7 +58,7 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
 
-import { composedResultValue } from "../meta/invoke-tool.js";
+import { composedResultValue, presentStepSections } from "../meta/invoke-tool.js";
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -140,14 +145,10 @@ export interface LocalArtifactExecutorOptions {
   privateValueOwnerWorkspaceId?: string;
 }
 
-function checkExecutable(filePath: string): boolean {
-  try {
-    const stat = fs.statSync(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
-}
+/** Enough of a recorded program for an agent to recognize it; the full text still executes. */
+const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
+/** Added lines of a recorded edit shown in its description; the whole edit still applies. */
+const RECORDED_PATCH_PREVIEW_LINES = 12;
 
 function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   try {
@@ -155,53 +156,6 @@ function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function resolveDenoExecutable(options?: {
-  denoExecutable?: string;
-  resinHome?: string;
-}): string | undefined {
-  // 1. Explicit denoExecutable option
-  if (options?.denoExecutable && checkExecutable(options.denoExecutable)) {
-    return options.denoExecutable;
-  }
-
-  // 2. RESIN_DENO_EXECUTABLE env
-  const envDeno = process.env.RESIN_DENO_EXECUTABLE;
-  if (envDeno && checkExecutable(envDeno)) {
-    return envDeno;
-  }
-
-  // 3. <resinHome>/current/deno/deno[.exe] where resinHome = RESIN_HOME env or ~/.resin
-  const resinHome =
-    options?.resinHome || process.env.RESIN_HOME || path.join(os.homedir(), ".resin");
-  const resinDeno = path.join(
-    resinHome,
-    "current",
-    "deno",
-    process.platform === "win32" ? "deno.exe" : "deno",
-  );
-  if (checkExecutable(resinDeno)) {
-    return resinDeno;
-  }
-  if (process.platform === "win32") {
-    const resinDenoFallback = path.join(resinHome, "current", "deno", "deno");
-    if (checkExecutable(resinDenoFallback)) {
-      return resinDenoFallback;
-    }
-  }
-
-  // 4. PATH lookup
-  const paths = (process.env.PATH || "").split(path.delimiter);
-  for (const p of paths) {
-    if (!p) continue;
-    const candidate = path.join(p, process.platform === "win32" ? "deno.exe" : "deno");
-    if (checkExecutable(candidate)) {
-      return candidate;
-    }
-  }
-
-  return undefined;
 }
 
 function findDenoBinary(
@@ -442,6 +396,8 @@ export class LocalArtifactExecutor {
   private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private readonly privateValueOwnerWorkspaceId?: string;
   private managedToolAccess?: ManagedToolAccess;
+  /** Resolved local descriptions by artifact and owning workspace; both are immutable inputs. */
+  private readonly recordedWorkflowDescriptions = new Map<string, string>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -478,6 +434,264 @@ export class LocalArtifactExecutor {
     return this.privateValueStore ?? FilePrivateValueStore.default();
   }
 
+  /**
+   * What a cached recorded workflow runs, for tool discovery on this machine. Program text stays
+   * private to the recording workspace: it resolves under the same declaration and ownership rules
+   * as execution and is returned only to the local caller, never uploaded.
+   */
+  describeRecordedWorkflow(artifactDigest: string, context: WorkspaceContext): string | undefined {
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    const key = `${artifactDigest}\u0000${owner}`;
+    const cached = this.recordedWorkflowDescriptions.get(key);
+    if (cached !== undefined) return cached;
+    if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
+      return undefined;
+    }
+    const artifactDir = this.cache.getArtifactPath(artifactDigest);
+    const entrypoint = [BUNDLE_FILE_ENTRYPOINT_TS, BUNDLE_FILE_ENTRYPOINT_JS]
+      .map((file) => path.join(artifactDir, file))
+      .find(isRegularFileWithoutFollowingSymlink);
+    if (entrypoint === undefined) return undefined;
+    let plan: RecordedWorkflow;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
+      if (!validateRecordedWorkflow(parsed).valid) return undefined;
+      plan = parsed as RecordedWorkflow;
+    } catch {
+      return undefined;
+    }
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    const resolveOwned = (reference: string): string | undefined => {
+      if (!declared.has(reference)) return undefined;
+      const recorded = store.origin?.(reference)?.workspaceId;
+      if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
+        return undefined;
+      }
+      try {
+        const value = resolvePrivateReference(store, reference);
+        return typeof value === "string" ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const templateText = (template: WorkflowValueTemplate): string | undefined =>
+      template.type === "literal"
+        ? typeof template.value === "string"
+          ? template.value
+          : undefined
+        : template.type === "private"
+          ? resolveOwned(template.reference)
+          : undefined;
+    const text = (source: WorkflowValueSource): string | undefined =>
+      source.kind === "literal"
+        ? typeof source.value === "string"
+          ? source.value
+          : undefined
+        : source.kind === "private"
+          ? resolveOwned(source.reference)
+          : source.kind === "template"
+            ? templateText(source.template)
+            : undefined;
+    /**
+     * A program whose tokens are bound to caller inputs: its recorded text with each bound token
+     * shown as `{input}`, so a caller sees where a value goes, and each input's recorded value.
+     */
+    const parameterized = (
+      source: WorkflowValueSource,
+    ): { text: string; parameters: string[] } | undefined => {
+      if (source.kind !== "template" || source.template.type !== "program") return undefined;
+      const template = source.template;
+      const recorded =
+        typeof template.sourceReference === "string"
+          ? resolveOwned(template.sourceReference)
+          : templateText(template.source);
+      if (recorded === undefined) return undefined;
+      let tokens: ReturnType<typeof tokenizeProgram>;
+      try {
+        tokens = tokenizeProgram(template.language, recorded);
+      } catch {
+        return { text: recorded, parameters: [] };
+      }
+      const programs = template.holes.some((hole) => hole.embedded !== undefined)
+        ? embeddedPrograms(recorded)
+        : [];
+      const bound = template.holes.flatMap((hole) => {
+        const token =
+          hole.embedded === undefined
+            ? tokens[hole.token]
+            : programs.find((program) => program.anchor === hole.token)?.tokens[hole.embedded];
+        if (token === undefined || recorded.slice(token.start, token.end) !== token.raw) return [];
+        if (
+          hole.span !== undefined &&
+          (typeof token.value !== "string" || hole.span.end > token.value.length)
+        ) {
+          return [];
+        }
+        if (hole.binding.type === "input") {
+          return [{ token, name: hole.binding.name, span: hole.span, parameter: true }];
+        }
+        // A value an earlier step printed: the recorded one is stale, so name where it comes from.
+        if (hole.binding.type === "extract") {
+          const producer = hole.binding.stepId;
+          const position = plan.steps.findIndex((entry) => entry.id === producer);
+          return position < 0
+            ? []
+            : [
+                {
+                  token,
+                  name: `output of step ${position + 1}`,
+                  span: hole.span,
+                  parameter: false,
+                },
+              ];
+        }
+        // A value a derivation computes from the inputs: shown by its name, never as a parameter.
+        const binding = hole.binding;
+        if (binding.type === "result") {
+          const producer = plan.steps.find((entry) => entry.id === binding.stepId);
+          const name = binding.path[0];
+          return producer?.origin === "derivation" &&
+            typeof name === "string" &&
+            binding.path.length === 1
+            ? [{ token, name, span: hole.span, parameter: false }]
+            : [];
+        }
+        return [];
+      });
+      // Span holes show `{input}` inside their token's recorded text: at the same offsets of the
+      // raw text when the value appears there verbatim, else inside the decoded value.
+      const shownTokens = new Map<(typeof tokens)[number], string>();
+      for (const { token, name, span } of bound) {
+        if (span === undefined) {
+          shownTokens.set(token, `{${name}}`);
+          continue;
+        }
+        const value = token.value as string;
+        const spans = bound
+          .filter((each) => each.token === token && each.span !== undefined)
+          .sort((left, right) => right.span!.start - left.span!.start);
+        if (shownTokens.has(token)) continue;
+        const offset = token.raw.indexOf(value);
+        let shown = offset >= 0 ? token.raw : value;
+        const base = offset >= 0 ? offset : 0;
+        for (const each of spans) {
+          shown = `${shown.slice(0, base + each.span!.start)}{${each.name}}${shown.slice(base + each.span!.end)}`;
+        }
+        shownTokens.set(token, shown);
+      }
+      let text = recorded;
+      for (const [token, shown] of [...shownTokens].sort((a, b) => b[0].start - a[0].start)) {
+        text = `${text.slice(0, token.start)}${shown}${text.slice(token.end)}`;
+      }
+      return {
+        text,
+        parameters: bound.flatMap(({ token, name, span, parameter }) =>
+          !parameter
+            ? []
+            : span === undefined
+              ? [`${name} = ${token.value ?? token.raw}`]
+              : [`${name} = ${(token.value as string).slice(span.start, span.end)}`],
+        ),
+      };
+    };
+    const steps: string[] = [];
+    const parameters = new Set<string>();
+    for (const [index, step] of plan.steps.entries()) {
+      // A derivation is model-written code: describe what it computes, never the code itself.
+      if (step.origin === "derivation") {
+        const computed = new Set<string>();
+        for (const consumer of plan.steps) {
+          for (const argument of consumer.arguments) {
+            if (
+              argument.source.kind !== "template" ||
+              argument.source.template.type !== "program"
+            ) {
+              continue;
+            }
+            for (const hole of argument.source.template.holes) {
+              if (
+                hole.binding.type === "result" &&
+                hole.binding.stepId === step.id &&
+                hole.binding.path.length === 1 &&
+                typeof hole.binding.path[0] === "string"
+              ) {
+                computed.add(`{${hole.binding.path[0]}}`);
+              }
+            }
+          }
+        }
+        const program = step.callable.program;
+        const source = step.arguments.find(
+          (argument) => argument.name === program?.argument,
+        )?.source;
+        const read = new Set<string>();
+        if (source?.kind === "template" && source.template.type === "program") {
+          for (const hole of source.template.holes) {
+            if (hole.binding.type === "input") read.add(`{${hole.binding.name}}`);
+          }
+        }
+        if (computed.size > 0 && read.size > 0) {
+          steps.push(
+            `Step ${index + 1} computes ${[...computed].join(", ")} from ${[...read].join(", ")}`,
+          );
+        }
+        continue;
+      }
+      const program = step.callable.program;
+      const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
+      const bound = source === undefined ? undefined : parameterized(source);
+      const programText =
+        program === undefined || source === undefined ? undefined : (bound?.text ?? text(source));
+      if (program === undefined || programText === undefined || programText.length === 0) continue;
+      const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
+      const workdir = workdirSource === undefined ? undefined : text(workdirSource);
+      for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
+      const toggle =
+        step.optional === undefined
+          ? ""
+          : ` (optional — set ${step.optional.input} to false to skip)`;
+      if (program.kind === "patch") {
+        // An edit reads as the file it edits and the lines it adds, holes shown as `{name}`.
+        const lines = programText.split("\n");
+        const header = lines.find((line) => line.startsWith("+++ "))?.slice(4);
+        const deleted = header === "/dev/null";
+        const file = deleted ? lines.find((line) => line.startsWith("--- "))?.slice(4) : header;
+        if (file === undefined) continue;
+        const shownFile =
+          workdir !== undefined && path.isAbsolute(file) ? path.relative(workdir, file) : file;
+        const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++ "));
+        const preview = added
+          .slice(0, RECORDED_PATCH_PREVIEW_LINES)
+          .map((line) => line.slice(1))
+          .join("\n");
+        steps.push(
+          `Step ${index + 1}${toggle} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}${
+            added.length > 0
+              ? `\n${preview}${added.length > RECORDED_PATCH_PREVIEW_LINES ? "\n[...]" : ""}`
+              : ""
+          }`,
+        );
+        continue;
+      }
+      const shown =
+        programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
+          ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
+          : programText;
+      steps.push(
+        `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
+      );
+    }
+    if (steps.length === 0) return undefined;
+    const inputs =
+      parameters.size === 0
+        ? ""
+        : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${[...parameters].join("; ")}`;
+    const description = `Recorded on this machine:\n${steps.join("\n")}${inputs}`;
+    this.recordedWorkflowDescriptions.set(key, description);
+    return description;
+  }
+
   setWorkspaceRoot(root: string): void {
     this.workspaceRoot = root;
   }
@@ -497,7 +711,11 @@ export class LocalArtifactExecutor {
     });
   }
 
-  canExecute(entry: { toolId: string; version?: string; artifactDigest?: string }): boolean {
+  canExecute(entry: {
+    toolId: string;
+    version?: string;
+    artifactDigest?: string;
+  }): boolean {
     if (!entry || !entry.artifactDigest) {
       return false;
     }
@@ -577,7 +795,11 @@ export class LocalArtifactExecutor {
     const maxBytes = DEFAULT_BUNDLE_LIMITS.maxBundleSizeBytes ?? 50 * 1024 * 1024;
     const maxSingleFileBytes = DEFAULT_BUNDLE_LIMITS.maxFileSizeBytes ?? 10 * 1024 * 1024;
 
-    const filesToArchive: Array<{ path: string; content: Buffer; executable: boolean }> = [];
+    const filesToArchive: Array<{
+      path: string;
+      content: Buffer;
+      executable: boolean;
+    }> = [];
     let totalSizeBytes = 0;
 
     const collectFiles = (currentDir: string, relBase = ""): boolean => {
@@ -835,7 +1057,10 @@ export class LocalArtifactExecutor {
     if (fs.existsSync(metaPath)) {
       try {
         const metaContent = fs.readFileSync(metaPath, "utf8");
-        const meta = JSON.parse(metaContent) as { digest?: string; verified?: boolean };
+        const meta = JSON.parse(metaContent) as {
+          digest?: string;
+          verified?: boolean;
+        };
         if (meta.digest) {
           const normMeta = normalizeSha256(meta.digest, false);
           const normEntry = normalizeSha256(entry.artifactDigest, false);
@@ -1273,14 +1498,33 @@ export class LocalArtifactExecutor {
       if (execution.status !== "completed") {
         return fail(execution.error ?? "Recorded workflow execution failed");
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(execution.result ?? null),
-          },
-        ],
-      };
+      const result = execution.result ?? null;
+      // Several returned outputs with a caller-omitted step among them: label that step skipped.
+      const omitted = new Set(
+        execution.steps.flatMap((outcome) =>
+          outcome.status === "omitted" ? [outcome.stepId] : [],
+        ),
+      );
+      if (
+        omitted.size > 0 &&
+        Array.isArray(result) &&
+        result.length > 1 &&
+        result.every((item) => typeof item === "string" || item === null)
+      ) {
+        const sinks = workflowSinkStepIds(plan);
+        const skipped = new Set(
+          sinks.flatMap((stepId, index) => (omitted.has(stepId) ? [index] : [])),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: presentStepSections(result as Array<string | null>, skipped),
+            },
+          ],
+        };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) {
       return fail(
         `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,

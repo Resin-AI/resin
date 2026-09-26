@@ -1392,3 +1392,46 @@ describe("HarnessReconciler", () => {
     });
   });
 });
+
+describe("Codex guidance reconciliation", () => {
+  const agentsPath = `${HOME}/.codex/AGENTS.md`;
+  const reconcileCodex = (bridge: InMemoryConfigFsBridge, dryRun: boolean) =>
+    new HarnessReconciler().reconcile({
+      autoRepair: true,
+      dryRun,
+      harnesses: ["codex-cli"],
+      installedHarnesses: ["codex-cli"],
+      customHome: HOME,
+      workspacePath: WORKSPACE,
+      gatewayUrl: GATEWAY_URL,
+      fsBridge: bridge,
+      probeHarness: NO_INSTALLATION_PROBE,
+    });
+
+  it("installs the guidance block into Codex AGENTS.md", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    await bridge.writeFile(agentsPath, "# User rules\n");
+
+    const report = await reconcileCodex(bridge, false);
+
+    expect(report.results[0]).toMatchObject({
+      configured: true,
+      changed: true,
+      guidance: { path: agentsPath, action: "updated" },
+    });
+    const content = await bridge.readFile(agentsPath);
+    expect(content?.startsWith("# User rules\n\n<!-- resin:codex-guidance:start -->")).toBe(true);
+
+    const again = await reconcileCodex(bridge, false);
+    expect(again.results[0]).toMatchObject({ changed: false, guidance: { action: "unchanged" } });
+  });
+
+  it("reports but does not write the guidance block in dry-run mode", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+
+    const report = await reconcileCodex(bridge, true);
+
+    expect(report.results[0]?.guidance).toEqual({ path: agentsPath, action: "created" });
+    expect(await bridge.exists(agentsPath)).toBe(false);
+  });
+});

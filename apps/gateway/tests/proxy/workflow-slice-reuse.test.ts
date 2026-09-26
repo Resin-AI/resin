@@ -5,7 +5,6 @@ import path from "node:path";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
-  type WorkflowBindingCandidate,
   type WorkflowJsonValue,
 } from "@resin/contracts";
 import {
@@ -26,7 +25,8 @@ import {
   instantiateRecordedWorkflow,
 } from "@resin/runtime";
 import { expect, it } from "vitest";
-import { createLocalWorkflowValidator } from "../../src/proxy/workflow-validation.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { localCallsFor } from "./recorded-sessions.js";
 
 it("validates a selected release workflow from its full repeat and uses a fresh identifier inside the program", async () => {
   const owner = "slice-reuse-owner";
@@ -114,25 +114,27 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
     const recorded = recordCallsFromEvents("release-slice", selected as RecordableEvent[], {
       supportingEvents: events as RecordableEvent[],
     })!.workflow;
-    const input: WorkflowBindingCandidate = {
-      stepId: "step0",
-      argument: "project",
-      path: [],
-      proposed: { kind: "input", name: "produce_project", type: "string" },
-      reason: "declared-by-the-callable",
-      missing: "the caller must confirm that project is a supplied input",
-    };
-    const plan = { ...recorded, candidates: [...(recorded.candidates ?? []), input] };
+    const input = recorded.candidates?.find(
+      (candidate) =>
+        candidate.stepId === "step0" &&
+        candidate.argument === "project" &&
+        candidate.path.length === 0 &&
+        candidate.proposed.kind === "input",
+    );
+    expect(input?.proposed.kind).toBe("input");
+    if (input?.proposed.kind !== "input") throw new Error("missing native project input proposal");
+    const inputName = input.proposed.name;
+    const plan = recorded;
     expect(plan.steps.map((step) => step.callId)).toEqual([...wanted]);
     const seen: ToolProtocolDispatchRequest[] = [];
     const dispatch = async (request: ToolProtocolDispatchRequest) => {
       seen.push(request);
       return makeResult(request.name, request.arguments);
     };
-    const answer = await createLocalWorkflowValidator({
+    const answer = await createRecordingCheckValidator({
       workspaceId: owner,
       privateValues: store,
-      dispatch,
+      localCalls: localCallsFor(store, owner, ["release-slice-session"]),
     })(plan);
     expect(answer.unavailable).toBeUndefined();
     expect(answer.verification).toMatchObject({
@@ -153,7 +155,7 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       );
     const promoted = applyAcceptedBindings(plan, accepted);
     const artifact = compileRecordedWorkflow(promoted);
-    expect(artifact.inputSchema.required).toEqual(["produce_project"]);
+    expect(artifact.inputSchema.required).toEqual([inputName]);
     const adapters = new RuntimeAdapterRegistry();
     adapters.register(createProcessAdapter({ cwd: consumerDir }));
     adapters.register(createToolProtocolAdapter({ dispatch }));
@@ -162,11 +164,15 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       access: { workspaceId: owner },
       resolvePrivate: (reference) => resolvePrivateReference(store, reference) as WorkflowJsonValue,
     });
-    seen.length = 0;
+    expect(seen).toEqual([]);
     for (const project of ["gamma-project", "delta-project"]) {
-      const result = await callable.invoke({ produce_project: project });
+      const result = await callable.invoke({ [inputName]: project });
       expect(result.status, result.error).toBe("completed");
-      expect(result.result).toEqual({ sealed: `release-for-${project}` });
+      // No step consumes another's output (they share a file), so both outputs are the result.
+      expect(result.result).toEqual([
+        `release-for-${project}\n`,
+        { sealed: `release-for-${project}` },
+      ]);
       expect(readFileSync(path.join(consumerDir, "release/README.txt"), "utf8")).toBe(
         `release-for-${project}\n`,
       );

@@ -39,7 +39,7 @@ We decide on the following storage and runtime technology stack for V1:
 ### 1. Control Plane & Runtimes
 
 - **Local Daemon & Gateway**: TypeScript on **Node.js (>=22 LTS)**. Node.js provides mature ecosystem support for MCP stdio/HTTP transports, process supervision, and native filesystem operations.
-- **Tool Sandbox Execution**: **Pinned Deno runtime** (managed and pinned to a specific version). Used strictly for executing isolated tool bundles with fine-grained sandbox permissions.
+- **Tool Sandbox Execution**: **Pinned Deno runtime** (managed and pinned to a specific version). Used strictly for sandboxed execution: isolated tool bundles with fine-grained permissions, and model-written derivation steps, which run as Python in a pinned Pyodide (shipped with the package, never downloaded at run time) inside a Deno process whose only permission is read access to those Pyodide assets.
 - **Cloud Backend Services**: TypeScript on **Node.js (>=22 LTS)** with fastify/express for HTTP/gRPC APIs.
 
 ### 2. Local Persistence: Embedded SQLite with WAL and OS-Standard Identity Stores

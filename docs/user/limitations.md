@@ -37,46 +37,55 @@ This document specifies the supported scope, platform matrix, resource boundarie
 | **Max Evolution Candidates**| 20 / day | 100 / day | Daily quota for autonomous tool synthesis |
 | **File Read Size** | 10 MB | 50 MB | Maximum single file size a tool may read |
 
-### Recorded-workflow replay inputs
+### Recorded-workflow validation
 
-The gateway runs recorded programs with a disposable working directory, never the live project as
-their current directory. Local validation binds private recording references to host-discovered
-sessions and their project roots before copying current safe, non-hidden project files into that
-directory while preserving relative paths. It never chooses a root supplied by a cloud plan or
-substitutes the polling MCP process's unrelated project.
-It does not reuse an old snapshot. Hidden entries, paths excluded by Resin's sensitive-path policy,
-and `node_modules`, `dist`, `build`, `coverage`, `__pycache__`, and `venv` directories are omitted.
-Symlinks and non-regular files are not copied or followed.
+Validation executes nothing recorded. For every recorded step (shell/process, program,
+tool-protocol, harness tool, composed invoke) the gateway resolves the step's call exactly as an
+invocation would and compares it with the call this device recorded for that step: the same
+callable (name, connection, program kind/argument) and every argument equal to the recorded value,
+with program templates compared after resolving the private original. A match lets the recorded
+output answer the step; a mismatch or a step with no recorded call is missed and the plan is not
+verified. No recorded program is spawned, no tool call is dispatched, and no project is copied.
 
-Each snapshot is limited to 128 MiB total, 10 MiB per file, 10,000 copied regular files, and 20,000
-enumerated filesystem entries. Reaching a limit exactly is allowed. Exceeding a bound or encountering
-an unsafe, inaccessible, or changing source fails snapshot preparation; the partial copy is removed
-and no validation decision is submitted, so the ask can be retried later. Missing, ambiguous, or
-conflicting local recording-to-project bindings likewise remain pending. Mixed program/tool-protocol
-replays additionally require the polling host to be in the recorded project before dispatching its
-tools. Before the trusted workspace context is ready, validation remains pending.
+Recorded values are read only from the local private store, under references the device
+recomputes from sessions its own harness adapters discovered and the plan's call ids, and only from
+entries owned by this workspace. References or literals carried in a plan are never trusted as the
+recording. Consequences:
 
-Snapshotting supplies current file bytes; it does not relax verification. Recorded outputs are still
-compared with the plan's expected observations, so changed inputs that produce different results do
-not verify. The temporary working directory is not a filesystem sandbox: a child process still runs
-with the daemon user's filesystem permissions and may access files by absolute path.
+- Recordings captured before Resin stored per-call identity entries cannot be validated.
+- Held-out repeats need their harness call ids (`heldOut.calls`); without them, or when calls
+  cannot be identified locally, the result is unavailable, never verified.
+- When session discovery is unavailable, the ask is deferred.
+- A step that still carries, as literal recorded text, a value the recording shows flowing from an
+  earlier step's output is not verified until the plan binds that position. A closed plan whose
+  literal matches an earlier output only by coincidence is therefore refused (fails closed).
+
+Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
 
 Python Eval recordings retain their adapter-established result semantics: explicit stdout and the
 final expression's representation contribute to the observed result, with Eval's edge-whitespace
 projection. A trailing semicolon does not suppress that expression. Ordinary Python process
 recordings still return stdout unchanged; callable names alone never select Eval behavior.
-Replay uses a fresh process and the recorded, closed setup sequence, not the live kernel. Unsupported
-host-prelude operations and unresolved state do not become supported merely because the recording
-carries an Eval marker. Output comparison remains unchanged.
+Invocation uses a fresh process and the recorded, closed setup sequence, not the live kernel.
+Unsupported host-prelude operations and unresolved state do not become supported merely because
+the recording carries an Eval marker.
 
-JavaScript Eval recordings likewise retain an adapter-established result interface. Replay preserves
-console output and synchronous script completion values; top-level `await`, `return`, and static
-imports use asynchronous evaluation with a final-expression result. Scalars render as text and
-cloneable objects use Eval's numbered display representation, followed by edge-whitespace projection.
-Static named, default, namespace, and side-effect imports are supported; export declarations and
-import attributes are not. Ordinary JavaScript process recordings still return stdout unchanged.
-This interface does not capture a live JavaScript kernel or make unresolved state and host-prelude
-operations replayable. Qualification still requires the replayed result to match the recording.
+JavaScript Eval recordings likewise retain an adapter-established result interface. Invocation
+preserves console output and synchronous script completion values; top-level `await`, `return`, and
+static imports use asynchronous evaluation with a final-expression result. Scalars render as text
+and cloneable objects use Eval's numbered display representation, followed by edge-whitespace
+projection. Static named, default, namespace, and side-effect imports are supported; export
+declarations and import attributes are not. Ordinary JavaScript process recordings still return
+stdout unchanged. This interface does not capture a live JavaScript kernel or make unresolved state
+and host-prelude operations supported.
+
+Derivation steps are the only code validation runs. They are model-written Python and run in Pyodide inside Deno and see only their inputs: they
+cannot read any file (project data included), use the network, or read the environment, and may
+import only a fixed allowlist of pure standard-library modules. Lookups that need project data
+cannot be expressed as a derivation. `numpy`, `pandas`, and other third-party packages are not
+available. Each derivation starts a fresh Deno process and loads Pyodide, which takes about a
+second, and derivations need Deno (bundled with Resin, or `RESIN_DENO_EXECUTABLE`); without it the
+step fails.
 
 ### Generated code imports
 

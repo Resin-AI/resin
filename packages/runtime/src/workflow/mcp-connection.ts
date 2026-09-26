@@ -30,7 +30,11 @@ export interface McpToolSummary {
 export interface McpToolConnection {
   readonly name: string;
   listTools(): Promise<McpToolSummary[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<WorkflowJsonValue>;
+  callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<WorkflowJsonValue>;
   close(): Promise<void>;
 }
 
@@ -63,7 +67,11 @@ interface JsonRpcNotification {
  * itself failed — a timeout, a closed connection, an HTTP status that is not an answer.
  */
 interface McpTransport {
-  exchange(request: JsonRpcRequest, timeoutMs: number): Promise<Record<string, unknown>>;
+  exchange(
+    request: JsonRpcRequest,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>>;
   /** Sends a JSON-RPC notification: no id, and no response is expected. */
   notify(notification: JsonRpcNotification, timeoutMs: number): Promise<void>;
   close(): Promise<void>;
@@ -235,14 +243,40 @@ function createStdioTransport(transport: {
     });
 
   return {
-    async exchange(request, timeoutMs) {
+    async exchange(request, timeoutMs, signal) {
       if (failure) throw failure;
+      if (signal?.aborted) throw new Error(`${label} request was cancelled`);
       return await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const cleanup = (): void => signal?.removeEventListener("abort", onAbort);
+        const onAbort = (): void => {
+          const entry = pending.get(request.id);
+          if (!entry) return;
+          pending.delete(request.id);
+          clearTimeout(entry.timer);
+          cleanup();
+          entry.reject(new Error(`${label} request was cancelled`));
+        };
         const timer = setTimeout(() => {
           pending.delete(request.id);
+          cleanup();
           reject(new Error(`${label} did not answer '${request.method}' within ${timeoutMs}ms`));
         }, timeoutMs);
-        pending.set(request.id, { resolve, reject, timer });
+        pending.set(request.id, {
+          resolve: (response) => {
+            cleanup();
+            resolve(response);
+          },
+          reject: (error) => {
+            cleanup();
+            reject(error);
+          },
+          timer,
+        });
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
         writeLine(request).catch((error: Error) => {
           const entry = pending.get(request.id);
           if (!entry) return;
@@ -285,10 +319,13 @@ function createHttpTransport(transport: {
   });
 
   return {
-    async exchange(request, timeoutMs) {
+    async exchange(request, timeoutMs, signal) {
       if (closed) throw new Error(`MCP server at ${transport.url} is closed`);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const abort = (): void => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      const timer = setTimeout(abort, timeoutMs);
       try {
         const response = await fetch(transport.url, {
           method: "POST",
@@ -312,12 +349,15 @@ function createHttpTransport(transport: {
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           throw new Error(
-            `MCP server at ${transport.url} did not answer '${request.method}' within ${timeoutMs}ms`,
+            signal?.aborted
+              ? `MCP server at ${transport.url} request was cancelled`
+              : `MCP server at ${transport.url} did not answer '${request.method}' within ${timeoutMs}ms`,
           );
         }
         throw error;
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
       }
     },
     async notify(notification, timeoutMs) {
@@ -386,8 +426,17 @@ class McpClient implements McpToolConnection {
     return tools;
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<WorkflowJsonValue> {
-    const result = await this.request("tools/call", { name, arguments: args });
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<WorkflowJsonValue> {
+    const result = await this.request(
+      "tools/call",
+      { name, arguments: args },
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      signal,
+    );
     return readToolResult(result, name);
   }
 
@@ -400,6 +449,7 @@ class McpClient implements McpToolConnection {
     method: string,
     params: JsonRpcParams,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (this.closed) throw new Error(`MCP connection '${this.name}' is closed`);
     if (this.inFlight >= MAX_IN_FLIGHT_REQUESTS) {
@@ -415,6 +465,7 @@ class McpClient implements McpToolConnection {
       const response = await this.transport.exchange(
         { jsonrpc: "2.0", id, method, params },
         timeoutMs,
+        signal,
       );
       if (response.error !== undefined) {
         throw new Error(

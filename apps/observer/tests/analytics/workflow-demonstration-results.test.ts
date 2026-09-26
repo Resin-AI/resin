@@ -162,6 +162,7 @@ describe("demonstration slice selection", () => {
       repeats: 0,
       inputs: [{ position: 0, argument: "path", reference: "private:input" }],
       observed: [{ position: 0, reference: "private:result" }],
+      calls: [{ position: 0, callId: "load-repeat" }],
     });
   });
 });

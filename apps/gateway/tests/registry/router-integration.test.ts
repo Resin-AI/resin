@@ -1,14 +1,17 @@
 import type { ToolManifest } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { FOR_EACH_DESCRIPTION_SENTENCE } from "../../src/for-each.js";
 import { LocalMcpGateway } from "../../src/gateway.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
-import type {
-  CallToolResult,
-  JsonRpcErrorResponse,
-  JsonRpcNotification,
-  JsonRpcSuccessResponse,
-  ListToolsResult,
+import {
+  type CallToolResult,
+  type JsonRpcErrorResponse,
+  type JsonRpcNotification,
+  type JsonRpcSuccessResponse,
+  type ListToolsResult,
+  RESIN_LEARNED_TOOL_META,
 } from "../../src/protocol/types.js";
+import type { ProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest, computeSha256 } from "../../src/registry/validator.js";
 import { createRegistryGatewayRouter } from "../../src/router.js";
@@ -128,6 +131,39 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     );
   });
 
+  it("lists a workspace's learned tool with what it runs here, marked for native listing", async () => {
+    const registry = new ToolRegistry();
+    registry.setLocalToolDescriber(() => "Recorded on this machine:\nStep 1 runs: cat design.md");
+    const router = createRegistryGatewayRouter(registry);
+    const context = {
+      workspaceId: "ws-learned",
+      projectId: "ws-learned",
+      projectRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      startupPath: "/tmp",
+      isReadOnly: false,
+      name: "learned-test",
+      source: "cwd_fallback" as const,
+      roots: [],
+    };
+    await registry.registerTool(
+      makeManifest({ id: "learned-tool-id", name: "read_design" }),
+      undefined,
+      {
+        workspaceId: context.workspaceId,
+      },
+    );
+
+    const tools = await router.listTools(context);
+    const learned = tools.find((tool) => tool.name === "read_design");
+    expect(learned?._meta).toEqual({ [RESIN_LEARNED_TOOL_META]: true });
+    // The learned tool has a text input, so its local detail also offers `for_each`.
+    expect(learned?.description).toBe(
+      `Test tool description\n\nRecorded on this machine:\nStep 1 runs: cat design.md\n\n${FOR_EACH_DESCRIPTION_SENTENCE}`,
+    );
+    expect(tools.find((tool) => tool.name === "invoke_tool")?._meta).toBeUndefined();
+  });
+
   it("lists active catalog tools via tools/list", async () => {
     const registry = new ToolRegistry();
     const router = createRegistryGatewayRouter(registry);
@@ -170,6 +206,54 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     const greetTool = listRes.result.tools.find((t) => t.name === "greet");
     expect(greetTool).toBeDefined();
     expect(greetTool?.description).toBe("Greets a user");
+  });
+
+  it("waits once for a fresh install's catalog sync before the first tool list", async () => {
+    const registry = new ToolRegistry();
+    const router = createRegistryGatewayRouter(registry);
+    let waits = 0;
+    let workspaceId = "";
+    // A fresh install learns its catalog in the background after initialize; the tool it syncs
+    // must be in the client's one startup tool list.
+    const runtime = {
+      async onWorkspaceReady() {},
+      async catalogSettled() {
+        waits += 1;
+        await registry.registerTool(
+          makeManifest({ id: "tool_synced", name: "synced_tool" }),
+          undefined,
+          { workspaceId },
+        );
+      },
+      async stop() {},
+    } as unknown as ProductionProxyRuntime;
+    const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+    const conn = gateway.createConnection();
+    await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test-client", version: "1.0.0" },
+        rootUri: "file:///test/project-fresh",
+      },
+    });
+    workspaceId = conn.workspaceContext.workspaceId;
+    const list = async (id: number) =>
+      (
+        (await gateway.handleMessage(conn.connectionId, {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/list",
+          params: {},
+        })) as JsonRpcSuccessResponse<ListToolsResult>
+      ).result.tools.map((tool) => tool.name);
+
+    expect(await list(2)).toContain("synced_tool");
+    await list(3);
+    expect(waits).toBe(1);
   });
 
   it("calls an active tool with custom handler via tools/call", async () => {
@@ -486,5 +570,137 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       },
     })) as JsonRpcErrorResponse;
     expect(callUnlocked.error.code).toBe(MCP_ERROR_CODES.TOOL_NOT_FOUND);
+  });
+
+  describe("listed learned tool names", () => {
+    const namesContext = {
+      workspaceId: "ws-names",
+      projectId: "ws-names",
+      projectRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      startupPath: "/tmp",
+      isReadOnly: false,
+      name: "names-test",
+      source: "cwd_fallback" as const,
+      roots: [],
+    };
+    const setup = async (tools: Array<{ id: string; name: string }>) => {
+      const registry = new ToolRegistry();
+      const invoke = vi.fn(async (request: { toolId: string }) => ({
+        content: [{ type: "text" as const, text: `ran ${request.toolId}` }],
+      }));
+      const router = createRegistryGatewayRouter(registry, { invoke });
+      for (const tool of tools) {
+        await registry.registerTool(makeManifest(tool), undefined, {
+          workspaceId: namesContext.workspaceId,
+        });
+      }
+      const listed = (await router.listTools(namesContext)).map((tool) => tool.name);
+      const call = (name: string) => router.callTool(namesContext, name, { input: "x" });
+      const invokeByName = (name: string) =>
+        router.callTool(namesContext, "invoke_tool", { name, parameters: { input: "x" } });
+      return { listed, call, invokeByName };
+    };
+
+    it("lists a manifest name containing a double underscore once, without it, and runs it by that name", async () => {
+      const { listed, call, invokeByName } = await setup([
+        { id: "deploy-id", name: "deploy_app_with_smoke_test_and__69b6abe0" },
+      ]);
+      const learned = listed.filter((name) => name.startsWith("deploy_app"));
+      expect(learned).toEqual(["deploy_app_with_smoke_test_and_69b6abe0"]);
+      expect((await call(learned[0])).content[0].text).toBe("ran deploy-id");
+      expect((await invokeByName(learned[0])).content[0].text).toBe("ran deploy-id");
+    });
+
+    it("gives colliding tools distinct single-underscore names that each run their own tool", async () => {
+      const { listed, call, invokeByName } = await setup([
+        { id: "collide-a", name: "fetch__report" },
+        { id: "collide-b", name: "fetch_report" },
+      ]);
+      const learned = listed.filter((name) => name.startsWith("fetch"));
+      expect(learned).toHaveLength(2);
+      expect(new Set(learned).size).toBe(2);
+      const ran = new Set<string>();
+      for (const name of learned) {
+        expect(name).not.toContain("__");
+        expect(name.length).toBeLessThanOrEqual(64);
+        expect(name).toMatch(/^[a-zA-Z0-9_-]+$/);
+        const native = (await call(name)).content[0].text;
+        expect((await invokeByName(name)).content[0].text).toBe(native);
+        ran.add(native);
+      }
+      expect(ran).toEqual(new Set(["ran collide-a", "ran collide-b"]));
+    });
+
+    it("keeps a 64-character colliding name distinct and within the limit", async () => {
+      const long = "a".repeat(64);
+      const { listed, call } = await setup([
+        { id: "long-a", name: long },
+        { id: "long-b", name: `${long}_` },
+      ]);
+      const learned = listed.filter((name) => name.startsWith("aaa"));
+      expect(new Set(learned).size).toBe(2);
+      const ran = new Set<string>();
+      for (const name of learned) {
+        expect(name).not.toContain("__");
+        expect(name.length).toBeLessThanOrEqual(64);
+        ran.add((await call(name)).content[0].text);
+      }
+      expect(ran).toEqual(new Set(["ran long-a", "ran long-b"]));
+    });
+
+    it("runs a locked tool whose manifest name has a double underscore by its listed name", async () => {
+      const registry = new ToolRegistry();
+      const invoke = vi.fn(async (request: { toolId: string }) => ({
+        content: [{ type: "text" as const, text: `ran ${request.toolId}` }],
+      }));
+      const router = createRegistryGatewayRouter(registry, { invoke });
+      const toolId = "550e8400-e29b-41d4-a716-446655440001";
+      const manifest = makeManifest({ id: toolId, name: "deploy_app__69b6abe0" });
+      const artifactDigest = "d".repeat(64);
+      const source = "export default function() { return 'deployed'; }";
+      await registry.stageToolVersion(manifest, {
+        artifactDigest,
+        bundleReference: {
+          uri: `memory://${artifactDigest}`,
+          hash: computeSha256(source),
+          sizeBytes: source.length,
+          format: "embedded",
+        },
+        entrypoint: "index.js",
+        sourceCode: source,
+        checksums: {},
+      });
+      registry.bindWorkspaceLock(
+        namesContext.workspaceId,
+        makeV1ToolLockFixture({
+          deploy_app__69b6abe0: {
+            toolId,
+            name: "deploy_app__69b6abe0",
+            version: "1.0.0",
+            manifestDigest: computeManifestDigest(manifest),
+            artifactDigest,
+            status: "active",
+          },
+        }),
+      );
+      const listed = (await router.listTools(namesContext)).map((tool) => tool.name);
+      expect(listed.filter((name) => name.startsWith("deploy_app"))).toEqual([
+        "deploy_app_69b6abe0",
+      ]);
+      const native = await router.callTool(namesContext, "deploy_app_69b6abe0", { input: "x" });
+      expect(native.content[0].text).toBe(`ran ${toolId}`);
+      const viaInvoke = await router.callTool(namesContext, "invoke_tool", {
+        name: "deploy_app_69b6abe0",
+        parameters: { input: "x" },
+      });
+      expect(viaInvoke.content[0].text).toBe(`ran ${toolId}`);
+    });
+
+    it("leaves names without a double underscore unchanged", async () => {
+      const { listed, call } = await setup([{ id: "plain-id", name: "read_design-doc" }]);
+      expect(listed).toContain("read_design-doc");
+      expect((await call("read_design-doc")).content[0].text).toBe("ran plain-id");
+    });
   });
 });

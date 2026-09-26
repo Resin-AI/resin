@@ -11,11 +11,18 @@
 import {
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  embeddedProgramIsProtected,
+  embeddedPrograms,
+  extractPrintedValue,
+  parseExtractLocator,
+  programTokenValueAt,
   tokenizeProgram,
   validateWorkflowProgramProjection,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import type {
   ProgramToken,
+  ProgramTokenSpanValue,
   RecordedWorkflow,
   WorkflowJsonValue,
   WorkflowStep,
@@ -34,6 +41,8 @@ export interface RecordedCallRequest {
   ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Workspace scope forwarded to the private resolver. */
   access?: { workspaceId?: string };
+  /** Cancels owned I/O; adapter calls must settle after abort before replay cleanup. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -69,6 +78,8 @@ export class RuntimeAdapterRegistry {
 export interface RecordedWorkflowExecutionOptions {
   inputs: Record<string, WorkflowJsonValue>;
   adapters: RuntimeAdapterRegistry;
+  /** Stops subsequent steps and forwards cancellation to every adapter call. */
+  signal?: AbortSignal;
   /** The workspace this invocation runs in, checked before any private reference resolves. */
   access?: { workspaceId?: string };
   /**
@@ -87,7 +98,9 @@ export interface RecordedWorkflowExecutionOptions {
 export type RecordedStepOutcome =
   | { stepId: string; status: "completed"; result: WorkflowJsonValue }
   | { stepId: string; status: "failed"; error: string }
-  | { stepId: string; status: "skipped"; reason: string };
+  | { stepId: string; status: "skipped"; reason: string }
+  /** An optional step the caller turned off through its toggle input; never ran. */
+  | { stepId: string; status: "omitted"; input: string };
 
 export type RecordedWorkflowExecution = {
   status: "completed" | "failed";
@@ -169,6 +182,104 @@ function projectedProgramSource(
   return template.sourceReference;
 }
 
+/**
+ * The whole original text a program template runs. A projected literal is only a bounded,
+ * secret-redacted view; its original is the execution authority and must resolve locally.
+ */
+async function originalProgramText(
+  template: Extract<WorkflowValueTemplate, { type: "program" }>,
+  step: WorkflowStep,
+  argumentName: string,
+  options: RecordedWorkflowExecutionOptions,
+  declaredPrivateReferences: ReadonlySet<string>,
+  resolveLeaf: (leaf: WorkflowValueTemplate) => Promise<WorkflowJsonValue>,
+): Promise<string> {
+  const projection = projectedProgramSource(template, step.id, argumentName);
+  if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
+    throw new WorkflowBindingError(
+      "the projected program source reference is not declared by the workflow",
+      step.id,
+      argumentName,
+    );
+  }
+  if (projection !== undefined) {
+    if (!options.resolvePrivate) {
+      throw new WorkflowBindingError(
+        "the original program source reference cannot be resolved in this environment",
+        step.id,
+        argumentName,
+      );
+    }
+    const original = await options.resolvePrivate(projection, options.access);
+    if (typeof original !== "string") {
+      throw new WorkflowBindingError(
+        "the original program source reference did not resolve to program text",
+        step.id,
+        argumentName,
+      );
+    }
+    return original;
+  }
+  const sourceText = await resolveLeaf(template.source);
+  if (typeof sourceText !== "string") {
+    throw new WorkflowBindingError(
+      "the recorded program did not resolve to program text",
+      step.id,
+      argumentName,
+    );
+  }
+  return sourceText;
+}
+
+/**
+ * The value the recording used for an omitted recorded-default input, read at the input's first
+ * hole in a recorded (non-derivation) program step — the token an omitted input keeps there.
+ * Undefined when no recorded step binds the input or its token is not safely readable.
+ */
+async function recordedInputValue(
+  workflow: RecordedWorkflow,
+  input: RecordedWorkflow["inputs"][number],
+  options: RecordedWorkflowExecutionOptions,
+  declaredPrivateReferences: ReadonlySet<string>,
+): Promise<WorkflowJsonValue | undefined> {
+  for (const step of workflow.steps) {
+    if (step.origin === "derivation") continue;
+    for (const argument of step.arguments) {
+      if (argument.source.kind !== "template" || argument.source.template.type !== "program") {
+        continue;
+      }
+      const template = argument.source.template;
+      const hole = template.holes.find(
+        (each) => each.binding.type === "input" && each.binding.name === input.name,
+      );
+      if (hole === undefined) continue;
+      const resolveLeaf = async (leaf: WorkflowValueTemplate): Promise<WorkflowJsonValue> =>
+        buildTemplate(leaf, step, argument.name, options, new Map(), declaredPrivateReferences);
+      let text: string;
+      try {
+        text = await originalProgramText(
+          template,
+          step,
+          argument.name,
+          options,
+          declaredPrivateReferences,
+          resolveLeaf,
+        );
+      } catch {
+        // An unreadable recording supplies nothing; the derivation then reports the input missing.
+        return undefined;
+      }
+      const value = programTokenValueAt(template.language, text, {
+        token: hole.token,
+        ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
+        ...(hole.span === undefined ? {} : { span: hole.span }),
+      });
+      return value !== undefined && matchesWorkflowInputType(value, input.type) ? value : undefined;
+    }
+  }
+  return undefined;
+}
+
 /** Builds a recursively constructed argument: every leaf keeps its own source. */
 async function buildTemplate(
   template: WorkflowValueTemplate,
@@ -221,6 +332,38 @@ async function buildTemplate(
       }
       return await options.resolvePrivate(template.reference, options.access);
     }
+    case "extract": {
+      const produced = results.get(template.stepId);
+      if (typeof produced !== "string") {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' printed no text in this invocation to extract a value from`,
+          step.id,
+          argumentName,
+        );
+      }
+      if (!declaredPrivateReferences.has(template.locator) || !options.resolvePrivate) {
+        throw new WorkflowBindingError(
+          "the extract locator cannot be resolved in this environment",
+          step.id,
+          argumentName,
+        );
+      }
+      const locatorText = await options.resolvePrivate(template.locator, options.access);
+      const locator =
+        typeof locatorText === "string" ? parseExtractLocator(locatorText) : undefined;
+      if (locator === undefined) {
+        throw new WorkflowBindingError("the extract locator is malformed", step.id, argumentName);
+      }
+      const value = extractPrintedValue(produced, locator);
+      if (value === undefined) {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' did not print the value this argument extracts`,
+          step.id,
+          argumentName,
+        );
+      }
+      return value;
+    }
     case "unresolved":
       throw new WorkflowBindingError(
         `the origin of this value was not recorded (${template.reason}); re-record the call or supply it as an input`,
@@ -240,45 +383,15 @@ async function buildTemplate(
       return built;
     }
     case "program": {
-      // A projected literal is only a bounded, secret-redacted view. Its whole original is the
-      // execution authority and must resolve locally before tokenization or binding substitution.
+      const text = await originalProgramText(
+        template,
+        step,
+        argumentName,
+        options,
+        declaredPrivateReferences,
+        resolveLeaf,
+      );
       const projection = projectedProgramSource(template, step.id, argumentName);
-      if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
-        throw new WorkflowBindingError(
-          "the projected program source reference is not declared by the workflow",
-          step.id,
-          argumentName,
-        );
-      }
-      let text: string;
-      if (projection !== undefined) {
-        if (!options.resolvePrivate) {
-          throw new WorkflowBindingError(
-            "the original program source reference cannot be resolved in this environment",
-            step.id,
-            argumentName,
-          );
-        }
-        const original = await options.resolvePrivate(projection, options.access);
-        if (typeof original !== "string") {
-          throw new WorkflowBindingError(
-            "the original program source reference did not resolve to program text",
-            step.id,
-            argumentName,
-          );
-        }
-        text = original;
-      } else {
-        const sourceText = await resolveLeaf(template.source);
-        if (typeof sourceText !== "string") {
-          throw new WorkflowBindingError(
-            "the recorded program did not resolve to program text",
-            step.id,
-            argumentName,
-          );
-        }
-        text = sourceText;
-      }
       let tokens: ProgramToken[] | undefined;
       if (projection !== undefined) {
         const sanitizedSource = template.source;
@@ -301,24 +414,72 @@ async function buildTemplate(
         ).tokens;
       }
       const values = new Map<number, string | number | boolean | null>();
+      const embedded = new Map<number, Map<number, string | number | boolean | null>>();
+      const spans: ProgramTokenSpanValue[] = [];
       for (const hole of template.holes) {
+        // An omitted recorded-default input leaves the token exactly as the recording ran it. A
+        // derivation's tokens were never recorded; its omitted recorded-default inputs were
+        // supplied from the recording before it ran.
+        if (
+          hole.binding.type === "input" &&
+          !Object.hasOwn(options.inputs, hole.binding.name) &&
+          step.origin !== "derivation"
+        ) {
+          continue;
+        }
         const bound = await resolveLeaf(hole.binding);
-        values.set(
-          hole.token,
+        if (hole.span !== undefined) {
+          if (typeof bound !== "string" && typeof bound !== "number") {
+            throw new WorkflowBindingError(
+              "a span hole needs a string or number value",
+              step.id,
+              argumentName,
+            );
+          }
+          spans.push({
+            token: hole.token,
+            ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
+            span: hole.span,
+            value: bound,
+          });
+          continue;
+        }
+        const value =
           typeof bound === "string" ||
-            typeof bound === "number" ||
-            typeof bound === "boolean" ||
-            bound === null
+          typeof bound === "number" ||
+          typeof bound === "boolean" ||
+          bound === null
             ? bound
-            : JSON.stringify(bound),
-        );
+            : JSON.stringify(bound);
+        if (hole.embedded === undefined) {
+          values.set(hole.token, value);
+        } else {
+          const program = embedded.get(hole.token) ?? new Map();
+          program.set(hole.embedded, value);
+          embedded.set(hole.token, program);
+        }
       }
-      return applyProgramTokenValues(
-        text,
-        tokens ?? tokenizeProgram(template.language, text),
-        values,
-        template.language,
-      );
+      const shellTokens = tokens ?? tokenizeProgram(template.language, text);
+      const embeddedAnchors = new Set([
+        ...embedded.keys(),
+        ...spans.flatMap((span) => (span.embedded === undefined ? [] : [span.token])),
+      ]);
+      if (embeddedAnchors.size > 0 && template.protectedTokens !== undefined) {
+        const protectedTokens = template.protectedTokens;
+        for (const program of embeddedPrograms(text)) {
+          if (
+            embeddedAnchors.has(program.anchor) &&
+            embeddedProgramIsProtected(program, shellTokens, protectedTokens)
+          ) {
+            throw new WorkflowBindingError(
+              "an embedded program hole is inside a protected program",
+              step.id,
+              argumentName,
+            );
+          }
+        }
+      }
+      return applyProgramTokenValues(text, shellTokens, values, template.language, embedded, spans);
     }
     default: {
       const exhaustive: never = template;
@@ -436,24 +597,62 @@ export async function executeRecordedWorkflow(
         );
       }
       inputs[input.name] = copyWorkflowJsonValue(input.default);
-    } else {
+    } else if (input.recordedDefault !== true) {
       throw new TypeError(`missing required workflow input '${input.name}'`);
     }
   }
   const executionOptions = { ...options, inputs };
+  // A derivation reads an omitted recorded-default input as the value the recording used.
+  const derivationInputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  Object.assign(derivationInputs, inputs);
+  const derivationReads = new Set<string>();
+  for (const step of workflow.steps) {
+    if (step.origin !== "derivation") continue;
+    for (const argument of step.arguments) {
+      if (argument.source.kind !== "template" || argument.source.template.type !== "program") {
+        continue;
+      }
+      for (const hole of argument.source.template.holes) {
+        if (hole.binding.type === "input") derivationReads.add(hole.binding.name);
+      }
+    }
+  }
+  const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
+  for (const input of workflow.inputs) {
+    if (
+      input.recordedDefault !== true ||
+      Object.hasOwn(inputs, input.name) ||
+      !derivationReads.has(input.name)
+    ) {
+      continue;
+    }
+    const recorded = await recordedInputValue(
+      workflow,
+      input,
+      executionOptions,
+      declaredPrivateReferences,
+    );
+    if (recorded !== undefined) derivationInputs[input.name] = recorded;
+  }
+  const derivationOptions = { ...options, inputs: derivationInputs };
   const outcomes: RecordedStepOutcome[] = [];
   const results = new Map<string, WorkflowJsonValue>();
-  const state = new Map<string, "completed" | "failed" | "skipped">();
-  const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
+  const state = new Map<string, "completed" | "failed" | "skipped" | "omitted">();
   let aborted = false;
 
   for (const step of workflow.steps) {
+    if (options.signal?.aborted) aborted = true;
     if (aborted) {
       state.set(step.id, "skipped");
       outcomes.push({ stepId: step.id, status: "skipped", reason: "an earlier step failed" });
       continue;
     }
-    const blockedBy = step.dependsOn.find((dependency) => state.get(dependency) !== "completed");
+    // A caller-omitted optional step never produces a result any step reads (the contract forbids
+    // it), so it releases its ordering dependents rather than blocking them.
+    const blockedBy = step.dependsOn.find((dependency) => {
+      const status = state.get(dependency);
+      return status !== "completed" && status !== "omitted";
+    });
     if (blockedBy) {
       state.set(step.id, "skipped");
       outcomes.push({
@@ -461,6 +660,11 @@ export async function executeRecordedWorkflow(
         status: "skipped",
         reason: `dependency '${blockedBy}' did not complete`,
       });
+      continue;
+    }
+    if (step.optional !== undefined && inputs[step.optional.input] === false) {
+      state.set(step.id, "omitted");
+      outcomes.push({ stepId: step.id, status: "omitted", input: step.optional.input });
       continue;
     }
 
@@ -482,7 +686,7 @@ export async function executeRecordedWorkflow(
           step,
           argument.name,
           argument.source,
-          executionOptions,
+          step.origin === "derivation" ? derivationOptions : executionOptions,
           results,
           declaredPrivateReferences,
         );
@@ -501,6 +705,7 @@ export async function executeRecordedWorkflow(
         arguments: args,
         ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
         ...(options.access ? { access: options.access } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
       });
       results.set(step.id, result);
       state.set(step.id, "completed");
@@ -515,15 +720,31 @@ export async function executeRecordedWorkflow(
 
   const failure = outcomes.find((outcome) => outcome.status === "failed");
   const lastCompleted = [...outcomes].reverse().find((outcome) => outcome.status === "completed");
+  // A run of independent steps returns every output it produced, in recorded order; a chain, the
+  // result its last step produced.
+  const sinks = workflowSinkStepIds(workflow);
+  const outcomeOf = new Map(outcomes.map((outcome) => [outcome.stepId, outcome]));
+  const result =
+    sinks.length > 1
+      ? sinks.map((stepId) => {
+          const outcome = outcomeOf.get(stepId);
+          return outcome?.status === "completed" ? outcome.result : null;
+        })
+      : lastCompleted?.status === "completed"
+        ? lastCompleted.result
+        : undefined;
   return {
     status: failure ? "failed" : "completed",
     steps: outcomes,
-    result: lastCompleted?.status === "completed" ? lastCompleted.result : undefined,
+    result,
     ...(failure?.status === "failed" ? { error: failure.error } : {}),
   };
 }
 
-/** The input schema of a recorded workflow, with defaults optional and other inputs required. */
+/**
+ * The input schema of a recorded workflow. An input with a default, or one that defaults to the
+ * recorded token, is optional; every other input is required.
+ */
 export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<string, unknown> {
   const JSON_SCHEMA_TYPES: Record<string, string> = {
     string: "string",
@@ -534,9 +755,11 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
   };
   const properties: Record<string, unknown> = {};
   for (const input of workflow.inputs) {
+    const description =
+      input.description ?? (input.recordedDefault ? "Omit to use the recorded value." : undefined);
     properties[input.name] = {
       type: JSON_SCHEMA_TYPES[input.type] ?? "string",
-      ...(input.description ? { description: input.description } : {}),
+      ...(description ? { description } : {}),
       ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
     };
   }
@@ -544,7 +767,7 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
     type: "object",
     properties,
     required: workflow.inputs
-      .filter((input) => !Object.hasOwn(input, "default"))
+      .filter((input) => !Object.hasOwn(input, "default") && input.recordedDefault !== true)
       .map((input) => input.name),
     additionalProperties: false,
   };

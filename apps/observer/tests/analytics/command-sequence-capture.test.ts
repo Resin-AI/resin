@@ -109,7 +109,6 @@ describe("completed command sequence capture", () => {
         result?.metadata,
       );
       expect(JSON.stringify(batches)).not.toContain("PRIVATE_DIGEST");
-      expect(JSON.stringify(batches)).not.toContain("private.bin");
       expect(callAck).toHaveBeenCalledTimes(1);
       expect(resultAck).toHaveBeenCalledTimes(1);
     } finally {

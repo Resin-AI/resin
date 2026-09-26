@@ -10,6 +10,7 @@ import {
   type RecordableEvent,
   recordCallsFromEvents,
 } from "../../src/analytics/workflow-recipe.js";
+import { recordCarriedCallsFromEvents } from "../../src/recording.js";
 
 function capture() {
   const store = new InMemoryPrivateValueStore();
@@ -95,6 +96,19 @@ describe("a selected workflow keeps its own slice of a recorded repetition", () 
     expect(resolvePrivateReference(store, produced.reference)).toEqual({
       release: "release-for-beta-project",
     });
+  });
+
+  it("names the repeat of each kept call when a carried slice starts mid-execution", () => {
+    const { store, events } = capture();
+    const selected = events.filter((event) => "callId" in event && event.callId === "consume-0");
+    const recipe = recordCarriedCallsFromEvents("late-slice", selected as RecordableEvent[], {
+      supportingEvents: events as RecordableEvent[],
+    })!;
+    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["consume-0"]);
+    expect(recipe.workflow.heldOut?.calls).toEqual([{ stepId: "step0", callIds: ["consume-1"] }]);
+    const input = recipe.workflow.heldOut!.inputs.find((entry) => entry.stepId === "step0")!;
+    expect(input.argument).toBe("release");
+    expect(resolvePrivateReference(store, input.reference)).toBe("release-for-beta-project");
   });
 
   it("honors a call's source-block order rather than a reversed delivery or lexical id", () => {

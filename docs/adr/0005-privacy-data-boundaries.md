@@ -49,12 +49,13 @@ Before any observation is queued for cloud synchronization, it passes through a 
 1. **Secret & Credential Scrubbing**: High-entropy token detection, regex filters for API keys (AWS, OpenAI, GitHub, SSH private keys, JWTs).
 2. **Path & Identifier Anonymization**: Absolute file paths are normalized to relative workspace root tokens (`<WORKSPACE_ROOT>/src/...`); user home directories (`/home/username/`) are scrubbed.
 3. **Payload Abstraction**: Tool input and output values are replaced with structural schema descriptors, byte counts, and execution metrics unless explicitly whitelisted as structural metadata.
-   Recorded JavaScript, TypeScript, and Python source views are an explicit exception to value-free abstraction: they retain non-secret code and literals after the configured engine's scanning and canonical token alignment. Paired `sourceReference` and `protectedTokens` retain local original authority and prohibit binding redaction-sensitive tokens. Shell, truncated, unparseable, or unalignable source is not projected.
+   Recorded JavaScript, TypeScript, and Python source views are an explicit exception to value-free abstraction: they retain non-secret code and literals after the configured engine's scanning and canonical token alignment. Paired `sourceReference` and `protectedTokens` retain local original authority and prohibit binding redaction-sensitive tokens. Shell, truncated, unparseable, or unalignable source is not projected as a program view.
+   Native command lines are a second, naming-only exception: the engine-redacted line (home directory generalized, bounded) is uploaded so learned tools can be named and described from what they run. It never executes; the exact command stays in the local private store, and a redaction policy that keeps `command` local suppresses it.
 4. **Error Signature Extraction**: Stack traces are stripped of local user names and private string literals, preserving only canonical error codes, exception types, and public module frames.
 
 ### 3. Strict Invariant: Zero Raw Data Upload (No-Raw-Upload V1 Policy)
 
-- **Hard Boundary**: Raw prompts, raw conversation turns, original private program source, and private store entries are not uploaded. Engine-redacted recorded-program views may be transmitted as sanitized evidence, including their non-secret code and literal values.
+- **Hard Boundary**: Raw prompts, raw conversation turns, original private program source, and private store entries are not uploaded. Engine-redacted recorded-program views and native command lines may be transmitted as sanitized evidence, including their non-secret code and literal values.
 - **No Raw Upload Path**: There is no configuration flag, opt-in toggle (`sync.upload_raw_traces`), remote directive, or alternative upload mode that permits raw transcript or source file exfiltration. All cloud sync is strictly limited to validated, branded, sanitized observation DTOs.
 
 ### 4. Cryptographic Audit Trail

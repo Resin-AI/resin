@@ -66,7 +66,6 @@ it.each([false, true])(
         candidates: sourceFirst ? [source, data] : [data, source],
         environment: {
           adapters,
-          workspaceDir: directory,
           inputs: { whole_program: "printf '%s' 'bravo'", value: "bravo" },
           observed: { step0: "bravo" },
         },

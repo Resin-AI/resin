@@ -19,6 +19,7 @@ export interface ToolProtocolDispatchRequest {
   arguments: Record<string, WorkflowJsonValue>;
   connection?: string;
   stepId: string;
+  signal?: AbortSignal;
 }
 
 export interface ToolProtocolAdapterOptions {
@@ -30,7 +31,7 @@ export interface ToolProtocolAdapterOptions {
    * Opens a named connection on first use, for a host that does not keep them open already. A
    * failed dial is the step's failure: it never falls back to another way of reaching the callable.
    */
-  openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+  openConnection?: (name: string, signal?: AbortSignal) => Promise<McpToolConnection | undefined>;
 }
 
 /** An MCP result that reports failure carries `isError`; it is a failure, not a value. */
@@ -63,11 +64,11 @@ export function createToolProtocolAdapter(options: ToolProtocolAdapterOptions): 
           : undefined;
       if (connection) {
         // The connection owns the protocol's own error reporting; it throws rather than answering.
-        return await connection.callTool(callable.name, request.arguments);
+        return await connection.callTool(callable.name, request.arguments, request.signal);
       }
       if (recorded !== undefined && options.openConnection) {
-        const dialed = await options.openConnection(recorded);
-        if (dialed) return await dialed.callTool(callable.name, request.arguments);
+        const dialed = await options.openConnection(recorded, request.signal);
+        if (dialed) return await dialed.callTool(callable.name, request.arguments, request.signal);
       }
       if (options.dispatch) {
         const value = await options.dispatch({
@@ -75,6 +76,7 @@ export function createToolProtocolAdapter(options: ToolProtocolAdapterOptions): 
           arguments: request.arguments,
           ...(recorded !== undefined ? { connection: recorded } : {}),
           stepId: step.id,
+          ...(request.signal ? { signal: request.signal } : {}),
         });
         if (isErrorResult(value)) {
           throw new Error(

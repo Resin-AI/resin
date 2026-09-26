@@ -18,4 +18,20 @@ describe("redaction recovery callback", () => {
     expect([...originals.values()]).toContain("capture-private-original");
     expect(originals.get("[REDACTED_LOCAL_FIELD:cwd]")).toBe("/private/workspace");
   });
+
+  it("does not create private references for absent optional local fields", () => {
+    const originals = new Map<string, unknown>();
+    const engine = new RedactionEngine({
+      onRedact: (placeholder, original) => originals.set(placeholder, original),
+    });
+    const result = engine.redact({
+      cwd: undefined,
+      nested: { socketPath: undefined, cwd: "/private/workspace" },
+    });
+    expect(result.data).toEqual({
+      nested: { cwd: "[REDACTED_LOCAL_FIELD:cwd]" },
+    });
+    expect(originals.has("[REDACTED_LOCAL_FIELD:socketPath]")).toBe(false);
+    expect(originals.get("[REDACTED_LOCAL_FIELD:cwd]")).toBe("/private/workspace");
+  });
 });

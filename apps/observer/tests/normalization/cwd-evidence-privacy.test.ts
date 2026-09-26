@@ -1,5 +1,5 @@
 import { OmpRecordDecoder } from "@resin/adapter-omp";
-import type { NormalizedSessionEvent } from "@resin/contracts";
+import { type NormalizedSessionEvent, RESIN_COMMAND_TEXT_METADATA_KEY } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
@@ -49,6 +49,13 @@ async function normalize(
   const result = results.find((entry) => entry.status === "success" && entry.event.type === type);
   if (!result || result.status !== "success") throw new Error(`Expected normalized ${type}`);
   return result.event;
+}
+
+/** The projection without its naming text: the command line is the one value that leaves. */
+function withoutCommandText(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  const { [RESIN_COMMAND_TEXT_METADATA_KEY]: text, ...metadata } = event.metadata ?? {};
+  expect(text).toEqual({ version: 1, text: command, truncated: false });
+  return { ...event, metadata };
 }
 
 describe("cwd evidence through decoding, normalization, and projection", () => {
@@ -117,7 +124,7 @@ describe("cwd evidence through decoding, normalization, and projection", () => {
       if (projected.type !== "command_exec") throw new Error("Expected command execution");
       expect(projected.metadata?.cwd).toBe(".");
       expect(projected.cwd).toBeUndefined();
-      expect(JSON.stringify(projected)).not.toContain("PRIVATE_");
+      expect(JSON.stringify(withoutCommandText(projected))).not.toContain("PRIVATE_");
     }
     for (const fields of [
       {},
@@ -133,7 +140,7 @@ describe("cwd evidence through decoding, normalization, and projection", () => {
       const normalized = await normalize(ompCommandExec(fields), "command_exec");
       const projected = projectEventToMetadataOnly(normalized, { validate: true });
       expect(projected.metadata).not.toHaveProperty("cwd");
-      expect(JSON.stringify(projected)).not.toContain("PRIVATE_");
+      expect(JSON.stringify(withoutCommandText(projected))).not.toContain("PRIVATE_");
     }
   });
 
@@ -195,5 +202,28 @@ describe("cwd evidence through decoding, normalization, and projection", () => {
     expect(
       projectEventToMetadataOnly(normalized, { enrichEvidence: false }).metadata,
     ).not.toHaveProperty("cwd");
+  });
+});
+
+describe("command text through normalization and projection", () => {
+  it("carries only a secret-scrubbed, home-generalized command line and nothing a local-only policy keeps", async () => {
+    const secretCommand =
+      "mysql -u root -phunter2secret -e 'select 1' && sshpass -p hunter2secret ssh host && " +
+      "/home/PRIVATE_USER/repo/deploy.sh --token SECRET_TOKEN_XYZ12 && PGPASSWORD=hunter2secret psql && " +
+      "ERP_USER=planner ERP_PASS='Planner#2025' python dbgw.py";
+    const record = ompCommandExec({ command: secretCommand });
+    const projected = projectEventToMetadataOnly(await normalize(record, "command_exec"), {
+      validate: true,
+      homeDir: "/home/PRIVATE_USER",
+    });
+    const text = projected.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY] as { text: string };
+    expect(text.text).toMatch(
+      /^mysql -u root -p\[REDACTED_CREDENTIAL:\w+\] -e 'select 1' && sshpass -p \[REDACTED_CREDENTIAL:\w+\] ssh host && ~\/repo\/deploy\.sh --token \[REDACTED_CREDENTIAL:\w+\] && PGPASSWORD=\[REDACTED_CREDENTIAL:\w+\] psql && ERP_USER=planner ERP_PASS='\[REDACTED_CREDENTIAL:\w+\]' python dbgw\.py$/,
+    );
+
+    const local = await normalize(record, "command_exec", { localOnlyFields: ["command"] });
+    expect(projectEventToMetadataOnly(local, { validate: true }).metadata).not.toHaveProperty(
+      RESIN_COMMAND_TEXT_METADATA_KEY,
+    );
   });
 });

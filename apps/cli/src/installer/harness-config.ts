@@ -15,6 +15,7 @@ import {
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
 import { parse as parseToml } from "smol-toml";
+import { resolveCodexHome } from "./codex-instructions.js";
 
 export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
 
@@ -120,13 +121,7 @@ export function resolveHarnessConfigPath(
       if (configPath && configPath.trim().length > 0) {
         return path.resolve(configPath);
       }
-      const codexHome = env.CODEX_HOME;
-      return path.join(
-        codexHome && codexHome.trim().length > 0
-          ? path.resolve(codexHome)
-          : path.join(customHome, ".codex"),
-        "config.toml",
-      );
+      return path.join(resolveCodexHome(customHome, env), "config.toml");
     }
     case "omp": {
       const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find(

@@ -1,6 +1,8 @@
 # Invariant Meta-Tools Specification
 
-The Resin MCP Gateway exposes four invariant, stable **Meta-Tools**. Rather than bloating agent prompt context with dozens of tool schemas upfront, harnesses interact with the system dynamically through these four endpoints.
+The Resin MCP Gateway exposes four invariant, stable **Meta-Tools** for finding, inspecting, running and managing tools. The current workspace's learned tools are also listed directly next to them, under their own names, so an agent can call one without searching first; every other tool stays reachable through the meta-tools instead of taking up prompt context upfront.
+
+On a fresh install, a connection's first tool list waits up to 5 seconds for the workspace's learned tools to sync if none are listed yet; later lists and already-synced installs never wait.
 
 ---
 
@@ -74,6 +76,12 @@ Search the active and canary tool catalog by keywords, semantic intent, tags, or
   "total": 1
 }
 ```
+
+For a learned tool that replays recorded programs, the description in `search_tools` and `get_tool_schema` results ends with the program each step runs (up to 600 characters per step), and queries also match that text. The program is resolved on this machine from the local private store, only for the workspace that recorded it; it is never uploaded.
+
+`search_tools` lists workspace tools; Resin's own meta-tools appear only with `"scope": "system"`. Each match includes the tool's `inputSchema`, so a caller can invoke it without a separate `get_tool_schema` call.
+
+A learned tool may take optional parameters for values its recorded programs ran with, such as a file path, a flag's value, or a word several steps share (the project in `./release test alpha` and `./release build alpha`). Omit a parameter to run the recorded value; pass one to substitute it at every position it held. Parameter names come from the flag (`--month` → `month`) or the value's shape (`path`, `number`, `text`). The tool's description on this machine lists each parameter's recorded value; that value is resolved locally and never uploaded.
 
 ---
 
@@ -166,6 +174,12 @@ Execute a registered tool inside an isolated worker sandbox subject to the activ
   }
 }
 ```
+
+When a tool's result is text, `invoke_tool` returns the text itself rather than an escaped JSON string. A learned tool that runs several independent commands returns every command's output in recorded order, one section per step (`--- step 1/3 ---`).
+
+A learned tool with at least one text input also accepts `for_each`, both as a native tool argument and inside `invoke_tool`'s `arguments`: `{"for_each": {"<input>": ["v1", "v2"]}}` (one input, 2–20 text values). The whole tool runs once per value, in order, through the normal call path (policy checks, validation and one invocation record per run), and stops at the first failing run. The result has one `[<input>=<value>]` section per run and names the failed value and the values that were not run. A malformed `for_each`, or one that conflicts with a value given directly for the same input, is refused before anything runs.
+
+A step that recordings of the same job show is not always needed can be optional: it is skipped when its boolean input (default `true`) is `false`, later steps still run, and the combined output shows `--- step N/M skipped ---` for it.
 
 ---
 

@@ -13,11 +13,13 @@ import {
   type WorkflowValueTemplate,
   collectWorkflowPrivateReferences,
   validateRecordedWorkflow,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import {
   type RecordedWorkflowExecution,
   type RuntimeAdapterRegistry,
   executeRecordedWorkflow,
+  recordedWorkflowInputSchema,
 } from "./recorded-workflow.js";
 
 export class RecordedWorkflowCompilationError extends Error {
@@ -39,8 +41,11 @@ export interface CompiledWorkflowArtifact {
   name: string;
   /** Caller-facing input schema, using the recorded types. */
   inputSchema: Record<string, unknown>;
-  /** What the artifact returns: the last step's recorded result shape. */
-  outputContract: { fromStep: string; callable: string };
+  /**
+   * What the artifact returns: the last step's result, or, when several steps' outputs go unused
+   * by any later step, each of those outputs in recorded order (`fromSteps`).
+   */
+  outputContract: { fromStep: string; callable: string; fromSteps?: string[] };
   /** Runtimes the artifact needs adapters for. */
   requiredRuntimes: string[];
   /** Private references the host must resolve locally at invocation time. */
@@ -161,35 +166,18 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
   // and the digest always describes the executable contents.
   const plan = isolate(workflow);
   const last = plan.steps[plan.steps.length - 1]!;
-
-  const JSON_SCHEMA_TYPES: Record<string, string> = {
-    string: "string",
-    number: "number",
-    boolean: "boolean",
-    object: "object",
-    array: "array",
-  };
-  const properties: Record<string, unknown> = {};
-  for (const input of plan.inputs) {
-    properties[input.name] = {
-      type: JSON_SCHEMA_TYPES[input.type] ?? "string",
-      ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
-    };
-  }
+  const sinks = workflowSinkStepIds(plan);
 
   return {
     plan,
     digest: digestOf(plan),
     name: nameOf(plan),
-    inputSchema: {
-      type: "object",
-      properties,
-      required: plan.inputs
-        .filter((input) => !Object.hasOwn(input, "default"))
-        .map((input) => input.name),
-      additionalProperties: false,
+    inputSchema: recordedWorkflowInputSchema(plan),
+    outputContract: {
+      fromStep: last.id,
+      callable: last.callable.name,
+      ...(sinks.length > 1 ? { fromSteps: sinks } : {}),
     },
-    outputContract: { fromStep: last.id, callable: last.callable.name },
     requiredRuntimes: [...new Set(plan.steps.map((step) => step.callable.runtime))],
     requiredPrivateReferences: collectWorkflowPrivateReferences(plan),
     permissions: plan.steps

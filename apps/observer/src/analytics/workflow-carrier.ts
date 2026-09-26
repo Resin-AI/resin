@@ -1,6 +1,7 @@
 /** Frozen workflow carrier vocabulary shared by live capture, projection, and import reconstruction. */
 
 import {
+  readCodexCommandMetadata,
   validateWorkflowProgramProjection,
   validateWorkflowProgramSourceInterface,
 } from "@resin/contracts";
@@ -13,6 +14,7 @@ import type {
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
+import type { WorkflowObservedOutput } from "@resin/contracts";
 
 export const RESIN_WORKFLOW_CALL_METADATA_KEY = "workflowCall";
 export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
@@ -86,6 +88,13 @@ export interface WorkflowCallCarrier {
   candidates?: WorkflowCallCandidate[];
   /** Which execution of this session this call belongs to, so a recording can keep them apart. */
   executionIndex?: number;
+  /**
+   * This call's place among its execution's calls: the position a demonstration of that execution
+   * lists the repeat of this call under. A recording may keep only some of an execution's calls.
+   */
+  executionPosition?: number;
+  /** Original call arguments, held by owner-scoped reference for baseline replay only. */
+  baselineInputs?: Record<string, string>;
   /** The repeat of earlier work this call is part of, as far as it has repeated it yet. */
   heldOut?: WorkflowCallHeldOut;
 }
@@ -108,6 +117,8 @@ export interface WorkflowCallHeldOut {
     reference: string;
     comparison?: "text-trim";
   }>;
+  /** The call that performed each repeated position, so a validator re-derives its own references. */
+  calls?: Array<{ position: number; callId: string }>;
 }
 
 /**
@@ -121,17 +132,24 @@ export interface WorkflowCallCandidate {
   path: WorkflowValuePath;
   proposed:
     | { kind: "result"; callId: string; path: WorkflowValuePath }
+    /** A value the call printed; `locator` is an opaque local private reference, never text. */
+    | { kind: "extract"; callId: string; locator: string }
     | {
         kind: "input";
         name: string;
         type: "string" | "number" | "boolean" | "object" | "array";
+        /** Optional input that keeps the recorded token when omitted; token positions only. */
+        recordedDefault?: true;
       };
   reason:
     | "equal-to-earlier-result"
     | "varies-across-executions"
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
-    | "tracks-earlier-result-across-executions";
+    | "tracks-earlier-result-across-executions"
+    | "classified-source-value"
+    | "native-data-argument"
+    | "printed-by-earlier-step";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
   missing: string;
@@ -153,7 +171,55 @@ export interface RecordableEvent {
   content?: unknown;
   /** Whether the recorded result reported an error; absent means the record does not say. */
   isError?: boolean;
+  exitCode?: number;
   metadata?: Record<string, unknown>;
+}
+
+/** The identity fields normalized and recordable events share. */
+export type WorkflowIdentityEvent = Pick<
+  RecordableEvent,
+  "type" | "eventId" | "callId" | "toolCallId" | "metadata"
+>;
+
+/** Native command and file-edit identity is authoritative only for validated Codex metadata. */
+export function workflowCallId(event: WorkflowIdentityEvent): string {
+  if (isCodexNativeEffect(event)) {
+    const native = readCodexCommandMetadata(event.metadata);
+    // A command that completed after its audited wrapper replied is that wrapper's result.
+    if (
+      native?.kind === "command" &&
+      native.association?.nativeCommandId === native.nativeId &&
+      event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY] === undefined
+    )
+      return native.association.callId;
+    if (native?.kind === "command" || native?.kind === "file-change") return native.nativeId;
+  }
+  return event.callId ?? event.toolCallId ?? event.eventId;
+}
+
+/** A Codex command or file edit whose record is its own call and result. */
+function isCodexNativeEffect(event: WorkflowIdentityEvent): boolean {
+  const kind = readCodexCommandMetadata(event.metadata)?.kind;
+  return (
+    (event.type === "command_exec" && kind === "command") ||
+    (event.type === "file_edit" && kind === "file-change")
+  );
+}
+
+export function isWorkflowCallEvent(event: WorkflowIdentityEvent): boolean {
+  return (
+    event.type === "tool_call" ||
+    (isCodexNativeEffect(event) &&
+      isWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]))
+  );
+}
+
+export function isWorkflowResultEvent(event: WorkflowIdentityEvent): boolean {
+  return (
+    event.type === "tool_result" ||
+    (isCodexNativeEffect(event) &&
+      readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]) !== undefined)
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -165,6 +231,7 @@ const PROGRAM_KINDS: Readonly<Record<string, true>> = {
   python: true,
   javascript: true,
   typescript: true,
+  patch: true,
 };
 
 function isJsonValue(value: unknown): value is WorkflowJsonValue {
@@ -298,6 +365,9 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "declared-by-the-callable": true,
   "shares-value-with-declared-input": true,
   "tracks-earlier-result-across-executions": true,
+  "classified-source-value": true,
+  "native-data-argument": true,
+  "printed-by-earlier-step": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -313,6 +383,14 @@ function readCandidate(value: unknown): WorkflowCallCandidate | undefined {
   let read: WorkflowCallCandidate["proposed"] | undefined;
   if (proposed.kind === "result" && typeof proposed.callId === "string") {
     read = { kind: "result", callId: proposed.callId, path: readValuePath(proposed.path) };
+  } else if (
+    proposed.kind === "extract" &&
+    typeof proposed.callId === "string" &&
+    typeof proposed.locator === "string" &&
+    proposed.locator.startsWith("private:v2:value:")
+  ) {
+    // Only an opaque local reference is accepted: locator text came from tool output.
+    read = { kind: "extract", callId: proposed.callId, locator: proposed.locator };
   } else if (proposed.kind === "input" && typeof proposed.name === "string") {
     const type =
       proposed.type === "number"
@@ -324,7 +402,12 @@ function readCandidate(value: unknown): WorkflowCallCandidate | undefined {
             : proposed.type === "array"
               ? "array"
               : "string";
-    read = { kind: "input", name: proposed.name, type };
+    read = {
+      kind: "input",
+      name: proposed.name,
+      type,
+      ...(proposed.recordedDefault === true ? { recordedDefault: true as const } : {}),
+    };
   }
   if (read === undefined) return undefined;
   const candidate: WorkflowCallCandidate = {
@@ -396,6 +479,21 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
     }
   }
   if (value.executionIndex !== undefined && !Number.isInteger(value.executionIndex)) return false;
+  if (
+    value.executionPosition !== undefined &&
+    (!Number.isInteger(value.executionPosition) || (value.executionPosition as number) < 0)
+  ) {
+    return false;
+  }
+  if (value.baselineInputs !== undefined) {
+    if (!isPlainObject(value.baselineInputs)) return false;
+    if (
+      Object.values(value.baselineInputs).some(
+        (reference) => typeof reference !== "string" || reference.length === 0,
+      )
+    )
+      return false;
+  }
   if (value.heldOut !== undefined && readHeldOut(value.heldOut) === undefined) return false;
   return true;
 }
@@ -443,7 +541,21 @@ function readHeldOut(value: unknown): WorkflowCallHeldOut | undefined {
       ...(entry.comparison === undefined ? {} : { comparison: entry.comparison }),
     });
   }
-  return { repeats: value.repeats as number, inputs, observed };
+  if (value.calls === undefined) return { repeats: value.repeats as number, inputs, observed };
+  if (!Array.isArray(value.calls)) return undefined;
+  const calls: NonNullable<WorkflowCallHeldOut["calls"]> = [];
+  for (const entry of value.calls) {
+    if (
+      !isPlainObject(entry) ||
+      !Number.isInteger(entry.position) ||
+      typeof entry.callId !== "string" ||
+      entry.callId.length === 0
+    ) {
+      return undefined;
+    }
+    calls.push({ position: entry.position as number, callId: entry.callId });
+  }
+  return { repeats: value.repeats as number, inputs, observed, calls };
 }
 
 /**
@@ -483,6 +595,8 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
     carrier.candidates = candidates;
   }
   if (value.executionIndex !== undefined) carrier.executionIndex = value.executionIndex;
+  if (value.executionPosition !== undefined) carrier.executionPosition = value.executionPosition;
+  if (value.baselineInputs !== undefined) carrier.baselineInputs = { ...value.baselineInputs };
   if (value.heldOut !== undefined) {
     const heldOut = readHeldOut(value.heldOut);
     if (heldOut !== undefined) carrier.heldOut = heldOut;
@@ -497,6 +611,7 @@ export interface WorkflowResultCarrier {
   baselineReference?: string;
   /** How the original baseline result may be projected before comparison. */
   baselineComparison?: "text-trim";
+  output?: WorkflowObservedOutput;
 }
 
 /** Re-reads a result carrier for projection. */
@@ -515,10 +630,25 @@ export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier
     if (value.baselineComparison !== "text-trim") return undefined;
     carrier.baselineComparison = value.baselineComparison;
   }
+  if (value.output !== undefined) {
+    const output = value.output;
+    if (
+      !isPlainObject(output) ||
+      Object.keys(output).some((key) => key !== "type" && key !== "hasContent") ||
+      !["null", "boolean", "number", "string", "array", "object"].includes(output.type as string) ||
+      typeof output.hasContent !== "boolean"
+    )
+      return undefined;
+    carrier.output = {
+      type: output.type as WorkflowObservedOutput["type"],
+      hasContent: output.hasContent,
+    };
+  }
   return carrier.handle === undefined &&
     carrier.heldOut === undefined &&
     carrier.baselineReference === undefined &&
-    carrier.baselineComparison === undefined
+    carrier.baselineComparison === undefined &&
+    carrier.output === undefined
     ? undefined
     : carrier;
 }

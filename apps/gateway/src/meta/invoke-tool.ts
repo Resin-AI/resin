@@ -13,6 +13,7 @@ import {
   isSafetyGateBypassTool,
 } from "@resin/contracts";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
+import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
 import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -91,6 +92,46 @@ export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
 }
 
 /**
+ * Several steps' text outputs as one labeled section per step, in recorded order. A step the caller
+ * turned off is labeled as skipped rather than shown as empty output.
+ */
+export function presentStepSections(
+  items: ReadonlyArray<string | null>,
+  skipped: ReadonlySet<number> = new Set(),
+): string {
+  return items
+    .map((item, index) =>
+      skipped.has(index)
+        ? `--- step ${index + 1}/${items.length} skipped ---`
+        : `--- step ${index + 1}/${items.length} ---\n${item ?? ""}`,
+    )
+    .join("\n");
+}
+
+/**
+ * Text output reaches the caller as text rather than as a JSON string literal of it: command output
+ * keeps its own formatting and costs no escaping. A workflow that returns several steps' text
+ * outputs is shown one labeled section per step, in recorded order.
+ */
+function presentedResult(result: CallToolResult): CallToolResult {
+  const value = composedResultValue(result);
+  const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+  const presented =
+    typeof value === "string"
+      ? value.length > 0
+        ? value
+        : "(completed with no output)"
+      : Array.isArray(value) &&
+          value.length > 1 &&
+          value.every((item) => typeof item === "string" || item === null)
+        ? presentStepSections(value)
+        : undefined;
+  return presented !== undefined && text !== undefined && presented !== text
+    ? { ...result, content: [{ type: "text", text: presented }] }
+    : result;
+}
+
+/**
  * Factory for creating the invoke_tool handler.
  */
 export function createInvokeToolHandler(
@@ -131,7 +172,7 @@ export function createInvokeToolHandler(
     return entry;
   };
 
-  return async (
+  const invokeOnce: ToolHandler = async (
     context: WorkspaceContext,
     params: JsonRpcParams,
     options?: ToolCallOptions,
@@ -550,7 +591,7 @@ export function createInvokeToolHandler(
           ],
         };
       }
-      return result;
+      return result.isError ? result : presentedResult(result);
     } catch (error) {
       if (timedOut) {
         const res: CallToolResult = {
@@ -600,5 +641,44 @@ export function createInvokeToolHandler(
         parentSignal.removeEventListener("abort", onParentAbort);
       }
     }
+  };
+
+  // `for_each` in a learned tool's arguments is one invoke_tool call per value: each run
+  // resolves, validates, executes, and records exactly as a call made alone would.
+  return async (context, params, options) => {
+    const argumentsKey = params.parameters !== undefined ? "parameters" : "arguments";
+    const target = params[argumentsKey];
+    if (
+      target !== null &&
+      typeof target === "object" &&
+      !Array.isArray(target) &&
+      Object.hasOwn(target, FOR_EACH_ARGUMENT)
+    ) {
+      const publicName = normalizeIdentifier(params.name) ?? normalizeIdentifier(params.tool_name);
+      const toolId = normalizeIdentifier(params.toolId);
+      const found =
+        (publicName
+          ? await registry.getTool(publicName, context.workspaceId, context.sessionId)
+          : undefined) ??
+        (toolId
+          ? await registry.getTool(toolId, context.workspaceId, context.sessionId)
+          : undefined);
+      const version = normalizeIdentifier(params.version);
+      const tool =
+        found && version ? (registry.getToolVersion(found.toolId, version) ?? found) : found;
+      if (tool && !tool.isSystem && (tool.scope === "workspace" || tool.scope === "session")) {
+        const plan = planForEach(
+          tool.parameters ?? tool.manifest?.parameters,
+          target as JsonRpcParams,
+        );
+        if (plan.kind === "invalid") return invalidForEachResult(plan.message);
+        if (plan.kind === "runs") {
+          return await runForEach(plan, (args) =>
+            invokeOnce(context, { ...params, [argumentsKey]: args }, options),
+          );
+        }
+      }
+    }
+    return await invokeOnce(context, params, options);
   };
 }

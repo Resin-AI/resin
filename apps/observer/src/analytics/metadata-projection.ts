@@ -18,14 +18,19 @@ import {
   type NormalizedToolResultEvent,
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
+  RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
+  commandLineOf,
+  commandTextMetadata,
   estimatePayloadTokens,
   nowIso,
   parseAssistantStopReason,
+  readCodexCommandMetadata,
   readComputationEvidence,
   readToolLinkEvidence,
 } from "@resin/contracts";
@@ -47,6 +52,8 @@ import {
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
 const DEFAULT_HOME_DIR = homedir();
+/** Prefix normalization writes in place of a field its redaction policy keeps local. */
+const LOCAL_FIELD_PLACEHOLDER = "[REDACTED_LOCAL_FIELD:";
 
 export type ParameterPrimitiveKind =
   | "string"
@@ -743,6 +750,27 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
+  if (
+    event.type === "tool_call" ||
+    event.type === "tool_result" ||
+    event.type === "command_exec" ||
+    event.type === "file_edit"
+  ) {
+    const codexCommand = readCodexCommandMetadata(event.metadata);
+    if (codexCommand !== undefined) metadata[RESIN_CODEX_COMMAND_METADATA_KEY] = codexCommand;
+  }
+  // Normalization already scrubbed secrets from the command; home paths are generalized here. The
+  // text names what a learned tool runs, while the exact command stays local and alone executes.
+  // A command the redaction policy keeps local is only a placeholder and names nothing.
+  if (event.type === "command_exec" && enrichEvidence) {
+    const commandLine = commandLineOf(event.command, Array.isArray(event.args) ? event.args : []);
+    const text = commandLine.includes(LOCAL_FIELD_PLACEHOLDER)
+      ? undefined
+      : commandTextMetadata(
+          homeDir.length > 1 ? commandLine.replaceAll(homeDir, "~") : commandLine,
+        );
+    if (text !== undefined) metadata[RESIN_COMMAND_TEXT_METADATA_KEY] = text;
+  }
   // Keep only this bounded suppression signal; native status and output remain outside the allowlist.
   if (event.type === "tool_result" && isLocalWorkflowResultSuppressed(event)) {
     metadata[RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY] = true;

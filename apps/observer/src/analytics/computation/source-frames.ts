@@ -1,5 +1,9 @@
 import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
-import type { NormalizedSessionEvent, NormalizedToolCallEvent } from "@resin/contracts";
+import {
+  type NormalizedSessionEvent,
+  type NormalizedToolCallEvent,
+  shellScriptOf,
+} from "@resin/contracts";
 import { extractRawCommandStringFromEvent } from "../deterministic-command-sequence.js";
 import {
   COMPUTATION_EVAL_TOOL_NAMES,
@@ -773,7 +777,12 @@ export function extractComputationSourceFrames(
         : [];
     }
     case "command_exec":
-      return framesFromCommand(event, event.command, options.knownFiles);
+      // A harness that launches every command as `bash -lc <script>` ran the script it carries.
+      return framesFromCommand(
+        event,
+        shellScriptOf(event.command, event.args) ?? event.command,
+        options.knownFiles,
+      );
     case "file_edit":
       return framesFromFileEdit(event);
     default:

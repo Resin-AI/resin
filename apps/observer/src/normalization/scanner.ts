@@ -115,6 +115,32 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
     confidence: "medium",
   },
   {
+    id: "cli_secret_flag",
+    name: "Secret Passed After a Long Command-Line Flag",
+    secretType: "CREDENTIAL",
+    regex:
+      /--(?:password|passwd|pass|token|secret|api-?key|access-token|auth-token|client-secret)(?:\s+|=)["']?([^"'\s-][^"'\s]{5,})["']?/gi,
+    confidence: "medium",
+  },
+  {
+    id: "secret_named_assignment",
+    name: "Assignment to a Secret-Named Variable",
+    secretType: "CREDENTIAL",
+    // DB_PASS='v', ERP_PASSWORD=v, GH_TOKEN=v, access_token=v: the variable name marks the value.
+    regex:
+      /\b[A-Za-z0-9_]*(?:PASS|PASSWD|PASSWORD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)\s*=\s*["']?([^"'\s;&|]{6,})["']?/gi,
+    confidence: "medium",
+  },
+  {
+    id: "cli_password_argument",
+    name: "Password Argument of a Known Client",
+    secretType: "CREDENTIAL",
+    // sshpass -p V, docker login -p V, redis-cli -a V, and the attached mysql-family -pV form.
+    regex:
+      /(?:\bsshpass\s+-p\s*|\bdocker\s+login\b[^\n|;&]*?\s-p\s+|\bredis-cli\b[^\n|;&]*?\s-a\s+|\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)["']?([^"'\s]{6,})["']?/g,
+    confidence: "medium",
+  },
+  {
     id: "slack_token",
     name: "Slack API Token",
     secretType: "SLACK_TOKEN",

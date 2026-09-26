@@ -17,8 +17,11 @@ export {
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  isWorkflowCallEvent,
+  isWorkflowResultEvent,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
+  workflowCallId,
 } from "./analytics/workflow-carrier.js";
 export type {
   DiscoveredCallable,
@@ -26,6 +29,7 @@ export type {
   WorkflowCallCandidate,
   WorkflowCallCarrier,
   WorkflowCallHeldOut,
+  WorkflowResultCarrier,
 } from "./analytics/workflow-carrier.js";
 export type {
   InputProposal,

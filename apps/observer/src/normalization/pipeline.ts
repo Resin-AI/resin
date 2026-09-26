@@ -457,7 +457,11 @@ export class NormalizationPipeline {
           programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
         }
       | undefined;
-    if (validEvent.type === "tool_call") {
+    if (
+      validEvent.type === "tool_call" ||
+      validEvent.type === "command_exec" ||
+      validEvent.type === "file_edit"
+    ) {
       localPayloadOptions = { programSourceRedactor: this.programSourceRedactor };
     }
     if (validEvent.type === "tool_result" && originalRawRecord !== undefined) {

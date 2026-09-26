@@ -89,6 +89,32 @@ describe("invoke_tool Meta-Tool", () => {
     expect(resMissing.content[0].text).toContain("Missing required parameter 'mode'");
   });
 
+  it("returns text output as text, one labeled section per step, not escaped JSON", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-invoke" });
+    const invoke = async (value: unknown) =>
+      createInvokeToolHandler(registry, {
+        async invoke(): Promise<CallToolResult> {
+          // A recorded workflow's result travels as JSON: a command's stdout is a string in it.
+          return { content: [{ type: "text", text: JSON.stringify(value) }] };
+        },
+      })(makeContext("ws-invoke"), {
+        toolId: "tool_validator",
+        parameters: { count: 1, mode: "fast" },
+      });
+
+    const single = await invoke('{\n  "rows": [1, 2]\n}\n');
+    const sequence = await invoke(["a.txt\nb.txt\n", "# Design\n"]);
+    const silent = await invoke("");
+
+    expect(single.content).toEqual([{ type: "text", text: '{\n  "rows": [1, 2]\n}\n' }]);
+    expect(sequence.content).toEqual([
+      { type: "text", text: "--- step 1/2 ---\na.txt\nb.txt\n\n--- step 2/2 ---\n# Design\n" },
+    ]);
+    // A command that printed nothing still reports that it ran.
+    expect(silent.content).toEqual([{ type: "text", text: "(completed with no output)" }]);
+  });
+
   it("validates parameter types, enums, and bounds strictly", async () => {
     const registry = new ToolRegistry();
     const manifest = makeManifest();

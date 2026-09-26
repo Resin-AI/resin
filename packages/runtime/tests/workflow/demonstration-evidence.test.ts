@@ -1,12 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   RecordedWorkflow,
   WorkflowBindingCandidate,
   WorkflowJsonValue,
 } from "@resin/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   confirmPromotedPlan,
   demonstrationEnvironment,
@@ -14,17 +11,6 @@ import {
 } from "../../src/workflow/binding-validation.js";
 import { RuntimeAdapterRegistry } from "../../src/workflow/recorded-workflow.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-async function directory() {
-  const path = await mkdtemp(join(tmpdir(), "resin-demonstration-"));
-  directories.push(path);
-  return path;
-}
 function plan(): RecordedWorkflow {
   return {
     schemaVersion: 1,
@@ -98,8 +84,7 @@ describe("demonstration evidence is interpreted at the actual argument position"
     const environment = await demonstrationEnvironment({
       plan: recording,
       candidates,
-      adapters: adapters(),
-      workspaceDir: await directory(),
+      adapters: () => adapters(),
       resolvePrivate: (reference) => {
         if (reference !== "private:options" && reference !== "private:observed")
           throw new Error("unknown reference");
@@ -151,8 +136,7 @@ describe("demonstration evidence is interpreted at the actual argument position"
     const environment = await demonstrationEnvironment({
       plan: recording,
       candidates: [],
-      adapters: registry,
-      workspaceDir: await directory(),
+      adapters: () => registry,
       resolvePrivate: () => "held-out-source",
     });
     expect(environment?.inputs).toEqual({ source: "held-out-source" });
@@ -177,8 +161,7 @@ describe("demonstration evidence is interpreted at the actual argument position"
     const environment = await demonstrationEnvironment({
       plan: recording,
       candidates,
-      adapters: adapters(),
-      workspaceDir: await directory(),
+      adapters: () => adapters(),
       resolvePrivate: () => ({ values: [9, 12], enabled: true }),
     });
     expect(Object.hasOwn(environment!.inputs, "shared")).toBe(false);
@@ -193,8 +176,7 @@ describe("demonstration evidence is interpreted at the actual argument position"
     const environment = await demonstrationEnvironment({
       plan: recording,
       candidates,
-      adapters: adapters(),
-      workspaceDir: await directory(),
+      adapters: () => adapters(),
       resolvePrivate: () => ({ values: ["9"], enabled: true }),
     });
     expect(Object.keys(environment!.inputs)).toEqual([]);
@@ -213,7 +195,6 @@ describe("demonstration evidence is interpreted at the actual argument position"
       accepted: [],
       environment: {
         adapters: adapters(),
-        workspaceDir: await directory(),
         inputs: {},
         observed: { step0: { values: [2], enabled: false } as WorkflowJsonValue },
       },

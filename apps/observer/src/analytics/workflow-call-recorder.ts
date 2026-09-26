@@ -15,6 +15,9 @@
  * stay in the local value store.
  */
 
+import { randomUUID } from "node:crypto";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type AgentArgumentOrigin,
@@ -22,6 +25,7 @@ import {
   type ProgramLanguage,
   ProgramSourceProjectionError,
   ProgramTokenizationError,
+  WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowArgumentProvenance,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
@@ -29,6 +33,11 @@ import {
   analyzeAgentArguments,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
+  embeddedProgramIsProtected,
+  embeddedPrograms,
+  programTokenPath,
+  programTokenValueAt,
+  readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
 import {
@@ -38,6 +47,7 @@ import {
   redactLocalWorkflowProgramSource,
   retainLocalWorkflowPayload,
 } from "../normalization/local-workflow-payload.js";
+import { isClosedCodexSource } from "./computation/codex-source-dependencies.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { deriveNativeCalls } from "./native-argument-derivation.js";
@@ -48,7 +58,12 @@ import {
   containsRedactionPlaceholder,
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
-import { workflowPrivateReference } from "./workflow-private-reference.js";
+import {
+  WORKFLOW_CALL_IDENTITY_SLOT,
+  WORKFLOW_CALL_ORDER_SLOT,
+  workflowCallArgumentSlot,
+  workflowPrivateReference,
+} from "./workflow-private-reference.js";
 
 import {
   type DiscoveredCallable,
@@ -75,6 +90,15 @@ export {
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
+
+/**
+ * The order this process recorded calls in: `epoch` names the process, `index` increases with every
+ * recorded call. Kept only in each call's local order slot, so a validator can tell whether the calls a
+ * plan names ran in the order it claims; calls from different epochs have no recorded order.
+ */
+const RECORDING_EPOCH = randomUUID();
+let recordingIndex = 0;
+
 export type {
   DiscoveredCallable,
   WorkflowCallCandidate,
@@ -104,6 +128,7 @@ interface LocalCall {
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
   result?: WorkflowJsonValue;
+  resultHandle?: string;
   resultReference?: string;
   resultComparison?: "text-trim";
   reads?: string[];
@@ -120,6 +145,8 @@ interface LocalCall {
   };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
+  /** This call's place among its execution's calls: the position a repeat of it is listed under. */
+  executionPosition: number;
 }
 
 /** One execution of a session: the calls one task made, in order. */
@@ -133,6 +160,8 @@ interface LocalExecution {
    * stored as they are observed, so a replay has what the repeat actually produced.
    */
   heldOut?: WorkflowCallHeldOut;
+  /** Words of the instruction that started this execution: the values its request named. */
+  requestWords: ReadonlySet<string>;
 }
 
 /** Executions kept per session: enough to recognise a repeat, bounded so a long session cannot grow. */
@@ -150,6 +179,16 @@ interface SessionDerivationState {
    * uniformly, and the turn index a transcript may carry is not set by every decoder.
    */
   newExecutionPending: boolean;
+  /** Words of the instructions since the last call, which the next execution was asked with. */
+  pendingRequestWords: Set<string>;
+  nativeOutputs: Map<string, { stdout: string; exitCode: number }>;
+  /**
+   * Audited single-command wrappers still awaiting their result. Such a result may still claim a
+   * command that completes now, so that command cannot be recorded as an independent execution.
+   */
+  openCodexWrappers: Set<string>;
+  /** Wrapper tracking exceeded its bound; claims can no longer be ruled out in this session. */
+  codexWrapperOverflow: boolean;
 }
 
 /** Observed calls kept per session for derivation. */
@@ -161,6 +200,25 @@ function isPlainObject(value: unknown): value is Record<string, WorkflowJsonValu
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Instruction words kept for one execution; the latest are kept, as the request comes last. */
+const MAX_REQUEST_WORDS = 256;
+
+/** Adds an instruction's words, keeping only the most recent when the bound is reached. */
+function addRequestWords(words: Set<string>, content: string): void {
+  const add = (word: string): void => {
+    words.delete(word);
+    words.add(word);
+    if (words.size > MAX_REQUEST_WORDS) words.delete(words.values().next().value!);
+  };
+  for (const match of content.matchAll(/[A-Za-z0-9][A-Za-z0-9_.:@+-]*/g)) {
+    const word = match[0].replace(/[.:]+$/, "");
+    if (word.length < 2 || word.length > 64) continue;
+    add(word);
+    // An ordinal names its number: `the 12th day` runs with `12`.
+    const ordinal = /^(\d+)(?:st|nd|rd|th)$/i.exec(word);
+    if (ordinal) add(ordinal[1]!);
+  }
+}
 /**
  * The reference-aware invocation surface, however the harness spelled it: bare
  * `invoke_tool`/`sys_invoke_tool`, or an MCP-prefixed `mcp__<server>__invoke_tool`.
@@ -225,7 +283,11 @@ export class WorkflowCallRecorder {
       turnKey: "",
       position: 0,
       executions: [],
+      nativeOutputs: new Map(),
+      openCodexWrappers: new Set(),
+      codexWrapperOverflow: false,
       newExecutionPending: false,
+      pendingRequestWords: new Set(),
     };
     this.sessions.set(sessionId, created);
     while (this.sessions.size > MAX_SESSIONS) {
@@ -318,22 +380,338 @@ export class WorkflowCallRecorder {
     if (event.type === "message" && event.role === "user") {
       // The instruction that starts a piece of work. Nothing else in a transcript separates one
       // piece of work from the next often enough to rely on.
-      this.sessionState(event.sessionId).newExecutionPending = true;
+      const state = this.sessionState(event.sessionId);
+      if (!state.newExecutionPending) state.pendingRequestWords = new Set();
+      addRequestWords(state.pendingRequestWords, event.content);
+      state.newExecutionPending = true;
       return event;
     }
-    if (event.type === "tool_call") return this.observeCall(event);
+    if (event.type === "command_exec") {
+      const command = readCodexCommandMetadata(event.metadata);
+      if (command?.kind !== "command") return event;
+      const raw = localWorkflowEvent(event);
+      if (
+        raw?.type !== "command_exec" ||
+        typeof raw.stdout !== "string" ||
+        !Number.isInteger(raw.exitCode)
+      )
+        return event;
+      const state = this.sessionState(event.sessionId);
+      state.nativeOutputs.set(command.nativeId, { stdout: raw.stdout, exitCode: raw.exitCode });
+      while (state.nativeOutputs.size > MAX_LOCAL_CALLS) {
+        const oldest = state.nativeOutputs.keys().next();
+        if (oldest.done) break;
+        state.nativeOutputs.delete(oldest.value);
+      }
+      const association = command.association;
+      if (association === undefined) {
+        if (state.codexWrapperOverflow || state.openCodexWrappers.size > 0) return event;
+        const argv = raw.command === "/bin/bash" ? raw.args : undefined;
+        if (
+          argv?.length !== 2 ||
+          argv[0] !== "-lc" ||
+          typeof argv[1] !== "string" ||
+          typeof raw.cwd !== "string"
+        )
+          return event;
+        // Codex records the working directory as a file URL; execution needs the path it names.
+        let workdir: string;
+        try {
+          workdir = raw.cwd.startsWith("file:") ? fileURLToPath(raw.cwd) : raw.cwd;
+        } catch {
+          return event;
+        }
+        const callId = command.nativeId;
+        const parameters = {
+          cmd: argv[1],
+          workdir,
+          resinCodexShellProfile: "bash-login-native-v1",
+        };
+        const program: WorkflowRecordedProgram = { kind: "shell", source: "", argument: "cmd" };
+        const origins: WorkflowCallCarrier["origins"] = {};
+        const provenance: Record<string, WorkflowArgumentProvenance> = {};
+        for (const [argument, value] of Object.entries(parameters)) {
+          origins[argument] = this.launderOrigin(
+            { type: "literal", value },
+            event.sessionId,
+            callId,
+            [argument],
+          );
+          provenance[argument] = { standing: "derived", rule: "single-observation" };
+        }
+        this.projectProgramSource(event, parameters, program, origins);
+        // The session state above also retains native output for guarded outer results.
+        let call: LocalCall | undefined;
+        for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
+          call = state.executions[index]!.calls.find(
+            (entry) => entry.callId === callId && entry.toolName === "command_exec",
+          );
+        }
+        if (call === undefined) {
+          call = this.recordLocalCall(
+            state,
+            { sessionId: event.sessionId, callId, toolName: "command_exec" },
+            parameters,
+            program,
+          );
+        }
+        const carrier: WorkflowCallCarrier = {
+          runtime: RESIN_PROCESS_RUNTIME,
+          name: "command_exec",
+          origins,
+          inputs: [],
+          provenance,
+          program,
+          executionIndex: call.executionIndex,
+          executionPosition: call.executionPosition,
+          baselineInputs: { ...call.argumentReferences },
+        };
+        const heldOut = this.heldOutSoFar(state, call);
+        if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
+        const relationships = this.relateLocalCall(state, call, event.sessionId);
+        if (relationships.dependsOnCallIds.length > 0)
+          carrier.dependsOnCallIds = relationships.dependsOnCallIds;
+        const candidates = unprotectedCandidates(
+          event,
+          parameters,
+          relationships.candidates,
+          program,
+          origins,
+        );
+        if (candidates.length > 0) carrier.candidates = candidates;
+        const succeeded = raw.exitCode === 0;
+        call.result = raw.stdout;
+        call.resultReference = succeeded
+          ? this.localReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
+          : undefined;
+        call.resultComparison = undefined;
+        if (call.resultReference !== undefined && state.executions.length > 0) {
+          const execution = state.executions.find((entry) => entry.index === call!.executionIndex);
+          if (execution?.accumulatedHeldOut !== undefined) {
+            execution.accumulatedHeldOut.observed = [
+              ...execution.accumulatedHeldOut.observed.filter(
+                (entry) => entry.position !== call!.position,
+              ),
+              { position: call.position, reference: call.resultReference },
+            ];
+          }
+        }
+        const demonstration = this.demonstrationCarrier(event.sessionId, callId);
+        const result = {
+          ...(succeeded ? { baselineReference: call.resultReference } : {}),
+          output: { type: "string" as const, hasContent: raw.stdout.length > 0 },
+          ...(demonstration === undefined ? {} : { heldOut: demonstration }),
+        };
+        return {
+          ...event,
+          metadata: {
+            ...event.metadata,
+            [RESIN_WORKFLOW_CALL_METADATA_KEY]: carrier,
+            [RESIN_WORKFLOW_RESULT_METADATA_KEY]: result,
+          },
+        };
+      }
+      if (association.nativeCommandId !== command.nativeId) return event;
+      const reference =
+        raw.exitCode === 0
+          ? this.localReference(
+              raw.stdout,
+              event.sessionId,
+              association.callId,
+              "native-result:v1:text-trim",
+            )
+          : undefined;
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          [RESIN_WORKFLOW_RESULT_METADATA_KEY]: {
+            ...(reference === undefined
+              ? {}
+              : {
+                  baselineReference: reference,
+                  baselineComparison: "text-trim",
+                }),
+            output: { type: "string", hasContent: raw.stdout.length > 0 },
+          },
+        },
+      };
+    }
+    if (event.type === "file_edit") return this.observeCodexFileEdit(event);
+    if (event.type === "tool_call") {
+      // The cell's edits arrive as Codex-native file edits; those, not the cell, are the calls.
+      if (
+        event.toolName === "exec" &&
+        readCodexCommandMetadata(event.metadata)?.kind === "patch-call"
+      ) {
+        return event;
+      }
+      if (event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call") {
+        const state = this.sessionState(event.sessionId);
+        if (state.openCodexWrappers.size >= MAX_LOCAL_CALLS) state.codexWrapperOverflow = true;
+        else state.openCodexWrappers.add(event.callId);
+      }
+      return this.observeCall(event);
+    }
     if (event.type === "tool_result") {
-      const resultObservation = localWorkflowResultObservation(event);
-      const observed = this.observeResult(original ?? event, event, resultObservation);
-      const resultEvent = { ...event, metadata: observed.metadata };
-      if (resultObservation !== undefined) {
-        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
-      } else if (isLocalWorkflowResultSuppressed(event)) {
+      this.sessions.get(event.sessionId)?.openCodexWrappers.delete(event.callId);
+      const source = original ?? event;
+      const codex =
+        source.type === "tool_result" && source.toolName === "exec"
+          ? readCodexCommandMetadata(source.metadata)
+          : undefined;
+      const native =
+        codex?.kind === "result" && codex.association !== undefined
+          ? this.sessionState(event.sessionId).nativeOutputs.get(codex.association.nativeCommandId)
+          : undefined;
+      const codexObservation =
+        codex?.kind === "result" &&
+        codex.form === "single-command-output" &&
+        codex.status === "completed" &&
+        native !== undefined
+          ? { result: native.stdout, comparison: "text-trim" as const }
+          : undefined;
+      const resultObservation =
+        codex?.kind === "result" ? codexObservation : localWorkflowResultObservation(event);
+      const suppressResult =
+        isLocalWorkflowResultSuppressed(event) ||
+        (codex?.kind === "result" &&
+          (codex.status !== "completed" || native === undefined || native.exitCode !== 0));
+      const observed = this.observeResult(source, event, resultObservation, suppressResult);
+      // The cell completed, but the command it ran failed: the step failed.
+      const resultEvent =
+        codex?.kind === "result" && native !== undefined && native.exitCode !== 0
+          ? { ...event, isError: true, metadata: observed.metadata }
+          : { ...event, metadata: observed.metadata };
+      if (suppressResult) {
         retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
+      } else if (resultObservation !== undefined) {
+        retainLocalWorkflowPayload(resultEvent, { result: event.result }, { resultObservation });
       }
       return resultEvent;
     }
     return event;
+  }
+
+  /**
+   * A Codex-native file edit becomes a patch step: the recorded diff, applied again in the directory
+   * the session worked in. The diff is file content, so it is stored privately and never projected,
+   * not even redacted; only its added lines' values are offered, and none when the redaction engine
+   * would change the diff. An edit outside the working directory, or without one, is not a step.
+   */
+  private observeCodexFileEdit(
+    event: Extract<NormalizedSessionEvent, { type: "file_edit" }>,
+  ): NormalizedSessionEvent {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (native?.kind !== "file-change") return event;
+    const raw = localWorkflowEvent(event);
+    if (raw?.type !== "file_edit" || typeof raw.patch !== "string") return event;
+    const codexNative = event.metadata?.codexNative;
+    const recordedCwd =
+      isPlainObject(codexNative) && typeof codexNative.cwd === "string"
+        ? codexNative.cwd
+        : undefined;
+    let workdir: string;
+    try {
+      workdir =
+        recordedCwd === undefined
+          ? ""
+          : recordedCwd.startsWith("file:")
+            ? fileURLToPath(recordedCwd)
+            : recordedCwd;
+    } catch {
+      return event;
+    }
+    if (!isAbsolute(workdir) || !isAbsolute(raw.filePath)) return event;
+    const inside = relative(resolve(workdir), resolve(raw.filePath));
+    if (inside.length === 0 || inside.startsWith("..") || isAbsolute(inside)) return event;
+    try {
+      tokenizeProgram("patch", raw.patch);
+    } catch {
+      return event;
+    }
+    const state = this.sessionState(event.sessionId);
+    const callId = native.nativeId;
+    const parameters = { patch: raw.patch, workdir };
+    const program: WorkflowRecordedProgram = { kind: "patch", source: "", argument: "patch" };
+    const origins: WorkflowCallCarrier["origins"] = {};
+    const provenance: Record<string, WorkflowArgumentProvenance> = {};
+    for (const [argument, value] of Object.entries(parameters)) {
+      origins[argument] = this.launderOrigin({ type: "literal", value }, event.sessionId, callId, [
+        argument,
+      ]);
+      provenance[argument] = { standing: "derived", rule: "single-observation" };
+    }
+    const privateSource = origins.patch;
+    if (privateSource?.type !== "private") return event;
+    origins.patch = { type: "program", language: "patch", source: privateSource, holes: [] };
+    let call: LocalCall | undefined;
+    for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
+      call = state.executions[index]!.calls.find(
+        (entry) => entry.callId === callId && entry.toolName === "apply_patch",
+      );
+    }
+    call ??= this.recordLocalCall(
+      state,
+      { sessionId: event.sessionId, callId, toolName: "apply_patch" },
+      parameters,
+      program,
+    );
+    const carrier: WorkflowCallCarrier = {
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "apply_patch",
+      origins,
+      inputs: [],
+      provenance,
+      program,
+      executionIndex: call.executionIndex,
+      executionPosition: call.executionPosition,
+      baselineInputs: { ...call.argumentReferences },
+    };
+    const heldOut = this.heldOutSoFar(state, call);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
+    const relationships = this.relateLocalCall(state, call, event.sessionId);
+    if (relationships.dependsOnCallIds.length > 0)
+      carrier.dependsOnCallIds = relationships.dependsOnCallIds;
+    // The diff names its files by absolute path, so the scan reads them relative to the working
+    // directory: where the project lives must not decide which values are offered.
+    const root = resolve(workdir);
+    const scrubbed = redactLocalWorkflowProgramSource(
+      event,
+      raw.patch.replaceAll(root.endsWith(sep) ? root : `${root}${sep}`, ""),
+    );
+    const candidates = scrubbed === undefined || scrubbed.changed ? [] : relationships.candidates;
+    if (candidates.length > 0) carrier.candidates = candidates;
+    call.result = WORKFLOW_PATCH_STEP_RESULT;
+    call.resultReference = this.localReference(
+      WORKFLOW_PATCH_STEP_RESULT,
+      event.sessionId,
+      callId,
+      "native-result:v1:exact",
+    );
+    call.resultComparison = undefined;
+    const execution = state.executions.find((entry) => entry.index === call.executionIndex);
+    if (execution?.accumulatedHeldOut !== undefined) {
+      execution.accumulatedHeldOut.observed = [
+        ...execution.accumulatedHeldOut.observed.filter(
+          (entry) => entry.position !== call.position,
+        ),
+        { position: call.position, reference: call.resultReference },
+      ];
+    }
+    const demonstration = this.demonstrationCarrier(event.sessionId, callId);
+    return {
+      ...event,
+      metadata: {
+        ...event.metadata,
+        [RESIN_WORKFLOW_CALL_METADATA_KEY]: carrier,
+        [RESIN_WORKFLOW_RESULT_METADATA_KEY]: {
+          baselineReference: call.resultReference,
+          output: { type: "string" as const, hasContent: true },
+          ...(demonstration === undefined ? {} : { heldOut: demonstration }),
+        },
+      },
+    };
   }
 
   /**
@@ -430,7 +808,22 @@ export class WorkflowCallRecorder {
               : undefined;
     if (routedName === undefined) return event;
     const inner = parameters.parameters ?? parameters.arguments;
-    const analysis = analyzeAgentArguments(isPlainObject(inner) ? inner : {});
+    const argumentsAtCall = isPlainObject(inner) ? inner : {};
+    const state = this.sessionState(event.sessionId);
+    // A delayed redelivery belongs to its original call, even after later executions.
+    // Its input identities must not drift to the current execution's next position.
+    let existing: LocalCall | undefined;
+    for (let index = state.executions.length - 1; index >= 0 && !existing; index--) {
+      existing = state.executions[index]!.calls.find((call) => call.callId === event.callId);
+    }
+    const position =
+      existing?.position ??
+      (state.executions.length === 0 || state.newExecutionPending ? 0 : state.position);
+    // Input identity follows the selected workflow step, not a session-global call id.
+    // Repeated executions have new call ids but the same logical positions.
+    const nameInput = (argument: string, path: WorkflowValuePath): string =>
+      `step${position}_${argument}${path.length === 0 ? "" : `.${path.map(String).join(".")}`}`;
+    const analysis = analyzeAgentArguments(argumentsAtCall, { nameInput });
     const origins: Record<string, AgentArgumentOrigin> = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     for (const [argument, origin] of Object.entries(analysis.origins)) {
@@ -454,6 +847,68 @@ export class WorkflowCallRecorder {
     // recorded for the callable. Nothing else: not the harness, never a guess from the name.
     const connection = event.connection ?? discovered?.provider;
     if (connection !== undefined) carrier.connection = connection;
+    const actualArguments: Record<string, WorkflowJsonValue> = {};
+    for (const [argument, envelope] of Object.entries(argumentsAtCall)) {
+      try {
+        const resolved = analyzeAgentArguments(
+          { [argument]: envelope },
+          {
+            resolveReference: (reference, path) => {
+              let producer: LocalCall | undefined;
+              for (
+                let index = state.executions.length - 1;
+                index >= 0 && producer === undefined;
+                index--
+              ) {
+                const calls = state.executions[index]!.calls;
+                for (let position = calls.length - 1; position >= 0; position--) {
+                  if (calls[position]!.resultHandle === reference) {
+                    producer = calls[position];
+                    break;
+                  }
+                }
+              }
+              if (producer?.result === undefined) throw new Error("unobserved reference");
+              let value: WorkflowJsonValue = producer.result;
+              for (const part of path) {
+                if (typeof part === "number") {
+                  if (
+                    !Number.isInteger(part) ||
+                    part < 0 ||
+                    !Array.isArray(value) ||
+                    part >= value.length
+                  ) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                } else {
+                  if (!isPlainObject(value) || !Object.hasOwn(value, part)) {
+                    throw new Error("unobserved reference path");
+                  }
+                  value = value[part]!;
+                }
+              }
+              return value;
+            },
+          },
+        ).resolved;
+        if (resolved !== undefined) actualArguments[argument] = resolved[argument]!;
+      } catch {
+        // An unresolved reference supplies no demonstration or baseline value.
+      }
+    }
+    const local =
+      existing ??
+      this.recordLocalCall(
+        state,
+        { ...event, toolName: routedName, parameters: actualArguments },
+        actualArguments,
+      );
+    carrier.executionIndex = local.executionIndex;
+    carrier.executionPosition = local.executionPosition;
+    carrier.baselineInputs = { ...local.argumentReferences };
+    const heldOut = this.heldOutSoFar(state, local);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     return this.withCallCarrier(event, carrier);
   }
 
@@ -472,7 +927,20 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     normalizedEvent: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
   ): NormalizedSessionEvent {
-    const parameters = isPlainObject(event.parameters) ? event.parameters : {};
+    // Optional arguments omitted by a producer have no JSON value to reference locally.
+    const rawParameters = isPlainObject(event.parameters) ? event.parameters : {};
+    let observedParameters = rawParameters;
+    for (const argument in rawParameters) {
+      if (!Object.hasOwn(rawParameters, argument) || rawParameters[argument] !== undefined)
+        continue;
+      if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
+      delete observedParameters[argument];
+    }
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    const parameters =
+      codex?.kind === "call" && typeof observedParameters.cmd === "string"
+        ? { ...observedParameters, resinCodexShellProfile: "bash-login-v1" }
+        : observedParameters;
     const program = this.programOf(event, parameters);
     const origins: WorkflowCallCarrier["origins"] = {};
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
@@ -511,29 +979,23 @@ export class WorkflowCallRecorder {
 
     const state = this.sessionState(event.sessionId);
     const call = this.recordLocalCall(state, event, parameters, program);
-    const relationships = this.relateLocalCall(state, call);
+    const relationships = this.relateLocalCall(state, call, event.sessionId);
     carrier.executionIndex = call.executionIndex;
+    carrier.executionPosition = call.executionPosition;
+    carrier.baselineInputs = { ...call.argumentReferences };
     const heldOut = this.heldOutSoFar(state, call);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
-    if (relationships.candidates.length > 0) {
-      const projected = program?.argument === undefined ? undefined : origins[program.argument];
-      const protectedTokens = projected?.type === "program" ? projected.protectedTokens : undefined;
-      const candidates =
-        protectedTokens === undefined || protectedTokens.length === 0
-          ? relationships.candidates
-          : relationships.candidates.filter(
-              (candidate) =>
-                candidate.argument !== program?.argument ||
-                candidate.path.length !== 2 ||
-                candidate.path[0] !== "tokens" ||
-                typeof candidate.path[1] !== "number" ||
-                !protectedTokens.includes(candidate.path[1]),
-            );
-      if (candidates.length > 0) carrier.candidates = candidates;
-    }
+    const candidates = unprotectedCandidates(
+      event,
+      parameters,
+      relationships.candidates,
+      program,
+      origins,
+    );
+    if (candidates.length > 0) carrier.candidates = candidates;
     return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
   }
 
@@ -626,7 +1088,12 @@ export class WorkflowCallRecorder {
   /** Keeps the observed call locally, so the conclusions that need its values are reached here. */
   private recordLocalCall(
     state: SessionDerivationState,
-    event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    event:
+      | Extract<NormalizedSessionEvent, { type: "tool_call" }>
+      | Pick<
+          Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+          "sessionId" | "callId" | "toolName" | "connection"
+        >,
     parameters: Record<string, WorkflowJsonValue>,
     /** The program the record established for this call, when it established one. */
     program?: WorkflowRecordedProgram,
@@ -641,11 +1108,14 @@ export class WorkflowCallRecorder {
             ? 0
             : state.executions[state.executions.length - 1]!.index + 1,
         calls: [],
+        requestWords: state.pendingRequestWords,
       });
+      state.pendingRequestWords = new Set();
       while (state.executions.length > MAX_EXECUTIONS) state.executions.shift();
     }
     const execution = state.executions[state.executions.length - 1]!;
-    const flow = declaredFlowOfToolCall(event);
+    const flow =
+      "type" in event && event.type === "tool_call" ? declaredFlowOfToolCall(event) : undefined;
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
     const call: LocalCall = {
       callId: event.callId,
@@ -655,11 +1125,17 @@ export class WorkflowCallRecorder {
         : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
       executionIndex: execution.index,
+      executionPosition: execution.calls.length,
       arguments: parameters,
       argumentReferences: Object.fromEntries(
         Object.entries(parameters).map(([argument, value]) => [
           argument,
-          this.localReference(value, event.sessionId, event.callId, `argument:${argument}`),
+          this.localReference(
+            value,
+            event.sessionId,
+            event.callId,
+            workflowCallArgumentSlot(argument),
+          ),
         ]),
       ),
       // Only a program whose text arrived in a named argument can be read as a program here: with
@@ -683,6 +1159,37 @@ export class WorkflowCallRecorder {
             writes: flow.writes.map((resource) => `${resource.kind}:${resource.identity}`),
           }),
     };
+    // The call's own identity, so a validator can compare a plan's callable with the recording
+    // under a reference it computes itself, never one the plan carries.
+    this.localReference(
+      {
+        name: call.toolName,
+        ...(call.connection === undefined ? {} : { connection: call.connection }),
+        ...(call.program === undefined
+          ? {}
+          : { program: { kind: call.program.kind, argument: call.program.argument } }),
+        arguments: Object.keys(parameters),
+      },
+      event.sessionId,
+      event.callId,
+      WORKFLOW_CALL_IDENTITY_SLOT,
+    );
+    // Where this call falls in the recorded order, kept from the first time it was recorded: a
+    // redelivered or re-read call keeps its place rather than moving to the end.
+    const order = workflowPrivateReference(
+      "demonstration",
+      this.observeAccess?.workspaceId,
+      this.privateRepresentation,
+      [event.sessionId, event.callId, WORKFLOW_CALL_ORDER_SLOT],
+    );
+    if (this.privateValues.get(order) === undefined) {
+      this.localReference(
+        { epoch: RECORDING_EPOCH, index: recordingIndex++ },
+        event.sessionId,
+        event.callId,
+        WORKFLOW_CALL_ORDER_SLOT,
+      );
+    }
     state.position += 1;
     execution.calls.push(call);
     return call;
@@ -703,6 +1210,12 @@ export class WorkflowCallRecorder {
    * the repeat has reached, so a session that diverges half way never presents the earlier half as
    * if the whole thing had been performed twice.
    *
+   * An execution that runs the earlier work's calls once per item — `for_each` on a learned tool, or
+   * the same job done for several items in one request — is a demonstration with one iteration per
+   * item: call j repeats the earlier call at position j mod k, and every iteration's call is listed
+   * under that position in execution order. Past its first iteration it is advertised only once a
+   * whole iteration has completed.
+   *
    * Values are stored by reference: they are the user's own work and stay where they were performed.
    */
   private heldOutSoFar(
@@ -714,11 +1227,10 @@ export class WorkflowCallRecorder {
     const earlier = [...state.executions].reverse().find(
       (entry) =>
         entry.index < call.executionIndex &&
-        execution.calls.length <= entry.calls.length &&
+        entry.calls.length > 0 &&
         execution.calls.every((mine, position) => {
-          const theirs = entry.calls[position];
+          const theirs = entry.calls[position % entry.calls.length]!;
           return (
-            theirs !== undefined &&
             mine.toolName === theirs.toolName &&
             mine.connection === theirs.connection &&
             mine.program?.kind === theirs.program?.kind &&
@@ -732,29 +1244,28 @@ export class WorkflowCallRecorder {
       execution.accumulatedHeldOut = undefined;
       return undefined;
     }
+    const width = earlier.calls.length;
+    if (execution.calls.length > width && execution.calls.length % width !== 0) {
+      // Mid-iteration: keep the last demonstration whose iterations were all complete.
+      return execution.accumulatedHeldOut;
+    }
     const inputs: WorkflowCallHeldOut["inputs"] = [];
     const observed: WorkflowCallHeldOut["observed"] = [];
-    for (const mine of execution.calls) {
-      const theirs = earlier.calls.find((entry) => entry.position === mine.position);
-      if (theirs === undefined || mine.toolName !== theirs.toolName) break;
+    const calls: NonNullable<WorkflowCallHeldOut["calls"]> = [];
+    for (const [ordinal, mine] of execution.calls.entries()) {
+      const position = ordinal % width;
+      calls.push({ position, callId: mine.callId });
       for (const [argument, reference] of Object.entries(mine.argumentReferences)) {
         // Nested arguments are part of an ordinary call too. Keep the complete value by local
         // reference; validation selects the candidate's nested path without uploading the value.
-        inputs.push({
-          position: mine.position,
-          argument,
-          reference,
-        });
+        inputs.push({ position, argument, reference });
       }
       if (mine.resultReference !== undefined) {
-        observed.push({
-          position: mine.position,
-          reference: mine.resultReference,
-        });
+        observed.push({ position, reference: mine.resultReference });
       }
     }
     if (inputs.length === 0 && observed.length === 0) return undefined;
-    execution.accumulatedHeldOut = { repeats: earlier.index, inputs, observed };
+    execution.accumulatedHeldOut = { repeats: earlier.index, inputs, observed, calls };
     return execution.accumulatedHeldOut;
   }
 
@@ -771,6 +1282,7 @@ export class WorkflowCallRecorder {
   private relateLocalCall(
     state: SessionDerivationState,
     call: LocalCall,
+    sessionId: string,
   ): { dependsOnCallIds: string[]; candidates: WorkflowCallCandidate[] } {
     const candidates: WorkflowCallCandidate[] = [];
     const calls = this.callsOf(state, call.executionIndex);
@@ -801,10 +1313,22 @@ export class WorkflowCallRecorder {
         ...(entry.result === undefined ? {} : { result: entry.result }),
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
+      state.executions.find((execution) => execution.index === call.executionIndex)?.requestWords,
     );
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
-      if (candidate.stepId !== ownStepId) continue;
+      // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.
+      if (candidate.stepId !== ownStepId || candidate.reason === "derived-from-inputs") continue;
+      if (candidate.proposed.kind === "input") {
+        candidates.push({
+          argument: candidate.argument,
+          path: candidate.path,
+          proposed: candidate.proposed,
+          reason: candidate.reason,
+          missing: candidate.missing,
+        });
+        continue;
+      }
       if (candidate.proposed.kind !== "result") continue;
       const producingIndex = Number.parseInt(candidate.proposed.stepId.slice("local".length), 10);
       const producingCall = calls[producingIndex];
@@ -816,6 +1340,32 @@ export class WorkflowCallRecorder {
         reason: "equal-to-earlier-result",
         ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
         missing: candidate.missing,
+      });
+    }
+    // A value an earlier call printed. The locator is text from that call's output, so it is kept
+    // in the local store and only its reference is proposed.
+    for (const extract of derivation.extracts) {
+      if (extract.stepId !== ownStepId) continue;
+      const producingIndex = Number.parseInt(extract.producerStepId.slice("local".length), 10);
+      const producingCall = calls[producingIndex];
+      if (producingCall === undefined) continue;
+      const locatorText = JSON.stringify(extract.locator);
+      // The identity covers the locator itself, so an immutable entry is never rewritten.
+      const locator = workflowPrivateReference(
+        "value",
+        this.observeAccess?.workspaceId,
+        this.privateRepresentation,
+        [sessionId, call.callId, "extract-locator:v1", extract.argument, extract.path, locatorText],
+      );
+      this.privateValues.set(locator, locatorText, this.observeAccess, this.privateRepresentation);
+      candidates.push({
+        argument: extract.argument,
+        path: extract.path,
+        proposed: { kind: "extract", callId: producingCall.callId, locator },
+        reason: "printed-by-earlier-step",
+        evidence: extract.evidence,
+        missing:
+          "one recording does not establish that this token was the value the earlier step printed rather than a literal that happens to match it",
       });
     }
     return { dependsOnCallIds, candidates };
@@ -837,6 +1387,10 @@ export class WorkflowCallRecorder {
     event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
     parameters: Record<string, WorkflowJsonValue>,
   ): WorkflowRecordedProgram | undefined {
+    const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
+    if (codex?.kind === "call" && typeof parameters.cmd === "string") {
+      return { kind: "shell", source: "", argument: "cmd" };
+    }
     const command = extractRawCommandStringFromEvent(event);
     if (command !== null) {
       const program: WorkflowRecordedProgram = { kind: "shell", source: "" };
@@ -865,13 +1419,17 @@ export class WorkflowCallRecorder {
         frame.executionScope === "isolated" &&
         frame.language === "javascript" &&
         typeof parameters.raw === "string" &&
-        frame.source === parameters.raw;
+        frame.source === parameters.raw &&
+        isClosedCodexSource(frame.source);
       const evalInterfaceMatchesFrame =
         sourceInterface !== undefined &&
         frame.executionScope === "persistent" &&
         frame.source === parameters.code &&
         ((sourceInterface === "python-eval" && frame.language === "python") ||
           (sourceInterface === "javascript-eval" && frame.language === "javascript"));
+      // A Codex frame is a native harness call unless its entire source is executable in
+      // the isolated VM. Never recast a host-dependent wrapper as generic Node JavaScript.
+      if (frame.sourceInterface === "codex-exec" && !codexExecFrameMatches) continue;
       const program: WorkflowRecordedProgram = { kind: frame.language, source: "" };
       if (codexExecFrameMatches) {
         program.argument = "raw";
@@ -888,16 +1446,26 @@ export class WorkflowCallRecorder {
     return undefined;
   }
 
-  /** Exposes a source view only when the real redactor and canonical parser both accept it. */
+  /**
+   * Exposes a source view only when the real redactor and canonical parser both accept it. A shell
+   * program is exposed only when it is a Codex command, whose scrubbed text already reaches the cloud
+   * as naming text; other harnesses' shell programs stay private.
+   */
   private projectProgramSource(
-    event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+    event: Extract<NormalizedSessionEvent, { type: "tool_call" | "command_exec" }>,
     parameters: Record<string, WorkflowJsonValue>,
     program: WorkflowRecordedProgram,
     origins: WorkflowCallCarrier["origins"],
   ): void {
-    // The shell tokenizer is a conservative lexer, not a syntax parser. It cannot attest to a
-    // parseable source projection; retain its existing private-source representation.
-    if (program.argument === undefined || program.kind === "shell") return;
+    if (program.argument === undefined) return;
+    if (program.kind === "shell") {
+      const codex = readCodexCommandMetadata(event.metadata);
+      const codexCommand =
+        event.type === "command_exec"
+          ? codex?.kind === "command"
+          : event.toolName === "exec" && codex?.kind === "call";
+      if (!codexCommand) return;
+    }
     const original = parameters[program.argument];
     const origin = origins[program.argument];
     if (typeof original !== "string" || origin?.type !== "private") return;
@@ -974,9 +1542,13 @@ export class WorkflowCallRecorder {
     event: NormalizedSessionEvent,
     publicEvent: NormalizedSessionEvent = event,
     localResultObservation?: { result: string; comparison?: "text-trim" },
+    suppressResult = false,
   ): NormalizedSessionEvent {
     let baselineReference: string | undefined;
     let baselineComparison: "text-trim" | undefined;
+    let output:
+      | { type: "null" | "boolean" | "number" | "string" | "array" | "object"; hasContent: boolean }
+      | undefined;
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -985,7 +1557,45 @@ export class WorkflowCallRecorder {
         const execution = state.executions[e]!;
         const call = execution.calls.find((entry) => entry.callId === event.callId);
         if (call === undefined) continue;
-        call.result = extractResultValueOf(localResultObservation?.result ?? event.result);
+        const wrappedComposedResult =
+          isInvokeToolCallName(event.toolName) &&
+          this.resultHandle(publicEvent) !== undefined &&
+          isPlainObject(event.result) &&
+          Object.hasOwn(event.result, "result");
+        const actual = suppressResult
+          ? undefined
+          : localResultObservation !== undefined
+            ? localResultObservation.result
+            : wrappedComposedResult
+              ? (event.result as Record<string, WorkflowJsonValue>).result
+              : event.result;
+        call.result = extractResultValueOf(actual);
+        call.resultHandle = call.result === undefined ? undefined : this.resultHandle(publicEvent);
+        if (actual !== undefined) {
+          const type = actual === null ? "null" : Array.isArray(actual) ? "array" : typeof actual;
+          if (
+            type === "null" ||
+            type === "boolean" ||
+            type === "number" ||
+            type === "string" ||
+            type === "array" ||
+            type === "object"
+          ) {
+            output = {
+              type,
+              hasContent:
+                type === "null"
+                  ? false
+                  : type === "string"
+                    ? (actual as string).length > 0
+                    : type === "array"
+                      ? (actual as unknown[]).length > 0
+                      : type === "object"
+                        ? Object.keys(actual as object).length > 0
+                        : true,
+            };
+          }
+        }
         call.resultComparison = localResultObservation?.comparison;
         call.resultReference =
           call.result === undefined
@@ -998,7 +1608,11 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (event.isError === false && !isLocalWorkflowResultSuppressed(publicEvent)) {
+        if (
+          event.isError === false &&
+          !suppressResult &&
+          !isLocalWorkflowResultSuppressed(publicEvent)
+        ) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
         }
@@ -1028,7 +1642,8 @@ export class WorkflowCallRecorder {
       handle === undefined &&
       heldOut === undefined &&
       baselineReference === undefined &&
-      baselineComparison === undefined
+      baselineComparison === undefined &&
+      output === undefined
     ) {
       return event;
     }
@@ -1037,6 +1652,7 @@ export class WorkflowCallRecorder {
       ...(handle === undefined ? {} : { handle }),
       ...(heldOut === undefined ? {} : { heldOut }),
       ...(baselineReference === undefined ? {} : { baselineReference }),
+      ...(output === undefined ? {} : { output }),
       ...(baselineComparison === undefined ? {} : { baselineComparison }),
     };
     return { ...event, metadata } as NormalizedSessionEvent;
@@ -1055,6 +1671,7 @@ export class WorkflowCallRecorder {
         repeats: heldOut.repeats,
         inputs: [...heldOut.inputs],
         observed: [...heldOut.observed],
+        ...(heldOut.calls === undefined ? {} : { calls: [...heldOut.calls] }),
       };
     }
     return undefined;
@@ -1070,6 +1687,85 @@ export class WorkflowCallRecorder {
     const handle = event.result.handle;
     return typeof handle === "string" && handle.startsWith("ref:") ? handle : undefined;
   }
+}
+
+/**
+ * A redacted token can never become a binding hole, so it is not proposed as one either; nor is any
+ * token of an embedded program that carries a secret: one a redacted top-level token touches, or
+ * whose own text the redaction engine would change.
+ */
+function unprotectedCandidates(
+  event: NormalizedSessionEvent,
+  parameters: Record<string, WorkflowJsonValue>,
+  candidates: readonly WorkflowCallCandidate[],
+  program: WorkflowRecordedProgram | undefined,
+  origins: WorkflowCallCarrier["origins"],
+): WorkflowCallCandidate[] {
+  const projected = program?.argument === undefined ? undefined : origins[program.argument];
+  const protectedTokens = projected?.type === "program" ? (projected.protectedTokens ?? []) : [];
+  const sanitized =
+    projected?.type === "program" &&
+    projected.language === "shell" &&
+    projected.source.type === "literal" &&
+    typeof projected.source.value === "string"
+      ? projected.source.value
+      : undefined;
+  const original = program?.argument === undefined ? undefined : parameters[program.argument];
+  const safeEmbedded = new Map<number, boolean>();
+  const embeddedIsSafe = (anchor: number): boolean => {
+    const known = safeEmbedded.get(anchor);
+    if (known !== undefined) return known;
+    let safe = false;
+    if (program?.kind === "shell" && typeof original === "string") {
+      const embedded = embeddedPrograms(original).find((each) => each.anchor === anchor);
+      const scrubbed =
+        embedded === undefined
+          ? undefined
+          : redactLocalWorkflowProgramSource(event, original.slice(embedded.start, embedded.end));
+      safe = scrubbed !== undefined && !scrubbed.changed;
+      if (safe && sanitized !== undefined && protectedTokens.length > 0) {
+        const projectedProgram = embeddedPrograms(sanitized).find((each) => each.anchor === anchor);
+        safe =
+          projectedProgram !== undefined &&
+          !embeddedProgramIsProtected(
+            projectedProgram,
+            tokenizeProgram("shell", sanitized),
+            protectedTokens,
+          );
+      }
+    }
+    safeEmbedded.set(anchor, safe);
+    return safe;
+  };
+  // A span keeps the rest of its token as recorded text, so a token that held a secret (or its
+  // redaction placeholder) is never split, whatever the projection says about the whole token.
+  const spanTokenIsSafe = (address: { token: number; embedded?: number }): boolean => {
+    if (program === undefined || typeof original !== "string") return false;
+    let value: unknown;
+    try {
+      value = programTokenValueAt(program.kind, original, address);
+    } catch {
+      return false;
+    }
+    if (typeof value !== "string" || containsRedactionPlaceholder(value)) return false;
+    const scrubbed = redactLocalWorkflowProgramSource(event, value);
+    return scrubbed !== undefined && !scrubbed.changed;
+  };
+  return candidates.filter((candidate) => {
+    if (candidate.argument !== program?.argument) return true;
+    const address = programTokenPath(candidate.path);
+    if (address === undefined) return true;
+    if (protectedTokens.includes(address.token)) return false;
+    if (address.embedded !== undefined && !embeddedIsSafe(address.token)) return false;
+    return (
+      address.span === undefined ||
+      spanTokenIsSafe(
+        address.embedded === undefined
+          ? { token: address.token }
+          : { token: address.token, embedded: address.embedded },
+      )
+    );
+  });
 }
 
 /** A tool result as a comparable value: its text when it is text, its own value otherwise. */

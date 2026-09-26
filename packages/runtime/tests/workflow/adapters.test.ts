@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,6 +167,90 @@ describe("recorded program adapters", () => {
     // line is part of what the program printed and part of what the recorded call returned.
     expect(value).toBe("beta\nalpha\n");
     expect(await readFile(join(workspace, "redirect.txt"), "utf8")).toBe("done\n");
+  });
+
+  it("runs native Codex bash with its recorded cwd and exact output once", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter();
+    const source = "printf ' native\\n'; printf x >> native-count";
+    const step = recordedStep({
+      id: "native-command",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: source,
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe(" native\n");
+    expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
+    const rejected = await failureOf(() =>
+      adapter.call({
+        step: { ...step, callable: { ...step.callable, name: "exec" } },
+        arguments: {
+          cmd: source,
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    );
+    expect(rejected).toContain("unsupported recorded shell profile");
+    expect(await readFile(join(workspace, "native-count"), "utf8")).toBe("x");
+  });
+
+  it("replays a Codex command with stderr merged into its output, as Codex recorded it", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter();
+    const step = recordedStep({
+      id: "native-streams",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    const run = (cmd: string) =>
+      adapter.call({
+        step,
+        arguments: { cmd, workdir: workspace, resinCodexShellProfile: "bash-login-native-v1" },
+      });
+
+    expect(await run("echo out; echo warning >&2; echo done")).toBe("out\nwarning\ndone\n");
+    expect(await failureOf(() => run("echo 'Traceback: boom' >&2; exit 3"))).toContain(
+      "exited with code 3: Traceback: boom",
+    );
+  });
+
+  it("keeps the inherited PATH in front when a login profile resets it", async () => {
+    // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
+    const workspace = await makeWorkspace();
+    const home = await makeWorkspace();
+    const bin = await makeWorkspace();
+    await writeFile(join(home, ".bash_profile"), "PATH=/usr/bin:/bin\n");
+    await writeFile(join(bin, "resin-path-probe"), "#!/bin/sh\necho found\n", { mode: 0o755 });
+    const adapter = createProcessAdapter({
+      env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+    });
+    const step = recordedStep({
+      id: "native-path",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: 'resin-path-probe; echo "${RESIN_INHERITED_PATH-unset}"',
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe("found\nunset\n");
   });
 
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {
@@ -731,7 +815,6 @@ describe("recorded program adapters", () => {
       },
       {
         cwd: workspace,
-        isolateEnvironment: true,
         resolvePrivate: () => "print('setup-noise')\nanswer = 41",
       },
     );
@@ -769,7 +852,7 @@ describe("recorded program adapters", () => {
 
   it("replays private Python setup cells once in a fresh process and suppresses setup output", async () => {
     const workspace = await makeWorkspace();
-    const adapter = createProgramAdapter({ cwd: workspace, isolateEnvironment: true });
+    const adapter = createProgramAdapter({ cwd: workspace });
     const sources: Record<string, string> = {
       "private:python:setup-1":
         "print('setup-noise')\ncounter = globals().get('counter', 0) + 1\nbase = 7\nexec = 'shadowed-exec'\ncompile = 'shadowed-compile'\nglobals = 'shadowed-globals'",
@@ -1065,31 +1148,6 @@ describe("recorded program adapters", () => {
     expect(await run("printf '\\n'")).toBe("\n");
   });
 
-  it("hands an isolated program only the environment it was given", async () => {
-    const workspace = await makeWorkspace();
-    process.env.RESIN_DAEMON_SECRET = "leaked-value";
-    try {
-      const isolated = await runRecordedProgram(
-        {
-          kind: "shell",
-          source: 'printf "%s|%s" "${RESIN_DAEMON_SECRET:-none}" "${RESIN_REPLAY:-none}"',
-        },
-        { cwd: workspace, isolateEnvironment: true, env: { RESIN_REPLAY: "1" } },
-      );
-      // The operator's own environment is not the replayed program's environment.
-      expect(isolated.value).toBe("none|1");
-
-      const inherited = await runRecordedProgram(
-        { kind: "shell", source: 'printf "%s" "${RESIN_DAEMON_SECRET:-none}"' },
-        { cwd: workspace },
-      );
-      // Without isolation the process's environment is used, which is what the daemon itself wants.
-      expect(inherited.value).toBe("leaked-value");
-    } finally {
-      delete process.env.RESIN_DAEMON_SECRET;
-    }
-  });
-
   it("carries a program's answer into the next call that consumes it", async () => {
     const workspace = await makeWorkspace();
     const adapters = new RuntimeAdapterRegistry();
@@ -1162,6 +1220,64 @@ describe("recorded program adapters", () => {
       "from-argument\n",
     );
     expect(await adapter.call({ step, arguments: {} })).toBe("from-source\n");
+    const ordinary = recordedStep({
+      id: "ordinary-workdir-data",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "run-command",
+      program: { kind: "shell", source: "pwd", argument: "command" },
+      arguments: [literalArgument("command", "pwd")],
+    });
+    expect(
+      await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: "/" } }),
+    ).toBe(`${workspace}\n`);
+    expect(await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: 3 } })).toBe(
+      `${workspace}\n`,
+    );
+  });
+
+  it("runs explicitly recorded Codex bash-login scripts in the observed working directory", async () => {
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter({ cwd: "/" });
+    const step = recordedStep({
+      id: "codex-shell",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+      arguments: [literalArgument("cmd", '[[ -n "$BASH_VERSION" ]] && pwd')],
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: '[[ -n "$BASH_VERSION" ]] && pwd',
+          workdir: workspace,
+          raw: "const r = await tools.exec_command({cmd:'x'}); text(r.output);",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).toBe(`${workspace}\n`);
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: "",
+          workdir: workspace,
+          raw: "source",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).toBe("");
+    await expect(
+      adapter.call({
+        step,
+        arguments: {
+          cmd: "pwd",
+          workdir: 3,
+          raw: "source",
+          resinCodexShellProfile: "bash-login-v1",
+        },
+      }),
+    ).rejects.toThrow("workdir must be a string");
   });
 
   it("kills a program that outlives its time budget instead of waiting for it", async () => {

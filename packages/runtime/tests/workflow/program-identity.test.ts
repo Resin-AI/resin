@@ -272,7 +272,6 @@ function executableEnvironment(observed: WorkflowJsonValue): CandidateValidation
   return {
     adapters,
     workspaceId: "workspace-a",
-    workspaceDir: "/tmp/resin-program-identity-test",
     inputs: {},
     observed: { run: observed },
     resolvePrivate: () => "printf alpha",
@@ -287,11 +286,12 @@ it("attaches identities only after the final whole-plan replay is verified", asy
   });
   expect(verified.verification.status).toBe("verified");
   expect(verified.verification.programIdentities).toHaveLength(1);
-  const incomplete = await confirmPromotedPlan({
+  const mismatched = await confirmPromotedPlan({
     plan: executablePlan(),
     accepted: [],
     environment: executableEnvironment({ received: "not-the-recorded-result" }),
   });
-  expect(incomplete.verification.status).toBe("incomplete");
-  expect(incomplete.verification.programIdentities).toBeUndefined();
+  expect(mismatched.verification.status).toBe("failed");
+  expect(mismatched.verification.missed.map((entry) => entry.stepId)).toEqual(["run"]);
+  expect(mismatched.verification.programIdentities).toBeUndefined();
 });

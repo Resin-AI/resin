@@ -2,7 +2,12 @@ import { Transform } from "node:stream";
 import { DEFAULT_GATEWAY_INSTRUCTIONS, DISABLED_SEARCH_GATEWAY_INSTRUCTIONS } from "../gateway.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../protocol/framing.js";
-import { InitializeParamsSchema, type JsonRpcId, type JsonRpcMessage } from "../protocol/types.js";
+import {
+  InitializeParamsSchema,
+  type JsonRpcId,
+  type JsonRpcMessage,
+  RESIN_LEARNED_TOOL_META,
+} from "../protocol/types.js";
 
 export { DISABLED_SEARCH_GATEWAY_INSTRUCTIONS };
 
@@ -366,11 +371,13 @@ export function createToolSearchSurface(
                   if (fullCatalog) {
                     return searchEnabled ? true : !isSearch(name);
                   }
-                  // Stable facade exposes system meta tools only
+                  // The stable facade exposes the system meta tools and the tools Resin learned
+                  // for this workspace, which an agent can call by name without searching.
                   if (
                     name === "get_tool_schema" ||
                     name === "invoke_tool" ||
-                    name === "manage_tools"
+                    name === "manage_tools" ||
+                    record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true
                   ) {
                     return true;
                   }

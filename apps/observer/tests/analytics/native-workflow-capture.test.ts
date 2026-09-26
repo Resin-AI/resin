@@ -8,6 +8,7 @@ import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/a
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import {
   NormalizedSessionEventSchema,
+  RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   isSubstantiveComputationEvidence,
   readComputationEvidence,
@@ -26,12 +27,15 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import {
   RESIN_HARNESS_TOOL_RUNTIME,
+  RESIN_INVOKE_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
   WorkflowCallRecorder,
   readWorkflowCallCarrier,
+  readWorkflowResultCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 import {
@@ -181,6 +185,149 @@ describe("native capture of ordinary calls", () => {
     expect(JSON.stringify(events[1]!.parameters)).toBe(
       JSON.stringify({ source: "alpha-feed", page: 2 }),
     );
+  });
+
+  it("retains a zero-input composed call's meaningful result as an owned baseline", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const observedCall = recorder.observe(
+      call(1, "invoke_tool", { toolName: "local.render_result", parameters: {} }),
+      { workspaceId: "ws_native" },
+    );
+    const observedResult = recorder.observe(
+      result(1, "invoke_tool", { result: "meaningful-observed-private" }),
+      { workspaceId: "ws_native" },
+    );
+    expect(carrierOf(observedCall)).toMatchObject({
+      runtime: RESIN_INVOKE_TOOL_RUNTIME,
+      name: "local.render_result",
+      executionIndex: 0,
+    });
+    const projected = projectEventToMetadataOnly(observedResult);
+    const carrier = readWorkflowResultCarrier(
+      projected.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
+    );
+    expect(carrier?.output).toEqual({ type: "object", hasContent: true });
+    expect(carrier?.baselineReference).toEqual(expect.any(String));
+    expect(resolvePrivateReference(store, carrier!.baselineReference!)).toEqual({
+      result: "meaningful-observed-private",
+    });
+    const recipe = recordCallsFromEvents("composed-zero-input", [observedCall, observedResult]);
+    expect(recipe?.workflow.steps[0]?.observed.output).toEqual({
+      type: "object",
+      hasContent: true,
+    });
+    expect(recipe?.workflow.baseline?.observed).toMatchObject([
+      { stepId: "step0", reference: carrier!.baselineReference },
+    ]);
+    expect(store.origin(carrier!.baselineReference!)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(projected.metadata)).not.toContain("meaningful-observed-private");
+  });
+
+  it("records original explicit arguments for baseline replay without independent evidence", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const events = [
+      recorder.observe(
+        call(1, "invoke_tool", {
+          toolName: "local.fetch",
+          parameters: { source: { value: "original-private-source" } },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+      recorder.observe(
+        result(1, "invoke_tool", {
+          handle: "ref:session-native-capture:call_1",
+          result: { source: "original-private-source" },
+        }),
+        { workspaceId: "ws_native" },
+      ),
+    ];
+    const recipe = recordCallsFromEvents("original-input-baseline", events);
+    expect(recipe?.workflow.inputs).toEqual([{ name: "step0_source", type: "string" }]);
+    expect(recipe?.workflow.heldOut).toBeUndefined();
+    const baseline = recipe!.workflow.baseline!;
+    expect(baseline.observed).toHaveLength(1);
+    expect(resolvePrivateReference(store, baseline.observed[0]!.reference)).toEqual({
+      source: "original-private-source",
+    });
+    const source = baseline.inputs.find(
+      (entry) => entry.stepId === "step0" && entry.argument === "source",
+    );
+    expect(source).toBeDefined();
+    expect(resolvePrivateReference(store, source!.reference)).toBe("original-private-source");
+    expect(store.origin(source!.reference)?.workspaceId).toBe("ws_owned");
+    expect(JSON.stringify(events.map((entry) => entry.metadata))).not.toContain(
+      "original-private-source",
+    );
+  });
+
+  it("distinguishes two caller inputs named echo across independent complete executions", () => {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_owned",
+    });
+    const captured = [
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
+      call(2, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-1" } } }),
+      result(2, "invoke_tool", { handle: "ref:scope:call_2", result: { echo: "ping-1" } }),
+      userTurn(3),
+      call(3, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-9" } },
+      }),
+      result(3, "invoke_tool", { handle: "ref:scope:call_3", result: { echo: "release-9" } }),
+      call(4, "invoke_tool", { name: "local.probe", parameters: { echo: { value: "ping-2" } } }),
+      result(4, "invoke_tool", { handle: "ref:scope:call_4", result: { echo: "ping-2" } }),
+      // A retry may redeliver an early call/result only after the second execution
+      // completed; it is still the original step, not the next position of the repeat.
+      call(1, "invoke_tool", {
+        name: "local.publish",
+        parameters: { echo: { value: "release-7" } },
+      }),
+      result(1, "invoke_tool", { handle: "ref:scope:call_1", result: { echo: "release-7" } }),
+    ].map((entry) => recorder.observe(entry, { workspaceId: "ws_native" }));
+    const originalAndRedelivered = captured.filter(
+      (entry) => entry.type === "tool_call" && entry.callId === "call_1",
+    );
+    expect(originalAndRedelivered).toHaveLength(2);
+    const original = carrierOf(originalAndRedelivered[0]!)!;
+    const redelivered = carrierOf(originalAndRedelivered[1]!)!;
+    const repeated = carrierOf(
+      captured.find((entry) => entry.type === "tool_call" && entry.callId === "call_3")!,
+    )!;
+    expect(redelivered.origins).toEqual(original.origins);
+    expect(redelivered.inputs).toEqual(original.inputs);
+    expect(redelivered.executionIndex).toBe(original.executionIndex);
+    expect(repeated.inputs).toEqual(original.inputs);
+    const recipe = recordCallsFromEvents("two-echo-inputs", captured);
+    expect(recipe?.workflow.steps).toHaveLength(2);
+    expect(recipe?.workflow.inputs).toEqual([
+      { name: "step0_echo", type: "string" },
+      { name: "step1_echo", type: "string" },
+    ]);
+    expect(recipe?.workflow.heldOut?.observed).toHaveLength(2);
+    expect(
+      recipe?.workflow.heldOut?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-9", "ping-2"]);
+    expect(
+      recipe?.workflow.baseline?.inputs.map((entry) =>
+        resolvePrivateReference(store, entry.reference),
+      ),
+    ).toEqual(["release-7", "ping-1"]);
   });
 
   it("never puts a recorded value into the projected metadata of an ordinary call", () => {
@@ -338,7 +485,6 @@ describe("native capture of ordinary calls", () => {
     ]);
 
     expect(recipe?.workflow.steps).toHaveLength(1);
-    expect(recipe?.workflow.baseline?.inputs).toEqual([]);
     expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
@@ -621,6 +767,56 @@ describe("native capture of ordinary calls", () => {
     ).toEqual(output.slice(1));
   });
 
+  it("only offers lexically closed native Codex sources as standalone programs", () => {
+    const cases = [
+      { source: "text(JSON.stringify({ answer: 42 }));", standalone: true },
+      { source: "const tools = { send: text }; tools.send('local');", standalone: true },
+      {
+        source: "const run = ({ tools }) => tools.send('bound'); run({ tools: { send: text } });",
+        standalone: true,
+      },
+      { source: "text({ tools: 'literal', label: 'tools.send' });", standalone: true },
+      {
+        source:
+          "const run = (globalThis) => globalThis.tools.send('local'); run({ tools: { send: text } });",
+        standalone: true,
+      },
+      { source: "tools.send({ value: 7 });", standalone: false },
+      { source: "hostApi.send({ value: 7 });", standalone: false },
+      { source: "globalThis['tools'].send({ value: 7 });", standalone: false },
+      { source: "text({ hostApi });", standalone: false },
+      { source: "console.log('not provided by the isolated VM');", standalone: false },
+      { source: "import value from 'example'; text(value);", standalone: false },
+    ];
+    for (const [index, { source, standalone }] of cases.entries()) {
+      const decoded = decodeCodexTranscript(
+        [
+          {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call",
+              call_id: `call-closed-source-${index}`,
+              name: "exec",
+              input: source,
+            },
+          },
+        ],
+        { sessionId: `session-closed-source-${index}` },
+      );
+      const nativeCall = decoded.find((entry) => entry.type === "tool_call");
+      if (nativeCall?.type !== "tool_call") throw new Error("expected native exec call");
+      const observed = new WorkflowCallRecorder({
+        privateValues: new InMemoryPrivateValueStore(),
+      }).observe(nativeCall, { workspaceId: "ws_native" });
+      const carrier = carrierOf(observed);
+      expect(carrier?.runtime, source).toBe(
+        standalone ? RESIN_PROGRAM_RUNTIME : RESIN_HARNESS_TOOL_RUNTIME,
+      );
+      expect(carrier?.program?.sourceInterface, source).toBe(standalone ? "codex-exec" : undefined);
+      expect(carrier?.program?.kind, source).toBe(standalone ? "javascript" : undefined);
+    }
+  });
+
   it("does not establish workflow or computation success from a terminal truncated exec result", () => {
     const sessionId = "session-native-codex-exec-truncated";
     const decoded = decodeCodexTranscript(
@@ -692,8 +888,10 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toHaveLength(1);
-    const candidate = derivation.candidates[0]!;
+    expect(derivation.candidates.filter((entry) => entry.proposed.kind === "result")).toHaveLength(
+      1,
+    );
+    const candidate = derivation.candidates.find((entry) => entry.proposed.kind === "result")!;
     expect(candidate.stepId).toBe("step1");
     expect(candidate.argument).toBe("entry");
     expect(candidate.proposed).toEqual({
@@ -725,7 +923,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("refuses a short token that collides with unrelated arguments", () => {
@@ -747,7 +945,7 @@ describe("what the derivation offers, and what it refuses to offer", () => {
       },
     ]);
 
-    expect(derivation.candidates).toEqual([]);
+    expect(derivation.candidates.every((entry) => entry.proposed.kind === "input")).toBe(true);
   });
 
   it("proves a producer-to-consumer edge from the calls' own declared resource use", () => {
@@ -795,8 +993,132 @@ describe("what the derivation offers, and what it refuses to offer", () => {
     ]);
 
     // It is offered as a result binding instead, which is what the record actually supports.
-    expect(derivation.candidates).toHaveLength(1);
-    expect(derivation.candidates[0]!.reason).toBe("equal-to-earlier-result");
+    expect(
+      derivation.candidates
+        .filter((entry) => entry.stepId === "step1" && entry.argument === "handle")
+        .map((entry) => entry.reason),
+    ).toEqual(["equal-to-earlier-result"]);
+  });
+  it("proposes private nested primitive inputs, including false and zero, without displacing results", () => {
+    const derivation = deriveNativeCalls([
+      {
+        callId: "first",
+        stepId: "step0",
+        toolName: "vendor.measure",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { payload: { count: 0, enabled: false, label: "private-label" } },
+        result: { count: 0 },
+      },
+      {
+        callId: "second",
+        stepId: "step1",
+        toolName: "vendor.render",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { count: 0, enabled: false },
+      },
+    ]);
+    const inputs = derivation.candidates.filter((entry) => entry.proposed.kind === "input");
+    expect(
+      inputs.map((entry) => [
+        entry.stepId,
+        entry.argument,
+        entry.path,
+        entry.proposed.kind === "input" && entry.proposed.type,
+      ]),
+    ).toEqual([
+      ["step0", "payload", ["count"], "number"],
+      ["step0", "payload", ["enabled"], "boolean"],
+      ["step0", "payload", ["label"], "string"],
+      ["step1", "count", [], "number"],
+      ["step1", "enabled", [], "boolean"],
+    ]);
+    expect(JSON.stringify(inputs)).not.toContain("private-label");
+    expect(inputs.every((entry) => entry.missing.length > 0)).toBe(true);
+  });
+  it("bounds weak input proposals without starving a later producer-to-consumer binding", () => {
+    const firstArguments = Object.fromEntries(
+      Array.from({ length: 300 }, (_, position) => [`field${position}`, position]),
+    );
+    const derivation = deriveNativeCalls([
+      {
+        callId: "producer",
+        stepId: "step0",
+        toolName: "vendor.produce",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: firstArguments,
+        result: { id: "minted-late-result" },
+      },
+      {
+        callId: "consumer",
+        stepId: "step1",
+        toolName: "vendor.consume",
+        runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+        arguments: { id: "minted-late-result" },
+      },
+    ]);
+    expect(derivation.candidates.length).toBeLessThanOrEqual(256);
+    expect(
+      derivation.candidates.filter(
+        (candidate) => candidate.stepId === "step1" && candidate.argument === "id",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        proposed: { kind: "result", stepId: "step0", path: ["id"] },
+      }),
+    ]);
+    expect(
+      derivation.candidates.some(
+        (candidate) =>
+          candidate.stepId === "step0" &&
+          candidate.argument === "field0" &&
+          candidate.proposed.kind === "input",
+      ),
+    ).toBe(true);
+  });
+  it("still offers inputs for a program call after harness-tool offers exhaust their budget", () => {
+    const reads = Array.from({ length: 300 }, (_, position) => ({
+      callId: `read${position}`,
+      stepId: `step${position}`,
+      toolName: position % 2 === 0 ? "read" : "edit",
+      runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+      arguments: { path: `src/file-${position}.ts` },
+    }));
+    const derivation = deriveNativeCalls(
+      [
+        ...reads,
+        {
+          callId: "bash",
+          stepId: "stepBash",
+          toolName: "bash",
+          runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+          arguments: { command: "wc -l 'reports/emea-summary.csv'" },
+          program: { kind: "shell", argument: "command" },
+        },
+      ],
+      new Set(["emea"]),
+    );
+    const harness = derivation.candidates.filter((entry) => entry.stepId !== "stepBash");
+    expect(harness).toHaveLength(256);
+    expect(
+      derivation.candidates.filter(
+        (entry) => entry.stepId === "stepBash" && entry.proposed.kind === "input",
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+  it("caps one program family's offers on its own", () => {
+    const commands = Array.from({ length: 300 }, (_, position) => ({
+      callId: `bash${position}`,
+      stepId: `step${position}`,
+      toolName: "bash",
+      runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
+      arguments: { command: `wc -l 'reports/file-${position}.csv'` },
+      program: { kind: "shell" as const, argument: "command" },
+    }));
+    const derivation = deriveNativeCalls(commands);
+    expect(derivation.candidates).toHaveLength(256);
+    expect(derivation.candidates.map((entry) => entry.stepId)).toEqual(
+      commands.slice(0, 256).map((command) => command.stepId),
+    );
   });
 });
 
@@ -827,17 +1149,15 @@ describe("the recording an ordinary session produces", () => {
     ]);
 
     // The suggestion is reported and not executed: the step still carries the recorded value.
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]!.stepId).toBe("step1");
-    expect(workflow.candidates![0]!.proposed).toEqual({
-      kind: "result",
-      stepId: "step0",
-      path: ["entry", "handle"],
-    });
+    expect(workflow.candidates).toContainEqual(
+      expect.objectContaining({
+        stepId: "step1",
+        proposed: { kind: "result", stepId: "step0", path: ["entry", "handle"] },
+      }),
+    );
     const storedArgument = workflow.steps[1]!.arguments.find((entry) => entry.name === "token")!;
     expect(storedArgument.source.kind).toBe("template");
 
-    expect(workflow.baseline?.inputs).toEqual([]);
     expect(workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0", "step1"]);
     expect(
       workflow.baseline?.observed.every((entry) =>
@@ -882,8 +1202,9 @@ describe("a value embedded in a program an ordinary session ran", () => {
     // The record still says the call was a program, and which argument held its text.
     expect(carrier.program).toEqual({ kind: "shell", source: "", argument: "command" });
 
-    expect(carrier.candidates).toHaveLength(1);
-    const candidate = carrier.candidates![0]!;
+    const results = carrier.candidates!.filter((entry) => entry.proposed.kind === "result");
+    expect(results).toHaveLength(1);
+    const candidate = results[0]!;
     expect(candidate.argument).toBe("command");
     expect(candidate.path).toEqual(["tokens", 2]);
     expect(candidate.proposed).toEqual({ kind: "result", callId: "call_1", path: ["stdout"] });
@@ -905,8 +1226,9 @@ describe("a value embedded in a program an ordinary session ran", () => {
 
     // The call the capture numbered `step1` keeps the position the capture gave the token: the
     // recording renumbers calls, and a token index is not a step identity.
-    expect(workflow.candidates).toHaveLength(1);
-    expect(workflow.candidates![0]).toMatchObject({
+    const results = workflow.candidates!.filter((entry) => entry.proposed.kind === "result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
       stepId: "step1",
       argument: "command",
       path: ["tokens", 2],
@@ -981,7 +1303,7 @@ describe("the demonstration an ordinary session offers", () => {
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
 
-  it("does not infer inputs from discovered schema, shared values, or repeated calls", () => {
+  it("does not declare inputs from discovered schema, shared values, or repeated calls", () => {
     const observed = record([
       discovery([
         {
@@ -994,11 +1316,18 @@ describe("the demonstration an ordinary session offers", () => {
       userTurn(2),
       call(3, "vendor.intake", { feed: "bravo-feed", note: "bravo-feed" }),
     ]).events;
-    expect(carrierOf(observed[1]!)?.candidates).toBeUndefined();
-    expect(carrierOf(observed[3]!)?.candidates).toBeUndefined();
+    const recipe = recordCallsFromEvents("wf_no_inferred_inputs", observed)!;
+    expect(recipe.workflow.inputs).toEqual([]);
     expect(
-      recordCallsFromEvents("wf_no_inferred_inputs", observed)!.workflow.candidates,
-    ).toBeUndefined();
+      recipe.workflow.steps[0]!.arguments.every((argument) => argument.source.kind === "template"),
+    ).toBe(true);
+    expect(
+      recipe.workflow.candidates?.every(
+        (candidate) => candidate.proposed.kind === "input" && candidate.missing.length > 0,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("alpha-feed");
+    expect(JSON.stringify(recipe.workflow.candidates)).not.toContain("bravo-feed");
   });
 });
 
@@ -1058,7 +1387,6 @@ describe("a recording and the demonstrations read beside it", () => {
       "step0",
       "step1",
     ]);
-    expect(recipe!.workflow.baseline?.inputs).toEqual([]);
     expect(recipe!.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual([
       "step0",
       "step1",
@@ -1797,5 +2125,106 @@ describe("native Codex rollout workflow and computation capture", () => {
       ),
     ).toBe(false);
     expect(recordCallsFromEvents(sessionId, replayed)?.workflow.baseline).toBeUndefined();
+  });
+
+  it("captures an independent native command with its exact pre-redaction process inputs", async () => {
+    const sessionId = "codex-independent-native-command";
+    const store = new InMemoryPrivateValueStore();
+    const pipeline = new NormalizationPipeline({ privateValueStore: store });
+    pipeline.registerDecoder(new CodexRecordDecoder());
+    const recorder = new WorkflowCallRecorder({
+      privateValues: store,
+      privateValueOwnerWorkspaceId: "ws_codex_native",
+    });
+    const timestamp = "2026-09-23T12:00:00.000Z";
+    const command = "python - <<'PY'\nprint('exact output')\nPY";
+    const native = [
+      {
+        type: "session_meta",
+        payload: { session_id: sessionId, id: sessionId, cwd: "/work/demo" },
+      },
+      { type: "turn_context", payload: { turn_id: "turn", cwd: "/work/demo", model: "gpt-6-sol" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "exec-independent",
+            command: ["/bin/bash", "-lc", command],
+            cwd: "file:///work/demo",
+            status: "completed",
+            stdout: "exact output\n",
+            stderr: "",
+            exit_code: 0,
+            duration: { secs: 0, nanos: 5_000_000 },
+          },
+          started_at_ms: 1_000,
+          completed_at_ms: 1_005,
+        },
+      },
+    ];
+    const events: NormalizedSessionEvent[] = [];
+    for (const [index, entry] of native.entries()) {
+      const ordinal = index + 1;
+      for (const result of await pipeline.processRecord(
+        {
+          recordId: `rec_${sessionId}_${ordinal}`,
+          sessionId,
+          harnessId: "codex-cli",
+          sequenceNumber: ordinal,
+          recordType: "transcript_line",
+          timestamp,
+          rawPayload: JSON.stringify({ timestamp, ordinal, ...entry }),
+          cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+          metadata: {},
+        },
+        { sessionId, harnessId: "codex-cli", workspaceId: "ws_codex_native" },
+      )) {
+        if (result.status !== "success" || result.isDuplicate) continue;
+        events.push(
+          projectEventToMetadataOnly(
+            recorder.observe(result.event, { workspaceId: "ws_codex_native" }),
+          ),
+        );
+      }
+    }
+    const commandEvent = events.find((entry) => entry.type === "command_exec");
+    expect(commandEvent?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
+    // The bash login wrapper is unwrapped: naming sees the script; the recorded output never leaves.
+    expect(commandEvent?.metadata?.[RESIN_COMMAND_TEXT_METADATA_KEY]).toEqual({
+      version: 1,
+      text: command,
+      truncated: false,
+    });
+    expect(JSON.stringify(events).replaceAll(JSON.stringify(command), "")).not.toContain(
+      "exact output",
+    );
+    const recipe = recordCallsFromEvents(sessionId, events);
+    const step = recipe?.workflow.steps[0];
+    expect(step?.callId).toBe("exec-independent");
+    const resolved = Object.fromEntries(
+      (step?.arguments ?? []).map((argument) => {
+        const source = argument.source;
+        const reference =
+          source.kind === "private"
+            ? source.reference
+            : source.kind === "template" && source.template.type === "private"
+              ? source.template.reference
+              : source.kind === "template" && source.template.type === "program"
+                ? source.template.sourceReference
+                : undefined;
+        return [argument.name, reference && resolvePrivateReference(store, reference)];
+      }),
+    );
+    // Normalization redacts the working directory; replay needs the directory the process used.
+    expect(resolved).toEqual({
+      cmd: command,
+      workdir: "/work/demo",
+      resinCodexShellProfile: "bash-login-native-v1",
+    });
+    expect(resolvePrivateReference(store, recipe!.workflow.baseline!.observed[0]!.reference)).toBe(
+      "exact output\n",
+    );
   });
 });

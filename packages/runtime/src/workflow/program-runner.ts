@@ -14,17 +14,20 @@ import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process"
 import { accessSync, constants as fsConstants } from "node:fs";
 import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { parse } from "@babel/parser";
 import {
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
+  WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
+import { runDerivation } from "./derivation-sandbox.js";
+import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
 
@@ -39,21 +42,16 @@ export interface RecordedProgramRun {
 export interface ProgramRunnerOptions {
   /** Directory the program runs in. Defaults to the process cwd. */
   cwd?: string;
+  /** Fixed local process profile, selected only from a recorded process argument. */
+  shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
   timeoutMs?: number;
+  /** Cancel only this replay-owned child process tree. */
+  signal?: AbortSignal;
   /** Cap on captured stdout or source-interface-specific authored output bytes. */
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
   env?: Record<string, string>;
-  /**
-   * Hand the program ONLY the environment it was given, never the process's own.
-   *
-   * A replay is not the daemon: a recorded program has no business reading the operator's
-   * credentials, tokens or proxy configuration out of the environment, and inheriting them would
-   * make a validation run as powerful as the daemon itself. PATH is always provided, because a
-   * program text naming an interpreter needs one to be found.
-   */
-  isolateEnvironment?: boolean;
   /** Resolves private Python setup-cell source in the owning workspace. */
   resolvePrivate?: (
     reference: string,
@@ -640,6 +638,17 @@ function resolveInterpreter(
   return undefined;
 }
 
+/**
+ * Codex records a command's stderr inside its stdout, so a replay of a Codex-recorded command
+ * merges the two the same way: a quiet `pip install` that only warned on stderr still produced
+ * the output it recorded. A login shell's profile may also reset PATH (Debian's `/etc/profile`
+ * does for root), dropping directories the recorded command resolved programs from, such as an
+ * agent harness's bundled helpers; the inherited PATH goes back in front. Both happen on the
+ * script's first line so its line numbers are unchanged.
+ */
+const INHERITED_PATH_VARIABLE = "RESIN_INHERITED_PATH";
+const CODEX_SHELL_PRELUDE = `exec 2>&1; if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then PATH="$${INHERITED_PATH_VARIABLE}:$PATH"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE}; `;
+
 function invocationFor(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions,
@@ -653,9 +662,11 @@ function invocationFor(
     case "shell":
       // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
       // recorded call did, and exit status is the program's exit status.
-      return platform === "win32"
-        ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
-        : { command: "/bin/sh", args: ["-c", source] };
+      return options.shellInvocation === "bash-login"
+        ? { command: "/bin/bash", args: ["-lc", `${CODEX_SHELL_PRELUDE}${source}`] }
+        : platform === "win32"
+          ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
+          : { command: "/bin/sh", args: ["-c", source] };
     case "python": {
       const interpreter = resolveInterpreter(["python3", "python"], env, platform);
       if (!interpreter) {
@@ -698,6 +709,8 @@ function invocationFor(
       }
       // Ordinary programs and TypeScript records retain their existing process semantics.
       return { command: process.execPath, args: ["-e", source] };
+    case "patch":
+      throw new Error("a recorded patch is applied in-process, never as a child process");
     default: {
       const exhaustive: never = program.kind;
       throw new Error(`recorded program kind '${String(exhaustive)}' cannot be run`);
@@ -718,7 +731,11 @@ function assertRunnable(program: unknown): asserts program is WorkflowRecordedPr
   const interfaceErrors: string[] = [];
   validateWorkflowProgramSourceInterface(program, "recorded program", interfaceErrors);
   if (interfaceErrors.length > 0) throw new Error(interfaceErrors[0]);
-  if (program.source.length === 0 && (program.argv?.length ?? 0) === 0) {
+  if (
+    program.source.length === 0 &&
+    (program.argv?.length ?? 0) === 0 &&
+    !(program.kind === "shell" && program.argument !== undefined)
+  ) {
     throw new Error(
       "the record carries neither a program source nor an argv, so there is nothing to run",
     );
@@ -1071,7 +1088,8 @@ function runChild(
   const stdout = new BoundedOutput(maxOutputBytes);
   const stderr = new BoundedOutput(maxOutputBytes);
   const cwd = options.cwd ?? process.cwd();
-
+  if (options.signal?.aborted)
+    return Promise.reject(new Error("recorded program replay was cancelled"));
   return new Promise<CapturedRun>((resolve, reject) => {
     const stdio: SpawnOptions["stdio"] =
       invocation.privateResultFd === undefined
@@ -1091,19 +1109,27 @@ function runChild(
       detached: process.platform !== "win32",
     });
     let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
+    let termination: string | undefined;
+    const terminate = (reason: string): void => {
+      if (settled || termination !== undefined) return;
+      termination = reason;
       killProcessTree(child);
-      reject(new Error(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`));
-    }, timeoutMs);
-
+    };
+    const onAbort = (): void => terminate("recorded program replay was cancelled");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    const timer = setTimeout(
+      () => terminate(`recorded program exceeded its ${timeoutMs}ms time budget and was killed`),
+      timeoutMs,
+    );
     const finish = (run: CapturedRun): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(run);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (termination !== undefined) reject(new Error(termination));
+      else resolve(run);
     };
-
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.write(chunk);
     });
@@ -1112,13 +1138,10 @@ function runChild(
     });
     child.on("error", (error: Error) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(
-        new Error(
-          `recorded program could not be started (${invocation.command}): ${error.message}`,
-        ),
-      );
+      // Spawn failures also emit close; keep the abort reason when cancellation won the race.
+      if (termination === undefined) {
+        termination = `recorded program could not be started (${invocation.command}): ${error.message}`;
+      }
     });
     if (invocation.input !== undefined && child.stdin !== null) {
       // The interpreter may exit before consuming all source; EPIPE is a normal transport race.
@@ -1312,6 +1335,19 @@ export async function runRecordedProgram(
   targetCallId?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
+  if (program.kind === "patch") {
+    // An edit is applied here, confined to the working directory; it starts no process.
+    if (options.cwd === undefined) {
+      throw new Error("a recorded patch needs the working directory it is confined to");
+    }
+    await applyRecordedPatch(program.source, options.cwd);
+    return {
+      exitCode: 0,
+      stdout: WORKFLOW_PATCH_STEP_RESULT,
+      stderr: "",
+      value: WORKFLOW_PATCH_STEP_RESULT,
+    };
+  }
   if (program.sourceInterface === "codex-exec") {
     assertCodexExecHasNoImports(program.source);
   }
@@ -1351,9 +1387,7 @@ export async function runRecordedProgram(
         ? await preparePythonReplaySource(program, options, targetCallId, outputPath)
         : program.source;
     const runnable = source === program.source ? program : { ...program, source };
-    const env: NodeJS.ProcessEnv = options.isolateEnvironment
-      ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
-      : { ...process.env, ...options.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
     const pythonReplayInput =
       runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
     const javascriptReplayInput =
@@ -1381,7 +1415,12 @@ export async function runRecordedProgram(
       throw new Error("recorded Codex exec replay result channel was not prepared");
     }
     // The VM driver is trusted Node code, but source-module text must not be preloaded into it.
-    const childEnv = isCodexExec ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" } : env;
+    const bashLogin = runnable.kind === "shell" && options.shellInvocation === "bash-login";
+    const childEnv = isCodexExec
+      ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" }
+      : bashLogin && env.PATH !== undefined
+        ? { ...env, [INHERITED_PATH_VARIABLE]: env.PATH }
+        : env;
     const invocation = invocationFor(
       runnable,
       options,
@@ -1473,6 +1512,38 @@ function programTextFor(
 }
 
 /**
+ * Applies a recorded patch step: its `workdir` argument is the directory the edit is confined to.
+ * A validation replay maps the recorded workspace root, in the workdir and in the patch's header
+ * alike, into the snapshot, and refuses a workdir outside that root.
+ */
+async function runRecordedPatchCall(
+  request: RecordedCallRequest,
+  source: string,
+  options: ProgramRunnerOptions,
+): Promise<WorkflowJsonValue> {
+  const { step } = request;
+  const workdir = request.arguments.workdir;
+  if (typeof workdir !== "string" || !isAbsolute(workdir)) {
+    throw new Error(`step '${step.id}' cannot run: a patch needs an absolute workdir`);
+  }
+  if (Object.keys(request.arguments).some((name) => name !== "workdir" && name !== "patch")) {
+    throw new Error(`step '${step.id}' cannot run: unsupported recorded patch arguments`);
+  }
+  try {
+    const run = await runRecordedProgram(
+      { ...step.callable.program!, source },
+      { ...options, cwd: workdir },
+      step.callId,
+    );
+    return run.value;
+  } catch (error) {
+    throw new Error(
+      `step '${step.id}' failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Runs the program a recorded call names and returns its value. Both program families share this:
  * they differ in how the observer recorded the call, not in what running it again means. A failure
  * — a missing program, an unrunnable record, a non-zero exit status — throws with the step id so
@@ -1490,22 +1561,84 @@ export async function runRecordedCall(
     );
   }
   const source = programTextFor(program, request.arguments);
-  if (source.length === 0) {
+  if (
+    source.length === 0 &&
+    !(
+      program.kind === "shell" &&
+      program.argument !== undefined &&
+      Object.hasOwn(request.arguments, program.argument) &&
+      request.arguments[program.argument] === ""
+    )
+  ) {
     throw new Error(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
+  if (step.origin === "derivation") {
+    // Model-written: runs in the Pyodide sandbox with only its inputs, never as a host process.
+    if (program.kind !== "python" || program.sourceInterface !== "python-eval") {
+      throw new Error(`step '${step.id}' cannot run: a derivation must be a Python Eval program`);
+    }
+    try {
+      return await runDerivation(source, {
+        timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+        ...(request.signal
+          ? { signal: request.signal }
+          : options.signal
+            ? { signal: options.signal }
+            : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `step '${step.id}' failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
+  const requestedWorkdir = request.arguments.workdir;
+  const shellProfile = request.arguments.resinCodexShellProfile;
+  const nativeCodexShell = shellProfile === "bash-login-native-v1";
+  if (
+    (shellProfile === "bash-login-v1" || nativeCodexShell) &&
+    typeof requestedWorkdir !== "string"
+  ) {
+    throw new Error(`step '${step.id}' cannot run: workdir must be a string`);
+  }
+  if (
+    shellProfile !== undefined &&
+    !(
+      ((shellProfile === "bash-login-v1" &&
+        step.callable.name === "exec" &&
+        typeof request.arguments.raw === "string") ||
+        (nativeCodexShell && step.callable.name === "command_exec")) &&
+      program.kind === "shell" &&
+      program.argument === "cmd" &&
+      typeof requestedWorkdir === "string"
+    )
+  ) {
+    throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
+  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
+    ...((shellProfile === "bash-login-v1" || nativeCodexShell) &&
+    typeof requestedWorkdir === "string"
+      ? { cwd: requestedWorkdir }
+      : {}),
+    ...(shellProfile === "bash-login-v1" || nativeCodexShell
+      ? { shellInvocation: "bash-login" as const }
+      : {}),
     ...(options.resolvePrivate === undefined && request.resolvePrivate
       ? { resolvePrivate: request.resolvePrivate }
       : {}),
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
   };
   const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {
-    const tail = stderrTail(run.stderr);
-    const detail = tail.length > 0 ? `: ${tail}` : " (no stderr)";
+    // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
+    const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);
+    const detail = tail.length > 0 ? `: ${tail}` : " (no output)";
     throw new Error(
       `step '${step.id}' failed: recorded ${program.kind} program exited with code ${run.exitCode}${detail}`,
     );

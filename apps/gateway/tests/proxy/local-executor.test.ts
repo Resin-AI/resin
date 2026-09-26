@@ -16,8 +16,9 @@ import {
   generateBundleKeyPair,
   signBundlePayload,
 } from "@resin/runtime";
+import { resolveDenoExecutable } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LocalArtifactExecutor, resolveDenoExecutable } from "../../src/proxy/local-executor.js";
+import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
 

@@ -25,9 +25,6 @@ export function analyzeProgramSourceProjection(
   redactedSource: string,
   expectedProtectedTokens?: readonly number[],
 ): { tokens: ProgramToken[]; protectedTokens: number[] } {
-  if (language === "shell") {
-    throw new ProgramSourceProjectionError("shell program source projections are not supported");
-  }
   const tokens = tokenizeProgram(language, originalSource);
   const redactedTokens = tokenizeProgram(language, redactedSource);
   if (tokens.length !== redactedTokens.length) {

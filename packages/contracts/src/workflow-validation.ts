@@ -80,10 +80,10 @@ export interface WorkflowValidationVerdict {
   reason?: string;
 }
 
-/** Proof that a plan was replayed once in a fresh disposable process. */
+/** Digest-bound proof that the plan was checked against this device's own recordings. */
 export interface WorkflowValidationReplayProof {
-  kind: "fresh-process";
-  /** The exact plan digest that the replay executed. */
+  kind: "recording";
+  /** The exact plan digest that the recording check evaluated. */
   planDigest: string;
 }
 
@@ -95,7 +95,7 @@ export interface WorkflowValidationPlanVerification {
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   /** Program identities are emitted only when the whole replay was verified. */
   programIdentities?: WorkflowProgramIdentity[];
-  /** Fresh-process proof is optional for old decisions and required by cloud publication gates. */
+  /** Replay proof is optional for old decisions and required by publication gates. */
   replay?: WorkflowValidationReplayProof;
 }
 
@@ -112,7 +112,7 @@ export interface WorkflowValidationDecision {
   attempt: string;
   planDigest: string;
   evidenceDigest: string;
-  /** Identity of the disposable environment the replay ran in. */
+  /** Identity of the device whose recording the plan was checked against. */
   environment: string;
   verdicts: WorkflowValidationVerdict[];
   verification?: WorkflowValidationPlanVerification;
@@ -164,6 +164,12 @@ const ProposedBindingSchema = z.union([
     kind: z.literal("input"),
     name: NonEmptyString,
     type: z.enum(["string", "number", "boolean", "object", "array"]),
+    recordedDefault: z.literal(true).optional(),
+  }),
+  z.object({
+    kind: z.literal("extract"),
+    stepId: NonEmptyString,
+    locator: NonEmptyString,
   }),
 ]);
 
@@ -178,7 +184,7 @@ const ProgramIdentitySchema = z.object({
 });
 
 const ReplayProofSchema = z.object({
-  kind: z.literal("fresh-process"),
+  kind: z.literal("recording"),
   planDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
 });
 

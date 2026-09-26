@@ -1,11 +1,31 @@
 import { type RecordedWorkflow, validateRecordedWorkflow } from "@resin/contracts";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
+import { readWorkflowResultCarrier } from "../../src/analytics/workflow-carrier.js";
 import {
   type RecordedCallObservation,
   acceptInputProposals,
   recordCallsFromEvents,
   recordWorkflowRecipe,
 } from "../../src/analytics/workflow-recipe.js";
+
+it("projects only value-free output facts from result carriers", () => {
+  expect(
+    readWorkflowResultCarrier({
+      output: { type: "boolean", hasContent: true },
+      source: "private",
+    }),
+  ).toEqual({ output: { type: "boolean", hasContent: true } });
+  expect(
+    readWorkflowResultCarrier({
+      output: { type: "string", hasContent: false, value: "private" },
+    }),
+  ).toBeUndefined();
+  expect(
+    readWorkflowResultCarrier({
+      output: { type: "number", hasContent: "false" },
+    }),
+  ).toBeUndefined();
+});
 
 function leaf(value: RecordedWorkflow["steps"][number]["arguments"][number]["source"]) {
   if (value.kind !== "template") throw new Error(`expected a template, got ${value.kind}`);
