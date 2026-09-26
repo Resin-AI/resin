@@ -356,9 +356,10 @@ describe("recorded workflows of ordinary calls", () => {
       privateValueStore: privateValues,
     });
 
-    expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
-      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}\nParameters (recorded values, used when omitted): month = 2025-01; text = EU zone`,
-    );
+    const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
+    // Each bound token reads as its input, and each input's recorded value is listed once.
+    expect(description).toContain("python3 solve.py --month {month} {text}\n");
+    expect(description).toContain("month = 2025-01; text = EU zone");
   });
 
   it("refuses to run a recorded program the manifest does not grant", async () => {

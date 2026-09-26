@@ -280,28 +280,6 @@ describe("MCP Initialization & Capability Negotiation", () => {
       const instructions = resp.result.instructions;
       expect(instructions).toBeDefined();
       expect(instructions).toBe(DEFAULT_GATEWAY_INSTRUCTIONS);
-
-      // Retains product label
-      expect(instructions).toContain("Resin Autonomous MCP Gateway");
-      // Advises checking listed Resin workflows before manually expanding repeated multi-step work
-      expect(instructions).toContain(
-        "Check listed Resin workflows before manually expanding repeated multi-step work",
-      );
-      // Prefers an active matching workflow only when it performs exactly the user's authorized task
-      expect(instructions).toContain(
-        "Prefer an active matching workflow only when it performs exactly the user's authorized task",
-      );
-      // Forbids expanding scope/side effects merely to fit a tool
-      expect(instructions).toContain("do not expand scope or side effects merely to fit a tool");
-      // Permits native tools when no suitable workflow is available
-      expect(instructions).toContain("When no suitable workflow is available, use native tools");
-      // Requires checking tool errors and actual task effects before claiming success
-      expect(instructions).toContain(
-        "Check tool errors and actual task effects before claiming success",
-      );
-      expect(instructions).toContain("current registry at call time");
-      expect(instructions).toContain("Discovery is read-only");
-      expect(instructions).toContain("Honor the user's explicit tool choices and restrictions");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -545,7 +545,10 @@ export class LocalArtifactExecutor {
           : source.kind === "template"
             ? templateText(source.template)
             : undefined;
-    /** A program whose tokens are bound to caller inputs: its recorded text and each input's value. */
+    /**
+     * A program whose tokens are bound to caller inputs: its recorded text with each bound token
+     * shown as `{input}`, so a caller sees where a value goes, and each input's recorded value.
+     */
     const parameterized = (
       source: WorkflowValueSource,
     ): { text: string; parameters: string[] } | undefined => {
@@ -562,15 +565,25 @@ export class LocalArtifactExecutor {
       } catch {
         return { text: recorded, parameters: [] };
       }
-      const parameters = template.holes.flatMap((hole) => {
+      const bound = template.holes.flatMap((hole) => {
         const token = tokens[hole.token];
-        return hole.binding.type === "input" && token !== undefined
-          ? [`${hole.binding.name} = ${token.value ?? token.raw}`]
+        return hole.binding.type === "input" &&
+          token !== undefined &&
+          recorded.slice(token.start, token.end) === token.raw
+          ? [{ token, name: hole.binding.name }]
           : [];
       });
-      return { text: recorded, parameters: [...new Set(parameters)] };
+      let text = recorded;
+      for (const { token, name } of [...bound].sort((a, b) => b.token.start - a.token.start)) {
+        text = `${text.slice(0, token.start)}{${name}}${text.slice(token.end)}`;
+      }
+      return {
+        text,
+        parameters: bound.map(({ token, name }) => `${name} = ${token.value ?? token.raw}`),
+      };
     };
     const steps: string[] = [];
+    const parameters = new Set<string>();
     for (const [index, step] of plan.steps.entries()) {
       const program = step.callable.program;
       const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
@@ -584,16 +597,17 @@ export class LocalArtifactExecutor {
         programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
           ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
           : programText;
-      const parameters =
-        bound === undefined || bound.parameters.length === 0
-          ? ""
-          : `\nParameters (recorded values, used when omitted): ${bound.parameters.join("; ")}`;
+      for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
       steps.push(
-        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}${parameters}`,
+        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
       );
     }
     if (steps.length === 0) return undefined;
-    const description = `Recorded on this machine:\n${steps.join("\n")}`;
+    const inputs =
+      parameters.size === 0
+        ? ""
+        : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${[...parameters].join("; ")}`;
+    const description = `Recorded on this machine:\n${steps.join("\n")}${inputs}`;
     this.recordedWorkflowDescriptions.set(key, description);
     return description;
   }
