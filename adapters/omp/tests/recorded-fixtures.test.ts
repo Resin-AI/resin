@@ -3,9 +3,8 @@ import * as path from "node:path";
 import type { IntermediateSessionEvent, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { OmpRecordDecoder } from "../src/decoder.js";
-import { classifyTranscriptSessionKind } from "../src/discovery.js";
+import { OMP_TESTED_VERSIONS, classifyTranscriptSessionKind } from "../src/discovery.js";
 import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.js";
-import { OMP_TESTED_VERSIONS } from "../src/versions.js";
 
 // Scrubbed sessions recorded with `omp -p` on the release named by the directory; see CAPTURE.md.
 const RECORDED = path.join(__dirname, "fixtures", "recorded");

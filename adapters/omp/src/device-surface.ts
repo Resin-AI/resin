@@ -14,7 +14,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { type OmpMcpServerConfig, resolveOmpConfigPath } from "./config-planner.js";
-import type { HarnessMcpServerDescriptor } from "@resin/harness-contracts";
 import { resolveOmpHome } from "./discovery.js";
 
 /** The scheme OMP's device surface uses for MCP tools. */
@@ -120,33 +119,4 @@ export function readConfiguredOmpServers(options?: {
     for (const server of servers) byName[server.name] = server;
   }
   return Object.values(byName);
-}
-
-/**
- * The connection to a server OMP itself declares, for replaying a recorded MCP step. A server the
- * configuration does not declare, or declares over a transport the host cannot speak, has none.
- */
-export function resolveOmpMcpServer(
-  name: string,
-  workspaceRoot: string,
-): HarnessMcpServerDescriptor | undefined {
-  const server = readConfiguredOmpServers({ workspaceRoot }).find((entry) => entry.name === name);
-  if (server === undefined) return undefined;
-  const { entry } = server;
-  const transport = entry.transport ?? entry.type;
-  if (entry.command !== undefined && (transport === undefined || transport === "stdio")) {
-    return {
-      name: server.name,
-      transport: {
-        kind: "stdio",
-        command: entry.command,
-        ...(entry.args === undefined ? {} : { args: entry.args }),
-        ...(entry.env === undefined ? {} : { env: entry.env }),
-      },
-    };
-  }
-  if (entry.url !== undefined && (transport === "http" || transport === "sse")) {
-    return { name: server.name, transport: { kind: "http", url: entry.url } };
-  }
-  return undefined;
 }

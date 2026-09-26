@@ -3,7 +3,6 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
   HarnessConfigOrchestrator,
-  RESIN_MCP_SERVER_KEYS,
   planHarnessRegistration,
   resolveHarnessConfigPath,
   resolveInstalledResinMcpCommand,
@@ -85,11 +84,6 @@ describe("harness adapter operations", () => {
         RESIN_OMP_HOME: "/profiles/resin-omp",
       }),
     ).toBe("/profiles/resin-omp/agent/mcp.json");
-    expect(RESIN_MCP_SERVER_KEYS).toEqual({
-      "claude-code": "resin",
-      "codex-cli": "resin",
-      omp: "resin",
-    });
   });
 
   it("plans registrations without removing user JSON servers, settings, or env", async () => {

@@ -25,9 +25,9 @@ export type ExecFunction = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /**
- * Default supported versions for Claude Code CLI.
+ * Exact Claude Code versions qualified with recorded fixtures.
  */
-export const SUPPORTED_CLAUDE_VERSIONS = [">=0.1.0", ">=0.2.0", ">=1.0.0"];
+export const CLAUDE_TESTED_VERSIONS: readonly string[] = [];
 
 /**
  * Minimal semver comparator for Claude Code versions (e.g. "0.2.14", "1.0.0").

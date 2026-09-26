@@ -24,7 +24,6 @@ import {
 } from "../src/config-planner.js";
 import { ClaudeRecordDecoder, decodeClaudeTranscriptLine } from "../src/decoder.js";
 import {
-  SUPPORTED_CLAUDE_VERSIONS,
   detectClaudeWorkspaces,
   probeClaudeInstallation,
 } from "../src/discovery.js";
@@ -36,8 +35,6 @@ describe("Claude Code Harness Qualification Suite [REM-017]", () => {
 
   describe("1. Installation Discovery and Qualification", () => {
     it("qualifies installed Claude Code versions against supported version matrix", async () => {
-      expect(SUPPORTED_CLAUDE_VERSIONS).toContain(">=0.1.0");
-
       const fsBridge = new InMemoryConfigFsBridge();
       await fsBridge.writeFile("/home/user/.claude.json", JSON.stringify({ mcpServers: {} }));
       await fsBridge.writeFile("/usr/local/bin/claude", "#!/bin/sh\n");

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { invokeOmpNativeTool } from "../src/native-tool-invoker.js";
-import { OMP_TESTED_VERSIONS } from "../src/versions.js";
+import { OMP_TESTED_VERSIONS } from "../src/discovery.js";
 
 const roots: string[] = [];
 

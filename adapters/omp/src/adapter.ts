@@ -26,6 +26,7 @@ import {
   verifyOmpMcpConfig,
 } from "./config-planner.js";
 import {
+  OMP_TESTED_VERSIONS,
   type OmpDiscoveryCatalog,
   type OmpDiscoveryOptions,
   type ParsedTranscript,
@@ -37,7 +38,6 @@ import {
 } from "./discovery.js";
 import { getOmpRefreshCapability, handleOmpCatalogRefresh } from "./refresh.js";
 import { OmpSessionEventSource } from "./source.js";
-import { OMP_TESTED_VERSIONS } from "./versions.js";
 
 /**
  * Harness adapter for Oh My Pi (OMP) agent harness.
@@ -119,7 +119,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "omp";
   readonly name = "omp";
   readonly version = "0.1.0";
-  readonly supportedHarnessVersions: readonly string[] = OMP_TESTED_VERSIONS;
+  readonly supportedHarnessVersions = OMP_TESTED_VERSIONS;
 
   private readonly fsBridge?: ConfigFsBridge;
   private discoveryOptions?: OmpDiscoveryOptions;

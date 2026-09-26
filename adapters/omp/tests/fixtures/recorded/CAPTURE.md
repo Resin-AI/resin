@@ -3,7 +3,7 @@
 `<version>/sessions/` holds real OMP sessions recorded headlessly with `omp -p`, scrubbed, in
 OMP's own on-disk layout: `<ts>_<id>.jsonl` main sessions, `<ts>_<id>/<Agent>.jsonl` subagent
 sessions, and `<ts>_<id>/<n>.eval.log` spilled Eval output. `tests/recorded-fixtures.test.ts`
-decodes every version listed in `OMP_TESTED_VERSIONS` (`src/versions.ts`).
+decodes every version listed in `OMP_TESTED_VERSIONS` (`src/discovery.ts`).
 
 ## 18.3.2
 
