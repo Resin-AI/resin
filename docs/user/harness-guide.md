@@ -94,14 +94,14 @@ Only a confirmed completed native shell result can establish a successful local 
 
 ### What a learned tool can vary
 
-A learned tool replays the commands Codex ran, with some recorded values turned into inputs. A value becomes an input candidate when the request named it, when several commands of the job used it, or when two recordings of the same job used different values at that position. Candidates can be:
+A learned tool runs the commands Codex ran, with some recorded values turned into inputs. A value becomes an input candidate when the request named it, when several commands of the job used it, or when two recordings of the same job used different values at that position. Candidates can be:
 
 - a whole command word (`./release test alpha` → `{project}`), or part of one (`out/emea-2025-03/summary.csv` → `out/{region}-{month}/summary.csv`);
 - a literal inside a Python or Node program the command runs (a heredoc body or a `-c`/`-e` string); such inputs are named after the record field or variable the literal is compared with or assigned to (`x['merchant']=='…'` → `{merchant}`), and record field names themselves are never inputs;
 - a value an earlier command printed, such as a generated deployment id, which later commands then read from that command's output on every run;
-- a value on a line a Codex `apply_patch` edit added; the edit is replayed as a patch step confined to the working directory.
+- a value on a line a Codex `apply_patch` edit added; the edit runs as a patch step confined to the working directory.
 
-Every candidate stays the recorded value until a local replay in a disposable copy of the workspace confirms it. Replay snapshots copy files up to 256 MiB each (1 GiB in total) and time out after two minutes. Outputs, file edits and the original text of every program stay on this machine. The secret-redacted text of Codex commands, like other secret-redacted program views (see [Security and Privacy](security-and-privacy.md)), is sent to Resin's service to name the tool and choose its inputs; shell commands from other harnesses are not.
+Every candidate stays the recorded value until local validation confirms it. Validation runs nothing recorded: it resolves each step's call as an invocation would and checks that it equals the call this device recorded, so the recorded output answers the step (see [Limitations](limitations.md#recorded-workflow-validation)). Outputs, file edits and the original text of every program stay on this machine. The secret-redacted text of Codex commands, like other secret-redacted program views (see [Security and Privacy](security-and-privacy.md)), is sent to Resin's service to name the tool and choose its inputs; shell commands from other harnesses are not.
 
 ---
 

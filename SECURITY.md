@@ -98,9 +98,9 @@ Resin is designed with a strict local-first architecture where the local develop
 
 1. **Daemon & Worker Isolation (ADR 0002):**
    - Worker runtimes execute inside unprivileged child processes with restricted capabilities.
-   - Capability envelopes (ADR 0007) enforce rigid boundaries: filesystem access is confined to configured directories, network outbound is restricted, child processes cannot escalate privileges, and CPU/memory limits prevent resource exhaustion.
+   - Capability envelopes (ADR 0007) are a manifest policy check: a tool's declared capabilities are checked against workspace policy before activation and dispatch. The envelope does not isolate processes; learned tools that run recorded commands run them with the user's own permissions.
 2. **Local Authority & Fail-Closed Enforcement:**
-   - The local Gateway and Runtime are authoritative. The local system never executes arbitrary remote instructions or code pushed from remote cloud services.
+   - The local Gateway and Runtime are authoritative. Cloud-sent workflow validation executes nothing recorded (see [Workflow Validation](#workflow-validation)); the only cloud-authored code it runs is sandboxed derivation steps.
    - All external inputs, activation certificates, and cloud sync responses are validated against strict schemas; unverified or signature-mismatched data is immediately rejected and fails closed.
 3. **Localhost IPC Security:**
    - Inter-process communication between Gateway, Observer, and Worker runtimes uses local domain sockets or named pipes with OS-level file permissions.
@@ -149,9 +149,24 @@ Every payload destined for cloud synchronization is validated against its corres
 ## Hostile Cloud Authority Rejection
 
 The local Resin installation does not trust remote cloud endpoints as an execution authority:
-- **No Remote Code Execution**: Cloud services cannot instruct the local runtime to execute arbitrary scripts, alter capability envelopes, or disable security gates.
+- **No Remote Code Execution**: Cloud services cannot instruct the local runtime to execute arbitrary scripts, alter capability envelopes, or disable security gates. Validation asks are answered from local recordings without running recorded programs or dispatching tool calls; derivation steps run only in a sandbox. Invoking a published tool, which the user's agent does, runs its recorded commands with the user's own permissions.
 - **Certificate Verification**: All activation certificates and plan updates from cloud endpoints must carry valid Ed25519 cryptographic signatures from recognized root keys.
 - **Fail-Closed on Tampering**: Expired, revoked, signature-mismatched, or unrecognized certificates immediately drop to local unentitled/safe mode without interruption of local tool compilation and execution.
+
+---
+
+## Workflow Validation
+
+The cloud sends validation asks; the gateway polls, decides and submits without user interaction. Validation executes nothing recorded. For every recorded step (shell/process, program, tool-protocol, harness tool, composed invoke) it resolves the step's call exactly as an invocation would and compares it with the call this device recorded for that step: same callable (name, connection, program kind/argument) and every argument equal to the recorded value, with program templates compared after resolving the private original. A match lets the recorded output answer the step; a mismatch or missing recorded call means the plan is not verified. No recorded program is spawned, no tool call is dispatched, and no project is copied.
+
+- **Local call identity**: Every recorded value compared or returned is read from the local private store under a reference the device recomputes from a session its own harness adapters discovered and a call id from the plan (`callId`, or `heldOut.calls` for held-out repeats); the entry must be owned by this workspace. References and literals carried in a plan are never trusted as the recording. Calls that cannot be identified locally yield "unavailable", never verified.
+- **Hidden dependencies**: A step that still carries, as literal recorded text, a value the recording shows flowing from an earlier step's output is not verified until the plan binds that position. Incidental matches fail closed.
+- **Decisions**: `verification.replay = { kind: "recording", planDigest }`, with only step ids, verdicts and fixed reason strings — never recorded values, commands or outputs.
+- **Not a safety verdict**: Passing validation does not make a tool safe to run. Invocation is unchanged and runs recorded commands with the user's own permissions.
+
+### Derivation steps
+
+Derivation steps — short Python a cloud model writes to compute a value a recording hard-coded — are the only plan code no local recording produced, and are never trusted. At validation and at tool invocation alike they run as Python in Pyodide (CPython compiled to WebAssembly) inside a Deno process whose only permission is read access to Resin's pinned local Pyodide assets; network, environment, subprocesses, FFI, system information, file writes, and remote or npm imports are denied, and no other file can be read. A derivation therefore sees only its inputs, written into its source: it cannot read the project, the home directory, or any secret on the device, even through Pyodide's JavaScript bridge. It may import only a fixed allowlist of pure standard-library modules, its result is the JSON object of its final expression, and it is bounded in output size, wall-clock time (the process is killed) and memory (V8 heap and 2 GiB WebAssembly limits). The Pyodide release (314.0.7) is pinned by version, lockfile integrity and per-asset SHA-256, ships inside the Resin package, and is never downloaded at run time. If Deno (the installer's ~/.resin/current/deno, RESIN_DENO_EXECUTABLE, or PATH) or the pinned assets are missing or altered, the derivation step fails closed.
 
 ---
 

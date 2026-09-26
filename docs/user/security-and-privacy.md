@@ -7,7 +7,7 @@ Resin is built on strict **Local-First**, **Zero Raw Data Exfiltration**, and **
 ## 1. Core Security Guarantees
 
 1. **Local-Only Originals**: Raw prompts, assistant reasoning, thinking blocks, original private program source, and private store entries remain local. When cloud sync is enabled, sanitized evidence may include secret-redacted recorded-program views that retain non-secret code and literal values.
-2. **Capability Envelopes**: Evolved tools execute in restricted sandboxes with explicitly declared and authorized permissions.
+2. **Capability Envelopes**: Each tool declares its capabilities in a manifest, checked against workspace policy before activation and dispatch. The envelope is a policy check, not process isolation: recorded commands a learned tool runs execute with your own user permissions.
 3. **Mediated Secret Access**: Tools never have raw read access to API keys, passwords, or cloud credentials.
 4. **Automated Secret Redaction**: All normalized events, logs, and telemetry pass through real-time entropy and regex pattern masking.
 5. **Owner-Only Cloud Credentials**: Device tokens live in `~/.resin/state/device-token.json` (mode `0600`) with an optional ancillary vault copy when a `SecretManager` is configured. They are distinct from the local IPC token.
@@ -64,10 +64,13 @@ Tools may only read/write files within the active workspace root or designated t
 Outbound internet access is disabled by default. When outbound network access is explicitly granted for specific domains, private IP ranges (RFC 1918, link-local, loopback except gateway) are strictly rejected.
 
 ### Command Execution
-Arbitrary shell execution (`/bin/sh`, `/bin/bash`, `cmd.exe`) is prohibited. Tools may only invoke pre-approved binaries from the envelope.
+Arbitrary shell execution (`/bin/sh`, `/bin/bash`, `cmd.exe`) is prohibited for generated code artifacts, which may only invoke pre-approved binaries from the envelope. Learned tools that run recorded commands are different: invoking one runs those recorded commands, including shell commands, with your own user permissions.
 
 ### Derivation Steps
-A learned tool may carry a derivation step: short Python written by the cloud model that computes a value a recording had hard-coded. It is the only plan code no local recording produced, so it is never trusted. A binding to its output is accepted only after the derivation, run locally, reproduces every recorded value it claims to compute. Every run — validation replay and tool invocation — is jailed by a Python audit hook installed after the wrapper has compiled the derivation. Inside the jail the derivation may read files under its working directory (symlinks resolved), import a fixed allowlist of pure modules (`json`, `csv`, `math`, `statistics`, `collections`, `datetime`, `re`, `decimal`, and similar; `numpy`/`pandas` when installed), and nothing else. Writes, reads outside the working directory, `eval`/`exec`/`compile`, other imports, processes, sockets, `ctypes`, `mmap`, and every mutating `os`/`shutil` operation end the process immediately (exit 126), so the step fails and its candidates are refuted. On Linux the process is also limited to 4 GiB of address space and 256 open files. Recorded programs are not jailed.
+A learned tool may carry a derivation step: short Python written by the cloud model that computes a value a recording had hard-coded. It is the only plan code no local recording produced, so it is never trusted. A binding to its output is accepted only after the derivation, run locally, reproduces every recorded value it claims to compute. Derivations are the only code workflow validation runs; they run in a sandbox at validation and at invocation (see [SECURITY.md](../../SECURITY.md#derivation-steps)). Recorded programs are not sandboxed.
+
+### Workflow Validation
+Validation executes nothing recorded. Each plan step's resolved call must equal the call this device recorded for it, read from the local private store under references the device recomputes itself; the recorded output then answers the step. Plan-carried references and literals are never trusted as the recording, and decisions carry only step ids, verdicts and fixed reason strings. Passing validation does not make a tool safe to run: invoking it still runs the recorded commands with your permissions. See [Limitations](limitations.md#recorded-workflow-validation).
 
 ---
 

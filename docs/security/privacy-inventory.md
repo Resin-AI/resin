@@ -96,6 +96,8 @@ Examples: `git commit -m "fix auth bug" && pnpm test src/auth/login.test.ts` upl
 
 A learned tool's optional parameters are named from structure only: a long flag's name (`--month` → `month`) or the recorded value's shape (`path`, `number`, `text`). The value is never uploaded; its token position is, and an omitted parameter re-runs the recorded text from the local private store.
 
+Workflow validation compares plans with recordings on the device. At capture the recorder also stores, locally only, a per-call identity entry (callable name, connection, program kind/argument, argument names) under a reference the device computes itself; it is never uploaded. Plans and held-out carriers identify recorded calls only by step ids and harness call ids (`callId`, and `heldOut.calls: [{stepId, callIds}]`), which cross the boundary as before; recorded values, commands and outputs do not. Validation decisions carry only step ids, verdicts, fixed reason strings and `verification.replay = { kind: "recording", planDigest }`.
+
 ---
 
 ## 5. Configured Subprocessors & Consent Boundaries
