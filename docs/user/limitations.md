@@ -60,8 +60,7 @@ recording. Consequences:
   earlier step's output is not verified until the plan binds that position. A closed plan whose
   literal matches an earlier output only by coincidence is therefore refused (fails closed).
 
-Passing validation does not make a tool safe to run: an invoked tool still runs its recorded
-commands with the user's own permissions.
+Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
 
 Python Eval recordings retain their adapter-established result semantics: explicit stdout and the
 final expression's representation contribute to the observed result, with Eval's edge-whitespace

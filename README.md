@@ -63,7 +63,7 @@ Recorded output observations share only a JSON type and whether meaningful outpu
 
 Capture retains bounded, dependency-closed subworkflows without rewriting the original recording. Ordinary non-program data arguments can suggest typed caller inputs without sharing their values; prior-result bindings take precedence. These remain proposals until independent recorded variations distinguish the bound workflow from the original literals.
 
-A captured baseline can request validation, but it cannot prove correctness or establish new input bindings. Validation executes nothing recorded: it resolves every step's call as an invocation would, requires it to equal the call this device recorded for that step, and binds the result to the exact plan digest as a `recording` proof. Recorded values are read only from the local private store, never from the plan. Invoked tools still run the recorded commands with your permissions; passing validation does not make a tool safe to run.
+A captured baseline can request validation, but it cannot prove correctness or establish new input bindings. Validation executes nothing recorded: it resolves every step's call as an invocation would, requires it to equal the call this device recorded for that step, and binds the result to the exact plan digest as a `recording` proof. Recorded values are read only from the local private store, never from the plan. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
 
 ## Coding agent compatibility
 
