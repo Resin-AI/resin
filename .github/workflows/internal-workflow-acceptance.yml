@@ -17,20 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Preserve exact tested source
         run: git archive --format=tar HEAD -o "$RUNNER_TEMP/workflow-source.tar"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: workflow-source-${{ github.sha }}
           path: ${{ runner.temp }}/workflow-source.tar
           retention-days: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.24.0
           run_install: false
@@ -44,7 +44,7 @@ jobs:
         run: |
           pnpm --filter @resin/runtime deploy --legacy --prod "$RUNNER_TEMP/replay-runtime"
           tar -czf "$RUNNER_TEMP/replay-runtime.tgz" -C "$RUNNER_TEMP/replay-runtime" .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: replay-runtime-${{ github.sha }}
           path: ${{ runner.temp }}/replay-runtime.tgz
