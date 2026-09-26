@@ -101,6 +101,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-grok-build':
+        specifier: workspace:*
+        version: link:../../adapters/grok-build
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
@@ -177,6 +180,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-grok-build':
+        specifier: workspace:*
+        version: link:../../adapters/grok-build
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
