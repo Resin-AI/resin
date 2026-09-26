@@ -174,35 +174,6 @@ describe("Claude Code Transcript Decoder", () => {
     }
   });
 
-  it("decodes file edits with modify and create types", () => {
-    const editLine = JSON.stringify({
-      type: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id: "toolu_edit_1",
-          name: "Edit",
-          input: {
-            file_path: "src/index.ts",
-            command: "modify",
-            old_str: "const a = 1;",
-            new_str: "const a = 2;",
-          },
-        },
-      ],
-    });
-
-    const events = decodeClaudeTranscriptLine(editLine, sessionId, 1);
-    const fileEdit = events.find((e) => e.type === "file_edit");
-    expect(fileEdit).toBeDefined();
-    if (fileEdit && fileEdit.type === "file_edit") {
-      expect(fileEdit.filePath).toBe("src/index.ts");
-      expect(fileEdit.operation).toBe("update");
-      expect(fileEdit.diff).toContain("-const a = 1;");
-      expect(fileEdit.diff).toContain("+const a = 2;");
-    }
-  });
-
   it("decodes compaction events and errors", () => {
     const compactionLine = JSON.stringify({
       type: "compaction",
@@ -571,12 +542,11 @@ describe("Claude Code Transcript Decoder", () => {
       };
 
       const events = decodeClaudeTranscriptLine(turnWithBashAndEdit, sessionId, 11);
-      // Events produced: model_reasoning, tool_call(Bash), command_exec(synthetic), tool_call(Edit), file_edit(synthetic), message(assistant)
+      // Events produced: model_reasoning, tool_call(Bash), command_exec(synthetic), tool_call(Edit), message(assistant)
       expect(events.length).toBeGreaterThanOrEqual(5);
 
       const messageEvents = events.filter((e) => e.type === "message");
       const commandExecEvents = events.filter((e) => e.type === "command_exec");
-      const fileEditEvents = events.filter((e) => e.type === "file_edit");
 
       // message event receives providerUsage
       expect(messageEvents).toHaveLength(1);
@@ -585,11 +555,6 @@ describe("Claude Code Transcript Decoder", () => {
       // synthetic command_exec MUST NOT have providerUsage
       for (const cmd of commandExecEvents) {
         expect("providerUsage" in cmd && cmd.providerUsage).toBeFalsy();
-      }
-
-      // synthetic file_edit MUST NOT have providerUsage
-      for (const edit of fileEditEvents) {
-        expect("providerUsage" in edit && edit.providerUsage).toBeFalsy();
       }
     });
 

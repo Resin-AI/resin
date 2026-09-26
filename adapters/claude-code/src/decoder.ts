@@ -1,7 +1,7 @@
 import {
   type CausalRef,
   type DiscoveredToolEntry,
-  type FileDiffStats,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
   type MessageContentPart,
   type ProviderReportedUsage,
   ProviderReportedUsageSchema,
@@ -28,6 +28,7 @@ import type {
   RawHarnessRecord,
   RecordDecoderContext,
 } from "@resin/harness-contracts";
+import { claudeFileEdit } from "./file-change.js";
 import { z } from "zod";
 
 export const CLAUDE_PROVIDER = "anthropic";
@@ -494,6 +495,30 @@ export function decodeClaudeTranscriptLine(
     return events;
   }
 
+  // Claude Code 2.x marks a compaction with a `compact_boundary` system record.
+  if (rawType === "system" && asString(payload.subtype) === "compact_boundary") {
+    const compact = asObject(payload.compactMetadata);
+    const trigger = asString(compact?.trigger);
+    events.push(
+      withBaseFields<IntermediateCompactionEvent>(
+        {
+          type: "compaction",
+          sessionId,
+          timestamp: recordTime,
+          triggerReason:
+            trigger === "manual" ? "manual" : trigger === "auto" ? "context_limit" : undefined,
+          tokensBefore: asNumber(compact?.preTokens),
+          originalTokenCount: asNumber(compact?.preTokens) ?? 0,
+          compactedTokenCount: asNumber(compact?.postTokens) ?? 0,
+        },
+        sessionId,
+        recordTime,
+        sequenceNumber,
+      ),
+    );
+    return events;
+  }
+
   // 3. Compaction & Summarization Events
   if (
     rawType === "compaction" ||
@@ -577,16 +602,24 @@ export function decodeClaudeTranscriptLine(
   ) {
     const rawContent =
       asObject(payload.message)?.content ?? payload.content ?? payload.text ?? payload.prompt;
+    const recordedCwd = asString(payload.cwd);
 
     const strContent = asString(rawContent);
     if (strContent !== undefined) {
+      // Claude writes its own turns as user records: compaction summaries, slash-command wrappers,
+      // caveats, and background-task notifications. None of them is an instruction from the user.
+      const harnessAuthored =
+        payload.isCompactSummary === true ||
+        payload.isMeta === true ||
+        asObject(payload.origin) !== undefined ||
+        /^<(command-name|local-command-[a-z]+|task-notification)>/u.test(strContent);
       events.push(
         withBaseFields<IntermediateMessageEvent>(
           {
             type: "message",
             sessionId,
             timestamp: recordTime,
-            role: "user",
+            role: harnessAuthored ? "system" : "user",
             content: strContent,
           },
           sessionId,
@@ -595,6 +628,7 @@ export function decodeClaudeTranscriptLine(
         ),
       );
     } else {
+      const toolResultIds: string[] = [];
       const contentParts = asArray(rawContent);
       if (contentParts) {
         for (const part of contentParts) {
@@ -634,6 +668,7 @@ export function decodeClaudeTranscriptLine(
                 sequenceNumber,
               ),
             );
+            toolResultIds.push(toolCallId);
           } else if (blockType === "text" || asString(block.text) !== undefined) {
             const text = asString(block.text) || asString(block.content) || "";
             events.push(
@@ -642,7 +677,8 @@ export function decodeClaudeTranscriptLine(
                   type: "message",
                   sessionId,
                   timestamp: recordTime,
-                  role: "user",
+                  // "[Request interrupted by user...]" is Claude's notice of an abort, not a request.
+                  role: /^\[Request interrupted by user/u.test(text) ? "system" : "user",
                   content: text,
                 },
                 sessionId,
@@ -652,6 +688,32 @@ export function decodeClaudeTranscriptLine(
             );
           }
         }
+      }
+      // A successful Edit/Write records what it applied; that edit, restated as a patch, is the
+      // step. It is identified by its tool call so the workflow recorder can place it.
+      const edit = toolResultIds.length === 1 ? claudeFileEdit(payload.toolUseResult) : undefined;
+      const nativeId = toolResultIds[0];
+      if (edit !== undefined && nativeId !== undefined && /^[A-Za-z0-9_-]{1,256}$/u.test(nativeId)) {
+        events.push(
+          withBaseFields<IntermediateFileEditEvent>(
+            {
+              type: "file_edit",
+              sessionId,
+              timestamp: recordTime,
+              filePath: edit.filePath,
+              operation: edit.operation,
+              action: edit.operation,
+              patch: edit.patch,
+              metadata: {
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: { version: 1, kind: "file-change", nativeId },
+                ...(recordedCwd === undefined ? {} : { claudeNative: { cwd: recordedCwd } }),
+              },
+            },
+            sessionId,
+            recordTime,
+            sequenceNumber,
+          ),
+        );
       }
     }
 
@@ -763,71 +825,8 @@ export function decodeClaudeTranscriptLine(
                     sessionId,
                     timestamp: recordTime,
                     command: asString(inputRecord.command)!,
-                    workingDirectory: asString(inputRecord.cwd),
+                    workingDirectory: asString(inputRecord.cwd) ?? asString(payload.cwd),
                     metadata: { toolCallId },
-                  },
-                  sessionId,
-                  recordTime,
-                  sequenceNumber,
-                ),
-              );
-            }
-
-            // Specialization for Edit/Write tools
-            const lowerName = toolName.toLowerCase();
-            if (
-              [
-                "edit",
-                "write",
-                "file_edit",
-                "file_editor",
-                "str_replace_editor",
-                "strreplaceeditor",
-                "multiedit",
-              ].includes(lowerName)
-            ) {
-              const filePath =
-                asString(inputRecord.file_path) || asString(inputRecord.path) || "unknown";
-              let operation: "create" | "update" | "delete" | "read" | "patch" = "update";
-              const cmd = asString(inputRecord.command)?.toLowerCase();
-              if (lowerName === "write" || cmd === "create" || cmd === "write") {
-                operation = "create";
-              } else if (cmd === "delete") {
-                operation = "delete";
-              } else if (cmd === "patch") {
-                operation = "patch";
-              }
-
-              let diff: string | undefined;
-              if (asString(inputRecord.diff) !== undefined) {
-                diff = asString(inputRecord.diff);
-              } else if (inputRecord.old_str !== undefined && inputRecord.new_str !== undefined) {
-                diff = `--- old\n+++ new\n@@ -1 +1 @@\n-${String(inputRecord.old_str)}\n+${String(inputRecord.new_str)}`;
-              }
-
-              const diffStats: FileDiffStats = {
-                linesAdded:
-                  asNumber(inputRecord.linesAdded) ?? asNumber(inputRecord.additions) ?? 0,
-                linesRemoved:
-                  asNumber(inputRecord.linesRemoved) ?? asNumber(inputRecord.deletions) ?? 0,
-              };
-
-              assistantTurnEvents.push(
-                withBaseFields<IntermediateFileEditEvent>(
-                  {
-                    type: "file_edit",
-                    sessionId,
-                    timestamp: recordTime,
-                    filePath,
-                    operation,
-                    action:
-                      operation === "create"
-                        ? "create"
-                        : operation === "delete"
-                          ? "delete"
-                          : "update",
-                    diff,
-                    diffStats,
                   },
                   sessionId,
                   recordTime,

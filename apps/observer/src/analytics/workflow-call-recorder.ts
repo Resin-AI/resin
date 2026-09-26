@@ -594,7 +594,7 @@ export class WorkflowCallRecorder {
   }
 
   /**
-   * A Codex-native file edit becomes a patch step: the recorded diff, applied again in the directory
+   * A native file edit (a Codex `FileChange` item or a Claude Code `Edit`/`Write` result) becomes a patch step: the recorded diff, applied again in the directory
    * the session worked in. The diff is file content, so it is stored privately and never projected,
    * not even redacted; only its added lines' values are offered, and none when the redaction engine
    * would change the diff. An edit outside the working directory, or without one, is not a step.
@@ -606,11 +606,10 @@ export class WorkflowCallRecorder {
     if (native?.kind !== "file-change") return event;
     const raw = localWorkflowEvent(event);
     if (raw?.type !== "file_edit" || typeof raw.patch !== "string") return event;
-    const codexNative = event.metadata?.codexNative;
+    // Codex records the edit's working directory with the rollout; Claude with each transcript record.
+    const recorded = event.metadata?.codexNative ?? event.metadata?.claudeNative;
     const recordedCwd =
-      isPlainObject(codexNative) && typeof codexNative.cwd === "string"
-        ? codexNative.cwd
-        : undefined;
+      isPlainObject(recorded) && typeof recorded.cwd === "string" ? recorded.cwd : undefined;
     let workdir: string;
     try {
       workdir =

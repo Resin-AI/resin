@@ -32,8 +32,9 @@ import {
 } from "./config-planner.js";
 import {
   type ExecFunction,
-  SUPPORTED_CLAUDE_VERSIONS,
+  CLAUDE_TESTED_VERSIONS,
   detectClaudeWorkspaces,
+  listClaudeSubagentTranscripts,
   probeClaudeInstallation,
 } from "./discovery.js";
 import { getClaudeRefreshCapability, notifyClaudeCatalogRefresh } from "./refresh.js";
@@ -54,7 +55,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "claude-code";
   readonly name = "Claude Code";
   readonly version = "0.1.0";
-  readonly supportedHarnessVersions = [...SUPPORTED_CLAUDE_VERSIONS];
+  readonly supportedHarnessVersions = [...CLAUDE_TESTED_VERSIONS];
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly execFn?: ExecFunction;
@@ -171,6 +172,34 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
       }
     }
 
+    // 4. Subagent transcripts: Claude 2.x writes each subagent (Task/Agent tool) beside its parent
+    // at `<projectDir>/<parentSessionId>/subagents/[<subdir>/]agent-<agentId>.jsonl`. They belong
+    // to the parent's project even when the subagent ran elsewhere (e.g. in a worktree): their
+    // recorded cwd is kept as metadata, never used to pick a workspace.
+    if (projectDir) {
+      for (const transcript of await listClaudeSubagentTranscripts(projectDir, this.fsBridge)) {
+        const sessionId = `agent-${transcript.agentId}`;
+        if (seenSessionIds.has(sessionId)) continue;
+        seenSessionIds.add(sessionId);
+        sessions.push({
+          sessionId,
+          workspaceId: workspace.workspaceId,
+          harnessId: this.id,
+          transcriptPath: transcript.transcriptPath,
+          status: transcript.recent ? "active" : "idle",
+          createdAt: transcript.createdAt,
+          updatedAt: transcript.updatedAt,
+          metadata: {
+            transcriptFile: path.basename(transcript.transcriptPath),
+            sessionKind: "agent",
+            parentSessionId: transcript.parentSessionId,
+            agentId: transcript.agentId,
+            ...transcript.head,
+          },
+        });
+      }
+    }
+
     return sessions;
   }
 
@@ -229,7 +258,8 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
       supportsConcurrentSessions: true,
       features: {
         transcriptTailing: true,
-        contextNudge: true,
+        contextNudge: false,
+        nativeListChange: true,
         mcpConfigPlanning: true,
         atomicRollback: true,
       },
