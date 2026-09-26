@@ -13,10 +13,8 @@ import {
   runDiagnostics,
 } from "../../src/commands/doctor.js";
 import { initCommand } from "../../src/commands/init.js";
-import {
-  type SupportedHarnessId,
-  resolveHarnessConfigPath,
-} from "../../src/installer/harness-config.js";
+import type { HarnessId } from "@resin/contracts";
+import { resolveHarnessConfigPath } from "../../src/installer/harness-config.js";
 import {
   HARNESS_HEALTH_CHECK_INTERVAL_MS,
   HARNESS_HEALTH_SETTINGS_FORMAT,
@@ -92,7 +90,7 @@ class SettingsReadErrorBridge extends MtimeMemoryBridge {
 
 function createInstalledProbe(
   isInstalled: () => boolean,
-  installedHarness: SupportedHarnessId = "claude-code",
+  installedHarness: HarnessId = "claude-code",
 ): HarnessInstallationProbe {
   return async ({ harnessId, targetPath, customHome }) => {
     if (harnessId !== installedHarness || !isInstalled()) {
