@@ -1,7 +1,7 @@
 /**
  * End to end: a real Codex service-config recording (apply_patch, ./build.sh, ./check.sh NAME) is
- * captured, its offered inputs promoted, and the plan replayed in a disposable copy of the
- * workspace with new values: the edit writes the new entry and the later steps see it.
+ * captured in a workspace, its offered inputs promoted, and the plan invoked there with new values:
+ * the edit writes the new entry and the later steps see it.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -57,7 +57,7 @@ cd "$(dirname "$0")"
 grep -qx "$1" dist/names && echo OK
 `;
 
-function command(id: string, cmd: string, stdout: string, at: number) {
+function command(id: string, cmd: string, stdout: string, at: number, root: string) {
   return {
     type: "event_msg",
     payload: {
@@ -66,7 +66,7 @@ function command(id: string, cmd: string, stdout: string, at: number) {
         type: "CommandExecution",
         id,
         command: ["/bin/bash", "-lc", cmd],
-        cwd: "file:///app",
+        cwd: `file://${root}`,
         status: "completed",
         stdout,
         stderr: "",
@@ -79,7 +79,7 @@ function command(id: string, cmd: string, stdout: string, at: number) {
   };
 }
 
-async function recordServiceConfig(store: InMemoryPrivateValueStore) {
+async function recordServiceConfig(store: InMemoryPrivateValueStore, root: string) {
   const pipeline = new NormalizationPipeline({
     privateValueStore: store,
     redactionConfig: { customSecrets: [], sensitiveEnvVars: [] },
@@ -89,8 +89,8 @@ async function recordServiceConfig(store: InMemoryPrivateValueStore) {
   const sessionId = "codex-patch-replay";
   const timestamp = "2026-09-26T12:00:00.000Z";
   const native = [
-    { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: "/app" } },
-    { type: "turn_context", payload: { turn_id: "turn", cwd: "/app", model: "gpt-6-sol" } },
+    { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: root } },
+    { type: "turn_context", payload: { turn_id: "turn", cwd: root, model: "gpt-6-sol" } },
     {
       type: "response_item",
       payload: {
@@ -99,7 +99,7 @@ async function recordServiceConfig(store: InMemoryPrivateValueStore) {
         content: [
           {
             type: "input_text",
-            text: "Add the `media` service (port 8083, path /media) to the edge proxy in /app.",
+            text: "Add the `media` service (port 8083, path /media) to the edge proxy.",
           },
         ],
       },
@@ -112,18 +112,18 @@ async function recordServiceConfig(store: InMemoryPrivateValueStore) {
           type: "FileChange",
           id: "exec-patch",
           changes: {
-            "/app/services.yaml": { type: "update", unified_diff: DIFF, move_path: null },
+            [`${root}/services.yaml`]: { type: "update", unified_diff: DIFF, move_path: null },
           },
           status: "completed",
-          stdout: "Success. Updated the following files:\nM /app/services.yaml\n",
+          stdout: `Success. Updated the following files:\nM ${root}/services.yaml\n`,
           stderr: "",
         },
         started_at_ms: 2_000,
         completed_at_ms: 2_005,
       },
     },
-    command("exec-build", "./build.sh", "built 4 services\n", 3_000),
-    command("exec-check", "./check.sh media", "OK\n", 4_000),
+    command("exec-build", "./build.sh", "built 4 services\n", 3_000, root),
+    command("exec-check", "./check.sh media", "OK\n", 4_000, root),
   ];
   const observed: NormalizedSessionEvent[] = [];
   for (const [index, entry] of native.entries()) {
@@ -154,11 +154,15 @@ async function recordServiceConfig(store: InMemoryPrivateValueStore) {
   return recipe.workflow;
 }
 
-describe("replaying a recorded Codex edit with new values", () => {
+describe("invoking a recorded Codex edit with new values", () => {
   let workspace: string;
 
   beforeEach(() => {
-    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "resin-patch-replay-"));
+    // A fixed root: which inputs the recorder offers for the patch currently varies with the
+    // recorded workspace path, so a random temporary name would make the offer nondeterministic.
+    workspace = path.join(os.tmpdir(), "resin-codex-patch-app");
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.mkdirSync(workspace);
     fs.writeFileSync(path.join(workspace, "services.yaml"), SERVICES);
     fs.writeFileSync(path.join(workspace, "build.sh"), BUILD, { mode: 0o755 });
     fs.writeFileSync(path.join(workspace, "check.sh"), CHECK, { mode: 0o755 });
@@ -170,7 +174,7 @@ describe("replaying a recorded Codex edit with new values", () => {
 
   it("writes the new entry, and the build and check steps run on it", async () => {
     const store = new InMemoryPrivateValueStore();
-    const recorded = await recordServiceConfig(store);
+    const recorded = await recordServiceConfig(store, workspace);
     const plan = applyAcceptedBindings(
       recorded,
       (recorded.candidates ?? []).filter((candidate) => candidate.proposed.kind === "input"),
@@ -179,13 +183,7 @@ describe("replaying a recorded Codex edit with new values", () => {
     expect(plan.inputs.map((input) => input.name).sort()).toEqual(["name", "port"]);
 
     const adapters = new RuntimeAdapterRegistry();
-    adapters.register(
-      createProcessAdapter({
-        cwd: workspace,
-        recordedWorkspaceRoot: "/app",
-        isolateEnvironment: true,
-      }),
-    );
+    adapters.register(createProcessAdapter({ cwd: workspace }));
     const run = await executeRecordedWorkflow(plan, {
       inputs: { name: "search", port: "8084" },
       adapters,

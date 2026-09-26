@@ -25,7 +25,8 @@ import {
   instantiateRecordedWorkflow,
 } from "@resin/runtime";
 import { expect, it } from "vitest";
-import { createLocalWorkflowValidator } from "../../src/proxy/workflow-validation.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { localCallsFor } from "./recorded-sessions.js";
 
 it("validates a selected release workflow from its full repeat and uses a fresh identifier inside the program", async () => {
   const owner = "slice-reuse-owner";
@@ -130,10 +131,10 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       seen.push(request);
       return makeResult(request.name, request.arguments);
     };
-    const answer = await createLocalWorkflowValidator({
+    const answer = await createRecordingCheckValidator({
       workspaceId: owner,
       privateValues: store,
-      dispatch,
+      localCalls: localCallsFor(store, owner, ["release-slice-session"]),
     })(plan);
     expect(answer.unavailable).toBeUndefined();
     expect(answer.verification).toMatchObject({
@@ -163,7 +164,7 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       access: { workspaceId: owner },
       resolvePrivate: (reference) => resolvePrivateReference(store, reference) as WorkflowJsonValue,
     });
-    seen.length = 0;
+    expect(seen).toEqual([]);
     for (const project of ["gamma-project", "delta-project"]) {
       const result = await callable.invoke({ [inputName]: project });
       expect(result.status, result.error).toBe("completed");

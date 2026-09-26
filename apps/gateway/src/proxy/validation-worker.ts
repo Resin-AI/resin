@@ -6,10 +6,10 @@
  * them, so deciding whether its proposals hold is a local service (`workflow-validation.ts`). What
  * is missing without this file is the wiring that lets a cloud-issued ask reach that service: a
  * client that speaks to the validation routes on the authenticated connection, and a worker that
- * takes each pending ask, substantiates it against this identity, replays it through the local
- * execution path, and posts the decision back.
+ * takes each pending ask, substantiates it against this identity, checks it against this device's
+ * own recording, and posts the decision back.
  *
- * Nothing here decides what a proposal means — the replay does. An ask this worker cannot
+ * Nothing here decides what a proposal means — the recording check does. An ask this worker cannot
  * substantiate is left unanswered rather than answered with a guess, and an answer the cloud
  * declines is reported and never retried forever: the ask is the cloud's to re-issue.
  */
@@ -18,25 +18,25 @@ import os from "node:os";
 import {
   type RecordedWorkflow,
   WORKFLOW_VALIDATION_SCHEMA_VERSION,
-  type WorkflowJsonValue,
   type WorkflowValidationDecision,
   type WorkflowValidationRequest,
   WorkflowValidationRequestSchema,
   type WorkflowValidationVerdict,
   workflowValidationPlanDigest,
 } from "@resin/contracts";
-import type { CloudRequestIdentity, PrivateValueStore } from "@resin/observer";
+import {
+  type CloudRequestIdentity,
+  FilePrivateValueStore,
+  type LocalCallIdentity,
+  LocalSessionDiscoveryUnavailableError,
+  type PrivateValueStore,
+  createLocalCallIdentity,
+} from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import type {
-  McpToolConnection,
-  RuntimeAdapter,
-  ToolProtocolDispatchRequest,
-} from "@resin/runtime";
 import { z } from "zod";
-import { ReplayWorkspaceUnavailableError } from "./replay-workspace-snapshot.js";
 import {
   type LocalWorkflowValidationResult,
-  createLocalWorkflowValidator,
+  createRecordingCheckValidator,
 } from "./workflow-validation.js";
 
 /** Where an ask is listed from, and where its answer is delivered. */
@@ -51,15 +51,14 @@ export const DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS = 15_000;
 /** Passes are spread over this fraction of the interval so a fleet does not wake in lockstep. */
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_JITTER_RATIO = 0.2;
 /**
- * A replay that outlives this bound is refused rather than allowed to run on forever. A recorded job
- * of a dozen build/test/sign steps, or one data script over a large file, routinely needs more than
- * thirty seconds on a busy machine; a timeout there refutes a correct plan.
+ * A check that outlives this bound is refused rather than allowed to run on forever. Recorded steps
+ * are answered from the recording; the bound is for sandboxed derivation steps.
  */
 export const DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS = 120_000;
-/** No caller may hand the worker a replay bound beyond this; the work is a replay, not a job. */
+/** No caller may hand the worker a check bound beyond this. */
 export const MAX_WORKFLOW_VALIDATION_TIMEOUT_MS = 120_000;
-/** Identity the decision names for the disposable environment a replay ran in. */
-export const DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT = `resin-gateway-replay:${os.hostname()}`;
+/** Identity the decision names for the device whose recording the plan was checked against. */
+export const DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT = `resin-gateway-recording:${os.hostname()}`;
 
 /**
  * The outcomes the decision route reports.
@@ -220,7 +219,7 @@ export class WorkflowValidationClient implements WorkflowValidationTransport {
   /**
    * The asks pending for this device.
    *
-   * An entry that is not a well-formed request cannot be replayed and is left out — it is not
+   * An entry that is not a well-formed request cannot be checked and is left out — it is not
    * answerable, and answering it from a guessed shape would decide a plan nobody asked about.
    */
   async listPending(deviceId: string, signal?: AbortSignal): Promise<WorkflowValidationRequest[]> {
@@ -296,7 +295,7 @@ export interface WorkflowValidationPassSummary {
   pending: number;
   /** Decisions the cloud recorded, or recognized as an identical re-delivery. */
   answered: number;
-  /** Asks the worker will not answer yet: another workspace, a mismatched plan, or no ready replay. */
+  /** Asks the worker will not answer yet: another workspace, a mismatched plan, or no session discovery. */
   refused: number;
 
   /** Decisions the cloud declined (conflict, stale, mismatched); reported, never retried here. */
@@ -305,7 +304,7 @@ export interface WorkflowValidationPassSummary {
   deferred: number;
 }
 
-/** Replays one plan; the validator `workflow-validation.ts` builds, or a test's stand-in. */
+/** Checks one plan; the validator `workflow-validation.ts` builds, or a test's stand-in. */
 export type WorkflowPlanValidator = (
   plan: RecordedWorkflow,
 ) => Promise<LocalWorkflowValidationResult>;
@@ -318,32 +317,18 @@ export interface WorkflowValidationWorkerOptions {
    */
   identity: { workspaceId: string; deviceId: string };
   /**
-   * Builds the validator one ask is replayed with. Defaults to `createLocalWorkflowValidator` with
-   * this worker's store, dispatch, environment and bound; a test may substitute one that answers
+   * Builds the validator one ask is checked with. Defaults to `createRecordingCheckValidator` with
+   * this worker's store, recorded-call identity and bound; a test may substitute one that answers
    * deterministically.
    */
   createValidator?: (request: WorkflowValidationRequest) => WorkflowPlanValidator;
-  /** Store the plan's local references resolve from; the same one the artifact executor uses. */
+  /** Store the recording is read from; the same one the artifact executor uses. */
   privateValues?: PrivateValueStore;
-  /** Dispatches a tool-protocol step through the host's own routing. */
-  dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
-  /**
-   * Protocol connections already open, by the name a plan's callable carries, and the resolver
-   * that dials one that is not. A replay resolves a recorded callable over the connection the
-   * record names, exactly as an invocation does.
-   */
-  connections?: Record<string, McpToolConnection>;
-  openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
-  /** Additional host-owned runtime families, built for each replay workspace. */
-  runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
-  /**
-   * Environment the replayed programs may see, and nothing else: a program recorded by somebody
-   * else's session must not be able to read this operator's credentials.
-   */
-  environment?: Record<string, string>;
-  /** Identity the decision reports for the replay environment. */
+  /** Reads this device's recorded calls; defaults to discovery over the local harness sessions. */
+  localCalls?: LocalCallIdentity;
+  /** Identity the decision reports for the validation environment. */
   environmentIdentity?: string;
-  /** Wall-clock bound for one replay; a caller's value is clamped, never unbounded. */
+  /** Wall-clock bound for one check; a caller's value is clamped, never unbounded. */
   timeoutMs?: number;
   /** Time between passes; defaults to 15s. */
   pollIntervalMs?: number;
@@ -384,7 +369,7 @@ function boundedJitter(value: number | undefined): number {
  * Answers the cloud's pending validation asks from the machine the recording was made on.
  *
  * A pass is the unit of work: list the pending asks, decide each one, deliver each decision. One
- * pass runs at a time, so two timers firing close together cannot replay the same plan twice, and
+ * pass runs at a time, so two timers firing close together cannot check the same plan twice, and
  * a pass that takes longer than the interval delays the next one instead of overlapping it.
  */
 export class WorkflowValidationWorker {
@@ -393,11 +378,7 @@ export class WorkflowValidationWorker {
   private readonly deviceId: string;
   private readonly createValidator?: WorkflowValidationWorkerOptions["createValidator"];
   private readonly privateValues?: PrivateValueStore;
-  private readonly dispatch?: (request: ToolProtocolDispatchRequest) => Promise<WorkflowJsonValue>;
-  private readonly connections?: Record<string, McpToolConnection>;
-  private readonly openConnection?: (name: string) => Promise<McpToolConnection | undefined>;
-  private readonly runtimeAdapters?: (workspaceDir: string) => readonly RuntimeAdapter[];
-  private readonly environment?: Record<string, string>;
+  private readonly localCalls?: LocalCallIdentity;
   private readonly environmentIdentity: string;
   private readonly timeoutMs: number;
   private readonly pollIntervalMs: number;
@@ -415,11 +396,7 @@ export class WorkflowValidationWorker {
     this.deviceId = options.identity.deviceId;
     this.createValidator = options.createValidator;
     this.privateValues = options.privateValues;
-    this.dispatch = options.dispatch;
-    this.connections = options.connections;
-    this.openConnection = options.openConnection;
-    this.environment = options.environment;
-    this.runtimeAdapters = options.runtimeAdapters;
+    this.localCalls = options.localCalls;
     this.environmentIdentity =
       options.environmentIdentity ?? DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT;
     this.timeoutMs = boundedTimeout(options.timeoutMs);
@@ -437,7 +414,7 @@ export class WorkflowValidationWorker {
     this.armTimer();
   }
 
-  /** Stops polling and cancels a transport call in flight; a replay already running finishes. */
+  /** Stops polling and cancels a transport call in flight; a check already running finishes. */
   stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -566,19 +543,19 @@ export class WorkflowValidationWorker {
     try {
       result = await this.buildValidator(request)(request.plan);
     } catch (error) {
-      if (error instanceof ReplayWorkspaceUnavailableError) {
+      if (error instanceof LocalSessionDiscoveryUnavailableError) {
         this.log(
-          `workflow validation: ask '${request.requestId}' deferred because trusted replay inputs are unavailable`,
+          `workflow validation: ask '${request.requestId}' deferred because local session discovery is unavailable`,
         );
         return undefined;
       }
       this.log(
-        `workflow validation: ask '${request.requestId}' replay failed (${describe(error)})`,
+        `workflow validation: ask '${request.requestId}' recording check failed (${describe(error)})`,
       );
       return this.failedDecision(
         request,
         planDigest,
-        "the local replay failed before it could verify the recorded workflow",
+        "the local recording check failed before it could verify the recorded workflow",
       );
     }
     if (
@@ -587,7 +564,9 @@ export class WorkflowValidationWorker {
     ) {
       const reason =
         result.unavailable ?? "the validator returned no verdicts and no whole-plan verification";
-      this.log(`workflow validation: ask '${request.requestId}' replay failed (${reason})`);
+      this.log(
+        `workflow validation: ask '${request.requestId}' recording check failed (${reason})`,
+      );
       return this.failedDecision(request, planDigest, reason);
     }
     const verdicts: WorkflowValidationVerdict[] = result.verdicts.map((verdict) => ({
@@ -657,16 +636,15 @@ export class WorkflowValidationWorker {
   private buildValidator(request: WorkflowValidationRequest): WorkflowPlanValidator {
     const create = this.createValidator;
     if (create) return create(request);
-    return createLocalWorkflowValidator({
-      // The replay resolves references the way an invocation does: only the ones this identity's
+    const privateValues = this.privateValues ?? FilePrivateValueStore.default();
+    return createRecordingCheckValidator({
+      // References resolve the way an invocation resolves them: only the ones this identity's
       // workspace recorded.
       workspaceId: this.workspaceId,
-      ...(this.privateValues === undefined ? {} : { privateValues: this.privateValues }),
-      ...(this.dispatch === undefined ? {} : { dispatch: this.dispatch }),
-      ...(this.connections === undefined ? {} : { connections: this.connections }),
-      ...(this.openConnection === undefined ? {} : { openConnection: this.openConnection }),
-      ...(this.runtimeAdapters === undefined ? {} : { runtimeAdapters: this.runtimeAdapters }),
-      ...(this.environment === undefined ? {} : { environment: this.environment }),
+      privateValues,
+      localCalls:
+        this.localCalls ??
+        createLocalCallIdentity({ workspaceId: this.workspaceId, privateValues }),
       timeoutMs: this.timeoutMs,
     });
   }

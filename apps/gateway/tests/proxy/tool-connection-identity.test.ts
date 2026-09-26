@@ -11,15 +11,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-  type RecordedWorkflow,
-  WORKFLOW_VALIDATION_SCHEMA_VERSION,
-  type WorkflowBindingCandidate,
-  type WorkflowJsonValue,
-  type WorkflowValidationDecision,
-  type WorkflowValidationRequest,
-  workflowValidationPlanDigest,
-} from "@resin/contracts";
+import type { RecordedWorkflow } from "@resin/contracts";
 import {
   CloudCredentialStore,
   type CloudRequestIdentity,
@@ -28,29 +20,22 @@ import {
 import {
   ArtifactCache,
   type McpServerDescriptor,
-  type McpToolConnection,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   compileRecordedWorkflow,
-  connectMcpServer,
   encodeDeterministicTar,
 } from "@resin/runtime";
 import { afterEach, describe, expect, it } from "vitest";
-import { composedResultValue } from "../../src/meta/invoke-tool.js";
-import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
-import {
-  type WorkflowValidationTransport,
-  WorkflowValidationWorker,
-} from "../../src/proxy/validation-worker.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
-import { type WorkspaceContext, resolveWorkspaceContext } from "../../src/workspace-resolver.js";
+import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
+import { localCallsFor, recordSession } from "./recorded-sessions.js";
 
 const WORKSPACE_ID = "ws_tool_connection";
 const DEVICE_ID = "dev_tool_connection";
 const INSTALLATION_ID = "install_tool_connection";
 const ACCOUNT_ID = "acct_tool_connection";
-const ATTEMPT = "attempt-01";
-const DECIDED_AT = "2026-09-18T12:00:00.000Z";
+const SESSION_ID = "tool-connection-session";
 
 const IDENTITY: CloudRequestIdentity = {
   cloudUrl: "https://cloud.test",
@@ -108,10 +93,8 @@ interface RecordedCall {
 }
 
 const tempDirs: string[] = [];
-const openedConnections: McpToolConnection[] = [];
 
-afterEach(async () => {
-  await Promise.all(openedConnections.splice(0).map((connection) => connection.close()));
+afterEach(() => {
   for (const directory of tempDirs.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -268,33 +251,12 @@ describe("invoking a callable over the connection a record names", () => {
   });
 });
 
-const tokenCandidate: WorkflowBindingCandidate = {
-  stepId: "second",
-  argument: "token",
-  path: [],
-  proposed: { kind: "input", name: "token", type: "string" },
-  reason: "declared-by-the-callable",
-  missing: "the recording never showed which caller-supplied value reached the call",
-};
-
-/**
- * A recording whose two steps both call `run`, each over its own connection, with a demonstration
- * on another token: the two replays the candidate is decided by run the whole plan twice.
- */
-function twoConnectionPlan(secondConnection: string): RecordedWorkflow {
+/** A recording whose two steps both call `run`, each over its own connection. */
+function twoConnectionPlan(): RecordedWorkflow {
   return {
     schemaVersion: 1,
     workflowId: "wf_two_connections",
     inputs: [],
-    privateReferences: ["private:replay:token", "private:replay:first", "private:replay:second"],
-    candidates: [tokenCandidate],
-    heldOut: {
-      inputs: [{ stepId: "second", argument: "token", reference: "private:replay:token" }],
-      observed: [
-        { stepId: "first", reference: "private:replay:first" },
-        { stepId: "second", reference: "private:replay:second" },
-      ],
-    },
     steps: [
       {
         id: "first",
@@ -316,7 +278,7 @@ function twoConnectionPlan(secondConnection: string): RecordedWorkflow {
         callable: {
           runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
           name: "run",
-          connection: secondConnection,
+          connection: "alpha_beta",
         },
         arguments: [
           {
@@ -332,69 +294,6 @@ function twoConnectionPlan(secondConnection: string): RecordedWorkflow {
   };
 }
 
-/**
- * The demonstration the recording kept, and the values it produced: both are the user's own work
- * and stay in the local store, stamped with the workspace that recorded them.
- */
-function replayStore(): InMemoryPrivateValueStore {
-  const store = new InMemoryPrivateValueStore();
-  const origin = { workspaceId: WORKSPACE_ID };
-  store.set("private:replay:token", "held-token", origin);
-  store.set(
-    "private:replay:first",
-    { server: "alpha", tool: "run", args: { query: "rows" } },
-    origin,
-  );
-  store.set(
-    "private:replay:second",
-    { server: "alpha_beta", tool: "run", args: { token: "held-token" } },
-    origin,
-  );
-  return store;
-}
-
-function requestFor(plan: RecordedWorkflow): WorkflowValidationRequest {
-  return {
-    schemaVersion: WORKFLOW_VALIDATION_SCHEMA_VERSION,
-    requestId: "req-01",
-    workspaceId: WORKSPACE_ID,
-    deviceId: DEVICE_ID,
-    attempt: ATTEMPT,
-    planDigest: workflowValidationPlanDigest(plan),
-    evidenceDigest: "evidence-digest-01",
-    createdAt: "2026-09-18T11:59:00.000Z",
-    plan,
-  };
-}
-
-/** The validator's router, composed the way the production runtime composes it. */
-function dispatchOver(
-  router: CloudInvocationRouter,
-  context: WorkspaceContext,
-  dispatched: string[],
-) {
-  return async (request: {
-    name: string;
-    arguments: Record<string, WorkflowJsonValue>;
-    connection?: string;
-    stepId: string;
-  }): Promise<WorkflowJsonValue> => {
-    dispatched.push(request.connection ?? request.name);
-    const result = await router.invoke({
-      toolId: request.name,
-      name: request.name,
-      version: "",
-      ...(request.connection ? { connection: request.connection } : {}),
-      parameters: request.arguments as JsonRpcParams,
-      context,
-    });
-    if (result.isError) {
-      throw new Error(textOf(result));
-    }
-    return composedResultValue(result);
-  };
-}
-
 describe("executing a recorded plan over the connections it names", () => {
   it("runs each step's callable through that step's own server", async () => {
     const root = workspaceOf("executor");
@@ -403,7 +302,7 @@ describe("executing a recorded plan over the connections it names", () => {
       alpha_beta: serverAt(root, "alpha_beta"),
     };
     const artifactCache = new ArtifactCache({ cacheDir: path.join(root, "artifacts") });
-    const plan = twoConnectionPlan("alpha_beta");
+    const plan = twoConnectionPlan();
     const manifest = {
       id: "tool_two_connections",
       name: "wf_two_connections",
@@ -477,118 +376,52 @@ describe("executing a recorded plan over the connections it names", () => {
   });
 });
 
-describe("replaying a plan over the connections it names", () => {
-  it("reaches each step's own server, even though both steps call the same tool name", async () => {
-    const root = workspaceOf("replay");
-    const descriptors: Record<string, McpServerDescriptor> = {
-      alpha: serverAt(root, "alpha"),
-      alpha_beta: serverAt(root, "alpha_beta"),
-    };
-    const dial = async (name: string) => {
-      const descriptor = descriptors[name];
-      if (descriptor === undefined) return undefined;
-      const connection = await connectMcpServer(descriptor);
-      openedConnections.push(connection);
-      return connection;
-    };
-    const router = new CloudInvocationRouter({
-      mockService: {
-        handleToolInvocation: async () => {
-          throw new Error("a recorded callable must not be answered by the cloud route");
+describe("checking a plan over the connections it names against the recording", () => {
+  /** Two `run` calls with the same short name, each recorded over its own connection. */
+  function recorded(store: InMemoryPrivateValueStore): RecordedWorkflow {
+    return recordSession(
+      store,
+      { workspaceId: WORKSPACE_ID, sessionId: SESSION_ID, workflowId: "wf_two_connections" },
+      [
+        { user: "Fetch the rows, then hand on the token" },
+        {
+          callId: "call_first",
+          toolName: "run",
+          connection: "alpha",
+          parameters: { query: "rows" },
+          result: "rows",
         },
-      },
-    });
-    const dispatched: string[] = [];
-    const context = resolveWorkspaceContext({ cwd: root });
-    const plan = twoConnectionPlan("alpha_beta");
-    let decision: WorkflowValidationDecision | undefined;
-    const transport: WorkflowValidationTransport = {
-      listPending: async () => [requestFor(plan)],
-      submitDecision: async (submitted) => {
-        decision = submitted;
-        return { status: "recorded" };
-      },
-    };
-    const worker = new WorkflowValidationWorker({
-      client: transport,
-      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: replayStore(),
-      openConnection: dial,
-      dispatch: dispatchOver(router, context, dispatched),
-      now: () => new Date(DECIDED_AT),
-    });
-
-    const summary = await worker.runOnce();
-
-    expect(summary.answered).toBe(1);
-    expect(decision!.verdicts).toHaveLength(1);
-    expect(decision!.verdicts[0]!.confirmed).toBe(true);
-    // The replay dialed the connections itself: the host's bare-name routing was never consulted.
-    expect(dispatched).toEqual([]);
-    // Each step reached its own server, and only its own. A candidate is decided by a run with it
-    // bound and a run with it reverted, and the confirmed plan runs once more: three runs of a
-    // two-step plan, so each server saw three calls — its own step's, never the other's.
-    expect(callsOf(root, "alpha")).toEqual([
-      { server: "alpha", tool: "run", args: { query: "rows" } },
-      { server: "alpha", tool: "run", args: { query: "rows" } },
-      { server: "alpha", tool: "run", args: { query: "rows" } },
-    ]);
-    expect(callsOf(root, "alpha_beta")).toEqual([
-      { server: "alpha_beta", tool: "run", args: { token: "held-token" } },
-      { server: "alpha_beta", tool: "run", args: { token: "recorded-token" } },
-      { server: "alpha_beta", tool: "run", args: { token: "held-token" } },
-    ]);
-  });
-
-  it("fails the replay naming a connection that cannot be reached, without substituting a tool", async () => {
-    const root = workspaceOf("replay-unreachable");
-    const descriptors: Record<string, McpServerDescriptor> = { alpha: serverAt(root, "alpha") };
-    const dial = async (name: string) => {
-      const descriptor = descriptors[name];
-      if (descriptor === undefined) return undefined;
-      const connection = await connectMcpServer(descriptor);
-      openedConnections.push(connection);
-      return connection;
-    };
-    const router = new CloudInvocationRouter({
-      mockService: {
-        handleToolInvocation: async () => {
-          throw new Error("a recorded callable must not be answered by the cloud route");
+        {
+          callId: "call_second",
+          toolName: "run",
+          connection: "alpha_beta",
+          parameters: { token: "recorded-token" },
+          result: "accepted",
         },
-      },
-    });
-    const dispatched: string[] = [];
-    const context = resolveWorkspaceContext({ cwd: root });
-    const plan = twoConnectionPlan("missing");
-    let decision: WorkflowValidationDecision | undefined;
-    const worker = new WorkflowValidationWorker({
-      client: {
-        listPending: async () => [requestFor(plan)],
-        submitDecision: async (submitted) => {
-          decision = submitted;
-          return { status: "recorded" };
-        },
-      },
-      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
-      privateValues: replayStore(),
-      openConnection: dial,
-      dispatch: dispatchOver(router, context, dispatched),
-      now: () => new Date(DECIDED_AT),
+      ],
+    );
+  }
+
+  it("verifies only when each step names the connection it was recorded over", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = { ...recorded(store), candidates: [] };
+    expect(plan.steps.map((step) => step.callable.connection)).toEqual(["alpha", "alpha_beta"]);
+    const check = createRecordingCheckValidator({
+      workspaceId: WORKSPACE_ID,
+      privateValues: store,
+      localCalls: localCallsFor(store, WORKSPACE_ID, [SESSION_ID]),
     });
 
-    const summary = await worker.runOnce();
+    expect((await check(plan)).verification?.status).toBe("verified");
 
-    expect(summary.answered).toBe(1);
-    expect(decision!.accepted).toEqual([]);
-    const reason = decision!.verdicts[0]!.reason ?? "";
-    expect(reason).toContain("connection 'missing'");
-    // The step was handed to the host's routing under its connection — which is what refuses it —
-    // and no server was asked for a tool the record did not reach. Every attempt names the
-    // connection; the bare name is never tried.
-    expect(dispatched.length).toBeGreaterThan(0);
-    expect(dispatched.every((attempt) => attempt === "missing")).toBe(true);
-    // The reachable step ran (its server saw each attempt of the plan); the unreachable one never
-    // reached a server, because no server owns that callable.
-    expect(callsOf(root, "alpha").length).toBeGreaterThan(0);
+    // The same short name over another connection is a different callable.
+    const swapped: RecordedWorkflow = {
+      ...plan,
+      steps: plan.steps.map((step, index) =>
+        index === 1 ? { ...step, callable: { ...step.callable, connection: "alpha" } } : step,
+      ),
+    };
+    const answer = await check(swapped);
+    expect(answer.verification?.status).not.toBe("verified");
   });
 });

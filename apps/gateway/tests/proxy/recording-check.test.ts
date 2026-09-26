@@ -1,0 +1,301 @@
+/**
+ * Validation checks a plan against this device's own recording and runs nothing it recorded.
+ *
+ * Recordings here are captured by the real recorder into a real store; the validator reads them back
+ * through the real local-call identity. Only session discovery is supplied, as a harness adapter
+ * would supply it.
+ */
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  type NormalizedSessionEvent,
+  NormalizedSessionEventSchema,
+  type RecordedWorkflow,
+} from "@resin/contracts";
+import {
+  InMemoryPrivateValueStore,
+  type RecordableEvent,
+  WorkflowCallRecorder,
+  projectEventToMetadataOnly,
+  recordCallsFromEvents,
+} from "@resin/observer";
+import { afterEach, describe, expect, it } from "vitest";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { localCallsFor } from "./recorded-sessions.js";
+
+const owner = "recording-check-owner";
+const SESSION = "recording-check-session";
+
+const directories: string[] = [];
+afterEach(() => {
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function scratch(prefix: string): string {
+  const directory = mkdtempSync(path.join(tmpdir(), prefix));
+  directories.push(directory);
+  return directory;
+}
+
+type Turn =
+  | { user: string }
+  | {
+      callId: string;
+      toolName: string;
+      parameters: Record<string, unknown>;
+      result: string;
+      connection?: string;
+    };
+
+/** Records turns as one session would have produced them; nothing is executed. */
+function record(store: InMemoryPrivateValueStore, turns: Turn[], workspaceId = owner) {
+  const recorder = new WorkflowCallRecorder({ privateValues: store });
+  const events: NormalizedSessionEvent[] = [];
+  let sequence = 0;
+  const emit = (fields: Record<string, unknown>) =>
+    events.push(
+      projectEventToMetadataOnly(
+        recorder.observe(
+          NormalizedSessionEventSchema.parse({
+            schemaVersion: "1.0.0",
+            sessionId: SESSION,
+            eventId: `event-${sequence}`,
+            timestamp: "2026-09-26T00:00:00.000Z",
+            causalRef: { causalSequence: sequence++ },
+            redaction: { isRedacted: false, redactedFields: [], redactionStrategy: "mask" },
+            ...fields,
+          }),
+          { workspaceId },
+        ),
+      ),
+    );
+  for (const turn of turns) {
+    if ("user" in turn) {
+      emit({ type: "message", role: "user", content: turn.user });
+      continue;
+    }
+    emit({
+      type: "tool_call",
+      callId: turn.callId,
+      toolName: turn.toolName,
+      parameters: turn.parameters,
+      ...(turn.connection === undefined ? {} : { connection: turn.connection }),
+    });
+    emit({
+      type: "tool_result",
+      callId: turn.callId,
+      toolName: turn.toolName,
+      result: turn.result,
+      isError: false,
+      executionDurationMs: 1,
+    });
+  }
+  return recordCallsFromEvents("recording-check", events as RecordableEvent[])!.workflow;
+}
+
+function validator(
+  store: InMemoryPrivateValueStore,
+  options: { workspaceId?: string; sessions?: string[] } = {},
+) {
+  const workspaceId = options.workspaceId ?? owner;
+  return createRecordingCheckValidator({
+    workspaceId,
+    privateValues: store,
+    localCalls: localCallsFor(store, workspaceId, options.sessions ?? [SESSION]),
+  });
+}
+
+/** A local listener that counts every connection made to it. */
+async function listener(): Promise<{ port: number; connections: () => number; close(): void }> {
+  let count = 0;
+  const server = net.createServer((socket) => {
+    count += 1;
+    socket.destroy();
+  });
+  const listening = Promise.withResolvers<void>();
+  server.listen(0, "127.0.0.1", listening.resolve);
+  await listening.promise;
+  const address = server.address() as net.AddressInfo;
+  return { port: address.port, connections: () => count, close: () => server.close() };
+}
+
+/** Runs `check` with a fresh, empty temporary directory and reports whether it stayed empty. */
+async function withEmptyTmp<T>(check: () => Promise<T>): Promise<{ value: T; created: string[] }> {
+  const directory = scratch("resin-recording-check-tmp-");
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = directory;
+  try {
+    const value = await check();
+    return { value, created: readdirSync(directory) };
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+}
+
+describe("a recorded shell step with side effects", () => {
+  it("verifies from the recording without creating the marker or connecting", async () => {
+    const server = await listener();
+    try {
+      const marker = path.join(scratch("resin-recording-check-marker-"), "marker");
+      const command = `touch ${marker} && node -e "require('net').connect(${server.port}, '127.0.0.1')" && echo done`;
+      const store = new InMemoryPrivateValueStore();
+      const plan = record(store, [
+        { user: "Touch the marker and ping the listener" },
+        { callId: "side-effect", toolName: "bash", parameters: { command }, result: "done\n" },
+      ]);
+      expect(plan.baseline).toBeDefined();
+
+      const { value: answer, created } = await withEmptyTmp(() =>
+        validator(store)({ ...plan, candidates: [] }),
+      );
+
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verification?.replay?.kind).toBe("recording");
+      expect(existsSync(marker)).toBe(false);
+      expect(server.connections()).toBe(0);
+      expect(created).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("misses a step whose literal program text differs from the recording, running nothing", async () => {
+    const marker = path.join(scratch("resin-recording-check-literal-"), "marker");
+    const recorded = "echo recorded";
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [
+      { user: "Say it" },
+      { callId: "say", toolName: "bash", parameters: { command: recorded }, result: "recorded\n" },
+    ]);
+    const withLiteral = (value: string): RecordedWorkflow => ({
+      ...plan,
+      candidates: [],
+      steps: plan.steps.map((step) => ({
+        ...step,
+        arguments: step.arguments.map((argument) =>
+          argument.name === "command"
+            ? { ...argument, source: { kind: "literal", value } }
+            : argument,
+        ),
+      })),
+    });
+
+    const forged = await validator(store)(withLiteral(`touch ${marker}`));
+    expect(forged.verification?.status).not.toBe("verified");
+    expect(forged.verification?.missed.map((entry) => entry.stepId)).toEqual([plan.steps[0]!.id]);
+    expect(existsSync(marker)).toBe(false);
+
+    const equal = await validator(store)(withLiteral(recorded));
+    expect(equal.verification?.status).toBe("verified");
+  });
+});
+
+describe("a recorded tool-protocol step", () => {
+  it("verifies from the recording with no dispatch wiring", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [
+      { user: "Look up order A-1001" },
+      {
+        callId: "lookup",
+        toolName: "lookup_order",
+        connection: "shop",
+        parameters: { order: "A-1001" },
+        result: "A-1001 shipped",
+      },
+    ]);
+    expect(plan.steps[0]!.callable.connection).toBe("shop");
+    const answer = await validator(store)({ ...plan, candidates: [] });
+    expect(answer.verification?.status).toBe("verified");
+  });
+});
+
+describe("held-out demonstrations", () => {
+  function repeated(store: InMemoryPrivateValueStore, secondRegion: string) {
+    return record(store, [
+      { user: "Look up order A-1001" },
+      {
+        callId: "first",
+        toolName: "lookup_order",
+        connection: "shop",
+        parameters: { order: "A-1001", region: "eu" },
+        result: "A-1001 shipped",
+      },
+      { user: "Look up order B-2002" },
+      {
+        callId: "second",
+        toolName: "lookup_order",
+        connection: "shop",
+        parameters: { order: "B-2002", region: secondRegion },
+        result: "B-2002 pending",
+      },
+    ]);
+  }
+  const orderOnly = (plan: RecordedWorkflow): RecordedWorkflow => ({
+    ...plan,
+    candidates: (plan.candidates ?? []).filter(
+      (candidate) => candidate.argument === "order" && candidate.proposed.kind === "input",
+    ),
+  });
+
+  it("confirms a candidate whose resolved call matches the held-out recorded call", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = orderOnly(repeated(store, "eu"));
+    expect(plan.heldOut?.calls).toEqual([{ stepId: plan.steps[0]!.id, callIds: ["second"] }]);
+    expect(plan.candidates).toHaveLength(1);
+    const answer = await validator(store)(plan);
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+    expect(answer.verification?.status).toBe("verified");
+  });
+
+  it("rejects the candidate when a part it does not bind differs from the held-out call", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = orderOnly(repeated(store, "us"));
+    const answer = await validator(store)(plan);
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    expect(answer.verification?.status).not.toBe("verified");
+  });
+
+  it("is unavailable when the demonstration names no calls", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = orderOnly(repeated(store, "eu"));
+    const { calls: _calls, ...heldOut } = plan.heldOut!;
+    const answer = await validator(store)({ ...plan, heldOut });
+    expect(answer.unavailable).toBeDefined();
+    expect(answer.verification).toBeUndefined();
+    expect(answer.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
+  });
+});
+
+describe("local call identity", () => {
+  const turns: Turn[] = [
+    { user: "Look up order A-1001" },
+    {
+      callId: "lookup",
+      toolName: "lookup_order",
+      connection: "shop",
+      parameters: { order: "A-1001" },
+      result: "A-1001 shipped",
+    },
+  ];
+
+  it("resolves nothing from a session this device did not discover", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, turns);
+    const answer = await validator(store, { sessions: ["some-other-session"] })(plan);
+    expect(answer.unavailable).toBeDefined();
+    expect(answer.verification?.status).not.toBe("verified");
+  });
+
+  it("resolves nothing another workspace recorded", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, turns, "another-workspace");
+    const answer = await validator(store)(plan);
+    expect(answer.unavailable).toBeDefined();
+    expect(answer.verification?.status).not.toBe("verified");
+  });
+});

@@ -1,10 +1,11 @@
 /**
  * A recorded report command hard-codes values an agent looked up for one merchant (its account type
  * and category code). A model-written derivation computes them from the merchant; one baseline
- * recording must be enough to confirm it by a real Python replay, and anything that merely repeats
- * the recording (hard-coded values), computes something else, or ignores the inputs is refuted.
+ * recording must be enough to confirm it by running the derivation against the recorded call, and
+ * anything that merely repeats the recording (hard-coded values), computes something else, or ignores
+ * the inputs is refuted.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -19,7 +20,6 @@ import {
 } from "@resin/contracts";
 import { InMemoryPrivateValueStore, resolvePrivateReference } from "@resin/observer";
 import {
-  RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RuntimeAdapterRegistry,
   applyAcceptedBindings,
@@ -29,16 +29,15 @@ import {
   instantiateRecordedWorkflow,
 } from "@resin/runtime";
 import { afterEach, describe, expect, it } from "vitest";
-import { createLocalWorkflowValidator } from "../../src/proxy/workflow-validation.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { localCallsFor, recordSession } from "./recorded-sessions.js";
 
 const owner = "derivation-binding-owner";
+const SESSION = "derivation-binding-session";
+/** The id the recorder gives the one recorded report call. */
+const REPORT = "step0";
 
-const MERCHANTS = {
-  Crossfit_Hanna: { account_type: "R", mcc: 5942 },
-  Golfclub_Baron_Friso: { account_type: "F", mcc: 7993 },
-};
-
-const RECORDED_COMMAND = "printf '%s %s %s\\n' Crossfit_Hanna R 5942";
+const RECORDED_COMMAND = "printf '%s %s %s\\n' Crossfit_Hanna C 1426";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -49,13 +48,15 @@ afterEach(() => {
 function workspace(prefix: string): string {
   const directory = mkdtempSync(path.join(tmpdir(), prefix));
   directories.push(directory);
-  writeFileSync(path.join(directory, "merchants.json"), JSON.stringify(MERCHANTS));
   return directory;
 }
 
-/** The body a model writes after the header; the header's merchant literal is a caller-input hole. */
-const LOOKUP =
-  'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
+/**
+ * Derivations see only their inputs, so the looked-up values are computed from the merchant: its
+ * initial is the account type and its character-code sum the category code.
+ */
+const NAME = 'name = inputs["merchant"]\ncode = sum(ord(c) for c in name)\n';
+const LOOKUP = `${NAME}{"account_type": name[0], "mcc": code}\n`;
 
 function derivation(body: string, bindInput = true): WorkflowStep {
   // The cloud does not know the recorded merchant, so the header carries a placeholder.
@@ -98,7 +99,7 @@ function tokenCandidate(
   reason: WorkflowBindingCandidate["reason"],
 ): WorkflowBindingCandidate {
   return {
-    stepId: "report",
+    stepId: REPORT,
     argument: "command",
     path: ["tokens", token],
     proposed,
@@ -107,34 +108,31 @@ function tokenCandidate(
   };
 }
 
+/** The report call as one session recorded it; its command and output stay in the local store. */
+function recordReport(
+  store: InMemoryPrivateValueStore,
+  command: string,
+  printed: string,
+): RecordedWorkflow {
+  const plan = recordSession(
+    store,
+    { workspaceId: owner, sessionId: SESSION, workflowId: "wf_merchant_report" },
+    [
+      { user: "Print the merchant report" },
+      { callId: "call_report", toolName: "bash", parameters: { command }, result: printed },
+    ],
+  );
+  expect(plan.steps.map((step) => step.id)).toEqual([REPORT]);
+  return plan;
+}
+
 /** The recorded report plus one derivation, as the cloud proposes it; recorded values stay local. */
 function recording(store: InMemoryPrivateValueStore, body: string, bindInput = true) {
-  const printed = "Crossfit_Hanna R 5942\n";
-  store.set("private:report-command", RECORDED_COMMAND, { workspaceId: owner });
-  store.set("private:report-output", printed, { workspaceId: owner });
+  const recorded = recordReport(store, RECORDED_COMMAND, "Crossfit_Hanna C 1426\n");
   const plan: RecordedWorkflow = {
-    schemaVersion: 1,
-    workflowId: "wf_merchant_report",
+    ...recorded,
     inputs: [{ name: "merchant", type: "string", recordedDefault: true }],
-    privateReferences: ["private:report-command", "private:report-output"],
-    steps: [
-      derivation(body, bindInput),
-      {
-        id: "report",
-        callId: "call_report",
-        callable: {
-          runtime: RESIN_PROCESS_RUNTIME,
-          name: "bash",
-          program: { kind: "shell", source: "", argument: "command" },
-        },
-        arguments: [
-          { name: "command", source: { kind: "private", reference: "private:report-command" } },
-        ],
-        dependsOn: [],
-        failurePolicy: { onError: "abort", policy: "default" },
-        observed: { outcome: "succeeded", output: { type: "string", hasContent: true } },
-      },
-    ],
+    steps: [derivation(body, bindInput), recorded.steps[0]!],
     candidates: [
       tokenCandidate(
         2,
@@ -148,19 +146,15 @@ function recording(store: InMemoryPrivateValueStore, body: string, bindInput = t
       ),
       tokenCandidate(4, { kind: "result", stepId: "derive", path: ["mcc"] }, "derived-from-inputs"),
     ],
-    baseline: {
-      inputs: [{ stepId: "report", argument: "command", reference: "private:report-command" }],
-      observed: [{ stepId: "report", reference: "private:report-output" }],
-    },
   };
   return plan;
 }
 
 async function validate(plan: RecordedWorkflow, store: InMemoryPrivateValueStore) {
-  return await createLocalWorkflowValidator({
+  return await createRecordingCheckValidator({
     workspaceId: owner,
     privateValues: store,
-    workspaceDir: workspace("resin-derive-replay-"),
+    localCalls: localCallsFor(store, owner, [SESSION]),
     timeoutMs: 20_000,
   })(plan);
 }
@@ -171,7 +165,7 @@ function verdictsByPath(answer: Awaited<ReturnType<typeof validate>>): Record<st
   );
 }
 
-describe("derivation bindings confirmed by a baseline replay", () => {
+describe("derivation bindings confirmed against one recording", { timeout: 60_000 }, () => {
   it("confirms a lookup derivation, and the promoted tool computes another merchant's values", async () => {
     const store = new InMemoryPrivateValueStore();
     const plan = recording(store, LOOKUP);
@@ -179,7 +173,7 @@ describe("derivation bindings confirmed by a baseline replay", () => {
     // No recorded value is carried by the plan the cloud sees.
     const serialized = JSON.stringify(plan);
     expect(serialized).not.toContain("Crossfit_Hanna");
-    expect(serialized).not.toContain("5942");
+    expect(serialized).not.toContain("1426");
 
     const answer = await validate(plan, store);
     expect(answer.verification?.status).toBe("verified");
@@ -206,15 +200,14 @@ describe("derivation bindings confirmed by a baseline replay", () => {
     });
     const other = await tool.invoke({ merchant: "Golfclub_Baron_Friso" });
     expect(other.status, other.error).toBe("completed");
-    expect(JSON.stringify(other.result)).toContain("Golfclub_Baron_Friso F 7993");
+    expect(JSON.stringify(other.result)).toContain("Golfclub_Baron_Friso G 2017");
     const recorded = await tool.invoke({ merchant: "Crossfit_Hanna" });
-    expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna R 5942");
+    expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna C 1426");
   });
 
   it("refutes a derivation that hard-codes a recorded value", async () => {
     const store = new InMemoryPrivateValueStore();
-    const hardCoded =
-      'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": "R", "mcc": m["mcc"]}\n';
+    const hardCoded = `${NAME}{"account_type": "C", "mcc": code}\n`;
     const answer = await validate(recording(store, hardCoded), store);
     // The whole derivation is refuted, including the binding it computes honestly.
     expect(verdictsByPath(answer)).toMatchObject({ "3": false, "4": false });
@@ -222,16 +215,14 @@ describe("derivation bindings confirmed by a baseline replay", () => {
 
   it("refutes a derived value that does not reproduce the recorded token", async () => {
     const store = new InMemoryPrivateValueStore();
-    const wrong =
-      'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"].lower(), "mcc": m["mcc"] + 1}\n';
+    const wrong = `${NAME}{"account_type": name[0].lower(), "mcc": code + 1}\n`;
     const answer = await validate(recording(store, wrong), store);
     expect(verdictsByPath(answer)).toMatchObject({ "3": false, "4": false });
   });
 
   it("accepts only the derived values that reproduce, from a step that ran", async () => {
     const store = new InMemoryPrivateValueStore();
-    const partly =
-      'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"] + 1}\n';
+    const partly = `${NAME}{"account_type": name[0], "mcc": code + 1}\n`;
     const answer = await validate(recording(store, partly), store);
     expect(verdictsByPath(answer)).toEqual({ "2": true, "3": true, "4": false });
     expect(answer.verification?.status).toBe("verified");
@@ -281,13 +272,11 @@ function reportPlan(
     candidates: WorkflowBindingCandidate[];
   },
 ): RecordedWorkflow {
-  store.set("private:report-command", params.command, { workspaceId: owner });
-  store.set("private:report-output", params.printed, { workspaceId: owner });
-  const plan = recording(new InMemoryPrivateValueStore(), LOOKUP);
+  const recorded = recordReport(store, params.command, params.printed);
   return {
-    ...plan,
+    ...recorded,
     inputs: params.inputs,
-    steps: [params.derive, plan.steps[1]!],
+    steps: [params.derive, recorded.steps[0]!],
     candidates: params.candidates,
   };
 }
@@ -310,7 +299,7 @@ function verdictsByFullPath(answer: Awaited<ReturnType<typeof validate>>): Recor
 }
 
 /** The report runs Python whose literals are the merchant and its looked-up values. */
-const EMBEDDED_COMMAND = `python3 -c "print('Crossfit_Hanna', 'R', 5942)"`;
+const EMBEDDED_COMMAND = `python3 -c "print('Crossfit_Hanna', 'C', 1426)"`;
 
 /** The embedded literal addresses of the merchant, account type and category code. */
 function embeddedAddresses(): { anchor: number; merchant: number; type: number; mcc: number } {
@@ -325,8 +314,8 @@ function embeddedAddresses(): { anchor: number; merchant: number; type: number; 
   return {
     anchor: program!.anchor,
     merchant: index("'Crossfit_Hanna'"),
-    type: index("'R'"),
-    mcc: index("5942"),
+    type: index("'C'"),
+    mcc: index("1426"),
   };
 }
 
@@ -340,7 +329,7 @@ function embeddedMerchantPlan(store: InMemoryPrivateValueStore): RecordedWorkflo
   ];
   return reportPlan(store, {
     command: EMBEDDED_COMMAND,
-    printed: "Crossfit_Hanna R 5942\n",
+    printed: "Crossfit_Hanna C 1426\n",
     derive: derivationReading(["merchant"], LOOKUP),
     inputs: [{ name: "merchant", type: "string", recordedDefault: true }],
     candidates: [
@@ -391,14 +380,13 @@ function publish(
 }
 
 /** A report whose command names the lookup table (a caller-selected input) and the merchant. */
-const TABLE_COMMAND = "printf '%s %s %s %s\\n' merchants.json Crossfit_Hanna R 5942";
-const TABLE_LOOKUP =
-  'import json\nm = json.load(open(inputs["table"]))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
+const TABLE_COMMAND = "printf '%s %s %s %s\\n' merchants.json Crossfit_Hanna C 1426";
+const TABLE_LOOKUP = `assert inputs["table"].endswith(".json")\n${LOOKUP}`;
 
 function tablePlan(store: InMemoryPrivateValueStore, body: string): RecordedWorkflow {
   return reportPlan(store, {
     command: TABLE_COMMAND,
-    printed: "merchants.json Crossfit_Hanna R 5942\n",
+    printed: "merchants.json Crossfit_Hanna C 1426\n",
     derive: derivationReading(["table", "merchant"], body),
     // The table is a required input the cloud selected; only a plan candidate says where it is.
     inputs: [
@@ -426,7 +414,7 @@ function tablePlan(store: InMemoryPrivateValueStore, body: string): RecordedWork
   });
 }
 
-describe("derivation inputs established by one recording", () => {
+describe("derivation inputs established by one recording", { timeout: 60_000 }, () => {
   it("confirms a derivation reading a recorded-default input seen only inside embedded code", async () => {
     const store = new InMemoryPrivateValueStore();
     const plan = embeddedMerchantPlan(store);
@@ -447,10 +435,10 @@ describe("derivation inputs established by one recording", () => {
     const tool = publish(plan, await validate(plan, store), store);
     const recorded = await tool.invoke({});
     expect(recorded.status, recorded.error).toBe("completed");
-    expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna R 5942");
+    expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna C 1426");
     const other = await tool.invoke({ merchant: "Golfclub_Baron_Friso" });
     expect(other.status, other.error).toBe("completed");
-    expect(JSON.stringify(other.result)).toContain("Golfclub_Baron_Friso F 7993");
+    expect(JSON.stringify(other.result)).toContain("Golfclub_Baron_Friso G 2017");
   });
 
   it("decides a derivation reading a required input whose position only a plan candidate names", async () => {
@@ -462,8 +450,7 @@ describe("derivation inputs established by one recording", () => {
 
   it("keeps a plan's confirmed inputs when its derivation is refuted", async () => {
     const store = new InMemoryPrivateValueStore();
-    const wrong =
-      'import json\nm = json.load(open(inputs["table"]))[inputs["merchant"]]\n{"account_type": m["account_type"].lower(), "mcc": m["mcc"] + 1}\n';
+    const wrong = `assert inputs["table"].endswith(".json")\n${NAME}{"account_type": name[0].lower(), "mcc": code + 1}\n`;
     const answer = await validate(tablePlan(store, wrong), store);
     expect(answer.verification?.status).toBe("verified");
     expect(verdictsByPath(answer)).toMatchObject({ "3": true, "4": false, "5": false });

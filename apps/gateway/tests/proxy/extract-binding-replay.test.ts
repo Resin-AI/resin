@@ -1,6 +1,7 @@
 /**
- * A recorded create → wait → smoke → promote job whose `create` prints a fresh random id. A replay
- * must feed its own printed id to the later commands, and one baseline recording can confirm that.
+ * A recorded create → wait → smoke → promote job whose `create` prints a fresh random id. Checked
+ * against its own recording, the printed-id bindings are confirmed and the promoted plan feeds each
+ * invocation's own id to the later commands.
  */
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -28,7 +29,8 @@ import {
   instantiateRecordedWorkflow,
 } from "@resin/runtime";
 import { afterEach, describe, expect, it } from "vitest";
-import { createLocalWorkflowValidator } from "../../src/proxy/workflow-validation.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { localCallsFor } from "./recorded-sessions.js";
 
 const owner = "extract-binding-owner";
 
@@ -120,14 +122,14 @@ function recordJob(store: InMemoryPrivateValueStore): { plan: RecordedWorkflow; 
 }
 
 async function validate(plan: RecordedWorkflow, store: InMemoryPrivateValueStore) {
-  return await createLocalWorkflowValidator({
+  return await createRecordingCheckValidator({
     workspaceId: owner,
     privateValues: store,
-    workspaceDir: workspace("resin-extract-replay-"),
+    localCalls: localCallsFor(store, owner, ["extract-session"]),
   })(plan);
 }
 
-describe("extract bindings confirmed by a baseline replay", () => {
+describe("extract bindings confirmed against the recording", () => {
   it("confirms the printed id bindings and the promoted plan runs with fresh ids", async () => {
     const store = new InMemoryPrivateValueStore();
     const { plan, id } = recordJob(store);
@@ -178,12 +180,11 @@ describe("extract bindings confirmed by a baseline replay", () => {
     expect(printed.has(id)).toBe(false);
   });
 
-  it("fails the baseline replay without the bindings", async () => {
+  it("does not verify the closed plan without the bindings (hidden dependency)", async () => {
     const store = new InMemoryPrivateValueStore();
     const { plan } = recordJob(store);
     const answer = await validate({ ...plan, candidates: [] }, store);
-    expect(answer.verification?.status).toBe("failed");
-    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain("step1");
+    expect(answer.verification?.status).not.toBe("verified");
   });
 
   it("refutes a locator that extracts some other printed value", async () => {

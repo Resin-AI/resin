@@ -1,6 +1,6 @@
 /**
  * End to end: a Codex data job prints a computed number (`total 12.9107 rounded 12.91`) and a later
- * command writes it (`printf '12.91' > /app/answer.txt`). The written number is offered as an
+ * command writes it (`printf '12.91' > <root>/answer.txt`). The written number is offered as an
  * extract of the printed one, and the promoted plan writes the number the script computes on new data.
  */
 import fs from "node:fs";
@@ -32,19 +32,18 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const WORKSPACE = "workspace-codex-numeric-extract";
-const REQUEST =
-  "Sum the fees in /app/fees.txt, round to cents and write the answer to /app/answer.txt.";
-const script = (format: string) =>
+const request = (root: string) =>
+  `Sum the fees in ${root}/fees.txt, round to cents and write the answer to ${root}/answer.txt.`;
+const script = (root: string, format: string) =>
   [
     "python3 - <<'EOF'",
-    "total = sum(float(line) for line in open('/app/fees.txt'))",
+    `total = sum(float(line) for line in open('${root}/fees.txt'))`,
     `print(f"${format}")`,
     "EOF",
   ].join("\n");
-const TOTAL_SCRIPT = script("total {total:.4f} rounded {total:.2f}");
-const WRITE = "printf '12.91' > /app/answer.txt";
+const TOTAL_FORMAT = "total {total:.4f} rounded {total:.2f}";
 
-function command(id: string, cmd: string, stdout: string, at: number) {
+function command(id: string, cmd: string, stdout: string, at: number, root: string) {
   return {
     type: "event_msg",
     payload: {
@@ -53,7 +52,7 @@ function command(id: string, cmd: string, stdout: string, at: number) {
         type: "CommandExecution",
         id,
         command: ["/bin/bash", "-lc", cmd],
-        cwd: "file:///app",
+        cwd: `file://${root}`,
         status: "completed",
         stdout,
         stderr: "",
@@ -68,7 +67,7 @@ function command(id: string, cmd: string, stdout: string, at: number) {
 
 async function record(
   store: InMemoryPrivateValueStore,
-  session: { request: string; source: string; printed: string },
+  session: { root: string; request: string; source: string; printed: string },
 ): Promise<RecordedWorkflow> {
   const pipeline = new NormalizationPipeline({
     privateValueStore: store,
@@ -79,8 +78,8 @@ async function record(
   const sessionId = "codex-numeric-extract";
   const timestamp = "2026-09-26T12:00:00.000Z";
   const native = [
-    { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: "/app" } },
-    { type: "turn_context", payload: { turn_id: "turn", cwd: "/app", model: "gpt-6-sol" } },
+    { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: session.root } },
+    { type: "turn_context", payload: { turn_id: "turn", cwd: session.root, model: "gpt-6-sol" } },
     {
       type: "response_item",
       payload: {
@@ -89,8 +88,8 @@ async function record(
         content: [{ type: "input_text", text: session.request }],
       },
     },
-    command("exec-total", session.source, session.printed, 1_000),
-    command("exec-write", WRITE, "", 2_000),
+    command("exec-total", session.source, session.printed, 1_000, session.root),
+    command("exec-write", `printf '12.91' > ${session.root}/answer.txt`, "", 2_000, session.root),
   ];
   const observed: NormalizedSessionEvent[] = [];
   for (const [index, entry] of native.entries()) {
@@ -144,11 +143,12 @@ describe("a computed number written by a later command", () => {
     fs.rmSync(workspace, { recursive: true, force: true });
   });
 
-  it("is offered as an extract of the printed number and replays with the new total", async () => {
+  it("is offered as an extract of the printed number and the promoted plan writes the new total", async () => {
     const store = new InMemoryPrivateValueStore();
     const recorded = await record(store, {
-      request: REQUEST,
-      source: TOTAL_SCRIPT,
+      root: workspace,
+      request: request(workspace),
+      source: script(workspace, TOTAL_FORMAT),
       printed: "total 12.9107 rounded 12.91\n",
     });
     const offered = extracts(recorded);
@@ -163,13 +163,7 @@ describe("a computed number written by a later command", () => {
     const plan = applyAcceptedBindings(recorded, [offered[0]!.candidate]);
     fs.writeFileSync(path.join(workspace, "fees.txt"), "3.25\n1.1\n0.004\n");
     const adapters = new RuntimeAdapterRegistry();
-    adapters.register(
-      createProcessAdapter({
-        cwd: workspace,
-        recordedWorkspaceRoot: "/app",
-        isolateEnvironment: true,
-      }),
-    );
+    adapters.register(createProcessAdapter({ cwd: workspace }));
     const run = await executeRecordedWorkflow(plan, {
       inputs: {},
       adapters,
@@ -182,15 +176,17 @@ describe("a computed number written by a later command", () => {
 
   it("is not offered when the request names it or only punctuation precedes it", async () => {
     const named = await record(new InMemoryPrivateValueStore(), {
-      request: `${REQUEST} The expected answer is 12.91.`,
-      source: TOTAL_SCRIPT,
+      root: "/app",
+      request: `${request("/app")} The expected answer is 12.91.`,
+      source: script("/app", TOTAL_FORMAT),
       printed: "total 12.9107 rounded 12.91\n",
     });
     expect(extracts(named)).toEqual([]);
 
     const unnamed = await record(new InMemoryPrivateValueStore(), {
-      request: REQUEST,
-      source: script("{total:.4f} => {total:.2f}"),
+      root: "/app",
+      request: request("/app"),
+      source: script("/app", "{total:.4f} => {total:.2f}"),
       printed: "12.9107 => 12.91\n",
     });
     expect(extracts(unnamed)).toEqual([]);
