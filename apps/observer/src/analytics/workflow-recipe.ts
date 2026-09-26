@@ -126,15 +126,25 @@ export function recordCallsFromEvents(
       })),
       ...(demonstration.calls === undefined || demonstration.calls.length === 0
         ? {}
-        : {
-            calls: demonstration.calls.map((entry) => ({
-              stepId: recipe.workflow.steps[entry.position]!.id,
-              callIds: [entry.callId],
-            })),
-          }),
+        : { calls: callsByStep(demonstration.calls, recipe.workflow.steps) }),
     };
   }
   recipe.workflow.privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
   if (recipe.workflow.privateReferences.length === 0) delete recipe.workflow.privateReferences;
   return recipe;
+}
+
+/** Each step's calls, every iteration's in execution order. */
+function callsByStep(
+  calls: ReadonlyArray<{ position: number; callId: string }>,
+  steps: readonly { id: string }[],
+): Array<{ stepId: string; callIds: string[] }> {
+  const grouped: Array<{ stepId: string; callIds: string[] }> = [];
+  for (const entry of calls) {
+    const stepId = steps[entry.position]!.id;
+    const existing = grouped.find((each) => each.stepId === stepId);
+    if (existing === undefined) grouped.push({ stepId, callIds: [entry.callId] });
+    else existing.callIds.push(entry.callId);
+  }
+  return grouped;
 }

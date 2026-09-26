@@ -1170,6 +1170,12 @@ export class WorkflowCallRecorder {
    * the repeat has reached, so a session that diverges half way never presents the earlier half as
    * if the whole thing had been performed twice.
    *
+   * An execution that runs the earlier work's calls once per item — `for_each` on a learned tool, or
+   * the same job done for several items in one request — is a demonstration with one iteration per
+   * item: call j repeats the earlier call at position j mod k, and every iteration's call is listed
+   * under that position in execution order. Past its first iteration it is advertised only once a
+   * whole iteration has completed.
+   *
    * Values are stored by reference: they are the user's own work and stay where they were performed.
    */
   private heldOutSoFar(
@@ -1181,11 +1187,10 @@ export class WorkflowCallRecorder {
     const earlier = [...state.executions].reverse().find(
       (entry) =>
         entry.index < call.executionIndex &&
-        execution.calls.length <= entry.calls.length &&
+        entry.calls.length > 0 &&
         execution.calls.every((mine, position) => {
-          const theirs = entry.calls[position];
+          const theirs = entry.calls[position % entry.calls.length]!;
           return (
-            theirs !== undefined &&
             mine.toolName === theirs.toolName &&
             mine.connection === theirs.connection &&
             mine.program?.kind === theirs.program?.kind &&
@@ -1199,27 +1204,24 @@ export class WorkflowCallRecorder {
       execution.accumulatedHeldOut = undefined;
       return undefined;
     }
+    const width = earlier.calls.length;
+    if (execution.calls.length > width && execution.calls.length % width !== 0) {
+      // Mid-iteration: keep the last demonstration whose iterations were all complete.
+      return execution.accumulatedHeldOut;
+    }
     const inputs: WorkflowCallHeldOut["inputs"] = [];
     const observed: WorkflowCallHeldOut["observed"] = [];
     const calls: NonNullable<WorkflowCallHeldOut["calls"]> = [];
-    for (const mine of execution.calls) {
-      const theirs = earlier.calls.find((entry) => entry.position === mine.position);
-      if (theirs === undefined || mine.toolName !== theirs.toolName) break;
-      calls.push({ position: mine.position, callId: mine.callId });
+    for (const [ordinal, mine] of execution.calls.entries()) {
+      const position = ordinal % width;
+      calls.push({ position, callId: mine.callId });
       for (const [argument, reference] of Object.entries(mine.argumentReferences)) {
         // Nested arguments are part of an ordinary call too. Keep the complete value by local
         // reference; validation selects the candidate's nested path without uploading the value.
-        inputs.push({
-          position: mine.position,
-          argument,
-          reference,
-        });
+        inputs.push({ position, argument, reference });
       }
       if (mine.resultReference !== undefined) {
-        observed.push({
-          position: mine.position,
-          reference: mine.resultReference,
-        });
+        observed.push({ position, reference: mine.resultReference });
       }
     }
     if (inputs.length === 0 && observed.length === 0) return undefined;

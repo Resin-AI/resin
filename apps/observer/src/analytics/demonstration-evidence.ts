@@ -70,8 +70,23 @@ export function selectDemonstration(
   }
   const selectedIdentities = selected.map((call) => call.identity);
   const positionsByExecution = new Map<number, ReadonlyMap<number, number>>();
+  /**
+   * Executions that ran the baseline's calls once per item: how many items. Their snapshots name
+   * each call by the baseline position it repeats, so one position holds one entry per item.
+   */
+  const iterationsByExecution = new Map<number, number>();
   for (const [index, members] of executions) {
     if (index === first.executionIndex || members.length < selectedIdentities.length) continue;
+    if (
+      members.length > baseline.length &&
+      members.length % baseline.length === 0 &&
+      members.every(
+        (member, ordinal) => member.identity === baseline[ordinal % baseline.length]!.identity,
+      )
+    ) {
+      iterationsByExecution.set(index, members.length / baseline.length);
+      continue;
+    }
     const starts: number[] = [];
     for (let start = 0; start <= members.length - selectedIdentities.length; start++) {
       if (
@@ -94,29 +109,32 @@ export function selectDemonstration(
     if (observation.sessionId !== first.sessionId) continue;
     const execution = executionByCall.get(observation.callId);
     if (execution === undefined) continue;
-    const selectedRepeatPositions = positionsByExecution.get(execution);
+    const iterations = iterationsByExecution.get(execution);
+    const selectedRepeatPositions =
+      iterations === undefined ? positionsByExecution.get(execution) : selectedPosition;
     if (selectedRepeatPositions === undefined) continue;
     const snapshot = observation.snapshot;
     if (snapshot.repeats !== first.executionIndex) continue;
     const members = executions.get(execution)!;
+    const width = iterations === undefined ? members.length : baseline.length;
     const inRange = (position: number): boolean =>
-      Number.isSafeInteger(position) && position >= 0 && position < members.length;
+      Number.isSafeInteger(position) && position >= 0 && position < width;
     if (
       snapshot.inputs.some((entry) => !inRange(entry.position)) ||
       snapshot.observed.some((entry) => !inRange(entry.position))
     ) {
       continue;
     }
-    // Duplicate positions are malformed evidence, not extra coverage.
-    if (
-      new Set(snapshot.observed.map((entry) => entry.position)).size !== snapshot.observed.length
-    ) {
-      continue;
-    }
-    if (
-      new Set(snapshot.inputs.map((entry) => JSON.stringify([entry.position, entry.argument])))
-        .size !== snapshot.inputs.length
-    ) {
+    // Duplicate positions are malformed evidence, not extra coverage: a position holds at most one
+    // entry per item.
+    const perItem = iterations ?? 1;
+    const tally = (keys: readonly string[]): boolean => {
+      const counts = new Map<string, number>();
+      for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+      return [...counts.values()].every((count) => count <= perItem);
+    };
+    if (!tally(snapshot.observed.map((entry) => String(entry.position)))) continue;
+    if (!tally(snapshot.inputs.map((entry) => JSON.stringify([entry.position, entry.argument])))) {
       continue;
     }
     // Snapshot positions belong to the repeated execution. Preserve only the uniquely matching
@@ -140,11 +158,14 @@ export function selectDemonstration(
       continue;
     observedCount = observed.length;
     inputCount = inputs.length;
-    // The repeat's calls come from the recorded execution itself, not from the snapshot.
-    const calls = [...selectedRepeatPositions].map(([position, ordinal]) => ({
-      position: ordinal,
-      callId: members[position]!.callId,
-    }));
+    // The repeat's calls come from the recorded execution itself, not from the snapshot: every
+    // item's call at each selected position, in execution order.
+    const calls: NonNullable<DemonstrationSnapshot["calls"]> = [];
+    for (let item = 0; item < perItem; item += 1) {
+      for (const [position, ordinal] of selectedRepeatPositions) {
+        calls.push({ position: ordinal, callId: members[item * width + position]!.callId });
+      }
+    }
     chosen = { repeats: snapshot.repeats, inputs, observed, calls };
   }
   return chosen;

@@ -271,6 +271,93 @@ describe("held-out demonstrations", () => {
   });
 });
 
+describe("demonstrations that ran once per item", () => {
+  const lookup = (callId: string, order: string, region: string, status: string): Turn => ({
+    callId,
+    toolName: "lookup_order",
+    connection: "shop",
+    parameters: { order, region },
+    result: `status: ${status}`,
+  });
+  const label = (callId: string, order: string): Turn => ({
+    callId,
+    toolName: "print_label",
+    connection: "shop",
+    parameters: { order },
+    result: "label printed",
+  });
+  /** One order handled, then three more in one request: one iteration per order. */
+  function iterated(store: InMemoryPrivateValueStore, secondRegion = "eu") {
+    const plan = record(store, [
+      { user: "Handle order A-1001" },
+      lookup("a-lookup", "A-1001", "eu", "shipped"),
+      label("a-label", "A-1001"),
+      { user: "Handle orders B-2002, C-3003 and D-4004" },
+      lookup("b-lookup", "B-2002", "eu", "pending"),
+      label("b-label", "B-2002"),
+      lookup("c-lookup", "C-3003", secondRegion, "shipped"),
+      label("c-label", "C-3003"),
+      lookup("d-lookup", "D-4004", "eu", "held"),
+      label("d-label", "D-4004"),
+    ]);
+    return {
+      ...plan,
+      candidates: (plan.candidates ?? []).filter(
+        (candidate) => candidate.argument === "order" && candidate.proposed.kind === "input",
+      ),
+    };
+  }
+
+  it("lists every iteration's call and confirms a candidate that reproduces all three", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = iterated(store);
+    expect(plan.heldOut?.calls).toEqual([
+      { stepId: plan.steps[0]!.id, callIds: ["b-lookup", "c-lookup", "d-lookup"] },
+      { stepId: plan.steps[1]!.id, callIds: ["b-label", "c-label", "d-label"] },
+    ]);
+    expect(plan.candidates.length).toBeGreaterThan(0);
+    const answer = await validator(store)(plan);
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verification?.status).toBe("verified");
+    expect(answer.verdicts.every((verdict) => verdict.confirmed)).toBe(true);
+  });
+
+  it("misses the step when one iteration ran a different call", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = iterated(store, "us");
+    const answer = await validator(store)(plan);
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain(plan.steps[0]!.id);
+  });
+
+  it("is not verified when a step's call count differs from the item count", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = iterated(store);
+    const heldOut = plan.heldOut!;
+    const calls = heldOut.calls!.map((entry, index) =>
+      index === 1 ? { ...entry, callIds: entry.callIds.slice(0, 2) } : entry,
+    );
+    const answer = await validator(store)({ ...plan, heldOut: { ...heldOut, calls } });
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verification?.missed.map((entry) => entry.stepId)).toEqual([plan.steps[1]!.id]);
+    expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+  });
+
+  it("is unavailable when an iteration's call cannot be identified", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = iterated(store);
+    const heldOut = plan.heldOut!;
+    const calls = heldOut.calls!.map((entry, index) =>
+      index === 0
+        ? { ...entry, callIds: [entry.callIds[0]!, "unknown", entry.callIds[2]!] }
+        : entry,
+    );
+    const answer = await validator(store)({ ...plan, heldOut: { ...heldOut, calls } });
+    expect(answer.unavailable).toBeDefined();
+  });
+});
+
 describe("local call identity", () => {
   const turns: Turn[] = [
     { user: "Look up order A-1001" },
