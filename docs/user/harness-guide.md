@@ -8,17 +8,11 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 
 | Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
-<<<<<<< HEAD
 | **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set) | MCP over Stdio | Local JSONL Session Tailing (incl. subagents) | Native ListChanged Notification |
 | **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | MCP over Stdio | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `18.3.2` (other versions run and are reported as untested) | `~/.omp/agent/mcp.json` (`$OMP_HOME/agent/mcp.json`; legacy `~/.omp/config.json`) | MCP over Stdio | JSONL Session Tailing (main and subagent transcripts) | Native ListChanged Notification |
-| **Cursor CLI** (`cursor-agent`) | none yet (targets `2026.09.26-dd393fe`; reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.cursor/rules/resin.mdc` | MCP over Stdio | Hook spool tailing (`~/.resin/capture/cursor-cli/`) | Next session |
-=======
-| **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
-| **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
-| **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
 | **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `~/.pi/agent/extensions/resin.ts` (Resin-owned Pi extension; `$PI_CODING_AGENT_DIR` honored) | MCP over Stdio via the extension | Local JSONL Session Tailing | Native ListChanged via the extension |
->>>>>>> feat/harness-pi
+| **Cursor CLI** (`cursor-agent`) | none yet (targets `2026.09.26-dd393fe`; reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json`, `~/.cursor/rules/resin.mdc` | MCP over Stdio | Hook spool tailing (`~/.resin/capture/cursor-cli/`) | Next session |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
