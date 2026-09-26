@@ -1,0 +1,18 @@
+{
+  "files": [
+    {
+      "hunks": [
+        {
+          "lines": [
+            "+print('hello')"
+          ],
+          "newLines": 1,
+          "newStart": 1,
+          "oldLines": 0,
+          "oldStart": 1
+        }
+      ],
+      "path": "/workspace/project/hello.py"
+    }
+  ]
+}

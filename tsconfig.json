@@ -35,6 +35,9 @@
       "path": "./adapters/codex-cli"
     },
     {
+      "path": "./adapters/muse-code"
+    },
+    {
       "path": "./adapters/omp"
     },
     {

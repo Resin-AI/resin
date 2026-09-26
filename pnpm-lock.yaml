@@ -69,6 +69,18 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  adapters/muse-code:
+    dependencies:
+      '@resin/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@resin/harness-contracts':
+        specifier: workspace:*
+        version: link:../../packages/harness-contracts
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   adapters/omp:
     dependencies:
       '@oh-my-pi/pi-coding-agent':
@@ -92,6 +104,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-muse-code':
+        specifier: workspace:*
+        version: link:../../adapters/muse-code
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
@@ -168,6 +183,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-muse-code':
+        specifier: workspace:*
+        version: link:../../adapters/muse-code
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
