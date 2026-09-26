@@ -1,0 +1,275 @@
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import type { Dirent, Stats } from "node:fs";
+import * as fsp from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+import {
+  type HarnessInstallation,
+  type HarnessSession,
+  type HarnessWorkspace,
+  UNKNOWN_HARNESS_VERSION,
+} from "@resin/harness-contracts";
+import { PI_DISPLAY_NAME, PI_HARNESS_ID, type PiSessionRoot } from "./paths.js";
+
+/** Pi versions qualified with recorded fixtures under `tests/fixtures/recorded/`. */
+export const PI_TESTED_VERSIONS = ["0.87.1"] as const;
+
+/** A transcript untouched for this long is idle rather than active. */
+export const PI_ACTIVE_WINDOW_MS = 60_000;
+
+const HEADER_SCAN_BYTES = 64 * 1024;
+
+export interface PiSessionHeader {
+  /** Session format version: 1 (linear), 2 (tree), 3 (hookMessage renamed to custom). */
+  version: number;
+  id: string;
+  timestamp: string;
+  cwd: string;
+  /** Source transcript path when the session was created by `/fork`, `/clone`, or `--fork`. */
+  parentSession?: string;
+}
+
+export interface PiTranscriptInfo {
+  transcriptPath: string;
+  header: PiSessionHeader;
+  sessionId: string;
+  updatedAt: Date;
+  sizeBytes: number;
+}
+
+/** Parses a Pi session header line; null when the line is not a `type: "session"` header. */
+export function parsePiSessionHeader(line: string): PiSessionHeader | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || !("type" in parsed) || parsed.type !== "session") {
+    return null;
+  }
+  const id = "id" in parsed && typeof parsed.id === "string" ? parsed.id : undefined;
+  const cwd = "cwd" in parsed && typeof parsed.cwd === "string" ? parsed.cwd : undefined;
+  if (!id || !cwd) return null;
+  const version = "version" in parsed && typeof parsed.version === "number" ? parsed.version : 1;
+  const timestamp =
+    "timestamp" in parsed && typeof parsed.timestamp === "string" ? parsed.timestamp : "";
+  const parentSession =
+    "parentSession" in parsed && typeof parsed.parentSession === "string"
+      ? parsed.parentSession
+      : undefined;
+  return { version, id, timestamp, cwd, ...(parentSession ? { parentSession } : {}) };
+}
+
+/** Reads the header of a Pi session file, or null when it has none (not a Pi transcript). */
+export async function readPiSessionHeader(filePath: string): Promise<PiSessionHeader | null> {
+  let handle: fsp.FileHandle;
+  try {
+    handle = await fsp.open(filePath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buffer = Buffer.alloc(HEADER_SCAN_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, HEADER_SCAN_BYTES, 0);
+    const text = buffer.toString("utf8", 0, bytesRead);
+    const newline = text.indexOf("\n");
+    return parsePiSessionHeader(newline === -1 ? text : text.slice(0, newline));
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Resin identifier for a Pi session id. Pi ids are UUIDs by default, but `--session-id` accepts
+ * caller-chosen ids; characters outside Resin's identifier alphabet become `_`.
+ */
+export function toPiSessionId(headerId: string): string {
+  const sanitized = headerId.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 128);
+  return /^[a-zA-Z0-9_-]/.test(sanitized) ? sanitized : `_${sanitized.slice(0, 127)}`;
+}
+
+/** Session id encoded in a Pi transcript file name `<timestamp>_<session-id>.jsonl`. */
+export function piSessionIdFromPath(transcriptPath: string): string | undefined {
+  const base = path.basename(transcriptPath, ".jsonl");
+  const separator = base.indexOf("_");
+  return separator === -1 ? undefined : base.slice(separator + 1) || undefined;
+}
+
+async function listJsonlFiles(dir: string, depth: number): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(full);
+    else if (entry.isDirectory() && depth > 0) files.push(...(await listJsonlFiles(full, depth - 1)));
+  }
+  return files;
+}
+
+/**
+ * Finds Pi transcripts under the given session roots. Default roots group files in one
+ * `--<cwd>--` directory level; custom session directories hold files directly. Files are bound to
+ * workspaces by the header's `cwd`, never by directory name.
+ */
+export async function scanPiTranscripts(
+  roots: readonly PiSessionRoot[],
+): Promise<PiTranscriptInfo[]> {
+  const seen = new Set<string>();
+  const transcripts: PiTranscriptInfo[] = [];
+  for (const root of roots) {
+    for (const file of await listJsonlFiles(root.dir, 1)) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const header = await readPiSessionHeader(file);
+      if (!header) continue;
+      let stat: Stats;
+      try {
+        stat = await fsp.stat(file);
+      } catch {
+        continue;
+      }
+      transcripts.push({
+        transcriptPath: file,
+        header,
+        sessionId: toPiSessionId(header.id),
+        updatedAt: stat.mtime,
+        sizeBytes: stat.size,
+      });
+    }
+  }
+  return transcripts.sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime());
+}
+
+export function piWorkspaceId(cwd: string): string {
+  return `pi-${createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16)}`;
+}
+
+export function toPiWorkspace(
+  cwd: string,
+  paths: { configPath: string; mcpConfigPath: string },
+): HarnessWorkspace {
+  const rootPath = path.resolve(cwd);
+  return {
+    workspaceId: piWorkspaceId(rootPath),
+    rootPath,
+    name: path.basename(rootPath) || rootPath,
+    harnessId: PI_HARNESS_ID,
+    configPath: paths.configPath,
+    mcpConfigPath: paths.mcpConfigPath,
+    metadata: {},
+  };
+}
+
+export function toPiSession(
+  transcript: PiTranscriptInfo,
+  workspaceId: string,
+  now: number,
+): HarnessSession {
+  const createdAt = Number.isFinite(Date.parse(transcript.header.timestamp))
+    ? new Date(transcript.header.timestamp).toISOString()
+    : transcript.updatedAt.toISOString();
+  const parentSessionId = transcript.header.parentSession
+    ? piSessionIdFromPath(transcript.header.parentSession)
+    : undefined;
+  return {
+    sessionId: transcript.sessionId,
+    workspaceId,
+    harnessId: PI_HARNESS_ID,
+    transcriptPath: transcript.transcriptPath,
+    status: now - transcript.updatedAt.getTime() <= PI_ACTIVE_WINDOW_MS ? "active" : "idle",
+    createdAt,
+    updatedAt: transcript.updatedAt.toISOString(),
+    metadata: {
+      cwd: transcript.header.cwd,
+      sessionFormatVersion: transcript.header.version,
+      ...(transcript.header.parentSession
+        ? { parentSessionPath: transcript.header.parentSession }
+        : {}),
+      ...(parentSessionId ? { parentSessionId: toPiSessionId(parentSessionId) } : {}),
+    },
+  };
+}
+
+const execFileAsync = promisify(execFile);
+
+async function findOnPath(name: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+  for (const dir of (env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      await fsp.access(candidate, 1);
+      return candidate;
+    } catch {
+      // keep looking
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Reads the version of the `@earendil-works/pi-coding-agent` package that owns the executable,
+ * falling back to `pi --version`.
+ */
+async function readPiVersion(executablePath: string): Promise<string | undefined> {
+  let dir = path.dirname(await fsp.realpath(executablePath).catch(() => executablePath));
+  for (let depth = 0; depth < 5; depth++) {
+    try {
+      const pkg: unknown = JSON.parse(await fsp.readFile(path.join(dir, "package.json"), "utf8"));
+      if (
+        pkg &&
+        typeof pkg === "object" &&
+        "name" in pkg &&
+        pkg.name === "@earendil-works/pi-coding-agent" &&
+        "version" in pkg &&
+        typeof pkg.version === "string"
+      ) {
+        return pkg.version;
+      }
+    } catch {
+      // not the package root
+    }
+    dir = path.dirname(dir);
+  }
+  try {
+    const { stdout } = await execFileAsync(executablePath, ["--version"], { timeout: 10_000 });
+    return /\d+\.\d+\.\d+(?:[-+][\w.]+)?/.exec(stdout)?.[0];
+  } catch {
+    return undefined;
+  }
+}
+
+export interface ProbePiInstallationOptions {
+  env: NodeJS.ProcessEnv;
+  /** Resin's registration path (the bridge extension file). */
+  configPath: string;
+  homePath: string;
+  executablePath?: string;
+}
+
+export async function probePiInstallation(
+  options: ProbePiInstallationOptions,
+): Promise<HarnessInstallation | null> {
+  const detectedAt = new Date().toISOString();
+  const executablePath = options.executablePath ?? (await findOnPath("pi", options.env));
+  if (!executablePath) return null;
+  const version = await readPiVersion(executablePath);
+  return {
+    harnessId: PI_HARNESS_ID,
+    displayName: PI_DISPLAY_NAME,
+    version: version ?? UNKNOWN_HARNESS_VERSION,
+    executablePath,
+    configPath: options.configPath,
+    homePath: options.homePath,
+    isInstalled: true,
+    status: version ? "ready" : "unknown",
+    detectedAt,
+    metadata: {},
+  };
+}

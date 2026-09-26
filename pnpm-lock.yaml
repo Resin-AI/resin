@@ -84,6 +84,18 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  adapters/pi:
+    dependencies:
+      '@resin/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@resin/harness-contracts':
+        specifier: workspace:*
+        version: link:../../packages/harness-contracts
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   apps/cli:
     dependencies:
       '@resin/adapter-claude-code':

@@ -38,6 +38,9 @@
       "path": "./adapters/omp"
     },
     {
+      "path": "./adapters/pi"
+    },
+    {
       "path": "./fixtures/test-fixtures"
     }
   ]
