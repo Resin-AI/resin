@@ -1928,18 +1928,30 @@ export class CodexSessionDecoder {
     item: CodexTranscriptPayload,
     timestamp?: string,
   ): NormalizedSessionEvent[] {
-    const invocation = { server: item.server, tool: item.tool, arguments: item.arguments ?? {} };
+    const server = asString(item.server);
+    const tool = asString(item.tool);
+    if (!server || !tool || !asString(item.id)) {
+      return [
+        {
+          ...this.emitHeader("unknown_passthrough", timestamp),
+          type: "unknown_passthrough",
+          rawEventType: "mcptoolcall",
+          rawPayload: item,
+        },
+      ];
+    }
+    const invocation = { server, tool, arguments: item.arguments ?? {} };
     const errorMessage = asString(asObject(item.error)?.message);
     const duration = asObject(item.duration);
     const durationMs =
       duration === undefined
         ? undefined
         : Math.round((asNumber(duration.secs) ?? 0) * 1000 + (asNumber(duration.nanos) ?? 0) / 1e6);
-    const status = asString(item.status);
+    // A failed call carries either `error` (never reached the server) or a result with isError.
     const result =
       errorMessage !== undefined
         ? { Err: errorMessage }
-        : status === "completed" && item.result !== undefined && item.result !== null
+        : item.result !== undefined && item.result !== null
           ? { Ok: item.result }
           : null;
     return [

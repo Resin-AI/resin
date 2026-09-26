@@ -73,6 +73,7 @@ function sessionForCodexTranscript(
   if (inspection.nativeSessionId) metadata.nativeSessionId = inspection.nativeSessionId;
   if (inspection.threadId) metadata.threadId = inspection.threadId;
   if (inspection.rootId) metadata.rootId = inspection.rootId;
+  if (inspection.parentThreadId) metadata.parentThreadId = inspection.parentThreadId;
 
   return {
     sessionId: baseName.startsWith("sess_") ? baseName : `sess_${baseName}`,

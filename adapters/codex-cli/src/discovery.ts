@@ -291,6 +291,8 @@ export interface CodexTranscriptInspection {
   nativeSessionId?: string;
   threadId?: string;
   rootId?: string;
+  /** Spawning thread of a multi-agent child rollout. */
+  parentThreadId?: string;
   status: SessionStatus;
   inspectedBytes: number;
 }
@@ -541,6 +543,7 @@ async function inspectCodexTranscript(
     let nativeSessionId: string | undefined;
     let threadId: string | undefined;
     let rootId: string | undefined;
+    let parentThreadId: string | undefined;
     let createdAt = fileStat.birthtime.getTime()
       ? fileStat.birthtime.toISOString()
       : fileStat.mtime.toISOString();
@@ -564,6 +567,12 @@ async function inspectCodexTranscript(
         nonEmptyString(payload.rootThreadId) ??
         nonEmptyString(payload.root_id) ??
         nonEmptyString(payload.rootId);
+      // Multi-agent children (0.156+) name the spawning thread; they share its cwd and project.
+      const source = isJsonObject(payload.source) ? payload.source : undefined;
+      const subagent = isJsonObject(source?.subagent) ? source.subagent : undefined;
+      const spawn = isJsonObject(subagent?.thread_spawn) ? subagent.thread_spawn : undefined;
+      parentThreadId =
+        nonEmptyString(payload.parent_thread_id) ?? nonEmptyString(spawn?.parent_thread_id);
       createdAt = codexRecordTimestamp(value) ?? createdAt;
       break;
     }
@@ -616,6 +625,7 @@ async function inspectCodexTranscript(
       ...(nativeSessionId ? { nativeSessionId } : {}),
       ...(threadId ? { threadId } : {}),
       ...(rootId ? { rootId } : {}),
+      ...(parentThreadId ? { parentThreadId } : {}),
       status,
       inspectedBytes,
     };
