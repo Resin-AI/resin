@@ -11,10 +11,11 @@ import {
   createLocalWorkflowValidator,
 } from "./workflow-validation.js";
 
-// Data workspaces routinely hold inputs of tens of megabytes (a CSV the recorded job reads); a
-// replay that cannot copy them cannot validate the job at all.
-const MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024;
-export const MAX_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
+// Data workspaces routinely hold inputs of tens to hundreds of megabytes (a CSV the recorded job
+// reads, a DuckDB file a dbt project builds against); a replay that cannot copy them cannot
+// validate the job at all.
+const MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024;
+export const MAX_SNAPSHOT_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES = 10_000;
 const MAX_SNAPSHOT_ENTRIES = 20_000;
 const COPY_CHUNK_BYTES = 64 * 1024;

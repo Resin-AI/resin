@@ -101,7 +101,7 @@ A learned tool replays the commands Codex ran, with some recorded values turned 
 - a value an earlier command printed, such as a generated deployment id, which later commands then read from that command's output on every run;
 - a value on a line a Codex `apply_patch` edit added; the edit is replayed as a patch step confined to the working directory.
 
-Every candidate stays the recorded value until a local replay in a disposable copy of the workspace confirms it. Replay snapshots copy files up to 64 MiB each (512 MiB in total) and time out after two minutes. Outputs, file edits and the original text of every program stay on this machine. The secret-redacted text of Codex commands, like other secret-redacted program views (see [Security and Privacy](security-and-privacy.md)), is sent to Resin's service to name the tool and choose its inputs; shell commands from other harnesses are not.
+Every candidate stays the recorded value until a local replay in a disposable copy of the workspace confirms it. Replay snapshots copy files up to 256 MiB each (1 GiB in total) and time out after two minutes. Outputs, file edits and the original text of every program stay on this machine. The secret-redacted text of Codex commands, like other secret-redacted program views (see [Security and Privacy](security-and-privacy.md)), is sent to Resin's service to name the tool and choose its inputs; shell commands from other harnesses are not.
 
 ---
 
