@@ -1,0 +1,21 @@
+{
+  "id": "msg_0dff3f548001dHQ0huXL0JHrIE",
+  "sessionID": "ses_f200c0ab8ffezEyenGnxw5g0Yn",
+  "role": "user",
+  "time": {
+    "created": 1790463702345
+  },
+  "summary": {
+    "diffs": []
+  },
+  "agent": "general",
+  "model": {
+    "providerID": "github-copilot",
+    "modelID": "gpt-4.1"
+  },
+  "tools": {
+    "todowrite": false,
+    "todoread": false,
+    "task": false
+  }
+}

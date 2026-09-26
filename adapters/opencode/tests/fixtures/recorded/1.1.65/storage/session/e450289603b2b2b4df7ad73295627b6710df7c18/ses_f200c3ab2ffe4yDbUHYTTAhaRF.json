@@ -1,0 +1,34 @@
+{
+  "id": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "slug": "mighty-mountain",
+  "version": "1.1.65",
+  "projectID": "e450289603b2b2b4df7ad73295627b6710df7c18",
+  "directory": "/workspace/project",
+  "title": "New session - 2026-09-26T23:01:30.062Z",
+  "permission": [
+    {
+      "permission": "question",
+      "pattern": "*",
+      "action": "deny"
+    },
+    {
+      "permission": "plan_enter",
+      "pattern": "*",
+      "action": "deny"
+    },
+    {
+      "permission": "plan_exit",
+      "pattern": "*",
+      "action": "deny"
+    }
+  ],
+  "time": {
+    "created": 1790463690062,
+    "updated": 1790463705746
+  },
+  "summary": {
+    "additions": 2,
+    "deletions": 1,
+    "files": 2
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "prt_0dff3e00b002Der1unqDWH1oJy",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "messageID": "msg_0dff3dc82001zvce2IFczJlbM0",
+  "type": "tool",
+  "callID": "call_KJFrejAVPi5poyT9MhmiuxUs",
+  "tool": "edit",
+  "state": {
+    "status": "completed",
+    "input": {
+      "filePath": "/workspace/project/README.md",
+      "newString": "A tiny demo project for fixtures.",
+      "oldString": "A tiny demo project."
+    },
+    "output": "Edit applied successfully.",
+    "title": "README.md",
+    "metadata": {
+      "diagnostics": {},
+      "diff": "Index: /workspace/project/README.md\n===================================================================\n--- /workspace/project/README.md\n+++ /workspace/project/README.md\n@@ -1,3 +1,3 @@\n # Tiny demo\n \n-A tiny demo project.\n+A tiny demo project for fixtures.\n",
+      "filediff": {
+        "file": "/workspace/project/README.md",
+        "before": "# Tiny demo\n\nA tiny demo project.\n",
+        "after": "# Tiny demo\n\nA tiny demo project for fixtures.\n",
+        "additions": 1,
+        "deletions": 1
+      },
+      "truncated": false
+    },
+    "time": {
+      "start": 1790463697348,
+      "end": 1790463697357
+    }
+  }
+}
