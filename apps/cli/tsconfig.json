@@ -40,6 +40,9 @@
       "path": "../../adapters/codex-cli"
     },
     {
+      "path": "../../adapters/grok-build"
+    },
+    {
       "path": "../../adapters/omp"
     }
   ]
