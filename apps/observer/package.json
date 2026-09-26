@@ -54,6 +54,7 @@
     "@resin/adapter-grok-build": "workspace:*",
     "@resin/adapter-cursor-cli": "workspace:*",
     "@resin/adapter-muse-code": "workspace:*",
+    "@resin/adapter-copilot-cli": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
     "@resin/adapter-opencode": "workspace:*",
     "@resin/contracts": "workspace:*",

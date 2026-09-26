@@ -38,6 +38,9 @@
       "path": "./adapters/muse-code"
     },
     {
+      "path": "./adapters/copilot-cli"
+    },
+    {
       "path": "./adapters/omp"
     },
     {

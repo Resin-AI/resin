@@ -69,6 +69,18 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  adapters/copilot-cli:
+    dependencies:
+      '@resin/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@resin/harness-contracts':
+        specifier: workspace:*
+        version: link:../../packages/harness-contracts
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
   adapters/cursor-cli:
     dependencies:
       '@resin/contracts':
@@ -131,6 +143,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-copilot-cli':
+        specifier: workspace:*
+        version: link:../../adapters/copilot-cli
       '@resin/adapter-cursor-cli':
         specifier: workspace:*
         version: link:../../adapters/cursor-cli
@@ -219,6 +234,9 @@ importers:
       '@resin/adapter-codex':
         specifier: workspace:*
         version: link:../../adapters/codex-cli
+      '@resin/adapter-copilot-cli':
+        specifier: workspace:*
+        version: link:../../adapters/copilot-cli
       '@resin/adapter-cursor-cli':
         specifier: workspace:*
         version: link:../../adapters/cursor-cli
