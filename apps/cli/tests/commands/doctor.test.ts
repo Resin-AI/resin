@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import type { HarnessId } from "@resin/contracts";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
@@ -13,7 +14,6 @@ import {
   runDiagnostics,
 } from "../../src/commands/doctor.js";
 import { initCommand } from "../../src/commands/init.js";
-import type { HarnessId } from "@resin/contracts";
 import { resolveHarnessConfigPath } from "../../src/installer/harness-config.js";
 import {
   HARNESS_HEALTH_CHECK_INTERVAL_MS,

@@ -4,8 +4,8 @@ import path from "node:path";
 import process from "node:process";
 import {
   type ConfigFsBridge,
-  LEGACY_RESIN_MCP_SERVER_ALIASES,
   type HarnessDefinition,
+  LEGACY_RESIN_MCP_SERVER_ALIASES,
   applyManagedBlock,
   defaultFsBridge,
   isRecognizedResinMcpEntry,
