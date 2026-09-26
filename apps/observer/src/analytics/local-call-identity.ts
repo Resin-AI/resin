@@ -1,9 +1,7 @@
-import { ClaudeHarnessAdapter } from "@resin/adapter-claude-code";
-import { CodexHarnessAdapter } from "@resin/adapter-codex";
-import { OmpHarnessAdapter } from "@resin/adapter-omp";
 import type { WorkflowJsonValue } from "@resin/contracts";
 import type { HarnessAdapter } from "@resin/harness-contracts";
 import { z } from "zod";
+import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 import {
   type PrivateValueRepresentation,
   type PrivateValueStore,
@@ -155,11 +153,8 @@ export function createLocalCallIdentity(options: {
   adapters?: readonly HarnessAdapter[];
   cacheTtlMs?: number;
 }): LocalCallIdentity {
-  const adapters = options.adapters ?? [
-    new ClaudeHarnessAdapter(),
-    new CodexHarnessAdapter(),
-    new OmpHarnessAdapter({ activeOnly: false }),
-  ];
+  const adapters =
+    options.adapters ?? HARNESS_DEFINITIONS.map((definition) => definition.createAdapter());
   const requestedTtl = options.cacheTtlMs;
   const cacheTtlMs =
     requestedTtl !== undefined && Number.isFinite(requestedTtl) && requestedTtl >= 0

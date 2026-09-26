@@ -1,5 +1,7 @@
 import os from "node:os";
 import process from "node:process";
+import type { HarnessId } from "@resin/contracts";
+import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 
 /**
  * Supported target operating systems for Resin.
@@ -119,12 +121,10 @@ export interface SupportMatrixHarness {
   readonly id: string;
   readonly name: string;
   readonly adapterPackage: string;
-  readonly supportedVersions: readonly string[];
-  readonly qualifiedVersions: readonly string[];
+  /** Exact versions qualified with recorded fixtures. */
+  readonly testedVersions: readonly string[];
   readonly protocol: "mcp";
   readonly transports: readonly string[];
-  readonly probeModule: string;
-  readonly probeFunction: string;
 }
 
 /**
@@ -191,11 +191,7 @@ export interface V1SupportMatrix {
   readonly platforms: readonly SupportMatrixPlatform[];
   readonly qualificationLanes: readonly RequiredQualificationLane[];
   readonly runtimeLanes: readonly PlatformQualificationLane[];
-  readonly harnesses: {
-    readonly "claude-code": SupportMatrixHarness;
-    readonly "codex-cli": SupportMatrixHarness;
-    readonly omp: SupportMatrixHarness;
-  };
+  readonly harnesses: Readonly<Partial<Record<HarnessId, SupportMatrixHarness>>>;
   readonly environmentAssumptions: SupportMatrixEnvironmentAssumptions;
   readonly limitations: SupportMatrixLimitations;
 }
@@ -304,41 +300,21 @@ export const V1_SUPPORT_MATRIX: V1SupportMatrix = Object.freeze({
   ]),
   qualificationLanes: REQUIRED_QUALIFICATION_LANES,
   runtimeLanes: ALL_QUALIFICATION_LANES,
-  harnesses: Object.freeze({
-    "claude-code": Object.freeze({
-      id: "claude-code",
-      name: "Claude Code",
-      adapterPackage: "@resin/adapter-claude-code",
-      supportedVersions: Object.freeze([">=0.1.0", ">=0.2.0", ">=1.0.0"]),
-      qualifiedVersions: Object.freeze(["0.2.14", "1.0.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["sse", "stdio"]),
-      probeModule: "adapters/claude-code/dist/index.js",
-      probeFunction: "probeClaudeInstallation",
-    }),
-    "codex-cli": Object.freeze({
-      id: "codex-cli",
-      name: "Codex CLI",
-      adapterPackage: "@resin/adapter-codex",
-      supportedVersions: Object.freeze([">=0.45.0"]),
-      qualifiedVersions: Object.freeze(["0.45.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["stdio", "sse"]),
-      probeModule: "adapters/codex-cli/dist/index.js",
-      probeFunction: "probeCodexInstallation",
-    }),
-    omp: Object.freeze({
-      id: "omp",
-      name: "Oh My Pi",
-      adapterPackage: "@resin/adapter-omp",
-      supportedVersions: Object.freeze([">=0.1.0"]),
-      qualifiedVersions: Object.freeze(["0.12.5", "1.0.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["stdio", "sse", "websocket", "http"]),
-      probeModule: "adapters/omp/dist/index.js",
-      probeFunction: "probeOmpInstallation",
-    }),
-  }),
+  harnesses: Object.freeze(
+    Object.fromEntries(
+      HARNESS_DEFINITIONS.map((definition) => [
+        definition.id,
+        Object.freeze({
+          id: definition.id,
+          name: definition.shortName,
+          adapterPackage: definition.adapterPackage,
+          testedVersions: Object.freeze([...definition.testedVersions]),
+          protocol: "mcp" as const,
+          transports: Object.freeze([...definition.mcpConfig.transports]),
+        }),
+      ]),
+    ),
+  ),
   environmentAssumptions: Object.freeze({
     shells: Object.freeze({
       supported: Object.freeze(["bash", "zsh", "sh"] as const),

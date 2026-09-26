@@ -5,12 +5,13 @@ import process from "node:process";
 import {
   type ConfigFsBridge,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
+  type HarnessDefinition,
+  applyManagedBlock,
   defaultFsBridge,
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
-import { applyCodexGuidance, resolveCodexAgentsPath } from "../installer/codex-instructions.js";
-import { resolveHarnessConfigPath } from "../installer/harness-config.js";
+import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 import { createUserServiceManager } from "../service/manager.js";
 export type McpServerConfigValue =
   | string
@@ -32,10 +33,12 @@ export interface McpServerConfig {
 
 export type McpServersRecord = Record<string, McpServerConfig>;
 
-export interface HarnessJsonConfig {
-  mcpServers?: McpServersRecord;
-  mcp_servers?: McpServersRecord;
-  [key: string]: McpServersRecord | McpServerConfigValue | undefined;
+export type HarnessJsonConfig = Record<string, McpServersRecord | McpServerConfigValue | undefined>;
+
+function isMcpContainer(
+  value: McpServersRecord | McpServerConfigValue | undefined,
+): value is McpServersRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export interface TomlRemovalResult {
@@ -131,6 +134,7 @@ Options:
 
 async function removeResinFromJsonConfig(
   configPath: string,
+  containerKeys: readonly string[],
   fsBridge: ConfigFsBridge,
 ): Promise<boolean> {
   const content = await fsBridge.readFile(configPath);
@@ -141,11 +145,11 @@ async function removeResinFromJsonConfig(
   try {
     const parsed: HarnessJsonConfig = JSON.parse(content);
     let modified = false;
-    if (parsed.mcpServers && !Array.isArray(parsed.mcpServers)) {
-      modified = cleanMcpContainer(parsed.mcpServers) || modified;
-    }
-    if (parsed.mcp_servers && !Array.isArray(parsed.mcp_servers)) {
-      modified = cleanMcpContainer(parsed.mcp_servers) || modified;
+    for (const key of containerKeys) {
+      const container = parsed[key];
+      if (isMcpContainer(container)) {
+        modified = cleanMcpContainer(container) || modified;
+      }
     }
     if (modified) {
       await fsBridge.writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`);
@@ -169,66 +173,57 @@ export async function removeHarnessMcpConfigurations(options: {
   const env = options.env ?? (options.customHome === undefined ? process.env : { HOME: home });
   const cleaned: string[] = [];
 
-  const claudePaths = new Set([
-    resolveHarnessConfigPath("claude-code", home, env),
-    path.join(home, ".claude.json"),
-    path.join(home, ".claude", "claude.json"),
-    path.join(home, ".claude", "config.json"),
-  ]);
-  let claudeCleaned = false;
-  for (const configPath of claudePaths) {
-    claudeCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || claudeCleaned;
-  }
-  if (claudeCleaned) {
-    cleaned.push("Claude Code");
-  }
-
-  const codexPaths = new Set([
-    resolveHarnessConfigPath("codex-cli", home, env),
-    path.join(home, ".codex", "config.toml"),
-    path.join(home, ".codex", "config.json"),
-    path.join(home, ".codex", "mcp.json"),
-  ]);
-  let codexCleaned = false;
-  for (const configPath of codexPaths) {
-    if (configPath.endsWith(".json")) {
-      codexCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || codexCleaned;
-      continue;
-    }
-    const content = await fsBridge.readFile(configPath);
-    if (!content) {
-      continue;
-    }
-    const removal = removeResinFromCodexToml(content);
-    if (removal.modified) {
-      await fsBridge.writeFile(configPath, removal.content);
-      codexCleaned = true;
+  for (const definition of HARNESS_DEFINITIONS) {
+    if (await removeHarnessRegistration(definition, home, env, fsBridge)) {
+      cleaned.push(definition.displayName);
     }
   }
-  const guidance = await applyCodexGuidance(resolveCodexAgentsPath(home, env), fsBridge, {
-    install: false,
-  });
-  codexCleaned = guidance.action === "removed" || codexCleaned;
-  if (codexCleaned) {
-    cleaned.push("Codex CLI");
-  }
 
-  const activeOmpPath = resolveHarnessConfigPath("omp", home, env);
-  const activeOmpHome = path.dirname(path.dirname(activeOmpPath));
-  const ompPaths = new Set([
-    activeOmpPath,
-    path.join(activeOmpHome, "config.json"),
-    path.join(home, ".omp", "agent", "mcp.json"),
-    path.join(home, ".omp", "config.json"),
-  ]);
-  let ompCleaned = false;
-  for (const configPath of ompPaths) {
-    ompCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || ompCleaned;
-  }
-  if (ompCleaned) {
-    cleaned.push("Oh My Pi (OMP)");
-  }
+  return cleaned;
+}
 
+async function removeHarnessRegistration(
+  definition: HarnessDefinition,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  fsBridge: ConfigFsBridge,
+): Promise<boolean> {
+  const { mcpConfig } = definition;
+  let cleaned = false;
+  if (mcpConfig.removeRegistration !== undefined) {
+    cleaned = await mcpConfig.removeRegistration({ home, env, fsBridge });
+  } else {
+    for (const configPath of new Set(mcpConfig.uninstallPaths(home, env))) {
+      if (mcpConfig.format !== "codex-toml" || configPath.endsWith(".json")) {
+        cleaned =
+          (await removeResinFromJsonConfig(configPath, mcpConfig.jsonContainerKeys, fsBridge)) ||
+          cleaned;
+        continue;
+      }
+      const content = await fsBridge.readFile(configPath);
+      if (!content) {
+        continue;
+      }
+      const removal = removeResinFromCodexToml(content);
+      if (removal.modified) {
+        await fsBridge.writeFile(configPath, removal.content);
+        cleaned = true;
+      }
+    }
+  }
+  if (definition.guidance !== undefined) {
+    const guidance = await applyManagedBlock(
+      fsBridge,
+      definition.guidance.resolvePath(home, env),
+      definition.guidance.markers,
+      null,
+    );
+    cleaned = guidance.action === "removed" || cleaned;
+  }
+  for (const extension of definition.installExtensions ?? []) {
+    const outcomes = await extension.uninstall({ home, env, fsBridge });
+    cleaned = outcomes.some((outcome) => outcome.action === "removed") || cleaned;
+  }
   return cleaned;
 }
 
@@ -329,7 +324,7 @@ export async function uninstallCommand(
       success: true,
       dryRun: true,
       serviceUninstalled: true,
-      harnessesCleaned: ["Claude Code", "Codex CLI", "Oh My Pi (OMP)"],
+      harnessesCleaned: HARNESS_DEFINITIONS.map((definition) => definition.displayName),
       purgedData: Boolean(flags.purgeData || flags.purgeAll),
       purgedSecrets: Boolean(flags.purgeSecrets || flags.purgeAll),
       purgedAll: Boolean(flags.purgeAll),

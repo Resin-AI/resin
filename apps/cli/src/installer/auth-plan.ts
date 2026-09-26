@@ -13,6 +13,7 @@ import { RedactionStrategySchema } from "@resin/contracts/common";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
+import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 
 /**
  * Privacy and observability configuration for Resin installation.
@@ -165,11 +166,10 @@ export async function createAuthorizationPlan(
   }
 
   // Build target harness list
-  const defaultHarnesses = [
-    { id: "claude-code", name: "Claude Code CLI" },
-    { id: "codex-cli", name: "Codex CLI" },
-    { id: "omp", name: "Oh My Pi (OMP)" },
-  ];
+  const defaultHarnesses = HARNESS_DEFINITIONS.map((definition) => ({
+    id: definition.id,
+    name: definition.displayName,
+  }));
   const targetHarnesses = options.targetHarnesses ?? defaultHarnesses;
 
   const harnesses: HarnessGrant[] = targetHarnesses.map((h) => ({
