@@ -1245,7 +1245,8 @@ export class WorkflowCallRecorder {
     );
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
-      if (candidate.stepId !== ownStepId) continue;
+      // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.
+      if (candidate.stepId !== ownStepId || candidate.reason === "derived-from-inputs") continue;
       if (candidate.proposed.kind === "input") {
         candidates.push({
           argument: candidate.argument,

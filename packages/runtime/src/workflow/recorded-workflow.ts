@@ -348,8 +348,13 @@ async function buildTemplate(
       const embedded = new Map<number, Map<number, string | number | boolean | null>>();
       const spans: ProgramTokenSpanValue[] = [];
       for (const hole of template.holes) {
-        // An omitted recorded-default input leaves the token exactly as the recording ran it.
-        if (hole.binding.type === "input" && !Object.hasOwn(options.inputs, hole.binding.name)) {
+        // An omitted recorded-default input leaves the token exactly as the recording ran it. A
+        // derivation's tokens were never recorded, so its inputs are always required.
+        if (
+          hole.binding.type === "input" &&
+          !Object.hasOwn(options.inputs, hole.binding.name) &&
+          step.origin !== "derivation"
+        ) {
           continue;
         }
         const bound = await resolveLeaf(hole.binding);

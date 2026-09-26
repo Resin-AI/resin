@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ToolManifest } from "@resin/contracts";
-import { embeddedPrograms } from "@resin/contracts";
+import { derivationHeader, derivationInputTokenIndexes, embeddedPrograms } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
   ArtifactCache,
@@ -435,6 +435,121 @@ describe("recorded workflows of ordinary calls", () => {
     expect(description).toContain("./deployctl wait {output of step 1}");
     expect(description).not.toContain("dep-9e983a");
     expect(description).not.toContain("Parameters");
+  });
+
+  it("describes a derivation by what it computes, never its code or computed values", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:report", "printf '%s %s %s\\n' Crossfit_Hanna R 5942", {
+      workspaceId: context.workspaceId,
+    });
+    const code = `${derivationHeader([{ name: "merchant", value: "" }])}import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n`;
+    const [merchantToken] = derivationInputTokenIndexes(code, ["merchant"]);
+    const installed = await installPlan(
+      {
+        id: "tool_derivation",
+        name: "wf_derivation",
+        version: "1.0.0",
+        description: "recorded report with derived values",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_derivation",
+        inputs: [{ name: "merchant", type: "string", recordedDefault: true }],
+        privateReferences: ["private:report"],
+        steps: [
+          {
+            id: "derive",
+            callId: "derivation:derive",
+            origin: "derivation",
+            callable: {
+              runtime: RESIN_PROGRAM_RUNTIME,
+              name: "python",
+              program: {
+                kind: "python",
+                sourceInterface: "python-eval",
+                source: code,
+                argument: "code",
+              },
+            },
+            arguments: [
+              {
+                name: "code",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "program",
+                    language: "python",
+                    source: { type: "literal", value: code },
+                    holes: [{ token: merchantToken, binding: { type: "input", name: "merchant" } }],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "unknown" },
+          },
+          {
+            id: "report",
+            callId: "call_report",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "program",
+                    language: "shell",
+                    source: { type: "private", reference: "private:report" },
+                    holes: [
+                      { token: 2, binding: { type: "input", name: "merchant" } },
+                      {
+                        token: 3,
+                        binding: { type: "result", stepId: "derive", path: ["account_type"] },
+                      },
+                      { token: 4, binding: { type: "result", stepId: "derive", path: ["mcc"] } },
+                    ],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+    const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toContain("Step 1 computes {account_type}, {mcc} from {merchant}");
+    expect(description).toContain("printf '%s %s %s\\n' {merchant} {account_type} {mcc}");
+    expect(description).not.toContain("json.load");
+    // Only the caller input is a parameter; derived values are neither parameters nor shown.
+    expect(description).toContain("merchant = Crossfit_Hanna");
+    expect(description).not.toContain("account_type =");
+    expect(description).not.toContain("5942");
   });
 
   it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {

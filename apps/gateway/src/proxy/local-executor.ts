@@ -602,6 +602,17 @@ export class LocalArtifactExecutor {
                 },
               ];
         }
+        // A value a derivation computes from the inputs: shown by its name, never as a parameter.
+        const binding = hole.binding;
+        if (binding.type === "result") {
+          const producer = plan.steps.find((entry) => entry.id === binding.stepId);
+          const name = binding.path[0];
+          return producer?.origin === "derivation" &&
+            typeof name === "string" &&
+            binding.path.length === 1
+            ? [{ token, name, span: hole.span, parameter: false }]
+            : [];
+        }
         return [];
       });
       // Span holes show `{input}` inside their token's recorded text: at the same offsets of the
@@ -643,6 +654,46 @@ export class LocalArtifactExecutor {
     const steps: string[] = [];
     const parameters = new Set<string>();
     for (const [index, step] of plan.steps.entries()) {
+      // A derivation is model-written code: describe what it computes, never the code itself.
+      if (step.origin === "derivation") {
+        const computed = new Set<string>();
+        for (const consumer of plan.steps) {
+          for (const argument of consumer.arguments) {
+            if (
+              argument.source.kind !== "template" ||
+              argument.source.template.type !== "program"
+            ) {
+              continue;
+            }
+            for (const hole of argument.source.template.holes) {
+              if (
+                hole.binding.type === "result" &&
+                hole.binding.stepId === step.id &&
+                hole.binding.path.length === 1 &&
+                typeof hole.binding.path[0] === "string"
+              ) {
+                computed.add(`{${hole.binding.path[0]}}`);
+              }
+            }
+          }
+        }
+        const program = step.callable.program;
+        const source = step.arguments.find(
+          (argument) => argument.name === program?.argument,
+        )?.source;
+        const read = new Set<string>();
+        if (source?.kind === "template" && source.template.type === "program") {
+          for (const hole of source.template.holes) {
+            if (hole.binding.type === "input") read.add(`{${hole.binding.name}}`);
+          }
+        }
+        if (computed.size > 0 && read.size > 0) {
+          steps.push(
+            `Step ${index + 1} computes ${[...computed].join(", ")} from ${[...read].join(", ")}`,
+          );
+        }
+        continue;
+      }
       const program = step.callable.program;
       const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
       const bound = source === undefined ? undefined : parameterized(source);

@@ -70,6 +70,11 @@ export interface ProgramRunnerOptions {
   ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Workspace scope forwarded to the private setup resolver. */
   access?: { workspaceId?: string };
+  /**
+   * Python Eval only: the result is the JSON of the final expression, which must be an object,
+   * rather than rendered text. Derivation steps run this way; printed output is not part of it.
+   */
+  pythonEvalResult?: "json-object";
   /** Overridable for tests. */
   platform?: NodeJS.Platform;
 }
@@ -824,7 +829,11 @@ function composePythonEvalReplaySource(
   outputPath: string,
   maxOutputBytes: number,
   maxEventBytes: number,
+  jsonResult = false,
 ): string {
+  const renderResult = jsonResult
+    ? "__resin_json.dumps(__resin_result, ensure_ascii=False, allow_nan=False)"
+    : "repr(__resin_result)";
   const serializedSources = JSON.stringify(JSON.stringify([...setupSources, target]));
   return [
     "import ast as __resin_ast",
@@ -962,7 +971,7 @@ function composePythonEvalReplaySource(
     "                __resin_expression_code = __resin_compile(__resin_expression_tree, '<resin-python-result>', 'eval', flags=__resin_future_flags, dont_inherit=True)",
     "                __resin_result = __resin_eval(__resin_expression_code, __resin_namespace, __resin_namespace)",
     "                if __resin_result is not None:",
-    "                    _resin_emit('r', repr(__resin_result) + '\\n')",
+    `                    _resin_emit('r', ${renderResult} + '\\n')`,
     "            __resin_stdout.flush()",
     "    finally:",
     "        try:",
@@ -1008,6 +1017,7 @@ async function preparePythonReplaySource(
       pythonEvalOutputPath,
       bounds.output,
       bounds.events,
+      options.pythonEvalResult === "json-object",
     );
   };
   if (state === undefined || state.setup.length === 0) {
@@ -1181,10 +1191,12 @@ function runChild(
 
 /**
  * Validates the bounded private event stream produced by the Python Eval wrapper, then applies the
- * result text projection used by that source interface.
+ * result text projection used by that source interface. With `jsonObject`, the value is the final
+ * expression's JSON object alone, and anything else fails the run rather than being guessed at.
  */
-function pythonEvalResultValue(output: string): WorkflowJsonValue {
+function pythonEvalResultValue(output: string, jsonObject = false): WorkflowJsonValue {
   const resultEvents: string[] = [];
+  let resultText: string | undefined;
   let complete = false;
   let hasResult = false;
   for (const line of output.split("\n")) {
@@ -1219,11 +1231,24 @@ function pythonEvalResultValue(output: string): WorkflowJsonValue {
         throw new Error("recorded Python Eval replay produced multiple result events");
       }
       hasResult = true;
+      resultText = event.v;
     }
     resultEvents.push(event.v);
   }
   if (!complete) {
     throw new Error("recorded Python Eval replay did not complete its output");
+  }
+  if (jsonObject) {
+    let parsed: unknown;
+    try {
+      parsed = resultText === undefined ? undefined : JSON.parse(resultText);
+    } catch {
+      parsed = undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("the derivation's final expression is not a JSON object");
+    }
+    return parsed as WorkflowJsonValue;
   }
   return resultEvents.join("").trim();
 }
@@ -1455,7 +1480,10 @@ export async function runRecordedProgram(
       if (outputStat.size > outputBounds.events) {
         throw new Error("recorded Python Eval replay exceeded its output event bound");
       }
-      value = pythonEvalResultValue(await outputFile.readFile({ encoding: "utf8" }));
+      value = pythonEvalResultValue(
+        await outputFile.readFile({ encoding: "utf8" }),
+        options.pythonEvalResult === "json-object",
+      );
     }
     if (isJavaScriptEval && captured.exitCode === 0) {
       if (outputPath === undefined || outputBounds === undefined || outputFile === undefined) {
@@ -1642,8 +1670,13 @@ export async function runRecordedCall(
     }
     replayWorkdir = join(options.cwd, subpath);
   }
+  const derivation = step.origin === "derivation";
+  if (derivation && (program.kind !== "python" || program.sourceInterface !== "python-eval")) {
+    throw new Error(`step '${step.id}' cannot run: a derivation must be a Python Eval program`);
+  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
+    ...(derivation ? { pythonEvalResult: "json-object" as const } : {}),
     ...((shellProfile === "bash-login-v1" || nativeCodexShell) && typeof replayWorkdir === "string"
       ? { cwd: replayWorkdir }
       : {}),

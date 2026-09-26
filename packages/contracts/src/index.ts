@@ -63,6 +63,7 @@ export const CONTRACTS_VERSION = "1.0.0";
 export * from "./recorded-workflow.js";
 export * from "./program-tokens.js";
 export * from "./extract-locator.js";
+export * from "./derivation-steps.js";
 export * from "./program-source-projection.js";
 export * from "./workflow-validation.js";
 export * from "./agent-arguments.js";

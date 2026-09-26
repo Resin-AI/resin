@@ -13,6 +13,9 @@
 
 import { mkdir } from "node:fs/promises";
 import {
+  type ProgramLanguage,
+  type ProgramTokenAddress,
+  type ProgramTokenSpanValue,
   type ProgramTokenValue,
   type RecordedWorkflow,
   type WorkflowArgument,
@@ -25,12 +28,14 @@ import {
   type WorkflowValuePath,
   type WorkflowValueSource,
   type WorkflowValueTemplate,
+  applyProgramTokenValues,
   bindProgramToken,
   demonstratedProgramTokenSpanValue,
   extractPrintedValue,
   parseExtractLocator,
   programTokenPath,
   programTokenValueAt,
+  tokenizeProgram,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
 import { computeWorkflowProgramIdentities } from "./program-identity.js";
@@ -416,7 +421,7 @@ function bindEveryCandidate(
       if (!declared) bound.inputs.push({ name: proposal.name, type: proposal.type });
     }
   }
-  return { plan: bound, unaddressable };
+  return { plan: pruneUnusedDerivations(bound), unaddressable };
 }
 
 /**
@@ -840,6 +845,540 @@ export async function demonstrationEnvironment(params: {
   };
 }
 
+/** Whether a step is a model-written derivation rather than a recorded call. */
+export function isDerivationStep(step: WorkflowStep): boolean {
+  return step.origin === "derivation";
+}
+
+/** The derivation step a candidate reads, when it proposes one's output. */
+function derivationProducer(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+): WorkflowStep | undefined {
+  const proposed = candidate.proposed;
+  if (proposed.kind !== "result") return undefined;
+  const producer = plan.steps.find((step) => step.id === proposed.stepId);
+  return producer !== undefined && isDerivationStep(producer) ? producer : undefined;
+}
+
+/** Every step id a template or source reads a result or printed value from. */
+function collectReadSteps(
+  source: WorkflowValueSource | WorkflowValueTemplate,
+  into: Set<string>,
+): void {
+  if ("kind" in source) {
+    if (source.kind === "result") into.add(source.stepId);
+    if (source.kind === "template") collectReadSteps(source.template, into);
+    return;
+  }
+  switch (source.type) {
+    case "result":
+    case "extract":
+      into.add(source.stepId);
+      return;
+    case "object":
+      for (const entry of Object.values(source.entries)) collectReadSteps(entry, into);
+      return;
+    case "array":
+      for (const entry of source.items) collectReadSteps(entry, into);
+      return;
+    case "program":
+      collectReadSteps(source.source, into);
+      for (const hole of source.holes) collectReadSteps(hole.binding, into);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Removes derivation steps nothing reads, with the proposals that named them. A derivation exists
+ * only to feed an accepted binding; one whose bindings were all refuted must not run model-written
+ * code for nothing. A plan without derivation steps is returned unchanged.
+ */
+export function pruneUnusedDerivations(plan: RecordedWorkflow): RecordedWorkflow {
+  if (!plan.steps.some(isDerivationStep)) return plan;
+  const read = new Set<string>();
+  for (const step of plan.steps) {
+    for (const argument of step.arguments) collectReadSteps(argument.source, read);
+  }
+  const removed = new Set(
+    plan.steps.filter((step) => isDerivationStep(step) && !read.has(step.id)).map((s) => s.id),
+  );
+  if (removed.size === 0) return plan;
+  const candidates = plan.candidates?.filter(
+    (candidate) =>
+      !removed.has(candidate.stepId) &&
+      !(
+        (candidate.proposed.kind === "result" || candidate.proposed.kind === "extract") &&
+        removed.has(candidate.proposed.stepId)
+      ),
+  );
+  return {
+    ...plan,
+    steps: plan.steps.filter((step) => !removed.has(step.id)),
+    ...(candidates === undefined ? {} : { candidates }),
+  };
+}
+
+/** The input names a derivation step's holes read. */
+function derivationInputNames(step: WorkflowStep): string[] | undefined {
+  const template = derivationTemplate(step);
+  if (template === undefined) return undefined;
+  const names = new Set<string>();
+  for (const hole of template.holes) {
+    if (hole.binding.type !== "input") return undefined;
+    names.add(hole.binding.name);
+  }
+  return [...names];
+}
+
+/** The literal program template a derivation carries its model-written source in. */
+function derivationTemplate(
+  step: WorkflowStep,
+): (WorkflowValueTemplate & { type: "program" }) | undefined {
+  const argumentName = step.callable.program?.argument;
+  const source = step.arguments.find((argument) => argument.name === argumentName)?.source;
+  if (source?.kind !== "template" || source.template.type !== "program") return undefined;
+  const template = source.template;
+  if (template.source.type !== "literal" || typeof template.source.value !== "string") {
+    return undefined;
+  }
+  return template;
+}
+
+/** Which demonstration an environment replays: the held-out run when there is one. */
+type DemonstrationLabel = "baseline" | "held-out";
+
+interface DemonstrationContext {
+  label: DemonstrationLabel;
+  demonstration: NonNullable<RecordedWorkflow["heldOut"]>;
+  environment: CandidateValidationEnvironment;
+}
+
+/**
+ * The recorded program text a token address is read against in one demonstration: the text that
+ * demonstration ran for the step's argument, or — for the baseline, which is the recording itself —
+ * the plan's own recorded text when the demonstration keeps no copy of it.
+ */
+async function demonstratedProgramText(
+  plan: RecordedWorkflow,
+  context: DemonstrationContext,
+  stepId: string,
+  argumentName: string,
+  resolve: (reference: string) => Promise<WorkflowJsonValue>,
+): Promise<string | undefined> {
+  const entry = context.demonstration.inputs.find(
+    (supplied) => supplied.stepId === stepId && supplied.argument === argumentName,
+  );
+  if (entry !== undefined) {
+    const supplied = await resolve(entry.reference);
+    return typeof supplied === "string" ? supplied : undefined;
+  }
+  if (context.label !== "baseline") return undefined;
+  const argument = plan.steps
+    .find((step) => step.id === stepId)
+    ?.arguments.find((each) => each.name === argumentName);
+  if (argument === undefined) return undefined;
+  const recorded = await recordedProgramText(argument.source, resolve);
+  return typeof recorded === "string" ? recorded : undefined;
+}
+
+/** The value a token address reads in one demonstration's program text. */
+async function demonstratedTokenAt(
+  plan: RecordedWorkflow,
+  context: DemonstrationContext,
+  target: { stepId: string; argument: string; path: WorkflowValuePath },
+  resolve: (reference: string) => Promise<WorkflowJsonValue>,
+): Promise<{ text: string; value: ProgramTokenValue } | undefined> {
+  const address = programTokenPath(target.path);
+  const step = plan.steps.find((entry) => entry.id === target.stepId);
+  const program = step?.callable.program;
+  if (address === undefined || program === undefined || program.argument !== target.argument) {
+    return undefined;
+  }
+  const text = await demonstratedProgramText(
+    plan,
+    context,
+    target.stepId,
+    target.argument,
+    resolve,
+  );
+  if (text === undefined) return undefined;
+  let value: ProgramTokenValue | undefined;
+  if (address.span === undefined || context.label === "baseline") {
+    value = programTokenValueAt(program.kind, text, address);
+  } else {
+    const argument = step?.arguments.find((entry) => entry.name === target.argument);
+    const recorded =
+      argument === undefined ? undefined : await recordedProgramText(argument.source, resolve);
+    value =
+      typeof recorded === "string"
+        ? demonstratedProgramTokenSpanValue(program.kind, recorded, text, address)
+        : undefined;
+  }
+  return value === undefined ? undefined : { text, value };
+}
+
+/**
+ * The demonstration's values for inputs a derivation reads that the environment does not supply.
+ *
+ * A derivation's input usually also appears as a token of a recorded program — bound there by an
+ * existing hole or proposed by an input candidate — so the demonstration's own text says what the
+ * caller supplied. Values that disagree establish nothing and are left out, which later refutes
+ * the derivation instead of running it on a guess.
+ */
+async function withDerivationInputs(
+  plan: RecordedWorkflow,
+  candidates: readonly WorkflowBindingCandidate[],
+  context: DemonstrationContext,
+): Promise<CandidateValidationEnvironment> {
+  const environment = context.environment;
+  const resolvePrivate = environment.resolvePrivate;
+  if (resolvePrivate === undefined) return environment;
+  const resolve = async (reference: string): Promise<WorkflowJsonValue> =>
+    await resolvePrivate(reference);
+  const wanted = new Set<string>();
+  for (const step of plan.steps) {
+    if (!isDerivationStep(step)) continue;
+    for (const name of derivationInputNames(step) ?? []) {
+      if (!Object.hasOwn(environment.inputs, name)) wanted.add(name);
+    }
+  }
+  if (wanted.size === 0) return environment;
+  const positions: Array<{
+    name: string;
+    stepId: string;
+    argument: string;
+    path: WorkflowValuePath;
+  }> = [];
+  for (const candidate of candidates) {
+    if (candidate.proposed.kind === "input" && candidate.path[0] === "tokens") {
+      positions.push({
+        name: candidate.proposed.name,
+        stepId: candidate.stepId,
+        argument: candidate.argument,
+        path: candidate.path,
+      });
+    }
+  }
+  for (const step of plan.steps) {
+    if (isDerivationStep(step)) continue;
+    for (const argument of step.arguments) {
+      if (argument.source.kind !== "template" || argument.source.template.type !== "program") {
+        continue;
+      }
+      for (const hole of argument.source.template.holes) {
+        // Span holes bind part of a token; the caller's whole value is not readable from them.
+        if (hole.binding.type !== "input" || hole.span !== undefined) continue;
+        positions.push({
+          name: hole.binding.name,
+          stepId: step.id,
+          argument: argument.name,
+          path:
+            hole.embedded === undefined
+              ? ["tokens", hole.token]
+              : ["tokens", hole.token, "embedded", hole.embedded],
+        });
+      }
+    }
+  }
+  const found = new Map<string, WorkflowJsonValue>();
+  const conflicting = new Set<string>();
+  for (const position of positions) {
+    if (!wanted.has(position.name)) continue;
+    const read = await demonstratedTokenAt(plan, context, position, resolve);
+    const declared = plan.inputs.find((input) => input.name === position.name);
+    if (
+      read === undefined ||
+      declared === undefined ||
+      !matchesDemonstratedType(read.value, declared.type)
+    ) {
+      continue;
+    }
+    const previous = found.get(position.name);
+    if (previous === undefined) found.set(position.name, read.value);
+    else if (!deepEqual(previous, read.value)) conflicting.add(position.name);
+  }
+  const inputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  Object.assign(inputs, environment.inputs);
+  for (const [name, value] of found) {
+    if (!conflicting.has(name)) inputs[name] = value;
+  }
+  return { ...environment, inputs };
+}
+
+/** A string or number literal of model-written source equals a recorded value. */
+function literalMatchesRecorded(literal: ProgramTokenValue, recorded: ProgramTokenValue): boolean {
+  if (literal === recorded) return true;
+  const numeric = (value: ProgramTokenValue): number | undefined => {
+    if (typeof value === "number") return value;
+    if (typeof value !== "string" || value.trim().length === 0) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const left = numeric(literal);
+  const right = numeric(recorded);
+  return left !== undefined && right !== undefined && left === right;
+}
+
+/**
+ * Whether a derived value reproduces a recorded token exactly: the same value (strings equal,
+ * numbers equal numerically), and binding it into the recorded text renders that text unchanged.
+ */
+function derivedValueReproduces(
+  language: ProgramLanguage,
+  text: string,
+  address: ProgramTokenAddress,
+  derived: WorkflowJsonValue | undefined,
+  recorded: ProgramTokenValue,
+): boolean {
+  if (derived === undefined || (derived !== null && typeof derived === "object")) return false;
+  const sameValue =
+    derived === recorded ||
+    (typeof derived === "number" &&
+      (typeof recorded === "number" || typeof recorded === "string") &&
+      recorded !== "" &&
+      Number(recorded) === derived);
+  if (!sameValue) return false;
+  try {
+    const tokens = tokenizeProgram(language, text);
+    const values = new Map<number, ProgramTokenValue>();
+    const embedded = new Map<number, Map<number, ProgramTokenValue>>();
+    const spans: ProgramTokenSpanValue[] = [];
+    if (address.span !== undefined) {
+      if (typeof derived !== "string" && typeof derived !== "number") return false;
+      spans.push({
+        token: address.token,
+        ...(address.embedded === undefined ? {} : { embedded: address.embedded }),
+        span: address.span,
+        value: derived,
+      });
+    } else if (address.embedded === undefined) {
+      values.set(address.token, derived);
+    } else {
+      embedded.set(address.token, new Map([[address.embedded, derived]]));
+    }
+    return applyProgramTokenValues(text, tokens, values, language, embedded, spans) === text;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decides candidates that bind recorded tokens to a derivation's output, without A/B replay.
+ *
+ * A derivation is model-written code, so it is held to more than reproducing the work: it must read
+ * a caller input, must not contain any recorded value its bindings claim to compute (hard-coding),
+ * and — run in the sandbox on each demonstration, before anything consumes it — must compute
+ * exactly the token each demonstration ran. A candidate is accepted only when every one of those
+ * holds for its step and its own value; the plan that carries it is then replayed as usual.
+ */
+async function evaluateDerivationCandidates(
+  plan: RecordedWorkflow,
+  derivationCandidates: readonly WorkflowBindingCandidate[],
+  candidates: readonly WorkflowBindingCandidate[],
+  environment: CandidateValidationEnvironment,
+): Promise<Map<WorkflowBindingCandidate, CandidateValidationOutcome>> {
+  const outcomes = new Map<WorkflowBindingCandidate, CandidateValidationOutcome>();
+  const refuteAll = (group: readonly WorkflowBindingCandidate[], reason: string): void => {
+    for (const candidate of group) {
+      if (!outcomes.has(candidate)) outcomes.set(candidate, refused(candidate, reason));
+    }
+  };
+  const resolvePrivate = environment.resolvePrivate;
+  if (resolvePrivate === undefined) {
+    refuteAll(derivationCandidates, "the replay cannot resolve the recorded program text");
+    return outcomes;
+  }
+  const resolve = async (reference: string): Promise<WorkflowJsonValue> =>
+    await resolvePrivate(reference);
+  // The environment replays the held-out run when there is one, else the baseline recording.
+  const contexts: DemonstrationContext[] = [];
+  if (plan.heldOut !== undefined) {
+    contexts.push({ label: "held-out", demonstration: plan.heldOut, environment });
+    if (plan.baseline !== undefined) {
+      const baseline = await demonstrationEnvironment({
+        plan: { ...plan, heldOut: plan.baseline },
+        candidates,
+        adapters: environment.adapters,
+        ...(environment.workspaceId === undefined ? {} : { workspaceId: environment.workspaceId }),
+        workspaceDir: environment.workspaceDir,
+        resolvePrivate,
+        ...(environment.timeoutMs === undefined ? {} : { timeoutMs: environment.timeoutMs }),
+      });
+      if (baseline === undefined) {
+        refuteAll(
+          derivationCandidates,
+          "the baseline recording could not be replayed to check the derivation against",
+        );
+        return outcomes;
+      }
+      contexts.push({ label: "baseline", demonstration: plan.baseline, environment: baseline });
+    }
+  } else if (plan.baseline !== undefined) {
+    contexts.push({ label: "baseline", demonstration: plan.baseline, environment });
+  }
+  if (contexts.length === 0) {
+    refuteAll(
+      derivationCandidates,
+      "the recording offers no demonstration to check the derivation",
+    );
+    return outcomes;
+  }
+  for (const context of contexts) {
+    context.environment = await withDerivationInputs(plan, candidates, context);
+  }
+  const groups = new Map<WorkflowStep, WorkflowBindingCandidate[]>();
+  for (const candidate of derivationCandidates) {
+    const producer = derivationProducer(plan, candidate);
+    if (producer === undefined) continue;
+    groups.set(producer, [...(groups.get(producer) ?? []), candidate]);
+  }
+  for (const [derivation, group] of groups) {
+    try {
+      const template = derivationTemplate(derivation);
+      const inputNames = derivationInputNames(derivation);
+      // (c) A derivation that reads no caller input computes a constant: it is refuted outright.
+      if (template === undefined || inputNames === undefined || inputNames.length === 0) {
+        refuteAll(group, `derivation '${derivation.id}' reads no caller input`);
+        continue;
+      }
+      const source = template.source.type === "literal" ? template.source.value : undefined;
+      if (typeof source !== "string") {
+        refuteAll(group, `derivation '${derivation.id}' carries no literal source`);
+        continue;
+      }
+      // Recorded values the bindings claim to compute, in every demonstration.
+      const expected = new Map<
+        WorkflowBindingCandidate,
+        Array<{ context: DemonstrationContext; text: string; value: ProgramTokenValue }>
+      >();
+      for (const candidate of group) {
+        const reads: Array<{
+          context: DemonstrationContext;
+          text: string;
+          value: ProgramTokenValue;
+        }> = [];
+        for (const context of contexts) {
+          const read = await demonstratedTokenAt(plan, context, candidate, resolve);
+          if (read === undefined) break;
+          reads.push({ context, ...read });
+        }
+        if (reads.length === contexts.length) expected.set(candidate, reads);
+      }
+      // (a) No hard-coding: a string or number literal the model wrote (outside the input holes)
+      // that equals a value any binding of this step claims to compute refutes the whole step.
+      const holeTokens = new Set(template.holes.map((hole) => hole.token));
+      const literals = tokenizeProgram("python", source).flatMap((token, index) =>
+        !holeTokens.has(index) &&
+        (token.kind === "string" || token.kind === "number") &&
+        token.value !== undefined
+          ? [token.value]
+          : [],
+      );
+      const recordedValues = [...expected.values()].flatMap((reads) =>
+        reads.map((read) => read.value),
+      );
+      if (
+        literals.some((literal) =>
+          recordedValues.some((recorded) => literalMatchesRecorded(literal, recorded)),
+        )
+      ) {
+        refuteAll(group, `derivation '${derivation.id}' hard-codes a recorded value`);
+        continue;
+      }
+      for (const candidate of group) {
+        if (!expected.has(candidate)) {
+          outcomes.set(
+            candidate,
+            refused(
+              candidate,
+              "a demonstration does not show the recorded token this candidate claims to derive",
+            ),
+          );
+        }
+      }
+      // (b) Reproduction: run the derivation (after the recorded steps before it) on each
+      // demonstration, and compare each derived value with the token that demonstration ran.
+      const index = plan.steps.indexOf(derivation);
+      const prefix: RecordedWorkflow = {
+        ...plan,
+        steps: plan.steps
+          .slice(0, index + 1)
+          .filter((step) => step === derivation || !isDerivationStep(step)),
+      };
+      for (const context of contexts) {
+        const pending = group.filter((candidate) => !outcomes.has(candidate));
+        if (pending.length === 0) break;
+        const missing = inputNames.find((name) => !Object.hasOwn(context.environment.inputs, name));
+        if (missing !== undefined) {
+          refuteAll(
+            pending,
+            `the ${context.label} demonstration does not establish input '${missing}' the derivation reads`,
+          );
+          break;
+        }
+        const replay = context.environment;
+        const execution = await withDeadline(
+          (signal) =>
+            executeRecordedWorkflow(prefix, {
+              inputs: inputsDeclaredByPlan(prefix, replay.inputs),
+              adapters: replay.adapters,
+              ...(replay.workspaceId ? { access: { workspaceId: replay.workspaceId } } : {}),
+              resolvePrivate: resolvePrivate,
+              signal,
+            }),
+          replay.timeoutMs,
+        );
+        const outcome = execution?.steps.find((entry) => entry.stepId === derivation.id);
+        if (outcome === undefined || outcome.status !== "completed") {
+          refuteAll(
+            pending,
+            execution === undefined
+              ? `the derivation replay exceeded its ${replay.timeoutMs}ms bound`
+              : outcome === undefined
+                ? `derivation '${derivation.id}' never ran`
+                : describeOutcome(execution, outcome),
+          );
+          break;
+        }
+        for (const candidate of pending) {
+          const read = expected.get(candidate)!.find((entry) => entry.context === context)!;
+          const address = programTokenPath(candidate.path)!;
+          const program = plan.steps.find((step) => step.id === candidate.stepId)!.callable
+            .program!;
+          if (candidate.proposed.kind !== "result") continue;
+          const derived = demonstratedValueAtPath(outcome.result, candidate.proposed.path);
+          if (!derivedValueReproduces(program.kind, read.text, address, derived, read.value)) {
+            outcomes.set(
+              candidate,
+              refused(
+                candidate,
+                `derivation '${derivation.id}' did not compute the token the ${context.label} demonstration ran for ${candidate.stepId}.${candidate.argument}${pathText(candidate.path)}`,
+              ),
+            );
+          }
+        }
+      }
+      for (const candidate of group) {
+        if (!outcomes.has(candidate)) {
+          outcomes.set(candidate, {
+            candidate,
+            accepted: true,
+            reason: `derivation '${derivation.id}' reads caller inputs, hard-codes no recorded value, and computed the recorded token for ${candidate.stepId}.${candidate.argument}${pathText(candidate.path)} on every demonstration`,
+          });
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      refuteAll(group, `the derivation could not be checked: ${message}`);
+    }
+  }
+  refuteAll(derivationCandidates, "the candidate does not read a derivation step");
+  return outcomes;
+}
+
 /**
  * Replays a plan ONCE and reports which of its observed steps it reproduced.
  *
@@ -871,6 +1410,24 @@ async function replayPlanOnce(
   const masks = execution === undefined ? [] : await extractMasks(plan, execution, environment);
   for (const step of plan.steps) {
     const stepId = step.id;
+    // A derivation was never observed: it is verified by the recorded steps that consume it, and
+    // here only by running to completion.
+    if (isDerivationStep(step)) {
+      const outcome = execution?.steps.find((entry) => entry.stepId === stepId);
+      if (outcome?.status === "completed") reproduced.push(stepId);
+      else {
+        missed.push({
+          stepId,
+          detail:
+            execution === undefined
+              ? `the replay exceeded its ${environment.timeoutMs}ms bound`
+              : outcome === undefined
+                ? `step '${stepId}' never ran`
+                : describeOutcome(execution, outcome),
+        });
+      }
+      continue;
+    }
     if (!Object.hasOwn(environment.observed, stepId)) {
       missed.push({
         stepId,
@@ -941,14 +1498,17 @@ export async function confirmPromotedPlan(params: {
     candidate: WorkflowBindingCandidate;
     reason: string;
   }> = [];
-  let plan = applyAcceptedBindings(params.plan, accepted);
+  let plan = pruneUnusedDerivations(applyAcceptedBindings(params.plan, accepted));
   let replay = await replayPlanOnce(plan, params.environment);
+  const unobserved = (stepId: string): boolean =>
+    !Object.hasOwn(params.environment.observed, stepId) &&
+    !params.plan.steps.some((step) => step.id === stepId && isDerivationStep(step));
   // True when the replay missed a step no accepted proposal decided, so nothing withdrawn here
   // could change it. That is a limit of the demonstration, not evidence against the proposals.
   let unattributed = false;
   for (let round = 0; round < rounds && replay.missed.length > 0; round += 1) {
     const missedStepId = replay.missed[0]!.stepId;
-    if (!Object.hasOwn(params.environment.observed, missedStepId)) {
+    if (unobserved(missedStepId)) {
       unattributed = true;
       break;
     }
@@ -968,12 +1528,10 @@ export async function confirmPromotedPlan(params: {
       candidate: blamed,
       reason: `the plan that would have been published did not reproduce step '${missedStepId}' of the demonstration (${replay.missed[0]!.detail}), so this proposal was withdrawn with it`,
     });
-    plan = applyAcceptedBindings(params.plan, accepted);
+    plan = pruneUnusedDerivations(applyAcceptedBindings(params.plan, accepted));
     replay = await replayPlanOnce(plan, params.environment);
   }
-  const missingObservation = replay.missed.some(
-    ({ stepId }) => !Object.hasOwn(params.environment.observed, stepId),
-  );
+  const missingObservation = replay.missed.some(({ stepId }) => unobserved(stepId));
   const verification: WorkflowPlanVerification = {
     status:
       replay.missed.length === 0
@@ -1014,13 +1572,24 @@ export async function validateAndConfirmCandidates(params: {
   plan: RecordedWorkflow;
   verification?: WorkflowPlanVerification;
 }> {
+  // Inputs a derivation reads are read out of the demonstration's own program text, so the
+  // decision and the confirming replay run the derivation on the values that run supplied.
+  const demonstration = params.plan.heldOut ?? params.plan.baseline;
+  const environment =
+    demonstration === undefined || !params.plan.steps.some(isDerivationStep)
+      ? params.environment
+      : await withDerivationInputs(params.plan, params.candidates, {
+          label: params.plan.heldOut === undefined ? "baseline" : "held-out",
+          demonstration,
+          environment: params.environment,
+        });
   const decided =
     params.candidates.length === 0
       ? []
       : await validateBindingCandidates({
           plan: params.plan,
           candidates: params.candidates,
-          environment: params.environment,
+          environment,
         });
   const accepted = decided
     .filter((outcome) => outcome.accepted)
@@ -1028,7 +1597,7 @@ export async function validateAndConfirmCandidates(params: {
   const confirmed = await confirmPromotedPlan({
     plan: params.plan,
     accepted,
-    environment: params.environment,
+    environment,
     ...(params.maxRounds === undefined ? {} : { maxRounds: params.maxRounds }),
   });
   const droppedBy = new Map(
@@ -1073,15 +1642,28 @@ export async function validateBindingCandidates(params: {
     ),
   );
   const dataCandidates = candidates.filter((candidate) => !sourceCandidates.has(candidate));
+  // Derivation bindings are decided by their own checks first; only accepted ones join the A/B
+  // plans of the other proposals, so model-written code nobody verified never shapes their runs.
+  const derivationCandidates = dataCandidates.filter(
+    (candidate) => derivationProducer(plan, candidate) !== undefined,
+  );
+  const derived =
+    derivationCandidates.length === 0
+      ? new Map<WorkflowBindingCandidate, CandidateValidationOutcome>()
+      : await evaluateDerivationCandidates(plan, derivationCandidates, candidates, environment);
+  const abCandidates = dataCandidates.filter(
+    (candidate) => !derived.has(candidate) || derived.get(candidate)!.accepted,
+  );
   const outcomes: CandidateValidationOutcome[] = [];
   for (const candidate of candidates) {
+    const decided = derived.get(candidate);
     outcomes.push(
       sourceCandidates.has(candidate)
         ? refused(
             candidate,
             "the whole executable program is the recorded implementation, not an inferred binding; propose changing data positions within it instead",
           )
-        : await evaluateCandidate(plan, candidate, dataCandidates, environment),
+        : (decided ?? (await evaluateCandidate(plan, candidate, abCandidates, environment))),
     );
   }
   return outcomes;

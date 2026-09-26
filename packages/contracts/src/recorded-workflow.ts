@@ -10,6 +10,7 @@
  * a workflow that uses it needs no compiler change.
  */
 
+import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
 import {
   type ProgramLanguage,
   embeddedProgramIsProtected,
@@ -268,7 +269,12 @@ export type WorkflowBindingCandidate = {
     | "shares-value-with-declared-input"
     | "classified-source-value"
     | "native-data-argument"
-    | "printed-by-earlier-step";
+    | "printed-by-earlier-step"
+    /**
+     * The token is computed from the caller inputs by an `origin: "derivation"` step; `proposed` is
+     * `{kind: "result", stepId: <that step>, path: [<name>]}`. Accepted only after local replay.
+     */
+    | "derived-from-inputs";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -324,6 +330,22 @@ export type WorkflowStep = {
    * other step may consume an optional step's result.
    */
   optional?: { input: string };
+  /**
+   * Where this step came from. Absent or `recorded`: a call the recording executed. `derivation`:
+   * a small Python program a model wrote to compute values from the caller inputs (see
+   * `derivation-steps.ts`).
+   *
+   * Only a derivation step may carry program source that no recording produced. A derivation must
+   * run as a Python Eval program in the program runtime, carry its source as a literal that equals
+   * `callable.program.source`, bind only caller inputs in its holes (at least one), reference no
+   * private value, depend on nothing, observe nothing, and be absent from `baseline`/`heldOut`.
+   *
+   * The structural validator cannot prove a recorded step's source was recorded: it can only reject
+   * a projected recorded program whose literal differs from its recorded `program.source`, and any
+   * step that claims the derivation origin without meeting the rules above. Whether recorded source
+   * came from the recording is established by the observer that builds the plan, not here.
+   */
+  origin?: "recorded" | "derivation";
 };
 
 /**
@@ -880,6 +902,94 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
 }
 
 /**
+ * The rules only a derivation step obeys (see `WorkflowStep.origin`). Input names and hole shapes
+ * are also checked by the general argument walk; this adds what makes model-authored source safe to
+ * carry: nothing private, nothing recorded, nothing but caller inputs flowing in.
+ */
+function validateDerivationStep(step: Record<string, unknown>, errors: string[]): void {
+  const where = `derivation step ${String(step.id)}`;
+  const callable = isPlainObject(step.callable) ? step.callable : undefined;
+  const program = isPlainObject(callable?.program) ? callable.program : undefined;
+  if (
+    callable?.runtime !== WORKFLOW_DERIVATION_RUNTIME ||
+    program === undefined ||
+    program.kind !== "python" ||
+    program.sourceInterface !== "python-eval" ||
+    typeof program.argument !== "string" ||
+    typeof program.source !== "string" ||
+    program.source.length === 0 ||
+    program.argv !== undefined ||
+    program.pythonState !== undefined
+  ) {
+    errors.push(
+      `${where} must be a Python Eval program in the ${WORKFLOW_DERIVATION_RUNTIME} runtime, carried in a named argument`,
+    );
+    return;
+  }
+  const observed = isPlainObject(step.observed) ? step.observed : undefined;
+  if (observed?.outcome !== "unknown" || observed.output !== undefined) {
+    errors.push(`${where} must not claim an observed outcome`);
+  }
+  if (!Array.isArray(step.dependsOn) || step.dependsOn.length !== 0) {
+    errors.push(`${where} must not depend on other steps`);
+  }
+  const args = Array.isArray(step.arguments) ? step.arguments : [];
+  for (const argument of args) {
+    if (!isPlainObject(argument)) continue;
+    const source = isPlainObject(argument.source) ? argument.source : undefined;
+    if (argument.name !== program.argument) {
+      if (source?.kind !== "literal") {
+        errors.push(`${where} argument ${String(argument.name)} must be a literal`);
+      }
+      continue;
+    }
+    const template = source?.kind === "template" ? source.template : undefined;
+    if (
+      !isPlainObject(template) ||
+      template.type !== "program" ||
+      template.language !== "python" ||
+      template.sourceReference !== undefined ||
+      template.protectedTokens !== undefined ||
+      !isPlainObject(template.source) ||
+      template.source.type !== "literal" ||
+      template.source.value !== program.source ||
+      !Array.isArray(template.holes)
+    ) {
+      errors.push(
+        `${where} must carry its source as a literal program template equal to its program source`,
+      );
+      continue;
+    }
+    const holes = template.holes;
+    if (holes.length === 0) {
+      errors.push(`${where} must read at least one caller input`);
+    }
+    for (const hole of holes) {
+      if (
+        !isPlainObject(hole) ||
+        hole.embedded !== undefined ||
+        hole.span !== undefined ||
+        !isPlainObject(hole.binding) ||
+        hole.binding.type !== "input"
+      ) {
+        errors.push(`${where} may bind only whole tokens to caller inputs`);
+      }
+    }
+  }
+  if (
+    !args.some(
+      (argument) =>
+        isPlainObject(argument) &&
+        argument.name === program.argument &&
+        isPlainObject(argument.source) &&
+        argument.source.kind === "template",
+    )
+  ) {
+    errors.push(`${where} must carry its source in argument ${program.argument}`);
+  }
+}
+
+/**
  * Validates a recorded workflow structurally.
  *
  * Structural only on purpose: nothing here inspects callable names, applications, or task
@@ -1014,12 +1124,25 @@ export function validateRecordedWorkflow(value: unknown): {
     if (permissions !== undefined && !isJsonValue(permissions)) {
       errors.push(`step ${step.id} permissions must be JSON`);
     }
+    const origin = step.origin;
+    if (origin !== undefined && origin !== "recorded" && origin !== "derivation") {
+      errors.push(`step ${step.id} has an unknown origin ${String(origin)}`);
+    }
+    if (origin === "derivation") {
+      validateDerivationStep(step, errors);
+    }
   }
   // Dependencies and bindings may only address steps that exist and come earlier.
   const order = new Map<string, number>();
   (steps ?? []).forEach((step, index) => {
     if (isPlainObject(step) && typeof step.id === "string") order.set(step.id, index);
   });
+  const derivationIds = new Set<string>();
+  for (const step of steps ?? []) {
+    if (isPlainObject(step) && typeof step.id === "string" && step.origin === "derivation") {
+      derivationIds.add(step.id);
+    }
+  }
   for (const step of steps ?? []) {
     if (!isPlainObject(step) || typeof step.id !== "string") continue;
     const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn : null;
@@ -1470,9 +1593,46 @@ export function validateRecordedWorkflow(value: unknown): {
           candidate.reason !== "shares-value-with-declared-input" &&
           candidate.reason !== "classified-source-value" &&
           candidate.reason !== "printed-by-earlier-step" &&
-          candidate.reason !== "native-data-argument"
+          candidate.reason !== "native-data-argument" &&
+          candidate.reason !== "derived-from-inputs"
         )
           errors.push(`candidate ${stepId}.${candidate.argument} has an unknown reason`);
+        // A derivation's output binds only recorded program tokens, only under its own reason, by
+        // one top-level name; nothing is ever bound into a derivation's own code.
+        const readsDerivation =
+          isPlainObject(proposed) &&
+          proposed.kind === "result" &&
+          derivationIds.has(String(proposed.stepId));
+        if (derivationIds.has(stepId)) {
+          errors.push(`candidate ${stepId}.${candidate.argument} binds into a derivation step`);
+        }
+        if (readsDerivation !== (candidate.reason === "derived-from-inputs")) {
+          errors.push(
+            `candidate ${stepId}.${candidate.argument} must read a derivation step exactly when its reason is derived-from-inputs`,
+          );
+        } else if (readsDerivation && isPlainObject(proposed)) {
+          const stepRef = String(proposed.stepId);
+          if ((order.get(stepRef) ?? 0) >= (order.get(stepId) ?? 0)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} reads derivation ${stepRef}, which does not come earlier`,
+            );
+          }
+          if (
+            !Array.isArray(proposed.path) ||
+            proposed.path.length !== 1 ||
+            typeof proposed.path[0] !== "string" ||
+            proposed.path[0].length === 0
+          ) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} must read one named value of its derivation`,
+            );
+          }
+          if (path[0] !== "tokens") {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} may bind a derived value only to a program token`,
+            );
+          }
+        }
         if (typeof candidate.missing !== "string" || candidate.missing.length === 0) {
           errors.push(
             `candidate ${stepId}.${candidate.argument} must name the fact the record is missing`,
@@ -1489,5 +1649,18 @@ export function validateRecordedWorkflow(value: unknown): {
     validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
   }
   validateWorkflowOptionalSteps(value, errors);
+  // A derivation was never executed by the recording, so no demonstration can have observed it.
+  for (const label of ["baseline", "heldOut"] as const) {
+    const demonstration = value[label];
+    if (!isPlainObject(demonstration)) continue;
+    for (const list of [demonstration.inputs, demonstration.observed]) {
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (isPlainObject(entry) && derivationIds.has(String(entry.stepId))) {
+          errors.push(`${label} references derivation step ${String(entry.stepId)}`);
+        }
+      }
+    }
+  }
   return { valid: errors.length === 0, errors };
 }

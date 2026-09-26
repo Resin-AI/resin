@@ -209,9 +209,21 @@ export function createLocalWorkflowValidator(
       }
       // A single recording can still show that a later command reads a value an earlier step
       // printed: the replay's own producer prints a fresh value, and only the bound plan can use
-      // it. Those proposals are decided by replay against the baseline like held-out candidates.
+      // it. Likewise a model-written derivation must compute, from the recording's inputs, exactly
+      // the tokens it claims. Both are decided by replay against the baseline.
       const baselineExtracts = baselineOnly
-        ? candidates.filter((candidate) => candidate.proposed.kind === "extract")
+        ? candidates.filter(
+            (candidate) =>
+              candidate.proposed.kind === "extract" ||
+              (candidate.proposed.kind === "result" &&
+                candidate.reason === "derived-from-inputs" &&
+                replayPlan.steps.some(
+                  (step) =>
+                    candidate.proposed.kind === "result" &&
+                    step.id === candidate.proposed.stepId &&
+                    step.origin === "derivation",
+                )),
+          )
         : [];
       const environment = await demonstrationEnvironment({
         plan: baselineOnly ? { ...replayPlan, heldOut: replayPlan.baseline } : plan,
