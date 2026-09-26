@@ -37,7 +37,6 @@ import { CodexSessionDecoder, decodeCodexRecord, decodeCodexTranscript } from ".
 import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
-  CODEX_MIN_SUPPORTED_VERSION,
   compareSemver,
   probeCodexInstallation,
   resolveCodexPaths,
@@ -50,8 +49,6 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
 
   describe("1. Installation Discovery and Qualification", () => {
     it("qualifies installed Codex CLI versions against supported version matrix", async () => {
-      expect(compareSemver("0.1.0", CODEX_MIN_SUPPORTED_VERSION)).toBeGreaterThanOrEqual(0);
-      expect(compareSemver("0.2.0", CODEX_MIN_SUPPORTED_VERSION)).toBeGreaterThanOrEqual(0);
 
       const mockExecutor = async (_cmd: string, args: string[]) => {
         if (args.includes("--version")) {

@@ -11,7 +11,6 @@ export {
 export {
   CODEX_HARNESS_ID,
   CODEX_DISPLAY_NAME,
-  CODEX_MIN_SUPPORTED_VERSION,
   CODEX_TESTED_VERSIONS,
   type CodexResolvedPaths,
   type CodexProbeOptions,

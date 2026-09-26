@@ -4,19 +4,19 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import type {
-  HarnessInstallation,
-  ProbeInstallationOptions,
-  SessionStatus,
+import {
+  classifyHarnessVersion,
+  type HarnessInstallation,
+  type ProbeInstallationOptions,
+  type SessionStatus,
 } from "@resin/harness-contracts";
 
 const execFileAsync = promisify(execFile);
 
 export const CODEX_HARNESS_ID = "codex-cli";
 export const CODEX_DISPLAY_NAME = "Codex CLI";
-export const CODEX_MIN_SUPPORTED_VERSION = "0.1.0";
-/** Exact Codex CLI versions qualified with recorded fixtures. */
-export const CODEX_TESTED_VERSIONS: readonly string[] = ["0.156.1"];
+/** Exact Codex CLI versions qualified with recorded rollout fixtures (tests/fixtures/recorded). */
+export const CODEX_TESTED_VERSIONS: readonly string[] = ["0.156.1", "0.157.1"];
 
 /**
  * Resolved paths for Codex CLI configuration and session directories.
@@ -698,7 +698,7 @@ export interface CodexProbeOptions extends ProbeInstallationOptions {
   platform?: NodeJS.Platform;
   executor?: CommandExecutor;
   pathLookup?: PathLookupFn;
-  minSupportedVersion?: string;
+  testedVersions?: readonly string[];
   customExecutablePath?: string;
   customConfigPath?: string;
   checkPermissions?: boolean;
@@ -711,7 +711,7 @@ export async function probeCodexInstallation(
   options?: CodexProbeOptions,
 ): Promise<HarnessInstallation> {
   const detectedAt = new Date().toISOString();
-  const minVersion = options?.minSupportedVersion ?? CODEX_MIN_SUPPORTED_VERSION;
+  const testedVersions = options?.testedVersions ?? CODEX_TESTED_VERSIONS;
 
   const resolvedPaths = await resolveCodexPaths({
     customConfigPath: options?.customConfigPath,
@@ -789,36 +789,6 @@ export async function probeCodexInstallation(
     };
   }
 
-  if (compareSemver(version, minVersion) < 0) {
-    return {
-      harnessId: CODEX_HARNESS_ID,
-      displayName: CODEX_DISPLAY_NAME,
-      version,
-      isInstalled: true,
-      status: "unsupported_version",
-      executablePath,
-      configPath: resolvedPaths.configPath,
-      homePath: resolvedPaths.homeDir,
-      detectedAt,
-      metadata: {
-        detectedVersion: version,
-        minSupportedVersion: minVersion,
-        homeDir: resolvedPaths.homeDir,
-        sessionRoot: resolvedPaths.sessionRoot,
-        configFormat: resolvedPaths.configFormat,
-        diagnostics: [
-          {
-            code: "UNSUPPORTED_VERSION",
-            severity: "error",
-            message: `Detected Codex CLI version ${version} is lower than minimum supported version ${minVersion}.`,
-            path: executablePath,
-            timestamp: detectedAt,
-          },
-        ],
-      },
-    };
-  }
-
   if (options?.checkPermissions) {
     try {
       const configDir = path.dirname(resolvedPaths.configPath);
@@ -855,6 +825,7 @@ export async function probeCodexInstallation(
     }
   }
 
+  const versionClassification = classifyHarnessVersion(version, testedVersions);
   return {
     harnessId: CODEX_HARNESS_ID,
     displayName: CODEX_DISPLAY_NAME,
@@ -869,7 +840,20 @@ export async function probeCodexInstallation(
       homeDir: resolvedPaths.homeDir,
       sessionRoot: resolvedPaths.sessionRoot,
       configFormat: resolvedPaths.configFormat,
-      diagnostics: [],
+      versionClassification,
+      testedVersions: [...testedVersions],
+      diagnostics:
+        versionClassification === "tested"
+          ? []
+          : [
+              {
+                code: "UNTESTED_VERSION",
+                severity: "warning",
+                message: `Codex CLI ${version} has not been qualified by Resin; tested versions: ${testedVersions.join(", ")}. Capture may miss records whose shape changed.`,
+                path: executablePath,
+                timestamp: detectedAt,
+              },
+            ],
     },
   };
 }
