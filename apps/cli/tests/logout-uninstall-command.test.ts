@@ -196,6 +196,22 @@ url = "http://localhost:9400"
     expect(await fsBridge.readFile(activeCodexPath)).not.toContain("[mcp_servers.resin]");
   });
 
+  it("removes the Resin guidance block from Codex AGENTS.md and keeps user content", async () => {
+    const agentsPath = "/profiles/codex/AGENTS.md";
+    const fsBridge = createMockFsBridge({
+      [agentsPath]:
+        "# Mine\n\n<!-- resin:codex-guidance:start -->\nguidance\n<!-- resin:codex-guidance:end -->\n",
+    });
+
+    const cleaned = await removeHarnessMcpConfigurations({
+      env: { HOME: homeDir, CODEX_HOME: "/profiles/codex" },
+      fsBridge,
+    });
+
+    expect(cleaned).toEqual(["Codex CLI"]);
+    expect(await fsBridge.readFile(agentsPath)).toBe("# Mine\n");
+  });
+
   it("removes legacy aliases only when recognizably Resin-owned, preserving unrecognized same-named entries", async () => {
     const claudePath = path.join(homeDir, ".claude.json");
     const codexPath = path.join(homeDir, ".codex", "config.toml");

@@ -17,6 +17,11 @@ import type {
 } from "@resin/harness-contracts";
 import { z } from "zod";
 import {
+  type CodexGuidanceResult,
+  applyCodexGuidance,
+  resolveCodexAgentsPath,
+} from "./codex-instructions.js";
+import {
   DEFAULT_GATEWAY_URL,
   HARNESS_DISPLAY_NAMES,
   RESIN_MCP_SERVER_KEYS,
@@ -141,6 +146,8 @@ export interface HarnessReconciliationResult {
   readonly rolledBack?: boolean;
   readonly diagnostic?: string;
   readonly plan?: ConfigMutationPlan;
+  /** Codex AGENTS.md guidance block outcome; with dryRun, the action that would be taken. */
+  readonly guidance?: CodexGuidanceResult;
   readonly error?: string;
 }
 
@@ -1261,7 +1268,12 @@ export class HarnessReconciler {
 
     const results: HarnessReconciliationResult[] = [];
     for (const harnessId of harnesses) {
-      results.push(await this.reconcileHarness(harnessId, resolved));
+      const result = await this.reconcileHarness(harnessId, resolved);
+      results.push(
+        harnessId === "codex-cli" && result.configured
+          ? await reconcileCodexGuidance(result, resolved)
+          : result,
+      );
     }
 
     return {
@@ -2289,4 +2301,25 @@ function isMissingFileError(cause: unknown): cause is NodeJS.ErrnoException {
 
 function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause ?? "");
+}
+
+/** Codex code mode shows MCP tools to the model only when its instructions mention them. */
+async function reconcileCodexGuidance(
+  result: HarnessReconciliationResult,
+  options: ResolvedReconcileOptions,
+): Promise<HarnessReconciliationResult> {
+  try {
+    const guidance = await applyCodexGuidance(
+      resolveCodexAgentsPath(options.customHome, options.env),
+      options.fsBridge,
+      { install: true, dryRun: options.dryRun },
+    );
+    return {
+      ...result,
+      guidance,
+      changed: result.changed || (!options.dryRun && guidance.action !== "unchanged"),
+    };
+  } catch (error: unknown) {
+    return { ...result, error: `Codex guidance update failed: ${describeError(error)}` };
+  }
 }

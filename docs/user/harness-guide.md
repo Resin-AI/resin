@@ -63,6 +63,8 @@ Resin automatically registers the gateway MCP server in `~/.codex/config.toml`:
 url = "http://127.0.0.1:9400/mcp/sse"
 ```
 
+Resin also adds a section marked by `<!-- resin:codex-guidance:start -->` and `<!-- resin:codex-guidance:end -->` to Codex's global instructions file, `$CODEX_HOME/AGENTS.md` (`~/.codex/AGENTS.md` by default). Codex's code mode shows MCP tools to the model only when its instructions mention them, so without this section the model never sees Resin's learned tools. Content outside the markers is left untouched, and `resin uninstall` removes the section (deleting the file if nothing else remains).
+
 ### Stable Tool Gateway
 
 For Codex clients identified as `codex-mcp-client` or `openai-codex-cli`, Resin advertises only four stable MCP tools:

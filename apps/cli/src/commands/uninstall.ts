@@ -9,6 +9,7 @@ import {
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
+import { applyCodexGuidance, resolveCodexAgentsPath } from "../installer/codex-instructions.js";
 import { resolveHarnessConfigPath } from "../installer/harness-config.js";
 import { createUserServiceManager } from "../service/manager.js";
 export type McpServerConfigValue =
@@ -204,6 +205,10 @@ export async function removeHarnessMcpConfigurations(options: {
       codexCleaned = true;
     }
   }
+  const guidance = await applyCodexGuidance(resolveCodexAgentsPath(home, env), fsBridge, {
+    install: false,
+  });
+  codexCleaned = guidance.action === "removed" || codexCleaned;
   if (codexCleaned) {
     cleaned.push("Codex CLI");
   }
