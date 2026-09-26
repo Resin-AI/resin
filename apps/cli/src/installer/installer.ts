@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
-import { defaultFsBridge } from "@resin/harness-contracts";
+import { classifyHarnessVersion, defaultFsBridge } from "@resin/harness-contracts";
 import {
   type DaemonConfig,
   DaemonConfigSchema,
@@ -12,6 +12,8 @@ import {
 } from "@resin/observer/client";
 
 export const resolveDaemonPaths = resolvePaths;
+import type { HarnessId } from "@resin/contracts";
+import { findHarnessDefinition, isSupportedHarnessId } from "../harness-registry.js";
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
@@ -49,8 +51,6 @@ import {
   selectPlatformAsset,
   verifyChannelMetadata,
 } from "./channel-verifier.js";
-import type { HarnessId } from "@resin/contracts";
-import { isSupportedHarnessId } from "../harness-registry.js";
 import { HarnessConfigOrchestrator, type HarnessConfigResult } from "./harness-config.js";
 import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
@@ -654,6 +654,7 @@ export class ResinInstaller {
       if (!orchestrationResult.success) {
         throw new Error(orchestrationResult.error || "Failed to configure agent harnesses.");
       }
+      await this.reportUntestedHarnessVersions(orchestrationResult.results, customHome, harnessEnv);
 
       // Record rollback action in journal
       this.journal.addRollbackAction(
@@ -996,6 +997,38 @@ export class ResinInstaller {
       harnesses: [],
       journal: loadedJournal.toJSON(),
     };
+  }
+
+  /** Registration proceeds for untested harness versions; say so, naming the tested ones. */
+  private async reportUntestedHarnessVersions(
+    results: readonly HarnessConfigResult[],
+    home: string,
+    env: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    for (const result of results) {
+      const definition = findHarnessDefinition(result.harnessId);
+      if (definition === undefined || !result.installed) continue;
+      const installation = await definition
+        .probeInstallation({
+          targetPath: result.targetPath ?? definition.mcpConfig.resolvePath(home, env),
+          home,
+          env,
+          fsBridge: this.fsBridge,
+        })
+        .catch(() => null);
+      const versionStatus = classifyHarnessVersion(
+        installation?.version,
+        definition.testedVersions,
+      );
+      if (versionStatus === "tested") continue;
+      const tested =
+        definition.testedVersions.length > 0 ? definition.testedVersions.join(", ") : "none";
+      this.log(
+        versionStatus === "unknown"
+          ? `    ${definition.displayName}: installed version unknown (tested: ${tested}); registered anyway.`
+          : `    ${definition.displayName} ${installation?.version} is untested (tested: ${tested}); registered anyway.`,
+      );
+    }
   }
 
   private log(message: string): void {

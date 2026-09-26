@@ -3,9 +3,9 @@ import { type Stats, constants as fsConstants, realpathSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { HarnessId } from "@resin/contracts";
 import { NodeConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
-import type { HarnessId } from "@resin/contracts";
 import {
   SUPPORTED_HARNESS_IDS,
   getHarnessDefinition,
@@ -56,7 +56,9 @@ export interface HarnessConfigHealthCache {
 }
 
 /** Config-file fingerprints keyed by harness id; a missing id reads as absent. */
-export type HarnessHealthConfigFiles = Readonly<Partial<Record<HarnessId, HarnessConfigHealthCache>>>;
+export type HarnessHealthConfigFiles = Readonly<
+  Partial<Record<HarnessId, HarnessConfigHealthCache>>
+>;
 
 export interface HarnessHealthHarnessSnapshot {
   readonly harnessId: HarnessId;
