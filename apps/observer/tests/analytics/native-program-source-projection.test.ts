@@ -321,7 +321,6 @@ text("sa\x66e-credential", token);`;
       commandEvent?.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
     );
     if (carrier === undefined) throw new Error("expected a native command carrier");
-    console.log("CANDS", JSON.stringify(carrier.candidates), JSON.stringify(carrier.origins));
     const origin = carrier.origins.cmd;
     if (origin?.type !== "program" || origin.source.type !== "literal") {
       throw new Error("expected a projected shell program origin");
@@ -360,5 +359,37 @@ text("sa\x66e-credential", token);`;
     expect(template.sourceReference).toBe(origin.sourceReference);
     expect(template.protectedTokens).toEqual([secretIndex]);
     expect(JSON.stringify(recipe?.workflow)).not.toContain(secret);
+  });
+
+  it("keeps another harness's shell command private: only Codex commands are projected", async () => {
+    const sessionId = "omp-shell-stays-private";
+    const command = "tar -czf out/alpha-release.tgz projects/alpha-release";
+    const store = new InMemoryPrivateValueStore();
+    const pipeline = new NormalizationPipeline({
+      privateValueStore: store,
+      redactionConfig: { sensitiveEnvVars: [] },
+    });
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    const origin = { sessionId, harnessId: "omp", workspaceId: WORKSPACE };
+    const result = await pipeline.processIntermediateEvent(
+      {
+        sessionId,
+        type: "tool_call",
+        toolName: "bash",
+        callId: "omp-bash-call",
+        parameters: { command },
+        timestamp: "2026-09-23T12:00:00.000Z",
+        causalRef: { causalSequence: 1, parentId: null },
+      },
+      origin,
+    );
+    if (result.status !== "success") throw new Error(result.errorReason);
+    const observed = recorder.observe(result.event, { workspaceId: WORKSPACE });
+    const carrier = readWorkflowCallCarrier(observed.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    if (carrier === undefined) throw new Error("expected a workflow carrier");
+    const commandOrigin = carrier.origins.command;
+    if (commandOrigin?.type !== "private") throw new Error("expected the command to stay private");
+    expect(resolvePrivateReference(store, commandOrigin.reference)).toBe(command);
+    expect(JSON.stringify(projectEventToMetadataOnly(observed))).not.toContain("alpha-release");
   });
 });

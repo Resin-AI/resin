@@ -1200,7 +1200,11 @@ export class WorkflowCallRecorder {
     return undefined;
   }
 
-  /** Exposes a source view only when the real redactor and canonical parser both accept it. */
+  /**
+   * Exposes a source view only when the real redactor and canonical parser both accept it. A shell
+   * program is exposed only when it is a Codex command, whose scrubbed text already reaches the cloud
+   * as naming text; other harnesses' shell programs stay private.
+   */
   private projectProgramSource(
     event: Extract<NormalizedSessionEvent, { type: "tool_call" | "command_exec" }>,
     parameters: Record<string, WorkflowJsonValue>,
@@ -1208,6 +1212,14 @@ export class WorkflowCallRecorder {
     origins: WorkflowCallCarrier["origins"],
   ): void {
     if (program.argument === undefined) return;
+    if (program.kind === "shell") {
+      const codex = readCodexCommandMetadata(event.metadata);
+      const codexCommand =
+        event.type === "command_exec"
+          ? codex?.kind === "command"
+          : event.toolName === "exec" && codex?.kind === "call";
+      if (!codexCommand) return;
+    }
     const original = parameters[program.argument];
     const origin = origins[program.argument];
     if (typeof original !== "string" || origin?.type !== "private") return;
