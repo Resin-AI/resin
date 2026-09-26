@@ -134,7 +134,6 @@ describe("printed numbers in replay comparisons", () => {
           accepted: [numeric],
           environment: {
             adapters,
-            workspaceDir,
             inputs: {},
             // The recording printed and wrote 7.5; this replay computes 4.2.
             observed: { create: "rounded 7.5\n", wait: `wrote 7.5 (limit ${limit})\n` },

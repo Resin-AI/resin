@@ -135,7 +135,7 @@ async function environmentOf(options: {
   observed: Record<string, WorkflowJsonValue>;
   observedComparisons?: Record<string, WorkflowObservedComparison>;
   adapters?: RuntimeAdapterRegistry;
-}): Promise<CandidateValidationEnvironment> {
+}): Promise<CandidateValidationEnvironment & { workspaceDir: string }> {
   const workspaceDir = await mkdtemp(join(tmpdir(), "resin-replay-"));
   workspaces.push(workspaceDir);
   return {
@@ -371,7 +371,6 @@ describe("the plan that results from accepting proposals", () => {
     workspaces.push(directory);
     return {
       adapters: transformAdapters(),
-      workspaceDir: directory,
       inputs: { seed: "bravo" },
       observed: {
         derive: { token: "tok(bravo)" },
@@ -439,8 +438,6 @@ describe("the plan that results from accepting proposals", () => {
 
 describe("closed observed-output replay without proposals", () => {
   it("executes a native plan once and reports every reproduced and missing observation", async () => {
-    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-baseline-native-"));
-    workspaces.push(workspaceDir);
     const invoked: string[] = [];
     const adapters = new RuntimeAdapterRegistry();
     adapters.register({
@@ -454,7 +451,6 @@ describe("closed observed-output replay without proposals", () => {
     });
     const environment = {
       adapters,
-      workspaceDir,
       inputs: { seed: "alpha" },
       observed: { derive: { token: "tok(alpha)" }, consume: { echoed: "different" } },
     };
@@ -592,8 +588,7 @@ describe("nested caller inputs in a held-out whole-plan replay", () => {
     const environment = await demonstrationEnvironment({
       plan: workflow,
       candidates: [],
-      adapters,
-      workspaceDir: directory,
+      adapters: () => adapters,
       resolvePrivate: (reference) => values[reference]!,
     });
     expect(environment?.inputs).toEqual({
@@ -625,8 +620,7 @@ describe("nested caller inputs in a held-out whole-plan replay", () => {
       await demonstrationEnvironment({
         plan: missing,
         candidates: [],
-        adapters,
-        workspaceDir: directory,
+        adapters: () => adapters,
         resolvePrivate: (reference) => values[reference]!,
       }),
     ).toBeUndefined();
@@ -663,8 +657,7 @@ describe("nested caller inputs in a held-out whole-plan replay", () => {
       await demonstrationEnvironment({
         plan: conflicting,
         candidates: [],
-        adapters,
-        workspaceDir: directory,
+        adapters: () => adapters,
         resolvePrivate: (reference) => values[reference]!,
       }),
     ).toBeUndefined();
@@ -688,13 +681,10 @@ describe("selected demonstration comparison projections", () => {
         ],
       },
     };
-    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-heldout-projection-"));
-    workspaces.push(workspaceDir);
     const environment = await demonstrationEnvironment({
       plan,
       candidates: [],
-      adapters: projectedTransformAdapters("trailing"),
-      workspaceDir,
+      adapters: () => projectedTransformAdapters("trailing"),
       resolvePrivate: (reference) => {
         if (reference === "private:derive-observed") return { token: "tok(replay-seed)" };
         if (reference === "private:consume-observed") return "tok(replay-seed)";
@@ -732,20 +722,6 @@ describe("recorded program replay verification", () => {
       ],
     };
   }
-
-  it("verifies a program that completes again, even when its output changed since recording", async () => {
-    // Tests, builds and queries legitimately print different text on a later run.
-    const environment = await environmentOf({ inputs: {}, observed: { eval: "{'count': 1}" } });
-    environment.adapters.register(createProgramAdapter({ cwd: environment.workspaceDir }));
-
-    const confirmed = await confirmPromotedPlan({
-      plan: evalPlan("{'count': 2}"),
-      accepted: [],
-      environment,
-    });
-
-    expect(confirmed.verification).toMatchObject({ status: "verified", reproduced: ["eval"] });
-  });
 
   it("misses a program that no longer runs to completion", async () => {
     const environment = await environmentOf({ inputs: {}, observed: { eval: "0.5" } });
@@ -898,7 +874,6 @@ describe("a plan is run once per attempt, as the work it is", () => {
       accepted: [binding, secondBinding],
       environment: {
         adapters: countingAdapters(invocations),
-        workspaceDir: directory,
         inputs: { seed: "bravo" },
         observed: {
           step0: { token: "tok(bravo)" },
@@ -923,7 +898,6 @@ describe("a plan is run once per attempt, as the work it is", () => {
       candidates: [binding],
       environment: {
         adapters: countingAdapters(invocations),
-        workspaceDir: directory,
         inputs: { seed: "bravo" },
         observed: {
           step0: { token: "tok(bravo)" },
@@ -1038,7 +1012,6 @@ describe("a value embedded in a recorded program", () => {
       candidates: [embeddedTokenCandidate()],
       environment: {
         adapters: programAdapters(seen),
-        workspaceDir: directory,
         inputs: { seed: "replay-seed" },
         observed: {
           seal: { named: ["%s\\n", "tok(replay-seed)", "%s\\n", "keep-me"] },
@@ -1067,12 +1040,6 @@ describe("a value embedded in a recorded program", () => {
       candidates: [candidate],
       environment: {
         adapters: programAdapters([]),
-        workspaceDir: await mkdtemp(join(tmpdir(), "resin-program-token-miss-")).then(
-          (directory) => {
-            workspaces.push(directory);
-            return directory;
-          },
-        ),
         inputs: { seed: "replay-seed" },
         observed: {
           seal: { named: ["%s\\n", "tok(replay-seed)", "%s\\n", "keep-me"] },
@@ -1142,13 +1109,11 @@ describe("a token of a recorded program a caller may supply", () => {
     candidate: WorkflowBindingCandidate,
     seen: string[],
   ): Promise<CandidateValidationEnvironment> {
-    const directory = await mkdtemp(join(tmpdir(), "resin-program-input-"));
-    workspaces.push(directory);
+    const adapters = programAdapters(seen);
     const environment = await demonstrationEnvironment({
       plan,
       candidates: [candidate],
-      adapters: programAdapters(seen),
-      workspaceDir: directory,
+      adapters: () => adapters,
       resolvePrivate: demonstrationResolver,
     });
     if (environment === undefined) throw new Error("the plan carries no demonstration");

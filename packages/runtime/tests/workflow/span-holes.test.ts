@@ -125,8 +125,7 @@ describe("span holes at runtime", () => {
           observed: [],
         }),
         candidates: [span(FILE, 4, 8, "region")],
-        adapters: new RuntimeAdapterRegistry(),
-        workspaceDir: tmpdir(),
+        adapters: () => new RuntimeAdapterRegistry(),
         resolvePrivate: () => heldOutCommand,
       });
     const decidable = await environment(COMMAND.replaceAll("emea", "apac"));

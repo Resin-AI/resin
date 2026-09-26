@@ -136,8 +136,7 @@ it.skipIf(process.platform === "win32")(
       const environment = await demonstrationEnvironment({
         plan: recipe.workflow,
         candidates,
-        adapters,
-        workspaceDir: root,
+        adapters: () => adapters,
         resolvePrivate: resolve,
         timeoutMs: 10000,
       });

@@ -1,17 +1,16 @@
 /**
- * Validating a proposed binding by replay, not by similarity.
+ * Validating a proposed binding against a demonstration, not by similarity.
  *
  * The capture proposes candidates it cannot establish: a value that equals an earlier result, or one
  * that moved with it across executions. Similarity is never proof — an incidental equality would
  * become a dependency, and a dependency that was not there would break the next execution. So every
- * candidate is decided by running it: the recorded plan with the candidate bound is executed in a
- * disposable environment on different inputs, and the recorded plan as it stands is executed too,
- * and a candidate is only promoted when its binding reproduces the held-out observation *and* the
- * recorded value does not. When both reproduce it, or neither does, the fact the record is missing
- * is reported instead of a promotion.
+ * candidate is decided against the demonstration: the recorded plan with the candidate bound is
+ * resolved on the demonstration's inputs through the adapters the caller supplies, and so is the
+ * recorded plan as it stands, and a candidate is only promoted when its binding reproduces the
+ * demonstration's observation *and* the recorded value does not. When both reproduce it, or neither
+ * does, the fact the record is missing is reported instead of a promotion.
  */
 
-import { mkdir } from "node:fs/promises";
 import {
   type ProgramLanguage,
   type ProgramTokenAddress,
@@ -46,14 +45,24 @@ import {
   type RuntimeAdapterRegistry,
   executeRecordedWorkflow,
 } from "./recorded-workflow.js";
-import { RESIN_PROCESS_RUNTIME, RESIN_PROGRAM_RUNTIME } from "./runtime-families.js";
+
+/** Which recorded execution a check reads: the one the plan was built from, or its repeat. */
+export type DemonstrationLabel = "baseline" | "held-out";
+
+/** The adapters that answer a plan's steps for one demonstration, or undefined when none can. */
+export type DemonstrationAdapters = (
+  demonstration: DemonstrationLabel,
+) => RuntimeAdapterRegistry | undefined;
 
 export interface CandidateValidationEnvironment {
   adapters: RuntimeAdapterRegistry;
-  /** Workspace scope for private-source identity hashing and replay ownership. */
+  /**
+   * Adapters for the other demonstration, when a decision must also be checked against it. Absent
+   * means `adapters` answers every demonstration.
+   */
+  adaptersFor?: DemonstrationAdapters;
+  /** Workspace scope for private-source identity hashing and ownership. */
   workspaceId?: string;
-  /** A disposable directory the workflow may write to; it is never the user's project. */
-  workspaceDir: string;
   /** Inputs for this replay. */
   inputs: Record<string, WorkflowJsonValue>;
   /** What the selected demonstration observed: stepId -> the value it produced. */
@@ -94,7 +103,7 @@ export interface WorkflowPlanVerification {
   dropped: Array<{ candidate: WorkflowBindingCandidate; reason: string }>;
   /** Hash-only identities for parameterized programs in the final verified plan. */
   programIdentities?: WorkflowProgramIdentity[];
-  /** Fresh-process proof attached only after a real replay. */
+  /** Digest-bound proof that the plan was checked against the recording. */
   replay?: WorkflowValidationReplayProof;
 }
 
@@ -145,34 +154,6 @@ function matchesObservedResult(
     typeof expected === "string" &&
     (actual === expected || actual.trim() === expected)
   );
-}
-
-/**
- * A recorded program or process is verified by running to successful completion again. Its output
- * may legitimately change with the workspace, the clock or ordering (tests, builds, listings,
- * queries), while a program that cannot run here still fails. It must still produce output when the
- * recording did: a pipeline such as `missing-tool | head` exits 0 having done nothing. Tool calls
- * are compared by result.
- */
-function completionReproduces(
-  step: WorkflowStep,
-  observed: WorkflowJsonValue,
-  replayed: WorkflowJsonValue | undefined,
-): boolean {
-  return (
-    step.callable.program !== undefined &&
-    (step.callable.runtime === RESIN_PROCESS_RUNTIME ||
-      step.callable.runtime === RESIN_PROGRAM_RUNTIME) &&
-    (!hasContent(observed) || hasContent(replayed))
-  );
-}
-
-function hasContent(value: WorkflowJsonValue | undefined): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object") return Object.keys(value).length > 0;
-  return true;
 }
 
 /** What a message calls a path: `["token", 0]` rather than a JSON dump. */
@@ -751,17 +732,21 @@ function matchesDemonstratedType(
 
 export async function demonstrationEnvironment(params: {
   plan: RecordedWorkflow;
+  /** The demonstration to read; defaults to the held-out repeat. */
+  demonstration?: DemonstrationLabel;
   candidates: readonly WorkflowBindingCandidate[];
-  adapters: RuntimeAdapterRegistry;
+  adapters: DemonstrationAdapters;
   workspaceId?: string;
-  workspaceDir: string;
   resolvePrivate?: (reference: string) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   timeoutMs?: number;
 }): Promise<CandidateValidationEnvironment | undefined> {
-  const demonstration = params.plan.heldOut;
+  const label = params.demonstration ?? "held-out";
+  const demonstration = label === "baseline" ? params.plan.baseline : params.plan.heldOut;
   if (demonstration === undefined) return undefined;
   const resolve = params.resolvePrivate;
   if (resolve === undefined) return undefined;
+  const adapters = params.adapters(label);
+  if (adapters === undefined) return undefined;
   const inputs: Record<string, WorkflowJsonValue> = Object.create(null);
   const conflictingInputs = new Set<string>();
   const values = new Map<string, Promise<WorkflowJsonValue>>();
@@ -848,9 +833,9 @@ export async function demonstrationEnvironment(params: {
     }
   }
   return {
-    adapters: params.adapters,
+    adapters,
+    adaptersFor: params.adapters,
     workspaceId: params.workspaceId,
-    workspaceDir: params.workspaceDir,
     inputs,
     observed,
     ...(Object.keys(observedComparisons).length === 0 ? {} : { observedComparisons }),
@@ -1015,8 +1000,6 @@ function derivationTemplate(
 }
 
 /** Which demonstration an environment replays: the held-out run when there is one. */
-type DemonstrationLabel = "baseline" | "held-out";
-
 interface DemonstrationContext {
   label: DemonstrationLabel;
   demonstration: NonNullable<RecordedWorkflow["heldOut"]>;
@@ -1267,11 +1250,11 @@ async function evaluateDerivationCandidates(
     contexts.push({ label: "held-out", demonstration: plan.heldOut, environment });
     if (plan.baseline !== undefined) {
       const baseline = await demonstrationEnvironment({
-        plan: { ...plan, heldOut: plan.baseline },
+        plan,
+        demonstration: "baseline",
         candidates,
-        adapters: environment.adapters,
+        adapters: environment.adaptersFor ?? (() => environment.adapters),
         ...(environment.workspaceId === undefined ? {} : { workspaceId: environment.workspaceId }),
-        workspaceDir: environment.workspaceDir,
         resolvePrivate,
         ...(environment.timeoutMs === undefined ? {} : { timeoutMs: environment.timeoutMs }),
       });
@@ -1522,7 +1505,6 @@ async function replayPlanOnce(
       continue;
     }
     if (
-      completionReproduces(step, observed, outcome.result) ||
       matchesObservedResult(
         maskValue(outcome.result, masks, "replayed"),
         maskValue(observed, masks, "recorded"),
@@ -1692,12 +1674,6 @@ export async function validateBindingCandidates(params: {
   environment: CandidateValidationEnvironment;
 }): Promise<CandidateValidationOutcome[]> {
   const { plan, candidates, environment } = params;
-  if (environment.workspaceDir.length === 0) {
-    throw new Error("the replay environment needs a disposable workspace directory");
-  }
-  // Replays may write files. The workspace is guaranteed to exist before any run, and the adapters
-  // handed in are expected to execute there — never in the caller's project.
-  await mkdir(environment.workspaceDir, { recursive: true });
   // Inferred replacement of the entire executable argument proves only that another
   // program ran, not that the recorded implementation accepts varying data. Exclude
   // both input and result proposals from every A/B plan so they cannot shadow a

@@ -272,7 +272,6 @@ function executableEnvironment(observed: WorkflowJsonValue): CandidateValidation
   return {
     adapters,
     workspaceId: "workspace-a",
-    workspaceDir: "/tmp/resin-program-identity-test",
     inputs: {},
     observed: { run: observed },
     resolvePrivate: () => "printf alpha",

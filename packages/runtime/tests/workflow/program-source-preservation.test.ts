@@ -172,7 +172,6 @@ it("still verifies and executes source supplied by an earlier result", async () 
       candidates: [],
       environment: {
         adapters,
-        workspaceDir: directory,
         inputs: {},
         observed: { step0: "printf fresh-result", step1: "fresh-result" },
       },

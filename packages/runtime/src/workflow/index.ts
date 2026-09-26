@@ -10,6 +10,7 @@ export * from "./program-adapter.js";
 export * from "./mcp-connection.js";
 export * from "./tool-protocol-adapter.js";
 export * from "./binding-validation.js";
+export * from "./recording-check.js";
 export * from "./candidate-promotion.js";
 export * from "./program-identity.js";
 export * from "./compile-recorded-workflow.js";

@@ -43,8 +43,8 @@ function workspace(): { dir: string; adapters: RuntimeAdapterRegistry } {
   directories.push(dir);
   writeFileSync(path.join(dir, "merchants.json"), JSON.stringify(MERCHANTS));
   const adapters = new RuntimeAdapterRegistry();
-  adapters.register(createProcessAdapter({ cwd: dir, isolateEnvironment: true }));
-  adapters.register(createProgramAdapter({ cwd: dir, isolateEnvironment: true }));
+  adapters.register(createProcessAdapter({ cwd: dir }));
+  adapters.register(createProgramAdapter({ cwd: dir }));
   return { dir, adapters };
 }
 
@@ -193,8 +193,7 @@ describe("deciding derivation bindings on a held-out demonstration", () => {
     const environment = await demonstrationEnvironment({
       plan: recorded,
       candidates: recorded.candidates ?? [],
-      adapters,
-      workspaceDir: dir,
+      adapters: () => adapters,
       resolvePrivate: (reference) => values[reference]!,
     });
     const decided = await validateAndConfirmCandidates({
@@ -222,7 +221,9 @@ describe("deciding derivation bindings on a held-out demonstration", () => {
     const baselineOnly =
       'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"] if inputs["merchant"].startswith("C") else "Q", "mcc": m["mcc"]}\n';
     const decided = await decide(baselineOnly);
-    expect(decided.accepted).toMatchObject({ "3": false, "4": true });
+    // The plan without the refuted token cannot reproduce the held-out run, so nothing is carried.
+    expect(decided.accepted).toMatchObject({ "3": false });
+    expect(decided.status).not.toBe("verified");
   });
 
   it("refutes a correct derivation that also reaches outside its jail", async () => {

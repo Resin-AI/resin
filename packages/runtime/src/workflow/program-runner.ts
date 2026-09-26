@@ -28,7 +28,6 @@ import {
 } from "@resin/contracts";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
-import { mapRecordedWorkspaceRoot } from "./replay-path-mapping.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
 
 export interface RecordedProgramRun {
@@ -42,8 +41,6 @@ export interface RecordedProgramRun {
 export interface ProgramRunnerOptions {
   /** Directory the program runs in. Defaults to the process cwd. */
   cwd?: string;
-  /** Trusted original workspace root; replay maps recorded shell cwd into cwd's snapshot. */
-  recordedWorkspaceRoot?: string;
   /** Fixed local process profile, selected only from a recorded process argument. */
   shellInvocation?: "bash-login";
   /** Hard wall-clock bound; the child is killed and the run fails when exceeded. */
@@ -54,15 +51,6 @@ export interface ProgramRunnerOptions {
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
   env?: Record<string, string>;
-  /**
-   * Hand the program ONLY the environment it was given, never the process's own.
-   *
-   * A replay is not the daemon: a recorded program has no business reading the operator's
-   * credentials, tokens or proxy configuration out of the environment, and inheriting them would
-   * make a validation run as powerful as the daemon itself. PATH is always provided, because a
-   * program text naming an interpreter needs one to be found.
-   */
-  isolateEnvironment?: boolean;
   /** Resolves private Python setup-cell source in the owning workspace. */
   resolvePrivate?: (
     reference: string,
@@ -1619,9 +1607,7 @@ export async function runRecordedProgram(
         ? await preparePythonReplaySource(program, options, targetCallId, outputPath)
         : program.source;
     const runnable = source === program.source ? program : { ...program, source };
-    const env: NodeJS.ProcessEnv = options.isolateEnvironment
-      ? { PATH: process.env.PATH ?? "/usr/bin:/bin", ...options.env }
-      : { ...process.env, ...options.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
     const pythonReplayInput =
       runnable.kind === "python" && runnable.pythonState !== undefined ? source : undefined;
     const javascriptReplayInput =
@@ -1766,24 +1752,10 @@ async function runRecordedPatchCall(
   if (Object.keys(request.arguments).some((name) => name !== "workdir" && name !== "patch")) {
     throw new Error(`step '${step.id}' cannot run: unsupported recorded patch arguments`);
   }
-  let root = workdir;
-  let patch = source;
-  if (options.recordedWorkspaceRoot !== undefined) {
-    if (options.cwd === undefined) {
-      throw new Error(`step '${step.id}' cannot run: replay workspace cwd is required`);
-    }
-    const originalRoot = resolve(options.recordedWorkspaceRoot);
-    const subpath = relative(originalRoot, resolve(workdir));
-    if (subpath === ".." || subpath.startsWith(`..${sep}`) || isAbsolute(subpath)) {
-      throw new Error(`step '${step.id}' cannot run: recorded workdir is outside the workspace`);
-    }
-    root = join(options.cwd, subpath);
-    patch = mapRecordedWorkspaceRoot(source, options.recordedWorkspaceRoot, options.cwd);
-  }
   try {
     const run = await runRecordedProgram(
-      { ...step.callable.program!, source: patch },
-      { ...options, cwd: root },
+      { ...step.callable.program!, source },
+      { ...options, cwd: workdir },
       step.callId,
     );
     return run.value;
@@ -1849,23 +1821,6 @@ export async function runRecordedCall(
   ) {
     throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
   }
-  let replayWorkdir = requestedWorkdir;
-  if (
-    (shellProfile === "bash-login-v1" || nativeCodexShell) &&
-    typeof requestedWorkdir === "string" &&
-    options.recordedWorkspaceRoot !== undefined
-  ) {
-    if (options.cwd === undefined) {
-      throw new Error(`step '${step.id}' cannot run: replay workspace cwd is required`);
-    }
-    const originalRoot = resolve(options.recordedWorkspaceRoot);
-    const originalWorkdir = resolve(originalRoot, requestedWorkdir);
-    const subpath = relative(originalRoot, originalWorkdir);
-    if (subpath === ".." || subpath.startsWith(`..${sep}`) || isAbsolute(subpath)) {
-      throw new Error(`step '${step.id}' cannot run: recorded workdir is outside the workspace`);
-    }
-    replayWorkdir = join(options.cwd, subpath);
-  }
   const derivation = step.origin === "derivation";
   if (derivation && (program.kind !== "python" || program.sourceInterface !== "python-eval")) {
     throw new Error(`step '${step.id}' cannot run: a derivation must be a Python Eval program`);
@@ -1873,8 +1828,9 @@ export async function runRecordedCall(
   const replayOptions: ProgramRunnerOptions = {
     ...options,
     ...(derivation ? { pythonEvalResult: "json-object" as const } : {}),
-    ...((shellProfile === "bash-login-v1" || nativeCodexShell) && typeof replayWorkdir === "string"
-      ? { cwd: replayWorkdir }
+    ...((shellProfile === "bash-login-v1" || nativeCodexShell) &&
+    typeof requestedWorkdir === "string"
+      ? { cwd: requestedWorkdir }
       : {}),
     ...(shellProfile === "bash-login-v1" || nativeCodexShell
       ? { shellInvocation: "bash-login" as const }
@@ -1885,17 +1841,7 @@ export async function runRecordedCall(
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   };
-  // Validation replays run in a snapshot at another path; map recorded absolute workspace paths
-  // in the program text into it. Normal invocations (no recorded root) run the text unchanged.
-  const replaySource =
-    options.recordedWorkspaceRoot !== undefined && options.cwd !== undefined
-      ? mapRecordedWorkspaceRoot(source, options.recordedWorkspaceRoot, options.cwd)
-      : source;
-  const run = await runRecordedProgram(
-    { ...program, source: replaySource },
-    replayOptions,
-    step.callId,
-  );
+  const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
   if (run.exitCode !== 0) {
     // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
     const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);

@@ -233,7 +233,6 @@ describe("recorded program adapters", () => {
     await writeFile(join(home, ".bash_profile"), "PATH=/usr/bin:/bin\n");
     await writeFile(join(bin, "resin-path-probe"), "#!/bin/sh\necho found\n", { mode: 0o755 });
     const adapter = createProcessAdapter({
-      isolateEnvironment: true,
       env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
     });
     const step = recordedStep({
@@ -252,72 +251,6 @@ describe("recorded program adapters", () => {
         },
       }),
     ).toBe("found\nunset\n");
-  });
-
-  it("maps recorded shell cwd into a replay snapshot without touching source", async () => {
-    const sourceRoot = await makeWorkspace();
-    const snapshot = await makeWorkspace();
-    await mkdir(join(sourceRoot, "nested"));
-    await mkdir(join(snapshot, "nested"));
-    const adapter = createProcessAdapter({
-      cwd: snapshot,
-      recordedWorkspaceRoot: sourceRoot,
-    });
-    const step = recordedStep({
-      id: "native-snapshot",
-      runtime: RESIN_PROCESS_RUNTIME,
-      name: "command_exec",
-      program: { kind: "shell", source: "", argument: "cmd" },
-    });
-    const argumentsFor = (workdir: string) => ({
-      cmd: "printf x >> touched",
-      workdir,
-      resinCodexShellProfile: "bash-login-native-v1",
-    });
-    expect(await adapter.call({ step, arguments: argumentsFor(join(sourceRoot, "nested")) })).toBe(
-      "",
-    );
-    expect(await readFile(join(snapshot, "nested", "touched"), "utf8")).toBe("x");
-    await expect(readFile(join(sourceRoot, "nested", "touched"), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    const outside = await makeWorkspace();
-    const failure = await failureOf(() => adapter.call({ step, arguments: argumentsFor(outside) }));
-    expect(failure).toContain("recorded workdir is outside the workspace");
-    expect(await readFile(join(snapshot, "nested", "touched"), "utf8")).toBe("x");
-  });
-
-  it("maps recorded absolute workspace paths in program text into a replay snapshot", async () => {
-    const sourceRoot = await makeWorkspace();
-    const snapshot = await makeWorkspace();
-    await writeFile(join(sourceRoot, "data.txt"), "live");
-    await writeFile(join(snapshot, "data.txt"), "snap");
-    const step = recordedStep({
-      id: "native-paths",
-      runtime: RESIN_PROCESS_RUNTIME,
-      name: "command_exec",
-      program: { kind: "shell", source: "", argument: "cmd" },
-    });
-    const run = (cmd: string, options: Parameters<typeof createProcessAdapter>[0]) =>
-      createProcessAdapter(options).call({
-        step,
-        arguments: { cmd, workdir: sourceRoot, resinCodexShellProfile: "bash-login-native-v1" },
-      });
-    const replay = { cwd: snapshot, recordedWorkspaceRoot: sourceRoot };
-    expect(await run(`cat ${sourceRoot}/data.txt; printf w > ${sourceRoot}/out`, replay)).toBe(
-      "snap",
-    );
-    expect(await readFile(join(snapshot, "out"), "utf8")).toBe("w");
-    await expect(readFile(join(sourceRoot, "out"), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    const heredoc = `python3 - <<'PY'\nprint(open("${sourceRoot}/data.txt").read())\nPY`;
-    expect(await run(heredoc, replay)).toBe("snap\n");
-    const untouched = `echo ${sourceRoot}ication/x ${sourceRoot}s https://h.example${sourceRoot}/x`;
-    expect(await run(untouched, replay)).toBe(
-      `${sourceRoot}ication/x ${sourceRoot}s https://h.example${sourceRoot}/x\n`,
-    );
-    expect(await run(`cat ${sourceRoot}/data.txt`, { cwd: sourceRoot })).toBe("live");
   });
 
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {
@@ -882,7 +815,6 @@ describe("recorded program adapters", () => {
       },
       {
         cwd: workspace,
-        isolateEnvironment: true,
         resolvePrivate: () => "print('setup-noise')\nanswer = 41",
       },
     );
@@ -920,7 +852,7 @@ describe("recorded program adapters", () => {
 
   it("replays private Python setup cells once in a fresh process and suppresses setup output", async () => {
     const workspace = await makeWorkspace();
-    const adapter = createProgramAdapter({ cwd: workspace, isolateEnvironment: true });
+    const adapter = createProgramAdapter({ cwd: workspace });
     const sources: Record<string, string> = {
       "private:python:setup-1":
         "print('setup-noise')\ncounter = globals().get('counter', 0) + 1\nbase = 7\nexec = 'shadowed-exec'\ncompile = 'shadowed-compile'\nglobals = 'shadowed-globals'",
@@ -1214,31 +1146,6 @@ describe("recorded program adapters", () => {
     expect(await run("printf '  spaced  \\n'")).toBe("  spaced  \n");
     expect(await run("printf 'a\\n\\nb\\n'")).toBe("a\n\nb\n");
     expect(await run("printf '\\n'")).toBe("\n");
-  });
-
-  it("hands an isolated program only the environment it was given", async () => {
-    const workspace = await makeWorkspace();
-    process.env.RESIN_DAEMON_SECRET = "leaked-value";
-    try {
-      const isolated = await runRecordedProgram(
-        {
-          kind: "shell",
-          source: 'printf "%s|%s" "${RESIN_DAEMON_SECRET:-none}" "${RESIN_REPLAY:-none}"',
-        },
-        { cwd: workspace, isolateEnvironment: true, env: { RESIN_REPLAY: "1" } },
-      );
-      // The operator's own environment is not the replayed program's environment.
-      expect(isolated.value).toBe("none|1");
-
-      const inherited = await runRecordedProgram(
-        { kind: "shell", source: 'printf "%s" "${RESIN_DAEMON_SECRET:-none}"' },
-        { cwd: workspace },
-      );
-      // Without isolation the process's environment is used, which is what the daemon itself wants.
-      expect(inherited.value).toBe("leaked-value");
-    } finally {
-      delete process.env.RESIN_DAEMON_SECRET;
-    }
   });
 
   it("carries a program's answer into the next call that consumes it", async () => {

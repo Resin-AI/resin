@@ -67,11 +67,11 @@ describe("recorded patch steps", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  /** Replays a patch recorded against `/app` in the temp workspace, as validation does. */
-  const replay = (patch: string, workdir = "/app"): Promise<WorkflowJsonValue> =>
+  /** Replays a patch written against `/app` with the temp workspace as its recorded workdir. */
+  const replay = (patch: string): Promise<WorkflowJsonValue> =>
     runRecordedCall(
-      { step: STEP, arguments: { patch, workdir } },
-      { cwd: workspace, recordedWorkspaceRoot: "/app" },
+      { step: STEP, arguments: { patch: patch.replaceAll("/app", workspace), workdir: workspace } },
+      { cwd: workspace },
     );
   const services = () => fs.readFileSync(path.join(workspace, "services.yaml"), "utf8");
 
@@ -133,7 +133,6 @@ describe("recorded patch steps", () => {
     const viaFileLink = ADD_MEDIA.replaceAll("/app/services.yaml", "/app/alias.yaml");
     await expect(replay(viaFileLink)).rejects.toThrow(/outside the step's working directory/);
     expect(fs.readFileSync(path.join(outside, "services.yaml"), "utf8")).toBe(SERVICES);
-    await expect(replay(ADD_MEDIA, "/elsewhere")).rejects.toThrow(/outside the workspace/);
   });
 
   it("writes the values bound to added-line tokens, and refuses a value spanning lines", async () => {
