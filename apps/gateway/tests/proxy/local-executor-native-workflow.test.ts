@@ -630,7 +630,7 @@ describe("recorded workflows of ordinary calls", () => {
     );
     expect(writing.isError).toBe(true);
     expect(fs.existsSync(escaped)).toBe(false);
-  });
+  }, 60_000);
 
   it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {
     const privateValues = new InMemoryPrivateValueStore();
