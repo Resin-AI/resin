@@ -7,12 +7,19 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CURRENT_VERSION } from "./commands/upgrade.js";
 import {
   SERVICE_SUPERVISOR_COMMAND,
   type ServiceSupervisorOptions,
   runServiceSupervisor,
 } from "./service/manager.js";
 import { sanitizeCrashDiagnostic } from "./service/recovery-state.js";
+import {
+  UPDATE_WORKER_COMMAND,
+  isManagedReleaseInstall,
+  runUpdateWorkerCommand,
+  startAutoUpdateAutomation,
+} from "./updates/auto-update.js";
 
 // Legacy helper compatibility
 export interface CliArgs {
@@ -69,6 +76,10 @@ export async function runServiceSupervisorCommand(argv: string[]): Promise<numbe
   const supervisorOptions: ServiceSupervisorOptions = {
     command,
     args: argv.slice(separatorIndex + 2),
+    autoUpdateFactory: ({ resinHome: serviceResinHome }) =>
+      isManagedReleaseInstall(serviceResinHome)
+        ? startAutoUpdateAutomation({ resinHome: serviceResinHome })
+        : undefined,
   };
   if (resinHome !== undefined) {
     supervisorOptions.resinHome = resinHome;
@@ -150,6 +161,17 @@ if (process.argv[2] === SERVICE_SUPERVISOR_COMMAND && isDirectServiceSupervisorE
     });
 }
 
+if (process.argv[2] === UPDATE_WORKER_COMMAND && isDirectServiceSupervisorEntry()) {
+  void runUpdateWorkerCommand(process.argv.slice(2), { currentVersionFallback: CURRENT_VERSION })
+    .then((exitCode) => {
+      process.exitCode = exitCode;
+    })
+    .catch((error: Error | string) => {
+      process.stderr.write(`[resin update] worker failed: ${sanitizeCrashDiagnostic(error)}\n`);
+      process.exitCode = 1;
+    });
+}
+
 // Platform Subsystem
 export * from "./platform/index.js";
 // Installer Engine
@@ -170,6 +192,8 @@ export * from "./updates/policy.js";
 export * from "./updates/update-lock.js";
 export * from "./updates/scheduler.js";
 export * from "./updates/engine.js";
+export * from "./updates/auto-update-state.js";
+export * from "./updates/auto-update.js";
 export type { JsonPrimitive, JsonValue } from "./updates/engine.js";
 
 // Service & Auth

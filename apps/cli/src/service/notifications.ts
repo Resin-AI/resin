@@ -74,7 +74,8 @@ export interface DoctorNotificationDiagnostic {
     | "harness"
     | "auth"
     | "runtime"
-    | "security";
+    | "security"
+    | "updates";
   status: "pass" | "warn" | "fail";
   remediation?: string;
   fixed?: boolean;

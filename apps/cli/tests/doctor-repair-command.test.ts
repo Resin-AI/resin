@@ -822,3 +822,201 @@ describe("doctor & repair commands", () => {
     expect(actions.some((a) => a.includes("daemon user service"))).toBe(false);
   });
 });
+
+describe("doctor automatic update diagnostics", () => {
+  const homeDir = "/home/testuser";
+  const resinHome = path.join(homeDir, ".resin");
+  const configFile = resolvePaths({ home: homeDir }).configFile;
+  const journalFile = path.join(resinHome, "journal.json");
+  const stateFile = path.join(resinHome, "updates", "auto-update-state.json");
+  const noticeFile = path.join(resinHome, "updates", "auto-update-notice.json");
+  const retryRemediation = "Run `resin upgrade` to retry, or `resin status --verbose` for details.";
+
+  function journal(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      schemaVersion: 1,
+      channel: "stable",
+      currentVersion: "1.2.3",
+      targetVersion: null,
+      pendingVersion: null,
+      lastCheckAt: "2027-01-02T00:00:00.000Z",
+      lastResult: "already-current",
+      lastError: null,
+      lastRollback: null,
+      quarantine: [],
+      ...overrides,
+    });
+  }
+
+  function autoUpdateState(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      schemaVersion: 1,
+      scheduler: { lastSuccessfulCheckAtMs: 1, offlineFailureCount: 0, offlineRetryAtMs: null },
+      lastCheck: {
+        at: "2027-01-05T00:00:00.000Z",
+        outcome: "already-current",
+        targetVersion: "1.2.3",
+        error: null,
+      },
+      nextCheckAt: "2027-01-05T06:00:00.000Z",
+      lastWorkerLaunchAt: null,
+      ...overrides,
+    });
+  }
+
+  async function diagnose(files: Record<string, string>) {
+    const items = await runDiagnostics({
+      home: homeDir,
+      fsBridge: createMockFsBridge(files),
+      serviceManager: createMockServiceManager(),
+    });
+    return items.find((item) => item.id === "automatic_updates");
+  }
+
+  it("passes with channel, interval, and schedule when automatic updates are on", async () => {
+    const item = await diagnose({
+      [journalFile]: journal(),
+      [stateFile]: autoUpdateState(),
+    });
+    expect(item).toMatchObject({
+      name: "Automatic Updates",
+      category: "updates",
+      status: "pass",
+      fixable: false,
+    });
+    expect(item?.message).toContain("Automatic updates are on (stable, every 360m)");
+    expect(item?.message).toContain("last check 2027-01-05T00:00:00.000Z (already-current)");
+    expect(item?.message).toContain("next check 2027-01-05T06:00:00.000Z");
+  });
+
+  it("passes with a manual-upgrade hint when disabled by config", async () => {
+    const item = await diagnose({
+      [configFile]: JSON.stringify({ updates: { autoUpdate: false } }),
+    });
+    expect(item).toMatchObject({
+      status: "pass",
+      message:
+        "Automatic updates are disabled (updates.autoUpdate=false); run `resin upgrade` to update manually.",
+    });
+  });
+
+  it.each([
+    {
+      label: "an automatic rollback",
+      overrides: {
+        lastResult: "rolled-back",
+        lastError: "Candidate health probe failed.",
+        lastRollback: {
+          fromVersion: "1.2.4",
+          toVersion: "1.2.3",
+          rolledBackAt: "2027-01-03T00:00:00.000Z",
+          reason: "Candidate health probe failed.",
+        },
+      },
+      expected: "v1.2.4 was rolled back to v1.2.3",
+    },
+    {
+      label: "a failed update",
+      overrides: { lastResult: "failed", lastError: "download failed" },
+      expected: "the last update attempt failed",
+    },
+    {
+      label: "a quarantined channel target",
+      overrides: {
+        targetVersion: "1.2.4",
+        quarantine: [
+          {
+            version: "1.2.4",
+            channel: "stable",
+            quarantinedAt: "2027-01-03T00:00:00.000Z",
+            reason: "Candidate health probe failed.",
+          },
+        ],
+      },
+      expected: "release v1.2.4 is quarantined",
+    },
+  ])("warns after $label", async ({ overrides, expected }) => {
+    const item = await diagnose({ [journalFile]: journal(overrides) });
+    expect(item).toMatchObject({ status: "warn", remediation: retryRemediation });
+    expect(item?.message).toContain(expected);
+  });
+
+  it("does not warn after a manual rollback or a quarantine on another channel", async () => {
+    const item = await diagnose({
+      [journalFile]: journal({
+        lastResult: "rolled-back",
+        lastRollback: {
+          fromVersion: "1.2.4",
+          toVersion: "1.2.3",
+          rolledBackAt: "2027-01-03T00:00:00.000Z",
+          reason: "Manual rollback requested.",
+        },
+        targetVersion: "1.2.4",
+        quarantine: [
+          {
+            version: "1.2.4",
+            channel: "beta",
+            quarantinedAt: "2027-01-03T00:00:00.000Z",
+            reason: "Candidate health probe failed.",
+          },
+        ],
+      }),
+    });
+    expect(item?.status).toBe("pass");
+  });
+
+  it("warns when the automatic update state is unreadable", async () => {
+    const item = await diagnose({ [stateFile]: "{not json" });
+    expect(item).toMatchObject({ status: "warn", category: "updates", fixable: false });
+    expect(item?.message).toContain("Automatic update state is unreadable");
+    expect(item?.remediation).toContain(stateFile);
+  });
+
+  it.each([
+    { label: "terminal", json: false },
+    { label: "JSON", json: true },
+  ])("prints the one-time update notice in $label output and acknowledges it", async ({ json }) => {
+    const fsBridge = createMockFsBridge({
+      [noticeFile]: JSON.stringify({
+        schemaVersion: 1,
+        fromVersion: "1.2.2",
+        toVersion: "1.2.3",
+        activatedAt: "2027-01-04T12:00:00.000Z",
+      }),
+    });
+    const chunks: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    const run = () =>
+      doctorCommand([...(json ? ["--json"] : []), "--home", homeDir], {
+        fsBridge,
+        serviceManager: createMockServiceManager(),
+        notificationConsumer: async (active) => active,
+      });
+    try {
+      await run();
+      const output = chunks.join("");
+      if (json) {
+        expect(JSON.parse(output).lastAutomaticUpdate).toEqual({
+          fromVersion: "1.2.2",
+          toVersion: "1.2.3",
+          activatedAt: "2027-01-04T12:00:00.000Z",
+        });
+      } else {
+        expect(output).toContain(
+          "Updated automatically: v1.2.2 -> v1.2.3 (at 2027-01-04T12:00:00.000Z)",
+        );
+      }
+      expect(fsBridge.files.has(noticeFile)).toBe(false);
+
+      chunks.length = 0;
+      await run();
+      expect(chunks.join("")).not.toContain("Updated automatically");
+      if (json) expect(JSON.parse(chunks.join("")).lastAutomaticUpdate).toBeUndefined();
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+});

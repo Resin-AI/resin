@@ -559,6 +559,24 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     expect(result.snapshot.quarantine).toEqual([]);
   });
 
+  it("quarantines a candidate whose daemon never becomes reachable so it is not retried", async () => {
+    const fixture = createEngineFixture({ useDefaultHealthProbe: true });
+
+    const result = await fixture.engine.run({ mode: "background" });
+
+    expect(result).toMatchObject({
+      status: "rolled-back",
+      rolledBack: true,
+      quarantined: true,
+    });
+    expect(result.error).toContain("IPC/MCP probe failed");
+    expect(result.snapshot.quarantine).toEqual([expect.objectContaining({ version: "1.1.0" })]);
+
+    const retry = await fixture.engine.run({ mode: "background" });
+    expect(retry.status).toBe("quarantined");
+    expect(fixture.events.filter((event) => event === "switch:1.1.0")).toHaveLength(1);
+  });
+
   it("preserves and reports concurrent configuration changes during rollback", async () => {
     const configPath = path.join("/home/update-test", ".resin", "config.json");
     interface BridgeHolder {
@@ -1257,6 +1275,248 @@ describe("UpdateEngine staging, activation, and rollback", () => {
       expect(result.pendingVersion).toBe("1.1.0");
       expect(result.stepsCompleted).toContain("activation_deferred");
       expect(events).not.toContain("switch:1.1.0");
+    } finally {
+      await server.stop().catch(() => {});
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never drains in-flight work for background updates and retries later instead", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-background-idle-"));
+    const resinHome = path.join(homeDir, ".resin");
+    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
+    const events: string[] = [];
+    // SAFETY: Mock supervisor object implements subset of DaemonSupervisor required for IPC health tests.
+    const supervisor = {
+      getConfig() {
+        return {};
+      },
+      async getHealth() {
+        return {
+          status: "fully-ready",
+          uptimeSeconds: 1,
+          startedAt: Date.now(),
+          version: "1.0.0",
+          modules: {
+            session: {
+              status: "healthy",
+              details: { activeSessions: 2 },
+              lastCheckTime: Date.now(),
+            },
+          },
+          timestamp: Date.now(),
+        };
+      },
+      async stop() {
+        events.push("ipc-drain");
+      },
+    } as DaemonSupervisor;
+    const server = new IpcServer({ supervisor, socketPath: platformPaths.socketPath });
+    try {
+      await fs.mkdir(resinHome, { recursive: true });
+      await fs.writeFile(
+        path.join(resinHome, "version.json"),
+        JSON.stringify({ version: "1.0.0" }),
+      );
+      await server.start();
+      const release = signedRelease("1.1.0");
+      const engine = new UpdateEngine({
+        homeDir,
+        resinHome,
+        configPath: path.join(resinHome, "config.json"),
+        platformInfo,
+        acquireLock: async () => ({ async release() {} }),
+        resolveRelease: async () => release,
+        downloadAsset: async (request) => ({
+          path: path.join(resinHome, "downloads", request.asset.filename),
+          sha256: request.asset.sha256,
+          sizeBytes: request.asset.sizeBytes,
+          verified: true,
+        }),
+        installRelease: async (request) => {
+          const versionDir = path.join(resinHome, "versions", `v${request.version}`);
+          const daemonPath = path.join(versionDir, "bin", "resin-daemon");
+          const metadataPath = path.join(versionDir, "version.json");
+          await fs.mkdir(path.dirname(daemonPath), { recursive: true });
+          await fs.writeFile(daemonPath, "candidate");
+          await fs.writeFile(metadataPath, JSON.stringify({ version: request.version }));
+          return {
+            version: request.version,
+            versionDir,
+            installedFiles: [daemonPath, metadataPath],
+            entryPoints: { daemon: daemonPath, mcpShim: "", cli: "" },
+          };
+        },
+        switchVersion: async (request) => {
+          events.push(`switch:${request.targetVersion}`);
+          return {
+            activeVersion: request.targetVersion,
+            previousVersion: "1.0.0",
+            activePath: path.join(resinHome, "current"),
+            rollbackRetained: true,
+          };
+        },
+        readActiveVersion: async () => "1.0.0",
+        serviceManager: {
+          async status() {
+            return {
+              installed: true,
+              active: true,
+              enabled: true,
+              serviceName: "resin",
+              unitPath: "/unit",
+            };
+          },
+          async stop() {
+            events.push("manager-stop");
+          },
+          async start() {
+            events.push("manager-start");
+          },
+        },
+        probationMs: 0,
+        drainTimeoutMs: 100,
+        healthProbeIntervalMs: 10,
+        sleep: async () => yieldEventLoop(),
+      });
+
+      const result = await engine.run({ mode: "background" });
+
+      expect(result).toMatchObject({
+        success: true,
+        status: "activation-deferred",
+        deferralReason: "active-sessions",
+        pendingVersion: "1.1.0",
+        staged: true,
+      });
+      expect(events).toEqual([]);
+      await expect(readUpdateStatusSnapshot({ resinHome })).resolves.toMatchObject({
+        lastResult: "activation-deferred",
+        pendingVersion: "1.1.0",
+      });
+    } finally {
+      await server.stop().catch(() => {});
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back and quarantines a candidate whose daemon does not report the target version", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-version-gate-"));
+    const resinHome = path.join(homeDir, ".resin");
+    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
+    const events: string[] = [];
+    let activeVersion = "1.0.0";
+    // SAFETY: Mock supervisor object implements subset of DaemonSupervisor required for IPC health tests.
+    const supervisor = {
+      getConfig() {
+        return {};
+      },
+      async getHealth() {
+        return {
+          status: "fully-ready",
+          uptimeSeconds: 1,
+          startedAt: Date.now(),
+          // The previous build keeps answering, e.g. because the cutover did not take effect.
+          version: "1.0.0",
+          modules: {},
+          timestamp: Date.now(),
+        };
+      },
+      async stop() {},
+    } as DaemonSupervisor;
+    const server = new IpcServer({ supervisor, socketPath: platformPaths.socketPath });
+    try {
+      await fs.mkdir(resinHome, { recursive: true });
+      await fs.writeFile(
+        path.join(resinHome, "version.json"),
+        JSON.stringify({ version: "1.0.0" }),
+      );
+      await server.start();
+      const release = signedRelease("1.1.0");
+      const engine = new UpdateEngine({
+        homeDir,
+        resinHome,
+        configPath: path.join(resinHome, "config.json"),
+        platformInfo,
+        customFetch: async () => new Response("unavailable", { status: 503 }),
+        acquireLock: async () => ({ async release() {} }),
+        resolveRelease: async () => release,
+        downloadAsset: async (request) => ({
+          path: path.join(resinHome, "downloads", request.asset.filename),
+          sha256: request.asset.sha256,
+          sizeBytes: request.asset.sizeBytes,
+          verified: true,
+        }),
+        installRelease: async (request) => {
+          const versionDir = path.join(resinHome, "versions", `v${request.version}`);
+          const daemonPath = path.join(versionDir, "bin", "resin-daemon");
+          const metadataPath = path.join(versionDir, "version.json");
+          await fs.mkdir(path.dirname(daemonPath), { recursive: true });
+          await fs.writeFile(daemonPath, "candidate");
+          await fs.writeFile(metadataPath, JSON.stringify({ version: request.version }));
+          return {
+            version: request.version,
+            versionDir,
+            installedFiles: [daemonPath, metadataPath],
+            entryPoints: { daemon: daemonPath, mcpShim: "", cli: "" },
+          };
+        },
+        switchVersion: async (request) => {
+          events.push(`switch:${request.targetVersion}`);
+          const previousVersion = activeVersion;
+          activeVersion = request.targetVersion;
+          return {
+            activeVersion,
+            previousVersion,
+            activePath: path.join(resinHome, "current"),
+            rollbackRetained: true,
+          };
+        },
+        readActiveVersion: async () => activeVersion,
+        removeVersion: async (versionDir) => {
+          events.push(`remove:${path.basename(versionDir)}`);
+        },
+        serviceManager: {
+          async status() {
+            return {
+              installed: true,
+              active: true,
+              enabled: true,
+              serviceName: "resin",
+              unitPath: "/unit",
+            };
+          },
+          async stop() {
+            events.push("manager-stop");
+          },
+          async start() {
+            events.push("manager-start");
+          },
+        },
+        sessionActivity: async () => false,
+        probationMs: 0,
+        healthProbeIntervalMs: 1,
+        sleep: async () => yieldEventLoop(),
+      });
+
+      const result = await engine.run({ mode: "background" });
+
+      expect(result).toMatchObject({
+        success: false,
+        status: "rolled-back",
+        rolledBack: true,
+        quarantined: true,
+        activeVersion: "1.0.0",
+      });
+      expect(result.error).toContain("daemon reports v1.0.0 instead of v1.1.0");
+      expect(events).toContain("switch:1.1.0");
+      expect(events.indexOf("switch:1.0.0")).toBeGreaterThan(events.indexOf("switch:1.1.0"));
+      expect(events).toContain("remove:v1.1.0");
+      await expect(readUpdateStatusSnapshot({ resinHome })).resolves.toMatchObject({
+        quarantine: [expect.objectContaining({ version: "1.1.0" })],
+      });
     } finally {
       await server.stop().catch(() => {});
       await fs.rm(homeDir, { recursive: true, force: true });

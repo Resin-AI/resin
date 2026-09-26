@@ -28,6 +28,7 @@ import {
 } from "@resin/protocol";
 import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
+import { getActiveVersion } from "../installer/asset-downloader.js";
 import {
   DEFAULT_GATEWAY_URL,
   resolveHarnessConfigPath,
@@ -53,7 +54,13 @@ import {
   RECOVERY_STATE_FILE_NAME,
   type RecoveryFailureCategory,
 } from "../service/recovery-state.js";
-import { readUpdateStatusSnapshot } from "../updates/engine.js";
+import {
+  acknowledgeAutoUpdateNotice,
+  readAutoUpdateNotice,
+  readAutoUpdateState,
+} from "../updates/auto-update-state.js";
+import { UpdateEngine, readUpdateStatusSnapshot } from "../updates/engine.js";
+import { listRunningGateways } from "../updates/gateway-registry.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
@@ -215,6 +222,29 @@ export interface DaemonStatusSummary {
       rolledBackAt: string;
     } | null;
     quarantinedVersions: string[];
+    automatic: {
+      enabled: boolean | null;
+      channel: string | null;
+      checkIntervalMinutes: number | null;
+      maintenanceWindow: { start: string; end: string; timeZone?: string } | null;
+      lastCheckAt: string | null;
+      lastOutcome: string | null;
+      /** Raw check errors stay local (they may contain paths); status only flags them. */
+      hasError: boolean;
+      nextCheckAt: string | null;
+      offlineFailureCount: number;
+      stateError: boolean;
+    };
+    lastAutomaticUpdate: {
+      fromVersion: string;
+      toVersion: string;
+      activatedAt: string;
+    } | null;
+    /** `resin mcp` processes still running a version other than the active install. */
+    staleMcpGateways: {
+      count: number;
+      versions: string[];
+    };
   };
   harnessHealth: {
     available: boolean;
@@ -532,7 +562,12 @@ export async function fetchDaemonStatusSummary(
     options.entryPath,
   );
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
-  const update = await readUpdateStatus(fsBridge, resinHome);
+  const update = await readUpdateStatus(fsBridge, {
+    home,
+    resinHome,
+    configPath: daemonPaths.configFile,
+    env,
+  });
   const privacy = collectPrivacySnapshot(
     localConfig,
     daemonHealthReport,
@@ -717,6 +752,11 @@ export function formatStatusForTerminal(
     row("Production", gate.status === "uninitialized" ? "Not verified" : "Blocked");
   }
 
+  const automaticUpdateNotice = formatAutomaticUpdateNotice(summary.update?.lastAutomaticUpdate);
+  if (automaticUpdateNotice) lines.push("", automaticUpdateNotice);
+  const staleGateways = formatStaleMcpGateways(summary.update?.staleMcpGateways);
+  if (staleGateways) lines.push("", staleGateways);
+
   if (remediations.length > 0) {
     lines.push("", "Next steps:");
     for (const remediation of remediations) {
@@ -879,6 +919,7 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
     if (summary.update.errorCode) {
       lines.push(`  State:      ERROR (${summary.update.errorCode})`);
     }
+    lines.push(...formatAutomaticUpdateLines(summary.update));
   }
 
   if (summary.safetyGate) {
@@ -970,6 +1011,13 @@ export async function statusCommand(
         ? `${JSON.stringify(output, null, 2)}\n`
         : formatStatusForTerminal(output, { verbose: flags.verbose || options.verbose }),
     );
+    if (summary.update.lastAutomaticUpdate) {
+      // The notice was shown once; acknowledging it is best-effort.
+      await acknowledgeAutoUpdateNotice({
+        resinHome: path.join(customHome, ".resin"),
+        fsBridge: options.fsBridge,
+      }).catch(() => undefined);
+    }
     return 0;
   } catch {
     writeStatusCommandError(Boolean(flags.json), "STATUS_EVALUATION_FAILED", 1);
@@ -1327,10 +1375,60 @@ async function collectHarnessStatuses(
   });
 }
 
+type UpdateJournalStatus = Omit<
+  DaemonStatusSummary["update"],
+  "automatic" | "lastAutomaticUpdate" | "staleMcpGateways"
+>;
+
 async function readUpdateStatus(
   fsBridge: ConfigFsBridge,
-  resinHome: string,
+  options: {
+    home: string;
+    resinHome: string;
+    configPath: string;
+    env: NodeJS.ProcessEnv;
+  },
 ): Promise<DaemonStatusSummary["update"]> {
+  const [journal, automatic, lastAutomaticUpdate, staleMcpGateways] = await Promise.all([
+    readUpdateJournalStatus(fsBridge, options.resinHome),
+    readAutomaticUpdateStatus(fsBridge, options),
+    readLastAutomaticUpdate(fsBridge, options.resinHome),
+    readStaleMcpGateways(options.resinHome),
+  ]);
+  return { ...journal, automatic, lastAutomaticUpdate, staleMcpGateways };
+}
+
+async function readStaleMcpGateways(
+  resinHome: string,
+): Promise<DaemonStatusSummary["update"]["staleMcpGateways"]> {
+  try {
+    const activeVersion = getActiveVersion(resinHome);
+    if (!activeVersion) return { count: 0, versions: [] };
+    const active = activeVersion.replace(/^v/u, "");
+    const stale = (await listRunningGateways({ resinHome })).filter(
+      (gateway) => gateway.version !== active,
+    );
+    const versions = [...new Set(stale.map((gateway) => safeVersion(gateway.version)))]
+      .filter((version): version is string => version !== null)
+      .sort();
+    return { count: stale.length, versions };
+  } catch {
+    return { count: 0, versions: [] };
+  }
+}
+
+export function formatStaleMcpGateways(
+  stale: DaemonStatusSummary["update"]["staleMcpGateways"] | undefined,
+): string | null {
+  if (!stale || stale.count === 0) return null;
+  const versions = stale.versions.map((version) => `v${version}`).join(", ");
+  return `${stale.count} MCP gateway process(es) still run an older Resin (${versions}); restart the harness to load the updated version.`;
+}
+
+async function readUpdateJournalStatus(
+  fsBridge: ConfigFsBridge,
+  resinHome: string,
+): Promise<UpdateJournalStatus> {
   try {
     const snapshot = await readUpdateStatusSnapshot({ resinHome, fsBridge });
     if (!snapshot) return emptyUpdate();
@@ -1360,7 +1458,7 @@ async function readUpdateStatus(
 
 function emptyUpdate(
   errorCode: DaemonStatusSummary["update"]["errorCode"] = null,
-): DaemonStatusSummary["update"] {
+): UpdateJournalStatus {
   return {
     available: false,
     channel: null,
@@ -1374,6 +1472,125 @@ function emptyUpdate(
     lastRollback: null,
     quarantinedVersions: [],
   };
+}
+
+async function readAutomaticUpdateStatus(
+  fsBridge: ConfigFsBridge,
+  options: {
+    home: string;
+    resinHome: string;
+    configPath: string;
+    env: NodeJS.ProcessEnv;
+  },
+): Promise<DaemonStatusSummary["update"]["automatic"]> {
+  const automatic: DaemonStatusSummary["update"]["automatic"] = {
+    enabled: null,
+    channel: null,
+    checkIntervalMinutes: null,
+    maintenanceWindow: null,
+    lastCheckAt: null,
+    lastOutcome: null,
+    hasError: false,
+    nextCheckAt: null,
+    offlineFailureCount: 0,
+    stateError: false,
+  };
+  try {
+    const policy = await new UpdateEngine({
+      homeDir: options.home,
+      resinHome: options.resinHome,
+      configPath: options.configPath,
+      env: options.env,
+      fsBridge,
+    }).readPolicy();
+    automatic.enabled = policy.autoUpdate;
+    automatic.channel = policy.channel;
+    automatic.checkIntervalMinutes = policy.checkIntervalMinutes;
+    const window = policy.maintenanceWindow;
+    automatic.maintenanceWindow = window
+      ? {
+          start: window.start,
+          end: window.end,
+          ...(window.timeZone ? { timeZone: window.timeZone } : {}),
+        }
+      : null;
+  } catch {
+    // An invalid update policy is reported as unknown; status never fails on it.
+  }
+  try {
+    const state = await readAutoUpdateState({ resinHome: options.resinHome, fsBridge });
+    if (state) {
+      automatic.lastCheckAt = safeIsoTimestamp(state.lastCheck?.at);
+      automatic.lastOutcome = state.lastCheck?.outcome ?? null;
+      automatic.hasError = Boolean(state.lastCheck?.error);
+      automatic.nextCheckAt = safeIsoTimestamp(state.nextCheckAt ?? undefined);
+      automatic.offlineFailureCount = state.scheduler.offlineFailureCount;
+    }
+  } catch {
+    automatic.stateError = true;
+  }
+  return automatic;
+}
+
+export async function readLastAutomaticUpdate(
+  fsBridge: ConfigFsBridge,
+  resinHome: string,
+): Promise<DaemonStatusSummary["update"]["lastAutomaticUpdate"]> {
+  try {
+    const notice = await readAutoUpdateNotice({ resinHome, fsBridge });
+    if (!notice) return null;
+    const fromVersion = safeVersion(notice.fromVersion);
+    const toVersion = safeVersion(notice.toVersion);
+    const activatedAt = safeIsoTimestamp(notice.activatedAt);
+    return fromVersion && toVersion && activatedAt ? { fromVersion, toVersion, activatedAt } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatAutomaticUpdateNotice(
+  notice: DaemonStatusSummary["update"]["lastAutomaticUpdate"] | undefined,
+): string | null {
+  if (!notice) return null;
+  return `Updated automatically: v${notice.fromVersion} -> v${notice.toVersion} (at ${notice.activatedAt})`;
+}
+
+function formatAutomaticUpdateLines(update: DaemonStatusSummary["update"]): string[] {
+  const automatic = update.automatic;
+  const lines: string[] = [];
+  if (automatic) {
+    if (automatic.enabled === null) {
+      lines.push("  Automatic:  unknown (update configuration is invalid)");
+    } else if (!automatic.enabled) {
+      lines.push("  Automatic:  off (updates.autoUpdate=false)");
+    } else {
+      lines.push(
+        `  Automatic:  on (every ${automatic.checkIntervalMinutes ?? "?"}m, ${automatic.channel ?? "unknown"})`,
+      );
+    }
+    const window = automatic.maintenanceWindow;
+    if (window) {
+      lines.push(
+        `  Window:     ${escapeTerminalControls(`${window.start}-${window.end} ${window.timeZone ?? "UTC"}`)}`,
+      );
+    }
+    if (automatic.enabled && automatic.nextCheckAt) {
+      lines.push(`  Next check: ${automatic.nextCheckAt}`);
+    }
+    if (automatic.lastOutcome) {
+      const at = automatic.lastCheckAt ? ` at ${automatic.lastCheckAt}` : "";
+      const error = automatic.hasError ? " (error; see resin doctor)" : "";
+      lines.push(`  Last auto:  ${automatic.lastOutcome}${at}${error}`);
+    }
+    if (automatic.stateError) {
+      lines.push("  Auto state: ERROR (auto_update_state_unreadable)");
+    }
+  }
+  const notice = formatAutomaticUpdateNotice(update.lastAutomaticUpdate);
+  if (notice) lines.push(`  ${notice}`);
+  const staleGateways = formatStaleMcpGateways(update.staleMcpGateways);
+  if (staleGateways) lines.push(`  ${staleGateways}`);
+  return lines;
 }
 
 function collectPrivacySnapshot(
