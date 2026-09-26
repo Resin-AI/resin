@@ -101,6 +101,50 @@ export function extractSingleCommandOutput(source: string): SingleCommandOutput 
   }
 }
 
+/**
+ * A cell whose only effect is one `tools.apply_patch` call with literal patch text, optionally
+ * printed: `text(await tools.apply_patch("…"))`. Its effect is recorded by the native `FileChange`
+ * items it produces, so the cell itself is not the replayable call.
+ */
+export function isApplyPatchOnlyCell(source: string): boolean {
+  if (source.length > 1_048_576) return false;
+  try {
+    const body = parseCode(source).program.body;
+    const [statement] = body;
+    if (body.length !== 1 || statement?.type !== "ExpressionStatement") return false;
+    let awaited = statement.expression;
+    if (
+      awaited.type === "CallExpression" &&
+      awaited.callee.type === "Identifier" &&
+      awaited.callee.name === "text" &&
+      awaited.arguments.length === 1 &&
+      awaited.arguments[0]!.type === "AwaitExpression"
+    ) {
+      awaited = awaited.arguments[0];
+    }
+    if (awaited.type !== "AwaitExpression") return false;
+    const call = awaited.argument;
+    if (
+      call.type !== "CallExpression" ||
+      call.arguments.length !== 1 ||
+      call.callee.type !== "MemberExpression" ||
+      call.callee.computed ||
+      call.callee.object.type !== "Identifier" ||
+      call.callee.object.name !== "tools" ||
+      call.callee.property.type !== "Identifier" ||
+      call.callee.property.name !== "apply_patch"
+    )
+      return false;
+    const patch = call.arguments[0]!;
+    return (
+      patch.type === "StringLiteral" ||
+      (patch.type === "TemplateLiteral" && patch.expressions.length === 0)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** An unsupported cell is unsafe unless its entire AST proves a synchronous, non-command form. */
 export function hasUnresolvedCodeModeEffects(source: string): boolean {
   if (source.length > 32_768) return true;

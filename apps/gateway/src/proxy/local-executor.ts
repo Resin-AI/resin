@@ -155,6 +155,8 @@ function checkExecutable(filePath: string): boolean {
 
 /** Enough of a recorded program for an agent to recognize it; the full text still executes. */
 const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
+/** Added lines of a recorded edit shown in its description; the whole edit still applies. */
+const RECORDED_PATCH_PREVIEW_LINES = 12;
 
 function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   try {
@@ -648,11 +650,34 @@ export class LocalArtifactExecutor {
       if (program === undefined || programText === undefined || programText.length === 0) continue;
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
       const workdir = workdirSource === undefined ? undefined : text(workdirSource);
+      for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
+      if (program.kind === "patch") {
+        // An edit reads as the file it edits and the lines it adds, holes shown as `{name}`.
+        const lines = programText.split("\n");
+        const header = lines.find((line) => line.startsWith("+++ "))?.slice(4);
+        const deleted = header === "/dev/null";
+        const file = deleted ? lines.find((line) => line.startsWith("--- "))?.slice(4) : header;
+        if (file === undefined) continue;
+        const shownFile =
+          workdir !== undefined && path.isAbsolute(file) ? path.relative(workdir, file) : file;
+        const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++ "));
+        const preview = added
+          .slice(0, RECORDED_PATCH_PREVIEW_LINES)
+          .map((line) => line.slice(1))
+          .join("\n");
+        steps.push(
+          `Step ${index + 1} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}${
+            added.length > 0
+              ? `\n${preview}${added.length > RECORDED_PATCH_PREVIEW_LINES ? "\n[...]" : ""}`
+              : ""
+          }`,
+        );
+        continue;
+      }
       const shown =
         programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
           ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
           : programText;
-      for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
       steps.push(
         `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
       );

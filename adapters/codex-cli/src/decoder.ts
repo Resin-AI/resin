@@ -36,7 +36,9 @@ import {
   type SingleCommandOutput,
   extractSingleCommandOutput,
   hasUnresolvedCodeModeEffects,
+  isApplyPatchOnlyCell,
 } from "./code-command.js";
+import { codexFileEdits } from "./file-change.js";
 
 export const DEFAULT_SCHEMA_VERSION = "1.0.0";
 
@@ -1240,6 +1242,38 @@ export class CodexSessionDecoder {
     ];
   }
 
+  /**
+   * A completed native `FileChange` item: one Codex-native `file_edit` per changed path, carrying
+   * the per-file diff. Any shape not seen in real rollouts decodes to nothing.
+   */
+  private normalizeNativeFileChange(
+    item: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const nativeId = asString(item.id);
+    const edits = codexFileEdits(item);
+    if (nativeId === undefined || edits === undefined) return [];
+    return edits.map((edit, index) => {
+      const header = this.emitHeader("file_edit", timestamp);
+      const event: NormalizedFileEditEvent = {
+        ...header,
+        type: "file_edit",
+        filePath: edit.filePath,
+        operation: edit.operation,
+        patch: edit.patch,
+        metadata: {
+          ...header.metadata,
+          [RESIN_CODEX_COMMAND_METADATA_KEY]: {
+            version: 1,
+            kind: "file-change",
+            nativeId: edits.length === 1 ? nativeId : `${nativeId}-${index}`,
+          },
+        },
+      };
+      return event;
+    });
+  }
+
   private nativeCallMapKey(callId: string, metadata = this.currentMetadata): string {
     const nativeMetadata = asObject(metadata?.codexNative);
     const threadId = asString(nativeMetadata?.threadId) ?? this.currentNativeThreadId;
@@ -1908,6 +1942,7 @@ export class CodexSessionDecoder {
       if (item.type === "CommandExecution") {
         return this.normalizePayload({ ...envelope, timestamp, metadata, payload }, false, true);
       }
+      if (item.type === "FileChange") return this.normalizeNativeFileChange(item, timestamp);
       const itemMetadata = {
         ...metadata,
         codexNative: {
@@ -2091,6 +2126,18 @@ export class CodexSessionDecoder {
                   kind: "call",
                   form: "single-command-output",
                 },
+              };
+        const patchCell =
+          native.name === "exec" &&
+          typeof nativeInput === "string" &&
+          !extracted &&
+          isApplyPatchOnlyCell(nativeInput);
+        if (patchCell)
+          for (const event of decoded)
+            if (event.type === "tool_call")
+              event.metadata = {
+                ...event.metadata,
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: { version: 1, kind: "patch-call" },
               };
         return decoded;
       }

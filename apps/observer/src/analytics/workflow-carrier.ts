@@ -174,20 +174,28 @@ export type WorkflowIdentityEvent = Pick<
   "type" | "eventId" | "callId" | "toolCallId" | "metadata"
 >;
 
-/** Native command identity is authoritative only for validated command metadata. */
+/** Native command and file-edit identity is authoritative only for validated Codex metadata. */
 export function workflowCallId(event: WorkflowIdentityEvent): string {
-  if (event.type === "command_exec") {
+  if (isCodexNativeEffect(event)) {
     const native = readCodexCommandMetadata(event.metadata);
-    if (native?.kind === "command") return native.nativeId;
+    if (native?.kind === "command" || native?.kind === "file-change") return native.nativeId;
   }
   return event.callId ?? event.toolCallId ?? event.eventId;
+}
+
+/** A Codex command or file edit whose record is its own call and result. */
+function isCodexNativeEffect(event: WorkflowIdentityEvent): boolean {
+  const kind = readCodexCommandMetadata(event.metadata)?.kind;
+  return (
+    (event.type === "command_exec" && kind === "command") ||
+    (event.type === "file_edit" && kind === "file-change")
+  );
 }
 
 export function isWorkflowCallEvent(event: WorkflowIdentityEvent): boolean {
   return (
     event.type === "tool_call" ||
-    (event.type === "command_exec" &&
-      readCodexCommandMetadata(event.metadata)?.kind === "command" &&
+    (isCodexNativeEffect(event) &&
       isWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]))
   );
 }
@@ -195,8 +203,7 @@ export function isWorkflowCallEvent(event: WorkflowIdentityEvent): boolean {
 export function isWorkflowResultEvent(event: WorkflowIdentityEvent): boolean {
   return (
     event.type === "tool_result" ||
-    (event.type === "command_exec" &&
-      readCodexCommandMetadata(event.metadata)?.kind === "command" &&
+    (isCodexNativeEffect(event) &&
       readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]) !== undefined)
   );
 }
@@ -210,6 +217,7 @@ const PROGRAM_KINDS: Readonly<Record<string, true>> = {
   python: true,
   javascript: true,
   typescript: true,
+  patch: true,
 };
 
 function isJsonValue(value: unknown): value is WorkflowJsonValue {

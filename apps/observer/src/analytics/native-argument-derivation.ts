@@ -304,6 +304,8 @@ export function deriveNativeCalls(
    */
   const programInputs = new Map<string, string>();
   const programInputNames = new Set<string>();
+  /** Values a file edit's added lines were offered as inputs for. */
+  const patchInputValues = new Set<string>();
   /** Every typed primitive leaf shown before each call's result arrived. */
   const seenBeforeResult: Array<Set<string>> = [];
 
@@ -482,9 +484,10 @@ export function deriveNativeCalls(
         if (positions !== undefined && (position === undefined || position === 0)) continue;
         const shared =
           position !== undefined &&
-          position >= 2 &&
           typeof token.value === "string" &&
-          (sharedWords.has(token.value) || requestWords.has(token.value));
+          ((position >= 2 && (sharedWords.has(token.value) || requestWords.has(token.value))) ||
+            // A value an earlier edit wrote as an input is the same value where a command uses it.
+            (position >= 1 && patchInputValues.has(token.value)));
         if (!isProgramValue(call.program.kind, token, previous, shared)) continue;
         const key = scalarKey(token.value);
         let name = programInputs.get(key);
@@ -509,6 +512,49 @@ export function deriveNativeCalls(
           missing:
             "one recording does not establish that this value varies; omitted, the input keeps the recorded value",
         });
+      }
+
+      // A value a file edit adds is offered when the request named it or an earlier call already
+      // offered it as an input. A key (`port:`) is the file's structure, never a value, and the
+      // input is named after that key when the value sits right after one.
+      if (call.program.kind === "patch") {
+        for (const [tokenIndex, token] of tokens.entries()) {
+          if (inputCandidates.length >= MAX_CANDIDATES) break;
+          const value = token.value;
+          if (!token.bindable || typeof value !== "string") continue;
+          if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH) continue;
+          if (value.startsWith("-") || /^\s*:/.test(text.slice(token.end))) continue;
+          const key = scalarKey(value);
+          let name = programInputs.get(key);
+          if (name === undefined && !requestWords.has(value)) continue;
+          if (name === undefined) {
+            if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
+            const lineStart = text.lastIndexOf("\n", token.start) + 1;
+            const field = /([A-Za-z_][A-Za-z0-9_]{0,30})\s*:\s*$/.exec(
+              text.slice(lineStart, token.start),
+            )?.[1];
+            const base = field?.toLowerCase() ?? programInputBaseName(value, undefined);
+            name = base;
+            for (let suffix = 2; programInputNames.has(name); suffix += 1)
+              name = `${base}_${suffix}`;
+            programInputs.set(key, name);
+            programInputNames.add(name);
+          } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
+            continue;
+          }
+          offered.add(name);
+          patchInputValues.add(value);
+          inputCandidates.push({
+            stepId: call.stepId,
+            argument: call.program.argument,
+            path: ["tokens", tokenIndex],
+            proposed: { kind: "input", name, type: "string", recordedDefault: true },
+            reason: "native-data-argument",
+            evidence: { tokens: tokens.length, token: tokenIndex },
+            missing:
+              "one recording does not establish that this value varies; omitted, the input keeps the recorded value",
+          });
+        }
       }
 
       // A literal inside a program the command embeds (a heredoc body or a `-c` string) is offered
@@ -563,8 +609,20 @@ export function deriveNativeCalls(
         if (token.start >= bodyStart) break;
         const position = positions?.[tokenIndex];
         if (positions !== undefined && (position === undefined || position === 0)) continue;
-        if (!isProgramValue(call.program.kind, token, tokens[tokenIndex - 1], true)) continue;
-        spanTargets.push({ token, path: ["tokens", tokenIndex] });
+        const patchValue =
+          call.program.kind === "patch" &&
+          token.bindable &&
+          typeof token.value === "string" &&
+          token.value.length > 0 &&
+          token.value.length <= MAX_PROGRAM_INPUT_LENGTH &&
+          !token.value.startsWith("-") &&
+          !/^\s*:/.test(text.slice(token.end));
+        if (!patchValue && !isProgramValue(call.program.kind, token, tokens[tokenIndex - 1], true))
+          continue;
+        spanTargets.push({
+          token: token as ProgramToken & { value: string },
+          path: ["tokens", tokenIndex],
+        });
       }
       if (call.program.kind === "shell") {
         for (const program of embeddedPrograms(text)) {

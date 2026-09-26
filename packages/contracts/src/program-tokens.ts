@@ -836,7 +836,38 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
  * partial token list.
  */
 export function tokenizeProgram(language: ProgramLanguage, source: string): ProgramToken[] {
+  if (language === "patch") return patchTokens(source);
   return language === "shell" ? shellTokens(source) : scriptTokens(source, language);
+}
+
+/** A maximal run of characters a patch token may carry: identifiers, numbers, paths, hosts. */
+const PATCH_WORD = /[A-Za-z0-9_.@/+-]+/g;
+
+/**
+ * A unified diff for one file: only the lines it ADDS carry values a caller may choose. Context and
+ * removed lines must match the file being edited, and headers name what is edited, so neither is
+ * ever a token. Each maximal word of an added line is a bindable word whose value is its text.
+ */
+function patchTokens(source: string): ProgramToken[] {
+  const tokens: ProgramToken[] = [];
+  let offset = 0;
+  for (const line of source.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      for (const match of line.slice(1).matchAll(PATCH_WORD)) {
+        const start = offset + 1 + match.index;
+        tokens.push({
+          kind: "word",
+          start,
+          end: start + match[0].length,
+          raw: match[0],
+          value: match[0],
+          bindable: true,
+        });
+      }
+    }
+    offset += line.length + 1;
+  }
+  return tokens;
 }
 
 /** A program embedded in a shell command: a heredoc body or a `-c`/`-e` code string. */
@@ -1193,6 +1224,13 @@ export function renderProgramTokenValue(
   if (!token.bindable) throw new Error("the recorded program token is not safely bindable");
   if (token.kind === "operator" || token.kind === "unsupported") {
     throw new Error("this program token cannot carry a bound value");
+  }
+  if (language === "patch") {
+    const text = typeof value === "string" ? value : String(value);
+    if (/[\r\n]/u.test(text)) {
+      throw new Error("a patch token value cannot span lines");
+    }
+    return text;
   }
   if (token.kind === "number") {
     if (typeof value !== "number" || !Number.isFinite(value)) {

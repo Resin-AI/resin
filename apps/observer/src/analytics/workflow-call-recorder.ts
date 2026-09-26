@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
@@ -23,6 +24,7 @@ import {
   type ProgramLanguage,
   ProgramSourceProjectionError,
   ProgramTokenizationError,
+  WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowArgumentProvenance,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
@@ -517,7 +519,15 @@ export class WorkflowCallRecorder {
         },
       };
     }
+    if (event.type === "file_edit") return this.observeCodexFileEdit(event);
     if (event.type === "tool_call") {
+      // The cell's edits arrive as Codex-native file edits; those, not the cell, are the calls.
+      if (
+        event.toolName === "exec" &&
+        readCodexCommandMetadata(event.metadata)?.kind === "patch-call"
+      ) {
+        return event;
+      }
       if (event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call") {
         const state = this.sessionState(event.sessionId);
         if (state.openCodexWrappers.size >= MAX_LOCAL_CALLS) state.codexWrapperOverflow = true;
@@ -559,6 +569,120 @@ export class WorkflowCallRecorder {
       return resultEvent;
     }
     return event;
+  }
+
+  /**
+   * A Codex-native file edit becomes a patch step: the recorded diff, applied again in the directory
+   * the session worked in. The diff is file content, so it is stored privately and never projected,
+   * not even redacted; only its added lines' values are offered, and none when the redaction engine
+   * would change the diff. An edit outside the working directory, or without one, is not a step.
+   */
+  private observeCodexFileEdit(
+    event: Extract<NormalizedSessionEvent, { type: "file_edit" }>,
+  ): NormalizedSessionEvent {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (native?.kind !== "file-change") return event;
+    const raw = localWorkflowEvent(event);
+    if (raw?.type !== "file_edit" || typeof raw.patch !== "string") return event;
+    const codexNative = event.metadata?.codexNative;
+    const recordedCwd =
+      isPlainObject(codexNative) && typeof codexNative.cwd === "string"
+        ? codexNative.cwd
+        : undefined;
+    let workdir: string;
+    try {
+      workdir =
+        recordedCwd === undefined
+          ? ""
+          : recordedCwd.startsWith("file:")
+            ? fileURLToPath(recordedCwd)
+            : recordedCwd;
+    } catch {
+      return event;
+    }
+    if (!isAbsolute(workdir) || !isAbsolute(raw.filePath)) return event;
+    const inside = relative(resolve(workdir), resolve(raw.filePath));
+    if (inside.length === 0 || inside.startsWith("..") || isAbsolute(inside)) return event;
+    try {
+      tokenizeProgram("patch", raw.patch);
+    } catch {
+      return event;
+    }
+    const state = this.sessionState(event.sessionId);
+    const callId = native.nativeId;
+    const parameters = { patch: raw.patch, workdir };
+    const program: WorkflowRecordedProgram = { kind: "patch", source: "", argument: "patch" };
+    const origins: WorkflowCallCarrier["origins"] = {};
+    const provenance: Record<string, WorkflowArgumentProvenance> = {};
+    for (const [argument, value] of Object.entries(parameters)) {
+      origins[argument] = this.launderOrigin({ type: "literal", value }, event.sessionId, callId, [
+        argument,
+      ]);
+      provenance[argument] = { standing: "derived", rule: "single-observation" };
+    }
+    const privateSource = origins.patch;
+    if (privateSource?.type !== "private") return event;
+    origins.patch = { type: "program", language: "patch", source: privateSource, holes: [] };
+    let call: LocalCall | undefined;
+    for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
+      call = state.executions[index]!.calls.find(
+        (entry) => entry.callId === callId && entry.toolName === "apply_patch",
+      );
+    }
+    call ??= this.recordLocalCall(
+      state,
+      { sessionId: event.sessionId, callId, toolName: "apply_patch" },
+      parameters,
+      program,
+    );
+    const carrier: WorkflowCallCarrier = {
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "apply_patch",
+      origins,
+      inputs: [],
+      provenance,
+      program,
+      executionIndex: call.executionIndex,
+      baselineInputs: { ...call.argumentReferences },
+    };
+    const heldOut = this.heldOutSoFar(state, call);
+    if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
+    const relationships = this.relateLocalCall(state, call, event.sessionId);
+    if (relationships.dependsOnCallIds.length > 0)
+      carrier.dependsOnCallIds = relationships.dependsOnCallIds;
+    const scrubbed = redactLocalWorkflowProgramSource(event, raw.patch);
+    const candidates = scrubbed === undefined || scrubbed.changed ? [] : relationships.candidates;
+    if (candidates.length > 0) carrier.candidates = candidates;
+    call.result = WORKFLOW_PATCH_STEP_RESULT;
+    call.resultReference = this.localReference(
+      WORKFLOW_PATCH_STEP_RESULT,
+      event.sessionId,
+      callId,
+      "native-result:v1:exact",
+    );
+    call.resultComparison = undefined;
+    const execution = state.executions.find((entry) => entry.index === call.executionIndex);
+    if (execution?.accumulatedHeldOut !== undefined) {
+      execution.accumulatedHeldOut.observed = [
+        ...execution.accumulatedHeldOut.observed.filter(
+          (entry) => entry.position !== call.position,
+        ),
+        { position: call.position, reference: call.resultReference },
+      ];
+    }
+    const demonstration = this.demonstrationCarrier(event.sessionId, callId);
+    return {
+      ...event,
+      metadata: {
+        ...event.metadata,
+        [RESIN_WORKFLOW_CALL_METADATA_KEY]: carrier,
+        [RESIN_WORKFLOW_RESULT_METADATA_KEY]: {
+          baselineReference: call.resultReference,
+          output: { type: "string" as const, hasContent: true },
+          ...(demonstration === undefined ? {} : { heldOut: demonstration }),
+        },
+      },
+    };
   }
 
   /**

@@ -152,6 +152,10 @@ importers:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
+    devDependencies:
+      '@resin/adapter-codex':
+        specifier: workspace:*
+        version: link:../../adapters/codex-cli
 
   apps/observer:
     dependencies:

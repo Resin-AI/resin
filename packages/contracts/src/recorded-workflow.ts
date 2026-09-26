@@ -144,8 +144,11 @@ export type WorkflowPythonState = {
  * family of runtime, not reconstructing an equivalent one.
  */
 export type WorkflowRecordedProgram = {
-  /** How the program runs: the family of shell or interpreter the record establishes. */
-  kind: "shell" | "python" | "javascript" | "typescript";
+  /**
+   * How the program runs: the family of shell or interpreter the record establishes. A `patch` is
+   * one file's unified diff, applied in-process to the file its header names.
+   */
+  kind: "shell" | "python" | "javascript" | "typescript" | "patch";
   /** Program text as recorded, or sanitized source metadata in a projected capture. */
   source: string;
   /**
@@ -167,6 +170,12 @@ export type WorkflowRecordedProgram = {
    */
   pythonState?: WorkflowPythonState;
 };
+
+/**
+ * What a `patch` program returns when applied. It is fixed and value-free: the edit's effect is the
+ * file, which later steps observe, and a recording records the same text so a replay compares equal.
+ */
+export const WORKFLOW_PATCH_STEP_RESULT = "patched";
 
 /** How a step is called again: the original callable and the connection it was reached through. */
 export type WorkflowCallable = {
@@ -1067,7 +1076,8 @@ export function validateRecordedWorkflow(value: unknown): {
                 template.language !== "shell" &&
                 template.language !== "python" &&
                 template.language !== "javascript" &&
-                template.language !== "typescript"
+                template.language !== "typescript" &&
+                template.language !== "patch"
               ) {
                 problems.push(`${where} program needs the language it runs in`);
               }
@@ -1215,7 +1225,8 @@ export function validateRecordedWorkflow(value: unknown): {
         (program.kind !== "shell" &&
           program.kind !== "python" &&
           program.kind !== "javascript" &&
-          program.kind !== "typescript") ||
+          program.kind !== "typescript" &&
+          program.kind !== "patch") ||
         typeof program.source !== "string"
       ) {
         errors.push(`step ${step.id} has an invalid recorded program`);

@@ -20,11 +20,13 @@ import { parse } from "@babel/parser";
 import {
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
+  WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
+import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { mapRecordedWorkspaceRoot } from "./replay-path-mapping.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
@@ -718,6 +720,8 @@ function invocationFor(
       }
       // Ordinary programs and TypeScript records retain their existing process semantics.
       return { command: process.execPath, args: ["-e", source] };
+    case "patch":
+      throw new Error("a recorded patch is applied in-process, never as a child process");
     default: {
       const exhaustive: never = program.kind;
       throw new Error(`recorded program kind '${String(exhaustive)}' cannot be run`);
@@ -1342,6 +1346,19 @@ export async function runRecordedProgram(
   targetCallId?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
+  if (program.kind === "patch") {
+    // An edit is applied here, confined to the working directory; it starts no process.
+    if (options.cwd === undefined) {
+      throw new Error("a recorded patch needs the working directory it is confined to");
+    }
+    await applyRecordedPatch(program.source, options.cwd);
+    return {
+      exitCode: 0,
+      stdout: WORKFLOW_PATCH_STEP_RESULT,
+      stderr: "",
+      value: WORKFLOW_PATCH_STEP_RESULT,
+    };
+  }
   if (program.sourceInterface === "codex-exec") {
     assertCodexExecHasNoImports(program.source);
   }
@@ -1508,6 +1525,52 @@ function programTextFor(
 }
 
 /**
+ * Applies a recorded patch step: its `workdir` argument is the directory the edit is confined to.
+ * A validation replay maps the recorded workspace root, in the workdir and in the patch's header
+ * alike, into the snapshot, and refuses a workdir outside that root.
+ */
+async function runRecordedPatchCall(
+  request: RecordedCallRequest,
+  source: string,
+  options: ProgramRunnerOptions,
+): Promise<WorkflowJsonValue> {
+  const { step } = request;
+  const workdir = request.arguments.workdir;
+  if (typeof workdir !== "string" || !isAbsolute(workdir)) {
+    throw new Error(`step '${step.id}' cannot run: a patch needs an absolute workdir`);
+  }
+  if (Object.keys(request.arguments).some((name) => name !== "workdir" && name !== "patch")) {
+    throw new Error(`step '${step.id}' cannot run: unsupported recorded patch arguments`);
+  }
+  let root = workdir;
+  let patch = source;
+  if (options.recordedWorkspaceRoot !== undefined) {
+    if (options.cwd === undefined) {
+      throw new Error(`step '${step.id}' cannot run: replay workspace cwd is required`);
+    }
+    const originalRoot = resolve(options.recordedWorkspaceRoot);
+    const subpath = relative(originalRoot, resolve(workdir));
+    if (subpath === ".." || subpath.startsWith(`..${sep}`) || isAbsolute(subpath)) {
+      throw new Error(`step '${step.id}' cannot run: recorded workdir is outside the workspace`);
+    }
+    root = join(options.cwd, subpath);
+    patch = mapRecordedWorkspaceRoot(source, options.recordedWorkspaceRoot, options.cwd);
+  }
+  try {
+    const run = await runRecordedProgram(
+      { ...step.callable.program!, source: patch },
+      { ...options, cwd: root },
+      step.callId,
+    );
+    return run.value;
+  } catch (error) {
+    throw new Error(
+      `step '${step.id}' failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Runs the program a recorded call names and returns its value. Both program families share this:
  * they differ in how the observer recorded the call, not in what running it again means. A failure
  * — a missing program, an unrunnable record, a non-zero exit status — throws with the step id so
@@ -1538,6 +1601,7 @@ export async function runRecordedCall(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
+  if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
   const requestedWorkdir = request.arguments.workdir;
   const shellProfile = request.arguments.resinCodexShellProfile;
   const nativeCodexShell = shellProfile === "bash-login-native-v1";

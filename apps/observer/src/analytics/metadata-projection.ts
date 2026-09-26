@@ -750,7 +750,12 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
-  if (event.type === "tool_call" || event.type === "tool_result" || event.type === "command_exec") {
+  if (
+    event.type === "tool_call" ||
+    event.type === "tool_result" ||
+    event.type === "command_exec" ||
+    event.type === "file_edit"
+  ) {
     const codexCommand = readCodexCommandMetadata(event.metadata);
     if (codexCommand !== undefined) metadata[RESIN_CODEX_COMMAND_METADATA_KEY] = codexCommand;
   }

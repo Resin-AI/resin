@@ -224,7 +224,9 @@ export function reconstructWorkflowFromEvents(
   for (const event of ordered) {
     if (!isWorkflowResultEvent(event)) continue;
     const callId =
-      event.type === "command_exec" ? workflowCallId(event) : (event.callId ?? event.toolCallId);
+      event.type === "command_exec" || event.type === "file_edit"
+        ? workflowCallId(event)
+        : (event.callId ?? event.toolCallId);
     if (!callId) continue;
     const eventKey = scopedKey(event.sessionId, callId);
     const resultCarrier = readWorkflowResultCarrier(
@@ -240,7 +242,9 @@ export function reconstructWorkflowFromEvents(
           ? event.exitCode === undefined
             ? undefined
             : event.exitCode !== 0
-          : event.isError,
+          : event.type === "file_edit"
+            ? false
+            : event.isError,
       ...(resultCarrier?.output === undefined ? {} : { output: resultCarrier.output }),
       ...(resultCarrier?.baselineReference === undefined ||
       (event.type === "command_exec" && event.exitCode !== 0)

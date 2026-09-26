@@ -51,6 +51,21 @@ export const CodexCommandMetadataSchema = z.discriminatedUnion("kind", [
       association: CodexCommandAssociationSchema.optional(),
     })
     .strict(),
+  /** One file a completed native `FileChange` item edited, recorded as a Codex-native edit. */
+  z
+    .object({
+      version: z.literal(1),
+      kind: z.literal("file-change"),
+      nativeId: Id,
+    })
+    .strict(),
+  /** A code-mode cell whose only effect is one `apply_patch`; its `FileChange` items are the calls. */
+  z
+    .object({
+      version: z.literal(1),
+      kind: z.literal("patch-call"),
+    })
+    .strict(),
 ]);
 export type CodexCommandMetadata = z.infer<typeof CodexCommandMetadataSchema>;
 

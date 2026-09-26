@@ -43,5 +43,8 @@
     "@resin/protocol": "workspace:*",
     "@resin/runtime": "workspace:*",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@resin/adapter-codex": "workspace:*"
   }
 }

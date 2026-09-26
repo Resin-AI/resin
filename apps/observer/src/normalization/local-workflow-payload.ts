@@ -31,6 +31,9 @@ interface LocalWorkflowPayload {
   command?: unknown;
   args?: unknown;
   cwd?: unknown;
+  /** Exact native file edit: the recorded path and diff the redacted event may have rewritten. */
+  filePath?: unknown;
+  patch?: unknown;
   resultSuppressed?: true;
   programSourceRedactor?: (source: string) => RedactedStringResult | undefined;
 }
@@ -51,14 +54,16 @@ export function retainLocalWorkflowPayload(
       ? (["stdout", "stderr", "command", "args", "cwd"] as const).filter((name) =>
           Object.hasOwn(original, name),
         )
-      : [];
+      : event.type === "file_edit"
+        ? (["filePath", "patch"] as const).filter((name) => Object.hasOwn(original, name))
+        : [];
   const hasNativeResult =
     event.type === "tool_result" &&
     options.resultObservation !== undefined &&
     typeof options.resultObservation.result === "string";
   const suppressResult = event.type === "tool_result" && options.suppressResult === true;
   const hasProgramSourceRedactor =
-    (event.type === "tool_call" || event.type === "command_exec") &&
+    (event.type === "tool_call" || event.type === "command_exec" || event.type === "file_edit") &&
     options.programSourceRedactor !== undefined;
   if (
     !hasOriginalField &&
@@ -98,6 +103,10 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
       if (Object.hasOwn(payload, name)) exact[name] = payload[name];
     }
     return { ...event, ...exact } as T;
+  }
+  if (event.type === "file_edit") {
+    if (typeof payload.patch !== "string" || typeof payload.filePath !== "string") return undefined;
+    return { ...event, filePath: payload.filePath, patch: payload.patch } as T;
   }
   if (field === undefined || !Object.hasOwn(payload, field)) return event;
   return { ...event, [field]: payload[field] } as T;
