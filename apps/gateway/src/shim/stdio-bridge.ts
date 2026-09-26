@@ -376,6 +376,10 @@ export class McpStdioShim {
           this.writeStderr(`[WARN] ${toolName}: ${reason}\n`);
           this.options.onOfflineDegraded?.(toolName, reason);
         },
+        // Why a recorded workflow's validation replay failed is otherwise invisible to the host.
+        onValidationLog: (message: string) => {
+          this.writeStderr(`[validation] ${message}\n`);
+        },
         onToolQualified: (tool: V1LockedToolEntry, outcome: ReconcileOutcome) => {
           this.options.onToolQualified?.(tool, outcome);
         },
