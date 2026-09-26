@@ -66,6 +66,9 @@ Outbound internet access is disabled by default. When outbound network access is
 ### Command Execution
 Arbitrary shell execution (`/bin/sh`, `/bin/bash`, `cmd.exe`) is prohibited. Tools may only invoke pre-approved binaries from the envelope.
 
+### Derivation Steps
+A learned tool may carry a derivation step: short Python written by the cloud model that computes a value a recording had hard-coded. It is the only plan code no local recording produced, so it is never trusted. A binding to its output is accepted only after the derivation, run locally, reproduces every recorded value it claims to compute. Every run — validation replay and tool invocation — is jailed by a Python audit hook installed after the wrapper has compiled the derivation. Inside the jail the derivation may read files under its working directory (symlinks resolved), import a fixed allowlist of pure modules (`json`, `csv`, `math`, `statistics`, `collections`, `datetime`, `re`, `decimal`, and similar; `numpy`/`pandas` when installed), and nothing else. Writes, reads outside the working directory, `eval`/`exec`/`compile`, other imports, processes, sockets, `ctypes`, `mmap`, and every mutating `os`/`shutil` operation end the process immediately (exit 126), so the step fails and its candidates are refuted. On Linux the process is also limited to 4 GiB of address space and 256 open files. Recorded programs are not jailed.
+
 ---
 
 ## 3. Install Privacy Plan And Device Approval

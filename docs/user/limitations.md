@@ -78,6 +78,12 @@ import attributes are not. Ordinary JavaScript process recordings still return s
 This interface does not capture a live JavaScript kernel or make unresolved state and host-prelude
 operations replayable. Qualification still requires the replayed result to match the recording.
 
+Derivation steps (model-written Python) run in an audit-hook jail: read-only access to the working
+directory, a fixed module allowlist, no `eval`/`exec`/`compile`, no processes or network. Derivations
+that need `collections.namedtuple`, `dataclasses.dataclass` creation, lazily imported submodules, or
+any other module fail. The jail is an in-process audit hook, not an OS sandbox: raw writes to file
+descriptors the process already holds (`os.write` has no audit event) are not refused.
+
 ### Generated code imports
 
 Sandboxed code artifacts may import only `@resin/runtime` and bundled relative

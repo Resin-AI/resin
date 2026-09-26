@@ -552,6 +552,89 @@ describe("recorded workflows of ordinary calls", () => {
     expect(description).not.toContain("5942");
   });
 
+  it("runs a learned tool's derivation step jailed when the tool is invoked", async () => {
+    fs.writeFileSync(
+      path.join(workspaceDir, "merchants.json"),
+      JSON.stringify({ Crossfit_Hanna: { account_type: "R", mcc: 5942 } }),
+    );
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    const lookup =
+      'import json\nm = json.load(open("merchants.json"))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
+    const invoke = async (body: string, name: string) => {
+      const code = `${derivationHeader([{ name: "merchant", value: "" }])}${body}`;
+      const [merchantToken] = derivationInputTokenIndexes(code, ["merchant"]);
+      const installed = await installPlan(
+        {
+          id: `tool_${name}`,
+          name,
+          version: "1.0.0",
+          description: "derived values",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          runtime: {
+            runtime: "recorded-workflow",
+            memoryLimitMb: 64,
+            timeoutMs: 10_000,
+            cpuLimitPercent: 100,
+            maxOutputSizeBytes: 65_536,
+          },
+          capabilities: { command: { allowShellExecution: true } },
+        },
+        {
+          schemaVersion: 1,
+          workflowId: name,
+          inputs: [{ name: "merchant", type: "string" }],
+          steps: [
+            {
+              id: "derive",
+              callId: "derivation:derive",
+              origin: "derivation",
+              callable: {
+                runtime: RESIN_PROGRAM_RUNTIME,
+                name: "python",
+                program: {
+                  kind: "python",
+                  sourceInterface: "python-eval",
+                  source: code,
+                  argument: "code",
+                },
+              },
+              arguments: [
+                {
+                  name: "code",
+                  source: {
+                    kind: "template",
+                    template: {
+                      type: "program",
+                      language: "python",
+                      source: { type: "literal", value: code },
+                      holes: [
+                        { token: merchantToken, binding: { type: "input", name: "merchant" } },
+                      ],
+                    },
+                  },
+                },
+              ],
+              dependsOn: [],
+              failurePolicy: { onError: "abort", policy: "default" },
+              observed: { outcome: "unknown" },
+            },
+          ],
+        },
+      );
+      return execute({ ...installed, privateValues }, { merchant: "Crossfit_Hanna" }, context);
+    };
+    const allowed = await invoke(lookup, "wf_derive_ok");
+    expect(allowed.isError, String(allowed.content[0]?.text)).toBeUndefined();
+    expect(allowed.content[0]?.text).toContain("5942");
+    const writing = await invoke(
+      `open("escaped.txt", "w").write("x")\n${lookup}`,
+      "wf_derive_write",
+    );
+    expect(writing.isError).toBe(true);
+    expect(fs.existsSync(path.join(workspaceDir, "escaped.txt"))).toBe(false);
+  });
+
   it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const program = "python3 - <<'PY'\nprint('Belles_cookbook_store')\nPY";
