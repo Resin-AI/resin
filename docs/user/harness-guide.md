@@ -92,6 +92,17 @@ Explicit turn usage takes precedence over duplicate last-response snapshots. Uni
 
 Only a confirmed completed native shell result can establish a successful local baseline. Running, explicitly truncated, or unclassified results are withheld from baseline and computation-success evidence without being relabeled as execution errors. Raw source and result values remain local.
 
+### What a learned tool can vary
+
+A learned tool replays the commands Codex ran, with some recorded values turned into inputs. A value becomes an input candidate when the request named it, when several commands of the job used it, or when two recordings of the same job used different values at that position. Candidates can be:
+
+- a whole command word (`./release test alpha` → `{project}`), or part of one (`out/emea-2025-03/summary.csv` → `out/{region}-{month}/summary.csv`);
+- a literal inside a Python or Node program the command runs (a heredoc body or a `-c`/`-e` string); such inputs are named after the record field or variable the literal is compared with or assigned to (`x['merchant']=='…'` → `{merchant}`), and record field names themselves are never inputs;
+- a value an earlier command printed, such as a generated deployment id, which later commands then read from that command's output on every run;
+- a value on a line a Codex `apply_patch` edit added; the edit is replayed as a patch step confined to the working directory.
+
+Every candidate stays the recorded value until a local replay in a disposable copy of the workspace confirms it. Replay snapshots copy files up to 64 MiB each (512 MiB in total) and time out after two minutes. Outputs, file edits and the original text of every program stay on this machine. The secret-redacted text of Codex commands, like other secret-redacted program views (see [Security and Privacy](security-and-privacy.md)), is sent to Resin's service to name the tool and choose its inputs; shell commands from other harnesses are not.
+
 ---
 
 ## 3. Oh My Pi (OMP) Integration

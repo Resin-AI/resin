@@ -177,6 +177,10 @@ Execute a registered tool inside an isolated worker sandbox subject to the activ
 
 When a tool's result is text, `invoke_tool` returns the text itself rather than an escaped JSON string. A learned tool that runs several independent commands returns every command's output in recorded order, one section per step (`--- step 1/3 ---`).
 
+A learned tool with at least one text input also accepts `for_each`, both as a native tool argument and inside `invoke_tool`'s `arguments`: `{"for_each": {"<input>": ["v1", "v2"]}}` (one input, 2–20 text values). The whole tool runs once per value, in order, through the normal call path (policy checks, validation and one invocation record per run), and stops at the first failing run. The result has one `[<input>=<value>]` section per run and names the failed value and the values that were not run. A malformed `for_each`, or one that conflicts with a value given directly for the same input, is refused before anything runs.
+
+A step that recordings of the same job show is not always needed can be optional: it is skipped when its boolean input (default `true`) is `false`, later steps still run, and the combined output shows `--- step N/M skipped ---` for it.
+
 ---
 
 ## 4. `manage_tools`
