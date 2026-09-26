@@ -80,13 +80,11 @@ export interface WorkflowValidationVerdict {
   reason?: string;
 }
 
-/** Digest-bound proof of an actual disposable host replay; program replays use a fresh process. */
+/** Digest-bound proof that the plan was checked against this device's own recordings. */
 export interface WorkflowValidationReplayProof {
-  kind: "fresh-process" | "host-replay";
-  /** The exact plan digest that the replay executed. */
+  kind: "recording";
+  /** The exact plan digest that the recording check evaluated. */
   planDigest: string;
-  /** On mixed host replays, only these steps were dispatched through fresh process adapters. */
-  freshProcessStepIds?: string[];
 }
 
 /** What replaying the plan as a whole concluded, as the runtime that ran it reported it. */
@@ -186,9 +184,8 @@ const ProgramIdentitySchema = z.object({
 });
 
 const ReplayProofSchema = z.object({
-  kind: z.enum(["fresh-process", "host-replay"]),
+  kind: z.literal("recording"),
   planDigest: z.string().regex(SHA256_HEX, "digest must be 64 lowercase hexadecimal characters"),
-  freshProcessStepIds: z.array(z.string().min(1)).optional(),
 });
 
 const PlanVerificationSchema = z.object({

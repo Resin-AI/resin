@@ -26,7 +26,7 @@ export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 export const MAX_WORKFLOW_PYTHON_SETUP_CELLS = 32;
 /** Maximum UTF-8 bytes for one captured Python source cell. */
 export const MAX_WORKFLOW_PYTHON_SOURCE_BYTES = 262_144;
-/** Maximum UTF-8 bytes for the complete fresh-process Python replay source. */
+/** Maximum UTF-8 bytes for the complete Python program source. */
 export const MAX_WORKFLOW_PYTHON_REPLAY_BYTES = 1_048_576;
 
 /** Values the schema validator accepts without importing a JSON library. */
@@ -365,6 +365,12 @@ export type WorkflowHeldOutDemonstration = {
     /** An explicit projection for textual output whose trailing whitespace is incidental. */
     comparison?: WorkflowObservedComparison;
   }>;
+  /**
+   * The local calls that performed each recorded (non-derivation) step in this demonstration, in
+   * execution order; more than one only for `for_each` iterations. The host recomputes every
+   * recorded value from these call ids and its own sessions, so a plan never carries the recording.
+   */
+  calls?: Array<{ stepId: string; callIds: string[] }>;
 };
 
 export type RecordedWorkflow = {
@@ -715,6 +721,29 @@ function validateDemonstration(
       if (entryLabel === "inputs" && typeof entry.argument !== "string") {
         errors.push(`every ${label}.inputs entry needs the argument it was supplied for`);
       }
+    }
+  }
+  if (demonstration.calls === undefined) return;
+  if (!Array.isArray(demonstration.calls)) {
+    errors.push(`${label}.calls must be an array when present`);
+    return;
+  }
+  const seen = new Set<string>();
+  for (const entry of demonstration.calls) {
+    if (!isPlainObject(entry)) {
+      errors.push(`every ${label}.calls entry must be an object`);
+      continue;
+    }
+    const stepId = String(entry.stepId);
+    if (!order.has(stepId)) errors.push(`every ${label}.calls entry names unknown step ${stepId}`);
+    if (seen.has(stepId)) errors.push(`${label}.calls names step ${stepId} twice`);
+    seen.add(stepId);
+    if (
+      !Array.isArray(entry.callIds) ||
+      entry.callIds.length === 0 ||
+      !entry.callIds.every((callId) => typeof callId === "string" && callId.length > 0)
+    ) {
+      errors.push(`${label}.calls entry for step ${stepId} needs non-empty call ids`);
     }
   }
 }
@@ -1653,7 +1682,7 @@ export function validateRecordedWorkflow(value: unknown): {
   for (const label of ["baseline", "heldOut"] as const) {
     const demonstration = value[label];
     if (!isPlainObject(demonstration)) continue;
-    for (const list of [demonstration.inputs, demonstration.observed]) {
+    for (const list of [demonstration.inputs, demonstration.observed, demonstration.calls]) {
       if (!Array.isArray(list)) continue;
       for (const entry of list) {
         if (isPlainObject(entry) && derivationIds.has(String(entry.stepId))) {

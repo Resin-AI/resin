@@ -193,6 +193,16 @@ describe("derivation steps in the recorded workflow contract", () => {
     ).toContain("baseline references derivation step derive");
   });
 
+  it("accepts local call ids for recorded steps and refuses derivations, unknown steps and empty ids", () => {
+    const withCalls = (calls: Array<{ stepId: string; callIds: string[] }>) =>
+      validateRecordedWorkflow(plan({ heldOut: { inputs: [], observed: [], calls } })).valid;
+    expect(withCalls([{ stepId: "report", callIds: ["call_a"] }])).toBe(true);
+    expect(withCalls([{ stepId: "derive", callIds: ["call_a"] }])).toBe(false);
+    expect(withCalls([{ stepId: "missing", callIds: ["call_a"] }])).toBe(false);
+    expect(withCalls([{ stepId: "report", callIds: [] }])).toBe(false);
+    expect(withCalls([{ stepId: "report", callIds: [""] }])).toBe(false);
+  });
+
   it("ties the derived-from-inputs reason to candidates that read a derivation", () => {
     const base = plan();
     const candidate = base.candidates![0]!;
