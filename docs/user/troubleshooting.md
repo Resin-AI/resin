@@ -108,7 +108,7 @@ The host could not write an RPC frame to the worker. Treat the invocation as fai
 
 ### Recipe 7: Validation Reports A Step As Missed
 
-Validation compares each plan step's resolved call with the call this device recorded for it; it runs nothing recorded. A step whose callable or any argument differs, or that has no locally recorded call, is missed and the plan is not verified. A plan whose step still carries, as literal text, a value the recording shows came from an earlier step's output is also refused until that position is bound to the earlier result.
+Validation compares each plan step's resolved call with the call this device recorded for it; it runs nothing recorded. A step whose callable or any argument differs, or that has no locally recorded call, is missed and the plan is not verified. A plan whose step still carries, as literal text, a value the recording shows came from an earlier step's output is also refused until that position is bound to the earlier result. A demonstration that ran the tool once per item (for example several items handled in one request, as `for_each` does) is checked one item at a time: each item's run must match that item's recorded calls in order, and a step whose number of recorded calls differs from the number of items is missed.
 
 Recordings captured before Resin stored per-call identity entries cannot be validated; record the workflow again. If this device's harness sessions cannot be discovered, the ask is deferred; if its calls cannot be identified locally, the result is unavailable, never verified.
 

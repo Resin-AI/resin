@@ -45,7 +45,10 @@ export interface RecordedCall {
   hiddenDependencies: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
 }
 
-/** The recorded call each recorded step of one demonstration made, by step id. */
+/**
+ * The recorded call each recorded step made in one run of a demonstration, by step id. A
+ * demonstration that ran once per item is checked as one such recording per item.
+ */
 export type WorkflowRecording = ReadonlyMap<string, RecordedCall>;
 
 /** The recorded runtime families every check registers. */

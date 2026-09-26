@@ -578,10 +578,13 @@ export function reconstructWorkflowFromEvents(
   }
   const baseline = [...baselineCalls.values()];
   for (const calls of repeats.values()) {
-    if (calls.length !== baseline.length) continue;
+    // A repeat runs the baseline's calls once per item, so it holds one or more whole iterations.
+    if (baseline.length === 0 || calls.length === 0 || calls.length % baseline.length !== 0) {
+      continue;
+    }
     if (
       calls.some((call, ordinal) => {
-        const original = baseline[ordinal]!;
+        const original = baseline[ordinal % baseline.length]!;
         return (
           call.name !== original.name ||
           call.runtime !== original.runtime ||
@@ -592,7 +595,7 @@ export function reconstructWorkflowFromEvents(
       continue;
     const stepIdByRepeatCallId = new Map<string, string>();
     for (const [ordinal, call] of calls.entries()) {
-      const original = baseline[ordinal]!;
+      const original = baseline[ordinal % baseline.length]!;
       const stepId = stepIdByCallId.get(scopedKey(selectedSession!, original.callId));
       if (stepId !== undefined) stepIdByRepeatCallId.set(call.callId, stepId);
     }

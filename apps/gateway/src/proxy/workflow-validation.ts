@@ -35,6 +35,7 @@ import {
   resolvePrivateReference,
 } from "@resin/observer";
 import {
+  type CandidateValidationOutcome,
   type DemonstrationLabel,
   type RecordedCall,
   type RuntimeAdapter,
@@ -99,16 +100,29 @@ interface LocalDemonstration {
 }
 
 /**
- * The recorded call of every recorded step in one demonstration, read from this device's recording,
- * and the demonstration rebuilt from the references this device computed for those calls.
+ * One demonstration as this device recorded it: one run of the plan per iteration.
  *
- * Undefined when the demonstration names no calls this device can identify.
+ * A tool invoked `for_each` runs its whole plan once per item, so each recorded step made one call
+ * per item, in order. Iteration i is the run made of every step's i-th call. `mismatched` names the
+ * steps whose call count differs from the item count (the first recorded step's): such a recording
+ * is not one run per item, and the check misses those steps rather than guessing which call belongs
+ * to which item.
+ */
+type LocalDemonstrationRuns =
+  | { iterations: LocalDemonstration[]; mismatched?: undefined }
+  | { iterations?: undefined; mismatched: string[] };
+
+/**
+ * The recorded calls of every recorded step in one demonstration, read from this device's recording,
+ * and each iteration's demonstration rebuilt from the references this device computed for its calls.
+ *
+ * Undefined when the demonstration names a call this device cannot identify.
  */
 async function localDemonstration(
   plan: RecordedWorkflow,
   label: DemonstrationLabel,
   localCalls: LocalCallIdentity,
-): Promise<LocalDemonstration | undefined> {
+): Promise<LocalDemonstrationRuns | undefined> {
   const recordedSteps = plan.steps.filter((step) => step.origin !== "derivation");
   const callIdsByStep = new Map<string, readonly string[]>();
   if (label === "baseline") {
@@ -122,24 +136,45 @@ async function localDemonstration(
     for (const entry of calls) callIdsByStep.set(entry.stepId, entry.callIds);
   }
 
-  const located: Array<{ stepId: string; step: WorkflowStep; call: LocalRecordedCall }> = [];
+  const located: Array<{ step: WorkflowStep; calls: LocalRecordedCall[] }> = [];
   for (const step of recordedSteps) {
     const callIds = callIdsByStep.get(step.id);
     if (callIds === undefined) continue;
-    // One recorded call per step: the executor has no iterated steps to spread calls over.
-    if (callIds.length !== 1) return undefined;
-    const call = await localCalls.lookup(callIds[0]!);
-    if (call === undefined) return undefined;
-    located.push({ stepId: step.id, step, call });
+    if (callIds.length === 0) return undefined;
+    const calls: LocalRecordedCall[] = [];
+    for (const callId of callIds) {
+      const call = await localCalls.lookup(callId);
+      if (call === undefined) return undefined;
+      calls.push(call);
+    }
+    located.push({ step, calls });
   }
   if (located.length === 0) return undefined;
+  const items = located[0]!.calls.length;
+  const mismatched = located
+    .filter(({ calls }) => calls.length !== items)
+    .map(({ step }) => step.id);
+  if (mismatched.length > 0) return { mismatched };
 
-  // Hidden dependencies: the recorder's own relationship detection, run over the recorded calls.
-  // A token or leaf it traces to an earlier recorded output must be read by the plan, not carried.
+  const iterations: LocalDemonstration[] = [];
+  for (let item = 0; item < items; item += 1) {
+    iterations.push(
+      iterationDemonstration(located.map(({ step, calls }) => ({ step, call: calls[item]! }))),
+    );
+  }
+  return { iterations };
+}
+
+/** One iteration's recording and demonstration: each step's call for that item, in plan order. */
+function iterationDemonstration(
+  located: ReadonlyArray<{ step: WorkflowStep; call: LocalRecordedCall }>,
+): LocalDemonstration {
+  // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
+  // calls. A token or leaf it traces to an earlier recorded output must be read by the plan.
   const derivation = deriveNativeCalls(
-    located.map(({ stepId, step, call }) => ({
+    located.map(({ step, call }) => ({
       callId: call.callId,
-      stepId,
+      stepId: step.id,
       toolName: call.callable.name,
       runtime: step.callable.runtime,
       arguments: call.arguments,
@@ -173,7 +208,8 @@ async function localDemonstration(
     observed: [],
     calls: [],
   };
-  for (const { stepId, call } of located) {
+  for (const { step, call } of located) {
+    const stepId = step.id;
     demonstration.calls.push({ stepId, callIds: [call.callId] });
     for (const [argument, reference] of Object.entries(call.argumentReferences)) {
       demonstration.inputs.push({ stepId, argument, reference });
@@ -192,6 +228,101 @@ async function localDemonstration(
     });
   }
   return { recording, demonstration };
+}
+
+/** What one run of the check decided. */
+interface IterationDecision {
+  outcomes: CandidateValidationOutcome[];
+  plan: RecordedWorkflow;
+  verification?: WorkflowPlanVerification;
+}
+
+/**
+ * One decision over every iteration of a demonstration: a candidate is confirmed only when every
+ * iteration confirms it, and the plan verifies only when every iteration reproduces its item.
+ *
+ * Iterations that accept different candidates are re-checked with only the ones all of them
+ * accepted, until they agree, so the verified plan is the same plan in every iteration.
+ */
+async function acrossIterations(
+  iterations: readonly LocalDemonstration[],
+  candidates: readonly WorkflowBindingCandidate[],
+  check: (
+    iteration: LocalDemonstration,
+    kept: readonly WorkflowBindingCandidate[],
+  ) => Promise<IterationDecision | undefined>,
+): Promise<IterationDecision | undefined> {
+  let kept = [...candidates];
+  for (;;) {
+    const decisions: IterationDecision[] = [];
+    for (const iteration of iterations) {
+      const decision = await check(iteration, kept);
+      if (decision === undefined) return undefined;
+      decisions.push(decision);
+    }
+    const accepted = decisions.map((decision) =>
+      kept.filter((candidate) =>
+        decision.outcomes.some((outcome) => outcome.candidate === candidate && outcome.accepted),
+      ),
+    );
+    const everywhere = kept.filter((candidate) => accepted.every((set) => set.includes(candidate)));
+    if (!accepted.every((set) => set.length === everywhere.length)) {
+      kept = everywhere;
+      continue;
+    }
+    const first = decisions[0]!;
+    const outcomes = candidates.map((candidate): CandidateValidationOutcome => {
+      if (!kept.includes(candidate)) {
+        return { candidate, accepted: false, reason: "not confirmed by every iteration" };
+      }
+      const refused = decisions
+        .flatMap((decision) => decision.outcomes)
+        .find((outcome) => outcome.candidate === candidate && !outcome.accepted);
+      return (
+        refused ??
+        first.outcomes.find((outcome) => outcome.candidate === candidate) ?? {
+          candidate,
+          accepted: false,
+          reason: "not decided",
+        }
+      );
+    });
+    const verifications = decisions.map((decision) => decision.verification);
+    if (!verifications.every((each) => each !== undefined)) {
+      return { outcomes, plan: first.plan };
+    }
+    const status = verifications.every((each) => each.status === "verified")
+      ? "verified"
+      : verifications.some((each) => each.status === "failed")
+        ? "failed"
+        : "incomplete";
+    const missed = new Map<string, { stepId: string; detail: string }>();
+    const dropped = new Map<
+      WorkflowBindingCandidate,
+      { candidate: WorkflowBindingCandidate; reason: string }
+    >();
+    for (const each of verifications) {
+      for (const entry of each.missed)
+        if (!missed.has(entry.stepId)) missed.set(entry.stepId, entry);
+      for (const entry of each.dropped) {
+        if (!dropped.has(entry.candidate)) dropped.set(entry.candidate, entry);
+      }
+    }
+    const programIdentities = verifications[0]!.programIdentities;
+    return {
+      outcomes,
+      plan: first.plan,
+      verification: {
+        status,
+        reproduced: verifications[0]!.reproduced.filter((stepId) =>
+          verifications.every((each) => each.reproduced.includes(stepId)),
+        ),
+        missed: [...missed.values()],
+        dropped: [...dropped.values()],
+        ...(status === "verified" && programIdentities !== undefined ? { programIdentities } : {}),
+      },
+    };
+  }
 }
 
 /**
@@ -230,32 +361,75 @@ export function createRecordingCheckValidator(
       };
     }
     const derivation = options.derivation ?? createProgramAdapter({ timeoutMs: options.timeoutMs });
-    const local = new Map<DemonstrationLabel, LocalDemonstration>();
+    const runs = new Map<DemonstrationLabel, LocalDemonstrationRuns>();
     for (const each of ["held-out", "baseline"] as const) {
       if ((each === "held-out" ? plan.heldOut : plan.baseline) === undefined) continue;
       const found = await localDemonstration(plan, each, options.localCalls);
-      if (found !== undefined) local.set(each, found);
+      if (found !== undefined) runs.set(each, found);
     }
-    if (!local.has(label)) return { verdicts: [], unavailable: UNAVAILABLE };
-    const registries = new Map<DemonstrationLabel, RuntimeAdapterRegistry>(
-      [...local].map(([each, found]) => [
-        each,
-        createRecordingCheckAdapters({
-          recording: found.recording,
-          runtimes: [RESIN_INVOKE_TOOL_RUNTIME],
-          derivation,
-        }),
-      ]),
-    );
+    const selected = runs.get(label);
+    if (selected === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
+    if (selected.mismatched !== undefined) {
+      // The steps did not run once per item alike: no iteration can be told apart, so nothing is
+      // reproduced and nothing is confirmed.
+      return {
+        verdicts: candidates.map((candidate) => ({
+          candidate: {
+            stepId: candidate.stepId,
+            argument: candidate.argument,
+            path: candidate.path,
+            proposed: candidate.proposed,
+          },
+          confirmed: false,
+          reason: NOT_CONFIRMED,
+        })),
+        verification: {
+          status: "failed",
+          reproduced: [],
+          missed: selected.mismatched.map((stepId) => ({ stepId, detail: MISSED_DETAIL })),
+          dropped: [],
+        },
+      };
+    }
+    const baselineRun = runs.get("baseline")?.iterations?.[0];
+    const registry = (found: LocalDemonstration): RuntimeAdapterRegistry =>
+      createRecordingCheckAdapters({
+        recording: found.recording,
+        runtimes: [RESIN_INVOKE_TOOL_RUNTIME],
+        derivation,
+      });
     // The engine reads the demonstration from the plan: hand it the one this device rebuilt.
-    const checkedPlan: RecordedWorkflow = {
-      ...plan,
+    const withIteration = (
+      target: RecordedWorkflow,
+      heldOut: LocalDemonstration | undefined,
+    ): RecordedWorkflow => ({
+      ...target,
       ...(plan.baseline === undefined
         ? {}
-        : { baseline: local.get("baseline")?.demonstration ?? plan.baseline }),
-      ...(plan.heldOut === undefined
-        ? {}
-        : { heldOut: local.get("held-out")?.demonstration ?? plan.heldOut }),
+        : { baseline: baselineRun?.demonstration ?? plan.baseline }),
+      ...(plan.heldOut === undefined ? {} : { heldOut: heldOut?.demonstration ?? plan.heldOut }),
+    });
+    /** One run of the check against one iteration of the selected demonstration. */
+    const checkIteration = async (
+      checked: RecordedWorkflow,
+      heldOut: LocalDemonstration | undefined,
+      decide: readonly WorkflowBindingCandidate[],
+      environmentCandidates: readonly WorkflowBindingCandidate[],
+    ) => {
+      const registries = new Map<DemonstrationLabel, RuntimeAdapterRegistry>();
+      if (baselineRun !== undefined) registries.set("baseline", registry(baselineRun));
+      if (heldOut !== undefined) registries.set("held-out", registry(heldOut));
+      const environment = await demonstrationEnvironment({
+        plan: checked,
+        demonstration: label,
+        candidates: environmentCandidates,
+        adapters: (each) => registries.get(each),
+        workspaceId,
+        resolvePrivate: resolveOwned,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      });
+      if (environment === undefined) return undefined;
+      return await validateAndConfirmCandidates({ plan: checked, candidates: decide, environment });
     };
 
     const baselineOnly = label === "baseline";
@@ -263,7 +437,7 @@ export function createRecordingCheckValidator(
     // input that keeps exactly what the recording ran when omitted. Those offers are applied first,
     // in plan order as the cloud applies confirmed ones, and checking that plan verifies the tool as
     // a caller gets it by default.
-    let checked = checkedPlan;
+    let checked = withIteration(plan, undefined);
     const recordedDefaults: WorkflowBindingCandidate[] = [];
     if (baselineOnly) {
       for (const candidate of candidates) {
@@ -294,21 +468,12 @@ export function createRecordingCheckValidator(
               )),
         )
       : [];
-    const environment = await demonstrationEnvironment({
-      plan: checked,
-      demonstration: label,
-      candidates: baselineOnly ? [] : candidates,
-      adapters: (each) => registries.get(each),
-      workspaceId,
-      resolvePrivate: resolveOwned,
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-    });
-    if (environment === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
-    const decided = await validateAndConfirmCandidates({
-      plan: checked,
-      candidates: baselineOnly ? baselineExtracts : candidates,
-      environment,
-    });
+    const decided = baselineOnly
+      ? await checkIteration(checked, undefined, baselineExtracts, [])
+      : await acrossIterations(selected.iterations, candidates, (iteration, kept) =>
+          checkIteration(withIteration(plan, iteration), iteration, kept, kept),
+        );
+    if (decided === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
     const verification = decided.verification;
     if (verification !== undefined) {
       // The digest names the plan the cloud would publish, with the demonstrations it sent.
