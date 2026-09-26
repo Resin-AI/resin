@@ -9,7 +9,7 @@ Resin integrates seamlessly with multiple AI developer harnesses via the Model C
 | Harness | Tested Versions | Configuration File | Bridge Protocol | Observation Mode | Refresh Mechanism |
 |---------|-----------------|-------------------|-----------------|------------------|-------------------|
 | **Claude Code CLI** | `0.2.29`, `1.0.0` (`>= 0.1.0`) | `~/.claude.json` or `~/.claude/claude.json` | MCP over SSE / Stdio | Local JSONL Session Tailing | Context Notice Prompt Nudge |
-| **Codex CLI** | `0.1.0`, `0.2.0` (`>= 0.1.0`) | `~/.codex/config.toml` | MCP over SSE | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
+| **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | MCP over Stdio | Native JSONL Rollout Tailing | Stable Meta-Tools + Response Catalog Notices |
 | **Oh My Pi (OMP)** | `0.1.0`, `0.2.0`, `17.3.8` (`>= 0.1.0`) | `~/.omp/agent/mcp.json` (legacy `~/.omp/config.json`) | MCP over Stdio / SSE / Hub IPC | In-process Event Tailer | Native ListChanged Notification |
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
@@ -55,12 +55,12 @@ Resin monitors Claude Code sessions locally by following active session files in
 
 ### Automated Registration
 
-Resin automatically registers the gateway MCP server in `~/.codex/config.toml`:
+Resin registers its stdio MCP shim in `$CODEX_HOME/config.toml` (`~/.codex/config.toml` by default; `CODEX_CONFIG_PATH` overrides the file):
 
 ```toml
-# Resin Gateway Registration
 [mcp_servers.resin]
-url = "http://127.0.0.1:9400/mcp/sse"
+command = "/home/<user>/.resin/bin/resin"
+args = ["mcp"]
 ```
 
 Resin also adds a section marked by `<!-- resin:codex-guidance:start -->` and `<!-- resin:codex-guidance:end -->` to Codex's global instructions file, `$CODEX_HOME/AGENTS.md` (`~/.codex/AGENTS.md` by default). Codex's code mode shows MCP tools to the model only when its instructions mention them, so without this section the model never sees Resin's learned tools. Content outside the markers is left untouched, and `resin uninstall` removes the section (deleting the file if nothing else remains).
@@ -80,9 +80,24 @@ Codex can discover and use newly available tools through these routes even when 
 
 Reconnect to the updated Resin server once after a software update to obtain this behavior. Subsequent catalog changes do not require a session restart, custom harness, extra daemon, refresh script, or repeated configuration edits.
 
+### Tested versions
+
+Resin qualifies Codex CLI **0.156.1** and **0.157.1** with rollouts recorded from real headless `codex exec` runs (`adapters/codex-cli/tests/fixtures/recorded/`). `resin status` reports any other installed version as untested: Resin still registers and observes it, but a record whose shape changed may be captured only as an unrecognized record.
+
 ### Session Observation
 
-Codex CLI JSONL rollouts are tailed from `~/.codex/sessions/`. Native session metadata, turn context, messages, function calls and outputs, provider usage, and terminal events are normalized locally. The recorded `session_meta.cwd` binds a rollout to its project; a missing or invalid working directory remains unbound rather than being guessed from the Codex home directory.
+Codex CLI JSONL rollouts are tailed from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex/sessions/` by default). Interactive (`codex`) and headless (`codex exec`) runs write the same rollouts and are discovered and captured the same way. Native session metadata, turn context, messages, function calls and outputs, provider usage, and terminal events are normalized locally. The recorded `session_meta.cwd` binds a rollout to its project; a missing or invalid working directory remains unbound rather than being guessed from the Codex home directory.
+
+On 0.156 and later, every model tool call is a code-mode `exec` cell (JavaScript) whose nested tools are recorded as separate items. Resin captures:
+
+- shell commands (`exec_command`) as command executions, and `apply_patch` edits as file edits;
+- MCP calls (`McpToolCall`), including Resin's own `invoke_tool`, with their server, arguments, result and error;
+- built-in web search (`web__run`) as a `web_search` tool call and its results;
+- token usage, compaction boundaries (`compacted`), and interrupted turns (`turn_aborted`, recorded as an interrupted session end).
+
+Codex runs subagents (`multi_agent`, on by default). The parent's `spawn_agent`/`wait` calls are recorded as subagent spawn and settle events that name the child thread; each child writes its own rollout whose `session_meta` names the parent thread and carries the same working directory, so it is captured as its own session bound to the parent's project. A record type Resin does not recognize is kept as an unrecognized record rather than dropped.
+
+Codex has no native-tool invoker. Its built-in tools on 0.157 are `exec_command`/`write_stdin` (shell), `apply_patch` (every file create, edit and delete), `view_image`, `web__run`, the multi-agent tools, goals, and MCP resource reads; there is no separate read, write or edit tool. File reads happen through shell commands and file changes through `apply_patch`, so a learned tool covers Codex's built-in steps as shell commands and patch steps. Web search, image viewing and subagent steps are recorded but are not replayed by learned tools.
 
 Fresh sessions that start while observation is running are read from the beginning, including sessions that finish between discovery scans. A saved cursor takes precedence. Touching an old rollout does not make its recorded creation time fresh.
 

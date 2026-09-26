@@ -1904,6 +1904,176 @@ export class CodexSessionDecoder {
     return [event];
   }
 
+  /** Codex 0.156+ `compacted` record: the context was replaced by `replacement_history`. */
+  private normalizeNativeCompaction(
+    payload: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const usage = this.nativeUsageState(this.currentNativeThreadId).lastTokenUsage;
+    const header = this.emitHeader("compaction", timestamp);
+    const event: NormalizedCompactionEvent = {
+      ...header,
+      type: "compaction",
+      triggerReason: "context_limit",
+      tokensBefore: asNumber(usage?.input_tokens) ?? 0,
+      tokensAfter: 0,
+    };
+    const summary = asString(payload.message);
+    if (summary) event.preservedContextSummary = summary;
+    return [event];
+  }
+
+  /** Codex 0.156+ code-mode MCP call, recorded as one completed `McpToolCall` item. */
+  private normalizeNativeMcpItem(
+    item: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const server = asString(item.server);
+    const tool = asString(item.tool);
+    if (!server || !tool || !asString(item.id)) {
+      return [
+        {
+          ...this.emitHeader("unknown_passthrough", timestamp),
+          type: "unknown_passthrough",
+          rawEventType: "mcptoolcall",
+          rawPayload: item,
+        },
+      ];
+    }
+    const invocation = { server, tool, arguments: item.arguments ?? {} };
+    const errorMessage = asString(asObject(item.error)?.message);
+    const duration = asObject(item.duration);
+    const durationMs =
+      duration === undefined
+        ? undefined
+        : Math.round((asNumber(duration.secs) ?? 0) * 1000 + (asNumber(duration.nanos) ?? 0) / 1e6);
+    // A failed call carries either `error` (never reached the server) or a result with isError.
+    const result =
+      errorMessage !== undefined
+        ? { Err: errorMessage }
+        : item.result !== undefined && item.result !== null
+          ? { Ok: item.result }
+          : null;
+    return [
+      ...this.normalizeNativeMcpEvent(
+        "mcp_tool_call_begin",
+        { call_id: item.id, invocation },
+        timestamp,
+      ),
+      ...this.normalizeNativeMcpEvent(
+        "mcp_tool_call_end",
+        {
+          call_id: item.id,
+          invocation,
+          result,
+          ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
+        },
+        timestamp,
+      ),
+    ];
+  }
+
+  /** Codex built-in web search, recorded as a completed `Extension` item of kind `web.search`. */
+  private normalizeNativeWebSearchItem(
+    item: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] {
+    const callId = asString(item.id) ?? generateEventId("web_search");
+    const parameters: Record<string, unknown> = {};
+    if (item.query !== undefined) parameters.query = item.query;
+    if (item.action !== undefined) parameters.action = item.action;
+    const call: NormalizedToolCallEvent = {
+      ...this.emitHeader("tool_call", timestamp),
+      type: "tool_call",
+      callId,
+      toolName: "web_search",
+      parameters,
+      isShadow: false,
+    };
+    const result: NormalizedToolResultEvent = {
+      ...this.emitHeader("tool_result", timestamp),
+      type: "tool_result",
+      callId,
+      toolName: "web_search",
+      result: item.results ?? null,
+      isError: false,
+      executionDurationMs: 0,
+      isShadow: false,
+    };
+    return [call, result];
+  }
+
+  /**
+   * Codex multi-agent tool call (`spawn_agent`, `wait`, ...). Child threads are separate
+   * rollouts; this records their lifecycle on the parent. Returns undefined for an
+   * unrecognized collab tool so it surfaces as drift.
+   */
+  private normalizeNativeCollabItem(
+    item: CodexTranscriptPayload,
+    timestamp?: string,
+  ): NormalizedSessionEvent[] | undefined {
+    const tool = asString(item.tool);
+    const parentId = asString(item.sender_thread_id) ?? this.sessionId;
+    const receivers = (asArray(item.receiver_thread_ids) ?? []).flatMap((id) => {
+      const threadId = asString(id);
+      return threadId ? [threadId] : [];
+    });
+    const states = asObject(item.agents_states) ?? {};
+    const nicknames = new Map<string, string>();
+    for (const agent of asArray(item.receiver_agents) ?? []) {
+      const threadId = asString(asObject(agent)?.thread_id);
+      const nickname = asString(asObject(agent)?.agent_nickname);
+      if (threadId && nickname) nicknames.set(threadId, nickname);
+    }
+    let lifecycleFor: (
+      threadId: string,
+    ) => NormalizedSubagentLifecycleEvent["lifecycleType"] | null;
+    switch (tool) {
+      case "spawn_agent":
+        lifecycleFor = () => "spawn";
+        break;
+      case "wait":
+      case "wait_agent":
+        lifecycleFor = (threadId) => {
+          const state = states[threadId];
+          const settled = asObject(state);
+          return settled && ("completed" in settled || "errored" in settled) ? "settle" : null;
+        };
+        break;
+      case "interrupt_agent":
+      case "close_agent":
+        lifecycleFor = () => "terminate";
+        break;
+      case "send_message":
+      case "send_input":
+      case "followup_task":
+      case "resume_agent":
+        lifecycleFor = () => "resume";
+        break;
+      case "list_agents":
+        return [];
+      default:
+        return undefined;
+    }
+    const events: NormalizedSessionEvent[] = [];
+    for (const subagentId of receivers) {
+      const lifecycleType = lifecycleFor(subagentId);
+      if (!lifecycleType) continue;
+      const event: NormalizedSubagentLifecycleEvent = {
+        ...this.emitHeader("subagent_lifecycle", timestamp),
+        type: "subagent_lifecycle",
+        subagentId,
+        lifecycleType,
+        reason: tool,
+      };
+      if (parentId) event.parentId = parentId;
+      const nickname = nicknames.get(subagentId);
+      if (nickname) event.role = nickname;
+      events.push(event);
+    }
+    return events;
+  }
+
   private normalizeNativeEnvelope(
     wrapperType: string,
     envelope: CodexTranscriptPayload,
@@ -1914,7 +2084,14 @@ export class CodexSessionDecoder {
       asString(envelope.timestamp) ?? asString(payload.timestamp) ?? asString(envelope.created_at);
     this.currentModel = this.currentNativeContext?.model ?? this.currentModel;
     this.currentCwd = this.currentNativeContext?.cwd ?? this.currentCwd;
-    if (wrapperType === "session_meta" || wrapperType === "turn_context") return [];
+    // world_state snapshots the agent's environment (AGENTS.md, skills); it is not a session step.
+    if (
+      wrapperType === "session_meta" ||
+      wrapperType === "turn_context" ||
+      wrapperType === "world_state"
+    )
+      return [];
+    if (wrapperType === "compacted") return this.normalizeNativeCompaction(payload, timestamp);
     if (wrapperType === "token_usage_record") {
       this.saveNativeUsageRecord(payload);
       return [];
@@ -1955,6 +2132,12 @@ export class CodexSessionDecoder {
     ) {
       return this.normalizeNativeTerminal(eventType, payload, timestamp);
     }
+    if (eventType === "thread_settings_applied") {
+      const settings = asObject(payload.thread_settings);
+      this.currentModel = asString(settings?.model) ?? this.currentModel;
+      this.currentCwd = asString(settings?.cwd) ?? this.currentCwd;
+      return [];
+    }
     if (eventType === "item_completed") {
       const item = asObject(payload.item);
       if (!item) return [];
@@ -1962,6 +2145,16 @@ export class CodexSessionDecoder {
         return this.normalizePayload({ ...envelope, timestamp, metadata, payload }, false, true);
       }
       if (item.type === "FileChange") return this.normalizeNativeFileChange(item, timestamp);
+      // The `compacted` record written just before this item already carried the boundary.
+      if (item.type === "ContextCompaction") return [];
+      if (item.type === "McpToolCall") return this.normalizeNativeMcpItem(item, timestamp);
+      if (item.type === "Extension" && item.kind === "web.search") {
+        return this.normalizeNativeWebSearchItem(item, timestamp);
+      }
+      if (item.type === "CollabAgentToolCall") {
+        const collab = this.normalizeNativeCollabItem(item, timestamp);
+        if (collab) return collab;
+      }
       const itemMetadata = {
         ...metadata,
         codexNative: {
@@ -2029,7 +2222,8 @@ export class CodexSessionDecoder {
         envelopeType === "response_item" ||
         envelopeType === "event_msg" ||
         envelopeType === "token_usage_record" ||
-        envelopeType === "world_state")
+        envelopeType === "world_state" ||
+        envelopeType === "compacted")
     ) {
       return this.normalizeNativeEnvelope(envelopeType, p, envelopePayload);
     }

@@ -25,7 +25,11 @@ export const codexHarness: HarnessDefinition = {
   shortName: "Codex CLI",
   adapterPackage: "@resin/adapter-codex",
   testedVersions: CODEX_TESTED_VERSIONS,
-  knownLimits: [],
+  knownLimits: [
+    "No native-tool invoker: learned tools replay Codex built-in steps only as shell commands and apply_patch edits; web search and multi-agent steps are recorded but not replayable.",
+    "Multi-agent child threads are separate rollouts, bound to the parent's project through their own session_meta cwd.",
+    "Compaction boundaries are captured, but Codex does not record the token count after compaction.",
+  ],
   probeInstallation: ({ targetPath, home, env }) =>
     probeCodexInstallation({ customConfigPath: targetPath, env: { ...env, HOME: home } }),
   mcpConfig: {
