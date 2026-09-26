@@ -48,7 +48,7 @@ It does not reuse an old snapshot. Hidden entries, paths excluded by Resin's sen
 and `node_modules`, `dist`, `build`, `coverage`, `__pycache__`, and `venv` directories are omitted.
 Symlinks and non-regular files are not copied or followed.
 
-Each snapshot is limited to 128 MiB total, 10 MiB per file, 10,000 copied regular files, and 20,000
+Each snapshot is limited to 1 GiB total, 256 MiB per file, 10,000 copied regular files, and 20,000
 enumerated filesystem entries. Reaching a limit exactly is allowed. Exceeding a bound or encountering
 an unsafe, inaccessible, or changing source fails snapshot preparation; the partial copy is removed
 and no validation decision is submitted, so the ask can be retried later. Missing, ambiguous, or
