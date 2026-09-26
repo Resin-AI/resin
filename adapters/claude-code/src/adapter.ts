@@ -32,7 +32,7 @@ import {
 } from "./config-planner.js";
 import {
   type ExecFunction,
-  SUPPORTED_CLAUDE_VERSIONS,
+  CLAUDE_TESTED_VERSIONS,
   detectClaudeWorkspaces,
   probeClaudeInstallation,
 } from "./discovery.js";
@@ -54,7 +54,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "claude-code";
   readonly name = "Claude Code";
   readonly version = "0.1.0";
-  readonly supportedHarnessVersions = [...SUPPORTED_CLAUDE_VERSIONS];
+  readonly supportedHarnessVersions = CLAUDE_TESTED_VERSIONS;
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly execFn?: ExecFunction;
