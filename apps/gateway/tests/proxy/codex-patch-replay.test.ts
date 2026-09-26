@@ -158,11 +158,7 @@ describe("invoking a recorded Codex edit with new values", () => {
   let workspace: string;
 
   beforeEach(() => {
-    // A fixed root: which inputs the recorder offers for the patch currently varies with the
-    // recorded workspace path, so a random temporary name would make the offer nondeterministic.
-    workspace = path.join(os.tmpdir(), "resin-codex-patch-app");
-    fs.rmSync(workspace, { recursive: true, force: true });
-    fs.mkdirSync(workspace);
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "resin-codex-patch-"));
     fs.writeFileSync(path.join(workspace, "services.yaml"), SERVICES);
     fs.writeFileSync(path.join(workspace, "build.sh"), BUILD, { mode: 0o755 });
     fs.writeFileSync(path.join(workspace, "check.sh"), CHECK, { mode: 0o755 });
@@ -202,5 +198,16 @@ describe("invoking a recorded Codex edit with new values", () => {
       "built 4 services\n",
       "OK\n",
     ]);
+  });
+
+  it("offers the same inputs wherever the project lives", async () => {
+    const offers = new Set<string>();
+    for (let index = 0; index < 200; index++) {
+      const root = fs.mkdtempSync(path.join(workspace, "project-"));
+      const recorded = await recordServiceConfig(new InMemoryPrivateValueStore(), root);
+      offers.add(JSON.stringify(recorded.candidates ?? []));
+    }
+    expect(offers.size).toBe(1);
+    expect(JSON.parse([...offers][0]!).length).toBeGreaterThan(0);
   });
 });
