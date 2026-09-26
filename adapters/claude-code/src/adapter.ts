@@ -31,8 +31,8 @@ import {
   verifyClaudeMcpConfig,
 } from "./config-planner.js";
 import {
-  type ExecFunction,
   CLAUDE_TESTED_VERSIONS,
+  type ExecFunction,
   detectClaudeWorkspaces,
   probeClaudeInstallation,
 } from "./discovery.js";

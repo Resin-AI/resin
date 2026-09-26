@@ -31,8 +31,8 @@ import {
 } from "@resin/protocol";
 import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
-import { getActiveVersion } from "../installer/asset-downloader.js";
 import { HARNESS_DEFINITIONS, isSupportedHarnessId } from "../harness-registry.js";
+import { getActiveVersion } from "../installer/asset-downloader.js";
 import {
   DEFAULT_GATEWAY_URL,
   resolveInstalledResinMcpCommand,
@@ -1304,40 +1304,40 @@ async function collectHarnessStatuses(
           }),
         ),
       ]);
-    const cachedHarness = cached.harnesses[id];
-    const installed =
-      (probe === null ? null : Boolean(probe.isInstalled)) ?? cachedHarness?.installed ?? false;
-    const versionStatus = installed
-      ? classifyHarnessVersion(probe?.version, definition.testedVersions)
-      : "unknown";
-    const configured = liveConfigured ?? cachedHarness?.configured ?? false;
-    const useCachedDiagnostic = liveConfigured === null;
-    const drift =
-      useCachedDiagnostic &&
-      (cachedHarness?.condition === "drifted" ||
-        cachedHarness?.status === "drifted" ||
-        cachedHarness?.recentAction === "drift_detected");
-    const error = useCachedDiagnostic && cachedHarness?.recentAction === "repair_failed";
-    return {
-      id,
-      name: definition.shortName,
-      installed,
-      configured,
-      mcpAttached: configured,
-      version: versionStatus === "unknown" ? null : (probe?.version ?? null),
-      versionStatus,
-      status: error
-        ? "error"
-        : drift
-          ? "drift"
-          : !installed
-            ? "not_installed"
-            : configured
-              ? "attached"
-              : "unconfigured",
-      lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
-      recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
-    };
+      const cachedHarness = cached.harnesses[id];
+      const installed =
+        (probe === null ? null : Boolean(probe.isInstalled)) ?? cachedHarness?.installed ?? false;
+      const versionStatus = installed
+        ? classifyHarnessVersion(probe?.version, definition.testedVersions)
+        : "unknown";
+      const configured = liveConfigured ?? cachedHarness?.configured ?? false;
+      const useCachedDiagnostic = liveConfigured === null;
+      const drift =
+        useCachedDiagnostic &&
+        (cachedHarness?.condition === "drifted" ||
+          cachedHarness?.status === "drifted" ||
+          cachedHarness?.recentAction === "drift_detected");
+      const error = useCachedDiagnostic && cachedHarness?.recentAction === "repair_failed";
+      return {
+        id,
+        name: definition.shortName,
+        installed,
+        configured,
+        mcpAttached: configured,
+        version: versionStatus === "unknown" ? null : (probe?.version ?? null),
+        versionStatus,
+        status: error
+          ? "error"
+          : drift
+            ? "drift"
+            : !installed
+              ? "not_installed"
+              : configured
+                ? "attached"
+                : "unconfigured",
+        lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
+        recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
+      };
     }),
   );
 }

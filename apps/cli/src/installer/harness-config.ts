@@ -147,7 +147,10 @@ export async function planHarnessRegistration(
 }
 
 /** Whether a registration at `targetPath` is TOML (Codex-style) rather than JSON. */
-export function isTomlRegistrationPath(mcpConfig: HarnessMcpConfigSurface, targetPath: string): boolean {
+export function isTomlRegistrationPath(
+  mcpConfig: HarnessMcpConfigSurface,
+  targetPath: string,
+): boolean {
   return mcpConfig.format === "codex-toml" && !targetPath.endsWith(".json");
 }
 
