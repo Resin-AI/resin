@@ -802,8 +802,11 @@ function printedBy(
   before: number,
   calls: readonly DerivationCall[],
 ): { producer: number; locator: ExtractLocator } | undefined {
-  if (!looksMinted(value)) return undefined;
-  const charset = extractCharsetOf(value);
+  // A computed number is found as a whole run of digits, `.` and `-`, so a replay reads the new
+  // number whatever its sign or precision; numbers coincide easily, so its locator must name it.
+  const numeric = /^-?(?:\d+\.\d+|\d{3,})$/.test(value);
+  if (!numeric && !looksMinted(value)) return undefined;
+  const charset = numeric ? ["digit", "-", "."] : extractCharsetOf(value);
   if (charset === undefined) return undefined;
   const inCharset = (char: string | undefined): boolean => {
     const entry = char === undefined ? undefined : extractCharsetOf(char)?.[0];
@@ -840,6 +843,7 @@ function printedBy(
     if (position === 0) attempts.push("");
     for (const attempt of attempts) {
       if (attempt.length === 0 && position !== 0) continue;
+      if (numeric && !/[A-Za-z]/.test(attempt)) continue;
       const locator = { before: attempt, charset };
       if (extractPrintedValue(output, locator) === value) return { producer, locator };
     }

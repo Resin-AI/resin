@@ -221,7 +221,7 @@ type ExtractMask = { recorded: string; replayed: string };
 /**
  * The values each extract binding in `plan` reads: from the producer's observed output and from its
  * output in this replay. A value is masked only when both sides extracted one of at least four
- * characters, so a comparison never hides text a binding did not account for.
+ * characters or a number, so a comparison never hides text a binding did not account for.
  */
 async function extractMasks(
   plan: RecordedWorkflow,
@@ -266,11 +266,16 @@ async function extractMasks(
     const recorded = extractPrintedValue(observed, locator);
     const replayed = extractPrintedValue(outcome.result, locator);
     if (recorded === undefined || replayed === undefined) continue;
-    if (recorded.length < 4 || replayed.length < 4) continue;
+    // Short values are too coincidence-prone to hide, except numbers, masked as whole runs only.
+    const short = (value: string): boolean => value.length < 4 && !NUMBER.test(value);
+    if (short(recorded) || short(replayed)) continue;
     masks.push({ recorded, replayed });
   }
   return masks;
 }
+
+/** A printed number: a decimal, or an integer of at least three digits. */
+const NUMBER = /^-?(?:\d+\.\d+|\d{3,})$/;
 
 /** Replaces every masked value in a JSON value's strings with the shared placeholder. */
 function maskValue(
@@ -283,7 +288,15 @@ function maskValue(
     let masked = value;
     // Longest first, so a value that contains another is masked whole.
     const ordered = [...masks].sort((left, right) => right[side].length - left[side].length);
-    for (const mask of ordered) masked = masked.split(mask[side]).join(EXTRACT_PLACEHOLDER);
+    for (const mask of ordered) {
+      const text = mask[side];
+      masked = NUMBER.test(text)
+        ? masked.replace(
+            new RegExp(`(?<![0-9.-])${text.replace(/[.-]/g, "\\$&")}(?![0-9.-])`, "g"),
+            EXTRACT_PLACEHOLDER,
+          )
+        : masked.split(text).join(EXTRACT_PLACEHOLDER);
+    }
     return masked;
   }
   if (Array.isArray(value)) return value.map((item) => maskValue(item, masks, side));

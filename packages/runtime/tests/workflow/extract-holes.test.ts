@@ -1,5 +1,11 @@
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { RecordedWorkflow, WorkflowBindingCandidate } from "@resin/contracts";
+import { tokenizeProgram } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { confirmPromotedPlan } from "../../src/workflow/binding-validation.js";
 import { applyConfirmedWorkflowBinding } from "../../src/workflow/candidate-promotion.js";
 import {
   RuntimeAdapterRegistry,
@@ -90,5 +96,60 @@ describe("extract holes", () => {
         proposed: { kind: "extract", stepId: "wait", locator: "private:locator" },
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("printed numbers in replay comparisons", () => {
+  it("masks a short extracted number as a whole run, so later outputs that write it still match", async () => {
+    const write = "printf 'wrote %s (limit 17.5)\\n' 7.5";
+    const token = tokenizeProgram("shell", write).findIndex((entry) => entry.value === "7.5");
+    const plan: RecordedWorkflow = {
+      ...recorded(),
+      steps: recorded().steps.map((step, index) => {
+        const source = index === 0 ? "printf 'rounded 4.2\\n'" : write;
+        return {
+          ...step,
+          callable: { ...step.callable, program: { kind: "shell", source, argument: "cmd" } },
+          arguments: [{ name: "cmd", source: { kind: "literal", value: source } }],
+        };
+      }),
+    };
+    const numeric: WorkflowBindingCandidate = { ...candidate, path: ["tokens", token] };
+    const workspaceDir = await mkdtemp(join(tmpdir(), "resin-numeric-mask-"));
+    try {
+      const confirm = async (limit: string) => {
+        // Real shell processes, compared by output (process-family steps compare by completion).
+        const adapters = new RuntimeAdapterRegistry();
+        adapters.register({
+          runtime: "process",
+          async call(request) {
+            return execFileSync("bash", ["-c", String(request.arguments.cmd)], {
+              cwd: workspaceDir,
+              encoding: "utf8",
+            });
+          },
+        });
+        return await confirmPromotedPlan({
+          plan,
+          accepted: [numeric],
+          environment: {
+            adapters,
+            workspaceDir,
+            inputs: {},
+            // The recording printed and wrote 7.5; this replay computes 4.2.
+            observed: { create: "rounded 7.5\n", wait: `wrote 7.5 (limit ${limit})\n` },
+            timeoutMs: 10_000,
+            resolvePrivate: () =>
+              JSON.stringify({ before: "rounded ", charset: ["digit", "-", "."] }),
+          },
+        });
+      };
+      // Masked only as a whole run: split as text, `17.5` would lose its `7.5` on one side only.
+      expect((await confirm("17.5")).verification.status).toBe("verified");
+      // Text the binding does not account for still differs.
+      expect((await confirm("19.0")).verification.status).toBe("failed");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
