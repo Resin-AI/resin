@@ -26,6 +26,7 @@ import {
   validateWorkflowPythonState,
 } from "@resin/contracts";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
+import { mapRecordedWorkspaceRoot } from "./replay-path-mapping.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
 
 export interface RecordedProgramRun {
@@ -1591,7 +1592,17 @@ export async function runRecordedCall(
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   };
-  const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
+  // Validation replays run in a snapshot at another path; map recorded absolute workspace paths
+  // in the program text into it. Normal invocations (no recorded root) run the text unchanged.
+  const replaySource =
+    options.recordedWorkspaceRoot !== undefined && options.cwd !== undefined
+      ? mapRecordedWorkspaceRoot(source, options.recordedWorkspaceRoot, options.cwd)
+      : source;
+  const run = await runRecordedProgram(
+    { ...program, source: replaySource },
+    replayOptions,
+    step.callId,
+  );
   if (run.exitCode !== 0) {
     // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
     const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);

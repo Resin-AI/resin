@@ -287,6 +287,39 @@ describe("recorded program adapters", () => {
     expect(await readFile(join(snapshot, "nested", "touched"), "utf8")).toBe("x");
   });
 
+  it("maps recorded absolute workspace paths in program text into a replay snapshot", async () => {
+    const sourceRoot = await makeWorkspace();
+    const snapshot = await makeWorkspace();
+    await writeFile(join(sourceRoot, "data.txt"), "live");
+    await writeFile(join(snapshot, "data.txt"), "snap");
+    const step = recordedStep({
+      id: "native-paths",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    const run = (cmd: string, options: Parameters<typeof createProcessAdapter>[0]) =>
+      createProcessAdapter(options).call({
+        step,
+        arguments: { cmd, workdir: sourceRoot, resinCodexShellProfile: "bash-login-native-v1" },
+      });
+    const replay = { cwd: snapshot, recordedWorkspaceRoot: sourceRoot };
+    expect(await run(`cat ${sourceRoot}/data.txt; printf w > ${sourceRoot}/out`, replay)).toBe(
+      "snap",
+    );
+    expect(await readFile(join(snapshot, "out"), "utf8")).toBe("w");
+    await expect(readFile(join(sourceRoot, "out"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const heredoc = `python3 - <<'PY'\nprint(open("${sourceRoot}/data.txt").read())\nPY`;
+    expect(await run(heredoc, replay)).toBe("snap\n");
+    const untouched = `echo ${sourceRoot}ication/x ${sourceRoot}s https://h.example${sourceRoot}/x`;
+    expect(await run(untouched, replay)).toBe(
+      `${sourceRoot}ication/x ${sourceRoot}s https://h.example${sourceRoot}/x\n`,
+    );
+    expect(await run(`cat ${sourceRoot}/data.txt`, { cwd: sourceRoot })).toBe("live");
+  });
+
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {
     const workspace = await makeWorkspace();
     const adapter = createProcessAdapter({ cwd: workspace });
