@@ -183,14 +183,10 @@ const GATEWAY_USE_RULES =
   "Discovery is read-only: never enable, pin, disable or roll back tools. Honor the user's tool choices; use no tools for requests that need none.";
 
 /** Static initialization instructions returned to MCP clients during capability negotiation. */
-export const DEFAULT_GATEWAY_INSTRUCTIONS =
-  "Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: search_tools(query=<task>) -> invoke_tool, or manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool.\n" +
-  GATEWAY_USE_RULES;
+export const DEFAULT_GATEWAY_INSTRUCTIONS = `Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: search_tools(query=<task>) -> invoke_tool, or manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /** Initialization instructions for a connection whose tool search is disabled: discovery uses manage_tools. */
-export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS =
-  "Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n" +
-  GATEWAY_USE_RULES;
+export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.
