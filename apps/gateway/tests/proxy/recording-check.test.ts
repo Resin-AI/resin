@@ -219,6 +219,24 @@ describe("a recorded tool-protocol step", () => {
   });
 });
 
+describe("a recorded invoke_tool step", () => {
+  it("verifies from the recording although its call and result were kept differently", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [
+      { user: "Look up order A-1001" },
+      {
+        callId: "invoke",
+        toolName: "invoke_tool",
+        parameters: { name: "lookup_order", arguments: { order: { value: "A-1001" } } },
+        result: "A-1001 shipped",
+      },
+    ]);
+    const answer = await validator(store)({ ...plan, candidates: [] });
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verification?.status).toBe("verified");
+  });
+});
+
 describe("held-out demonstrations", () => {
   function repeated(store: InMemoryPrivateValueStore, secondRegion: string) {
     return record(store, [

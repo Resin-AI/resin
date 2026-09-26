@@ -230,17 +230,25 @@ export function createLocalCallIdentity(options: {
         args[name] = owned.value;
         argumentReferences[name] = reference;
       }
+      // A result is kept under the representation of the result event, which can differ from the
+      // call's: an invoke_tool call is always recorded redacted, its result as the event arrived.
       let result: LocalRecordedCall["result"];
       for (const { slot, comparison } of WORKFLOW_CALL_RESULT_SLOTS) {
-        const reference = referenceFor(slot);
-        const owned = ownedValue(store, reference, match.representation, workspaceId);
-        if (owned === undefined) continue;
-        // The native command output is the call's own result when both were kept.
-        result = {
-          value: owned.value,
-          reference,
-          ...(comparison === undefined ? {} : { comparison }),
-        };
+        for (const representation of PRIVATE_REPRESENTATIONS) {
+          const reference = workflowPrivateReference("demonstration", workspaceId, representation, [
+            match.sessionId,
+            callId,
+            slot,
+          ]);
+          const owned = ownedValue(store, reference, representation, workspaceId);
+          if (owned === undefined) continue;
+          // The native command output is the call's own result when both were kept.
+          result = {
+            value: owned.value,
+            reference,
+            ...(comparison === undefined ? {} : { comparison }),
+          };
+        }
       }
       const order = ownedValue(
         store,
