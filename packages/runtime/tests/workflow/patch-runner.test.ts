@@ -87,6 +87,20 @@ describe("recorded patch steps", () => {
     expect(fs.readdirSync(workspace)).toEqual(["services.yaml"]);
   });
 
+  it("never applies a patch program on a model-written derivation step", async () => {
+    const derived = { ...STEP, origin: "derivation" } as WorkflowStep;
+    await expect(
+      runRecordedCall(
+        {
+          step: derived,
+          arguments: { patch: ADD_MEDIA.replaceAll("/app", workspace), workdir: workspace },
+        },
+        { cwd: workspace },
+      ),
+    ).rejects.toThrow(/derivation/);
+    expect(services()).toBe(SERVICES);
+  });
+
   it("applies a hunk whose lines moved, when they appear exactly once", async () => {
     fs.writeFileSync(path.join(workspace, "services.yaml"), `# header\n# more\n${SERVICES}`);
     await replay(ADD_MEDIA);

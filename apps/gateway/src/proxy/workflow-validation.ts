@@ -116,7 +116,12 @@ type LocalDemonstrationRuns =
  * The recorded calls of every recorded step in one demonstration, read from this device's recording,
  * and each iteration's demonstration rebuilt from the references this device computed for its calls.
  *
- * Undefined when the demonstration names a call this device cannot identify.
+ * The plan chooses the call ids, so they must also belong together by this device's own record:
+ * every call of one iteration was recorded in one session, in the plan's step order, and no call id
+ * is named twice or by both demonstrations. A plan cannot claim a linkage the recording lacks.
+ *
+ * Undefined when the demonstration names a call this device cannot identify, or an iteration whose
+ * calls were recorded in different sessions.
  */
 async function localDemonstration(
   plan: RecordedWorkflow,
@@ -125,6 +130,10 @@ async function localDemonstration(
 ): Promise<LocalDemonstrationRuns | undefined> {
   const recordedSteps = plan.steps.filter((step) => step.origin !== "derivation");
   const callIdsByStep = new Map<string, readonly string[]>();
+  const baselineIds = new Set<string>();
+  for (const step of recordedSteps) {
+    if (step.callId !== undefined && step.callId.length > 0) baselineIds.add(step.callId);
+  }
   if (label === "baseline") {
     for (const step of recordedSteps) {
       if (step.callId === undefined || step.callId.length === 0) return undefined;
@@ -137,12 +146,19 @@ async function localDemonstration(
   }
 
   const located: Array<{ step: WorkflowStep; calls: LocalRecordedCall[] }> = [];
+  const incoherent = new Set<string>();
+  const named = new Set<string>();
   for (const step of recordedSteps) {
     const callIds = callIdsByStep.get(step.id);
     if (callIds === undefined) continue;
     if (callIds.length === 0) return undefined;
     const calls: LocalRecordedCall[] = [];
     for (const callId of callIds) {
+      // One recorded call is one step of one iteration; the held-out run is a different run.
+      if (named.has(callId) || (label === "held-out" && baselineIds.has(callId))) {
+        incoherent.add(step.id);
+      }
+      named.add(callId);
       const call = await localCalls.lookup(callId);
       if (call === undefined) return undefined;
       calls.push(call);
@@ -152,15 +168,33 @@ async function localDemonstration(
   if (located.length === 0) return undefined;
   const items = located[0]!.calls.length;
   const mismatched = located
-    .filter(({ calls }) => calls.length !== items)
+    .filter(({ step, calls }) => calls.length !== items || incoherent.has(step.id))
     .map(({ step }) => step.id);
   if (mismatched.length > 0) return { mismatched };
 
   const iterations: LocalDemonstration[] = [];
+  const unordered = new Set<string>();
   for (let item = 0; item < items; item += 1) {
-    iterations.push(
-      iterationDemonstration(located.map(({ step, calls }) => ({ step, call: calls[item]! }))),
-    );
+    const iteration = located.map(({ step, calls }) => ({ step, call: calls[item]! }));
+    const sessionId = iteration[0]!.call.sessionId;
+    if (iteration.some(({ call }) => call.sessionId !== sessionId)) return undefined;
+    // Recorded order: each step's call was recorded after the previous step's, by one recorder.
+    let previous: LocalRecordedCall["sequence"];
+    for (const { step, call } of iteration) {
+      const sequence = call.sequence;
+      if (
+        sequence === undefined ||
+        (previous !== undefined &&
+          (sequence.epoch !== previous.epoch || sequence.index <= previous.index))
+      ) {
+        unordered.add(step.id);
+      }
+      previous = sequence ?? previous;
+    }
+    iterations.push(iterationDemonstration(iteration));
+  }
+  if (unordered.size > 0) {
+    return { mismatched: located.map(({ step }) => step.id).filter((id) => unordered.has(id)) };
   }
   return { iterations };
 }

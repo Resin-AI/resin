@@ -52,7 +52,12 @@ type Turn =
     };
 
 /** Records turns as one session would have produced them; nothing is executed. */
-function record(store: InMemoryPrivateValueStore, turns: Turn[], workspaceId = owner) {
+function record(
+  store: InMemoryPrivateValueStore,
+  turns: Turn[],
+  workspaceId = owner,
+  sessionId = SESSION,
+) {
   const recorder = new WorkflowCallRecorder({ privateValues: store });
   const events: NormalizedSessionEvent[] = [];
   let sequence = 0;
@@ -62,7 +67,7 @@ function record(store: InMemoryPrivateValueStore, turns: Turn[], workspaceId = o
         recorder.observe(
           NormalizedSessionEventSchema.parse({
             schemaVersion: "1.0.0",
-            sessionId: SESSION,
+            sessionId,
             eventId: `event-${sequence}`,
             timestamp: "2026-09-26T00:00:00.000Z",
             causalRef: { causalSequence: sequence++ },
@@ -268,6 +273,88 @@ describe("held-out demonstrations", () => {
     expect(answer.unavailable).toBeDefined();
     expect(answer.verification).toBeUndefined();
     expect(answer.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
+  });
+});
+
+describe("which recorded calls make up one demonstration", () => {
+  const lookup = (callId: string): Turn => ({
+    callId,
+    toolName: "lookup_order",
+    connection: "shop",
+    parameters: { order: "A-1001" },
+    result: "A-1001 shipped",
+  });
+  const label = (callId: string): Turn => ({
+    callId,
+    toolName: "print_label",
+    connection: "shop",
+    parameters: { order: "A-1001" },
+    result: "label printed",
+  });
+  const stepOf = (plan: RecordedWorkflow, toolName: string) =>
+    plan.steps.find((step) => step.callable.name === toolName)!;
+
+  it("is unavailable when one run's calls were recorded in two sessions", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [{ user: "Handle order A-1001" }, lookup("l1"), label("p1")]);
+    record(store, [{ user: "Handle order A-1001" }, lookup("l2"), label("p2")], owner, "other");
+    const check = validator(store, { sessions: [SESSION, "other"] });
+    expect((await check({ ...plan, candidates: [] })).verification?.status).toBe("verified");
+    const spliced: RecordedWorkflow = {
+      ...plan,
+      candidates: [],
+      steps: plan.steps.map((step) =>
+        step.id === stepOf(plan, "print_label").id ? { ...step, callId: "p2" } : step,
+      ),
+    };
+    const answer = await check(spliced);
+    expect(answer.unavailable).toBeDefined();
+    expect(answer.verification).toBeUndefined();
+  });
+
+  it("is not verified when the named calls ran in a different order than the plan's steps", async () => {
+    const store = new InMemoryPrivateValueStore();
+    // A label printed before the lookup, then the lookup and the label again.
+    record(store, [{ user: "Print the label for A-1001" }, label("p0")]);
+    const plan = record(store, [{ user: "Handle order A-1001" }, lookup("l1"), label("p1")]);
+    const labelStep = stepOf(plan, "print_label").id;
+    expect(plan.steps.map((step) => step.callId)).toEqual(["l1", "p1"]);
+    const reordered: RecordedWorkflow = {
+      ...plan,
+      candidates: [],
+      steps: plan.steps.map((step) => (step.id === labelStep ? { ...step, callId: "p0" } : step)),
+    };
+    const answer = await validator(store)(reordered);
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain(labelStep);
+  });
+
+  it("confirms nothing when the held-out run reuses the baseline's calls", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [
+      { user: "Look up order A-1001" },
+      { ...lookup("first"), parameters: { order: "A-1001", region: "eu" } },
+      { user: "Look up order B-2002" },
+      {
+        ...lookup("second"),
+        parameters: { order: "B-2002", region: "eu" },
+        result: "B-2002 pending",
+      },
+    ]);
+    const candidates = (plan.candidates ?? []).filter(
+      (candidate) => candidate.argument === "order" && candidate.proposed.kind === "input",
+    );
+    expect(candidates).toHaveLength(1);
+    const heldOut = plan.heldOut!;
+    const reused = {
+      ...plan,
+      candidates,
+      heldOut: { ...heldOut, calls: [{ stepId: plan.steps[0]!.id, callIds: ["first"] }] },
+    };
+    const answer = await validator(store)(reused);
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    expect(answer.verification?.status).not.toBe("verified");
   });
 });
 

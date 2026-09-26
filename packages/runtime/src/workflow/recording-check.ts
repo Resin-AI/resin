@@ -84,12 +84,20 @@ function deepEqual(left: unknown, right: unknown): boolean {
   );
 }
 
-/** Whether a template position reads its value from somewhere other than the recorded text. */
+/**
+ * Whether a template position reads its value from an earlier step: a result (a derivation step's
+ * included) or an extract. Literal, private and unresolved leaves carry the recorded text, and an
+ * input — a recorded default above all — would resend whatever the caller or the recording supplies.
+ */
 function templateBinds(template: WorkflowValueTemplate, path: WorkflowValuePath): boolean {
   switch (template.type) {
+    case "result":
+    case "extract":
+      return true;
     case "literal":
     case "private":
     case "unresolved":
+    case "input":
       return false;
     case "object": {
       const [head, ...rest] = path;
@@ -103,19 +111,24 @@ function templateBinds(template: WorkflowValueTemplate, path: WorkflowValuePath)
     }
     case "program": {
       const address = programTokenPath(path);
-      return (
-        address !== undefined &&
-        template.holes.some(
-          (hole) => hole.token === address.token && hole.embedded === address.embedded,
-        )
+      if (address === undefined) return false;
+      const { span } = address;
+      return template.holes.some(
+        (hole) =>
+          hole.token === address.token &&
+          hole.embedded === address.embedded &&
+          // A whole-token hole binds every span of it; a span hole binds only what it covers.
+          (hole.span === undefined ||
+            (span !== undefined && hole.span.start <= span.start && hole.span.end >= span.end)) &&
+          templateBinds(hole.binding, []),
       );
     }
     default:
-      return true;
+      return false;
   }
 }
 
-/** Whether the plan binds this argument position, rather than carrying the recorded text. */
+/** Whether the plan binds this argument position to an earlier step, rather than recorded text. */
 export function stepBindsPosition(
   step: WorkflowStep,
   argument: string,
@@ -123,7 +136,7 @@ export function stepBindsPosition(
 ): boolean {
   const source = step.arguments.find((entry) => entry.name === argument)?.source;
   if (source === undefined) return false;
-  if (source.kind === "input" || source.kind === "result") return true;
+  if (source.kind === "result") return true;
   return source.kind === "template" && templateBinds(source.template, path);
 }
 

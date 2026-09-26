@@ -11,6 +11,7 @@ import {
 } from "./private-value-store.js";
 import {
   WORKFLOW_CALL_IDENTITY_SLOT,
+  WORKFLOW_CALL_ORDER_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -39,6 +40,11 @@ export interface LocalRecordedCall {
   argumentReferences: Record<string, string>;
   /** Absent when the recording kept no successful result for the call. */
   result?: { value: WorkflowJsonValue; reference: string; comparison?: "text-trim" };
+  /**
+   * Where the recorder placed this call in the order it recorded calls: comparable only between
+   * calls of the same `epoch`. Absent for a call recorded before the recorder kept an order.
+   */
+  sequence?: { epoch: string; index: number };
 }
 
 /** This device cannot list its own sessions right now; the caller should try again later. */
@@ -118,6 +124,12 @@ const RecordedCallIdentity = z.object({
   connection: z.string().optional(),
   program: z.object({ kind: z.string(), argument: z.string() }).optional(),
   arguments: z.array(z.string()),
+});
+
+/** Where the recorder placed a call among the calls it recorded, kept under its order slot. */
+const RecordedCallOrder = z.object({
+  epoch: z.string().min(1),
+  index: z.number().int().nonnegative(),
 });
 
 /** Reads a device's own recorded calls back by call id. */
@@ -230,6 +242,13 @@ export function createLocalCallIdentity(options: {
           ...(comparison === undefined ? {} : { comparison }),
         };
       }
+      const order = ownedValue(
+        store,
+        referenceFor(WORKFLOW_CALL_ORDER_SLOT),
+        match.representation,
+        workspaceId,
+      );
+      const sequence = order === undefined ? undefined : RecordedCallOrder.safeParse(order.value);
       return {
         sessionId: match.sessionId,
         callId,
@@ -237,6 +256,7 @@ export function createLocalCallIdentity(options: {
         arguments: args,
         argumentReferences,
         ...(result === undefined ? {} : { result }),
+        ...(sequence?.success === true ? { sequence: sequence.data } : {}),
       };
     },
   };
