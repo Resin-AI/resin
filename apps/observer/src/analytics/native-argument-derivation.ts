@@ -105,8 +105,20 @@ export interface NativeDerivation {
  */
 const MIN_CANDIDATE_STRING_LENGTH = 4;
 
-/** Distinct candidate bindings one recording may report, so a large session cannot explode. */
-const MAX_CANDIDATES = 256;
+/**
+ * Distinct candidate bindings one recording may report per call family, so a large session cannot
+ * explode. Harness-tool calls (reads, edits, JSON tools) and program calls (shell, Python,
+ * JavaScript, Codex exec) each get their own budget: a long session's many harness-tool offers can
+ * never starve the program calls that come after them. The total stays bounded at twice this.
+ */
+const MAX_CANDIDATES_PER_FAMILY = 256;
+
+type CandidateFamily = "harness" | "program";
+
+/** A program the call ran is its own family; a file edit is harness data like any other tool's. */
+function candidateFamily(call: DerivationCall): CandidateFamily {
+  return call.program === undefined || call.program.kind === "patch" ? "harness" : "program";
+}
 
 /** Values one program call may offer as optional inputs, so a long command stays a short schema. */
 const MAX_PROGRAM_INPUTS_PER_CALL = 6;
@@ -314,10 +326,18 @@ export function deriveNativeCalls(
   /** Typed primitive leaves each call's own result contributed. */
   const resultValues: Array<Set<string>> = [];
   const seen = new Set<string>();
+  /** Candidates (result, extract, and input) each family has taken, in order of arrival. */
+  const resultUsed: Record<CandidateFamily, number> = { harness: 0, program: 0 };
+  const inputUsed: Record<CandidateFamily, number> = { harness: 0, program: 0 };
+  const familyOf = new Map<string, CandidateFamily>();
   const sharedWords = sharedShellWords(calls);
   const sharedEmbedded = sharedEmbeddedStrings(calls);
 
   for (const [index, call] of calls.entries()) {
+    const family = candidateFamily(call);
+    familyOf.set(call.stepId, family);
+    const resultFull = () => resultUsed[family] >= MAX_CANDIDATES_PER_FAMILY;
+    const inputFull = () => inputUsed[family] >= MAX_CANDIDATES_PER_FAMILY;
     const argumentLeaves: Array<{
       path: WorkflowValuePath;
       value: CandidateScalar;
@@ -351,9 +371,9 @@ export function deriveNativeCalls(
 
     // Candidate result bindings, only for values this call could only have got from the producer:
     // a value already present before the producer ran is not evidence of anything.
-    if (candidates.length >= MAX_CANDIDATES) continue;
+    if (resultFull() && inputFull()) continue;
     for (const leaf of argumentLeaves) {
-      if (candidates.length >= MAX_CANDIDATES) break;
+      if (resultFull()) break;
       if (typeof leaf.value === "string" && leaf.value.length < MIN_CANDIDATE_STRING_LENGTH)
         continue;
       const argumentName = leaf.path[0];
@@ -362,6 +382,7 @@ export function deriveNativeCalls(
       const producers = producersOfValue(leaf.value, index, calls, resultValues, seenBeforeResult);
       if (producers.length === 0) continue;
       const first = producers[0]!;
+      resultUsed[family] += 1;
       candidates.push({
         stepId: call.stepId,
         argument: argumentName,
@@ -379,14 +400,15 @@ export function deriveNativeCalls(
     // Ordinary JSON leaves can be proposed as caller inputs, but one observation cannot
     // establish that they vary. Result-derived proposals take precedence at the same position.
     // Program-bearing calls use token proposals instead: never bind their source wholesale.
-    if (call.program === undefined && inputCandidates.length < MAX_CANDIDATES) {
+    if (call.program === undefined && !inputFull()) {
       for (const [leafIndex, leaf] of argumentLeaves.entries()) {
-        if (inputCandidates.length >= MAX_CANDIDATES) break;
+        if (inputFull()) break;
         const argument = leaf.path[0];
         if (typeof argument !== "string") continue;
         const type = typeof leaf.value;
         if (type !== "string" && type !== "number" && type !== "boolean") continue;
         const path = leaf.path.slice(1);
+        inputUsed[family] += 1;
         inputCandidates.push({
           stepId: call.stepId,
           argument,
@@ -420,13 +442,14 @@ export function deriveNativeCalls(
         throw error;
       }
       for (const [tokenIndex, token] of tokens.entries()) {
-        if (candidates.length >= MAX_CANDIDATES) break;
+        if (resultFull()) break;
         if (!token.bindable) continue;
         const value = token.value;
         if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
         const producers = producersOfValue(value, index, calls, resultValues, seenBeforeResult);
         if (producers.length === 0) continue;
         const first = producers[0]!;
+        resultUsed[family] += 1;
         candidates.push({
           stepId: call.stepId,
           argument: call.program.argument,
@@ -453,12 +476,13 @@ export function deriveNativeCalls(
         );
         const bodyStart = heredocStart("shell", text);
         for (const [tokenIndex, token] of tokens.entries()) {
-          if (candidates.length + extracts.length >= MAX_CANDIDATES) break;
+          if (resultFull()) break;
           if (token.start >= bodyStart) break;
           if (!token.bindable || typeof token.value !== "string" || bound.has(tokenIndex)) continue;
           if (requestWords.has(token.value)) continue;
           const found = printedBy(token.value, index, calls);
           if (found === undefined) continue;
+          resultUsed[family] += 1;
           extracts.push({
             stepId: call.stepId,
             argument: call.program.argument,
@@ -483,7 +507,7 @@ export function deriveNativeCalls(
       const script = call.program.kind === "python" || call.program.kind === "javascript";
       const fieldKeys = script ? scriptRecordFieldKeys(text, tokens) : new Set<number>();
       for (const [tokenIndex, token] of tokens.entries()) {
-        if (inputCandidates.length >= MAX_CANDIDATES || token.start >= bodyStart) break;
+        if (inputFull() || token.start >= bodyStart) break;
         const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
         const position = positions?.[tokenIndex];
         if (positions !== undefined && (position === undefined || position === 0)) continue;
@@ -510,6 +534,7 @@ export function deriveNativeCalls(
           continue;
         }
         offered.add(name);
+        inputUsed[family] += 1;
         inputCandidates.push({
           stepId: call.stepId,
           argument: call.program.argument,
@@ -527,7 +552,7 @@ export function deriveNativeCalls(
       // input is named after that key when the value sits right after one.
       if (call.program.kind === "patch") {
         for (const [tokenIndex, token] of tokens.entries()) {
-          if (inputCandidates.length >= MAX_CANDIDATES) break;
+          if (inputFull()) break;
           const value = token.value;
           if (!token.bindable || typeof value !== "string") continue;
           if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH) continue;
@@ -552,6 +577,7 @@ export function deriveNativeCalls(
           }
           offered.add(name);
           patchInputValues.add(value);
+          inputUsed[family] += 1;
           inputCandidates.push({
             stepId: call.stepId,
             argument: call.program.argument,
@@ -572,7 +598,7 @@ export function deriveNativeCalls(
         for (const program of embeddedPrograms(text)) {
           const embeddedFields = scriptRecordFieldKeys(text, program.tokens);
           for (const [embeddedIndex, token] of program.tokens.entries()) {
-            if (inputCandidates.length >= MAX_CANDIDATES) break;
+            if (inputFull()) break;
             const value = token.value;
             if (!token.bindable || token.kind !== "string" || typeof value !== "string") continue;
             if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH) continue;
@@ -595,6 +621,7 @@ export function deriveNativeCalls(
               continue;
             }
             offered.add(name);
+            inputUsed[family] += 1;
             inputCandidates.push({
               stepId: call.stepId,
               argument: call.program.argument,
@@ -657,7 +684,7 @@ export function deriveNativeCalls(
         return type === "string" && typeof value === "string" && value.length > 0 ? [value] : [];
       });
       for (const target of spanTargets) {
-        if (inputCandidates.length >= MAX_CANDIDATES) break;
+        if (inputFull()) break;
         const value = target.token.value;
         const pathKey = JSON.stringify(target.path);
         const wholeIndex = inputCandidates.findIndex(
@@ -717,10 +744,11 @@ export function deriveNativeCalls(
         if (wholeIndex >= 0) {
           if (!chosen.some((match) => match.input)) continue;
           inputCandidates.splice(wholeIndex, 1);
+          inputUsed[family] -= 1;
         }
         chosen.sort((left, right) => left.start - right.start);
         for (const match of chosen) {
-          if (inputCandidates.length >= MAX_CANDIDATES) break;
+          if (inputFull()) break;
           const key = scalarKey(match.needle);
           let name = programInputs.get(key);
           if (name === undefined) {
@@ -736,6 +764,7 @@ export function deriveNativeCalls(
           }
           offered.add(name);
           const address = programTokenPath(target.path)!;
+          inputUsed[family] += 1;
           inputCandidates.push({
             stepId: call.stepId,
             argument: call.program.argument,
@@ -766,10 +795,14 @@ export function deriveNativeCalls(
       JSON.stringify([candidate.stepId, candidate.argument, candidate.path]),
     ),
   );
+  // Inputs fill what result evidence left of each family's budget, in recording order.
+  const used: Record<CandidateFamily, number> = { ...resultUsed };
   for (const candidate of inputCandidates) {
-    if (candidates.length >= MAX_CANDIDATES) break;
+    const family = familyOf.get(candidate.stepId) ?? "harness";
+    if (used[family] >= MAX_CANDIDATES_PER_FAMILY) continue;
     if (resultPositions.has(JSON.stringify([candidate.stepId, candidate.argument, candidate.path])))
       continue;
+    used[family] += 1;
     candidates.push(candidate);
   }
   return { calls: derived, candidates, extracts };
