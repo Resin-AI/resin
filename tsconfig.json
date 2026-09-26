@@ -38,6 +38,9 @@
       "path": "./adapters/omp"
     },
     {
+      "path": "./adapters/grok-build"
+    },
+    {
       "path": "./fixtures/test-fixtures"
     }
   ]
