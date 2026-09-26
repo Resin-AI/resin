@@ -50,8 +50,12 @@ const WORKSPACE_INPUTS_CAPABILITY = "workspace-inputs-v1";
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS = 15_000;
 /** Passes are spread over this fraction of the interval so a fleet does not wake in lockstep. */
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_JITTER_RATIO = 0.2;
-/** A replay that outlives this bound is refused rather than allowed to run on forever. */
-export const DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS = 30_000;
+/**
+ * A replay that outlives this bound is refused rather than allowed to run on forever. A recorded job
+ * of a dozen build/test/sign steps, or one data script over a large file, routinely needs more than
+ * thirty seconds on a busy machine; a timeout there refutes a correct plan.
+ */
+export const DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS = 120_000;
 /** No caller may hand the worker a replay bound beyond this; the work is a replay, not a job. */
 export const MAX_WORKFLOW_VALIDATION_TIMEOUT_MS = 120_000;
 /** Identity the decision names for the disposable environment a replay ran in. */
