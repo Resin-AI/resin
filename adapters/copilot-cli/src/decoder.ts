@@ -31,6 +31,7 @@ interface ToolStart {
   toolName: string;
   arguments: Json;
   mcpServerName?: string;
+  startedAt: number;
 }
 
 interface ModelUsageTotals {
@@ -123,6 +124,8 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
   readonly decoderVersion = COPILOT_DECODER_VERSION;
 
   private readonly toolStarts = new Map<string, ToolStart>();
+  /** `session.compaction_start.trigger` awaiting its `session.compaction_complete`, per session. */
+  private readonly compactionTriggers = new Map<string, string>();
   private readonly previousTotalsBySession = new Map<string, Map<string, ModelUsageTotals>>();
 
   canDecode(record: RawHarnessRecord): boolean {
@@ -132,7 +135,11 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
   decode(record: RawHarnessRecord): IntermediateSessionEvent[] {
     const event = parseEvent(record.rawPayload);
     if (!event) return [];
-    return this.decodeEvent(event, record.sessionId, record.sequenceNumber, record.timestamp);
+    // One line can yield several events (tool result + command/file edit); stepIndex keeps
+    // their (sequence, step) identity unique for the observer's deduplicator.
+    return this.decodeEvent(event, record.sessionId, record.sequenceNumber, record.timestamp).map(
+      (decoded, stepIndex) => ({ ...decoded, causalRef: { ...decoded.causalRef, stepIndex } }),
+    );
   }
 
   decodeEvent(
@@ -225,8 +232,8 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
           event.type === "subagent.started"
             ? "start"
             : event.type === "subagent.completed"
-              ? "end"
-              : "crash";
+              ? "settle"
+              : "terminate";
         return [
           {
             ...base,
@@ -248,11 +255,18 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
           },
         ];
       }
-      case "session.compaction_complete":
+      case "session.compaction_start":
+        this.compactionTriggers.set(sessionId, asString(data.trigger) ?? "");
+        return [];
+      case "session.compaction_complete": {
+        const trigger = this.compactionTriggers.get(sessionId);
+        this.compactionTriggers.delete(sessionId);
         return [
           {
             ...base,
             type: "compaction",
+            // `/compact` records "manual"; automatic compaction runs when the context fills up.
+            triggerReason: trigger === "manual" ? "manual" : "context_limit",
             summary: asString(data.summaryContent),
             tokensBefore: asCount(data.preCompactionTokens),
             tokensAfter: asCount(data.postCompactionTokens),
@@ -261,9 +275,11 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
               success: data.success === true,
               messagesRemoved: asCount(data.messagesRemoved),
               ...(asString(data.error) ? { error: asString(data.error) } : {}),
+              ...(trigger ? { trigger } : {}),
             },
           },
         ];
+      }
       case "session.error":
         return [
           {
@@ -296,7 +312,6 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
       case "assistant.turn_start":
       case "assistant.turn_end":
       case "session.usage_checkpoint":
-      case "session.compaction_start":
       case "subagent.selected":
       case "subagent.configured":
         return [];
@@ -319,7 +334,13 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
     const model = asString(data.model);
     const reasoning = asString(data.reasoningText);
     if (reasoning) {
-      events.push({ ...base, type: "model_reasoning", reasoningText: reasoning, model });
+      events.push({
+        ...base,
+        type: "model_reasoning",
+        reasoningText: reasoning,
+        reasoningContent: reasoning,
+        model,
+      });
     }
     const content = asString(data.content) ?? "";
     if (content.length > 0) {
@@ -350,6 +371,7 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
         toolName,
         arguments: args,
         mcpServerName,
+        startedAt: Date.parse(base.timestamp),
       });
     }
     const input = asRecord(args);
@@ -361,7 +383,9 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
         callId: toolCallId,
         toolName,
         ...(mcpServerName ? { connection: mcpServerName } : {}),
-        ...(input ? { input, parameters: input } : {}),
+        // Freeform tools (apply_patch) take one raw string; it is kept verbatim under `raw`.
+        parameters: input ?? (typeof args === "string" ? { raw: args } : {}),
+        ...(input ? { input } : {}),
         ...(typeof args === "string" ? { rawInput: args } : {}),
         metadata: {
           ...base.metadata,
@@ -389,6 +413,12 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
     const result = asRecord(data.result);
     const error = asRecord(data.error);
     const output = asString(result?.content);
+    const finishedAt = Date.parse(base.timestamp);
+    // Both timestamps are Copilot's own; a completion without its start has no duration.
+    const durationMs =
+      start && Number.isFinite(start.startedAt) && Number.isFinite(finishedAt)
+        ? Math.max(0, finishedAt - start.startedAt)
+        : undefined;
     const errorMessage = asString(error?.message);
     const events: IntermediateSessionEvent[] = [
       {
@@ -400,6 +430,7 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
         result: output ?? null,
         output: output ?? null,
         isError: !success,
+        ...(durationMs !== undefined ? { executionDurationMs: durationMs, durationMs } : {}),
         ...(errorMessage ? { error: errorMessage } : {}),
         ...(output !== undefined ? { outputSizeBytes: Buffer.byteLength(output, "utf8") } : {}),
         metadata: {
@@ -426,6 +457,7 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
           type: "command_exec",
           command,
           ...(typeof exitCode === "number" ? { exitCode } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
           ...(output !== undefined ? { stdout: output } : {}),
           metadata: { ...base.metadata, toolCallId },
         });

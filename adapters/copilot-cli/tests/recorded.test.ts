@@ -161,7 +161,7 @@ describe("Copilot CLI 1.0.88 recorded sessions", () => {
     const lifecycle = ofType(events, "subagent_lifecycle");
     expect(lifecycle.map((e) => [e.lifecycleType, e.role])).toEqual([
       ["start", "explore"],
-      ["end", "explore"],
+      ["settle", "explore"],
     ]);
     const taskCallId = lifecycle[0]!.subagentId;
     expect(ofType(events, "tool_call").find((c) => c.toolName === "task")?.toolCallId).toBe(
