@@ -168,6 +168,11 @@ const ProposedBindingSchema = z.union([
     type: z.enum(["string", "number", "boolean", "object", "array"]),
     recordedDefault: z.literal(true).optional(),
   }),
+  z.object({
+    kind: z.literal("extract"),
+    stepId: NonEmptyString,
+    locator: NonEmptyString,
+  }),
 ]);
 
 const ProgramIdentitySchema = z.object({

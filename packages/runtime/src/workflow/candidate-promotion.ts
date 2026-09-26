@@ -105,9 +105,12 @@ export function applyConfirmedWorkflowBinding(
   if (argumentIndex < 0) return undefined;
   const argument = step.arguments[argumentIndex]!;
   const proposed = candidate.proposed;
-  if (proposed.kind === "result") {
+  if (proposed.kind === "result" || proposed.kind === "extract") {
     const producer = plan.steps.findIndex((entry) => entry.id === proposed.stepId);
     if (producer < 0 || producer >= stepIndex) return undefined;
+    if (proposed.kind === "extract" && !(plan.privateReferences ?? []).includes(proposed.locator)) {
+      return undefined;
+    }
   } else {
     const existing = plan.inputs.find((input) => input.name === proposed.name);
     if (
@@ -130,7 +133,9 @@ export function applyConfirmedWorkflowBinding(
   const leaf: WorkflowValueTemplate =
     proposed.kind === "result"
       ? { type: "result", stepId: proposed.stepId, path: [...proposed.path] }
-      : { type: "input", name: proposed.name };
+      : proposed.kind === "extract"
+        ? { type: "extract", stepId: proposed.stepId, locator: proposed.locator }
+        : { type: "input", name: proposed.name };
   const source = sourceAsTemplate(argument.source);
   const template = source.type === "literal" && !isToken ? literalAsTemplate(source) : source;
   let replaced: WorkflowValueTemplate | undefined;

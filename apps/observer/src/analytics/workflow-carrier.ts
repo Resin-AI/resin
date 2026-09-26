@@ -125,6 +125,8 @@ export interface WorkflowCallCandidate {
   path: WorkflowValuePath;
   proposed:
     | { kind: "result"; callId: string; path: WorkflowValuePath }
+    /** A value the call printed; `locator` is an opaque local private reference, never text. */
+    | { kind: "extract"; callId: string; locator: string }
     | {
         kind: "input";
         name: string;
@@ -139,7 +141,8 @@ export interface WorkflowCallCandidate {
     | "shares-value-with-declared-input"
     | "tracks-earlier-result-across-executions"
     | "classified-source-value"
-    | "native-data-argument";
+    | "native-data-argument"
+    | "printed-by-earlier-step";
   evidence?: WorkflowJsonValue;
   /** The fact the record does not establish, so a refusal can be reported instead of silent. */
   missing: string;
@@ -342,6 +345,7 @@ const CANDIDATE_REASONS: Readonly<Record<string, true>> = {
   "tracks-earlier-result-across-executions": true,
   "classified-source-value": true,
   "native-data-argument": true,
+  "printed-by-earlier-step": true,
 };
 
 /** Reads one suggested binding back through the frozen vocabulary, or drops it. */
@@ -357,6 +361,14 @@ function readCandidate(value: unknown): WorkflowCallCandidate | undefined {
   let read: WorkflowCallCandidate["proposed"] | undefined;
   if (proposed.kind === "result" && typeof proposed.callId === "string") {
     read = { kind: "result", callId: proposed.callId, path: readValuePath(proposed.path) };
+  } else if (
+    proposed.kind === "extract" &&
+    typeof proposed.callId === "string" &&
+    typeof proposed.locator === "string" &&
+    proposed.locator.startsWith("private:v2:value:")
+  ) {
+    // Only an opaque local reference is accepted: locator text came from tool output.
+    read = { kind: "extract", callId: proposed.callId, locator: proposed.locator };
   } else if (proposed.kind === "input" && typeof proposed.name === "string") {
     const type =
       proposed.type === "number"

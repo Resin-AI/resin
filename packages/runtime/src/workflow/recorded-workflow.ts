@@ -13,6 +13,8 @@ import {
   applyProgramTokenValues,
   embeddedProgramIsProtected,
   embeddedPrograms,
+  extractPrintedValue,
+  parseExtractLocator,
   tokenizeProgram,
   validateWorkflowProgramProjection,
   workflowSinkStepIds,
@@ -228,6 +230,38 @@ async function buildTemplate(
         );
       }
       return await options.resolvePrivate(template.reference, options.access);
+    }
+    case "extract": {
+      const produced = results.get(template.stepId);
+      if (typeof produced !== "string") {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' printed no text in this invocation to extract a value from`,
+          step.id,
+          argumentName,
+        );
+      }
+      if (!declaredPrivateReferences.has(template.locator) || !options.resolvePrivate) {
+        throw new WorkflowBindingError(
+          "the extract locator cannot be resolved in this environment",
+          step.id,
+          argumentName,
+        );
+      }
+      const locatorText = await options.resolvePrivate(template.locator, options.access);
+      const locator =
+        typeof locatorText === "string" ? parseExtractLocator(locatorText) : undefined;
+      if (locator === undefined) {
+        throw new WorkflowBindingError("the extract locator is malformed", step.id, argumentName);
+      }
+      const value = extractPrintedValue(produced, locator);
+      if (value === undefined) {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' did not print the value this argument extracts`,
+          step.id,
+          argumentName,
+        );
+      }
+      return value;
     }
     case "unresolved":
       throw new WorkflowBindingError(

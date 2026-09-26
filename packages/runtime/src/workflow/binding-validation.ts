@@ -27,6 +27,8 @@ import {
   type WorkflowValueTemplate,
   bindProgramToken,
   demonstratedProgramTokenSpanValue,
+  extractPrintedValue,
+  parseExtractLocator,
   programTokenPath,
   programTokenValueAt,
 } from "@resin/contracts";
@@ -182,15 +184,110 @@ function isLeafTemplate(template: WorkflowValueTemplate): boolean {
 }
 
 function proposedTemplate(candidate: WorkflowBindingCandidate): WorkflowValueTemplate {
-  return candidate.proposed.kind === "result"
-    ? { type: "result", stepId: candidate.proposed.stepId, path: [...candidate.proposed.path] }
-    : { type: "input", name: candidate.proposed.name };
+  const proposed = candidate.proposed;
+  switch (proposed.kind) {
+    case "result":
+      return { type: "result", stepId: proposed.stepId, path: [...proposed.path] };
+    case "extract":
+      return { type: "extract", stepId: proposed.stepId, locator: proposed.locator };
+    default:
+      return { type: "input", name: proposed.name };
+  }
 }
 
 function proposedSource(candidate: WorkflowBindingCandidate): WorkflowValueSource {
-  return candidate.proposed.kind === "result"
-    ? { kind: "result", stepId: candidate.proposed.stepId, path: [...candidate.proposed.path] }
-    : { kind: "input", name: candidate.proposed.name };
+  const proposed = candidate.proposed;
+  switch (proposed.kind) {
+    case "result":
+      return { kind: "result", stepId: proposed.stepId, path: [...proposed.path] };
+    case "extract":
+      return { kind: "template", template: proposedTemplate(candidate) };
+    default:
+      return { kind: "input", name: proposed.name };
+  }
+}
+
+/** Where a masked printed value stands in both compared outputs; opaque and never a real value. */
+const EXTRACT_PLACEHOLDER = "\u0000resin-extracted-value\u0000";
+
+/** A printed value extracted in the observation and in the replay, masked as one before comparing. */
+type ExtractMask = { recorded: string; replayed: string };
+
+/**
+ * The values each extract binding in `plan` reads: from the producer's observed output and from its
+ * output in this replay. A value is masked only when both sides extracted one of at least four
+ * characters, so a comparison never hides text a binding did not account for.
+ */
+async function extractMasks(
+  plan: RecordedWorkflow,
+  execution: RecordedWorkflowExecution,
+  environment: CandidateValidationEnvironment,
+): Promise<ExtractMask[]> {
+  const bindings = new Map<string, { stepId: string; locator: string }>();
+  const walk = (template: WorkflowValueTemplate): void => {
+    switch (template.type) {
+      case "extract":
+        bindings.set(`${template.stepId}\u0000${template.locator}`, template);
+        return;
+      case "object":
+        for (const entry of Object.values(template.entries)) walk(entry);
+        return;
+      case "array":
+        for (const entry of template.items) walk(entry);
+        return;
+      case "program":
+        walk(template.source);
+        for (const hole of template.holes) walk(hole.binding);
+        return;
+      default:
+        return;
+    }
+  };
+  for (const step of plan.steps) {
+    for (const argument of step.arguments) {
+      if (argument.source.kind === "template") walk(argument.source.template);
+    }
+  }
+  const masks: ExtractMask[] = [];
+  if (bindings.size === 0 || environment.resolvePrivate === undefined) return masks;
+  for (const binding of bindings.values()) {
+    const observed = environment.observed[binding.stepId];
+    const outcome = execution.steps.find((entry) => entry.stepId === binding.stepId);
+    if (typeof observed !== "string" || outcome?.status !== "completed") continue;
+    if (typeof outcome.result !== "string") continue;
+    const locatorText = await environment.resolvePrivate(binding.locator);
+    const locator = typeof locatorText === "string" ? parseExtractLocator(locatorText) : undefined;
+    if (locator === undefined) continue;
+    const recorded = extractPrintedValue(observed, locator);
+    const replayed = extractPrintedValue(outcome.result, locator);
+    if (recorded === undefined || replayed === undefined) continue;
+    if (recorded.length < 4 || replayed.length < 4) continue;
+    masks.push({ recorded, replayed });
+  }
+  return masks;
+}
+
+/** Replaces every masked value in a JSON value's strings with the shared placeholder. */
+function maskValue(
+  value: WorkflowJsonValue,
+  masks: readonly ExtractMask[],
+  side: keyof ExtractMask,
+): WorkflowJsonValue {
+  if (masks.length === 0) return value;
+  if (typeof value === "string") {
+    let masked = value;
+    // Longest first, so a value that contains another is masked whole.
+    const ordered = [...masks].sort((left, right) => right[side].length - left[side].length);
+    for (const mask of ordered) masked = masked.split(mask[side]).join(EXTRACT_PLACEHOLDER);
+    return masked;
+  }
+  if (Array.isArray(value)) return value.map((item) => maskValue(item, masks, side));
+  if (value !== null && typeof value === "object") {
+    const masked: Record<string, WorkflowJsonValue> = {};
+    for (const [key, entry] of Object.entries(value)) masked[key] = maskValue(entry, masks, side);
+    return masked;
+  }
+  return value;
 }
 
 /**
@@ -416,6 +513,7 @@ async function replayStep(
   stepId: string,
   observed: WorkflowJsonValue,
   environment: CandidateValidationEnvironment,
+  maskingPlan: RecordedWorkflow,
 ): Promise<StepReplay> {
   const options: RecordedWorkflowExecutionOptions = {
     inputs: inputsDeclaredByPlan(plan, environment.inputs),
@@ -438,9 +536,10 @@ async function replayStep(
   if (outcome.status !== "completed") {
     return { reproduced: false, detail: describeOutcome(execution, outcome) };
   }
+  const masks = await extractMasks(maskingPlan, execution, environment);
   const reproduced = matchesObservedResult(
-    outcome.result,
-    observed,
+    maskValue(outcome.result, masks, "replayed"),
+    maskValue(observed, masks, "recorded"),
     environment.observedComparisons?.[stepId],
   );
   return {
@@ -481,8 +580,21 @@ async function evaluateCandidate(
     // Two runs. The adapters must be stateless, or the caller must hand in a registry whose
     // adapters hold no per-run state: a registry that remembered the first run would decide the
     // second one for it.
-    const bound = await replayStep(plans.bound, candidate.stepId, observed, environment);
-    const literal = await replayStep(plans.literal, candidate.stepId, observed, environment);
+    // Both runs mask the printed values the bound plan extracts, so they are compared alike.
+    const bound = await replayStep(
+      plans.bound,
+      candidate.stepId,
+      observed,
+      environment,
+      plans.bound,
+    );
+    const literal = await replayStep(
+      plans.literal,
+      candidate.stepId,
+      observed,
+      environment,
+      plans.bound,
+    );
     if (bound.reproduced && !literal.reproduced) {
       return {
         candidate,
@@ -754,6 +866,7 @@ async function replayPlanOnce(
   );
   const reproduced: string[] = [];
   const missed: Array<{ stepId: string; detail: string }> = [];
+  const masks = execution === undefined ? [] : await extractMasks(plan, execution, environment);
   for (const step of plan.steps) {
     const stepId = step.id;
     if (!Object.hasOwn(environment.observed, stepId)) {
@@ -782,7 +895,11 @@ async function replayPlanOnce(
     }
     if (
       completionReproduces(step, observed, outcome.result) ||
-      matchesObservedResult(outcome.result, observed, environment.observedComparisons?.[stepId])
+      matchesObservedResult(
+        maskValue(outcome.result, masks, "replayed"),
+        maskValue(observed, masks, "recorded"),
+        environment.observedComparisons?.[stepId],
+      )
     ) {
       reproduced.push(stepId);
     } else missed.push({ stepId, detail: describeOutcome(execution, outcome) });
@@ -837,7 +954,8 @@ export async function confirmPromotedPlan(params: {
       accepted.find((candidate) => candidate.stepId === missedStepId) ??
       accepted.find(
         (candidate) =>
-          candidate.proposed.kind === "result" && candidate.proposed.stepId === missedStepId,
+          (candidate.proposed.kind === "result" || candidate.proposed.kind === "extract") &&
+          candidate.proposed.stepId === missedStepId,
       );
     if (blamed === undefined) {
       unattributed = true;

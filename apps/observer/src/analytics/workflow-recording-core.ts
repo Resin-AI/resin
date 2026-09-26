@@ -506,7 +506,7 @@ export function reconstructWorkflowFromEvents(
     if (executionIndex !== undefined) stepIdByPosition.set(observations.length - 1, ownStepId);
     if (carrier?.candidates !== undefined) {
       for (const candidate of carrier.candidates) {
-        if (candidate.proposed.kind !== "result") {
+        if (candidate.proposed.kind !== "result" && candidate.proposed.kind !== "extract") {
           carrierCandidates.push({
             stepId: ownStepId,
             argument: candidate.argument,
@@ -528,7 +528,10 @@ export function reconstructWorkflowFromEvents(
           stepId: ownStepId,
           argument: candidate.argument,
           path: candidate.path,
-          proposed: { kind: "result", stepId: producingStepId, path: candidate.proposed.path },
+          proposed:
+            candidate.proposed.kind === "extract"
+              ? { kind: "extract", stepId: producingStepId, locator: candidate.proposed.locator }
+              : { kind: "result", stepId: producingStepId, path: candidate.proposed.path },
           reason: candidate.reason,
           ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
           missing: candidate.missing,
@@ -594,10 +597,10 @@ export function reconstructWorkflowFromEvents(
       if (stepId === undefined) continue;
       for (const candidate of call.candidates) {
         const producingStepId =
-          candidate.proposed.kind === "result"
+          candidate.proposed.kind === "result" || candidate.proposed.kind === "extract"
             ? stepIdByRepeatCallId.get(candidate.proposed.callId)
             : undefined;
-        if (candidate.proposed.kind === "result" && producingStepId === undefined) continue;
+        if (candidate.proposed.kind !== "input" && producingStepId === undefined) continue;
         const priorIndex = carrierCandidates.findIndex(
           (entry) =>
             entry.stepId === stepId &&
@@ -624,7 +627,9 @@ export function reconstructWorkflowFromEvents(
           proposed:
             candidate.proposed.kind === "result"
               ? { kind: "result", stepId: producingStepId!, path: candidate.proposed.path }
-              : candidate.proposed,
+              : candidate.proposed.kind === "extract"
+                ? { kind: "extract", stepId: producingStepId!, locator: candidate.proposed.locator }
+                : candidate.proposed,
           reason: candidate.reason,
           ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
           missing: candidate.missing,

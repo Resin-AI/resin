@@ -363,6 +363,80 @@ describe("recorded workflows of ordinary calls", () => {
     expect(description).toContain("month = 2025-01; text = EU zone");
   });
 
+  it("names the printing step at a token bound to an earlier step's output", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    const owned = { workspaceId: context.workspaceId };
+    privateValues.set("private:create", "./deployctl create", owned);
+    privateValues.set("private:wait", "./deployctl wait dep-9e983a", owned);
+    privateValues.set(
+      "private:locator",
+      JSON.stringify({ before: "deployment ", charset: ["lower", "digit", "-"] }),
+      owned,
+    );
+    const shellStep = (id: string, callId: string, template: unknown) => ({
+      id,
+      callId,
+      callable: {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell", source: "", argument: "command" },
+      },
+      arguments: [{ name: "command", source: { kind: "template", template } }],
+      dependsOn: [],
+      failurePolicy: { onError: "abort", policy: "default" },
+      observed: { outcome: "succeeded" },
+    });
+    const installed = await installPlan(
+      {
+        id: "tool_process_extract",
+        name: "wf_process_extract",
+        version: "1.0.0",
+        description: "recorded program reading a printed id",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_extract",
+        inputs: [],
+        privateReferences: ["private:create", "private:wait", "private:locator"],
+        steps: [
+          shellStep("step0", "call_1", { type: "private", reference: "private:create" }),
+          shellStep("step1", "call_2", {
+            type: "program",
+            language: "shell",
+            source: { type: "private", reference: "private:wait" },
+            holes: [
+              {
+                token: 2,
+                binding: { type: "extract", stepId: "step0", locator: "private:locator" },
+              },
+            ],
+          }),
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+    const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toContain("./deployctl wait {output of step 1}");
+    expect(description).not.toContain("dep-9e983a");
+    expect(description).not.toContain("Parameters");
+  });
+
   it("shows an input placeholder inside a heredoc body the recorded program embeds", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const program = "python3 - <<'PY'\nprint('Belles_cookbook_store')\nPY";

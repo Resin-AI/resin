@@ -46,6 +46,12 @@ export type WorkflowValueTemplate =
   | { type: "input"; name: string }
   | { type: "result"; stepId: string; path: WorkflowValuePath }
   | { type: "private"; reference: string }
+  /**
+   * The value an earlier step printed, found in its string result by a locator. `locator` is a
+   * private reference whose value is the JSON text of an `ExtractLocator`; it is resolved locally
+   * and never uploaded, because the text around the value came from tool output.
+   */
+  | { type: "extract"; stepId: string; locator: string }
   /** Origin the record does not establish: preserved as such, never guessed. */
   | { type: "unresolved"; reason: string }
   | { type: "object"; entries: Record<string, WorkflowValueTemplate> }
@@ -234,6 +240,7 @@ export type WorkflowBindingCandidate = {
   path: WorkflowValuePath;
   proposed:
     | { kind: "result"; stepId: string; path: WorkflowValuePath }
+    | { kind: "extract"; stepId: string; locator: string }
     | {
         kind: "input";
         name: string;
@@ -251,7 +258,8 @@ export type WorkflowBindingCandidate = {
     | "declared-by-the-callable"
     | "shares-value-with-declared-input"
     | "classified-source-value"
-    | "native-data-argument";
+    | "native-data-argument"
+    | "printed-by-earlier-step";
   /** Structural, privacy-safe evidence: identities and shapes, never the values themselves. */
   evidence?: WorkflowJsonValue;
   missing: string;
@@ -685,6 +693,7 @@ export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
   const walkTemplate = (template: WorkflowValueTemplate): void => {
     switch (template.type) {
       case "result":
+      case "extract":
         consumed.add(template.stepId);
         return;
       case "object":
@@ -729,6 +738,9 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
       case "private":
         references.add(template.reference);
         return;
+      case "extract":
+        references.add(template.locator);
+        return;
       case "object":
         for (const entry of Object.values(template.entries)) walkTemplate(entry);
         return;
@@ -756,6 +768,11 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
     if (demonstration === undefined) continue;
     for (const entry of demonstration.inputs) references.add(entry.reference);
     for (const entry of demonstration.observed) references.add(entry.reference);
+  }
+  // A proposed extract names its locator by reference; it must be declared so a replay can resolve
+  // it, and the reference is never the locator text.
+  for (const candidate of workflow.candidates ?? []) {
+    if (candidate.proposed.kind === "extract") references.add(candidate.proposed.locator);
   }
   return [...references];
 }
@@ -1010,6 +1027,20 @@ export function validateRecordedWorkflow(value: unknown): {
                 );
               }
               return;
+            case "extract": {
+              const stepRef = typeof template.stepId === "string" ? template.stepId : "";
+              if (!order.has(stepRef))
+                problems.push(`${where} extracts from unknown step ${stepRef}`);
+              else if ((order.get(stepRef) ?? 0) >= (order.get(String(step.id)) ?? 0)) {
+                problems.push(`${where} extracts from ${stepRef}, which does not come earlier`);
+              }
+              if (typeof template.locator !== "string" || !declaredPrivates.has(template.locator)) {
+                problems.push(
+                  `${where} reads undeclared private reference ${String(template.locator)}`,
+                );
+              }
+              return;
+            }
             case "unresolved":
               if (typeof template.reason !== "string") problems.push(`${where} needs a reason`);
               return;
@@ -1289,6 +1320,20 @@ export function validateRecordedWorkflow(value: unknown): {
           if (!order.has(stepRef)) {
             errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
           }
+        } else if (proposed.kind === "extract") {
+          const stepRef = String(proposed.stepId);
+          if (!order.has(stepRef)) {
+            errors.push(`candidate ${stepId}.${candidate.argument} reads unknown step ${stepRef}`);
+          } else if ((order.get(stepRef) ?? 0) >= (order.get(stepId) ?? 0)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} extracts from ${stepRef}, which does not come earlier`,
+            );
+          }
+          if (typeof proposed.locator !== "string" || !declaredPrivates.has(proposed.locator)) {
+            errors.push(
+              `candidate ${stepId}.${candidate.argument} reads undeclared private reference ${String(proposed.locator)}`,
+            );
+          }
         } else if (proposed.kind === "input") {
           if (typeof proposed.name !== "string" || proposed.name.length === 0) {
             errors.push(`candidate ${stepId}.${candidate.argument} needs an input name`);
@@ -1320,6 +1365,7 @@ export function validateRecordedWorkflow(value: unknown): {
           candidate.reason !== "declared-by-the-callable" &&
           candidate.reason !== "shares-value-with-declared-input" &&
           candidate.reason !== "classified-source-value" &&
+          candidate.reason !== "printed-by-earlier-step" &&
           candidate.reason !== "native-data-argument"
         )
           errors.push(`candidate ${stepId}.${candidate.argument} has an unknown reason`);

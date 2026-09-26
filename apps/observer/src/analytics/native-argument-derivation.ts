@@ -24,6 +24,7 @@
  */
 
 import {
+  type ExtractLocator,
   type ProgramLanguage,
   type ProgramToken,
   ProgramTokenizationError,
@@ -31,6 +32,8 @@ import {
   type WorkflowJsonValue,
   type WorkflowValuePath,
   embeddedPrograms,
+  extractCharsetOf,
+  extractPrintedValue,
   programTokenPath,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -67,10 +70,28 @@ export interface DerivedCall {
   dependsOn: string[];
 }
 
+/**
+ * A program token whose value an earlier call printed inside its text output.
+ *
+ * The locator is text taken from that output, so it never becomes part of a candidate here: the
+ * caller that owns the private value store keeps it locally and proposes only its reference.
+ */
+export interface DerivedExtract {
+  stepId: string;
+  argument: string;
+  path: WorkflowValuePath;
+  producerStepId: string;
+  locator: ExtractLocator;
+  /** Structural only: token count and position. */
+  evidence: { tokens: number; token: number };
+}
+
 export interface NativeDerivation {
   calls: DerivedCall[];
   /** Bindings the record suggests but does not establish. Never executable as recorded. */
   candidates: WorkflowBindingCandidate[];
+  /** Values printed by an earlier call; proposals only once their locator is stored privately. */
+  extracts: DerivedExtract[];
 }
 
 /**
@@ -274,6 +295,7 @@ export function deriveNativeCalls(
 ): NativeDerivation {
   const derived: DerivedCall[] = [];
   const candidates: WorkflowBindingCandidate[] = [];
+  const extracts: DerivedExtract[] = [];
   // Weak caller-input suggestions never consume slots reserved for result evidence.
   const inputCandidates: WorkflowBindingCandidate[] = [];
   /**
@@ -415,6 +437,33 @@ export function deriveNativeCalls(
               ? `the record shows ${producers.length} earlier calls returning this value, so it does not establish which one this token came from`
               : "the token's text first appeared after that call returned, but the record does not show this token was rendered from its result rather than written into the program as a literal",
         });
+      }
+
+      // A token an earlier call printed inside its text output (`created deployment dep-9e983a`).
+      // Whole-value equality above cannot see it; a locator on the producer's output can.
+      if (call.program.kind === "shell") {
+        const bound = new Set(
+          candidates
+            .filter((entry) => entry.stepId === call.stepId && entry.path[0] === "tokens")
+            .map((entry) => entry.path[1]),
+        );
+        const bodyStart = heredocStart("shell", text);
+        for (const [tokenIndex, token] of tokens.entries()) {
+          if (candidates.length + extracts.length >= MAX_CANDIDATES) break;
+          if (token.start >= bodyStart) break;
+          if (!token.bindable || typeof token.value !== "string" || bound.has(tokenIndex)) continue;
+          if (requestWords.has(token.value)) continue;
+          const found = printedBy(token.value, index, calls);
+          if (found === undefined) continue;
+          extracts.push({
+            stepId: call.stepId,
+            argument: call.program.argument,
+            path: ["tokens", tokenIndex],
+            producerStepId: calls[found.producer]!.stepId,
+            locator: found.locator,
+            evidence: { tokens: tokens.length, token: tokenIndex },
+          });
+        }
       }
 
       // A value the program ran with can be offered as an optional input that defaults to exactly
@@ -640,7 +689,7 @@ export function deriveNativeCalls(
   }
 
   const resultPositions = new Set(
-    candidates.map((candidate) =>
+    [...candidates, ...extracts].map((candidate) =>
       JSON.stringify([candidate.stepId, candidate.argument, candidate.path]),
     ),
   );
@@ -650,7 +699,80 @@ export function deriveNativeCalls(
       continue;
     candidates.push(candidate);
   }
-  return { calls: derived, candidates };
+  return { calls: derived, candidates, extracts };
+}
+
+/** Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash. */
+function looksMinted(value: string): boolean {
+  if (/\s/.test(value)) return false;
+  if (value.length >= 12) return true;
+  return value.length >= 4 && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
+}
+
+/** Whether some string leaf of a value contains `needle`. */
+function mentions(value: WorkflowJsonValue | undefined, needle: string): boolean {
+  const leaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
+  scalarLeaves(value, [], leaves);
+  return leaves.some((leaf) => typeof leaf.value === "string" && leaf.value.includes(needle));
+}
+
+/**
+ * The earlier call that printed `value` and the locator that finds it in that call's output.
+ *
+ * The producer is the latest earlier call whose text result holds the value as a whole run of its
+ * characters, provided no call up to and including it was given the value: a value a call was
+ * given is echoed, not minted. The locator is the shortest text before the value, on its own line,
+ * that finds exactly this value in the producer's output.
+ */
+function printedBy(
+  value: string,
+  before: number,
+  calls: readonly DerivationCall[],
+): { producer: number; locator: ExtractLocator } | undefined {
+  if (!looksMinted(value)) return undefined;
+  const charset = extractCharsetOf(value);
+  if (charset === undefined) return undefined;
+  const inCharset = (char: string | undefined): boolean => {
+    const entry = char === undefined ? undefined : extractCharsetOf(char)?.[0];
+    return entry !== undefined && charset.includes(entry);
+  };
+  let firstMention = before;
+  for (let index = 0; index < before; index += 1) {
+    if (mentions(calls[index]!.arguments, value)) {
+      firstMention = index;
+      break;
+    }
+  }
+  for (let producer = Math.min(before, firstMention) - 1; producer >= 0; producer -= 1) {
+    const output = calls[producer]!.result;
+    if (typeof output !== "string") continue;
+    let position = output.indexOf(value);
+    while (
+      position >= 0 &&
+      (inCharset(output[position - 1]) || inCharset(output[position + value.length]))
+    ) {
+      position = output.indexOf(value, position + 1);
+    }
+    if (position < 0) continue;
+    const lineStart = output.lastIndexOf("\n", position - 1) + 1;
+    const prefix = output.slice(lineStart, position);
+    const attempts: string[] = [];
+    // The last one, two and three whole words before the value, with their separators.
+    const words = [...prefix.matchAll(/\S+\s*/g)];
+    for (const count of [1, 2, 3]) {
+      const word = words[words.length - count];
+      if (word !== undefined) attempts.push(prefix.slice(word.index));
+    }
+    attempts.push(lineStart > 0 ? output.slice(lineStart - 1, position) : prefix);
+    if (position === 0) attempts.push("");
+    for (const attempt of attempts) {
+      if (attempt.length === 0 && position !== 0) continue;
+      const locator = { before: attempt, charset };
+      if (extractPrintedValue(output, locator) === value) return { producer, locator };
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 /**

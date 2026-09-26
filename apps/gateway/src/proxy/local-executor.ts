@@ -574,13 +574,32 @@ export class LocalArtifactExecutor {
           hole.embedded === undefined
             ? tokens[hole.token]
             : programs.find((program) => program.anchor === hole.token)?.tokens[hole.embedded];
-        return hole.binding.type === "input" &&
-          token !== undefined &&
-          recorded.slice(token.start, token.end) === token.raw &&
-          (hole.span === undefined ||
-            (typeof token.value === "string" && hole.span.end <= token.value.length))
-          ? [{ token, name: hole.binding.name, span: hole.span }]
-          : [];
+        if (token === undefined || recorded.slice(token.start, token.end) !== token.raw) return [];
+        if (
+          hole.span !== undefined &&
+          (typeof token.value !== "string" || hole.span.end > token.value.length)
+        ) {
+          return [];
+        }
+        if (hole.binding.type === "input") {
+          return [{ token, name: hole.binding.name, span: hole.span, parameter: true }];
+        }
+        // A value an earlier step printed: the recorded one is stale, so name where it comes from.
+        if (hole.binding.type === "extract") {
+          const producer = hole.binding.stepId;
+          const position = plan.steps.findIndex((entry) => entry.id === producer);
+          return position < 0
+            ? []
+            : [
+                {
+                  token,
+                  name: `output of step ${position + 1}`,
+                  span: hole.span,
+                  parameter: false,
+                },
+              ];
+        }
+        return [];
       });
       // Span holes show `{input}` inside their token's recorded text: at the same offsets of the
       // raw text when the value appears there verbatim, else inside the decoded value.
@@ -609,10 +628,12 @@ export class LocalArtifactExecutor {
       }
       return {
         text,
-        parameters: bound.map(({ token, name, span }) =>
-          span === undefined
-            ? `${name} = ${token.value ?? token.raw}`
-            : `${name} = ${(token.value as string).slice(span.start, span.end)}`,
+        parameters: bound.flatMap(({ token, name, span, parameter }) =>
+          !parameter
+            ? []
+            : span === undefined
+              ? [`${name} = ${token.value ?? token.raw}`]
+              : [`${name} = ${(token.value as string).slice(span.start, span.end)}`],
         ),
       };
     };

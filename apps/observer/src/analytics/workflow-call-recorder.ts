@@ -448,7 +448,7 @@ export class WorkflowCallRecorder {
         };
         const heldOut = this.heldOutSoFar(state, call);
         if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
-        const relationships = this.relateLocalCall(state, call);
+        const relationships = this.relateLocalCall(state, call, event.sessionId);
         if (relationships.dependsOnCallIds.length > 0)
           carrier.dependsOnCallIds = relationships.dependsOnCallIds;
         const candidates = unprotectedCandidates(
@@ -825,7 +825,7 @@ export class WorkflowCallRecorder {
 
     const state = this.sessionState(event.sessionId);
     const call = this.recordLocalCall(state, event, parameters, program);
-    const relationships = this.relateLocalCall(state, call);
+    const relationships = this.relateLocalCall(state, call, event.sessionId);
     carrier.executionIndex = call.executionIndex;
     carrier.baselineInputs = { ...call.argumentReferences };
     const heldOut = this.heldOutSoFar(state, call);
@@ -1086,6 +1086,7 @@ export class WorkflowCallRecorder {
   private relateLocalCall(
     state: SessionDerivationState,
     call: LocalCall,
+    sessionId: string,
   ): { dependsOnCallIds: string[]; candidates: WorkflowCallCandidate[] } {
     const candidates: WorkflowCallCandidate[] = [];
     const calls = this.callsOf(state, call.executionIndex);
@@ -1142,6 +1143,32 @@ export class WorkflowCallRecorder {
         reason: "equal-to-earlier-result",
         ...(candidate.evidence === undefined ? {} : { evidence: candidate.evidence }),
         missing: candidate.missing,
+      });
+    }
+    // A value an earlier call printed. The locator is text from that call's output, so it is kept
+    // in the local store and only its reference is proposed.
+    for (const extract of derivation.extracts) {
+      if (extract.stepId !== ownStepId) continue;
+      const producingIndex = Number.parseInt(extract.producerStepId.slice("local".length), 10);
+      const producingCall = calls[producingIndex];
+      if (producingCall === undefined) continue;
+      const locatorText = JSON.stringify(extract.locator);
+      // The identity covers the locator itself, so an immutable entry is never rewritten.
+      const locator = workflowPrivateReference(
+        "value",
+        this.observeAccess?.workspaceId,
+        this.privateRepresentation,
+        [sessionId, call.callId, "extract-locator:v1", extract.argument, extract.path, locatorText],
+      );
+      this.privateValues.set(locator, locatorText, this.observeAccess, this.privateRepresentation);
+      candidates.push({
+        argument: extract.argument,
+        path: extract.path,
+        proposed: { kind: "extract", callId: producingCall.callId, locator },
+        reason: "printed-by-earlier-step",
+        evidence: extract.evidence,
+        missing:
+          "one recording does not establish that this token was the value the earlier step printed rather than a literal that happens to match it",
       });
     }
     return { dependsOnCallIds, candidates };

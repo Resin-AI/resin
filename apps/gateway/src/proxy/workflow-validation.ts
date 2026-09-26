@@ -207,6 +207,12 @@ export function createLocalWorkflowValidator(
           recordedDefaults.push(candidate);
         }
       }
+      // A single recording can still show that a later command reads a value an earlier step
+      // printed: the replay's own producer prints a fresh value, and only the bound plan can use
+      // it. Those proposals are decided by replay against the baseline like held-out candidates.
+      const baselineExtracts = baselineOnly
+        ? candidates.filter((candidate) => candidate.proposed.kind === "extract")
+        : [];
       const environment = await demonstrationEnvironment({
         plan: baselineOnly ? { ...replayPlan, heldOut: replayPlan.baseline } : plan,
         candidates: baselineOnly ? [] : candidates,
@@ -224,7 +230,7 @@ export function createLocalWorkflowValidator(
         };
       const decided = await validateAndConfirmCandidates({
         plan: replayPlan,
-        candidates: baselineOnly ? [] : candidates,
+        candidates: baselineOnly ? baselineExtracts : candidates,
         environment,
       });
       if (decided.verification?.status === "verified") {
@@ -260,6 +266,8 @@ export function createLocalWorkflowValidator(
       return {
         verdicts: (baselineOnly
           ? candidates.map((candidate) => {
+              const extracted = decided.outcomes.find((outcome) => outcome.candidate === candidate);
+              if (extracted !== undefined) return extracted;
               const defaulted =
                 recordedDefaults.includes(candidate) && decided.verification?.status === "verified";
               return {
