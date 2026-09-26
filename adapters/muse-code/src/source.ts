@@ -182,9 +182,7 @@ export class MuseSessionEventSource implements SessionEventSource {
         const remainingQuantumBytes = READ_QUANTUM_BYTES - bytesReadThisQuantum;
         const pendingAllowance = MAX_PENDING_RECORD_BYTES - pending.length + 1;
         const preferredChunkBytes =
-          droppingOversizedLine || pending.length > 0
-            ? READ_QUANTUM_BYTES
-            : READ_CHUNK_BYTES;
+          droppingOversizedLine || pending.length > 0 ? READ_QUANTUM_BYTES : READ_CHUNK_BYTES;
         const bytesToRead = Math.min(
           preferredChunkBytes,
           remainingBytes,

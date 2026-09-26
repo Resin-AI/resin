@@ -4,7 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import {
   type ConfigFsBridge,
-  type HarnessDefinition,
+  type HarnessInstallDefinition,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   applyManagedBlock,
   defaultFsBridge,
@@ -183,7 +183,7 @@ export async function removeHarnessMcpConfigurations(options: {
 }
 
 async function removeHarnessRegistration(
-  definition: HarnessDefinition,
+  definition: HarnessInstallDefinition,
   home: string,
   env: NodeJS.ProcessEnv,
   fsBridge: ConfigFsBridge,

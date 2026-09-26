@@ -14,7 +14,7 @@ import type {
   SessionStatus,
 } from "@resin/harness-contracts";
 import { z } from "zod";
-import { getOmpSessionExitReason } from "./decoder.js";
+import { getOmpSessionExitReason } from "./session-exit.js";
 
 const execFileAsync = promisify(execFile);
 const ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 60_000;

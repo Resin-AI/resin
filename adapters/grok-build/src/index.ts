@@ -1,4 +1,9 @@
-export { grokBuildHarness, GROK_GUIDANCE_MARKERS, GROK_RESIN_GUIDANCE } from "./harness.js";
+export { grokBuildHarness } from "./harness.js";
+export {
+  GROK_GUIDANCE_MARKERS,
+  GROK_RESIN_GUIDANCE,
+  grokBuildInstallHarness,
+} from "./install.js";
 export {
   GrokHarnessAdapter,
   GROK_ADAPTER_CAPABILITIES,

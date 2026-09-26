@@ -150,8 +150,9 @@ export class MuseHarnessAdapter implements StrictHarnessAdapter {
   async resolveActiveSession(workspace: HarnessWorkspace): Promise<HarnessSession | null> {
     const sessions = await this.listSessions(workspace);
     return (
-      sessions.find((session) => session.status === "active" && !session.metadata.parentSessionId) ??
-      null
+      sessions.find(
+        (session) => session.status === "active" && !session.metadata.parentSessionId,
+      ) ?? null
     );
   }
 

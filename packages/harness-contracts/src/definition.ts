@@ -154,10 +154,11 @@ export type HarnessNativeToolInvoker = (
 ) => Promise<HarnessNativeToolResult>;
 
 /**
- * Everything the CLI and observer need to support one harness. Each adapter package exports
- * one definition; app registries are plain arrays of them.
+ * The install-side half of a harness: what the CLI installer, status, uninstall, and reconciler
+ * need. Adapter packages export it from their `./install` subpath, which must not load session
+ * discovery or decoding, so the standalone install helper stays small.
  */
-export interface HarnessDefinition {
+export interface HarnessInstallDefinition {
   readonly id: HarnessId;
   /** Installer/uninstall name, e.g. "Codex CLI". */
   readonly displayName: string;
@@ -173,6 +174,13 @@ export interface HarnessDefinition {
   readonly guidance?: HarnessGuidanceSurface;
   /** Extra Resin-owned artifacts installed after registration and removed on uninstall. */
   readonly installExtensions?: readonly HarnessInstallExtension[];
+}
+
+/**
+ * Everything the CLI and observer need to support one harness. Each adapter package exports
+ * one definition; app registries are plain arrays of them.
+ */
+export interface HarnessDefinition extends HarnessInstallDefinition {
   /** Session discovery adapter used by the observer (historical sessions included). */
   createAdapter(): HarnessAdapter;
   createDecoder(): HarnessRecordDecoder;

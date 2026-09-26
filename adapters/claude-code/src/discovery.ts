@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { nowIso } from "@resin/contracts";
+import { nowIso } from "@resin/contracts/common";
 import type { ProbeInstallationOptions } from "@resin/harness-contracts";
 import {
   type ConfigFsBridge,

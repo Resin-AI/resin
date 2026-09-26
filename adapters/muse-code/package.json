@@ -17,7 +17,7 @@
     "access": "public",
     "provenance": true
   },
-  "files": ["dist", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,6 +26,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./install": {
+      "types": "./dist/install.d.ts",
+      "import": "./dist/install.js",
+      "default": "./dist/install.js"
     }
   },
   "scripts": {

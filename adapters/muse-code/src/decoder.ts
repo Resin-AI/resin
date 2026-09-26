@@ -171,7 +171,12 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         ];
       case "session.resumed":
         return [
-          { ...base, type: "session_lifecycle", lifecycleType: "resume", harnessName: MUSE_HARNESS_ID },
+          {
+            ...base,
+            type: "session_lifecycle",
+            lifecycleType: "resume",
+            harnessName: MUSE_HARNESS_ID,
+          },
         ];
       case "session.end":
         return [
@@ -343,7 +348,8 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       provider: "meta",
       ...(model ? { model } : {}),
       accountingVersion: MUSE_ACCOUNTING_VERSION,
-      availability: inputTokens !== undefined && outputTokens !== undefined ? "complete" : "partial",
+      availability:
+        inputTokens !== undefined && outputTokens !== undefined ? "complete" : "partial",
       inputTokens: inputTokens ?? null,
       outputTokens: outputTokens ?? null,
       reasoningTokens: asCount(usage.reasoning_tokens) ?? null,
@@ -380,11 +386,16 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
     ];
   }
 
-  private resolveTool(name: string, state: SessionState): { toolName: string; connection?: string } {
+  private resolveTool(
+    name: string,
+    state: SessionState,
+  ): { toolName: string; connection?: string } {
     const known = state.mcpTools.get(name);
     if (known) return { toolName: known.tool, connection: known.server };
     const match = /^mcp__(.+?)__(.+)$/.exec(name);
-    return match?.[1] && match[2] ? { toolName: match[2], connection: match[1] } : { toolName: name };
+    return match?.[1] && match[2]
+      ? { toolName: match[2], connection: match[1] }
+      : { toolName: name };
   }
 
   private decodeToolCalls(
@@ -486,7 +497,10 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
   private decodeShellResult(
     text: string,
     call: CallState,
-  ): Omit<Extract<IntermediateSessionEvent, { type: "command_exec" }>, "sessionId" | "timestamp"> | null {
+  ): Omit<
+    Extract<IntermediateSessionEvent, { type: "command_exec" }>,
+    "sessionId" | "timestamp"
+  > | null {
     let parsed: Json | undefined;
     try {
       parsed = asRecord(JSON.parse(text));

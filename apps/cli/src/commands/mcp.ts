@@ -7,7 +7,7 @@ import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
-import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-registry.js";
+import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-runtime-registry.js";
 import { registerRunningGateway } from "../updates/gateway-registry.js";
 
 const PackageJsonSchema = z.object({

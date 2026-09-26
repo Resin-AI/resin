@@ -18,3 +18,4 @@ export * from "./refresh.js";
 
 // Harness Definition (registry entry)
 export * from "./harness.js";
+export * from "./install.js";

@@ -311,7 +311,8 @@ async function populateOmpProgramObservation(
   // the spill either as a byte truncation (`meta.truncation`) or as column truncation
   // (`meta.limits.columnTruncated`). Both name the same artifact; the display text is never the result.
   const truncation = meta?.truncation;
-  const truncationDeclared = truncation !== undefined && truncation !== null && truncation !== false;
+  const truncationDeclared =
+    truncation !== undefined && truncation !== null && truncation !== false;
   const columnTruncationDeclared =
     columnTruncated !== undefined && columnTruncated !== null && columnTruncated !== false;
   if (unrecognizedTruncation) {
@@ -324,10 +325,7 @@ async function populateOmpProgramObservation(
       ...(columnTruncationDeclared ? [asRecord(columnTruncated)?.artifactId] : []),
     ];
     const artifactId = artifactIds[0];
-    if (
-      !validArtifactId(artifactId) ||
-      artifactIds.some((candidate) => candidate !== artifactId)
-    ) {
+    if (!validArtifactId(artifactId) || artifactIds.some((candidate) => candidate !== artifactId)) {
       ompProgramObservations.set(record, { callId: native.callId, unavailable: true });
       return;
     }
