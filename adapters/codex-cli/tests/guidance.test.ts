@@ -1,11 +1,30 @@
-import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
-import { describe, expect, it } from "vitest";
 import {
-  CODEX_GUIDANCE_END_MARKER,
-  CODEX_GUIDANCE_START_MARKER,
-  applyCodexGuidance,
-  resolveCodexAgentsPath,
-} from "../../src/installer/codex-instructions.js";
+  type ConfigFsBridge,
+  InMemoryConfigFsBridge,
+  type ManagedBlockResult,
+  applyManagedBlock,
+} from "@resin/harness-contracts";
+import { describe, expect, it } from "vitest";
+import { codexHarness } from "../src/harness.js";
+import { CODEX_GUIDANCE_MARKERS, resolveCodexAgentsPath } from "../src/instructions.js";
+
+const CODEX_GUIDANCE_START_MARKER = CODEX_GUIDANCE_MARKERS.start;
+const CODEX_GUIDANCE_END_MARKER = CODEX_GUIDANCE_MARKERS.end;
+
+/** Installs (or removes) Codex's guidance block exactly as `resin init`/`uninstall` do. */
+function applyCodexGuidance(
+  filePath: string,
+  fs: ConfigFsBridge,
+  options: { install: boolean; dryRun?: boolean },
+): Promise<ManagedBlockResult> {
+  return applyManagedBlock(
+    fs,
+    filePath,
+    CODEX_GUIDANCE_MARKERS,
+    options.install ? (codexHarness.guidance?.body ?? null) : null,
+    { dryRun: options.dryRun },
+  );
+}
 
 const AGENTS = "/home/dev/.codex/AGENTS.md";
 

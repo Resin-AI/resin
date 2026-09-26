@@ -1,26 +1,23 @@
 import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { planClaudeMcpConfig, probeClaudeInstallation } from "@resin/adapter-claude-code";
-import { planCodexMcpConfig, probeCodexInstallation } from "@resin/adapter-codex";
-import { planOmpMcpConfig, probeOmpInstallation } from "@resin/adapter-omp";
+import type { HarnessId } from "@resin/contracts";
 import {
+  CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   type ConfigBackup,
   type ConfigFsBridge,
   type ConfigMutationPlan,
   type HarnessInstallation,
+  type HarnessMcpConfigSurface,
   type HarnessWorkspace,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
   isRecognizedResinMcpEntry,
 } from "@resin/harness-contracts";
 import { parse as parseToml } from "smol-toml";
-import { resolveCodexHome } from "./codex-instructions.js";
+import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../harness-registry.js";
 
 export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
-
-export const SUPPORTED_HARNESS_IDS = ["claude-code", "codex-cli", "omp"] as const;
-export type SupportedHarnessId = (typeof SUPPORTED_HARNESS_IDS)[number];
 
 export type HarnessConfigValue =
   | string
@@ -43,20 +40,8 @@ function isConfigObject(
   );
 }
 
-export const HARNESS_DISPLAY_NAMES = {
-  "claude-code": "Claude Code CLI",
-  "codex-cli": "Codex CLI",
-  omp: "Oh My Pi (OMP)",
-} as const satisfies Readonly<Record<SupportedHarnessId, string>>;
-
-export const RESIN_MCP_SERVER_KEYS = {
-  "claude-code": "resin",
-  "codex-cli": "resin",
-  omp: "resin",
-} as const satisfies Readonly<Record<SupportedHarnessId, string>>;
-
 export interface HarnessConfigResult {
-  readonly harnessId: SupportedHarnessId;
+  readonly harnessId: HarnessId;
   readonly displayName: string;
   readonly installed: boolean;
   readonly configured: boolean;
@@ -68,7 +53,7 @@ export interface HarnessConfigResult {
 }
 
 export interface MultiHarnessConfigOptions {
-  harnesses?: SupportedHarnessId[];
+  harnesses?: HarnessId[];
   workspacePath?: string;
   gatewayUrl?: string;
   customHome?: string;
@@ -82,7 +67,7 @@ export interface MultiHarnessConfigOptions {
 }
 
 export interface HarnessAdapterOperationOptions {
-  readonly harnessId: SupportedHarnessId;
+  readonly harnessId: HarnessId;
   readonly targetPath: string;
   readonly workspacePath: string;
   readonly gatewayUrl: string;
@@ -91,7 +76,7 @@ export interface HarnessAdapterOperationOptions {
 }
 
 export interface HarnessProbeOptions {
-  readonly harnessId: SupportedHarnessId;
+  readonly harnessId: HarnessId;
   readonly targetPath: string;
   readonly customHome: string;
   readonly env: NodeJS.ProcessEnv;
@@ -105,33 +90,11 @@ export interface HarnessProbeOptions {
  * pass a synthetic home in tests can omit it and remain isolated from ambient state.
  */
 export function resolveHarnessConfigPath(
-  harnessId: SupportedHarnessId,
+  harnessId: HarnessId,
   customHome: string,
   env: NodeJS.ProcessEnv = {},
 ): string {
-  switch (harnessId) {
-    case "claude-code": {
-      const configDirectory = env.CLAUDE_CONFIG_DIR;
-      return configDirectory && configDirectory.trim().length > 0
-        ? path.join(path.resolve(configDirectory), ".claude.json")
-        : path.join(customHome, ".claude.json");
-    }
-    case "codex-cli": {
-      const configPath = env.CODEX_CONFIG_PATH;
-      if (configPath && configPath.trim().length > 0) {
-        return path.resolve(configPath);
-      }
-      return path.join(resolveCodexHome(customHome, env), "config.toml");
-    }
-    case "omp": {
-      const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find(
-        (candidate): candidate is string =>
-          typeof candidate === "string" && candidate.trim().length > 0,
-      );
-      const ompHome = configuredHome ? path.resolve(configuredHome) : path.join(customHome, ".omp");
-      return path.join(ompHome, "agent", "mcp.json");
-    }
-  }
+  return getHarnessDefinition(harnessId).mcpConfig.resolvePath(customHome, env);
 }
 
 /**
@@ -148,21 +111,12 @@ export function resolveInstalledResinMcpCommand(customHome: string): string {
 export async function probeHarnessInstallation(
   options: HarnessProbeOptions,
 ): Promise<HarnessInstallation | null> {
-  switch (options.harnessId) {
-    case "claude-code":
-      return probeClaudeInstallation({ customConfigPath: options.targetPath }, options.fsBridge);
-    case "codex-cli":
-      return probeCodexInstallation({
-        customConfigPath: options.targetPath,
-        env: { ...options.env, HOME: options.customHome },
-      });
-    case "omp":
-      return probeOmpInstallation({
-        customConfigPath: options.targetPath,
-        env: options.env,
-        homeDir: options.customHome,
-      });
-  }
+  return getHarnessDefinition(options.harnessId).probeInstallation({
+    targetPath: options.targetPath,
+    home: options.customHome,
+    env: options.env,
+    fsBridge: options.fsBridge,
+  });
 }
 
 /**
@@ -182,24 +136,19 @@ export async function planHarnessRegistration(
     mcpConfigPath: options.targetPath,
     metadata: {},
   };
-  switch (options.harnessId) {
-    case "claude-code":
-      return planClaudeMcpConfig(workspace, options.gatewayUrl, options.fsBridge, command);
-    case "codex-cli":
-      return planCodexMcpConfig({
-        targetPath: options.targetPath,
-        command,
-        args: ["mcp"],
-        fsBridge: options.fsBridge,
-      });
-    case "omp":
-      return planOmpMcpConfig({
-        customConfigPath: options.targetPath,
-        command,
-        args: ["mcp"],
-        fsBridge: options.fsBridge,
-      });
-  }
+  return getHarnessDefinition(options.harnessId).mcpConfig.planRegistration({
+    targetPath: options.targetPath,
+    workspace,
+    gatewayUrl: options.gatewayUrl,
+    command,
+    args: CANONICAL_RESIN_MCP_ARGS,
+    fsBridge: options.fsBridge,
+  });
+}
+
+/** Whether a registration at `targetPath` is TOML (Codex-style) rather than JSON. */
+export function isTomlRegistrationPath(mcpConfig: HarnessMcpConfigSurface, targetPath: string): boolean {
+  return mcpConfig.format === "codex-toml" && !targetPath.endsWith(".json");
 }
 
 function isExpectedResinStdioServer(server: HarnessConfigRecord, expectedCommand: string): boolean {
@@ -218,80 +167,36 @@ function isExpectedResinStdioServer(server: HarnessConfigRecord, expectedCommand
 }
 
 /**
- * Verifies one registration through its adapter. Codex TOML receives an additional
- * section-scoped URL check because its adapter verifier also scans unrelated sections.
+ * Verifies one registration: the definition's own verifier when it has one, else the entry
+ * under its server key must be Resin's stdio shim. TOML lookups are section-scoped.
  */
 export async function verifyHarnessRegistration(
   options: HarnessAdapterOperationOptions,
 ): Promise<boolean> {
   const expectedCommand = options.command ?? CANONICAL_RESIN_MCP_COMMAND;
-  if (options.harnessId === "codex-cli") {
-    if (options.targetPath.endsWith(".json")) {
-      const content = await options.fsBridge.readFile(options.targetPath);
-      if (content === null || content.trim().length === 0) {
-        return false;
-      }
-      try {
-        const config = asObject(JSON.parse(content));
-        if (config === null) {
-          return false;
-        }
-        const server = findJsonServerConfig(
-          config,
-          options.harnessId,
-          RESIN_MCP_SERVER_KEYS[options.harnessId],
-        );
-        if (server === null) {
-          return false;
-        }
-        return isExpectedResinStdioServer(server, expectedCommand);
-      } catch {
-        return false;
-      }
-    }
-    const content = await options.fsBridge.readFile(options.targetPath);
-    if (content === null || content.trim().length === 0) {
-      return false;
-    }
-    try {
-      const server = findCodexTomlServerConfig(
-        parseCodexTomlConfig(content),
-        RESIN_MCP_SERVER_KEYS[options.harnessId],
-      );
-      if (server === null) {
-        return false;
-      }
-      return isExpectedResinStdioServer(server, expectedCommand);
-    } catch {
-      return false;
-    }
+  const { mcpConfig } = getHarnessDefinition(options.harnessId);
+  if (mcpConfig.verifyRegistration !== undefined) {
+    return mcpConfig.verifyRegistration({
+      targetPath: options.targetPath,
+      command: expectedCommand,
+      fsBridge: options.fsBridge,
+    });
   }
-
-  if (options.harnessId === "omp" || options.harnessId === "claude-code") {
-    const content = await options.fsBridge.readFile(options.targetPath);
-    if (content === null || content.trim().length === 0) {
-      return false;
-    }
-    try {
-      const config = asObject(JSON.parse(content));
-      if (config === null) {
-        return false;
-      }
-      const server = findJsonServerConfig(
-        config,
-        options.harnessId,
-        RESIN_MCP_SERVER_KEYS[options.harnessId],
-      );
-      if (server === null) {
-        return false;
-      }
-      return isExpectedResinStdioServer(server, expectedCommand);
-    } catch {
-      return false;
-    }
+  if (mcpConfig.format === "owned-file") {
+    return false;
   }
-
-  return false;
+  const content = await options.fsBridge.readFile(options.targetPath);
+  if (content === null || content.trim().length === 0) {
+    return false;
+  }
+  try {
+    const server = isTomlRegistrationPath(mcpConfig, options.targetPath)
+      ? findCodexTomlServerConfig(parseCodexTomlConfig(content), mcpConfig.serverKey)
+      : findJsonServerConfig(asObject(JSON.parse(content)), mcpConfig);
+    return server !== null && isExpectedResinStdioServer(server, expectedCommand);
+  } catch {
+    return false;
+  }
 }
 
 const RESIN_TRANSPORT_FIELDS = ["type", "url", "command", "args"] as const;
@@ -382,14 +287,15 @@ export function projectUserOwnedCodexToml(
 export { projectUserOwnedCodexToml as projectCodexTomlUserConfig };
 
 function findJsonServerConfig(
-  config: HarnessConfigRecord,
-  harnessId: SupportedHarnessId,
-  serverName: string,
+  config: HarnessConfigRecord | null,
+  mcpConfig: HarnessMcpConfigSurface,
 ): HarnessConfigRecord | null {
-  const containerKeys = harnessId === "codex-cli" ? ["mcpServers", "mcp_servers"] : ["mcpServers"];
-  const matches = containerKeys.flatMap((key) => {
+  if (config === null) {
+    return null;
+  }
+  const matches = mcpConfig.jsonContainerKeys.flatMap((key) => {
     const container = asObject(config[key]);
-    const entry = container === null ? null : asObject(container[serverName]);
+    const entry = container === null ? null : asObject(container[mcpConfig.serverKey]);
     return entry === null ? [] : [entry];
   });
   return matches[0] ?? null;
