@@ -175,6 +175,30 @@ export interface UpdateEngineResult {
   readonly snapshot: UpdateStatusSnapshot;
 }
 
+export type UpdateCheckStatus =
+  | "disabled"
+  | "update-available"
+  | "already-current"
+  | "downgrade-blocked"
+  | "quarantined"
+  | "offline"
+  | "failed";
+
+export interface UpdateCheckRequest {
+  readonly signal?: AbortSignal;
+}
+
+/** Outcome of a read-only signed-channel availability check. */
+export interface UpdateCheckResult {
+  readonly status: UpdateCheckStatus;
+  /** Effective policy, or null when the configuration could not be read. */
+  readonly policy: UpdatePolicy | null;
+  readonly channel: UpdateChannel;
+  readonly currentVersion: string;
+  readonly targetVersion?: string;
+  readonly error?: string;
+}
+
 type UpdateServiceManager = Pick<UserServiceManager, "start" | "stop" | "status"> &
   Partial<Pick<UserServiceManager, "install" | "getUnitDefinition" | "getUnitPath">>;
 type UpdateLockHandle = Pick<UpdateLock, "release">;
@@ -678,6 +702,80 @@ export class UpdateEngine {
     }
   }
 
+  /** Reads the effective update policy from config.json and constructor layers. */
+  async readPolicy(): Promise<UpdatePolicy> {
+    return this.resolvePolicy({});
+  }
+
+  /**
+   * Read-only availability check for resident schedulers. It authenticates the
+   * signed channel but never takes the update lock, writes the journal,
+   * downloads artifacts, or touches the running service.
+   */
+  async checkForUpdate(request: UpdateCheckRequest = {}): Promise<UpdateCheckResult> {
+    this.throwIfAborted(request.signal);
+    let currentVersion: string;
+    let policy: UpdatePolicy;
+    try {
+      currentVersion = (await this.readVersionMetadata()).version;
+      policy = await this.resolvePolicy({});
+    } catch (error) {
+      return {
+        status: "failed",
+        policy: null,
+        channel: "stable",
+        currentVersion: await this.readCurrentVersion(),
+        error: safeDiagnostic(error),
+      };
+    }
+    const base = { policy, channel: policy.channel, currentVersion };
+    if (!policy.autoUpdate) return { ...base, status: "disabled" };
+
+    let release: ResolvedProductionRelease;
+    try {
+      release = await this.resolveRelease({
+        platform: this.platformInfo,
+        channel: policy.channel,
+        channelUrl: this.channelUrl ?? this.env.RESIN_RELEASE_CHANNEL_URL,
+        currentInstalledVersion: currentVersion,
+        currentActiveVersion: currentVersion,
+        fetchImpl: this.customFetch,
+        env: this.env,
+        allowInsecureHttpForTests: this.env.RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES === "1",
+      });
+      this.assertTrustedRelease(release);
+    } catch (error) {
+      if (request.signal?.aborted) throw error;
+      return {
+        ...base,
+        status: isOfflineError(error) ? "offline" : "failed",
+        error: safeDiagnostic(error),
+      };
+    }
+    this.throwIfAborted(request.signal);
+
+    const targetVersion = normalizeVersion(release.version);
+    let snapshot: UpdateStatusSnapshot | null = null;
+    try {
+      snapshot = await readUpdateStatusSnapshot({
+        resinHome: this.resinHome,
+        fsBridge: this.fsBridge,
+      });
+    } catch {
+      // The update worker owns journal recovery; an unreadable journal cannot hide a release.
+    }
+    if (snapshot && this.isQuarantined(snapshot, targetVersion)) {
+      return { ...base, status: "quarantined", targetVersion };
+    }
+    if (targetVersion === normalizeVersion(currentVersion)) {
+      return { ...base, status: "already-current", targetVersion };
+    }
+    if (compareSemver(targetVersion, currentVersion) < 0 && !policy.allowDowngrades) {
+      return { ...base, status: "downgrade-blocked", targetVersion };
+    }
+    return { ...base, status: "update-available", targetVersion };
+  }
+
   private async runLocked(request: UpdateEngineRunRequest): Promise<UpdateEngineResult> {
     const mode = request.mode ?? "manual";
     this.throwIfAborted(request.signal);
@@ -974,7 +1072,7 @@ export class UpdateEngine {
       ]);
     }
 
-    const lease = await this.acquireActivationLease(request.signal);
+    const lease = await this.acquireActivationLease(request.signal, request.mode ?? "manual");
     const activity = lease.activity;
     if (activity.state !== "inactive") {
       const deferralReason: UpdateDeferralReason =
@@ -1450,6 +1548,13 @@ export class UpdateEngine {
       const health = await ipcClient.getHealth();
       ipcResponsive = !["failed", "stopped", "stopping"].includes(health.status);
       if (!ipcResponsive) failures.push(`daemon health is ${health.status}`);
+      const runningVersion = normalizeVersion(String(health.version ?? ""));
+      if (ipcResponsive && runningVersion !== normalizeVersion(context.targetVersion)) {
+        ipcResponsive = false;
+        failures.push(
+          `daemon reports v${runningVersion || "unknown"} instead of v${normalizeVersion(context.targetVersion)}`,
+        );
+      }
       const gateway = await runVerificationSuite({
         homeDir: this.homeDir,
         resinHome: this.resinHome,
@@ -1462,8 +1567,9 @@ export class UpdateEngine {
       mcpResponsive = gateway.passed;
       if (!mcpResponsive) failures.push("MCP gateway is unresponsive");
     } catch (error) {
+      // The previous version answered on this socket before cutover, so a candidate
+      // daemon that never becomes reachable is the candidate's failure, not the probe's.
       failures.push(`IPC/MCP probe failed: ${safeDiagnostic(error)}`);
-      infrastructureFailure = true;
     } finally {
       await ipcClient.close().catch(() => {});
     }
@@ -1487,7 +1593,10 @@ export class UpdateEngine {
     };
   }
 
-  private async acquireActivationLease(signal?: AbortSignal): Promise<ActivationLease> {
+  private async acquireActivationLease(
+    signal?: AbortSignal,
+    mode: UpdateRunMode = "manual",
+  ): Promise<ActivationLease> {
     let serviceState: ServiceStatusInfo;
     try {
       this.throwIfAborted(signal);
@@ -1573,6 +1682,20 @@ export class UpdateEngine {
       if (initialHealth.status === "stopped" && this.countActiveWork(initialHealth) === 0) {
         return {
           activity: { state: "inactive", activeCount: 0 },
+          serviceState,
+          drainInitiated: false,
+        };
+      }
+
+      // Background updates never interrupt in-flight work: they only drain an idle daemon.
+      const initialActiveCount = this.countActiveWork(initialHealth);
+      if (mode === "background" && initialActiveCount > 0) {
+        return {
+          activity: {
+            state: "active",
+            activeCount: initialActiveCount,
+            reason: "background updates activate only while the daemon is idle",
+          },
           serviceState,
           drainInitiated: false,
         };

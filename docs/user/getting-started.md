@@ -172,6 +172,36 @@ Ask the harness to search the catalog:
 
 ---
 
+## 6. Updates
+
+Installs from the release installer update themselves. The background service checks the configured release channel every 6 hours by default, downloads and verifies signed releases, and installs them automatically. A new version is only activated while Resin is idle (no in-flight sessions); otherwise activation is deferred and retried later. After activation the service is health-checked, and a release that fails is automatically rolled back and quarantined so it is not retried. Running `resin mcp` gateways keep the old version until the harness restarts them.
+
+`resin status --verbose` shows the channel, automatic-update schedule, next check, and the last result; `resin status` and `resin doctor` print a one-time `Updated automatically: vA -> vB` notice after an update, `resin status` reports MCP gateways that still run an older version, and `resin doctor` warns when an update was rolled back or failed.
+
+Configure updates in `~/.resin/config/config.json` (or the file named by `RESIN_CONFIG_FILE`):
+
+```json
+{
+  "updates": {
+    "autoUpdate": true,
+    "channel": "stable",
+    "checkIntervalMinutes": 360,
+    "maintenanceWindow": { "start": "02:00", "end": "05:00", "timeZone": "Europe/Berlin" },
+    "allowDowngrades": false
+  }
+}
+```
+
+- `autoUpdate`: set to `false` to disable automatic updates.
+- `channel`: `stable`, `beta`, or `nightly`.
+- `checkIntervalMinutes`: `5` to `10080` (7 days); default `360`.
+- `maintenanceWindow`: optional daily `HH:mm` window (`timeZone` defaults to UTC; the window may cross midnight) that limits when automatic updates run.
+- `allowDowngrades`: allow moving to an older release when the channel points to one; default `false`.
+
+Manual `resin upgrade` still works whether or not automatic updates are enabled. Automatic updates apply only to installs from the release installer, not to source checkouts or npm installs.
+
+---
+
 ## Next Steps
 
 - [Configuration Reference](configuration.md)
