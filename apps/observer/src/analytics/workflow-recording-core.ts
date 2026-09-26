@@ -506,8 +506,13 @@ export function reconstructWorkflowFromEvents(
     // The observation was just pushed, so this call's step is the last one.
     const ownStepId = `step${observations.length - 1}`;
     stepIdByCallId.set(scopedCallKey, ownStepId);
-    // Steps are numbered in the order the calls arrived, which is the order the demonstration used.
-    if (executionIndex !== undefined) stepIdByPosition.set(observations.length - 1, ownStepId);
+    // A demonstration lists each repeated call under its place in the execution, and a recording
+    // may keep only some of an execution's calls: a step is addressed by the place the capture
+    // recorded for its own call, never by where it falls among this recording's steps. A call with
+    // no recorded place names no demonstration position.
+    if (executionIndex !== undefined && carrier?.executionPosition !== undefined) {
+      stepIdByPosition.set(carrier.executionPosition, ownStepId);
+    }
     if (carrier?.candidates !== undefined) {
       for (const candidate of carrier.candidates) {
         if (candidate.proposed.kind !== "result" && candidate.proposed.kind !== "extract") {

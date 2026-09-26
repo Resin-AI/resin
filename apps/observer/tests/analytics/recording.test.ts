@@ -67,6 +67,7 @@ function recordingEvents(): {
     origins: { command: { type: "private", reference: "private:value:command" } },
     inputs: [],
     executionIndex: 0,
+    executionPosition: 0,
   };
   const store: WorkflowCallCarrier = {
     runtime: "resin-tool-protocol",
@@ -93,6 +94,7 @@ function recordingEvents(): {
       },
     ],
     executionIndex: 0,
+    executionPosition: 1,
   };
   const repeatRun: WorkflowCallCarrier = {
     ...run,

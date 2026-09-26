@@ -88,6 +88,11 @@ export interface WorkflowCallCarrier {
   candidates?: WorkflowCallCandidate[];
   /** Which execution of this session this call belongs to, so a recording can keep them apart. */
   executionIndex?: number;
+  /**
+   * This call's place among its execution's calls: the position a demonstration of that execution
+   * lists the repeat of this call under. A recording may keep only some of an execution's calls.
+   */
+  executionPosition?: number;
   /** Original call arguments, held by owner-scoped reference for baseline replay only. */
   baselineInputs?: Record<string, string>;
   /** The repeat of earlier work this call is part of, as far as it has repeated it yet. */
@@ -474,6 +479,12 @@ function isWorkflowCallCarrier(value: unknown): value is WorkflowCallCarrier {
     }
   }
   if (value.executionIndex !== undefined && !Number.isInteger(value.executionIndex)) return false;
+  if (
+    value.executionPosition !== undefined &&
+    (!Number.isInteger(value.executionPosition) || (value.executionPosition as number) < 0)
+  ) {
+    return false;
+  }
   if (value.baselineInputs !== undefined) {
     if (!isPlainObject(value.baselineInputs)) return false;
     if (
@@ -584,6 +595,7 @@ export function readWorkflowCallCarrier(value: unknown): WorkflowCallCarrier | u
     carrier.candidates = candidates;
   }
   if (value.executionIndex !== undefined) carrier.executionIndex = value.executionIndex;
+  if (value.executionPosition !== undefined) carrier.executionPosition = value.executionPosition;
   if (value.baselineInputs !== undefined) carrier.baselineInputs = { ...value.baselineInputs };
   if (value.heldOut !== undefined) {
     const heldOut = readHeldOut(value.heldOut);

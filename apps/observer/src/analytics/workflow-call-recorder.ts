@@ -145,6 +145,8 @@ interface LocalCall {
   };
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
+  /** This call's place among its execution's calls: the position a repeat of it is listed under. */
+  executionPosition: number;
 }
 
 /** One execution of a session: the calls one task made, in order. */
@@ -461,6 +463,7 @@ export class WorkflowCallRecorder {
           provenance,
           program,
           executionIndex: call.executionIndex,
+          executionPosition: call.executionPosition,
           baselineInputs: { ...call.argumentReferences },
         };
         const heldOut = this.heldOutSoFar(state, call);
@@ -662,6 +665,7 @@ export class WorkflowCallRecorder {
       provenance,
       program,
       executionIndex: call.executionIndex,
+      executionPosition: call.executionPosition,
       baselineInputs: { ...call.argumentReferences },
     };
     const heldOut = this.heldOutSoFar(state, call);
@@ -901,6 +905,7 @@ export class WorkflowCallRecorder {
         actualArguments,
       );
     carrier.executionIndex = local.executionIndex;
+    carrier.executionPosition = local.executionPosition;
     carrier.baselineInputs = { ...local.argumentReferences };
     const heldOut = this.heldOutSoFar(state, local);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
@@ -976,6 +981,7 @@ export class WorkflowCallRecorder {
     const call = this.recordLocalCall(state, event, parameters, program);
     const relationships = this.relateLocalCall(state, call, event.sessionId);
     carrier.executionIndex = call.executionIndex;
+    carrier.executionPosition = call.executionPosition;
     carrier.baselineInputs = { ...call.argumentReferences };
     const heldOut = this.heldOutSoFar(state, call);
     if (heldOut !== undefined && heldOut.inputs.length > 0) carrier.heldOut = heldOut;
@@ -1119,6 +1125,7 @@ export class WorkflowCallRecorder {
         : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
       executionIndex: execution.index,
+      executionPosition: execution.calls.length,
       arguments: parameters,
       argumentReferences: Object.fromEntries(
         Object.entries(parameters).map(([argument, value]) => [
