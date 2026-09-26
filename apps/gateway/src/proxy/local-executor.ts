@@ -19,6 +19,7 @@ import {
   normalizeSha256,
   tokenizeProgram,
   validateRecordedWorkflow,
+  workflowSinkStepIds,
 } from "@resin/contracts";
 import {
   FilePrivateValueStore,
@@ -57,7 +58,7 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
 
-import { composedResultValue } from "../meta/invoke-tool.js";
+import { composedResultValue, presentStepSections } from "../meta/invoke-tool.js";
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -651,6 +652,10 @@ export class LocalArtifactExecutor {
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
       const workdir = workdirSource === undefined ? undefined : text(workdirSource);
       for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
+      const toggle =
+        step.optional === undefined
+          ? ""
+          : ` (optional — set ${step.optional.input} to false to skip)`;
       if (program.kind === "patch") {
         // An edit reads as the file it edits and the lines it adds, holes shown as `{name}`.
         const lines = programText.split("\n");
@@ -666,7 +671,7 @@ export class LocalArtifactExecutor {
           .map((line) => line.slice(1))
           .join("\n");
         steps.push(
-          `Step ${index + 1} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}${
+          `Step ${index + 1}${toggle} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}${
             added.length > 0
               ? `\n${preview}${added.length > RECORDED_PATCH_PREVIEW_LINES ? "\n[...]" : ""}`
               : ""
@@ -679,7 +684,7 @@ export class LocalArtifactExecutor {
           ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
           : programText;
       steps.push(
-        `Step ${index + 1} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
+        `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
       );
     }
     if (steps.length === 0) return undefined;
@@ -1498,14 +1503,33 @@ export class LocalArtifactExecutor {
       if (execution.status !== "completed") {
         return fail(execution.error ?? "Recorded workflow execution failed");
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(execution.result ?? null),
-          },
-        ],
-      };
+      const result = execution.result ?? null;
+      // Several returned outputs with a caller-omitted step among them: label that step skipped.
+      const omitted = new Set(
+        execution.steps.flatMap((outcome) =>
+          outcome.status === "omitted" ? [outcome.stepId] : [],
+        ),
+      );
+      if (
+        omitted.size > 0 &&
+        Array.isArray(result) &&
+        result.length > 1 &&
+        result.every((item) => typeof item === "string" || item === null)
+      ) {
+        const sinks = workflowSinkStepIds(plan);
+        const skipped = new Set(
+          sinks.flatMap((stepId, index) => (omitted.has(stepId) ? [index] : [])),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: presentStepSections(result as Array<string | null>, skipped),
+            },
+          ],
+        };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) {
       return fail(
         `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -489,6 +489,8 @@ function describeOutcome(
         ? `step '${outcome.stepId}' was skipped (${outcome.reason}); step '${failed.stepId}' failed: ${failed.error}`
         : `step '${outcome.stepId}' was skipped: ${outcome.reason}`;
     }
+    case "omitted":
+      return `step '${outcome.stepId}' was turned off by input '${outcome.input}'`;
     default: {
       const exhaustive: never = outcome;
       return `step outcome ${JSON.stringify(exhaustive)}`;

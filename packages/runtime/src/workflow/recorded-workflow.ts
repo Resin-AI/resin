@@ -97,7 +97,9 @@ export interface RecordedWorkflowExecutionOptions {
 export type RecordedStepOutcome =
   | { stepId: string; status: "completed"; result: WorkflowJsonValue }
   | { stepId: string; status: "failed"; error: string }
-  | { stepId: string; status: "skipped"; reason: string };
+  | { stepId: string; status: "skipped"; reason: string }
+  /** An optional step the caller turned off through its toggle input; never ran. */
+  | { stepId: string; status: "omitted"; input: string };
 
 export type RecordedWorkflowExecution = {
   status: "completed" | "failed";
@@ -527,7 +529,7 @@ export async function executeRecordedWorkflow(
   const executionOptions = { ...options, inputs };
   const outcomes: RecordedStepOutcome[] = [];
   const results = new Map<string, WorkflowJsonValue>();
-  const state = new Map<string, "completed" | "failed" | "skipped">();
+  const state = new Map<string, "completed" | "failed" | "skipped" | "omitted">();
   const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
   let aborted = false;
 
@@ -538,7 +540,12 @@ export async function executeRecordedWorkflow(
       outcomes.push({ stepId: step.id, status: "skipped", reason: "an earlier step failed" });
       continue;
     }
-    const blockedBy = step.dependsOn.find((dependency) => state.get(dependency) !== "completed");
+    // A caller-omitted optional step never produces a result any step reads (the contract forbids
+    // it), so it releases its ordering dependents rather than blocking them.
+    const blockedBy = step.dependsOn.find((dependency) => {
+      const status = state.get(dependency);
+      return status !== "completed" && status !== "omitted";
+    });
     if (blockedBy) {
       state.set(step.id, "skipped");
       outcomes.push({
@@ -546,6 +553,11 @@ export async function executeRecordedWorkflow(
         status: "skipped",
         reason: `dependency '${blockedBy}' did not complete`,
       });
+      continue;
+    }
+    if (step.optional !== undefined && inputs[step.optional.input] === false) {
+      state.set(step.id, "omitted");
+      outcomes.push({ stepId: step.id, status: "omitted", input: step.optional.input });
       continue;
     }
 

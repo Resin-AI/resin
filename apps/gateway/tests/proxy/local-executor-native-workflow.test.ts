@@ -760,4 +760,90 @@ describe("recorded workflows of ordinary calls", () => {
     expect(seen[0]!.name).toBe("vendor.score");
     expect(seen[0]!.parameters).toEqual({ rows: '{"rows": [1, 2, 3]}\n' });
   });
+
+  it("runs an optional middle step by default and skips it when its toggle is false", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    const commands = [
+      "echo one > a.marker; echo first",
+      "echo two > b.marker; echo second",
+      "echo three > c.marker; echo third",
+    ];
+    commands.forEach((command, index) =>
+      privateValues.set(`private:sess:${index}`, command, {
+        workspaceId: context.workspaceId,
+      }),
+    );
+    const step = (index: number) => ({
+      id: `step${index}`,
+      callId: `call_${index}`,
+      callable: {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell", source: "", argument: "command" },
+      },
+      arguments: [
+        {
+          name: "command",
+          source: {
+            kind: "template",
+            template: { type: "private", reference: `private:sess:${index}` },
+          },
+        },
+      ],
+      dependsOn: [],
+      failurePolicy: { onError: "abort", policy: "default" },
+      observed: { outcome: "succeeded" },
+    });
+    const installed = await installPlan(
+      {
+        id: "tool_optional_steps",
+        name: "wf_optional_steps",
+        version: "1.0.0",
+        description: "recorded plan with an optional step",
+        parameters: {
+          type: "object",
+          properties: { run_step2: { type: "boolean", default: true } },
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_optional_steps",
+        inputs: [{ name: "run_step2", type: "boolean", default: true }],
+        privateReferences: ["private:sess:0", "private:sess:1", "private:sess:2"],
+        steps: [step(0), { ...step(1), optional: { input: "run_step2" } }, step(2)],
+      },
+    );
+    const marker = (name: string) => fs.existsSync(path.join(workspaceDir, name));
+
+    const all = await execute({ ...installed, privateValues }, {}, context);
+    expect(all.isError, String(all.content[0]?.text)).toBeUndefined();
+    expect([marker("a.marker"), marker("b.marker"), marker("c.marker")]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+
+    for (const name of ["a.marker", "b.marker", "c.marker"])
+      fs.rmSync(path.join(workspaceDir, name));
+    const skipped = await execute({ ...installed, privateValues }, { run_step2: false }, context);
+    expect(skipped.isError, String(skipped.content[0]?.text)).toBeUndefined();
+    expect([marker("a.marker"), marker("b.marker"), marker("c.marker")]).toEqual([
+      true,
+      false,
+      true,
+    ]);
+    expect(skipped.content[0]?.text).toBe(
+      "--- step 1/3 ---\nfirst\n\n--- step 2/3 skipped ---\n--- step 3/3 ---\nthird\n",
+    );
+  });
 });

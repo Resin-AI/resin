@@ -92,6 +92,23 @@ export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
 }
 
 /**
+ * Several steps' text outputs as one labeled section per step, in recorded order. A step the caller
+ * turned off is labeled as skipped rather than shown as empty output.
+ */
+export function presentStepSections(
+  items: ReadonlyArray<string | null>,
+  skipped: ReadonlySet<number> = new Set(),
+): string {
+  return items
+    .map((item, index) =>
+      skipped.has(index)
+        ? `--- step ${index + 1}/${items.length} skipped ---`
+        : `--- step ${index + 1}/${items.length} ---\n${item ?? ""}`,
+    )
+    .join("\n");
+}
+
+/**
  * Text output reaches the caller as text rather than as a JSON string literal of it: command output
  * keeps its own formatting and costs no escaping. A workflow that returns several steps' text
  * outputs is shown one labeled section per step, in recorded order.
@@ -107,9 +124,7 @@ function presentedResult(result: CallToolResult): CallToolResult {
       : Array.isArray(value) &&
           value.length > 1 &&
           value.every((item) => typeof item === "string" || item === null)
-        ? value
-            .map((item, index) => `--- step ${index + 1}/${value.length} ---\n${item ?? ""}`)
-            .join("\n")
+        ? presentStepSections(value)
         : undefined;
   return presented !== undefined && text !== undefined && presented !== text
     ? { ...result, content: [{ type: "text", text: presented }] }

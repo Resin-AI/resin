@@ -318,6 +318,12 @@ export type WorkflowStep = {
   observed: WorkflowStepObservation;
   /** Execution permissions the recorded call used, for reporting and for the runtime to enforce. */
   permissions?: WorkflowJsonValue;
+  /**
+   * The step is a caller toggle: when the named boolean input resolves to `false`, the step is
+   * skipped. The input defaults to `true`, so an omitted toggle keeps the recorded behavior. No
+   * other step may consume an optional step's result.
+   */
+  optional?: { input: string };
 };
 
 /**
@@ -784,6 +790,93 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
     if (candidate.proposed.kind === "extract") references.add(candidate.proposed.locator);
   }
   return [...references];
+}
+
+/**
+ * An optional step is toggled by exactly one boolean input that defaults to `true` and is used
+ * nowhere else; no other step (argument, hole, or candidate proposal) may read its result, so
+ * skipping it can never leave a later binding without a value.
+ */
+function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors: string[]): void {
+  const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  const inputs = Array.isArray(workflow.inputs) ? workflow.inputs.filter(isPlainObject) : [];
+  const toggles = new Map<string, string>();
+  for (const step of steps) {
+    if (!Object.hasOwn(step, "optional")) continue;
+    const optional = step.optional;
+    const stepId = String(step.id);
+    if (
+      !isPlainObject(optional) ||
+      !hasOnlyKeys(optional, ["input"]) ||
+      typeof optional.input !== "string" ||
+      optional.input.length === 0
+    ) {
+      errors.push(`step ${stepId} optional must name exactly one toggle input`);
+      continue;
+    }
+    const name = optional.input;
+    const input = inputs.find((entry) => entry.name === name);
+    if (input === undefined) {
+      errors.push(`step ${stepId} is toggled by unknown input ${name}`);
+    } else if (input.type !== "boolean" || input.default !== true) {
+      errors.push(`step ${stepId} toggle input ${name} must be a boolean defaulting to true`);
+    }
+    const other = toggles.get(name);
+    if (other !== undefined) {
+      errors.push(`input ${name} toggles both step ${other} and step ${stepId}`);
+    } else {
+      toggles.set(name, stepId);
+    }
+  }
+  if (toggles.size === 0) return;
+  const optionalSteps = new Set(toggles.values());
+  const optionalCalls = new Set(
+    steps
+      .filter((step) => optionalSteps.has(String(step.id)) && typeof step.callId === "string")
+      .map((step) => String(step.callId)),
+  );
+  const reported = new Set<string>();
+  const report = (message: string): void => {
+    if (reported.has(message)) return;
+    reported.add(message);
+    errors.push(message);
+  };
+  // A structural walk over every binding shape: templates (`type`) and sources/proposals (`kind`).
+  const walk = (node: unknown, where: string): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, where);
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    const shape = typeof node.type === "string" ? node.type : node.kind;
+    // Recorded literal values are data, not bindings.
+    if (shape === "literal") return;
+    if ((shape === "result" || shape === "extract") && typeof node.stepId === "string") {
+      if (optionalSteps.has(node.stepId)) {
+        report(`${where} binds the result of optional step ${node.stepId}`);
+      }
+    }
+    if (shape === "input" && typeof node.name === "string" && toggles.has(node.name)) {
+      report(`${where} uses toggle input ${node.name} outside its toggle`);
+    }
+    for (const entry of Object.values(node)) walk(entry, where);
+  };
+  for (const step of steps) {
+    walk(step.arguments, `step ${String(step.id)}`);
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    const state = isPlainObject(program?.pythonState) ? program.pythonState : undefined;
+    for (const descriptor of Array.isArray(state?.setup) ? state.setup : []) {
+      if (isPlainObject(descriptor) && optionalCalls.has(String(descriptor.callId))) {
+        report(`step ${String(step.id)} replays setup from an optional step`);
+      }
+    }
+  }
+  if (Array.isArray(workflow.candidates)) {
+    for (const candidate of workflow.candidates) {
+      if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
+    }
+  }
 }
 
 /**
@@ -1395,5 +1488,6 @@ export function validateRecordedWorkflow(value: unknown): {
   if (value.heldOut !== undefined) {
     validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
   }
+  validateWorkflowOptionalSteps(value, errors);
   return { valid: errors.length === 0, errors };
 }

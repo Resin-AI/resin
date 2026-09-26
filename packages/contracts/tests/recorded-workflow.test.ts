@@ -740,6 +740,103 @@ describe("recorded-default inputs", () => {
   });
 });
 
+describe("optional steps", () => {
+  function toggled(
+    stepId: string,
+    input: RecordedWorkflow["inputs"][number] = {
+      name: "run_it",
+      type: "boolean",
+      default: true,
+    },
+  ): RecordedWorkflow {
+    const workflow = fourCallWorkflow();
+    workflow.inputs.push(input);
+    workflow.steps.find((step) => step.id === stepId)!.optional = {
+      input: "run_it",
+    };
+    return workflow;
+  }
+
+  it("accept a step no other step reads, toggled by its own boolean input defaulting to true", () => {
+    expect(validateRecordedWorkflow(toggled("upload")).errors).toEqual([]);
+  });
+
+  it("reject a toggle input that is missing, not boolean, or not defaulting to true", () => {
+    const missing = fourCallWorkflow();
+    missing.steps[3]!.optional = { input: "run_it" };
+    expect(validateRecordedWorkflow(missing).errors).toEqual([
+      "step upload is toggled by unknown input run_it",
+    ]);
+    for (const input of [
+      { name: "run_it", type: "string" as const, default: "yes" },
+      { name: "run_it", type: "boolean" as const, default: false },
+      { name: "run_it", type: "boolean" as const },
+    ]) {
+      expect(validateRecordedWorkflow(toggled("upload", input)).errors).toEqual([
+        "step upload toggle input run_it must be a boolean defaulting to true",
+      ]);
+    }
+  });
+
+  it("reject an optional step whose result a later step binds", () => {
+    // `upload` reads `write`'s result.
+    expect(validateRecordedWorkflow(toggled("write")).errors).toEqual([
+      "step upload binds the result of optional step write",
+    ]);
+    const extracted = toggled("write");
+    extracted.privateReferences!.push("private:locator");
+    extracted.steps[3]!.arguments[0]!.source = {
+      kind: "template",
+      template: {
+        type: "extract",
+        stepId: "write",
+        locator: "private:locator",
+      },
+    };
+    expect(validateRecordedWorkflow(extracted).errors).toEqual([
+      "step upload binds the result of optional step write",
+    ]);
+    // A candidate proposing the optional step's result is refused too.
+    const proposed = toggled("upload");
+    proposed.steps.push({
+      ...proposed.steps[0]!,
+      id: "after",
+      callId: "call_5",
+      arguments: [{ name: "file", source: { kind: "literal", value: "x" } }],
+    });
+    proposed.candidates = [
+      {
+        stepId: "after",
+        argument: "file",
+        path: [],
+        proposed: { kind: "result", stepId: "upload", path: [] },
+        reason: "equal-to-earlier-result",
+        missing: "whether the value flows from upload",
+      } as never,
+    ];
+    expect(validateRecordedWorkflow(proposed).errors).toContain(
+      "candidate binds the result of optional step upload",
+    );
+  });
+
+  it("reject a toggle input that also feeds a binding", () => {
+    const workflow = toggled("upload");
+    workflow.steps[0]!.arguments[0]!.source = { kind: "input", name: "run_it" };
+    expect(validateRecordedWorkflow(workflow).errors).toEqual([
+      "step fetch uses toggle input run_it outside its toggle",
+    ]);
+  });
+
+  it("reject one input toggling two steps", () => {
+    const workflow = toggled("upload");
+    workflow.steps[0]!.optional = { input: "run_it" };
+    // `fetch` would also be result-bound, so check the double toggle is named on its own.
+    expect(validateRecordedWorkflow(workflow).errors).toContain(
+      "input run_it toggles both step fetch and step upload",
+    );
+  });
+});
+
 describe("workflow sink steps", () => {
   it("returns a chain's final step but every output no later step consumes", () => {
     expect(workflowSinkStepIds(fourCallWorkflow())).toEqual(["upload"]);
