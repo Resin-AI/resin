@@ -6,6 +6,7 @@ import { InMemoryConfigFsBridge, NodeConfigFsBridge } from "@resin/harness-contr
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin/cli.js";
 import { initCommand, parseInitFlags } from "../src/commands/init.js";
+import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
 import {
   InstallationError,
   type InstallationPairingSummary,
@@ -128,7 +129,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(summary.dryRun).toBe(false);
     expect(summary.journal.status).toBe("completed");
     expect(summary.journal.steps.every((s) => s.status === "completed")).toBe(true);
-    expect(summary.harnesses).toHaveLength(3);
+    expect(summary.harnesses).toHaveLength(SUPPORTED_HARNESS_IDS.length);
 
     // Verify journal file was persisted in state directory
     const journalSaved = await bridge.readFile(`${home}/.resin/state/install-journal.json`);
@@ -140,7 +141,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     );
     expect(verifyStep?.details).toMatchObject({
       allConfigured: true,
-      installedHarnessCount: 3,
+      installedHarnessCount: SUPPORTED_HARNESS_IDS.length,
       onboardingReady: false,
     });
 
