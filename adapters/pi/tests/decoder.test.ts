@@ -7,6 +7,7 @@ import type {
   RawHarnessRecord,
   SourceCursor,
 } from "@resin/harness-contracts";
+import { NormalizedSessionEventSchema } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { PiRecordDecoder } from "../src/decoder.js";
 import { PiSessionEventSource } from "../src/source.js";
@@ -81,14 +82,14 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     const mcpCall = events.find(
       (event) => event.type === "tool_call" && event.toolName === "mcp__fixture__word_count",
     );
-    expect(mcpCall).toMatchObject({ connection: "fixture", input: { text: "one two three" } });
+    expect(mcpCall).toMatchObject({ connection: "fixture", parameters: { text: "one two three" } });
     const mcpResult = events.find(
       (event) => event.type === "tool_result" && event.toolName === "mcp__fixture__word_count",
     );
-    expect(mcpResult).toMatchObject({ output: "words: 3", isError: false });
+    expect(mcpResult).toMatchObject({ result: "words: 3", isError: false });
 
     expect(events.filter((event) => event.type === "command_exec")).toEqual([
-      expect.objectContaining({ command: "./greet.sh world" }),
+      expect.objectContaining({ command: "./greet.sh world", stdout: "hello, world\n", exitCode: 0 }),
     ]);
     expect(
       events.flatMap((event) =>
@@ -183,7 +184,7 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
         type: "tool_result",
         toolName: "bash",
         isError: true,
-        output: "Command aborted",
+        result: "Command aborted",
       }),
     );
     // Pi 0.87.1 persists an aborted request as `stopReason: "error"` with the abort message.
@@ -211,11 +212,14 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
   it("links a fork to its parent session and skips the copied parent history", async () => {
     const events = await decodeFixture("rpc-fork.jsonl");
     expect(events[0]).toMatchObject({ type: "session_lifecycle", lifecycleType: "start" });
-    expect(events[1]).toMatchObject({
-      type: "branch_fork",
-      forkReason: "session_fork",
-      sourceSessionId: "01a0dff0-d537-7747-bfb8-d1f92fceb35d",
-    });
+    // The fork continues the copied parent entry 489d0935 (the parent's leading system prompt).
+    expect(events.filter((event) => event.type === "branch_fork")).toEqual([
+      expect.objectContaining({
+        forkReason: "session_fork",
+        sourceSessionId: "01a0dff0-d537-7747-bfb8-d1f92fceb35d",
+        branchPointEventId: "489d0935",
+      }),
+    ]);
     expect(
       events.flatMap((event) =>
         event.type === "message" ? [`${event.role}:${event.content}`] : [],
@@ -235,6 +239,41 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
       const batched = await decodeFixture(name, 2);
       expect(batched, name).toEqual(whole);
     }
+  });
+
+  it("emits events that satisfy the normalized event schema", async () => {
+    for (const name of [
+      "tools-mcp-bridge.jsonl",
+      "resin-gateway-bridge.jsonl",
+      "rpc-tree-rewind.jsonl",
+      "rpc-branch-model-bash-abort-compaction.jsonl",
+      "rpc-fork.jsonl",
+    ]) {
+      for (const [index, event] of (await decodeFixture(name)).entries()) {
+        // Fields the observer pipeline adds before validating.
+        const candidate = {
+          ...event,
+          eventId: `e${index}`,
+          causalRef: { parentId: null, ...event.causalRef },
+          redaction: { isRedacted: false },
+        };
+        const parsed = NormalizedSessionEventSchema.safeParse(candidate);
+        expect(parsed.error?.issues, `${name} #${index} ${event.type}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("records bash exit status and duration from the call it answers", async () => {
+    const events = await decodeFixture("rpc-branch-model-bash-abort-compaction.jsonl");
+    const aborted = events.find(
+      (event) => event.type === "command_exec" && event.command.startsWith("sleep 30"),
+    );
+    expect(aborted).toMatchObject({ exitCode: 130 });
+    const abortedResult = events.find(
+      (event) => event.type === "tool_result" && event.result === "Command aborted",
+    );
+    // Written 22:58:40.738 (call) → 22:58:42.245 (result).
+    expect(abortedResult).toMatchObject({ executionDurationMs: 1507 });
   });
 
   it("assigns unique, increasing causal sequences", async () => {

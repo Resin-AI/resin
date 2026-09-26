@@ -52,6 +52,7 @@
     "@resin/adapter-claude-code": "workspace:*",
     "@resin/adapter-codex": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
+    "@resin/adapter-pi": "workspace:*",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
     "@resin/db": "workspace:*",

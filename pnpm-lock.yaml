@@ -107,6 +107,9 @@ importers:
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
+      '@resin/adapter-pi':
+        specifier: workspace:*
+        version: link:../../adapters/pi
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -183,6 +186,9 @@ importers:
       '@resin/adapter-omp':
         specifier: workspace:*
         version: link:../../adapters/omp
+      '@resin/adapter-pi':
+        specifier: workspace:*
+        version: link:../../adapters/pi
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

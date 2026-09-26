@@ -111,6 +111,26 @@ function editDiff(filePath: string, edits: unknown): { diff: string; added: numb
   return { diff: lines.join("\n"), added, removed };
 }
 
+/**
+ * Resin call id for a Pi tool call id. Pi keeps provider ids verbatim (OpenAI Responses ids look
+ * like `call_…|fc_…`), and Resin identifiers allow only `[A-Za-z0-9_.:-]`, so other characters
+ * become `_`; the original id stays in `toolCallId`.
+ */
+export function piCallId(toolCallId: string): string {
+  const sanitized = toolCallId.replace(/[^a-zA-Z0-9_.:-]/g, "_");
+  const safe = /^[a-zA-Z0-9_-]/.test(sanitized) ? sanitized : `_${sanitized}`;
+  return safe.length > 0 ? safe.slice(0, 128) : "_";
+}
+
+/** Exit code of a Pi `bash` tool result, from the status line Pi appends on failure. */
+function bashExitCode(output: string, isError: boolean): number {
+  if (!isError) return 0;
+  const exited = /Command exited with code (\d+)\s*$/.exec(output);
+  if (exited) return Number(exited[1]);
+  // Aborted or signal-terminated commands have no exit code; use the shell's SIGINT convention.
+  return /Command (aborted|terminated without an exit code)\s*$/.test(output) ? 130 : 1;
+}
+
 interface EntryContext {
   sessionId: string;
   timestamp: string;
@@ -121,7 +141,8 @@ interface EntryContext {
 /**
  * Stateless decoder for Pi session JSONL entries (format versions 1–3). Everything a record
  * needs arrives on the record: {@link PiSessionEventSource} synthesizes v1 tree ids and attaches
- * the previously appended entry id, so decoding resumes correctly from any cursor.
+ * the previously appended entry, the call each tool result answers, and the fork boundary, so
+ * decoding resumes correctly from any cursor.
  *
  * Tree semantics: Pi appends every entry, so file order is chronological and each branch's
  * entries are contiguous. An entry whose `parentId` is not the previous entry starts a new
@@ -157,6 +178,17 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     };
 
     const events: IntermediateSessionEvent[] = [];
+    const parentSessionPath = str(recordMeta.piParentSessionPath);
+    if (parentSessionPath) {
+      const parentFileId = piSessionIdFromPath(parentSessionPath);
+      events.push({
+        ...this.base(ctx, { parentSessionPath }),
+        type: "branch_fork",
+        forkReason: "session_fork",
+        sourceSessionId: parentFileId ? toPiSessionId(parentFileId) : ctx.sessionId,
+        branchPointEventId: str(recordMeta.piForkedFromEntryId) ?? "root",
+      });
+    }
     const isBranch =
       entry.type !== "session" &&
       entry.type !== "branch_summary" &&
@@ -165,14 +197,15 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
       parentId !== previousEntryId;
     if (isBranch) {
       events.push({
-        ...this.base(ctx),
+        ...this.base(ctx, { abandonedLeafEntryId: previousEntryId }),
         type: "branch_fork",
         forkReason: "tree_navigation",
+        sourceSessionId: ctx.sessionId,
+        branchPointEventId: parentId ?? "root",
         parentBranchId: previousEntryId,
-        ...(parentId ? { branchPointEventId: parentId } : {}),
       });
     }
-    events.push(...this.decodeEntry(entry, ctx));
+    events.push(...this.decodeEntry(entry, ctx, recordMeta));
     return events.length > 0 ? events : null;
   }
 
@@ -186,12 +219,27 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     };
   }
 
-  private decodeEntry(entry: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
+  private decodeEntry(
+    entry: JsonRecord,
+    ctx: EntryContext,
+    recordMeta: JsonRecord,
+  ): IntermediateSessionEvent[] {
     switch (entry.type) {
       case "session":
-        return this.decodeHeader(entry, ctx);
+        return [
+          {
+            ...this.base(ctx, {
+              sessionFormatVersion: typeof entry.version === "number" ? entry.version : 1,
+              ...(str(entry.cwd) ? { cwd: str(entry.cwd) } : {}),
+              ...(str(entry.parentSession) ? { parentSessionPath: str(entry.parentSession) } : {}),
+            }),
+            type: "session_lifecycle",
+            lifecycleType: "start",
+            harnessName: PI_HARNESS_ID,
+          },
+        ];
       case "message":
-        return isRecord(entry.message) ? this.decodeMessage(entry.message, ctx) : [];
+        return isRecord(entry.message) ? this.decodeMessage(entry.message, ctx, recordMeta) : [];
       case "compaction":
         return [
           {
@@ -200,14 +248,17 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
                 ? { firstKeptEntryId: str(entry.firstKeptEntryId) }
                 : {}),
               fromHook: entry.fromHook === true,
+              // Pi records the context size before compaction only.
+              tokensAfterUnknown: true,
               ...(entry.details === undefined ? {} : { details: toJson(entry.details) }),
             }),
             type: "compaction",
-            triggerReason: entry.fromHook === true ? "scheduled" : "context_limit",
-            ...(str(entry.summary) === undefined ? {} : { summary: str(entry.summary) }),
-            ...(nonNegativeInt(entry.tokensBefore) === undefined
+            triggerReason: "context_limit",
+            tokensBefore: nonNegativeInt(entry.tokensBefore) ?? 0,
+            tokensAfter: 0,
+            ...(str(entry.summary) === undefined
               ? {}
-              : { tokensBefore: nonNegativeInt(entry.tokensBefore) }),
+              : { preservedContextSummary: str(entry.summary) }),
             ...this.usageField(entry.usage, undefined, undefined),
           },
         ];
@@ -215,26 +266,26 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
         return [
           {
             ...this.base(ctx, {
+              ...(str(entry.fromId) ? { abandonedLeafEntryId: str(entry.fromId) } : {}),
               ...(str(entry.summary) === undefined ? {} : { summary: str(entry.summary) }),
             }),
             type: "branch_fork",
             forkReason: "tree_navigation_summary",
+            sourceSessionId: ctx.sessionId,
+            branchPointEventId: str(entry.parentId) ?? "root",
             ...(str(entry.fromId) ? { parentBranchId: str(entry.fromId) } : {}),
-            ...(str(entry.parentId) ? { branchPointEventId: str(entry.parentId) } : {}),
             ...this.usageField(entry.usage, undefined, undefined),
           },
         ];
-      case "custom_message": {
-        const text = contentText(entry.content);
+      case "custom_message":
         return [
           {
             ...this.base(ctx, { customType: str(entry.customType) ?? null }),
             type: "message",
             role: "user",
-            content: text,
+            content: contentText(entry.content),
           },
         ];
-      }
       case "usage":
         return [
           {
@@ -266,32 +317,6 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     }
   }
 
-  private decodeHeader(entry: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
-    const cwd = str(entry.cwd);
-    const events: IntermediateSessionEvent[] = [
-      {
-        ...this.base(ctx, {
-          sessionFormatVersion: typeof entry.version === "number" ? entry.version : 1,
-          ...(cwd ? { cwd } : {}),
-        }),
-        type: "session_lifecycle",
-        lifecycleType: "start",
-        harnessName: PI_HARNESS_ID,
-      },
-    ];
-    const parentSession = str(entry.parentSession);
-    if (parentSession) {
-      const parentId = piSessionIdFromPath(parentSession);
-      events.push({
-        ...this.base(ctx, { parentSessionPath: parentSession }),
-        type: "branch_fork",
-        forkReason: "session_fork",
-        ...(parentId ? { sourceSessionId: toPiSessionId(parentId) } : {}),
-      });
-    }
-    return events;
-  }
-
   private usageField(
     usage: unknown,
     provider: string | undefined,
@@ -301,7 +326,11 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     return providerUsage ? { providerUsage } : {};
   }
 
-  private decodeMessage(message: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
+  private decodeMessage(
+    message: JsonRecord,
+    ctx: EntryContext,
+    recordMeta: JsonRecord,
+  ): IntermediateSessionEvent[] {
     switch (message.role) {
       case "system":
         return this.decodeSystem(message, ctx);
@@ -312,20 +341,23 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
       case "assistant":
         return this.decodeAssistant(message, ctx);
       case "toolResult":
-        return this.decodeToolResult(message, ctx);
+        return this.decodeToolResult(message, ctx, recordMeta);
       case "bashExecution": {
-        const exitCode = nonNegativeInt(message.exitCode);
+        const exitCode = typeof message.exitCode === "number" ? message.exitCode : undefined;
         return [
           {
             ...this.base(ctx, {
               userShell: true,
               cancelled: message.cancelled === true,
               excludeFromContext: message.excludeFromContext === true,
+              ...(exitCode === undefined ? { exitCodeUnknown: true } : {}),
             }),
             type: "command_exec",
             command: str(message.command) ?? "",
             ...(str(message.output) === undefined ? {} : { stdout: str(message.output) }),
-            ...(exitCode === undefined ? {} : { exitCode }),
+            exitCode: exitCode ?? (message.cancelled === true ? 130 : 1),
+            // Pi does not record how long user shell commands ran.
+            durationMs: 0,
           },
         ];
       }
@@ -348,15 +380,16 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
   private decodeSystem(message: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
     const added = Array.isArray(message.toolsAdded) ? message.toolsAdded : [];
     const removed = Array.isArray(message.toolsRemoved)
-      ? message.toolsRemoved.flatMap((tool) => (isRecord(tool) && str(tool.name) ? [str(tool.name)] : []))
+      ? message.toolsRemoved.flatMap((tool) =>
+          isRecord(tool) && typeof tool.name === "string" ? [tool.name] : [],
+        )
       : [];
     const tools: DiscoveredToolEntry[] = added.flatMap((tool) => {
-      if (!isRecord(tool) || !str(tool.name)) return [];
-      const name = str(tool.name) ?? "";
-      const mcp = parsePiMcpToolName(name);
+      if (!isRecord(tool) || typeof tool.name !== "string" || tool.name.length === 0) return [];
+      const mcp = parsePiMcpToolName(tool.name);
       return [
         {
-          name,
+          name: tool.name,
           ...(str(tool.description) === undefined ? {} : { description: str(tool.description) }),
           ...(isRecord(tool.parameters) ? { inputSchema: tool.parameters } : {}),
           ...(mcp ? { provider: mcp.server } : {}),
@@ -395,13 +428,24 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
         events.push({
           ...this.base(ctx),
           type: "model_reasoning",
-          reasoningText: str(part.thinking) ?? "",
+          reasoningContent: str(part.thinking) ?? "",
           visibility: "visible",
           redacted: part.redacted === true,
           ...(model ? { model } : {}),
         });
       } else if (part.type === "toolCall") {
-        events.push(...this.decodeToolCall(part, ctx));
+        const toolCallId = str(part.id) ?? "";
+        const toolName = str(part.name) || "unknown";
+        const mcp = parsePiMcpToolName(toolName);
+        events.push({
+          ...this.base(ctx, { toolCallId }),
+          type: "tool_call",
+          callId: piCallId(toolCallId),
+          toolCallId,
+          toolName,
+          parameters: isRecord(part.arguments) ? part.arguments : {},
+          ...(mcp ? { connection: mcp.server } : {}),
+        });
       }
     }
     const stopReason = str(message.stopReason);
@@ -431,77 +475,81 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     return events;
   }
 
-  private decodeToolCall(part: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
-    const toolCallId = str(part.id) ?? "";
-    const toolName = str(part.name) ?? "unknown";
-    const args = isRecord(part.arguments) ? part.arguments : {};
-    const mcp = parsePiMcpToolName(toolName);
+  /**
+   * A tool result, plus the side effect it confirms: `bash` becomes a `command_exec` with the
+   * real exit status, and a successful `edit`/`write` becomes a `file_edit`. The call arguments
+   * come from the source, which saw the call earlier in the file.
+   */
+  private decodeToolResult(
+    message: JsonRecord,
+    ctx: EntryContext,
+    recordMeta: JsonRecord,
+  ): IntermediateSessionEvent[] {
+    const output = contentText(message.content);
+    const toolCallId = str(message.toolCallId) ?? "";
+    const call = isRecord(recordMeta.piToolCall) ? recordMeta.piToolCall : undefined;
+    const toolName = str(message.toolName) || str(call?.name) || "unknown";
+    const details = isRecord(message.details) ? message.details : undefined;
+    const isError = message.isError === true;
+    const startedAt = Date.parse(str(call?.startedAt) ?? "");
+    const durationMs = Math.max(0, Date.parse(ctx.timestamp) - startedAt) || 0;
+    const args = isRecord(call?.arguments) ? call.arguments : undefined;
+
     const events: IntermediateSessionEvent[] = [
       {
-        ...this.base(ctx),
-        type: "tool_call",
+        ...this.base(ctx, {
+          toolCallId,
+          ...(Number.isFinite(startedAt) ? {} : { executionDurationUnknown: true }),
+          ...(details?.mcpServer ? { mcpServer: toJson(details.mcpServer) } : {}),
+          ...(details?.mcpTool ? { mcpTool: toJson(details.mcpTool) } : {}),
+        }),
+        type: "tool_result",
+        callId: piCallId(toolCallId),
         toolCallId,
         toolName,
-        input: args,
-        rawInput: JSON.stringify(args),
-        ...(mcp ? { connection: mcp.server } : {}),
+        result: output,
+        isError,
+        ...(isError ? { error: output } : {}),
+        executionDurationMs: durationMs,
+        outputSizeBytes: Buffer.byteLength(output, "utf8"),
+        ...this.usageField(message.usage, undefined, undefined),
       },
     ];
-    const filePath = str(args.path);
-    if (toolName === "bash" && str(args.command)) {
+
+    const filePath = str(args?.path);
+    if (toolName === "bash" && args && str(args.command) !== undefined) {
       events.push({
         ...this.base(ctx, { toolCallId }),
         type: "command_exec",
         command: str(args.command) ?? "",
+        stdout: output,
+        exitCode: bashExitCode(output, isError),
+        durationMs,
       });
-    } else if (toolName === "edit" && filePath) {
-      const { diff, added, removed } = editDiff(filePath, args.edits);
+    } else if (toolName === "edit" && filePath && !isError) {
+      const constructed = editDiff(filePath, args?.edits);
+      const piDiff = str(details?.diff);
       events.push({
         ...this.base(ctx, { toolCallId }),
         type: "file_edit",
         filePath,
         operation: "update",
-        action: "update",
-        diff,
-        linesAdded: added,
-        linesRemoved: removed,
+        patch: piDiff ?? constructed.diff,
+        diffStats: { linesAdded: constructed.added, linesRemoved: constructed.removed },
       });
-    } else if (toolName === "write" && filePath) {
-      const content = str(args.content) ?? "";
+    } else if (toolName === "write" && filePath && !isError) {
+      const content = str(args?.content) ?? "";
       events.push({
-        ...this.base(ctx, { toolCallId }),
+        ...this.base(ctx, { toolCallId, bytesWritten: Buffer.byteLength(content, "utf8") }),
         type: "file_edit",
         filePath,
         operation: "create",
-        action: "create",
-        linesAdded: content.length === 0 ? 0 : content.split("\n").length,
-        bytesAdded: Buffer.byteLength(content, "utf8"),
+        diffStats: {
+          linesAdded: content.length === 0 ? 0 : content.split("\n").length,
+          linesRemoved: 0,
+        },
       });
     }
     return events;
-  }
-
-  private decodeToolResult(message: JsonRecord, ctx: EntryContext): IntermediateSessionEvent[] {
-    const output = contentText(message.content);
-    const toolName = str(message.toolName);
-    const details = isRecord(message.details) ? message.details : undefined;
-    const isError = message.isError === true;
-    return [
-      {
-        ...this.base(ctx, {
-          ...(details?.mcpServer ? { mcpServer: toJson(details.mcpServer) } : {}),
-          ...(details?.mcpTool ? { mcpTool: toJson(details.mcpTool) } : {}),
-        }),
-        type: "tool_result",
-        toolCallId: str(message.toolCallId) ?? "",
-        ...(toolName ? { toolName } : {}),
-        output,
-        isError,
-        ...(isError ? { error: output } : {}),
-        outputSizeBytes: Buffer.byteLength(output, "utf8"),
-        ...(details?.diff !== undefined ? { result: { diff: toJson(details.diff) } } : {}),
-        ...this.usageField(message.usage, undefined, undefined),
-      },
-    ];
   }
 }
