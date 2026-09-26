@@ -1,11 +1,17 @@
-import * as fsp from "node:fs/promises";
 import path from "node:path";
+import {
+  type ManagedBlockMarkers,
+  applyManagedBlock,
+  defaultFsBridge,
+} from "@resin/harness-contracts";
 import { resolveOmpHome } from "./discovery.js";
 
 export const DEFAULT_APPEND_SYSTEM_FILENAME = path.join("agent", "APPEND_SYSTEM.md");
 
-const MANAGED_BLOCK_START = "<!-- resin:catalog:start -->";
-const MANAGED_BLOCK_END = "<!-- resin:catalog:end -->";
+const OMP_CATALOG_MARKERS: ManagedBlockMarkers = {
+  start: "<!-- resin:catalog:start -->",
+  end: "<!-- resin:catalog:end -->",
+};
 
 /**
  * Renders the per-tool invocation convention for Oh My Pi sessions.
@@ -31,9 +37,16 @@ export function buildOmpCatalogInstructionsBlock(options: {
   toolNames?: string[];
   serverName?: string;
 }): string {
+  return `${OMP_CATALOG_MARKERS.start}\n${renderOmpCatalogInstructionsBody(options)}\n${OMP_CATALOG_MARKERS.end}`;
+}
+
+function renderOmpCatalogInstructionsBody(options: {
+  markdown: string;
+  toolNames?: string[];
+  serverName?: string;
+}): string {
   const serverName = options.serverName ?? "resin";
   const lines: string[] = [
-    MANAGED_BLOCK_START,
     "",
     options.markdown.trim(),
     "",
@@ -45,7 +58,7 @@ export function buildOmpCatalogInstructionsBlock(options: {
     lines.push(renderOmpInvocationSnippet(toolName, serverName));
   }
 
-  lines.push("", MANAGED_BLOCK_END);
+  lines.push("");
   return lines.join("\n");
 }
 
@@ -131,46 +144,13 @@ export async function applyOmpCatalogInstructions(
     options.appendSystemPath ??
     path.join(resolveOmpHome({ customHome: options.ompHome }), DEFAULT_APPEND_SYSTEM_FILENAME);
 
-  const existing = await fsp.readFile(targetPath, "utf8").catch(() => undefined);
-
   const markdown = options.markdown?.trim();
-  const block = markdown
-    ? buildOmpCatalogInstructionsBlock({
+  const body = markdown
+    ? renderOmpCatalogInstructionsBody({
         markdown,
         toolNames: options.toolNames,
         serverName: options.serverName,
       })
-    : undefined;
-
-  const startIdx = existing?.indexOf(MANAGED_BLOCK_START) ?? -1;
-  const endIdx = existing?.indexOf(MANAGED_BLOCK_END) ?? -1;
-  const hasBlock = existing !== undefined && startIdx !== -1 && endIdx > startIdx;
-
-  let next: string;
-  let action: ApplyOmpCatalogInstructionsResult["action"];
-
-  if (hasBlock) {
-    const before = existing!.slice(0, startIdx).trimEnd();
-    const after = existing!.slice(endIdx + MANAGED_BLOCK_END.length).trimStart();
-    if (block) {
-      next = `${[before, block, after].filter((part) => part.length > 0).join("\n\n")}\n`;
-      action = next === existing ? "unchanged" : "updated";
-    } else {
-      next = [before, after].filter((part) => part.length > 0).join("\n\n");
-      next = next.length > 0 ? `${next}\n` : "";
-      action = "removed";
-    }
-  } else if (block) {
-    next =
-      existing && existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${block}\n` : `${block}\n`;
-    action = existing === undefined ? "created" : "updated";
-  } else {
-    return { path: targetPath, action: "unchanged" };
-  }
-
-  if (action !== "unchanged") {
-    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
-    await fsp.writeFile(targetPath, next, "utf8");
-  }
-  return { path: targetPath, action };
+    : null;
+  return applyManagedBlock(defaultFsBridge, targetPath, OMP_CATALOG_MARKERS, body);
 }

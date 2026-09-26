@@ -12,7 +12,6 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
     expect(adapter.id).toBe("omp");
     expect(adapter.name).toBe("omp");
     expect(adapter.version).toBe("0.1.0");
-    expect(adapter.supportedHarnessVersions).toContain("^0.1.0");
 
     expect(OmpAdapter).toBe(OmpHarnessAdapter);
   });

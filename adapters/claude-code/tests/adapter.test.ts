@@ -28,7 +28,6 @@ describe("ClaudeHarnessAdapter", () => {
     expect(adapter.id).toBe("claude-code");
     expect(adapter.name).toBe("Claude Code");
     expect(adapter.version).toBe("0.1.0");
-    expect(adapter.supportedHarnessVersions.length).toBeGreaterThan(0);
   });
 
   it("reports accurate capabilities and fidelity rating", () => {

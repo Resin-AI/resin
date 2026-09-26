@@ -12,6 +12,7 @@ export {
   CODEX_HARNESS_ID,
   CODEX_DISPLAY_NAME,
   CODEX_MIN_SUPPORTED_VERSION,
+  CODEX_TESTED_VERSIONS,
   type CodexResolvedPaths,
   type CodexProbeOptions,
   type CommandExecutor,
@@ -69,3 +70,12 @@ export {
   CodexRefreshHandler,
   handleCodexCatalogRefresh,
 } from "./refresh.js";
+
+// Harness Definition (registry entry) & Codex guidance
+export { codexHarness } from "./harness.js";
+export {
+  CODEX_GUIDANCE_MARKERS,
+  CODEX_RESIN_GUIDANCE,
+  resolveCodexAgentsPath,
+  resolveCodexHome,
+} from "./instructions.js";

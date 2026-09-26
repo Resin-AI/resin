@@ -181,6 +181,9 @@ function classifyTranscriptSessionKindWithKeys(
   return "user";
 }
 
+/** Exact OMP versions qualified with recorded fixtures. */
+export const OMP_TESTED_VERSIONS: readonly string[] = ["18.3.2"];
+
 /**
  * Resolves the OMP home directory (~/.omp or $OMP_HOME).
  */
