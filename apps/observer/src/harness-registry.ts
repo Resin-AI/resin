@@ -1,6 +1,7 @@
 import { claudeCodeHarness } from "@resin/adapter-claude-code";
 import { codexHarness } from "@resin/adapter-codex";
 import { grokBuildHarness } from "@resin/adapter-grok-build";
+import { cursorHarness } from "@resin/adapter-cursor-cli";
 import { ompHarness } from "@resin/adapter-omp";
 import type { HarnessDefinition } from "@resin/harness-contracts";
 
@@ -13,4 +14,5 @@ export const HARNESS_DEFINITIONS: readonly HarnessDefinition[] = [
   codexHarness,
   grokBuildHarness,
   ompHarness,
+  cursorHarness,
 ];

@@ -1,0 +1,231 @@
+import * as fs from "node:fs";
+import path from "node:path";
+import { type RawHarnessRecord, classifyHarnessVersion } from "@resin/harness-contracts";
+import { describe, expect, it } from "vitest";
+import {
+  CURSOR_TARGET_VERSION,
+  CursorHarnessAdapter,
+  CursorRecordDecoder,
+  CursorSessionEventSource,
+  cursorProjectSlug,
+  inspectCursorHookPayload,
+  normalizeCursorVersion,
+  resolveCursorProjectsDir,
+} from "../src/index.js";
+import { conversationPayloads, installedHook, tempHome } from "./helpers.js";
+
+async function capture(home: string, payloads: Record<string, unknown>[]): Promise<void> {
+  const run = await installedHook(home);
+  for (const payload of payloads) run(payload);
+}
+
+async function readAll(
+  adapter: CursorHarnessAdapter,
+  sessionId: string,
+): Promise<RawHarnessRecord[]> {
+  for (const workspace of await adapter.listWorkspaces()) {
+    const session = (await adapter.listSessions(workspace)).find((s) => s.sessionId === sessionId);
+    if (session) return (await adapter.openEventSource(session)).readNext(1000);
+  }
+  throw new Error(`session ${sessionId} not found`);
+}
+
+describe("discovery", () => {
+  it("binds sessions to the recorded cwd, links subagents, and reports uncaptured transcripts", async () => {
+    const home = tempHome();
+    const workspace = "/work/demo project";
+    await capture(home, [
+      ...conversationPayloads({ conversationId: "parent-1", workspace, subagentId: "child-1" }),
+      // The subagent's own payloads omit workspace_roots: it inherits the parent's root.
+      {
+        conversation_id: "child-1",
+        hook_event_name: "stop",
+        status: "completed",
+        workspace_roots: [],
+      },
+    ]);
+    const transcripts = path.join(
+      resolveCursorProjectsDir(home),
+      cursorProjectSlug(workspace),
+      "agent-transcripts",
+    );
+    fs.mkdirSync(path.join(transcripts, "parent-1", "subagents"), { recursive: true });
+    fs.writeFileSync(path.join(transcripts, "parent-1", "parent-1.jsonl"), "{}\n");
+    fs.writeFileSync(path.join(transcripts, "parent-1", "subagents", "child-1.jsonl"), "{}\n");
+    fs.mkdirSync(path.join(transcripts, "old-2"), { recursive: true });
+    fs.writeFileSync(path.join(transcripts, "old-2", "old-2.jsonl"), "{}\n");
+    fs.writeFileSync(path.join(transcripts, "parent-1", "subagents", "child-9.jsonl"), "{}\n");
+
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
+    const workspaces = await adapter.listWorkspaces();
+    expect(workspaces.map((w) => w.rootPath)).toEqual([workspace]);
+    const sessions = await adapter.listSessions(workspaces[0]!);
+    const byId = Object.fromEntries(sessions.map((s) => [s.sessionId, s]));
+    expect(Object.keys(byId).sort()).toEqual(["child-1", "parent-1"]);
+    expect(byId["parent-1"]!.status).toBe("completed");
+    expect(byId["child-1"]!.metadata).toMatchObject({
+      parentSessionId: "parent-1",
+      isSubagent: true,
+      cwd: workspace,
+    });
+
+    const uncaptured = await adapter.listUncapturedSessions();
+    expect(uncaptured.map((u) => [u.conversationId, u.parentConversationId, u.reason])).toEqual([
+      ["old-2", null, "no-hook-capture"],
+      ["child-9", "parent-1", "no-hook-capture"],
+    ]);
+  });
+});
+
+describe("event source", () => {
+  it("resumes from its cursor and leaves a partial trailing line for later", async () => {
+    const home = tempHome();
+    await capture(
+      home,
+      conversationPayloads({ conversationId: "c1", workspace: "/w" }).slice(0, 3),
+    );
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const [session] = await adapter.listSessions(workspace!);
+    const source = new CursorSessionEventSource(session!);
+    expect((await source.readNext(2)).map((r) => r.sequenceNumber)).toEqual([1, 2]);
+    const cursor = source.getCursor();
+
+    fs.appendFileSync(session!.transcriptPath, '{"hook_event_name":"stop"');
+    const resumed = new CursorSessionEventSource(session!, cursor);
+    const rest = await resumed.readNext();
+    expect(rest.map((r) => r.sequenceNumber)).toEqual([3]);
+    expect(await resumed.readNext()).toEqual([]);
+    fs.appendFileSync(session!.transcriptPath, ',"status":"completed","conversation_id":"c1"}\n');
+    expect((await resumed.readNext()).map((r) => r.sequenceNumber)).toEqual([4]);
+  });
+});
+
+describe("decoder", () => {
+  it("decodes every captured hook event into ordered, identified events", async () => {
+    const home = tempHome();
+    await capture(
+      home,
+      conversationPayloads({ conversationId: "c1", workspace: "/w", subagentId: "sub-1" }),
+    );
+    const decoder = new CursorRecordDecoder();
+    const records = await readAll(new CursorHarnessAdapter({ home, env: {} }), "c1");
+    const events = records.flatMap((record) => decoder.decode(record) ?? []);
+    expect(decoder.driftIssues).toEqual([]);
+    expect(events.map((e) => e.type)).toEqual([
+      "session_lifecycle",
+      "message",
+      "model_reasoning",
+      "tool_call",
+      "tool_result",
+      "command_exec",
+      "tool_call",
+      "tool_result",
+      "file_edit",
+      "tool_call",
+      "tool_result",
+      "message",
+      "compaction",
+      "subagent_lifecycle",
+      "error",
+      "session_lifecycle",
+    ]);
+    expect(new Set(events.map((e) => e.eventId)).size).toBe(events.length);
+
+    const shellCall = events[3]!;
+    expect(shellCall).toMatchObject({
+      toolCallId: "call-shell-1",
+      toolName: "Shell",
+      input: { command: "wc -l README.md", working_directory: "/w" },
+    });
+    expect(events[4]).toMatchObject({ toolCallId: "call-shell-1", isError: false, durationMs: 42 });
+    expect(events[5]).toMatchObject({
+      command: "wc -l README.md",
+      cwd: "/w",
+      exitCode: 0,
+      stdout: "3 README.md\n",
+    });
+    expect(events[7]).toMatchObject({
+      toolCallId: "call-read-2",
+      isError: true,
+      error: "File not found",
+    });
+    expect(events[8]).toMatchObject({ filePath: "/w/notes.txt", operation: "create" });
+    expect(events[8]!.metadata?.edits).toEqual([{ oldString: "", newString: "hello\n" }]);
+    expect(events[9]).toMatchObject({ toolName: "mcp_demo_echo", input: { text: "ping" } });
+    expect(events[11]).toMatchObject({
+      role: "assistant",
+      content: "README.md has 3 lines.",
+      providerUsage: {
+        inputTokens: 1200,
+        outputTokens: 80,
+        cachedInputTokens: 900,
+        availability: "partial",
+      },
+    });
+    expect(events[12]).toMatchObject({ triggerReason: "context_limit", tokensBefore: 180000 });
+    expect(events[13]).toMatchObject({
+      subagentId: "sub-1",
+      parentId: "c1",
+      lifecycleType: "start",
+    });
+    expect(events[14]).toMatchObject({ errorType: "aborted" });
+    expect(events[1]).toMatchObject({ role: "user", content: "count the lines in README.md" });
+  });
+
+  it("reports drift instead of guessing at unknown events or changed fields", () => {
+    const decoder = new CursorRecordDecoder();
+    const record = (rawPayload: unknown, n: number): RawHarnessRecord => ({
+      recordId: `r${n}`,
+      sessionId: "s",
+      harnessId: "cursor-cli",
+      sequenceNumber: n,
+      timestamp: "2026-09-26T00:00:00.000Z",
+      recordType: "custom",
+      rawPayload,
+      cursor: { offset: 0, line: 1, sequence: n, timestamp: "2026-09-26T00:00:00.000Z" },
+      metadata: {},
+    });
+    const base = {
+      resin_received_at: "2026-09-26T00:00:00.000Z",
+      workspace_roots: ["/w"],
+      conversation_id: "s",
+    };
+    expect(decoder.decode(record({ ...base, hook_event_name: "afterTabFileEdit" }, 1))).toBeNull();
+    expect(
+      decoder.decode(
+        record({ ...base, hook_event_name: "postToolUse", tool_name: "Shell", toolUseId: "x" }, 2),
+      ),
+    ).toBeNull();
+    expect(
+      decoder.decode(
+        record({ ...base, hook_event_name: "stop", status: "completed", extra: 1 }, 3),
+      ),
+    ).toEqual([]);
+    expect(
+      decoder.driftIssues.map((issue) => [issue.recordId, issue.kind, issue.field ?? issue.event]),
+    ).toEqual([
+      ["r1", "unknown_event", "afterTabFileEdit"],
+      ["r2", "missing_field", "tool_use_id"],
+    ]);
+    expect(
+      inspectCursorHookPayload({
+        ...base,
+        hook_event_name: "afterFileEdit",
+        file_path: "a",
+        edits: "x",
+      }),
+    ).toEqual([expect.objectContaining({ kind: "wrong_type", field: "edits" })]);
+  });
+});
+
+describe("version pinning", () => {
+  it("normalizes cursor-agent's date version and classifies it", () => {
+    expect(normalizeCursorVersion("2026.09.26-dd393fe\n")).toBe("2026.9.26-dd393fe");
+    const classify = (raw: string) =>
+      classifyHarnessVersion(normalizeCursorVersion(raw), [CURSOR_TARGET_VERSION]);
+    expect(classify("2026.09.26-dd393fe")).toBe("tested");
+    expect(classify("2026.10.02-abc1234")).toBe("untested");
+    expect(classify("garbage")).toBe("unknown");
+  });
+});

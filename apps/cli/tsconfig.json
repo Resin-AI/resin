@@ -44,6 +44,9 @@
     },
     {
       "path": "../../adapters/omp"
+    },
+    {
+      "path": "../../adapters/cursor-cli"
     }
   ]
 }
