@@ -1,5 +1,6 @@
 import type { ToolManifest } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { FOR_EACH_DESCRIPTION_SENTENCE } from "../../src/for-each.js";
 import { LocalMcpGateway } from "../../src/gateway.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
 import {
@@ -156,8 +157,9 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     const tools = await router.listTools(context);
     const learned = tools.find((tool) => tool.name === "read_design");
     expect(learned?._meta).toEqual({ [RESIN_LEARNED_TOOL_META]: true });
+    // The learned tool has a text input, so its local detail also offers `for_each`.
     expect(learned?.description).toBe(
-      "Test tool description\n\nRecorded on this machine:\nStep 1 runs: cat design.md",
+      `Test tool description\n\nRecorded on this machine:\nStep 1 runs: cat design.md\n\n${FOR_EACH_DESCRIPTION_SENTENCE}`,
     );
     expect(tools.find((tool) => tool.name === "invoke_tool")?._meta).toBeUndefined();
   });

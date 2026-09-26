@@ -13,6 +13,14 @@ import {
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import {
+  invalidForEachResult,
+  offersForEach,
+  planForEach,
+  runForEach,
+  withForEachInput,
+  withForEachSentence,
+} from "./for-each.js";
+import {
   SessionDiscoveryTracker as DefaultSessionDiscoveryTracker,
   type SessionDiscoveryTracker,
   isDiscoveryTool,
@@ -243,20 +251,30 @@ export class RegistryGatewayRouter implements GatewayRouter {
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
       };
     };
-    const describe = (catalog: string, local: string | undefined) =>
-      local === undefined ? catalog : catalog ? `${catalog}\n\n${local}` : local;
+    // A learned tool with a text input also takes `for_each`, and its locally generated
+    // description says so; nothing else about a listed tool changes.
+    const listed = (tool: CatalogEntry | RegistryTool, catalog: string) => {
+      const { local, _meta } = learnedDetail(tool);
+      const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
+      const forEach = _meta !== undefined && offersForEach(schema);
+      const detail = local !== undefined && forEach ? withForEachSentence(local) : local;
+      return {
+        description: detail === undefined ? catalog : catalog ? `${catalog}\n\n${detail}` : detail,
+        inputSchema: forEach ? withForEachInput(schema) : schema,
+        _meta,
+      };
+    };
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
-        const schema = toMcpInputSchema(entry.parameters ?? entry.manifest?.parameters);
-        const { local, _meta } = learnedDetail(entry);
+        const { description, inputSchema, _meta } = listed(
+          entry,
+          entry.description || entry.manifest?.description || `Tool ${entry.name}`,
+        );
         mcpTools.push({
           name: entry.exposedName,
-          description: describe(
-            entry.description || entry.manifest?.description || `Tool ${entry.name}`,
-            local,
-          ),
-          inputSchema: schema,
+          description,
+          inputSchema,
           catalogOutputSchema: entry.outputSchema ?? entry.manifest?.outputSchema,
           annotations: discoveryAnnotations(entry),
           ...(_meta === undefined ? {} : { _meta }),
@@ -270,15 +288,14 @@ export class RegistryGatewayRouter implements GatewayRouter {
           context.sessionId,
         );
         if (tool) {
-          const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
-          const { local, _meta } = learnedDetail(tool);
+          const { description, inputSchema, _meta } = listed(
+            tool,
+            tool.description || tool.manifest?.description || `Tool ${tool.name}`,
+          );
           mcpTools.push({
             name: tool.exposedName || tool.name,
-            description: describe(
-              tool.description || tool.manifest?.description || `Tool ${tool.name}`,
-              local,
-            ),
-            inputSchema: schema,
+            description,
+            inputSchema,
             catalogOutputSchema: tool.outputSchema ?? tool.manifest?.outputSchema,
             annotations: discoveryAnnotations(tool),
             ...(_meta === undefined ? {} : { _meta }),
@@ -299,7 +316,27 @@ export class RegistryGatewayRouter implements GatewayRouter {
     if (!tool) {
       throw new McpProtocolError(MCP_ERROR_CODES.TOOL_NOT_FOUND, `Tool '${name}' not found`);
     }
+    // `for_each` on a learned tool is one ordinary call per value: each run is gated,
+    // executed, and recorded exactly as if the caller had made it alone.
+    if (!tool.isSystem && (tool.scope === "workspace" || tool.scope === "session")) {
+      const plan = planForEach(tool.parameters ?? tool.manifest?.parameters, params);
+      if (plan.kind === "invalid") return invalidForEachResult(plan.message);
+      if (plan.kind === "runs") {
+        return await runForEach(plan, (args) =>
+          this.callResolvedTool(context, tool, name, args, options),
+        );
+      }
+    }
+    return await this.callResolvedTool(context, tool, name, params, options);
+  }
 
+  private async callResolvedTool(
+    context: WorkspaceContext,
+    tool: RegistryTool,
+    name: string,
+    params: JsonRpcParams,
+    options?: ToolCallOptions,
+  ): Promise<CallToolResult> {
     // Harnesses call evolved tools by name, not through invoke_tool. Record those
     // calls the same way, or the invocation ledger (and every saving computed
     // from it) only ever sees the meta-tool path.
