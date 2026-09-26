@@ -11,6 +11,7 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   type RecordedWorkflow,
+  type WorkflowBindingCandidate,
   type WorkflowJsonValue,
 } from "@resin/contracts";
 import {
@@ -185,6 +186,48 @@ describe("extract bindings confirmed against the recording", () => {
     const { plan } = recordJob(store);
     const answer = await validate({ ...plan, candidates: [] }, store);
     expect(answer.verification?.status).not.toBe("verified");
+  });
+
+  it("verifies the id read from the create step but not the same hole carrying the recorded id", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan, id } = recordJob(store);
+    const extracts = (plan.candidates ?? []).filter(
+      (candidate) => candidate.proposed.kind === "extract",
+    );
+    const bound = { ...applyAcceptedBindings(plan, extracts), candidates: [] };
+    expect((await validate(bound, store)).verification?.status).toBe("verified");
+
+    // The very same plan, its holes now binding the printed id as recorded literal text.
+    const literal = JSON.parse(
+      JSON.stringify(bound, (key, value) =>
+        value !== null && typeof value === "object" && value.type === "extract"
+          ? { type: "literal", value: id }
+          : value,
+      ),
+    ) as RecordedWorkflow;
+    const answer = await validate(literal, store);
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain("step1");
+  });
+
+  it("does not verify a recorded default offered for the printed id", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan } = recordJob(store);
+    const extracts = (plan.candidates ?? []).filter(
+      (candidate) => candidate.proposed.kind === "extract",
+    );
+    const printed = extracts.find((candidate) => candidate.stepId === "step1")!;
+    // The later steps read the id; the first offers it as an input defaulting to the recorded id.
+    const offered: WorkflowBindingCandidate = {
+      ...printed,
+      proposed: { kind: "input", name: "id", type: "string", recordedDefault: true },
+      reason: "classified-source-value",
+    };
+    const candidates = [offered, ...extracts.filter((candidate) => candidate !== printed)];
+    const answer = await validate({ ...plan, candidates }, store);
+    expect(answer.verification?.status).not.toBe("verified");
+    const verdict = answer.verdicts.find((entry) => entry.candidate.proposed.kind === "input");
+    expect(verdict?.confirmed).toBe(false);
   });
 
   it("refutes a locator that extracts some other printed value", async () => {

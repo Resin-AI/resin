@@ -1574,7 +1574,6 @@ export async function runRecordedCall(
       `step '${step.id}' cannot run: the record carries no program text for callable '${step.callable.name}'`,
     );
   }
-  if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
   if (step.origin === "derivation") {
     // Model-written: runs in the Pyodide sandbox with only its inputs, never as a host process.
     if (program.kind !== "python" || program.sourceInterface !== "python-eval") {
@@ -1596,6 +1595,7 @@ export async function runRecordedCall(
       );
     }
   }
+  if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
   const requestedWorkdir = request.arguments.workdir;
   const shellProfile = request.arguments.resinCodexShellProfile;
   const nativeCodexShell = shellProfile === "bash-login-native-v1";

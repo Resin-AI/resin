@@ -19,6 +19,12 @@ export function workflowPrivateReference(
 /** Demonstration slot holding a recorded call's callable and argument names. */
 export const WORKFLOW_CALL_IDENTITY_SLOT = "callable:v1";
 
+/**
+ * Demonstration slot holding where the recorder placed a call among the calls it recorded,
+ * `{epoch, index}`. Written once, the first time the call is recorded, and never uploaded.
+ */
+export const WORKFLOW_CALL_ORDER_SLOT = "order:v1";
+
 /** Demonstration slot holding one whole recorded argument of a call. */
 export function workflowCallArgumentSlot(argument: string): string {
   return `argument:${argument}`;

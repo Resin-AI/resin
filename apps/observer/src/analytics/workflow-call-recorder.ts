@@ -15,6 +15,7 @@
  * stay in the local value store.
  */
 
+import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
@@ -59,6 +60,7 @@ import {
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
 import {
   WORKFLOW_CALL_IDENTITY_SLOT,
+  WORKFLOW_CALL_ORDER_SLOT,
   workflowCallArgumentSlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
@@ -88,6 +90,15 @@ export {
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
+
+/**
+ * The order this process recorded calls in: `epoch` names the process, `index` increases with every
+ * recorded call. Kept only in each call's local order slot, so a validator can tell whether the calls a
+ * plan names ran in the order it claims; calls from different epochs have no recorded order.
+ */
+const RECORDING_EPOCH = randomUUID();
+let recordingIndex = 0;
+
 export type {
   DiscoveredCallable,
   WorkflowCallCandidate,
@@ -1156,6 +1167,22 @@ export class WorkflowCallRecorder {
       event.callId,
       WORKFLOW_CALL_IDENTITY_SLOT,
     );
+    // Where this call falls in the recorded order, kept from the first time it was recorded: a
+    // redelivered or re-read call keeps its place rather than moving to the end.
+    const order = workflowPrivateReference(
+      "demonstration",
+      this.observeAccess?.workspaceId,
+      this.privateRepresentation,
+      [event.sessionId, event.callId, WORKFLOW_CALL_ORDER_SLOT],
+    );
+    if (this.privateValues.get(order) === undefined) {
+      this.localReference(
+        { epoch: RECORDING_EPOCH, index: recordingIndex++ },
+        event.sessionId,
+        event.callId,
+        WORKFLOW_CALL_ORDER_SLOT,
+      );
+    }
     state.position += 1;
     execution.calls.push(call);
     return call;
