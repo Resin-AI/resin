@@ -35,6 +35,8 @@ import {
   extractCharsetOf,
   extractPrintedValue,
   programTokenPath,
+  scriptRecordFieldKeys,
+  scriptTokenContextName,
   tokenizeProgram,
 } from "@resin/contracts";
 
@@ -477,6 +479,9 @@ export function deriveNativeCalls(
       // assignments — names the program to run, never a value it runs with. A bare word past the
       // subcommand's position is a value when other calls ran with it too.
       const positions = call.program.kind === "shell" ? shellArgumentPositions(tokens) : undefined;
+      // A script's record-field keys (`x['merchant']`) are its schema, never its data.
+      const script = call.program.kind === "python" || call.program.kind === "javascript";
+      const fieldKeys = script ? scriptRecordFieldKeys(text, tokens) : new Set<number>();
       for (const [tokenIndex, token] of tokens.entries()) {
         if (inputCandidates.length >= MAX_CANDIDATES || token.start >= bodyStart) break;
         const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
@@ -489,11 +494,14 @@ export function deriveNativeCalls(
             // A value an earlier edit wrote as an input is the same value where a command uses it.
             (position >= 1 && patchInputValues.has(token.value)));
         if (!isProgramValue(call.program.kind, token, previous, shared)) continue;
+        if (fieldKeys.has(tokenIndex)) continue;
         const key = scalarKey(token.value);
         let name = programInputs.get(key);
         if (name === undefined) {
           if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
-          const base = programInputBaseName(token.value, previous);
+          const base =
+            (script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined) ??
+            programInputBaseName(token.value, previous);
           name = base;
           for (let suffix = 2; programInputNames.has(name); suffix += 1) name = `${base}_${suffix}`;
           programInputs.set(key, name);
@@ -562,17 +570,21 @@ export function deriveNativeCalls(
       // task's inputs, and its address stays inside that program so top-level indexes never move.
       if (call.program.kind === "shell") {
         for (const program of embeddedPrograms(text)) {
+          const embeddedFields = scriptRecordFieldKeys(text, program.tokens);
           for (const [embeddedIndex, token] of program.tokens.entries()) {
             if (inputCandidates.length >= MAX_CANDIDATES) break;
             const value = token.value;
             if (!token.bindable || token.kind !== "string" || typeof value !== "string") continue;
             if (value.length === 0 || value.length > MAX_PROGRAM_INPUT_LENGTH) continue;
             if (!requestWords.has(value) && !sharedEmbedded.has(value)) continue;
+            if (embeddedFields.has(embeddedIndex)) continue;
             const key = scalarKey(value);
             let name = programInputs.get(key);
             if (name === undefined) {
               if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
-              const base = programInputBaseName(value, program.tokens[embeddedIndex - 1]);
+              const base =
+                scriptTokenContextName(text, program.tokens, embeddedIndex) ??
+                programInputBaseName(value, program.tokens[embeddedIndex - 1]);
               name = base;
               for (let suffix = 2; programInputNames.has(name); suffix += 1) {
                 name = `${base}_${suffix}`;
@@ -619,6 +631,7 @@ export function deriveNativeCalls(
           !/^\s*:/.test(text.slice(token.end));
         if (!patchValue && !isProgramValue(call.program.kind, token, tokens[tokenIndex - 1], true))
           continue;
+        if (fieldKeys.has(tokenIndex)) continue;
         spanTargets.push({
           token: token as ProgramToken & { value: string },
           path: ["tokens", tokenIndex],
@@ -626,7 +639,9 @@ export function deriveNativeCalls(
       }
       if (call.program.kind === "shell") {
         for (const program of embeddedPrograms(text)) {
+          const embeddedFields = scriptRecordFieldKeys(text, program.tokens);
           for (const [embeddedIndex, token] of program.tokens.entries()) {
+            if (embeddedFields.has(embeddedIndex)) continue;
             if (!token.bindable || token.kind !== "string" || typeof token.value !== "string") {
               continue;
             }

@@ -1646,3 +1646,166 @@ export function bindProgramToken(
   );
   return { ...source, holes };
 }
+
+/** Words a script never uses as a value's name: keywords and constants. */
+const SCRIPT_NAME_EXCLUDED: Record<string, true> = {
+  and: true,
+  or: true,
+  not: true,
+  in: true,
+  is: true,
+  None: true,
+  True: true,
+  False: true,
+  null: true,
+  undefined: true,
+  this: true,
+  self: true,
+};
+
+/** The offset of the `{` that opens the innermost brace pair around `offset`, skipping strings. */
+function enclosingBrace(
+  source: string,
+  tokens: readonly ProgramToken[],
+  offset: number,
+): number | undefined {
+  let depth = 0;
+  let tokenIndex = tokens.length - 1;
+  for (let at = offset - 1; at >= 0; at -= 1) {
+    while (tokenIndex >= 0 && tokens[tokenIndex]!.start > at) tokenIndex -= 1;
+    const token = tokenIndex >= 0 ? tokens[tokenIndex] : undefined;
+    if (token !== undefined && token.kind === "string" && at < token.end) {
+      at = token.start;
+      continue;
+    }
+    const char = source[at];
+    if (char === "}") depth += 1;
+    else if (char === "{") {
+      if (depth === 0) return at;
+      depth -= 1;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Indexes of string tokens that name a record's fields rather than carry data: keys a record is
+ * subscripted with (`x['merchant']`, `x['year']` — at least two distinct keys on one base) and the
+ * keys of a dict/object literal with at least two string keys. Token offsets index `source`.
+ */
+export function scriptRecordFieldKeys(
+  source: string,
+  tokens: readonly ProgramToken[],
+): Set<number> {
+  const subscripts = new Map<string, { indexes: number[]; keys: Set<string> }>();
+  const dicts = new Map<number, number[]>();
+  for (const [index, token] of tokens.entries()) {
+    if (token.kind !== "string" || typeof token.value !== "string") continue;
+    const after = source.slice(token.end);
+    const previous = index > 0 ? tokens[index - 1] : undefined;
+    if (
+      previous?.kind === "word" &&
+      /^\s*\[\s*$/.test(source.slice(previous.end, token.start)) &&
+      /^\s*\]/.test(after)
+    ) {
+      const entry = subscripts.get(previous.raw) ?? {
+        indexes: [],
+        keys: new Set<string>(),
+      };
+      entry.indexes.push(index);
+      entry.keys.add(token.value);
+      subscripts.set(previous.raw, entry);
+      continue;
+    }
+    if (/^\s*:(?!:)/.test(after)) {
+      const brace = enclosingBrace(source, tokens, token.start);
+      if (brace === undefined) continue;
+      const keys = dicts.get(brace) ?? [];
+      keys.push(index);
+      dicts.set(brace, keys);
+    }
+  }
+  const fields = new Set<number>();
+  for (const entry of subscripts.values()) {
+    if (entry.keys.size >= 2) for (const index of entry.indexes) fields.add(index);
+  }
+  for (const keys of dicts.values()) {
+    if (keys.length >= 2) for (const index of keys) fields.add(index);
+  }
+  return fields;
+}
+
+/** A code identifier or record key as an input name, or undefined when it cannot be one. */
+function normalizeScriptName(text: string): string | undefined {
+  const name = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return /^[a-z][a-z0-9_]{1,29}$/.test(name) ? name : undefined;
+}
+
+/**
+ * A readable input name for the script literal at `index`, taken from the code around it — the
+ * record field it is compared with or stored under, or the identifier it is compared with or
+ * assigned to — never from the value itself. Undefined when the code names nothing.
+ */
+export function scriptTokenContextName(
+  source: string,
+  tokens: readonly ProgramToken[],
+  index: number,
+): string | undefined {
+  const token = tokens[index];
+  if (token === undefined) return undefined;
+  const previous = index > 0 ? tokens[index - 1] : undefined;
+  const next = tokens[index + 1];
+  const gap = (left: ProgramToken, right: ProgramToken) => source.slice(left.end, right.start);
+  const identifier = (candidate: ProgramToken | undefined) =>
+    candidate?.kind === "word" && SCRIPT_NAME_EXCLUDED[candidate.raw] !== true
+      ? candidate.raw
+      : undefined;
+  let fields: Set<number> | undefined;
+  const isField = (at: number) => (fields ??= scriptRecordFieldKeys(source, tokens)).has(at);
+  const comparison = /^\s*(===?|!==?|<=|>=|<|>)\s*$/;
+  const names: Array<() => string | undefined> = [
+    // a. B['k'] OP V
+    () =>
+      previous !== undefined &&
+      /^\s*\]\s*(===?|!==?|<=|>=|<|>)\s*$/.test(gap(previous, token)) &&
+      isField(index - 1)
+        ? (previous.value as string)
+        : undefined,
+    // b. V OP B['k']
+    () => {
+      const key = tokens[index + 2];
+      return next?.kind === "word" &&
+        key !== undefined &&
+        /^\s*(===?|!==?)\s*$/.test(gap(token, next)) &&
+        /^\s*\[\s*$/.test(gap(next, key)) &&
+        isField(index + 2)
+        ? (key.value as string)
+        : undefined;
+    },
+    // c. ident OP V / V OP ident
+    () =>
+      (previous !== undefined && comparison.test(gap(previous, token))
+        ? identifier(previous)
+        : undefined) ??
+      (next !== undefined && comparison.test(gap(token, next)) ? identifier(next) : undefined),
+    // d. ident = V (assignment, keyword argument, declaration)
+    () =>
+      previous !== undefined && /^\s*=\s*$/.test(gap(previous, token))
+        ? identifier(previous)
+        : undefined,
+    // e. 'k': V in a record literal
+    () =>
+      previous !== undefined && /^\s*:\s*$/.test(gap(previous, token)) && isField(index - 1)
+        ? (previous.value as string)
+        : undefined,
+  ];
+  for (const rule of names) {
+    const raw = rule();
+    const name = raw === undefined ? undefined : normalizeScriptName(raw);
+    if (name !== undefined) return name;
+  }
+  return undefined;
+}

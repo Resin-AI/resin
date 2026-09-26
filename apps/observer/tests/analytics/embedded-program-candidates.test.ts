@@ -238,6 +238,48 @@ describe("literals inside an embedded program", () => {
       JSON.stringify(observed.map((entry) => projectEventToMetadataOnly(entry))),
     ).not.toContain(secret);
   });
+
+  it("offers a record's filter values under their column names and never the column names", async () => {
+    const command = `python3 - <<'PY'
+import json
+p=json.load(open('data/payments.json'))
+f=json.load(open('data/fees.json'))
+t=[x for x in p if x['merchant']=='Belles_cookbook_store' and x['year']=='2023' and x['day_of_year']=='12']
+print(len(t), len(f))
+PY`;
+    const { carrier } = await recordCodexCommand(
+      "codex-embedded-record-fields",
+      "For the 12th of the year 2023, what is the total fees (in euros) that Belles_cookbook_store should pay?",
+      command,
+    );
+    const embedded = (carrier.candidates ?? []).filter(
+      (candidate) => programTokenPath(candidate.path)?.embedded !== undefined,
+    );
+    const values = embeddedValues(command, embedded);
+    const named = new Map(
+      embedded.map((candidate, index) => [
+        candidate.proposed.kind === "input" ? candidate.proposed.name : undefined,
+        values[index],
+      ]),
+    );
+    expect(named.get("merchant")).toBe("Belles_cookbook_store");
+    expect(named.get("year")).toBe("2023");
+    expect(named.get("day_of_year")).toBe("12");
+    for (const key of ["merchant", "year", "day_of_year"]) expect(values).not.toContain(key);
+  });
+
+  it("still offers a request-named key a record subscripts alone", async () => {
+    const command = `python3 - <<'PY'
+d=json.load(open('data/d.json'))
+print(d['alpha'])
+PY`;
+    const { carrier } = await recordCodexCommand(
+      "codex-embedded-single-key",
+      "Print the alpha entry.",
+      command,
+    );
+    expect(embeddedValues(command, carrier.candidates ?? [])).toContain("alpha");
+  });
 });
 
 const REPORT_COMMAND =
