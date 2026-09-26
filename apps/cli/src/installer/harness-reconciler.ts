@@ -19,10 +19,7 @@ import type {
   ManagedBlockResult,
 } from "@resin/harness-contracts";
 import { z } from "zod";
-import {
-  SUPPORTED_HARNESS_IDS,
-  getHarnessDefinition,
-} from "../harness-registry.js";
+import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../harness-registry.js";
 import {
   DEFAULT_GATEWAY_URL,
   findCodexTomlServerConfig,
@@ -2334,7 +2331,10 @@ async function reconcileInstallArtifacts(
         changed: next.changed || (!options.dryRun && outcome.action !== "unchanged"),
       };
     } catch (error: unknown) {
-      return { ...next, error: `${definition.shortName} guidance update failed: ${describeError(error)}` };
+      return {
+        ...next,
+        error: `${definition.shortName} guidance update failed: ${describeError(error)}`,
+      };
     }
   }
   const outcomes: ManagedBlockResult[] = [];

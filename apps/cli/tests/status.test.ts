@@ -1,8 +1,5 @@
 import path from "node:path";
 import process from "node:process";
-import { claudeCodeHarness } from "@resin/adapter-claude-code";
-import { codexHarness } from "@resin/adapter-codex";
-import { ompHarness } from "@resin/adapter-omp";
 import type { HarnessInstallation } from "@resin/harness-contracts";
 import { type DaemonHealthReport, IpcClient } from "@resin/observer";
 import type { ActionableNotification } from "@resin/protocol";
@@ -15,6 +12,7 @@ import {
   formatStatusForTerminal,
   statusCommand,
 } from "../src/commands/status.js";
+import { HARNESS_DEFINITIONS } from "../src/harness-registry.js";
 import * as serviceManagerModule from "../src/service/manager.js";
 
 type JsonPrimitive = string | number | boolean | null;
@@ -50,11 +48,8 @@ const runtime = vi.hoisted(() => ({
       failClosed: false,
     },
   },
-  installedHarnesses: {
-    "claude-code": true,
-    "codex-cli": true,
-    omp: true,
-  },
+  // Overrides per harness; otherwise the harnesses with fixture configs probe as installed.
+  installedHarnesses: {} as Record<string, boolean>,
 }));
 
 vi.spyOn(serviceManagerModule, "createUserServiceManager").mockImplementation(() => ({
@@ -97,15 +92,16 @@ vi.spyOn(IpcClient.prototype, "close").mockImplementation(async () => {});
 // SAFETY: Status reads only `isInstalled` and `version` from probe results.
 const probeResult = (isInstalled: boolean, version: string) =>
   ({ isInstalled, version }) as HarnessInstallation;
-vi.spyOn(claudeCodeHarness, "probeInstallation").mockImplementation(async () =>
-  probeResult(runtime.installedHarnesses["claude-code"], "0.0.0"),
-);
-vi.spyOn(codexHarness, "probeInstallation").mockImplementation(async () =>
-  probeResult(runtime.installedHarnesses["codex-cli"], codexHarness.testedVersions[0] ?? "0.0.0"),
-);
-vi.spyOn(ompHarness, "probeInstallation").mockImplementation(async () =>
-  probeResult(runtime.installedHarnesses.omp, "999.0.0"),
-);
+/** Harnesses whose registrations the fixture home seeds; any other registered harness is absent. */
+const FIXTURE_HARNESS_IDS: readonly string[] = ["claude-code", "codex-cli", "omp"];
+for (const definition of HARNESS_DEFINITIONS) {
+  vi.spyOn(definition, "probeInstallation").mockImplementation(async () =>
+    probeResult(
+      runtime.installedHarnesses[definition.id] ?? FIXTURE_HARNESS_IDS.includes(definition.id),
+      definition.testedVersions[0] ?? "0.0.0",
+    ),
+  );
+}
 
 const NOW = 1_800_000_000_000;
 const HOME = "/home/status-user";
@@ -214,38 +210,16 @@ function harnessSnapshot(overrides: JsonObject = {}) {
     success: true,
     hasDrift: false,
     configFiles: {},
-    harnesses: [
-      {
-        harnessId: "claude-code",
-        displayName: "Claude Code",
-        installed: true,
-        configured: true,
-        status: "registered",
-        condition: "healthy",
-        changed: false,
-        checkedAt: "2027-01-03T00:00:00.000Z",
-      },
-      {
-        harnessId: "codex-cli",
-        displayName: "Codex CLI",
-        installed: true,
-        configured: true,
-        status: "registered",
-        condition: "healthy",
-        changed: false,
-        checkedAt: "2027-01-03T00:00:00.000Z",
-      },
-      {
-        harnessId: "omp",
-        displayName: "Oh My Pi",
-        installed: true,
-        configured: true,
-        status: "registered",
-        condition: "healthy",
-        changed: false,
-        checkedAt: "2027-01-03T00:00:00.000Z",
-      },
-    ],
+    harnesses: HARNESS_DEFINITIONS.map((definition) => ({
+      harnessId: definition.id,
+      displayName: definition.shortName,
+      installed: FIXTURE_HARNESS_IDS.includes(definition.id),
+      configured: FIXTURE_HARNESS_IDS.includes(definition.id),
+      status: "registered",
+      condition: "healthy",
+      changed: false,
+      checkedAt: "2027-01-03T00:00:00.000Z",
+    })),
     ...overrides,
   };
 }
@@ -308,11 +282,7 @@ beforeEach(() => {
       failClosed: false,
     },
   };
-  runtime.installedHarnesses = {
-    "claude-code": true,
-    "codex-cli": true,
-    omp: true,
-  };
+  runtime.installedHarnesses = {};
 });
 
 describe("unified status schema", () => {
@@ -482,7 +452,11 @@ describe("unified status schema", () => {
       success: true,
       hasDrift: false,
     });
-    expect(summary.harnesses.every((harness) => harness.status === "attached")).toBe(true);
+    expect(
+      summary.harnesses
+        .filter((harness) => FIXTURE_HARNESS_IDS.includes(harness.id))
+        .map((harness) => harness.status),
+    ).toEqual(FIXTURE_HARNESS_IDS.map(() => "attached"));
     expect(summary.remediations).toEqual([]);
   });
 

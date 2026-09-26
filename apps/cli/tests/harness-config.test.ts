@@ -1,10 +1,10 @@
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
-import { HARNESS_DEFINITIONS } from "../src/harness-registry.js";
+import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
 import { HarnessConfigOrchestrator } from "../src/installer/harness-config.js";
 
 describe("HarnessConfigOrchestrator", () => {
-  it("configures every registered harness in a clean environment", async () => {
+  it("configures Claude Code, Codex CLI, and OMP in a clean environment", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
 
@@ -20,8 +20,8 @@ describe("HarnessConfigOrchestrator", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.results).toHaveLength(HARNESS_DEFINITIONS.length);
-    expect(result.backups).toHaveLength(HARNESS_DEFINITIONS.length);
+    expect(result.results).toHaveLength(SUPPORTED_HARNESS_IDS.length);
+    expect(result.backups).toHaveLength(SUPPORTED_HARNESS_IDS.length);
 
     // Verify Claude config was written
     const claudeContent = await bridge.readFile(`${home}/.claude.json`);
@@ -63,7 +63,7 @@ describe("HarnessConfigOrchestrator", () => {
       fsBridge: bridge,
     });
     expect(firstRun.success).toBe(true);
-    expect(firstRun.backups).toHaveLength(HARNESS_DEFINITIONS.length);
+    expect(firstRun.backups).toHaveLength(SUPPORTED_HARNESS_IDS.length);
 
     // Second run: should detect already configured state without applying new mutations
     const secondRun = await orchestrator.configureHarnesses({
