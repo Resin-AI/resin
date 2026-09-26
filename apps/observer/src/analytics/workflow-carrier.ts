@@ -178,6 +178,13 @@ export type WorkflowIdentityEvent = Pick<
 export function workflowCallId(event: WorkflowIdentityEvent): string {
   if (isCodexNativeEffect(event)) {
     const native = readCodexCommandMetadata(event.metadata);
+    // A command that completed after its audited wrapper replied is that wrapper's result.
+    if (
+      native?.kind === "command" &&
+      native.association?.nativeCommandId === native.nativeId &&
+      event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY] === undefined
+    )
+      return native.association.callId;
     if (native?.kind === "command" || native?.kind === "file-change") return native.nativeId;
   }
   return event.callId ?? event.toolCallId ?? event.eventId;

@@ -560,7 +560,11 @@ export class WorkflowCallRecorder {
         (codex?.kind === "result" &&
           (codex.status !== "completed" || native === undefined || native.exitCode !== 0));
       const observed = this.observeResult(source, event, resultObservation, suppressResult);
-      const resultEvent = { ...event, metadata: observed.metadata };
+      // The cell completed, but the command it ran failed: the step failed.
+      const resultEvent =
+        codex?.kind === "result" && native !== undefined && native.exitCode !== 0
+          ? { ...event, isError: true, metadata: observed.metadata }
+          : { ...event, metadata: observed.metadata };
       if (suppressResult) {
         retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
       } else if (resultObservation !== undefined) {

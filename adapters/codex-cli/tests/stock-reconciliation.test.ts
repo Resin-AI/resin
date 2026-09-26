@@ -254,6 +254,36 @@ describe("stock Codex command reconciliation", () => {
     }
   });
 
+  it("trusts a later wrapper only once an awaited multi-command cell has completed", () => {
+    const settled =
+      "const cmds=['cat a','cat b'];\nconst r=await Promise.allSettled(cmds.map(cmd=>tools.exec_command({cmd,workdir:'/repo'})));\nr.forEach((x,i)=>text(String(x.status)));";
+    const associated = (source: string, replyBeforeLater: boolean) => {
+      const decoder = new CodexSessionDecoder({ sessionId: "s" });
+      const survey = call("survey", "ignored", base);
+      survey.payload.input = source;
+      decoder.decodeRecord(survey);
+      if (replyBeforeLater) decoder.decodeRecord(reply("survey", base + 5));
+      decoder.decodeRecord(call("later", "echo ok", base + 10));
+      decoder.decodeRecord(command("n1", "echo ok", base + 20, base + 30));
+      if (!replyBeforeLater) decoder.decodeRecord(reply("survey", base + 35));
+      return readCodexCommandMetadata(decoder.decodeRecord(reply("later", base + 40))[0]!.metadata);
+    };
+    expect(associated(settled, true)).toMatchObject({
+      association: { callId: "later", nativeCommandId: "n1" },
+    });
+    // Still running when the later command started: its commands could be that command.
+    expect(associated(settled, false)).not.toHaveProperty("association");
+    // Cell sources (never executed): each could start a command after the cell completes.
+    for (const unproven of [
+      settled.replace("cmd=>tools.exec_command", "cmd=>setTimeout(()=>tools.exec_command"),
+      settled.replace("cmds.map", "({map:(f)=>[f('x')]}).map"),
+      settled.replace("const cmds=['cat a','cat b'];", "const cmds=['cat a'];cmds.map=(f)=>[];"),
+      settled.replace("Promise.allSettled", "Promise.race"),
+      `const t=tools;\n${settled}`,
+    ])
+      expect(associated(unproven, true)).not.toHaveProperty("association");
+  });
+
   it("does not treat quoted apply-patch source as a concurrent command", () => {
     const decoder = new CodexSessionDecoder({ sessionId: "s" });
     const patch = call("patch", "ignored", base);

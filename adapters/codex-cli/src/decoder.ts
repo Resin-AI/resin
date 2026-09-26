@@ -37,6 +37,7 @@ import {
   extractSingleCommandOutput,
   hasUnresolvedCodeModeEffects,
   isApplyPatchOnlyCell,
+  settlesBeforeCompletion,
 } from "./code-command.js";
 import { codexFileEdits } from "./file-change.js";
 
@@ -1036,6 +1037,11 @@ export class CodexSessionDecoder {
   >();
   private nativeMatches = new Set<string>();
   private unsafeCodeMode = false;
+  /**
+   * Unsupported cells proven to settle every command before `Script completed`; unsafe only until
+   * that reply. Any other reply, or losing track of one, makes the session unsafe for good.
+   */
+  private settlingCells = new Set<string>();
   private nativeUsageSeen = new Set<string>();
   private nativeContexts = new Map<string, CodexNativeThreadContext>();
   private currentNativeContext?: CodexNativeThreadContext;
@@ -1086,7 +1092,13 @@ export class CodexSessionDecoder {
     const [callId, wrapper] = candidates[0];
     // Count all native starts, including incompatible commands and already-matched roots.
     // A second child invalidates a pending root result; emitted events are never rewritten.
-    if (wrapper.matched || wrapper.blocked || wrapper.status === "yielded" || this.unsafeCodeMode) {
+    if (
+      wrapper.matched ||
+      wrapper.blocked ||
+      wrapper.status === "yielded" ||
+      this.unsafeCodeMode ||
+      this.settlingCells.size > 0
+    ) {
       wrapper.blocked = true;
       return undefined;
     }
@@ -1536,6 +1548,13 @@ export class CodexSessionDecoder {
       return [];
     }
     if (!this.rememberNativeItem(item, threadId, outputSource)) return [];
+    if (
+      source === "response_item" &&
+      (itemType === "function_call_output" || itemType === "custom_tool_call_output") &&
+      this.settlingCells.delete(outputCallId ?? "") &&
+      !asString(asObject(asArray(item.output)?.[0])?.text)?.startsWith("Script completed")
+    )
+      this.unsafeCodeMode = true;
     if (
       source === "response_item" &&
       (itemType === "function_call" ||
@@ -2087,8 +2106,16 @@ export class CodexSessionDecoder {
           native.name === "exec" &&
           (typeof nativeInput !== "string" ||
             (!extracted && hasUnresolvedCodeModeEffects(nativeInput)))
-        )
-          this.unsafeCodeMode = true;
+        ) {
+          if (
+            callId &&
+            typeof nativeInput === "string" &&
+            this.settlingCells.size < 128 &&
+            settlesBeforeCompletion(nativeInput)
+          )
+            this.settlingCells.add(callId);
+          else this.unsafeCodeMode = true;
+        }
         const callTime = asNumber(
           asObject(native.internal_chat_message_metadata_passthrough)?.create_time,
         );
