@@ -237,11 +237,17 @@ function heredocStart(language: ProgramLanguage, text: string): number {
 
 /**
  * Derives, from a recorded call sequence, the dependencies and the candidate bindings it supports.
+ * `requestWords` are the words of the instruction the calls answered: a bare word the request named
+ * (`Cut a release of the alpha project` → `./release test alpha`) is what the work runs on, even at
+ * its first use.
  *
  * The function is a pure function of what it is given: no clock, no filesystem, no execution, and
  * no model. Two runs over the same recording produce the same derivation.
  */
-export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDerivation {
+export function deriveNativeCalls(
+  calls: readonly DerivationCall[],
+  requestWords: ReadonlySet<string> = new Set(),
+): NativeDerivation {
   const derived: DerivedCall[] = [];
   const candidates: WorkflowBindingCandidate[] = [];
   // Weak caller-input suggestions never consume slots reserved for result evidence.
@@ -398,7 +404,7 @@ export function deriveNativeCalls(calls: readonly DerivationCall[]): NativeDeriv
           position !== undefined &&
           position >= 2 &&
           typeof token.value === "string" &&
-          sharedWords.has(token.value);
+          (sharedWords.has(token.value) || requestWords.has(token.value));
         if (!isProgramValue(call.program.kind, token, previous, shared)) continue;
         const key = scalarKey(token.value);
         let name = programInputs.get(key);

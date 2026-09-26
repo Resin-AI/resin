@@ -267,6 +267,31 @@ describe("a value embedded in a recorded program", () => {
     ]);
   });
 
+  it("offers a bare word the instruction named, from its first use", () => {
+    const offered = (instruction: string) => {
+      const { events } = record([
+        event({
+          eventId: "evt_instruction",
+          type: "message",
+          role: "user",
+          content: instruction,
+          causalRef: { causalSequence: 0, parentId: null },
+        }),
+        call(1, { command: "./release test alpha" }),
+        result(1, { stdout: "1 passed" }),
+      ]);
+      return (carrierOf(events[1]!)?.candidates ?? []).map((candidate) => [
+        candidate.path,
+        candidate.proposed,
+      ]);
+    };
+
+    expect(offered("Cut a release of the `alpha` project, following RUNBOOK.md.")).toEqual([
+      [["tokens", 2], { kind: "input", name: "text", type: "string", recordedDefault: true }],
+    ]);
+    expect(offered("Cut the next release, following RUNBOOK.md.")).toEqual([]);
+  });
+
   it("names a recording's parameters from its own values, not the session's numbering", () => {
     const { events } = record([
       call(1, { command: "cat /app/a.txt" }),

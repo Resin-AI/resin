@@ -137,6 +137,8 @@ interface LocalExecution {
    * stored as they are observed, so a replay has what the repeat actually produced.
    */
   heldOut?: WorkflowCallHeldOut;
+  /** Words of the instruction that started this execution: the values its request named. */
+  requestWords: ReadonlySet<string>;
 }
 
 /** Executions kept per session: enough to recognise a repeat, bounded so a long session cannot grow. */
@@ -154,6 +156,8 @@ interface SessionDerivationState {
    * uniformly, and the turn index a transcript may carry is not set by every decoder.
    */
   newExecutionPending: boolean;
+  /** Words of the instructions since the last call, which the next execution was asked with. */
+  pendingRequestWords: Set<string>;
   nativeOutputs: Map<string, { stdout: string; exitCode: number }>;
   /**
    * Audited single-command wrappers still awaiting their result. Such a result may still claim a
@@ -173,6 +177,19 @@ function isPlainObject(value: unknown): value is Record<string, WorkflowJsonValu
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Instruction words kept for one execution; the latest are kept, as the request comes last. */
+const MAX_REQUEST_WORDS = 256;
+
+/** Adds an instruction's words, keeping only the most recent when the bound is reached. */
+function addRequestWords(words: Set<string>, content: string): void {
+  for (const match of content.matchAll(/[A-Za-z0-9][A-Za-z0-9_.:@+-]*/g)) {
+    const word = match[0].replace(/[.:]+$/, "");
+    if (word.length < 2 || word.length > 64) continue;
+    words.delete(word);
+    words.add(word);
+    if (words.size > MAX_REQUEST_WORDS) words.delete(words.values().next().value!);
+  }
+}
 /**
  * The reference-aware invocation surface, however the harness spelled it: bare
  * `invoke_tool`/`sys_invoke_tool`, or an MCP-prefixed `mcp__<server>__invoke_tool`.
@@ -241,6 +258,7 @@ export class WorkflowCallRecorder {
       openCodexWrappers: new Set(),
       codexWrapperOverflow: false,
       newExecutionPending: false,
+      pendingRequestWords: new Set(),
     };
     this.sessions.set(sessionId, created);
     while (this.sessions.size > MAX_SESSIONS) {
@@ -333,7 +351,10 @@ export class WorkflowCallRecorder {
     if (event.type === "message" && event.role === "user") {
       // The instruction that starts a piece of work. Nothing else in a transcript separates one
       // piece of work from the next often enough to rely on.
-      this.sessionState(event.sessionId).newExecutionPending = true;
+      const state = this.sessionState(event.sessionId);
+      if (!state.newExecutionPending) state.pendingRequestWords = new Set();
+      addRequestWords(state.pendingRequestWords, event.content);
+      state.newExecutionPending = true;
       return event;
     }
     if (event.type === "command_exec") {
@@ -922,7 +943,9 @@ export class WorkflowCallRecorder {
             ? 0
             : state.executions[state.executions.length - 1]!.index + 1,
         calls: [],
+        requestWords: state.pendingRequestWords,
       });
+      state.pendingRequestWords = new Set();
       while (state.executions.length > MAX_EXECUTIONS) state.executions.shift();
     }
     const execution = state.executions[state.executions.length - 1]!;
@@ -1083,6 +1106,7 @@ export class WorkflowCallRecorder {
         ...(entry.result === undefined ? {} : { result: entry.result }),
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
+      state.executions.find((execution) => execution.index === call.executionIndex)?.requestWords,
     );
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
