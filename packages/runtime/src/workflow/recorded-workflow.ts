@@ -15,6 +15,7 @@ import {
   embeddedPrograms,
   extractPrintedValue,
   parseExtractLocator,
+  programTokenValueAt,
   tokenizeProgram,
   validateWorkflowProgramProjection,
   workflowSinkStepIds,
@@ -181,6 +182,104 @@ function projectedProgramSource(
   return template.sourceReference;
 }
 
+/**
+ * The whole original text a program template runs. A projected literal is only a bounded,
+ * secret-redacted view; its original is the execution authority and must resolve locally.
+ */
+async function originalProgramText(
+  template: Extract<WorkflowValueTemplate, { type: "program" }>,
+  step: WorkflowStep,
+  argumentName: string,
+  options: RecordedWorkflowExecutionOptions,
+  declaredPrivateReferences: ReadonlySet<string>,
+  resolveLeaf: (leaf: WorkflowValueTemplate) => Promise<WorkflowJsonValue>,
+): Promise<string> {
+  const projection = projectedProgramSource(template, step.id, argumentName);
+  if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
+    throw new WorkflowBindingError(
+      "the projected program source reference is not declared by the workflow",
+      step.id,
+      argumentName,
+    );
+  }
+  if (projection !== undefined) {
+    if (!options.resolvePrivate) {
+      throw new WorkflowBindingError(
+        "the original program source reference cannot be resolved in this environment",
+        step.id,
+        argumentName,
+      );
+    }
+    const original = await options.resolvePrivate(projection, options.access);
+    if (typeof original !== "string") {
+      throw new WorkflowBindingError(
+        "the original program source reference did not resolve to program text",
+        step.id,
+        argumentName,
+      );
+    }
+    return original;
+  }
+  const sourceText = await resolveLeaf(template.source);
+  if (typeof sourceText !== "string") {
+    throw new WorkflowBindingError(
+      "the recorded program did not resolve to program text",
+      step.id,
+      argumentName,
+    );
+  }
+  return sourceText;
+}
+
+/**
+ * The value the recording used for an omitted recorded-default input, read at the input's first
+ * hole in a recorded (non-derivation) program step — the token an omitted input keeps there.
+ * Undefined when no recorded step binds the input or its token is not safely readable.
+ */
+async function recordedInputValue(
+  workflow: RecordedWorkflow,
+  input: RecordedWorkflow["inputs"][number],
+  options: RecordedWorkflowExecutionOptions,
+  declaredPrivateReferences: ReadonlySet<string>,
+): Promise<WorkflowJsonValue | undefined> {
+  for (const step of workflow.steps) {
+    if (step.origin === "derivation") continue;
+    for (const argument of step.arguments) {
+      if (argument.source.kind !== "template" || argument.source.template.type !== "program") {
+        continue;
+      }
+      const template = argument.source.template;
+      const hole = template.holes.find(
+        (each) => each.binding.type === "input" && each.binding.name === input.name,
+      );
+      if (hole === undefined) continue;
+      const resolveLeaf = async (leaf: WorkflowValueTemplate): Promise<WorkflowJsonValue> =>
+        buildTemplate(leaf, step, argument.name, options, new Map(), declaredPrivateReferences);
+      let text: string;
+      try {
+        text = await originalProgramText(
+          template,
+          step,
+          argument.name,
+          options,
+          declaredPrivateReferences,
+          resolveLeaf,
+        );
+      } catch {
+        // An unreadable recording supplies nothing; the derivation then reports the input missing.
+        return undefined;
+      }
+      const value = programTokenValueAt(template.language, text, {
+        token: hole.token,
+        ...(hole.embedded === undefined ? {} : { embedded: hole.embedded }),
+        ...(hole.span === undefined ? {} : { span: hole.span }),
+      });
+      return value !== undefined && matchesWorkflowInputType(value, input.type) ? value : undefined;
+    }
+  }
+  return undefined;
+}
+
 /** Builds a recursively constructed argument: every leaf keeps its own source. */
 async function buildTemplate(
   template: WorkflowValueTemplate,
@@ -284,45 +383,15 @@ async function buildTemplate(
       return built;
     }
     case "program": {
-      // A projected literal is only a bounded, secret-redacted view. Its whole original is the
-      // execution authority and must resolve locally before tokenization or binding substitution.
+      const text = await originalProgramText(
+        template,
+        step,
+        argumentName,
+        options,
+        declaredPrivateReferences,
+        resolveLeaf,
+      );
       const projection = projectedProgramSource(template, step.id, argumentName);
-      if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
-        throw new WorkflowBindingError(
-          "the projected program source reference is not declared by the workflow",
-          step.id,
-          argumentName,
-        );
-      }
-      let text: string;
-      if (projection !== undefined) {
-        if (!options.resolvePrivate) {
-          throw new WorkflowBindingError(
-            "the original program source reference cannot be resolved in this environment",
-            step.id,
-            argumentName,
-          );
-        }
-        const original = await options.resolvePrivate(projection, options.access);
-        if (typeof original !== "string") {
-          throw new WorkflowBindingError(
-            "the original program source reference did not resolve to program text",
-            step.id,
-            argumentName,
-          );
-        }
-        text = original;
-      } else {
-        const sourceText = await resolveLeaf(template.source);
-        if (typeof sourceText !== "string") {
-          throw new WorkflowBindingError(
-            "the recorded program did not resolve to program text",
-            step.id,
-            argumentName,
-          );
-        }
-        text = sourceText;
-      }
       let tokens: ProgramToken[] | undefined;
       if (projection !== undefined) {
         const sanitizedSource = template.source;
@@ -349,7 +418,8 @@ async function buildTemplate(
       const spans: ProgramTokenSpanValue[] = [];
       for (const hole of template.holes) {
         // An omitted recorded-default input leaves the token exactly as the recording ran it. A
-        // derivation's tokens were never recorded, so its inputs are always required.
+        // derivation's tokens were never recorded; its omitted recorded-default inputs were
+        // supplied from the recording before it ran.
         if (
           hole.binding.type === "input" &&
           !Object.hasOwn(options.inputs, hole.binding.name) &&
@@ -532,10 +602,42 @@ export async function executeRecordedWorkflow(
     }
   }
   const executionOptions = { ...options, inputs };
+  // A derivation reads an omitted recorded-default input as the value the recording used.
+  const derivationInputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  Object.assign(derivationInputs, inputs);
+  const derivationReads = new Set<string>();
+  for (const step of workflow.steps) {
+    if (step.origin !== "derivation") continue;
+    for (const argument of step.arguments) {
+      if (argument.source.kind !== "template" || argument.source.template.type !== "program") {
+        continue;
+      }
+      for (const hole of argument.source.template.holes) {
+        if (hole.binding.type === "input") derivationReads.add(hole.binding.name);
+      }
+    }
+  }
+  const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
+  for (const input of workflow.inputs) {
+    if (
+      input.recordedDefault !== true ||
+      Object.hasOwn(inputs, input.name) ||
+      !derivationReads.has(input.name)
+    ) {
+      continue;
+    }
+    const recorded = await recordedInputValue(
+      workflow,
+      input,
+      executionOptions,
+      declaredPrivateReferences,
+    );
+    if (recorded !== undefined) derivationInputs[input.name] = recorded;
+  }
+  const derivationOptions = { ...options, inputs: derivationInputs };
   const outcomes: RecordedStepOutcome[] = [];
   const results = new Map<string, WorkflowJsonValue>();
   const state = new Map<string, "completed" | "failed" | "skipped" | "omitted">();
-  const declaredPrivateReferences = new Set(workflow.privateReferences ?? []);
   let aborted = false;
 
   for (const step of workflow.steps) {
@@ -584,7 +686,7 @@ export async function executeRecordedWorkflow(
           step,
           argument.name,
           argument.source,
-          executionOptions,
+          step.origin === "derivation" ? derivationOptions : executionOptions,
           results,
           declaredPrivateReferences,
         );

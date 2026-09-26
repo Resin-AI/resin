@@ -535,14 +535,15 @@ async function replayStep(
   environment: CandidateValidationEnvironment,
   maskingPlan: RecordedWorkflow,
 ): Promise<StepReplay> {
+  const replayed = replayedPlan(plan);
   const options: RecordedWorkflowExecutionOptions = {
-    inputs: inputsDeclaredByPlan(plan, environment.inputs),
+    inputs: inputsDeclaredByPlan(replayed, environment.inputs),
     adapters: environment.adapters,
     ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
   };
   const execution = await withDeadline(
-    (signal) => executeRecordedWorkflow(plan, { ...options, signal }),
+    (signal) => executeRecordedWorkflow(replayed, { ...options, signal }),
     environment.timeoutMs,
   );
   if (!execution) {
@@ -934,6 +935,59 @@ export function pruneUnusedDerivations(plan: RecordedWorkflow): RecordedWorkflow
   };
 }
 
+/** Every input name a template or source reads. */
+function collectReadInputs(
+  source: WorkflowValueSource | WorkflowValueTemplate,
+  into: Set<string>,
+): void {
+  if ("kind" in source) {
+    if (source.kind === "input") into.add(source.name);
+    if (source.kind === "template") collectReadInputs(source.template, into);
+    return;
+  }
+  switch (source.type) {
+    case "input":
+      into.add(source.name);
+      return;
+    case "object":
+      for (const entry of Object.values(source.entries)) collectReadInputs(entry, into);
+      return;
+    case "array":
+      for (const entry of source.items) collectReadInputs(entry, into);
+      return;
+    case "program":
+      collectReadInputs(source.source, into);
+      for (const hole of source.holes) collectReadInputs(hole.binding, into);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * The plan a validation replay runs: derivations no binding reads are left out (a refuted or
+ * undecided derivation must neither run nor fail the replay), and so are inputs only they read,
+ * which nothing in the replay needs. The validated plan itself is unchanged.
+ */
+function replayedPlan(plan: RecordedWorkflow): RecordedWorkflow {
+  const pruned = pruneUnusedDerivations(plan);
+  if (pruned === plan) return plan;
+  const kept = new Set<string>();
+  for (const step of pruned.steps) {
+    for (const argument of step.arguments) collectReadInputs(argument.source, kept);
+    if (step.optional !== undefined) kept.add(step.optional.input);
+  }
+  const removedReads = new Set<string>();
+  for (const step of plan.steps) {
+    if (pruned.steps.includes(step)) continue;
+    for (const argument of step.arguments) collectReadInputs(argument.source, removedReads);
+  }
+  return {
+    ...pruned,
+    inputs: pruned.inputs.filter((input) => kept.has(input.name) || !removedReads.has(input.name)),
+  };
+}
+
 /** The input names a derivation step's holes read. */
 function derivationInputNames(step: WorkflowStep): string[] | undefined {
   const template = derivationTemplate(step);
@@ -1065,7 +1119,8 @@ async function withDerivationInputs(
     argument: string;
     path: WorkflowValuePath;
   }> = [];
-  for (const candidate of candidates) {
+  // Reading a position the plan knows never promotes it: plan candidates still undecided count too.
+  for (const candidate of [...candidates, ...(plan.candidates ?? [])]) {
     if (candidate.proposed.kind === "input" && candidate.path[0] === "tokens") {
       positions.push({
         name: candidate.proposed.name,
@@ -1402,12 +1457,13 @@ async function evaluateDerivationCandidates(
  * step by matching that one trace.
  */
 async function replayPlanOnce(
-  plan: RecordedWorkflow,
+  validated: RecordedWorkflow,
   environment: CandidateValidationEnvironment,
 ): Promise<{
   reproduced: string[];
   missed: Array<{ stepId: string; detail: string }>;
 }> {
+  const plan = replayedPlan(validated);
   const options: RecordedWorkflowExecutionOptions = {
     inputs: inputsDeclaredByPlan(plan, environment.inputs),
     adapters: environment.adapters,

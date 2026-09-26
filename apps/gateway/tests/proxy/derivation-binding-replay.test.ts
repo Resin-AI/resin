@@ -14,6 +14,7 @@ import {
   type WorkflowStep,
   derivationHeader,
   derivationInputTokenIndexes,
+  embeddedPrograms,
   validateRecordedWorkflow,
 } from "@resin/contracts";
 import { InMemoryPrivateValueStore, resolvePrivateReference } from "@resin/observer";
@@ -240,5 +241,231 @@ describe("derivation bindings confirmed by a baseline replay", () => {
     const store = new InMemoryPrivateValueStore();
     const answer = await validate(recording(store, LOOKUP, false), store);
     expect(verdictsByPath(answer)).toMatchObject({ "3": false, "4": false });
+  });
+});
+
+/** A derivation step reading the named inputs, with the header literal of each bound to its input. */
+function derivationReading(names: readonly string[], body: string): WorkflowStep {
+  const source = derivationHeader(names.map((name) => ({ name, value: "" }))) + body;
+  const indexes = derivationInputTokenIndexes(source, names);
+  const step = derivation(body, false);
+  step.callable.program = { ...step.callable.program!, source };
+  step.arguments = [
+    {
+      name: "code",
+      source: {
+        kind: "template",
+        template: {
+          type: "program",
+          language: "python",
+          source: { type: "literal", value: source },
+          holes: names.map((name, index) => ({
+            token: indexes[index]!,
+            binding: { type: "input" as const, name },
+          })),
+        },
+      },
+    },
+  ];
+  return step;
+}
+
+/** One recorded report step (its command and output kept locally) after a derivation. */
+function reportPlan(
+  store: InMemoryPrivateValueStore,
+  params: {
+    command: string;
+    printed: string;
+    derive: WorkflowStep;
+    inputs: RecordedWorkflow["inputs"];
+    candidates: WorkflowBindingCandidate[];
+  },
+): RecordedWorkflow {
+  store.set("private:report-command", params.command, { workspaceId: owner });
+  store.set("private:report-output", params.printed, { workspaceId: owner });
+  const plan = recording(new InMemoryPrivateValueStore(), LOOKUP);
+  return {
+    ...plan,
+    inputs: params.inputs,
+    steps: [params.derive, plan.steps[1]!],
+    candidates: params.candidates,
+  };
+}
+
+function atPath(
+  path: WorkflowBindingCandidate["path"],
+  proposed: WorkflowBindingCandidate["proposed"],
+  reason: WorkflowBindingCandidate["reason"],
+): WorkflowBindingCandidate {
+  return { ...tokenCandidate(0, proposed, reason), path };
+}
+
+function verdictsByFullPath(answer: Awaited<ReturnType<typeof validate>>): Record<string, boolean> {
+  return Object.fromEntries(
+    answer.verdicts.map((verdict) => [
+      verdict.candidate.path.slice(1).join("."),
+      verdict.confirmed,
+    ]),
+  );
+}
+
+/** The report runs Python whose literals are the merchant and its looked-up values. */
+const EMBEDDED_COMMAND = `python3 -c "print('Crossfit_Hanna', 'R', 5942)"`;
+
+/** The embedded literal addresses of the merchant, account type and category code. */
+function embeddedAddresses(): { anchor: number; merchant: number; type: number; mcc: number } {
+  const [program] = embeddedPrograms(EMBEDDED_COMMAND);
+  const index = (text: string): number => {
+    const found = program!.tokens.findIndex(
+      (token) => EMBEDDED_COMMAND.slice(token.start, token.end) === text,
+    );
+    expect(found).toBeGreaterThanOrEqual(0);
+    return found;
+  };
+  return {
+    anchor: program!.anchor,
+    merchant: index("'Crossfit_Hanna'"),
+    type: index("'R'"),
+    mcc: index("5942"),
+  };
+}
+
+function embeddedMerchantPlan(store: InMemoryPrivateValueStore): RecordedWorkflow {
+  const at = embeddedAddresses();
+  const embedded = (token: number): WorkflowBindingCandidate["path"] => [
+    "tokens",
+    at.anchor,
+    "embedded",
+    token,
+  ];
+  return reportPlan(store, {
+    command: EMBEDDED_COMMAND,
+    printed: "Crossfit_Hanna R 5942\n",
+    derive: derivationReading(["merchant"], LOOKUP),
+    inputs: [{ name: "merchant", type: "string", recordedDefault: true }],
+    candidates: [
+      atPath(
+        embedded(at.merchant),
+        { kind: "input", name: "merchant", type: "string", recordedDefault: true },
+        "classified-source-value",
+      ),
+      atPath(
+        embedded(at.type),
+        { kind: "result", stepId: "derive", path: ["account_type"] },
+        "derived-from-inputs",
+      ),
+      atPath(
+        embedded(at.mcc),
+        { kind: "result", stepId: "derive", path: ["mcc"] },
+        "derived-from-inputs",
+      ),
+    ],
+  });
+}
+
+/** The published tool of a validated plan: its confirmed bindings applied. */
+function publish(
+  plan: RecordedWorkflow,
+  answer: Awaited<ReturnType<typeof validate>>,
+  store: InMemoryPrivateValueStore,
+) {
+  const accepted = (plan.candidates ?? []).filter((candidate) =>
+    answer.verdicts.some(
+      (verdict) =>
+        verdict.confirmed &&
+        JSON.stringify(verdict.candidate.path) === JSON.stringify(candidate.path) &&
+        verdict.candidate.stepId === candidate.stepId,
+    ),
+  );
+  const promoted = applyAcceptedBindings(plan, accepted);
+  expect(validateRecordedWorkflow(promoted).errors).toEqual([]);
+  const consumerDir = workspace("resin-derive-consumer-");
+  const adapters = new RuntimeAdapterRegistry();
+  adapters.register(createProcessAdapter({ cwd: consumerDir }));
+  adapters.register(createProgramAdapter({ cwd: consumerDir }));
+  return instantiateRecordedWorkflow(compileRecordedWorkflow(promoted), {
+    adapters,
+    access: { workspaceId: owner },
+    resolvePrivate: (reference) => resolvePrivateReference(store, reference) as WorkflowJsonValue,
+  });
+}
+
+/** A report whose command names the lookup table (a caller-selected input) and the merchant. */
+const TABLE_COMMAND = "printf '%s %s %s %s\\n' merchants.json Crossfit_Hanna R 5942";
+const TABLE_LOOKUP =
+  'import json\nm = json.load(open(inputs["table"]))[inputs["merchant"]]\n{"account_type": m["account_type"], "mcc": m["mcc"]}\n';
+
+function tablePlan(store: InMemoryPrivateValueStore, body: string): RecordedWorkflow {
+  return reportPlan(store, {
+    command: TABLE_COMMAND,
+    printed: "merchants.json Crossfit_Hanna R 5942\n",
+    derive: derivationReading(["table", "merchant"], body),
+    // The table is a required input the cloud selected; only a plan candidate says where it is.
+    inputs: [
+      { name: "table", type: "string" },
+      { name: "merchant", type: "string", recordedDefault: true },
+    ],
+    candidates: [
+      tokenCandidate(
+        2,
+        { kind: "input", name: "table", type: "string" },
+        "classified-source-value",
+      ),
+      tokenCandidate(
+        3,
+        { kind: "input", name: "merchant", type: "string", recordedDefault: true },
+        "classified-source-value",
+      ),
+      tokenCandidate(
+        4,
+        { kind: "result", stepId: "derive", path: ["account_type"] },
+        "derived-from-inputs",
+      ),
+      tokenCandidate(5, { kind: "result", stepId: "derive", path: ["mcc"] }, "derived-from-inputs"),
+    ],
+  });
+}
+
+describe("derivation inputs established by one recording", () => {
+  it("confirms a derivation reading a recorded-default input seen only inside embedded code", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = embeddedMerchantPlan(store);
+    expect(validateRecordedWorkflow(plan).errors).toEqual([]);
+    const at = embeddedAddresses();
+    const answer = await validate(plan, store);
+    expect(answer.verification?.status).toBe("verified");
+    expect(verdictsByFullPath(answer)).toEqual({
+      [`${at.anchor}.embedded.${at.merchant}`]: true,
+      [`${at.anchor}.embedded.${at.type}`]: true,
+      [`${at.anchor}.embedded.${at.mcc}`]: true,
+    });
+  });
+
+  it("runs a published derivation on the recorded merchant when the caller omits it", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = embeddedMerchantPlan(store);
+    const tool = publish(plan, await validate(plan, store), store);
+    const recorded = await tool.invoke({});
+    expect(recorded.status, recorded.error).toBe("completed");
+    expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna R 5942");
+    const other = await tool.invoke({ merchant: "Golfclub_Baron_Friso" });
+    expect(other.status, other.error).toBe("completed");
+    expect(JSON.stringify(other.result)).toContain("Golfclub_Baron_Friso F 7993");
+  });
+
+  it("decides a derivation reading a required input whose position only a plan candidate names", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const answer = await validate(tablePlan(store, TABLE_LOOKUP), store);
+    expect(answer.verification?.status).toBe("verified");
+    expect(verdictsByPath(answer)).toMatchObject({ "3": true, "4": true, "5": true });
+  });
+
+  it("keeps a plan's confirmed inputs when its derivation is refuted", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const wrong =
+      'import json\nm = json.load(open(inputs["table"]))[inputs["merchant"]]\n{"account_type": m["account_type"].lower(), "mcc": m["mcc"] + 1}\n';
+    const answer = await validate(tablePlan(store, wrong), store);
+    expect(answer.verification?.status).toBe("verified");
+    expect(verdictsByPath(answer)).toMatchObject({ "3": true, "4": false, "5": false });
   });
 });
