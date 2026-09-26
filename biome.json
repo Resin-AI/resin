@@ -19,6 +19,7 @@
   },
   "formatter": {
     "enabled": true,
+    "ignore": ["adapters/*/tests/fixtures/recorded/**"],
     "indentStyle": "space",
     "indentWidth": 2,
     "lineWidth": 100
