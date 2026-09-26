@@ -27,6 +27,9 @@ import {
 } from "./trajectory-emitter.js";
 import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 
+/** Cloud ingestion's per-request observation limit (and the batch schema's maximum). */
+const MAX_OBSERVATIONS_PER_BATCH = 1000;
+
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.string(),
@@ -1079,22 +1082,33 @@ export class TrajectoryCaptureCoordinator {
       }
       return;
     }
-    const firstSeq = projectedEvents[0]?.causalRef.causalSequence ?? 0;
-    const batchDigest = createHash("sha256")
-      .update(projectedEvents.map((event) => event.eventId).join("\0"))
-      .digest("hex")
-      .slice(0, 16);
     const sessionKey = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-    const batchId = `obs_${batchDigest}_${sessionKey}_${firstSeq}`.slice(0, 128);
+    const chunkBatchId = (chunk: readonly NormalizedSessionEvent[]): string => {
+      const firstSeq = chunk[0]?.causalRef.causalSequence ?? 0;
+      const batchDigest = createHash("sha256")
+        .update(chunk.map((event) => event.eventId).join("\0"))
+        .digest("hex")
+        .slice(0, 16);
+      return `obs_${batchDigest}_${sessionKey}_${firstSeq}`.slice(0, 128);
+    };
+    let batchId = chunkBatchId(projectedEvents);
 
     try {
-      const receipt = await this.observationClient.sendObservationBatch({
-        batchId,
-        observations: projectedEvents,
-      });
-      if (receipt?.acceptedCount > 0) {
-        this.totalGenericBatchesAccepted++;
-        this.totalGenericObservationsAccepted += receipt.acceptedCount;
+      // A buffer can outgrow what one request may carry: a large read batch, or records that kept
+      // arriving while an earlier failed flush was being retried. Cloud ingestion refuses a batch
+      // above its per-batch event limit with a 429 that no retry can satisfy, so the buffer is sent
+      // in bounded chunks, in event order, and acknowledged only after every chunk is accepted.
+      for (let start = 0; start < projectedEvents.length; start += MAX_OBSERVATIONS_PER_BATCH) {
+        const chunk = projectedEvents.slice(start, start + MAX_OBSERVATIONS_PER_BATCH);
+        batchId = chunkBatchId(chunk);
+        const receipt = await this.observationClient.sendObservationBatch({
+          batchId,
+          observations: chunk,
+        });
+        if (receipt?.acceptedCount > 0) {
+          this.totalGenericBatchesAccepted++;
+          this.totalGenericObservationsAccepted += receipt.acceptedCount;
+        }
       }
       await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
       this.sessionBackoffs.delete(sessionId);
