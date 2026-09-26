@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -49,6 +48,7 @@ import {
   encodeDeterministicTar,
   inspectArtifactImports,
   instantiateRecordedWorkflow,
+  resolveDenoExecutable,
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
@@ -145,15 +145,6 @@ export interface LocalArtifactExecutorOptions {
   privateValueOwnerWorkspaceId?: string;
 }
 
-function checkExecutable(filePath: string): boolean {
-  try {
-    const stat = fs.statSync(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
-}
-
 /** Enough of a recorded program for an agent to recognize it; the full text still executes. */
 const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 /** Added lines of a recorded edit shown in its description; the whole edit still applies. */
@@ -165,53 +156,6 @@ function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function resolveDenoExecutable(options?: {
-  denoExecutable?: string;
-  resinHome?: string;
-}): string | undefined {
-  // 1. Explicit denoExecutable option
-  if (options?.denoExecutable && checkExecutable(options.denoExecutable)) {
-    return options.denoExecutable;
-  }
-
-  // 2. RESIN_DENO_EXECUTABLE env
-  const envDeno = process.env.RESIN_DENO_EXECUTABLE;
-  if (envDeno && checkExecutable(envDeno)) {
-    return envDeno;
-  }
-
-  // 3. <resinHome>/current/deno/deno[.exe] where resinHome = RESIN_HOME env or ~/.resin
-  const resinHome =
-    options?.resinHome || process.env.RESIN_HOME || path.join(os.homedir(), ".resin");
-  const resinDeno = path.join(
-    resinHome,
-    "current",
-    "deno",
-    process.platform === "win32" ? "deno.exe" : "deno",
-  );
-  if (checkExecutable(resinDeno)) {
-    return resinDeno;
-  }
-  if (process.platform === "win32") {
-    const resinDenoFallback = path.join(resinHome, "current", "deno", "deno");
-    if (checkExecutable(resinDenoFallback)) {
-      return resinDenoFallback;
-    }
-  }
-
-  // 4. PATH lookup
-  const paths = (process.env.PATH || "").split(path.delimiter);
-  for (const p of paths) {
-    if (!p) continue;
-    const candidate = path.join(p, process.platform === "win32" ? "deno.exe" : "deno");
-    if (checkExecutable(candidate)) {
-      return candidate;
-    }
-  }
-
-  return undefined;
 }
 
 function findDenoBinary(

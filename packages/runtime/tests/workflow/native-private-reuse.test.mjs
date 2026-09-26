@@ -129,7 +129,6 @@ it.skipIf(process.platform === "win32")(
         createProcessAdapter({
           cwd: root,
           env: { PATH: process.env.PATH },
-          isolateEnvironment: true,
           timeoutMs: 5000,
         }),
       );

@@ -11,9 +11,9 @@ import {
   generateBundleKeyPair,
   signBundlePayload,
 } from "@resin/runtime";
+import { resolveDenoExecutable } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalArtifactTrustConfigurationError } from "../../src/proxy/local-artifact-trust.js";
-import { resolveDenoExecutable } from "../../src/proxy/local-executor.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";

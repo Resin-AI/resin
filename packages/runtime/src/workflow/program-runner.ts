@@ -26,6 +26,7 @@ import {
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
+import { runDerivation } from "./derivation-sandbox.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
@@ -58,11 +59,6 @@ export interface ProgramRunnerOptions {
   ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Workspace scope forwarded to the private setup resolver. */
   access?: { workspaceId?: string };
-  /**
-   * Python Eval only: the result is the JSON of the final expression, which must be an object,
-   * rather than rendered text. Derivation steps run this way; printed output is not part of it.
-   */
-  pythonEvalResult?: "json-object";
   /** Overridable for tests. */
   platform?: NodeJS.Platform;
 }
@@ -967,200 +963,6 @@ function composePythonEvalReplaySource(
   ].join("\n");
 }
 
-/** Modules a derivation may import: pre-imported by its wrapper before the jail closes. */
-const DERIVATION_MODULES = [
-  "json",
-  "csv",
-  "math",
-  "statistics",
-  "collections",
-  "collections.abc",
-  "datetime",
-  "_strptime",
-  "time",
-  "calendar",
-  "re",
-  "itertools",
-  "functools",
-  "operator",
-  "decimal",
-  "fractions",
-  "numbers",
-  "string",
-  "bisect",
-  "heapq",
-  "copy",
-  "unicodedata",
-  "textwrap",
-  "typing",
-  "enum",
-  "dataclasses",
-];
-
-/** Pre-imported only when the interpreter has them; otherwise simply unavailable. */
-const DERIVATION_OPTIONAL_MODULES = ["numpy", "pandas"];
-
-/**
- * Runs a model-written derivation in a jail. The wrapper pre-imports the allowed modules, opens its
- * result file, compiles the derivation's body and final expression, bounds memory and descriptors,
- * and only then installs an audit hook (which Python code cannot remove). From that point the
- * process may only read files under its working directory, import the pre-imported allowlist, and
- * execute the two pre-compiled code objects; any other audited capability (writes, other paths,
- * new code, processes, sockets, ctypes, …) ends the process at once, so no `except` in the
- * derivation can swallow the refusal and its candidates are refuted.
- */
-function composeDerivationJailSource(
-  target: string,
-  outputPath: string,
-  maxOutputBytes: number,
-): string {
-  const serializedSource = JSON.stringify(JSON.stringify(target));
-  return [
-    "import ast as __resin_ast",
-    "import builtins as __resin_builtins",
-    "import contextlib as __resin_contextlib",
-    "import __future__ as __resin_future",
-    "import json as __resin_json",
-    "import os as __resin_os",
-    "import sys as __resin_sys",
-    "",
-    "def __resin_run():",
-    `    __resin_source = __resin_json.loads(${serializedSource})`,
-    `    __resin_allowed = ${JSON.stringify(DERIVATION_MODULES)}`,
-    `    __resin_optional = ${JSON.stringify(DERIVATION_OPTIONAL_MODULES)}`,
-    "    __resin_real_import = __resin_builtins.__import__",
-    "    for __resin_name in __resin_allowed:",
-    "        __resin_real_import(__resin_name)",
-    "    for __resin_name in __resin_optional:",
-    "        try:",
-    "            __resin_real_import(__resin_name)",
-    "        except Exception:",
-    "            pass",
-    "    __resin_modules = __resin_sys.modules",
-    "    __resin_importable = frozenset(n for n in __resin_allowed + __resin_optional if n in __resin_modules)",
-    "    __resin_packages = tuple(n + '.' for n in __resin_optional if n in __resin_importable)",
-    "",
-    "    __resin_write_fd = __resin_os.write",
-    "    __resin_exit = __resin_os._exit",
-    "",
-    "    def __resin_refuse(what):",
-    "        try:",
-    "            __resin_write_fd(2, ('resin: derivation refused: ' + what + '\\n').encode('utf-8', 'replace'))",
-    "        finally:",
-    "            __resin_exit(126)",
-    "",
-    "    def __resin_import(name, globals=None, locals=None, fromlist=(), level=0):",
-    "        if level != 0 or not (name in __resin_importable or (name.startswith(__resin_packages) and name in __resin_modules)):",
-    "            __resin_refuse('import ' + str(name))",
-    "        return __resin_real_import(name, globals, locals, fromlist, level)",
-    "",
-    "    __resin_derivation_builtins = dict(__resin_builtins.__dict__)",
-    "    __resin_derivation_builtins['__import__'] = __resin_import",
-    "    __resin_namespace = {'__name__': '__main__', '__builtins__': __resin_derivation_builtins}",
-    "    __resin_tree = __resin_ast.parse(__resin_source, '<resin-derivation>', 'exec')",
-    "    __resin_body = __resin_tree.body",
-    "    __resin_expression_code = None",
-    "    __resin_future_mask = 0",
-    "    for __resin_feature in __resin_future.all_feature_names:",
-    "        __resin_future_mask |= getattr(__resin_future, __resin_feature).compiler_flag",
-    "    __resin_last = __resin_body[-1] if __resin_body and isinstance(__resin_body[-1], __resin_ast.Expr) else None",
-    "    if __resin_last is not None:",
-    "        __resin_tree.body = __resin_body[:-1]",
-    "    __resin_ast.fix_missing_locations(__resin_tree)",
-    "    __resin_body_code = compile(__resin_tree, '<resin-derivation>', 'exec', dont_inherit=True)",
-    "    if __resin_last is not None:",
-    "        __resin_expression_tree = __resin_ast.Expression(body=__resin_last.value)",
-    "        __resin_ast.fix_missing_locations(__resin_expression_tree)",
-    "        __resin_expression_code = compile(__resin_expression_tree, '<resin-derivation-result>', 'eval', flags=__resin_body_code.co_flags & __resin_future_mask, dont_inherit=True)",
-    `    __resin_event_file = open(${JSON.stringify(outputPath)}, 'ab', buffering=0)`,
-    "",
-    "    def __resin_write(frame):",
-    "        view = memoryview(frame)",
-    "        while view:",
-    "            written = __resin_event_file.write(view)",
-    "            if written is None or written <= 0:",
-    "                raise OSError('short write to private Python Eval result file')",
-    "            view = view[written:]",
-    "",
-    "    if __resin_sys.platform.startswith('linux'):",
-    "        try:",
-    "            import resource as __resin_resource",
-    "            for __resin_limit, __resin_value in ((__resin_resource.RLIMIT_AS, 4 << 30), (__resin_resource.RLIMIT_NOFILE, 256)):",
-    "                __resin_soft, __resin_hard = __resin_resource.getrlimit(__resin_limit)",
-    "                if __resin_hard != __resin_resource.RLIM_INFINITY:",
-    "                    __resin_value = min(__resin_value, __resin_hard)",
-    "                __resin_resource.setrlimit(__resin_limit, (__resin_value, __resin_value))",
-    "        except Exception:",
-    "            pass",
-    "",
-    "    __resin_path = __resin_os.path",
-    "    __resin_root = __resin_path.realpath(__resin_os.getcwd())",
-    "    __resin_root_prefix = __resin_root.rstrip(__resin_os.sep) + __resin_os.sep",
-    "    __resin_fspath = __resin_os.fspath",
-    "    __resin_fsdecode = __resin_os.fsdecode",
-    "    __resin_read_only = __resin_os.O_RDONLY",
-    "    __resin_access_mask = __resin_os.O_ACCMODE",
-    "    __resin_write_flags = __resin_os.O_CREAT | __resin_os.O_TRUNC | __resin_os.O_APPEND | __resin_os.O_EXCL | getattr(__resin_os, 'O_TMPFILE', 0)",
-    "    __resin_codes = tuple(c for c in (__resin_body_code, __resin_expression_code) if c is not None)",
-    "    __resin_loaded = frozenset(__resin_modules)",
-    "    __resin_denied_prefixes = ('os.', 'posix.', 'nt.', 'socket.', 'subprocess.', '_posixsubprocess.', 'ctypes.', 'mmap.', 'pty.', 'shutil.', 'tempfile.', 'winreg.', 'msvcrt.', '_winapi.', 'marshal.', 'pickle.', 'sqlite3.', 'urllib.', 'http.', 'ftplib.', 'smtplib.', 'poplib.', 'imaplib.', 'nntplib.', 'telnetlib.', 'webbrowser.', 'fcntl.', 'resource.', 'signal.', 'syslog.', '_thread.', 'cpython.run_', 'code.', 'function.', 'builtins.', 'io.', 'compile', 'setopencodehook', 'sys.remote_exec')",
-    "    __resin_listing = ('os.listdir', 'os.scandir')",
-    "",
-    "    def __resin_inside(path):",
-    "        if path is None:",
-    "            path = '.'",
-    "        if isinstance(path, int) or isinstance(path, bool):",
-    "            return False",
-    "        resolved = __resin_path.realpath(__resin_fsdecode(__resin_fspath(path)))",
-    "        return resolved == __resin_root or resolved.startswith(__resin_root_prefix)",
-    "",
-    "    def __resin_allows(event, args):",
-    "        if event == 'open':",
-    "            path, mode, flags = args",
-    "            if isinstance(mode, str) and any(c in mode for c in 'wax+'):",
-    "                return False",
-    "            if (flags & __resin_access_mask) != __resin_read_only or flags & __resin_write_flags:",
-    "                return False",
-    "            return __resin_inside(path)",
-    "        if event == 'exec':",
-    "            return any(args[0] is code for code in __resin_codes)",
-    "        if event == 'import':",
-    "            return args[0] in __resin_loaded",
-    "        if event in __resin_listing:",
-    "            return __resin_inside(args[0])",
-    "        return not event.startswith(__resin_denied_prefixes)",
-    "",
-    "    def __resin_hook(event, args):",
-    "        try:",
-    "            allowed = __resin_allows(event, args)",
-    "        except BaseException:",
-    "            allowed = False",
-    "        if not allowed:",
-    "            __resin_refuse(event)",
-    "",
-    `    _resin_output_limit = ${String(maxOutputBytes)}`,
-    "    __resin_discard = type('_ResinDiscard', (), {'write': lambda _self, text: len(text), 'flush': lambda _self: None})()",
-    "    __resin_sys.addaudithook(__resin_hook)",
-    "    try:",
-    "        with __resin_contextlib.redirect_stdout(__resin_discard):",
-    "            exec(__resin_body_code, __resin_namespace, __resin_namespace)",
-    "            if __resin_expression_code is not None:",
-    "                __resin_result = eval(__resin_expression_code, __resin_namespace, __resin_namespace)",
-    "                if __resin_result is not None:",
-    "                    __resin_text = __resin_json.dumps(__resin_result, ensure_ascii=False, allow_nan=False) + '\\n'",
-    "                    if len(__resin_text.encode('utf-8')) > _resin_output_limit:",
-    "                        raise ValueError('Python Eval result exceeds the replay output bound')",
-    "                    __resin_write(__resin_json.dumps({'k': 'r', 'v': __resin_text}, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\\n')",
-    "    finally:",
-    "        try:",
-    "            __resin_write(b'{\"d\":true}\\n')",
-    "        finally:",
-    "            __resin_event_file.close()",
-    "",
-    "__resin_run()",
-  ].join("\n");
-}
-
 interface PythonEvalOutputBounds {
   output: number;
   events: number;
@@ -1189,13 +991,6 @@ async function preparePythonReplaySource(
       throw new Error("Python Eval replay result file was not prepared");
     }
     const bounds = pythonEvalOutputBounds(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
-    if (options.pythonEvalResult === "json-object") {
-      // A derivation is model-written: it runs alone, jailed, never after recorded setup code.
-      if (setupSources.length > 0) {
-        throw new Error("a derivation cannot run after recorded Python setup");
-      }
-      return composeDerivationJailSource(program.source, pythonEvalOutputPath, bounds.output);
-    }
     return composePythonEvalReplaySource(
       setupSources,
       program.source,
@@ -1375,12 +1170,10 @@ function runChild(
 
 /**
  * Validates the bounded private event stream produced by the Python Eval wrapper, then applies the
- * result text projection used by that source interface. With `jsonObject`, the value is the final
- * expression's JSON object alone, and anything else fails the run rather than being guessed at.
+ * result text projection used by that source interface.
  */
-function pythonEvalResultValue(output: string, jsonObject = false): WorkflowJsonValue {
+function pythonEvalResultValue(output: string): WorkflowJsonValue {
   const resultEvents: string[] = [];
-  let resultText: string | undefined;
   let complete = false;
   let hasResult = false;
   for (const line of output.split("\n")) {
@@ -1415,24 +1208,11 @@ function pythonEvalResultValue(output: string, jsonObject = false): WorkflowJson
         throw new Error("recorded Python Eval replay produced multiple result events");
       }
       hasResult = true;
-      resultText = event.v;
     }
     resultEvents.push(event.v);
   }
   if (!complete) {
     throw new Error("recorded Python Eval replay did not complete its output");
-  }
-  if (jsonObject) {
-    let parsed: unknown;
-    try {
-      parsed = resultText === undefined ? undefined : JSON.parse(resultText);
-    } catch {
-      parsed = undefined;
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error("the derivation's final expression is not a JSON object");
-    }
-    return parsed as WorkflowJsonValue;
   }
   return resultEvents.join("").trim();
 }
@@ -1662,10 +1442,7 @@ export async function runRecordedProgram(
       if (outputStat.size > outputBounds.events) {
         throw new Error("recorded Python Eval replay exceeded its output event bound");
       }
-      value = pythonEvalResultValue(
-        await outputFile.readFile({ encoding: "utf8" }),
-        options.pythonEvalResult === "json-object",
-      );
+      value = pythonEvalResultValue(await outputFile.readFile({ encoding: "utf8" }));
     }
     if (isJavaScriptEval && captured.exitCode === 0) {
       if (outputPath === undefined || outputBounds === undefined || outputFile === undefined) {
@@ -1798,6 +1575,27 @@ export async function runRecordedCall(
     );
   }
   if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
+  if (step.origin === "derivation") {
+    // Model-written: runs in the Pyodide sandbox with only its inputs, never as a host process.
+    if (program.kind !== "python" || program.sourceInterface !== "python-eval") {
+      throw new Error(`step '${step.id}' cannot run: a derivation must be a Python Eval program`);
+    }
+    try {
+      return await runDerivation(source, {
+        timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        maxOutputBytes: options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+        ...(request.signal
+          ? { signal: request.signal }
+          : options.signal
+            ? { signal: options.signal }
+            : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `step '${step.id}' failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   const requestedWorkdir = request.arguments.workdir;
   const shellProfile = request.arguments.resinCodexShellProfile;
   const nativeCodexShell = shellProfile === "bash-login-native-v1";
@@ -1821,13 +1619,8 @@ export async function runRecordedCall(
   ) {
     throw new Error(`step '${step.id}' cannot run: unsupported recorded shell profile`);
   }
-  const derivation = step.origin === "derivation";
-  if (derivation && (program.kind !== "python" || program.sourceInterface !== "python-eval")) {
-    throw new Error(`step '${step.id}' cannot run: a derivation must be a Python Eval program`);
-  }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
-    ...(derivation ? { pythonEvalResult: "json-object" as const } : {}),
     ...((shellProfile === "bash-login-v1" || nativeCodexShell) &&
     typeof requestedWorkdir === "string"
       ? { cwd: requestedWorkdir }
