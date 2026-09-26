@@ -630,21 +630,24 @@ describe("TrajectoryCaptureCoordinator", () => {
       const pipeline = new NormalizationPipeline();
       const batches: Array<Array<{ eventId: string }>> = [];
       let failSecondChunk = true;
-      const sendObservationBatch = vi.fn(async (input: { observations: Array<{ eventId: string }> }) => {
-        if (input.observations.length > 1000) throw new Error("oversized batch reached the client");
-        if (batches.length === 1 && failSecondChunk) {
-          failSecondChunk = false;
-          throw new Error("transient failure on the second chunk");
-        }
-        batches.push(input.observations);
-        return {
-          batchId: `batch_${batches.length}`,
-          status: "accepted",
-          acceptedCount: input.observations.length,
-          rejectedCount: 0,
-          errors: [],
-        };
-      });
+      const sendObservationBatch = vi.fn(
+        async (input: { observations: Array<{ eventId: string }> }) => {
+          if (input.observations.length > 1000)
+            throw new Error("oversized batch reached the client");
+          if (batches.length === 1 && failSecondChunk) {
+            failSecondChunk = false;
+            throw new Error("transient failure on the second chunk");
+          }
+          batches.push(input.observations);
+          return {
+            batchId: `batch_${batches.length}`,
+            status: "accepted",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+            errors: [],
+          };
+        },
+      );
       const coordinator = new TrajectoryCaptureCoordinator({
         pipeline,
         observationClient: createMockObservationClient({
