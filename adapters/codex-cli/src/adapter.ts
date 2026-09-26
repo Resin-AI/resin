@@ -29,6 +29,7 @@ import {
 } from "./config-planner.js";
 import {
   CODEX_DISPLAY_NAME,
+  CODEX_TESTED_VERSIONS,
   CODEX_HARNESS_ID,
   type CodexTranscriptInspection,
   type CommandExecutor,
@@ -160,6 +161,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   readonly id: string = CODEX_HARNESS_ID;
   readonly name: string = CODEX_DISPLAY_NAME;
   readonly version = "0.1.0";
+  readonly supportedHarnessVersions = CODEX_TESTED_VERSIONS;
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly customExecutablePath?: string;

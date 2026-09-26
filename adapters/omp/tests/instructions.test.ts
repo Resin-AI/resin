@@ -103,8 +103,8 @@ describe("applyOmpCatalogInstructions", () => {
         appendSystemPath: target,
       });
       expect(result.action).toBe("removed");
-      const content = await fsp.readFile(target, "utf8");
-      expect(content).not.toContain("resin:catalog");
+      // A file that held only the managed block is deleted.
+      await expect(fsp.access(target)).rejects.toThrow();
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });
     }

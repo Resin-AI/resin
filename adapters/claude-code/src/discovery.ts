@@ -25,7 +25,7 @@ export type ExecFunction = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /** Claude Code versions qualified with the recorded fixtures under `tests/fixtures/recorded`. */
-export const CLAUDE_TESTED_VERSIONS = ["2.1.283"] as const;
+export const CLAUDE_TESTED_VERSIONS: readonly string[] = ["2.1.283"];
 
 /**
  * Minimal semver comparator for Claude Code versions (e.g. "0.2.14", "1.0.0").

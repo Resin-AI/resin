@@ -55,7 +55,7 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
   readonly id = "claude-code";
   readonly name = "Claude Code";
   readonly version = "0.1.0";
-  readonly supportedHarnessVersions = [...CLAUDE_TESTED_VERSIONS];
+  readonly supportedHarnessVersions = CLAUDE_TESTED_VERSIONS;
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly execFn?: ExecFunction;

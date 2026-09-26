@@ -15,6 +15,8 @@ const execFileAsync = promisify(execFile);
 export const CODEX_HARNESS_ID = "codex-cli";
 export const CODEX_DISPLAY_NAME = "Codex CLI";
 export const CODEX_MIN_SUPPORTED_VERSION = "0.1.0";
+/** Exact Codex CLI versions qualified with recorded fixtures. */
+export const CODEX_TESTED_VERSIONS: readonly string[] = ["0.156.1"];
 
 /**
  * Resolved paths for Codex CLI configuration and session directories.

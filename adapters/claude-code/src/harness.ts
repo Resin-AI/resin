@@ -61,7 +61,12 @@ export const claudeCodeHarness: HarnessDefinition = {
     probeClaudeInstallation({ customConfigPath: targetPath }, fsBridge),
   mcpConfig: {
     resolvePath: resolveClaudeMcpConfigPath,
-    uninstallPaths: (home, env) => [resolveClaudeMcpConfigPath(home, env)],
+    uninstallPaths: (home, env) => [
+      resolveClaudeMcpConfigPath(home, env),
+      path.join(home, ".claude.json"),
+      path.join(home, ".claude", "claude.json"),
+      path.join(home, ".claude", "config.json"),
+    ],
     format: "json",
     serverKey: "resin",
     jsonContainerKeys: ["mcpServers"],
@@ -76,5 +81,5 @@ export const claudeCodeHarness: HarnessDefinition = {
   },
   createAdapter: () => new ClaudeHarnessAdapter(),
   createDecoder: () => new ClaudeRecordDecoder(),
-  sessionCapture: "file-activity",
+  sessionCapture: "observation-window",
 };

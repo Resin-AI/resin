@@ -16,5 +16,5 @@ export * from "./source.js";
 // Catalog Refresh & Context Nudge
 export * from "./refresh.js";
 
-// Harness definition for CLI and observer registries
-export * from "./definition.js";
+// Harness Definition (registry entry)
+export * from "./harness.js";
