@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import {
-  classifyHarnessVersion,
   type HarnessInstallation,
   type ProbeInstallationOptions,
   type SessionStatus,
+  classifyHarnessVersion,
 } from "@resin/harness-contracts";
 
 const execFileAsync = promisify(execFile);

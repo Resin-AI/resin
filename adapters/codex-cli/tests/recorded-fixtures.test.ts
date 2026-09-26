@@ -25,7 +25,9 @@ function ofType<T extends NormalizedSessionEvent["type"]>(
   events: NormalizedSessionEvent[],
   type: T,
 ): Extract<NormalizedSessionEvent, { type: T }>[] {
-  return events.filter((event): event is Extract<NormalizedSessionEvent, { type: T }> => event.type === type);
+  return events.filter(
+    (event): event is Extract<NormalizedSessionEvent, { type: T }> => event.type === type,
+  );
 }
 
 function sessionMeta(jsonl: string): Record<string, unknown> {
@@ -91,8 +93,12 @@ describe.each(CODEX_TESTED_VERSIONS)("recorded Codex %s rollouts", (version) => 
       JSON.stringify(event.parameters).includes("sleep 60"),
     );
     expect(cell).toBeDefined();
-    expect(ofType(events, "tool_result").some((event) => event.callId === cell?.callId)).toBe(false);
-    const sleep = ofType(events, "command_exec").find((event) => event.args.includes("sleep 60 && echo finished"));
+    expect(ofType(events, "tool_result").some((event) => event.callId === cell?.callId)).toBe(
+      false,
+    );
+    const sleep = ofType(events, "command_exec").find((event) =>
+      event.args.includes("sleep 60 && echo finished"),
+    );
     expect(sleep?.exitCode).not.toBe(0);
   });
 
@@ -141,8 +147,12 @@ describe("recorded headless rollouts under discovery", () => {
       expect(listed.map((session) => session.sessionId).sort()).toEqual(
         SCENARIOS.map((scenario) => `sess_${names[scenario]}`).sort(),
       );
-      const child = listed.find((session) => session.sessionId === `sess_${names["subagent-child"]}`);
-      const parent = listed.find((session) => session.sessionId === `sess_${names["subagent-parent"]}`);
+      const child = listed.find(
+        (session) => session.sessionId === `sess_${names["subagent-child"]}`,
+      );
+      const parent = listed.find(
+        (session) => session.sessionId === `sess_${names["subagent-parent"]}`,
+      );
       expect(child?.workspaceId).toBe(parent?.workspaceId);
       expect(child?.metadata?.parentThreadId).toBe(parent?.metadata?.threadId);
     },
@@ -165,15 +175,30 @@ describe("Codex record drift", () => {
   it.each([
     [
       "an unknown top-level record type",
-      JSON.stringify({ timestamp: "2026-09-26T00:00:01.000Z", type: "future_record", payload: { x: 1 } }),
+      JSON.stringify({
+        timestamp: "2026-09-26T00:00:01.000Z",
+        type: "future_record",
+        payload: { x: 1 },
+      }),
     ],
     ["an unknown completed item type", itemCompleted({ type: "FutureItem", id: "i1" })],
-    ["an MCP call item missing its server", itemCompleted({ type: "McpToolCall", id: "i1", tool: "word_count" })],
+    [
+      "an MCP call item missing its server",
+      itemCompleted({ type: "McpToolCall", id: "i1", tool: "word_count" }),
+    ],
     [
       "an unknown multi-agent tool",
-      itemCompleted({ type: "CollabAgentToolCall", id: "i1", tool: "fork_agent", receiver_thread_ids: ["t2"] }),
+      itemCompleted({
+        type: "CollabAgentToolCall",
+        id: "i1",
+        tool: "fork_agent",
+        receiver_thread_ids: ["t2"],
+      }),
     ],
-    ["an unknown extension kind", itemCompleted({ type: "Extension", kind: "browser.open", id: "i1" })],
+    [
+      "an unknown extension kind",
+      itemCompleted({ type: "Extension", kind: "browser.open", id: "i1" }),
+    ],
   ])("surfaces %s as unknown_passthrough instead of dropping it", (_label, record) => {
     const events = decodeCodexTranscript(`${header}\n${record}\n`);
     expect(events.filter((event) => event.type === "unknown_passthrough")).toHaveLength(1);

@@ -2025,7 +2025,9 @@ export class CodexSessionDecoder {
       const nickname = asString(asObject(agent)?.agent_nickname);
       if (threadId && nickname) nicknames.set(threadId, nickname);
     }
-    let lifecycleFor: (threadId: string) => NormalizedSubagentLifecycleEvent["lifecycleType"] | null;
+    let lifecycleFor: (
+      threadId: string,
+    ) => NormalizedSubagentLifecycleEvent["lifecycleType"] | null;
     switch (tool) {
       case "spawn_agent":
         lifecycleFor = () => "spawn";

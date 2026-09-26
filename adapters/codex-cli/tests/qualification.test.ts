@@ -49,7 +49,6 @@ describe("Codex CLI Harness Qualification Suite [REM-017]", () => {
 
   describe("1. Installation Discovery and Qualification", () => {
     it("qualifies installed Codex CLI versions against supported version matrix", async () => {
-
       const mockExecutor = async (_cmd: string, args: string[]) => {
         if (args.includes("--version")) {
           return { stdout: "codex-cli version 0.2.0\n", stderr: "", exitCode: 0 };

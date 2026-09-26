@@ -29,8 +29,8 @@ import {
 } from "./config-planner.js";
 import {
   CODEX_DISPLAY_NAME,
-  CODEX_TESTED_VERSIONS,
   CODEX_HARNESS_ID,
+  CODEX_TESTED_VERSIONS,
   type CodexTranscriptInspection,
   type CommandExecutor,
   type PathLookupFn,

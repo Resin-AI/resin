@@ -180,7 +180,9 @@ describe("Codex CLI Discovery & Version Probing", () => {
       expect(result.metadata.versionClassification).toBe("untested");
       // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string; severity: string }>;
-      expect(diagnostics).toEqual([expect.objectContaining({ code: "UNTESTED_VERSION", severity: "warning" })]);
+      expect(diagnostics).toEqual([
+        expect.objectContaining({ code: "UNTESTED_VERSION", severity: "warning" }),
+      ]);
     });
 
     it("returns ready without diagnostics for a tested version", async () => {
