@@ -386,12 +386,14 @@ export type WorkflowHeldOutDemonstration = {
     stepId: string;
     callIds: string[];
     /**
-     * For a segment step (`WorkflowStep.segment`), where each named call's segment sits in that
-     * call's own recorded chain, parallel to `callIds`: another run may have chained the same
-     * command with a different setup, so its index and count need not be the plan step's. The host
-     * re-splits its own recording at this address and admits nothing when it does not split so.
+     * Where each named call ran this step, parallel to `callIds`: a segment address in that call's
+     * own recorded `&&` chain, or `null` for the whole call. Another run may have chained the same
+     * command differently — behind another setup, fused with the next command, or alone — so the
+     * address need not be the plan step's `segment`. Required for a segment step; absent means every
+     * call ran the whole step. The host re-splits its own recording at an address and admits
+     * nothing when it does not split so.
      */
-    segments?: Array<{ index: number; count: number; version: number }>;
+    segments?: Array<{ index: number; count: number; version: number } | null>;
   }>;
 };
 
@@ -973,28 +975,22 @@ function isSegmentAddress(value: unknown): boolean {
 
 function validateWorkflowSegments(workflow: Record<string, unknown>, errors: string[]): void {
   const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
-  // A held-out call of a segment step names its segment in its own chain; nothing else does.
+  // A held-out call names where it ran the step: a segment of its own chain, or the whole call.
   const heldOut = isPlainObject(workflow.heldOut) ? workflow.heldOut : undefined;
   for (const entry of Array.isArray(heldOut?.calls) ? heldOut.calls : []) {
     if (!isPlainObject(entry)) continue;
     const step = steps.find((candidate) => candidate.id === entry.stepId);
     const segmented = step !== undefined && Object.hasOwn(step, "segment");
     const segments = entry.segments;
-    if (!segmented) {
-      if (segments !== undefined)
-        errors.push(
-          `heldOut.calls entry for step ${String(entry.stepId)} addresses segments of a step that is not one`,
-        );
-      continue;
-    }
+    if (segments === undefined && !segmented) continue;
     if (
       !Array.isArray(segments) ||
       !Array.isArray(entry.callIds) ||
       segments.length !== entry.callIds.length ||
-      !segments.every(isSegmentAddress)
+      !segments.every((address) => address === null || isSegmentAddress(address))
     ) {
       errors.push(
-        `heldOut.calls entry for segment step ${String(entry.stepId)} needs one segment address per call`,
+        `heldOut.calls entry for step ${String(entry.stepId)} needs one segment address or null per call`,
       );
     }
   }

@@ -777,13 +777,18 @@ export async function demonstrationEnvironment(params: {
     reference: string,
   ): Promise<WorkflowJsonValue | undefined> => {
     const value = await resolveOnce(reference);
-    if (step.segment === undefined || step.callable.program?.argument !== argument) return value;
-    // The demonstration's call names where its segment sits in its own chain; the plan's own
-    // baseline call sits where the plan step does.
+    if (step.callable.program?.argument !== argument) return value;
+    // The demonstration's call names where it ran the step: a segment of its own chain, or the
+    // whole call. The plan's own baseline call ran where the plan step says.
+    const segments = demonstration.calls?.find((entry) => entry.stepId === step.id)?.segments;
     const address =
-      demonstration.calls?.find((entry) => entry.stepId === step.id)?.segments?.[0] ??
-      (label === "baseline" ? step.segment : undefined);
-    return address === undefined ? undefined : shellAndChainSegmentText("sh", value, address);
+      segments !== undefined
+        ? segments[0]
+        : label === "baseline" || step.segment === undefined
+          ? (step.segment ?? null)
+          : undefined;
+    if (address === undefined) return undefined;
+    return address === null ? value : shellAndChainSegmentText("sh", value, address);
   };
   for (const entry of demonstration.inputs) {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
