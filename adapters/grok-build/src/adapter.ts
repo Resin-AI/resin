@@ -38,8 +38,8 @@ import { GrokSessionEventSource } from "./source.js";
 import {
   type GrokSessionEntry,
   computeGrokForkPrefixOffset,
-  listGrokProjects,
   isGrokTurnOpen,
+  listGrokProjects,
   listGrokSessions,
   readGrokSubagentParents,
 } from "./store.js";

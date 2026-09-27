@@ -1103,9 +1103,7 @@ export function projectEventToMetadataOnly(
       };
       if (event.exitReason !== undefined) lifeEvent.exitReason = event.exitReason;
       if (event.harnessName !== undefined) lifeEvent.harnessName = event.harnessName;
-      // A lifecycle event's workspaceId is the daemon's local workspace identifier, which the
-      // cloud has never seen; uploads are addressed to the paired cloud workspace. Forwarding it
-      // makes cloud detection treat the session as another workspace's and drop all its evidence.
+      if (event.workspaceId !== undefined) lifeEvent.workspaceId = event.workspaceId;
       projected = lifeEvent;
       break;
     }

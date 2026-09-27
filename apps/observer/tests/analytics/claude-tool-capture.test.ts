@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ClaudeRecordDecoder } from "@resin/adapter-claude-code";
-import { parseAssistantStopReason, type NormalizedSessionEvent } from "@resin/contracts";
+import { type NormalizedSessionEvent, parseAssistantStopReason } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import { InMemoryPrivateValueStore } from "../../src/analytics/private-value-store.js";
@@ -72,7 +72,8 @@ describe("Claude Code tool capture", () => {
     const results = projected.filter((event) => event.type === "tool_result");
     expect(calls).toHaveLength(11);
     expect(results).toHaveLength(11);
-    for (const call of calls) expect(call.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
+    for (const call of calls)
+      expect(call.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
     for (const result of results) {
       expect(result.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]).toBeDefined();
     }

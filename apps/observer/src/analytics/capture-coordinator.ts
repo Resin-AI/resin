@@ -30,6 +30,13 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 /** Cloud ingestion's per-request observation limit (and the batch schema's maximum). */
 const MAX_OBSERVATIONS_PER_BATCH = 1000;
 
+/** The upload form of an event: without the daemon-local workspace id a lifecycle event carries. */
+function withoutLocalWorkspaceId(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (event.type !== "session_lifecycle" || event.workspaceId === undefined) return event;
+  const { workspaceId: _localWorkspaceId, ...wire } = event;
+  return wire;
+}
+
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.string(),
@@ -1060,7 +1067,11 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
 
-    const projectedEvents = [...buffer.projectedEvents];
+    // A lifecycle event's workspaceId is this daemon's local workspace identifier (for example
+    // ws_codex_<root>_<hash>), which the cloud has never seen: uploads are addressed to the paired
+    // cloud workspace, and forwarding the local id makes cloud detection attribute the session to
+    // another workspace and drop its evidence. Local consumers keep it.
+    const projectedEvents = buffer.projectedEvents.map(withoutLocalWorkspaceId);
     // Cloud ingestion rejects batches whose consecutive event timestamps regress by
     // more than 1000ms (CURSOR_ORDERING_ERROR). Transcript records can arrive out of
     // order, and records missing a timestamp fall back to a wall-clock stamp, so sort
