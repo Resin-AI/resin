@@ -1,6 +1,7 @@
 import { CodexRecordDecoder, decodeCodexTranscript } from "@resin/adapter-codex";
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
-import { tokenizeProgram } from "@resin/contracts";
+import { applyProgramTokenValues, tokenizeProgram } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import {
@@ -361,8 +362,8 @@ text("sa\x66e-credential", token);`;
     expect(JSON.stringify(recipe?.workflow)).not.toContain(secret);
   });
 
-  it("keeps another harness's shell command private: only Codex commands are projected", async () => {
-    const sessionId = "omp-shell-stays-private";
+  it("keeps a bash tool's command private unless the OMP decoder proved its interface", async () => {
+    const sessionId = "unproven-bash-stays-private";
     const command = "tar -czf out/alpha-release.tgz projects/alpha-release";
     const store = new InMemoryPrivateValueStore();
     const pipeline = new NormalizationPipeline({
@@ -370,13 +371,13 @@ text("sa\x66e-credential", token);`;
       redactionConfig: { sensitiveEnvVars: [] },
     });
     const recorder = new WorkflowCallRecorder({ privateValues: store });
-    const origin = { sessionId, harnessId: "omp", workspaceId: WORKSPACE };
+    const origin = { sessionId, harnessId: "claude-code", workspaceId: WORKSPACE };
     const result = await pipeline.processIntermediateEvent(
       {
         sessionId,
         type: "tool_call",
         toolName: "bash",
-        callId: "omp-bash-call",
+        callId: "unproven-bash-call",
         parameters: { command },
         timestamp: "2026-09-23T12:00:00.000Z",
         causalRef: { causalSequence: 1, parentId: null },
@@ -391,5 +392,97 @@ text("sa\x66e-credential", token);`;
     if (commandOrigin?.type !== "private") throw new Error("expected the command to stay private");
     expect(resolvePrivateReference(store, commandOrigin.reference)).toBe(command);
     expect(JSON.stringify(projectEventToMetadataOnly(observed))).not.toContain("alpha-release");
+  });
+
+  it("projects an OMP bash command with its credential protected, other arguments private, and bound tokens rendering against the original", async () => {
+    const sessionId = "omp-bash-shell-projection";
+    const secret = "sk-live-abc123XYZ";
+    const command = `curl -H 'Authorization: Bearer ${secret}' https://x/y --out data/a.json`;
+    const cwd = "/home/someone/private-project";
+    const env = { API_TOKEN: "env-only-value" };
+    const store = new InMemoryPrivateValueStore();
+    const pipeline = new NormalizationPipeline({
+      privateValueStore: store,
+      redactionConfig: { customSecrets: [secret], sensitiveEnvVars: [] },
+    });
+    pipeline.registerDecoder(new OmpRecordDecoder());
+    const timestamp = "2026-09-23T12:00:00.000Z";
+    const results = await pipeline.processRecord(
+      {
+        recordId: `rec_${sessionId}`,
+        sessionId,
+        harnessId: "omp",
+        sequenceNumber: 1,
+        recordType: "transcript_line",
+        timestamp,
+        rawPayload: JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "omp-bash-call",
+                name: "bash",
+                arguments: { command, cwd, env, timeout: 30, i: "Downloading data" },
+              },
+            ],
+          },
+        }),
+        cursor: { offset: 1, line: 1, sequence: 1, timestamp },
+        metadata: {},
+      },
+      { sessionId, harnessId: "omp", workspaceId: WORKSPACE },
+    );
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    const observed = results.flatMap((result) =>
+      result.status === "success" && !result.isDuplicate
+        ? [recorder.observe(result.event, { workspaceId: WORKSPACE })]
+        : [],
+    );
+    const { carrier } = callAndCarrier(observed, "omp-bash-call");
+    const origin = carrier.origins.command;
+    if (origin?.type !== "program" || origin.source.type !== "literal") {
+      throw new Error("expected a projected shell program origin");
+    }
+    const scrubbed = origin.source.value;
+    if (typeof scrubbed !== "string") throw new Error("expected literal scrubbed source");
+    expect(origin.language).toBe("shell");
+    expect(scrubbed).not.toContain(secret);
+    const sourceTokens = tokenizeProgram("shell", command);
+    const secretIndex = sourceTokens.findIndex((token) => token.raw.includes(secret));
+    expect(origin.protectedTokens).toEqual([secretIndex]);
+    if (origin.sourceReference === undefined) throw new Error("expected a source reference");
+    expect(resolvePrivateReference(store, origin.sourceReference)).toBe(command);
+    expect(carrier.program?.source).toBe(scrubbed);
+    for (const argument of ["cwd", "timeout", "i"]) {
+      expect(carrier.origins[argument]?.type).toBe("private");
+    }
+    expect(JSON.stringify(carrier.origins.env)).not.toContain("env-only-value");
+
+    const publicEvents = observed.map((entry) => projectEventToMetadataOnly(entry));
+    const published = JSON.stringify(publicEvents);
+    expect(published).not.toContain(secret);
+    expect(published).not.toContain("private-project");
+    expect(published).not.toContain("env-only-value");
+    const recipe = recordCallsFromEvents(sessionId, publicEvents);
+    const argument = recipe?.workflow.steps[0]?.arguments.find((entry) => entry.name === "command");
+    const template = argument?.source.kind === "template" ? argument.source.template : undefined;
+    if (template?.type !== "program") throw new Error("expected a shell program template");
+    expect(template.sourceReference).toBe(origin.sourceReference);
+    expect(template.protectedTokens).toEqual([secretIndex]);
+    expect(JSON.stringify(recipe?.workflow)).not.toContain(secret);
+
+    // A bound token renders against the local original, so the credential survives execution.
+    const outIndex = sourceTokens.findIndex((token) => token.raw === "data/a.json");
+    const rendered = applyProgramTokenValues(
+      resolvePrivateReference(store, origin.sourceReference) as string,
+      sourceTokens,
+      new Map([[outIndex, "data/b.json"]]),
+      "shell",
+    );
+    expect(rendered).toBe(
+      `curl -H 'Authorization: Bearer ${secret}' https://x/y --out data/b.json`,
+    );
   });
 });

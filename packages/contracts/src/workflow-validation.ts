@@ -76,6 +76,11 @@ export interface WorkflowValidationVerdict {
     proposed: WorkflowBindingCandidate["proposed"];
   };
   confirmed: boolean;
+  /**
+   * The JSON type of the values the device resolved for a confirmed input proposal — never the
+   * value. Always present when a proposal typed `unknown` is confirmed.
+   */
+  confirmedType?: "string" | "number" | "boolean" | "object" | "array";
   /** Why a proposal was not confirmed; recorded verbatim when the plan reports the refusal. */
   reason?: string;
 }
@@ -163,7 +168,7 @@ const ProposedBindingSchema = z.union([
   z.object({
     kind: z.literal("input"),
     name: NonEmptyString,
-    type: z.enum(["string", "number", "boolean", "object", "array"]),
+    type: z.enum(["string", "number", "boolean", "object", "array", "unknown"]),
     recordedDefault: z.literal(true).optional(),
   }),
   z.object({
@@ -205,6 +210,7 @@ const VerdictSchema = z.object({
     proposed: ProposedBindingSchema,
   }),
   confirmed: z.boolean(),
+  confirmedType: z.enum(["string", "number", "boolean", "object", "array"]).optional(),
   reason: z.string().optional(),
 });
 

@@ -190,7 +190,11 @@ describe("WorkflowValidationClient", () => {
     expect(headerOf(call, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(call, "x-installation-id")).toBe(INSTALLATION_ID);
     expect(headerOf(call, "x-protocol-version")).toBe(PROTOCOL_VERSION);
-    expect(headerOf(call, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
+    expect(headerOf(call, "x-resin-workflow-validation-capabilities")?.split(",")).toEqual([
+      "workspace-inputs-v1",
+      "unknown-typed-proposals-v1",
+      "cross-session-held-out-v1",
+    ]);
     // An entry that is not a well-formed ask cannot be replayed; it is left out, not guessed at.
     expect(requests).toHaveLength(1);
     expect(requests[0]?.requestId).toBe("req-01");
@@ -266,7 +270,11 @@ describe("WorkflowValidationWorker", () => {
     expect(headerOf(post, "x-workspace-id")).toBe(WORKSPACE_ID);
     expect(headerOf(post, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(post, "x-protocol-version")).toBe(PROTOCOL_VERSION);
-    expect(headerOf(post, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
+    expect(headerOf(post, "x-resin-workflow-validation-capabilities")?.split(",")).toEqual([
+      "workspace-inputs-v1",
+      "unknown-typed-proposals-v1",
+      "cross-session-held-out-v1",
+    ]);
     expect(headerOf(post, "content-type")).toBe("application/json");
 
     const decision = postedDecision(calls);

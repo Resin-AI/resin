@@ -119,6 +119,28 @@ function withoutLocalOmpSourceInterface(event: NormalizedSessionEvent): Normaliz
   return { ...event, metadata };
 }
 
+/**
+ * The shell interfaces whose command argument may leave as a scrubbed program view, each proven by
+ * its decoder rather than by a tool name another server could also use. Claude Code `Bash` is
+ * absent: its decoder carries no trusted local marker, so an MCP tool named `Bash` could pose as it.
+ */
+const KNOWN_SHELL_COMMANDS: readonly {
+  argument: string;
+  proves: (event: Extract<NormalizedSessionEvent, { type: "tool_call" }>) => boolean;
+}[] = [
+  {
+    argument: "cmd",
+    proves: (event) =>
+      event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call",
+  },
+  {
+    argument: "command",
+    proves: (event) =>
+      event.toolName === "bash" &&
+      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash",
+  },
+];
+
 /** One observed call kept locally: its real values never leave this machine. */
 interface LocalCall {
   callId: string;
@@ -439,7 +461,7 @@ export class WorkflowCallRecorder {
           );
           provenance[argument] = { standing: "derived", rule: "single-observation" };
         }
-        this.projectProgramSource(event, parameters, program, origins);
+        this.projectProgramSource(event, parameters, program, origins, true);
         // The session state above also retains native output for guarded outer results.
         let call: LocalCall | undefined;
         for (let index = state.executions.length - 1; index >= 0 && call === undefined; index--) {
@@ -955,7 +977,10 @@ export class WorkflowCallRecorder {
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
     if (program !== undefined) {
-      this.projectProgramSource(normalizedEvent, parameters, program, origins);
+      const shellKnown = KNOWN_SHELL_COMMANDS.some(
+        (shell) => shell.argument === program.argument && shell.proves(event),
+      );
+      this.projectProgramSource(normalizedEvent, parameters, program, origins, shellKnown);
     }
     const discovered = this.discoveredCallable(event.sessionId, event.toolName, event.connection);
     const connection = event.connection ?? discovered?.provider;
@@ -1319,11 +1344,13 @@ export class WorkflowCallRecorder {
     for (const candidate of derivation.candidates) {
       // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.
       if (candidate.stepId !== ownStepId || candidate.reason === "derived-from-inputs") continue;
-      if (candidate.proposed.kind === "input") {
+      const proposed = candidate.proposed;
+      // The recorder sees the value, so it never proposes an input of unknown type.
+      if (proposed.kind === "input" && proposed.type !== "unknown") {
         candidates.push({
           argument: candidate.argument,
           path: candidate.path,
-          proposed: candidate.proposed,
+          proposed: { ...proposed, type: proposed.type },
           reason: candidate.reason,
           missing: candidate.missing,
         });
@@ -1448,24 +1475,18 @@ export class WorkflowCallRecorder {
 
   /**
    * Exposes a source view only when the real redactor and canonical parser both accept it. A shell
-   * program is exposed only when it is a Codex command, whose scrubbed text already reaches the cloud
-   * as naming text; other harnesses' shell programs stay private.
+   * program is exposed only when its caller proved a known harness shell interface (a native Codex
+   * command, or an entry of `KNOWN_SHELL_COMMANDS`); other shell programs stay private.
    */
   private projectProgramSource(
     event: Extract<NormalizedSessionEvent, { type: "tool_call" | "command_exec" }>,
     parameters: Record<string, WorkflowJsonValue>,
     program: WorkflowRecordedProgram,
     origins: WorkflowCallCarrier["origins"],
+    shellKnown: boolean,
   ): void {
     if (program.argument === undefined) return;
-    if (program.kind === "shell") {
-      const codex = readCodexCommandMetadata(event.metadata);
-      const codexCommand =
-        event.type === "command_exec"
-          ? codex?.kind === "command"
-          : event.toolName === "exec" && codex?.kind === "call";
-      if (!codexCommand) return;
-    }
+    if (program.kind === "shell" && !shellKnown) return;
     const original = parameters[program.argument];
     const origin = origins[program.argument];
     if (typeof original !== "string" || origin?.type !== "private") return;

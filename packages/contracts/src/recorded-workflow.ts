@@ -254,7 +254,12 @@ export type WorkflowBindingCandidate = {
     | {
         kind: "input";
         name: string;
-        type: "string" | "number" | "boolean" | "object" | "array";
+        /**
+         * `unknown` when the proposer cannot see the value's type (a private harness-tool
+         * argument): the device that confirms it reports the type, and only proposals carry it —
+         * never `RecordedWorkflow.inputs`.
+         */
+        type: "string" | "number" | "boolean" | "object" | "array" | "unknown";
         /**
          * Promote as an optional input that defaults to the recorded token (see
          * `RecordedWorkflow.inputs[].recordedDefault`). Only a program-token position qualifies.
@@ -1607,7 +1612,8 @@ export function validateRecordedWorkflow(value: unknown): {
             proposed.type !== "number" &&
             proposed.type !== "boolean" &&
             proposed.type !== "object" &&
-            proposed.type !== "array"
+            proposed.type !== "array" &&
+            proposed.type !== "unknown"
           ) {
             errors.push(`candidate ${stepId}.${candidate.argument} needs an input type`);
           }
