@@ -27,6 +27,8 @@ export function parseArgs(argv) {
     else if (arg.startsWith("--output=")) options.output = arg.slice(9);
     else if (arg === "--commit-sha") options.commitSha = argv[++index];
     else if (arg.startsWith("--commit-sha=")) options.commitSha = arg.slice(13);
+    else if (arg.startsWith("--release-ready-file="))
+      options.releaseReadyFile = arg.slice("--release-ready-file=".length);
     else if (arg === "--test-only") options.testOnly = true;
     else if (arg === "--production") options.production = true;
   }
@@ -69,40 +71,59 @@ export function collectReleaseBinding(releaseDir) {
   };
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// The suites don't read the packaged release, so packaging may run concurrently
+// with them: the packager writes its exit code to this file when it finishes.
+function awaitReleaseReady(readyFile, timeoutMs = 20 * 60 * 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(readyFile) || fs.readFileSync(readyFile, "utf8").trim() === "") {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for release: ${readyFile}`);
+    sleepSync(500);
+  }
+  const code = fs.readFileSync(readyFile, "utf8").trim();
+  if (code !== "0") throw new Error(`Release packaging failed with exit code ${code}`);
+}
+
 export function runSystemQualification(options = {}) {
   const rootDir = options.rootDir ?? process.cwd();
   const releaseDir = path.resolve(rootDir, options.releaseDir ?? "dist/release/v1.0.3");
   const outputPath = path.resolve(rootDir, options.output ?? "dist/qualification/system-e2e.json");
   const suites = options.suites ?? SYSTEM_QUALIFICATION_SUITES;
-  const release = collectReleaseBinding(releaseDir);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
   const testOnly =
     options.testOnly === true ||
     (!options.production && process.env.RESIN_RELEASE_TEST_ONLY === "1");
-
-  if (!testOnly) {
-    if (process.env.RESIN_RELEASE_TEST_ONLY === "1") {
-      throw new Error("Production qualification cannot run with RESIN_RELEASE_TEST_ONLY=1");
+  const bindRelease = () => {
+    const release = collectReleaseBinding(releaseDir);
+    if (!testOnly) {
+      if (process.env.RESIN_RELEASE_TEST_ONLY === "1") {
+        throw new Error("Production qualification cannot run with RESIN_RELEASE_TEST_ONLY=1");
+      }
+      const trustDomain = release.releaseIdentity?.trustDomain ?? release.trust?.trustDomain;
+      if (trustDomain === "test") {
+        throw new Error(
+          "Production qualification requires a production-signed release candidate, found test trust domain",
+        );
+      }
     }
-    const trustDomain = release.releaseIdentity?.trustDomain ?? release.trust?.trustDomain;
-    if (trustDomain === "test") {
+
+    if (!/^[0-9a-f]{40}$/i.test(release.commitSha ?? "")) {
+      throw new Error(`Qualification release commit is invalid: ${release.commitSha}`);
+    }
+    const expectedCommitSha =
+      options.commitSha ?? process.env.RESIN_RELEASE_SHA ?? process.env.GITHUB_SHA;
+    if (expectedCommitSha && expectedCommitSha.toLowerCase() !== release.commitSha.toLowerCase()) {
       throw new Error(
-        "Production qualification requires a production-signed release candidate, found test trust domain",
+        `Release commit SHA mismatch for full-system qualification: expected ${expectedCommitSha}, got ${release.commitSha}`,
       );
     }
-  }
-
-  if (!/^[0-9a-f]{40}$/i.test(release.commitSha ?? "")) {
-    throw new Error(`Qualification release commit is invalid: ${release.commitSha}`);
-  }
-  const expectedCommitSha =
-    options.commitSha ?? process.env.RESIN_RELEASE_SHA ?? process.env.GITHUB_SHA;
-  if (expectedCommitSha && expectedCommitSha.toLowerCase() !== release.commitSha.toLowerCase()) {
-    throw new Error(
-      `Release commit SHA mismatch for full-system qualification: expected ${expectedCommitSha}, got ${release.commitSha}`,
-    );
-  }
+    return release;
+  };
+  let release = options.releaseReadyFile ? null : bindRelease();
 
   for (const suite of suites) {
     if (!fs.existsSync(path.join(rootDir, suite))) {
@@ -134,6 +155,10 @@ export function runSystemQualification(options = {}) {
     throw new Error(
       `System qualification suites failed:\n${result.stdout ?? ""}\n${result.stderr ?? ""}`,
     );
+  }
+  if (!release) {
+    awaitReleaseReady(path.resolve(rootDir, options.releaseReadyFile));
+    release = bindRelease();
   }
 
   const evidence = {

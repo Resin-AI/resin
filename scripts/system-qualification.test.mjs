@@ -85,4 +85,31 @@ describe("public core system qualification", () => {
       }),
     ).toThrow("Release commit SHA mismatch");
   });
+
+  it("binds the release only after concurrent packaging reports success", () => {
+    const { rootDir, releaseDir } = createReleaseFixture();
+    const manifestPath = path.join(releaseDir, "manifest.json");
+    const manifest = fs.readFileSync(manifestPath);
+    const readyFile = path.join(rootDir, "release-ready");
+    const run = (code) => {
+      fs.rmSync(manifestPath, { force: true });
+      return runSystemQualification({
+        rootDir,
+        releaseDir,
+        output: path.join(rootDir, "system-e2e.json"),
+        commitSha: COMMIT_SHA,
+        testOnly: true,
+        suites: [],
+        releaseReadyFile: readyFile,
+        // Packaging finishes while the suites run.
+        spawnSync: () => {
+          fs.writeFileSync(manifestPath, manifest);
+          fs.writeFileSync(readyFile, `${code}\n`);
+          return { status: 0, stdout: "passed", stderr: "" };
+        },
+      });
+    };
+    expect(() => run(1)).toThrow("Release packaging failed with exit code 1");
+    expect(run(0).release.commitSha).toBe(COMMIT_SHA);
+  });
 });

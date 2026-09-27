@@ -16,18 +16,6 @@ const CANDIDATE_WORKFLOW_PATH = path.join(
 );
 const PRODUCTION_WORKFLOW_PATH = path.join(ROOT_DIR, ".github", "workflows", "release.yml");
 const CI_WORKFLOW_PATH = path.join(ROOT_DIR, ".github", "workflows", "ci.yml");
-const PLATFORM_QUALIFICATION_WORKFLOW_PATH = path.join(
-  ROOT_DIR,
-  ".github",
-  "workflows",
-  "platform-qualification.yml",
-);
-const SYSTEM_QUALIFICATION_WORKFLOW_PATH = path.join(
-  ROOT_DIR,
-  ".github",
-  "workflows",
-  "system-qualification.yml",
-);
 const PACKAGE_JSON_PATH = path.join(ROOT_DIR, "package.json");
 
 function loadWorkflow(filePath) {
@@ -45,8 +33,6 @@ describe("Public Release Workflows Contract", () => {
   const candidate = loadWorkflow(CANDIDATE_WORKFLOW_PATH);
   const production = loadWorkflow(PRODUCTION_WORKFLOW_PATH);
   const ci = loadWorkflow(CI_WORKFLOW_PATH);
-  const platformQualification = loadWorkflow(PLATFORM_QUALIFICATION_WORKFLOW_PATH);
-  const systemQualification = loadWorkflow(SYSTEM_QUALIFICATION_WORKFLOW_PATH);
   describe("YAML Structure & Runner Compliance", () => {
     it("parses release-candidate.yml as valid YAML document", () => {
       expect(candidate.doc).toBeDefined();
@@ -60,11 +46,26 @@ describe("Public Release Workflows Contract", () => {
       expect(production.doc.jobs).toBeDefined();
     });
 
-    it("requires the ARM64 self-hosted runner for every candidate job", () => {
+    it("signs on the ARM64 self-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
+      const qualificationJobs = ["platform-qualification", "system-qualification"];
       for (const [jobId, job] of Object.entries(candidate.doc.jobs)) {
-        expect(job["runs-on"], `Job ${jobId} must run on resin-vm-linux-arm64`).toBe(
-          "resin-vm-linux-arm64",
-        );
+        if (qualificationJobs.includes(jobId)) {
+          expect(job.environment, `${jobId} must not use a protected environment`).toBeUndefined();
+          expect(job.permissions, `${jobId} must be read-only`).toEqual({ contents: "read" });
+          expect(JSON.stringify(job), `${jobId} must not reference secrets`).not.toContain(
+            "secrets.",
+          );
+          const runners = job.strategy?.matrix?.include?.map((entry) => entry.runner) ?? [
+            job["runs-on"],
+          ];
+          for (const runner of runners) {
+            expect(runner, `${jobId} must run on a GitHub-hosted runner`).toMatch(/^ubuntu-/);
+          }
+        } else {
+          expect(job["runs-on"], `Job ${jobId} must run on resin-vm-linux-arm64`).toBe(
+            "resin-vm-linux-arm64",
+          );
+        }
       }
     });
 
@@ -143,15 +144,15 @@ describe("Public Release Workflows Contract", () => {
     const jobs = candidate.doc.jobs;
     const inputs = candidate.doc.on?.workflow_dispatch?.inputs;
 
-    it("defines workflow_dispatch trigger with commit_sha and four public release gate run IDs", () => {
+    it("defines workflow_dispatch trigger with commit_sha and the CI run ID as the only upstream gate", () => {
       expect(inputs).toBeDefined();
       expect(inputs.commit_sha?.required).toBe(true);
       expect(inputs.release_tag?.required).toBe(true);
       expect(inputs.release_tag?.default).toBeUndefined();
       expect(inputs.ci_run_id?.required).toBe(true);
-      expect(inputs.platform_qualification_run_id?.required).toBe(true);
-      expect(inputs.system_qualification_run_id?.required).toBe(true);
-      expect(inputs.security_scan_run_id?.required).toBe(true);
+      expect(inputs.platform_qualification_run_id).toBeUndefined();
+      expect(inputs.system_qualification_run_id).toBeUndefined();
+      expect(inputs.security_scan_run_id).toBeUndefined();
       expect(inputs.operational_evidence_run_id).toBeUndefined();
       expect(
         inputs.allow_uncommitted_worktree,
@@ -196,40 +197,17 @@ describe("Public Release Workflows Contract", () => {
       expect(buildJob.permissions?.actions).toBe("read");
     });
 
-    it("retains verified candidates and deletes temporary unsigned candidates", () => {
-      const verifyJob = jobs["attest-and-publish-candidate"];
-      expect(verifyJob, "candidate verification job must exist").toBeDefined();
-      expect(verifyJob.needs).toContain("build-and-sign");
-      expect(
-        verifyJob.environment,
-        "candidate verification job must NOT have production environment",
-      ).toBeUndefined();
-      expect(verifyJob.permissions?.contents).toBe("read");
-      expect(verifyJob.permissions?.["id-token"]).toBeUndefined();
-      expect(verifyJob.permissions?.attestations).toBeUndefined();
-
-      const uploadStep = verifyJob.steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
-      expect(uploadStep).toBeDefined();
-      expect(uploadStep.with?.["retention-days"]).toBe(30);
-
-      const intermediateUpload = jobs["build-and-sign"].steps.find((s) =>
-        s.uses?.startsWith("actions/upload-artifact"),
-      );
-      expect(intermediateUpload?.id).toBe("upload-unsigned");
-      expect(intermediateUpload?.with?.["retention-days"]).toBe(1);
-      expect(jobs["build-and-sign"].outputs.unsigned_artifact_id).toBe(
-        "${{ steps.upload-unsigned.outputs.artifact-id }}",
-      );
-
-      const cleanupJob = jobs["delete-unsigned-candidate"];
-      expect(cleanupJob.needs).toEqual(["build-and-sign", "attest-and-publish-candidate"]);
-      expect(cleanupJob.permissions).toEqual({ actions: "write", contents: "read" });
-      expect(cleanupJob.env.ARTIFACT_ID).toBe(
-        "${{ needs.build-and-sign.outputs.unsigned_artifact_id }}",
-      );
-      expect(cleanupJob.steps[0].run).toContain(
-        'gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"',
-      );
+    it("uploads the verified candidate once from the signing job", () => {
+      const buildJob = jobs["build-and-sign"];
+      expect(Object.keys(jobs).sort()).toEqual([
+        "build-and-sign",
+        "platform-qualification",
+        "system-qualification",
+      ]);
+      expect(buildJob.needs).toEqual(["platform-qualification", "system-qualification"]);
+      const uploads = buildJob.steps.filter((s) => s.uses?.startsWith("actions/upload-artifact"));
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0].with?.["retention-days"]).toBe(30);
     });
 
     it("checks out exact SHA with fetch-depth 0", () => {
@@ -247,7 +225,7 @@ describe("Public Release Workflows Contract", () => {
       expect(start).toBeGreaterThan(-1);
       expect(end).toBeGreaterThan(start);
       const gate = script.slice(start, end);
-      const run = (repository) =>
+      const run = (repository, overrides = {}) =>
         spawnSync(
           "bash",
           [
@@ -270,8 +248,11 @@ describe("Public Release Workflows Contract", () => {
                 head_repository: { full_name: repository },
                 path: ".github/workflows/ci.yml",
                 head_sha: "a".repeat(40),
+                event: "push",
+                head_branch: "main",
                 status: "completed",
                 conclusion: "success",
+                ...overrides,
               }),
             },
           },
@@ -282,6 +263,16 @@ describe("Public Release Workflows Contract", () => {
       const rejected = run("untrusted/fork");
       expect(rejected.status).not.toBe(0);
       expect(rejected.stdout).not.toContain("QUALIFIED");
+      for (const overrides of [
+        { event: "pull_request" },
+        { head_branch: "feature" },
+        { head_sha: "b".repeat(40) },
+        { conclusion: "failure" },
+      ]) {
+        const result = run("Resin-AI/resin", overrides);
+        expect(result.status, JSON.stringify(overrides)).not.toBe(0);
+        expect(result.stdout).not.toContain("QUALIFIED");
+      }
     });
 
     it("validates every supplied upstream run via actions/runs/<id> without polling fallbacks", () => {
@@ -294,13 +285,55 @@ describe("Public Release Workflows Contract", () => {
 
       expect(script).toContain("actions/runs/");
       expect(script).toContain(".github/workflows/ci.yml");
-      expect(script).toContain(".github/workflows/platform-qualification.yml");
-      expect(script).toContain(".github/workflows/system-qualification.yml");
-      expect(script).toContain(".github/workflows/security-scan.yml");
+      expect(script).not.toContain("platform-qualification.yml");
+      expect(script).not.toContain("system-qualification.yml");
+      expect(script).not.toContain("security-scan.yml");
       expect(script).not.toContain("production-operational-evidence");
-      expect(script).toContain("vulnerability-scan-evidence.json");
       expect(script).toContain("REVOKED_RELEASE_KEY_IDS");
+      const auditStep = steps.find(
+        (s) => s.name === "Generate retained vulnerability scan evidence",
+      );
+      expect(auditStep.run).toContain("vulnerability-scan-evidence.json");
       expect(script, "Must not contain sleep polling loops").not.toMatch(/sleep\s+\d+/);
+    });
+
+    it("waits for the exact-SHA CI push run to succeed before generating signed evidence", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const waitIndex = steps.findIndex(
+        (s) => s.name === "Wait for the exact-SHA CI run to succeed",
+      );
+      const evidenceIndex = steps.findIndex(
+        (s) => s.name === "Generate production qualification evidence",
+      );
+      expect(waitIndex).toBeGreaterThan(-1);
+      expect(waitIndex).toBeLessThan(evidenceIndex);
+      const script = steps[waitIndex].run;
+      expect(script).toContain("actions/runs/$CI_RUN_ID");
+      expect(script).toContain('"$run_path" != ".github/workflows/ci.yml"');
+      expect(script).toContain('"$run_sha" != "$RELEASE_SHA"');
+      expect(script).toContain('"$run_event" != "push"');
+      expect(script).toContain('"$run_branch" != "main"');
+      expect(script).toContain('"$run_repo" != "$GITHUB_REPOSITORY"');
+      expect(script).toContain('"$run_conclusion" != "success"');
+      expect(script).toContain("SECONDS + 900");
+    });
+
+    it("downloads qualification evidence only from this run and requires all five lanes", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const downloads = steps.filter((s) => s.uses?.startsWith("actions/download-artifact"));
+      expect(downloads).toHaveLength(2);
+      for (const step of downloads) {
+        expect(step.with?.["run-id"]).toBeUndefined();
+        expect(step.with?.repository).toBeUndefined();
+        expect(step.with?.["github-token"]).toBeUndefined();
+      }
+      const laneCheck = steps.find(
+        (s) => s.name === "Require evidence for every qualification lane",
+      );
+      expect(laneCheck.run).toContain(
+        "test \"$(find dist/upstream-qualification/platform -name '*.json' -type f | wc -l)\" -eq 5",
+      );
+      expect(laneCheck.run).toContain("test -s dist/upstream-qualification/system/system-e2e.json");
     });
 
     it("requires qualification for all four production platforms", () => {
@@ -391,10 +424,9 @@ describe("Public Release Workflows Contract", () => {
     });
 
     it("verifies and uploads exact named candidate artifact", () => {
-      const verifySteps = jobs["attest-and-publish-candidate"].steps;
-      const digestStep = verifySteps.find((s) => s.name === "Verify candidate archive digest");
-      expect(digestStep).toBeDefined();
-      expect(digestStep.run).toContain("sha256sum -c");
+      const verifySteps = jobs["build-and-sign"].steps;
+      const assembleStep = verifySteps.find((s) => s.name?.includes("Assemble deterministic"));
+      expect(assembleStep.run).toContain("sha256sum -c resin-release-candidate.tar.gz.sha256");
 
       const uploadStep = verifySteps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
       expect(uploadStep).toBeDefined();
@@ -435,6 +467,30 @@ describe("Public Release Workflows Contract", () => {
 
   describe("Production Release Workflow: Controls, Verification & Immutable Transaction", () => {
     const job = production.doc.jobs.release;
+
+    it("refuses promotion until the CI run recorded in the candidate evidence succeeded on the exact SHA", () => {
+      const steps = job.steps;
+      const extractIndex = steps.findIndex(
+        (s) => s.name === "Extract candidate tools and release bundle",
+      );
+      const ciIndex = steps.findIndex(
+        (s) => s.name === "Verify candidate CI run passed on the exact release SHA",
+      );
+      const draftIndex = steps.findIndex((s) => s.name === "Create draft GitHub release");
+      expect(ciIndex).toBeGreaterThan(extractIndex);
+      expect(ciIndex).toBeLessThan(draftIndex);
+      const script = steps[ciIndex].run;
+      expect(script).toContain("qualification/production-release-evidence.json");
+      expect(script).toContain(".ciRunId");
+      expect(script).toContain('"$run_path" != ".github/workflows/ci.yml"');
+      expect(script).toContain('"$run_sha" != "$RELEASE_SHA"');
+      expect(script).toContain('"$run_event" != "push"');
+      expect(script).toContain('"$run_branch" != "main"');
+      expect(script).toContain(
+        '"$run_status" != "completed" ] || [ "$run_conclusion" != "success"',
+      );
+      expect(script).not.toMatch(/sleep\s+\d+/);
+    });
     const inputs = production.doc.on?.workflow_dispatch?.inputs;
 
     it("defines workflow_dispatch with required environment choice and candidate_run_id", () => {
@@ -1397,13 +1453,7 @@ with patch("subprocess.run", side_effect=publish):
   });
 
   describe("Public PR Workflow Trust, Runner Isolation & Gate Enforcement", () => {
-    const prWorkflows = [
-      { name: "ci.yml", data: ci },
-      { name: "platform-qualification.yml", data: platformQualification },
-      ...(systemQualification
-        ? [{ name: "system-qualification.yml", data: systemQualification }]
-        : []),
-    ];
+    const prWorkflows = [{ name: "ci.yml", data: ci }];
 
     const GITHUB_HOSTED_RUNNER_PATTERNS = [
       /^ubuntu-(?:latest|\d{2}\.\d{2}(?:-arm)?)$/,
@@ -1416,19 +1466,15 @@ with patch("subprocess.run", side_effect=publish):
       return GITHUB_HOSTED_RUNNER_PATTERNS.some((pattern) => pattern.test(runner));
     }
 
-    it("parses ci.yml, platform-qualification.yml, and system-qualification.yml as valid YAML documents", () => {
-      expect(ci.doc).toBeDefined();
+    it("keeps ci.yml as the only push-to-main workflow gating a release", () => {
       expect(ci.doc.name).toBe("CI");
       expect(ci.doc.jobs).toBeDefined();
-
-      expect(platformQualification.doc).toBeDefined();
-      expect(platformQualification.doc.name).toBe("Platform Qualification");
-      expect(platformQualification.doc.jobs).toBeDefined();
-
-      if (systemQualification) {
-        expect(systemQualification.doc).toBeDefined();
-        expect(systemQualification.doc.name).toBe("System Qualification");
-        expect(systemQualification.doc.jobs).toBeDefined();
+      for (const retired of [
+        "platform-qualification.yml",
+        "system-qualification.yml",
+        "security-scan.yml",
+      ]) {
+        expect(fs.existsSync(path.join(ROOT_DIR, ".github", "workflows", retired))).toBe(false);
       }
     });
 
@@ -1722,42 +1768,34 @@ with patch("subprocess.run", side_effect=publish):
       }
     });
 
-    it("retains 5-lane platform qualification coverage in platform-qualification.yml on GitHub-hosted runners", () => {
-      const platformJob = platformQualification.doc.jobs["platform-artifacts"];
-      expect(platformJob).toBeDefined();
+    it("retains 5-lane platform qualification coverage in the release candidate on GitHub-hosted runners", () => {
+      const platformJob = candidate.doc.jobs["platform-qualification"];
       expect(platformJob["runs-on"]).toBe("${{ matrix.runner }}");
-
       const matrix = platformJob.strategy?.matrix?.include;
-      expect(matrix).toHaveLength(5);
-
-      const lanes = matrix.map((m) => m.lane);
-      expect(lanes).toEqual(
-        expect.arrayContaining(["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "wsl"]),
-      );
-
+      const lanes = matrix.flatMap((m) => m.lanes.split(" "));
+      expect(lanes.sort()).toEqual([
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+        "wsl",
+      ]);
       for (const entry of matrix) {
         expect(isGitHubHostedRunner(entry.runner)).toBe(true);
-        if (entry.lane.startsWith("darwin") || entry.lane === "wsl") {
-          expect(entry.mode).toBe("artifact");
-        }
+        const artifactOnly = entry.lanes
+          .split(" ")
+          .some((l) => l.startsWith("darwin") || l === "wsl");
+        expect(entry.mode).toBe(artifactOnly ? "artifact" : "native");
       }
     });
 
-    it("validates system-qualification.yml clean checkout gate and artifact upload on GitHub-hosted runner", () => {
-      if (!systemQualification) {
-        return;
-      }
-      const job = systemQualification.doc.jobs["full-system"];
-      expect(job).toBeDefined();
+    it("runs system qualification against the exact candidate in the release candidate", () => {
+      const job = candidate.doc.jobs["system-qualification"];
       expect(job["runs-on"]).toBe("ubuntu-latest");
-
-      const steps = job.steps;
-      const checkoutStep = steps.find((s) => s.uses?.startsWith("actions/checkout"));
-      expect(checkoutStep).toBeDefined();
+      const checkoutStep = job.steps.find((s) => s.uses?.startsWith("actions/checkout"));
+      expect(checkoutStep.with?.ref).toContain("RELEASE_SHA");
       expect(checkoutStep.with?.["persist-credentials"]).toBe(false);
-
-      const uploadStep = steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
-      expect(uploadStep).toBeDefined();
+      const uploadStep = job.steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
       expect(uploadStep.with?.path).toBe("dist/qualification/system-e2e.json");
     });
   });

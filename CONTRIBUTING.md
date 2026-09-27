@@ -15,7 +15,15 @@ Pull-request CI (`.github/workflows/ci.yml`) runs only:
 - **Unit Tests:** `pnpm test`, sharded across parallel jobs
 - **CI Gate Rollup:** the single required check; it fails unless both jobs above pass
 
-Every other check below runs by hand. `platform-qualification.yml`, `system-qualification.yml` and `security-scan.yml` run on pushes to `main` (the release candidate workflow requires their runs on the exact release SHA) and by manual dispatch.
+Every other check below runs by hand. `ci.yml` is the only workflow that runs on pushes to `main`; everything the release needs beyond it runs inside `release-candidate.yml`.
+
+Speed targets: PR CI ≤ 90 s, merge to `main` → published release ≤ 5 min. Keep signing, integrity verification, the packaged vulnerability scan, exact-SHA pinning and channel verification; anything that only repeats a test run must not be added to the release path.
+
+### Cutting a release
+
+1. Merge to `main`. The `ci.yml` push run for the merge commit starts immediately.
+2. Right away, dispatch `release-candidate.yml` with `commit_sha` (the merge commit), `release_tag` and `ci_run_id` (the ID of that `ci.yml` push run; it may still be running). The RC runs platform qualification (linux-x64 and linux-arm64 natively, darwin-x64/darwin-arm64/wsl artifact validation) and system qualification in parallel on GitHub-hosted runners, then the signing job audits production dependencies, generates the qualification evidence, and builds, signs and verifies the candidate.
+3. When the RC and the CI run have both succeeded, dispatch `release.yml` with `commit_sha`, `release_tag`, `candidate_run_id`, `confirm_promotion=PROMOTE_PRODUCTION` and `environment=production`. It fails before publishing anything unless the CI run recorded in the candidate evidence completed successfully on the exact SHA, then publishes and verifies the channel.
 
 ### Complete Local Verification Gate
 

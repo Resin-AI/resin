@@ -11,7 +11,6 @@ const PRIVILEGED_RELEASE_WORKFLOWS = [
   ".github/workflows/release-candidate.yml",
   ".github/workflows/channel-renewal.yml",
   ".github/workflows/production-operational-evidence.yml",
-  ".github/workflows/security-scan.yml",
 ];
 
 const ALL_PRIVILEGED_WORKFLOWS = [
@@ -85,46 +84,35 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       }
     });
 
-    it("keeps release workflows manual while auto-running the security scan only on protected-main pushes", () => {
+    it("keeps release workflows manual and scans dependencies inside the signing job", () => {
       const release = releaseWorkflows[".github/workflows/release.yml"];
       const candidate = releaseWorkflows[".github/workflows/release-candidate.yml"];
       const operational = releaseWorkflows[".github/workflows/production-operational-evidence.yml"];
-      const securityScan = releaseWorkflows[".github/workflows/security-scan.yml"];
 
       expect(Object.keys(release.doc.on)).toEqual(["workflow_dispatch"]);
       expect(Object.keys(candidate.doc.on)).toEqual(["workflow_dispatch"]);
       if (operational) {
         expect(Object.keys(operational.doc.on)).toEqual(["workflow_dispatch"]);
       }
-      expect(securityScan.doc.on.push).toEqual({ branches: ["main"] });
-      expect(securityScan.doc.on.workflow_dispatch.inputs.commit_sha).toMatchObject({
-        required: true,
-        type: "string",
-      });
-      expect(securityScan.doc.concurrency).toMatchObject({
-        group: "production-security-scan-${{ inputs.commit_sha || github.sha }}",
-        "cancel-in-progress": false,
-      });
-      const securitySteps = securityScan.doc.jobs.scan.steps;
-      expect(securitySteps.find((step) => step.name === "Check out exact candidate").with.ref).toBe(
-        "${{ inputs.commit_sha || github.sha }}",
+      const signSteps = candidate.doc.jobs["build-and-sign"].steps;
+      const auditIndex = signSteps.findIndex((s) => s.name === "Audit production dependencies");
+      const packageIndex = signSteps.findIndex(
+        (s) => s.name === "Package exact production-signed release",
       );
-      expect(
-        securitySteps.find((step) => step.name === "Verify checkout identity").env.TARGET_SHA,
-      ).toBe("${{ inputs.commit_sha || github.sha }}");
-      expect(
-        securitySteps.find((step) => step.name === "Generate retained scan evidence").env
-          .RELEASE_SHA,
-      ).toBe("${{ inputs.commit_sha || github.sha }}");
+      expect(auditIndex).toBeGreaterThan(-1);
+      expect(auditIndex).toBeLessThan(packageIndex);
+      expect(signSteps[packageIndex].env.RESIN_VULNERABILITY_SCAN_PATH).toBe(
+        "dist/security-scan/vulnerability-scan-evidence.json",
+      );
     });
 
     it("keeps the public security scan independent of the private cloud container", () => {
-      const securityScan = releaseWorkflows[".github/workflows/security-scan.yml"];
+      const candidate = releaseWorkflows[".github/workflows/release-candidate.yml"];
 
-      expect(securityScan.raw).not.toContain("apps/cloud");
-      expect(securityScan.raw).not.toContain("trivy");
-      expect(securityScan.raw).toContain('source: "pnpm-audit"');
-      expect(securityScan.raw).toContain('status: "NOT_APPLICABLE"');
+      expect(candidate.raw).not.toContain("apps/cloud");
+      expect(candidate.raw).not.toContain("trivy");
+      expect(candidate.raw).toContain('source: "pnpm-audit"');
+      expect(candidate.raw).toContain('status: "NOT_APPLICABLE"');
     });
 
     it("validates workflow_dispatch inputs enforce required fields and descriptive parameters", () => {
@@ -345,10 +333,12 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       expect(buildAndSignJob).toBeDefined();
       expect(buildAndSignJob.environment).toBe("production");
 
-      const verifyJob = candidate.doc.jobs["attest-and-publish-candidate"];
-      expect(verifyJob).toBeDefined();
-      expect(verifyJob.environment).toBeUndefined();
-      expect(JSON.stringify(verifyJob)).not.toMatch(/RESIN_RELEASE_PRIVATE_KEY/);
+      for (const jobId of ["platform-qualification", "system-qualification"]) {
+        const job = candidate.doc.jobs[jobId];
+        expect(job).toBeDefined();
+        expect(job.environment).toBeUndefined();
+        expect(JSON.stringify(job)).not.toMatch(/secrets\./);
+      }
     });
 
     it("confines production operational evidence rehearsal secrets to production environment", () => {
@@ -414,7 +404,6 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
     it("verifies commit_sha inputs are validated against exact 40-hex pattern in verification steps", () => {
       const candidate = releaseWorkflows[".github/workflows/release-candidate.yml"];
       const operational = releaseWorkflows[".github/workflows/production-operational-evidence.yml"];
-      const securityScan = releaseWorkflows[".github/workflows/security-scan.yml"];
 
       expect(candidate.raw).toMatch(
         /\[\[\s*!\s*"\$RELEASE_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/,
@@ -422,7 +411,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       if (operational) {
         expect(operational.raw).toMatch(/\[\[\s*"\$TARGET_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/);
       }
-      expect(securityScan.raw).toMatch(/\[\[\s*"\$TARGET_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/);
+      expect(candidate.raw).toMatch(/\[\[\s*"\$RELEASE_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/);
     });
 
     it("prohibits raw inputs interpolation inside multiline shell scripts in release workflows", () => {
