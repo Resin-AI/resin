@@ -1082,14 +1082,17 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     if (cleanMetadata !== metadata) delete cleanMetadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
 
     const language = asString(parameters.language)?.trim().toLowerCase();
+    // Only the decoder proves the native interface; the recorder trusts this local-only key.
     const sourceInterface =
-      toolName !== "eval" || typeof parameters.code !== "string"
-        ? undefined
-        : language === "py" || language === "python"
-          ? "python-eval"
-          : language === "js" || language === "javascript"
-            ? "javascript-eval"
-            : undefined;
+      toolName === "bash" && typeof parameters.command === "string"
+        ? "omp-bash"
+        : toolName !== "eval" || typeof parameters.code !== "string"
+          ? undefined
+          : language === "py" || language === "python"
+            ? "python-eval"
+            : language === "js" || language === "javascript"
+              ? "javascript-eval"
+              : undefined;
     return sourceInterface === undefined
       ? cleanMetadata
       : { ...cleanMetadata, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: sourceInterface };
