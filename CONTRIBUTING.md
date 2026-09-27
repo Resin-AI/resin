@@ -6,11 +6,20 @@ Thank you for contributing to Resin! Please follow the guidelines below to maint
 
 ## Development Workflow & Local Verification
 
-Before submitting any pull request or pushing changes, ensure your local workspace passes all required checks.
+### What CI runs
+
+CI is deliberately minimal (static checks + unit tests). Don't add CI jobs, required checks or pre-push gates without the owner's approval.
+
+Pull-request CI (`.github/workflows/ci.yml`) runs only:
+- **Static Checks:** `pnpm lint` and `pnpm typecheck`
+- **Unit Tests:** `pnpm test`, sharded across parallel jobs
+- **CI Gate Rollup:** the single required check; it fails unless both jobs above pass
+
+Every other check below runs by hand. `platform-qualification.yml`, `system-qualification.yml` and `security-scan.yml` run on pushes to `main` (the release candidate workflow requires their runs on the exact release SHA) and by manual dispatch.
 
 ### Complete Local Verification Gate
 
-Run the master verification command that mirrors the complete CI gate set:
+Run the full verification sequence by hand when a change touches release, security or packaging paths:
 
 ```bash
 pnpm run check:all
