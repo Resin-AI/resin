@@ -4,24 +4,14 @@ import {
   type CatalogChangeSummary,
   type HarnessWorkspace,
   type RefreshCapability,
-  type RefreshDetailRecord,
   type RefreshResult,
   createRefreshResult,
 } from "@resin/harness-contracts";
-import { applyOmpCatalogInstructions } from "./instructions.js";
 
 export interface OmpRefreshOptions {
   customSocketPath?: string;
   notificationFilePath?: string;
   forceContextNudge?: boolean;
-  /** Rendered catalog instructions markdown to inject into OMP's append-system-prompt file. */
-  catalogMarkdown?: string;
-  /** Evolved tool names for per-tool xd:// invocation snippets. */
-  toolNames?: string[];
-  /** MCP server name used in xd:// invocation paths (dashes become underscores). */
-  serverName?: string;
-  /** Override OMP home (defaults to resolveOmpHome()). */
-  ompHome?: string;
 }
 
 /**
@@ -75,23 +65,6 @@ export async function handleOmpCatalogRefresh(
       // Workspace .omp directory not present or not writable; continue
     }
 
-    // Inject catalog instructions into OMP's append-system-prompt file so
-    // sessions learn about evolved tools and their xd:// invocation paths (D3).
-    let instructionsAction: string | undefined;
-    if (options?.catalogMarkdown !== undefined) {
-      try {
-        const applied = await applyOmpCatalogInstructions({
-          markdown: options.catalogMarkdown,
-          toolNames: options.toolNames,
-          serverName: options.serverName,
-          ompHome: options.ompHome,
-        });
-        instructionsAction = applied.action;
-      } catch {
-        // Append-system prompt injection is best-effort; do not fail refresh
-      }
-    }
-
     const outcome = options?.forceContextNudge ? "context_nudge" : "native_list_change";
 
     return createRefreshResult(outcome, {
@@ -100,18 +73,12 @@ export async function handleOmpCatalogRefresh(
       affectedToolCount: totalChanges,
       requiresRestart: false,
       appliedAt: now,
-      details: (() => {
-        const d: RefreshDetailRecord = {
-          addedCount: changeSummary.addedToolIds?.length ?? 0,
-          updatedCount: changeSummary.updatedToolIds?.length ?? 0,
-          removedCount: changeSummary.removedToolIds?.length ?? 0,
-          workspaceId: workspace.workspaceId,
-        };
-        if (instructionsAction) {
-          d.instructionsAction = instructionsAction;
-        }
-        return d;
-      })(),
+      details: {
+        addedCount: changeSummary.addedToolIds?.length ?? 0,
+        updatedCount: changeSummary.updatedToolIds?.length ?? 0,
+        removedCount: changeSummary.removedToolIds?.length ?? 0,
+        workspaceId: workspace.workspaceId,
+      },
     });
   } catch (err: unknown) {
     return createRefreshResult("failed", {

@@ -50,7 +50,7 @@ export interface OmpConfiguredServer {
  * `alpha_beta`) claims its own tools: `xd://mcp__alpha_beta_run` is `alpha_beta`/`run`, while
  * `xd://mcp__alpha_run` is `alpha`/`run`. A tie between two configured names of the same length,
  * and a path no configured name owns, are both unresolved. A server's name is spelled with
- * underscores in the path, exactly as `renderOmpInvocationSnippet` spells it.
+ * underscores in the path, exactly as OMP mounts it (`xd://mcp__<server>_<tool>`).
  */
 export function resolveOmpDeviceSurfaceCall(
   devicePath: string,
