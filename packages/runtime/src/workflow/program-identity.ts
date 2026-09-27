@@ -12,12 +12,14 @@ import {
   type RecordedWorkflow,
   type WorkflowJsonValue,
   type WorkflowProgramIdentity,
+  type WorkflowStep,
   type WorkflowValuePath,
   type WorkflowValueTemplate,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
   embeddedPrograms,
   hashCanonical,
+  segmentOriginal,
   tokenizeProgram,
   validateWorkflowProgramProjection,
 } from "@resin/contracts";
@@ -68,13 +70,14 @@ async function resolveProgramSource(
 
 async function identityForProgram(
   template: Extract<WorkflowValueTemplate, { type: "program" }>,
-  stepId: string,
+  step: WorkflowStep,
   argument: string,
   path: WorkflowValuePath,
   workspaceId: string | undefined,
   resolvePrivate: WorkflowProgramIdentityOptions["resolvePrivate"],
   declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowProgramIdentity | undefined> {
+  const stepId = step.id;
   const projection = projectedProgramSource(template, `${stepId}.${argument}`);
   if (projection !== undefined && !declaredPrivateReferences.has(projection)) {
     throw new Error(`${stepId}.${argument} projected source reference is not declared`);
@@ -82,8 +85,9 @@ async function identityForProgram(
   // A program without an applied hole is not a parameterized identity. In particular, a source that
   // was merely observed or proposed must not become an equivalence proof.
   if (template.holes.length === 0) return undefined;
-  const source = await resolveProgramSource(template, projection, resolvePrivate);
-  if (source === undefined) return undefined;
+  const resolved = await resolveProgramSource(template, projection, resolvePrivate);
+  const source = projection === undefined ? resolved : segmentOriginal(step, argument, resolved);
+  if (typeof source !== "string") return undefined;
   let tokens: ProgramToken[];
   if (projection === undefined) {
     tokens = tokenizeProgram(template.language, source);
@@ -164,7 +168,7 @@ async function identityForProgram(
 
 async function collectTemplatePrograms(
   template: WorkflowValueTemplate,
-  stepId: string,
+  step: WorkflowStep,
   argument: string,
   path: WorkflowValuePath,
   workspaceId: string | undefined,
@@ -177,7 +181,7 @@ async function collectTemplatePrograms(
       for (const [key, entry] of Object.entries(template.entries)) {
         await collectTemplatePrograms(
           entry,
-          stepId,
+          step,
           argument,
           [...path, key],
           workspaceId,
@@ -191,7 +195,7 @@ async function collectTemplatePrograms(
       for (const [index, entry] of template.items.entries()) {
         await collectTemplatePrograms(
           entry,
-          stepId,
+          step,
           argument,
           [...path, index],
           workspaceId,
@@ -204,7 +208,7 @@ async function collectTemplatePrograms(
     case "program": {
       const identity = await identityForProgram(
         template,
-        stepId,
+        step,
         argument,
         path,
         workspaceId,
@@ -236,7 +240,7 @@ export async function computeWorkflowProgramIdentities(
       if (argument.source.kind !== "template") continue;
       await collectTemplatePrograms(
         argument.source.template,
-        step.id,
+        step,
         argument.name,
         [],
         params.workspaceId,

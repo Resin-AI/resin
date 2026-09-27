@@ -1207,6 +1207,39 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       });
     });
 
+    it.each([
+      ["a foreground run that finished", { wallTimeMs: 82 }, false, "omp-bash-completed"],
+      ["an async run", { async: { state: "running", jobId: "j1" } }, false, undefined],
+      [
+        "an auto-backgrounded run",
+        { async: { state: "running" }, wallTimeMs: 60000 },
+        false,
+        undefined,
+      ],
+      ["a service", { service: { name: "web", state: "running" } }, false, undefined],
+      ["a timed-out run", { timedOut: true }, false, undefined],
+      ["a failed run", { wallTimeMs: 5 }, true, undefined],
+      ["a result without details", undefined, false, undefined],
+    ])(
+      "marks %s as completed only when it finished in the foreground",
+      (_, details, isError, marker) => {
+        const result = decoder.decode(
+          v18Record(5, {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolCallId: "call-bash|fc_1",
+              toolName: "bash",
+              content: [{ type: "text", text: "ok" }],
+              isError,
+              ...(details === undefined ? {} : { details }),
+            },
+          }),
+        ) as IntermediateToolResultEvent;
+        expect(result.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe(marker);
+      },
+    );
+
     it("emits repeated actionable calls and preserves failed results", () => {
       const payloads = [
         {

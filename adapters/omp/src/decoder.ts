@@ -2099,13 +2099,28 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       0;
 
     const providerUsage = this.extractProviderUsage(obj, metadata);
+    // Only a bash run that finished in the foreground reported its exit status: OMP's bash tool
+    // reports an error for any non-zero exit, but an async, auto-backgrounded, service or timed-out
+    // run returns before the command finishes, with no error and no status.
+    const completedBash =
+      toolName === "bash" &&
+      !isError &&
+      details !== undefined &&
+      !["async", "service", "timedOut", "background", "job", "daemon"].some((key) =>
+        Object.hasOwn(details, key),
+      );
     const nativeArguments =
       toolName === "eval" && lateName === "eval" ? boundedNativeArguments(lateArgs) : undefined;
+    // Only the decoder proves a completed run; a key a record carried itself is dropped.
+    const { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
+    const resultMetadata = completedBash
+      ? { ...unproven, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
+      : unproven;
     const eventMetadata =
       nativeArguments === undefined
-        ? metadata
+        ? resultMetadata
         : {
-            ...metadata,
+            ...resultMetadata,
             [RESIN_LOCAL_OMP_NATIVE_CALL_KEY]: {
               callId,
               toolName,

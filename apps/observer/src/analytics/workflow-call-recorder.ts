@@ -59,6 +59,7 @@ import {
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
 import {
+  WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
   workflowCallArgumentSlot,
@@ -180,6 +181,8 @@ interface LocalCall {
     argument: string;
     sourceInterface?: "python-eval" | "javascript-eval" | "codex-exec";
   };
+  /** An OMP bash call, whose tool reports an error for any non-zero exit status. */
+  ompBash?: true;
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
   /** This call's place among its execution's calls: the position a repeat of it is listed under. */
@@ -519,6 +522,7 @@ export class WorkflowCallRecorder {
         );
         if (candidates.length > 0) carrier.candidates = candidates;
         const succeeded = raw.exitCode === 0;
+        this.localReference(raw.exitCode, event.sessionId, callId, WORKFLOW_CALL_EXIT_CODE_SLOT);
         call.result = raw.stdout;
         call.resultReference = succeeded
           ? this.localReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
@@ -616,12 +620,19 @@ export class WorkflowCallRecorder {
         isLocalWorkflowResultSuppressed(event) ||
         (codex?.kind === "result" &&
           (codex.status !== "completed" || native === undefined || native.exitCode !== 0));
-      const observed = this.observeResult(source, event, resultObservation, suppressResult);
+      const observed = this.observeResult(
+        source,
+        event,
+        resultObservation,
+        suppressResult,
+        codex?.kind === "result" ? native?.exitCode : undefined,
+      );
       // The cell completed, but the command it ran failed: the step failed.
-      const resultEvent =
+      const resultEvent = withoutLocalOmpSourceInterface(
         codex?.kind === "result" && native !== undefined && native.exitCode !== 0
           ? { ...event, isError: true, metadata: observed.metadata }
-          : { ...event, metadata: observed.metadata };
+          : { ...event, metadata: observed.metadata },
+      );
       if (suppressResult) {
         retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
       } else if (resultObservation !== undefined) {
@@ -1165,6 +1176,11 @@ export class WorkflowCallRecorder {
         ? {}
         : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
+      ...("metadata" in event &&
+      event.toolName === "bash" &&
+      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash"
+        ? { ompBash: true as const }
+        : {}),
       executionIndex: execution.index,
       executionPosition: execution.calls.length,
       arguments: parameters,
@@ -1583,6 +1599,8 @@ export class WorkflowCallRecorder {
     publicEvent: NormalizedSessionEvent = event,
     localResultObservation?: { result: string; comparison?: "text-trim" },
     suppressResult = false,
+    /** The exit code of the native command a Codex cell ran, when it reported one. */
+    nativeExitCode?: number,
   ): NormalizedSessionEvent {
     let baselineReference: string | undefined;
     let baselineComparison: "text-trim" | undefined;
@@ -1648,6 +1666,18 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
+        // An OMP bash call's status is known only for a run the decoder saw finish in the
+        // foreground; a result that returned early carries no exit status at all.
+        const exitCode =
+          nativeExitCode ??
+          (call.ompBash === true &&
+          event.isError === false &&
+          event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash-completed"
+            ? 0
+            : undefined);
+        if (exitCode !== undefined) {
+          this.localReference(exitCode, event.sessionId, call.callId, WORKFLOW_CALL_EXIT_CODE_SLOT);
+        }
         if (
           event.isError === false &&
           !suppressResult &&

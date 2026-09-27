@@ -34,6 +34,7 @@ import {
   parseExtractLocator,
   programTokenPath,
   programTokenValueAt,
+  segmentOriginal,
   tokenizeProgram,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
@@ -659,7 +660,9 @@ async function demonstratedTokenValue(
   // the recorded text around the span.
   const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
   const recorded =
-    argument === undefined ? undefined : await recordedProgramText(argument.source, resolve);
+    argument === undefined
+      ? undefined
+      : segmentOriginal(step!, argument.name, await recordedProgramText(argument.source, resolve));
   if (typeof recorded !== "string") return undefined;
   return demonstratedProgramTokenSpanValue(program.kind, recorded, supplied, address);
 }
@@ -765,11 +768,22 @@ export async function demonstrationEnvironment(params: {
     }
     return value;
   };
+  // A segment step's program argument is supplied as its recorded chain; what the segment ran is
+  // that chain's segment, re-split as the recording check split it.
+  const suppliedFor = async (
+    step: WorkflowStep,
+    argument: string,
+    reference: string,
+  ): Promise<WorkflowJsonValue | undefined> => {
+    const value = await resolveOnce(reference);
+    return segmentOriginal(step, argument, value) as WorkflowJsonValue | undefined;
+  };
   for (const entry of demonstration.inputs) {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
     const argument = step?.arguments.find((candidate) => candidate.name === entry.argument);
     if (step === undefined || argument === undefined) return undefined;
-    const supplied = await resolveOnce(entry.reference);
+    const supplied = await suppliedFor(step, entry.argument, entry.reference);
+    if (supplied === undefined) return undefined;
     const bindInput = (name: string, path: WorkflowValuePath): boolean => {
       const input = params.plan.inputs.find((candidate) => candidate.name === name);
       if (input === undefined) return false;
@@ -809,7 +823,10 @@ export async function demonstrationEnvironment(params: {
     // A token candidate is about one position of the program the argument's text holds, so the
     // value the replay must bind is the token's own value — read out of the text the repeat
     // actually ran, not out of the recorded text the candidate is proposed against.
-    const supplied = await resolveOnce(entry.reference);
+    const step = params.plan.steps.find((each) => each.id === entry.stepId);
+    const supplied =
+      step === undefined ? undefined : await suppliedFor(step, entry.argument, entry.reference);
+    if (supplied === undefined) continue;
     const value =
       candidate.path[0] === "tokens"
         ? await demonstratedTokenValue(params.plan, candidate, supplied, resolveOnce)
