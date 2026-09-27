@@ -1,11 +1,12 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PLATFORMS, RELEASE_VERSION, packageRelease } from "./package-release.mjs";
+import { PLATFORMS, RELEASE_VERSION } from "./package-release.mjs";
 import { PROPRIETARY_CLOUD_IDENTIFIERS, verifyReleaseFiles } from "./verify-release.mjs";
 
 describe("standalone platform release artifact", () => {
@@ -15,12 +16,24 @@ describe("standalone platform release artifact", () => {
   const extractDir = path.join(tempRoot, "extract");
   const outsideCwd = path.join(tempRoot, "outside-workspace");
 
-  beforeAll(() => {
+  beforeAll(async () => {
     fs.mkdirSync(releaseDir, { recursive: true });
     fs.mkdirSync(extractDir, { recursive: true });
     fs.mkdirSync(outsideCwd, { recursive: true });
-    packageRelease({ rootDir, distDir: releaseDir, skipBuild: true, testOnly: true });
-  }, 120_000);
+    // Packaging every platform is about a minute of synchronous CPU work. Running it in a child
+    // process keeps this test worker responsive to the runner, which otherwise times out its RPC.
+    const packageRelease = pathToFileURL(path.join(rootDir, "scripts", "package-release.mjs")).href;
+    const options = { rootDir, distDir: releaseDir, skipBuild: true, testOnly: true };
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const { packageRelease } = await import(${JSON.stringify(packageRelease)});\npackageRelease(${JSON.stringify(options)});`,
+      ],
+      { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
+    );
+  }, 240_000);
 
   afterAll(async () => {
     await fs.promises.rm(tempRoot, { recursive: true, force: true });

@@ -1,7 +1,10 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CLOUD_ONLY_IDENTIFIERS,
@@ -17,7 +20,6 @@ import {
   collectProjectDependencies,
   collectStandaloneRuntimeEntries,
   createDeterministicTar,
-  createPlatformReleaseTarballs,
   extractTarEntries,
   generateCycloneDxSbom,
   generatePackageDigests,
@@ -238,11 +240,30 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
       expect(digests["@resin/e2e"]).toBeUndefined();
     });
 
-    it("createPlatformReleaseTarballs packages release with non-destructive guarantees", () => {
+    it("createPlatformReleaseTarballs packages release with non-destructive guarantees", async () => {
       const outputDir = path.join(tempDir, "release-output");
       fs.mkdirSync(outputDir, { recursive: true });
 
-      const assetResults = createPlatformReleaseTarballs(rootDir, outputDir);
+      // Building every platform tarball is long synchronous CPU work; a child process keeps this
+      // test worker responsive to the runner, which otherwise times out its RPC.
+      const resultFile = path.join(tempDir, "release-output-result.json");
+      const packageRelease = pathToFileURL(
+        path.join(rootDir, "scripts", "package-release.mjs"),
+      ).href;
+      await promisify(execFile)(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          [
+            `const { createPlatformReleaseTarballs } = await import(${JSON.stringify(packageRelease)});`,
+            `const result = createPlatformReleaseTarballs(${JSON.stringify(rootDir)}, ${JSON.stringify(outputDir)});`,
+            `(await import("node:fs")).writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify(result));`,
+          ].join("\n"),
+        ],
+        { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
+      );
+      const assetResults = JSON.parse(fs.readFileSync(resultFile, "utf8"));
       expect(Object.keys(assetResults)).toHaveLength(PLATFORMS.length);
 
       for (const platform of PLATFORMS) {
@@ -268,7 +289,7 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
           assertNoForbiddenReleaseArtifacts(entries, platform.filename);
         }).not.toThrow();
       }
-    }, 60_000);
+    }, 240_000);
 
     it("verifyReleaseFiles reports FORBIDDEN_RELEASE_ARTIFACT if a tarball contains seeded forbidden files", () => {
       const corruptedReleaseDir = path.join(tempDir, "corrupted-release");
