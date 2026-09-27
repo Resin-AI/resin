@@ -264,6 +264,76 @@ interface NativeShellOutput {
   outcome: NativeOutcome;
 }
 
+interface UnifiedExecOutput {
+  /** Present when the process exited; absent while it is still running. */
+  exitCode?: number;
+  durationMs?: number;
+  body?: string;
+}
+
+const UNIFIED_EXEC_OUTPUT_MARKER = /^(?:Final output|Output):$/;
+const UNIFIED_EXEC_HEADER_FIELD = /^[A-Z][A-Za-z ]*: \S.*$/;
+
+/**
+ * Codex's unified exec formatter: `Chunk ID`, `Wall time`, then the process line, then any further
+ * `Name: value` header fields (Codex 0.141 adds `Original token count`), then `Output:` (older
+ * releases: `Final output:`) and the body. Header fields are matched by shape, not by name, so a
+ * release that adds one still parses. A running process may carry no output section.
+ */
+function parseUnifiedExecOutput(text: string): UnifiedExecOutput | undefined {
+  const lines = text.split("\n");
+  const line = (index: number) => (lines[index] ?? "").replace(/\r$/, "");
+  if (!/^Chunk ID: [A-Za-z0-9_-]+$/.test(line(0))) return undefined;
+  const wallTime = line(1).match(/^Wall time: (\d+(?:\.\d+)?(?:s| seconds?)?)$/);
+  if (!wallTime) return undefined;
+  const exited = line(2).match(/^Process exited with code (-?\d+)$/);
+  const running = /^Process running with session ID:?[ \t]*[A-Za-z0-9_-]+$/.test(line(2));
+  if (!exited && !running) return undefined;
+  let body: string | undefined;
+  for (let index = 3; index < lines.length; index += 1) {
+    const current = line(index);
+    if (UNIFIED_EXEC_OUTPUT_MARKER.test(current)) {
+      body = lines.slice(index + 1).join("\n");
+      break;
+    }
+    if (current === "" && index === lines.length - 1) break;
+    if (!UNIFIED_EXEC_HEADER_FIELD.test(current)) return undefined;
+  }
+  // A finished process always reports its output section; without it the text is not this format.
+  if (exited && body === undefined) return undefined;
+  return {
+    ...(exited ? { exitCode: Number(exited[1]) } : {}),
+    durationMs: parseWallTimeMs(wallTime[1]),
+    ...(body === undefined ? {} : { body }),
+  };
+}
+
+const reportedUnrecognizedExecShapes = new Set<string>();
+
+/**
+ * A terminal result that looks like a Codex exec formatter but matched none of the known forms is
+ * recorded without a completion, which drops it from workflow evidence. Say so once per header shape
+ * so a formatter change is visible in the daemon log. Only header field names are reported, never
+ * values or output.
+ */
+function reportUnrecognizedExecOutput(text: string): void {
+  if (!/^(?:Chunk ID: |Exit code: |Process (?:exited|running) )/.test(text)) return;
+  const header: string[] = [];
+  for (const raw of text.split("\n", 6)) {
+    const each = raw.replace(/\r$/, "");
+    header.push(each.match(/^[A-Z][A-Za-z]*(?: [A-Za-z]+){0,4}/)?.[0] ?? "?");
+    if (UNIFIED_EXEC_OUTPUT_MARKER.test(each)) break;
+  }
+  const shape = header.join("|");
+  if (reportedUnrecognizedExecShapes.has(shape) || reportedUnrecognizedExecShapes.size >= 32)
+    return;
+  reportedUnrecognizedExecShapes.add(shape);
+  process.emitWarning(
+    `Unrecognized Codex exec output format (header: ${shape}); its result is recorded without a completion status`,
+    { code: "RESIN_CODEX_EXEC_OUTPUT_UNRECOGNIZED" },
+  );
+}
+
 function parseNativeShellOutput(
   rawOutput: CodexTranscriptValue | undefined,
   rawRecord: CodexTranscriptPayload,
@@ -366,27 +436,19 @@ function parseNativeShellOutput(
 
   const formatted = asString(rawOutput);
   if (formatted !== undefined) {
-    const unified = formatted.match(
-      /^Chunk ID: [A-Za-z0-9_-]+\r?\nWall time: (\d+(?:\.\d+)?(?:s| seconds?)?)\r?\nProcess exited with code (-?\d+)\r?\nFinal output:\r?\n([\s\S]*)$/,
-    );
-    if (unified) {
-      const wallTimeMs = parseWallTimeMs(unified[1]);
-      const formattedExitCode = Number(unified[2]);
+    const unified = parseUnifiedExecOutput(formatted);
+    if (unified?.exitCode !== undefined) {
       return {
-        result: unified[3] ?? "",
-        exitCode: formattedExitCode,
-        durationMs: wallTimeMs ?? durationMs,
-        outcome: statusOutcome ?? (formattedExitCode === 0 ? "completed" : "failed"),
+        result: unified.body ?? "",
+        exitCode: unified.exitCode,
+        durationMs: unified.durationMs ?? durationMs,
+        outcome: statusOutcome ?? (unified.exitCode === 0 ? "completed" : "failed"),
       };
     }
-
-    const running = formatted.match(
-      /^Chunk ID: [A-Za-z0-9_-]+\r?\nWall time: (\d+(?:\.\d+)?(?:s| seconds?)?)\r?\nProcess running with session ID:?[ \t]*[A-Za-z0-9_-]+(?:\r?\nFinal output:\r?\n([\s\S]*))?(?:\r?\n)?$/,
-    );
-    if (running) {
+    if (unified !== undefined) {
       return {
-        result: running[2] ?? "",
-        durationMs: parseWallTimeMs(running[1]) ?? durationMs,
+        result: unified.body ?? "",
+        durationMs: unified.durationMs ?? durationMs,
         outcome: statusOutcome ?? "running",
       };
     }
@@ -403,6 +465,7 @@ function parseNativeShellOutput(
         outcome: statusOutcome ?? (formattedExitCode === 0 ? "completed" : "failed"),
       };
     }
+    reportUnrecognizedExecOutput(formatted);
   }
 
   const outcome =

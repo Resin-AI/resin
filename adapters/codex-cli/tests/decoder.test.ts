@@ -7,7 +7,7 @@ import type {
   IntermediateToolResultEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MULTI_TURN_TOOLS_ROLLOUT_PATH,
   STANDARD_SESSION_ROLLOUT_PATH,
@@ -1862,6 +1862,55 @@ describe("Codex CLI Session Decoder", () => {
         isError: false,
       },
       {
+        name: "parses the Codex 0.141 exec formatter with its token-count header and Output marker",
+        toolName: "exec_command",
+        output:
+          "Chunk ID: a3cf80\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 58\nOutput:\n# Database backups\n",
+        fields: {},
+        result: "# Database backups\n",
+        outcome: "completed",
+        isError: false,
+      },
+      {
+        name: "reports a Codex 0.141 nonzero exit as failure",
+        toolName: "exec_command",
+        output:
+          "Chunk ID: 9b01c2\nWall time: 0.0123 seconds\nProcess exited with code 2\nOriginal token count: 4\nOutput:\nno such table\n",
+        fields: {},
+        result: "no such table\n",
+        outcome: "failed",
+        isError: true,
+      },
+      {
+        name: "parses an exec formatter with a further unknown header field",
+        toolName: "exec_command",
+        output:
+          "Chunk ID: c0ffee\nWall time: 1.5 seconds\nProcess exited with code 0\nOriginal token count: 3\nSandbox: none\nOutput:\nok\n",
+        fields: {},
+        result: "ok\n",
+        outcome: "completed",
+        isError: false,
+      },
+      {
+        name: "recognizes a running exec formatter with a token-count header",
+        toolName: "write_stdin",
+        output:
+          "Chunk ID: 77aa01\nWall time: 5.0021 seconds\nProcess running with session ID 4012\nOriginal token count: 9\nOutput:\npartial\n",
+        fields: {},
+        result: "partial\n",
+        outcome: "running",
+        isError: false,
+      },
+      {
+        name: "does not complete an exited formatter that has no output section",
+        toolName: "exec_command",
+        output: "Chunk ID: 1a2b3c\nWall time: 0.01 seconds\nProcess exited with code 0\n",
+        fields: {},
+        result: "Chunk ID: 1a2b3c\nWall time: 0.01 seconds\nProcess exited with code 0\n",
+        outcome: "unknown",
+        isError: false,
+      },
+      {
         name: "recognizes a representative running shell formatter without completion",
         toolName: "write_stdin",
         output:
@@ -1907,6 +1956,28 @@ describe("Codex CLI Session Decoder", () => {
       expect(toolResult.result).toEqual(result);
       expect(toolResult.isError).toBe(isError);
       expect(toolResult.metadata?.codexNative).toMatchObject({ outcome });
+    });
+
+    it("reports an unrecognized exec formatter once, by header field names only", () => {
+      const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+      try {
+        const output =
+          "Chunk ID: 5e5e5e\nWall time: 0.2 seconds\nProcess exited with code 0\nresult-token 12345\nsecret-value\n";
+        for (const _ of [1, 2]) {
+          const events = decodeNativeShellResult("exec_command", output, {});
+          const toolResult = events.find((event) => event.type === "tool_result");
+          expect(toolResult?.metadata?.codexNative).toMatchObject({ outcome: "unknown" });
+        }
+        const reports = warn.mock.calls.filter(
+          ([, options]) =>
+            (options as { code?: string } | undefined)?.code ===
+            "RESIN_CODEX_EXEC_OUTPUT_UNRECOGNIZED",
+        );
+        expect(reports).toHaveLength(1);
+        expect(String(reports[0]![0])).not.toMatch(/secret-value|12345|5e5e5e/);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     const authoredOne = { type: "input_text", text: "first authored item" };
@@ -1959,6 +2030,25 @@ describe("Codex CLI Session Decoder", () => {
         result: [authoredOne],
         outcome: "failed",
         isError: true,
+      },
+      {
+        name: "parses the Codex 0.156.1 Code Mode exec header",
+        output: [
+          { type: "input_text", text: "Script completed\nWall time 1.2 seconds\nOutput:\n" },
+          {
+            type: "input_text",
+            text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}',
+          },
+        ],
+        fields: {},
+        result: [
+          {
+            type: "input_text",
+            text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}',
+          },
+        ],
+        outcome: "completed",
+        isError: false,
       },
       {
         name: "does not complete an explicitly truncated exec result",
