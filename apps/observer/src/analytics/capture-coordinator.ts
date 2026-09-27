@@ -27,8 +27,76 @@ import {
 } from "./trajectory-emitter.js";
 import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
 
-/** Cloud ingestion's per-request observation limit (and the batch schema's maximum). */
-const MAX_OBSERVATIONS_PER_BATCH = 1000;
+/**
+ * Upload batching policy for generic observation sessions. Every constant that decides when a
+ * buffered session is sent to the cloud lives here.
+ *
+ * Rationale: each `POST /v1/observations/batch` costs a fixed ~13-15 DynamoDB WRU on the cloud side
+ * (ingestion receipt + outbox item + cursor-head update in one transaction) on top of the
+ * per-event writes. Flushing on every turn boundary produced ~88 uploads per active user-hour at
+ * ~6 events each, so the fixed per-request cost dominated. A longer window amortizes it over more
+ * events while bounded latency is kept for detection:
+ * - `windowMs`: a batch is sent at most 15 s after its first buffered event.
+ * - `turnHintWindowMs`: a settled turn (assistant reply/completion) no longer forces a send; it
+ *   shortens the remaining window to at most 5 s so detection still sees the turn promptly.
+ * - Session end, terminal lifecycle events and shutdown/stop (`waitForIdle`/`flush`) still send
+ *   immediately; unsent records are never acknowledged to the tailer, so nothing is lost.
+ * - `maxEvents`/`maxBytes`: send early once a batch is large. Cloud ingestion allows at most 1,000
+ *   events and 10 MiB of wire bytes (50 MiB decompressed) per request (ingestion validator and
+ *   quota limiter), so 250 events / 2 MiB of uncompressed JSON leaves ≥4x margin on both.
+ * - `maxPendingDeliveries`: the tailer stops delivering a session after 100 unacknowledged
+ *   deliveries (`defaultMaxInFlightBatches` in trajectory-capture-module), so a batch is sent
+ *   before it could stall the tailer for the rest of its window.
+ * - `requestMaxEvents`/`requestMaxBytes`: hard per-request ceilings used when a buffer outgrew one
+ *   request (e.g. records kept arriving while a failed send was backing off). They sit at the
+ *   server's event limit and at half its byte limit, before compression.
+ */
+export const OBSERVATION_UPLOAD_POLICY = {
+  windowMs: 15_000,
+  turnHintWindowMs: 5_000,
+  maxEvents: 250,
+  maxBytes: 2 * 1024 * 1024,
+  maxPendingDeliveries: 100,
+  requestMaxEvents: 1_000,
+  requestMaxBytes: 5 * 1024 * 1024,
+} as const;
+
+function serializedByteLength(event: unknown): number {
+  return Buffer.byteLength(JSON.stringify(event));
+}
+
+/**
+ * Splits an ordered upload into request-sized chunks without reordering. A buffer that fits one
+ * request by bytes is split by event count only, exactly as before byte-bounded chunking existed.
+ * A single event larger than the byte ceiling travels alone.
+ */
+export function chunkObservationsForUpload<T>(events: readonly T[], totalBytes: number): T[][] {
+  const { requestMaxEvents, requestMaxBytes } = OBSERVATION_UPLOAD_POLICY;
+  const chunks: T[][] = [];
+  if (totalBytes <= requestMaxBytes) {
+    for (let start = 0; start < events.length; start += requestMaxEvents) {
+      chunks.push(events.slice(start, start + requestMaxEvents));
+    }
+    return chunks;
+  }
+  let chunk: T[] = [];
+  let chunkBytes = 0;
+  for (const event of events) {
+    const eventBytes = serializedByteLength(event);
+    if (
+      chunk.length > 0 &&
+      (chunk.length >= requestMaxEvents || chunkBytes + eventBytes > requestMaxBytes)
+    ) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 0;
+    }
+    chunk.push(event);
+    chunkBytes += eventBytes;
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks;
+}
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -130,15 +198,26 @@ export interface TrajectoryCaptureCoordinatorOptions {
    */
   minimumRecordTimestampMs?: number;
   /**
-   * Bounded coalescing dwell window in milliseconds for generic observation sessions.
-   * Defaults to 2000 (2 seconds). Set to 0 to disable coalescing.
+   * Upload window in milliseconds for generic observation sessions, measured from the first
+   * buffered event. Defaults to `OBSERVATION_UPLOAD_POLICY.windowMs`. Set to 0 to disable
+   * coalescing.
    */
   coalesceDwellMs?: number;
   /**
+   * Upper bound on the remaining window once a turn settles. Defaults to
+   * `OBSERVATION_UPLOAD_POLICY.turnHintWindowMs`.
+   */
+  turnHintDwellMs?: number;
+  /**
    * Maximum batch size (number of observations) before an immediate flush occurs.
-   * Defaults to 100.
+   * Defaults to `OBSERVATION_UPLOAD_POLICY.maxEvents`.
    */
   maxBatchSize?: number;
+  /**
+   * Maximum serialized batch size in bytes before an immediate flush occurs.
+   * Defaults to `OBSERVATION_UPLOAD_POLICY.maxBytes`.
+   */
+  maxBatchBytes?: number;
   /**
    * Optional local telemetry aggregator for recording batch metrics.
    */
@@ -184,6 +263,12 @@ interface GenericCoalescingBuffer {
   rawRecords: RawHarnessRecord[];
   acks: Array<() => Promise<void>>;
   timer: NodeJS.Timeout | null;
+  /** Wall-clock time the pending timer fires; null when no timer is pending. */
+  flushDueAtMs: number | null;
+  /** A retry timer carries backoff and is never shortened by a turn hint. */
+  timerKind: "window" | "retry" | null;
+  /** Serialized JSON bytes of `projectedEvents`. */
+  projectedBytes: number;
   telemetryRecordTimestampMs: number[];
   latestTail?: GenericSessionTail;
   isTerminal: boolean;
@@ -213,7 +298,9 @@ export class TrajectoryCaptureCoordinator {
   private readonly sessionLocks = new Map<string, Promise<void>>();
   private readonly genericSessionTails = new Map<string, GenericSessionTail>();
   private readonly coalesceDwellMs: number;
+  private readonly turnHintDwellMs: number;
   private readonly maxBatchSize: number;
+  private readonly maxBatchBytes: number;
   private readonly telemetry?: TelemetryAggregator;
   private onSessionEvents?: SessionEventSink;
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
@@ -250,8 +337,10 @@ export class TrajectoryCaptureCoordinator {
       this.logger = options?.logger;
       this.isTelemetryEnabledFn = undefined;
       this.minimumRecordTimestampMs = 0;
-      this.coalesceDwellMs = 2000;
-      this.maxBatchSize = 100;
+      this.coalesceDwellMs = OBSERVATION_UPLOAD_POLICY.windowMs;
+      this.turnHintDwellMs = OBSERVATION_UPLOAD_POLICY.turnHintWindowMs;
+      this.maxBatchSize = OBSERVATION_UPLOAD_POLICY.maxEvents;
+      this.maxBatchBytes = OBSERVATION_UPLOAD_POLICY.maxBytes;
       this.telemetry = undefined;
       this.onSessionEvents = undefined;
       this.computationEvidenceRecorder = new ComputationEvidenceRecorder();
@@ -269,8 +358,19 @@ export class TrajectoryCaptureCoordinator {
       this.coalesceDwellMs =
         pipelineOrOptions.coalesceDwellMs !== undefined
           ? Math.max(0, pipelineOrOptions.coalesceDwellMs)
-          : 2000;
-      this.maxBatchSize = Math.max(1, pipelineOrOptions.maxBatchSize ?? 100);
+          : OBSERVATION_UPLOAD_POLICY.windowMs;
+      this.turnHintDwellMs = Math.max(
+        0,
+        pipelineOrOptions.turnHintDwellMs ?? OBSERVATION_UPLOAD_POLICY.turnHintWindowMs,
+      );
+      this.maxBatchSize = Math.max(
+        1,
+        pipelineOrOptions.maxBatchSize ?? OBSERVATION_UPLOAD_POLICY.maxEvents,
+      );
+      this.maxBatchBytes = Math.max(
+        1,
+        pipelineOrOptions.maxBatchBytes ?? OBSERVATION_UPLOAD_POLICY.maxBytes,
+      );
       this.telemetry = pipelineOrOptions.telemetry;
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
       this.computationEvidenceRecorder =
@@ -868,6 +968,9 @@ export class TrajectoryCaptureCoordinator {
             rawRecords: [],
             acks: [],
             timer: null,
+            flushDueAtMs: null,
+            timerKind: null,
+            projectedBytes: 0,
             telemetryRecordTimestampMs: [],
             latestTail,
             isTerminal: false,
@@ -878,6 +981,9 @@ export class TrajectoryCaptureCoordinator {
         buffer.session = session;
         buffer.validEvents.push(...validEvents);
         buffer.projectedEvents.push(...projectedEvents);
+        for (const event of projectedEvents) {
+          buffer.projectedBytes += serializedByteLength(event);
+        }
         buffer.rawRecords.push(...records);
         buffer.acks.push(ack);
         buffer.telemetryRecordTimestampMs.push(...telemetryRecordTimestampMs);
@@ -888,11 +994,17 @@ export class TrajectoryCaptureCoordinator {
           buffer.isTerminal = isTerminal;
         }
 
-        const isTurn = this.isTurnBoundary(session, records, validEvents, hasExplicitTerminal);
+        // Session end and terminal lifecycle events send now; a settled turn only shortens the
+        // window (see OBSERVATION_UPLOAD_POLICY).
+        const isTerminalSignal =
+          buffer.isTerminal || this.isTerminalSignal(session, validEvents, hasExplicitTerminal);
         const reachedMaxSize =
-          buffer.validEvents.length >= this.maxBatchSize || buffer.acks.length >= this.maxBatchSize;
+          buffer.validEvents.length >= this.maxBatchSize ||
+          buffer.acks.length >=
+            Math.min(this.maxBatchSize, OBSERVATION_UPLOAD_POLICY.maxPendingDeliveries) ||
+          buffer.projectedBytes >= this.maxBatchBytes;
         const shouldFlushImmediately =
-          this.coalesceDwellMs === 0 || buffer.isTerminal || reachedMaxSize || isTurn;
+          this.coalesceDwellMs === 0 || isTerminalSignal || reachedMaxSize;
 
         if (shouldFlushImmediately) {
           try {
@@ -905,10 +1017,13 @@ export class TrajectoryCaptureCoordinator {
               throw err;
             }
             const nextDelay = Math.min(60_000, this.getSessionBackoff(sessionId).nextDelay());
-            this.scheduleGenericFlush(sessionId, buffer, nextDelay);
+            this.scheduleGenericFlush(sessionId, buffer, "retry", nextDelay);
           }
         } else {
-          this.scheduleGenericFlush(sessionId, buffer);
+          this.scheduleGenericFlush(sessionId, buffer, "window", this.coalesceDwellMs);
+          if (this.isTurnHint(records, validEvents)) {
+            this.shortenGenericFlushWindow(sessionId, buffer, this.turnHintDwellMs);
+          }
         }
       }
     });
@@ -946,10 +1061,10 @@ export class TrajectoryCaptureCoordinator {
     }
   }
 
-  private isTurnBoundary(
+  /** Session end or a terminal lifecycle event: the batch is sent without waiting. */
+  private isTerminalSignal(
     session: HarnessSession,
-    records: RawHarnessRecord[],
-    events: NormalizedSessionEvent[],
+    events: readonly NormalizedSessionEvent[],
     hasExplicitTerminal: boolean,
   ): boolean {
     if (
@@ -960,47 +1075,46 @@ export class TrajectoryCaptureCoordinator {
     ) {
       return true;
     }
+    return events.some(
+      (ev) =>
+        ev.type === "session_lifecycle" &&
+        (ev.lifecycleType === "end" || ev.lifecycleType === "crash"),
+    );
+  }
 
+  /** A settled turn (assistant reply or completion): shortens the window, never forces a send. */
+  private isTurnHint(
+    records: readonly RawHarnessRecord[],
+    events: readonly NormalizedSessionEvent[],
+  ): boolean {
     for (const record of records) {
       if (record.recordType === "completion") {
         return true;
       }
       const rawPayload = record.rawPayload;
       if (rawPayload && typeof rawPayload === "object") {
-        const payloadObj = rawPayload as Record<string, unknown>;
-        if (payloadObj.type === "completion") {
+        if ("type" in rawPayload && rawPayload.type === "completion") {
           return true;
         }
-        if (payloadObj.role === "assistant") {
+        if ("role" in rawPayload && rawPayload.role === "assistant") {
           return true;
         }
       }
     }
-
-    for (const ev of events) {
-      if (
-        ev.type === "session_lifecycle" &&
-        (ev.lifecycleType === "end" || ev.lifecycleType === "crash")
-      ) {
-        return true;
-      }
-      if (ev.type === "message" && ev.role === "assistant") {
-        return true;
-      }
-    }
-
-    return false;
+    return events.some((ev) => ev.type === "message" && ev.role === "assistant");
   }
 
   private scheduleGenericFlush(
     sessionId: string,
     buffer: GenericCoalescingBuffer,
-    delayMs?: number,
+    kind: "window" | "retry",
+    delayMs: number,
   ): void {
     if (buffer.timer || this.coalesceDwellMs === 0) {
       return;
     }
-    const delay = delayMs ?? this.coalesceDwellMs;
+    buffer.flushDueAtMs = Date.now() + delayMs;
+    buffer.timerKind = kind;
     buffer.timer = setTimeout(() => {
       void this.runSessionTask(sessionId, async () => {
         try {
@@ -1012,11 +1126,31 @@ export class TrajectoryCaptureCoordinator {
           const retryBuffer = this.genericCoalescingBuffers.get(sessionId);
           if (retryBuffer) {
             const nextDelay = Math.min(60_000, this.getSessionBackoff(sessionId).nextDelay());
-            this.scheduleGenericFlush(sessionId, retryBuffer, nextDelay);
+            this.scheduleGenericFlush(sessionId, retryBuffer, "retry", nextDelay);
           }
         }
       });
-    }, delay);
+    }, delayMs);
+  }
+
+  /**
+   * Pulls a pending window timer forward so it fires within `maxRemainingMs`. Retry timers keep
+   * their backoff.
+   */
+  private shortenGenericFlushWindow(
+    sessionId: string,
+    buffer: GenericCoalescingBuffer,
+    maxRemainingMs: number,
+  ): void {
+    if (!buffer.timer || buffer.timerKind !== "window" || buffer.flushDueAtMs === null) {
+      return;
+    }
+    if (buffer.flushDueAtMs - Date.now() <= maxRemainingMs) {
+      return;
+    }
+    clearTimeout(buffer.timer);
+    buffer.timer = null;
+    this.scheduleGenericFlush(sessionId, buffer, "window", maxRemainingMs);
   }
 
   private async flushGenericSession(sessionId: string): Promise<void> {
@@ -1024,8 +1158,10 @@ export class TrajectoryCaptureCoordinator {
     if (!buffer) {
       return;
     }
-    clearTimeout(buffer.timer!);
+    clearTimeout(buffer.timer ?? undefined);
     buffer.timer = null;
+    buffer.flushDueAtMs = null;
+    buffer.timerKind = null;
     this.genericCoalescingBuffers.delete(sessionId);
 
     const { validEvents, acks, telemetryRecordTimestampMs } = buffer;
@@ -1096,10 +1232,9 @@ export class TrajectoryCaptureCoordinator {
     try {
       // A buffer can outgrow what one request may carry: a large read batch, or records that kept
       // arriving while an earlier failed flush was being retried. Cloud ingestion refuses a batch
-      // above its per-batch event limit with a 429 that no retry can satisfy, so the buffer is sent
-      // in bounded chunks, in event order, and acknowledged only after every chunk is accepted.
-      for (let start = 0; start < projectedEvents.length; start += MAX_OBSERVATIONS_PER_BATCH) {
-        const chunk = projectedEvents.slice(start, start + MAX_OBSERVATIONS_PER_BATCH);
+      // above its per-batch event or byte limit, and no retry can satisfy that, so the buffer is
+      // sent in bounded chunks, in event order, and acknowledged only after every chunk is accepted.
+      for (const chunk of chunkObservationsForUpload(projectedEvents, buffer.projectedBytes)) {
         batchId = chunkBatchId(chunk);
         const receipt = await this.observationClient.sendObservationBatch({
           batchId,
@@ -1274,6 +1409,18 @@ export class TrajectoryCaptureCoordinator {
       });
     } else {
       await this.flushAllGenericBuffers();
+    }
+  }
+
+  /**
+   * Sends a session's buffered batch on the next tick instead of at the end of its window, e.g.
+   * when the tailer is draining a session that ended. A batch backing off after a failed send
+   * keeps its retry delay, and a failure here retries exactly like a window flush.
+   */
+  public expediteFlush(sessionId: string): void {
+    const buffer = this.genericCoalescingBuffers.get(sessionId);
+    if (buffer) {
+      this.shortenGenericFlushWindow(sessionId, buffer, 0);
     }
   }
 

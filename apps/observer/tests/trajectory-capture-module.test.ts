@@ -60,6 +60,18 @@ function mockCloudObservationClient(
   return Object.assign(client, defaults, obj);
 }
 
+/**
+ * Delivers a session's readable records and sends the coordinator's coalesced upload now, as a
+ * stop does, instead of waiting out the multi-second upload window in real time.
+ */
+async function deliverAndFlush(
+  module: TrajectoryCaptureRuntimeModule,
+  sessionId: string,
+): Promise<void> {
+  await module.getObserverCoordinator().getTailer().pumpSession(sessionId);
+  await module.getCaptureCoordinator().waitForIdle();
+}
+
 function createMockLogger(): Logger {
   return {
     debug: vi.fn(),
@@ -790,7 +802,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         for (const payload of initialPayloads) {
           source1.appendRecord(payload, "transcript_line", session.harnessId);
         }
-        await module1.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
+        await deliverAndFlush(module1, session.sessionId);
         await pass1Promise;
         // Allow handling and acknowledgement to settle and stop module1 cleanly
         await module1.stop(context1);
@@ -864,7 +876,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         }
 
         await module2.getObserverCoordinator().getTailer().attachSession(session, source2);
-        await module2.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
+        await deliverAndFlush(module2, session.sessionId);
         await pass2Promise;
         await module2.stop(context2);
 
@@ -1169,7 +1181,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
           pollingIntervalMs: 10,
         });
         fs.appendFileSync(transcriptPath, `${ompLines.join("\n")}\n`);
-        await module.getObserverCoordinator().getTailer().pumpSession(session.sessionId);
+        await deliverAndFlush(module, session.sessionId);
 
         await batchReceivedPromise;
         await module.stop(context);
@@ -1989,6 +2001,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         );
 
         // 3. Preexisting active session record is backfilled and processed once
+        await deliverAndFlush(module1, activeSession.sessionId);
         await pass1Promise;
 
         // Confirm stale session records were never processed
@@ -2129,6 +2142,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
         );
         activeRecord2.timestamp = activeRecordPayload2.timestamp;
         activeRecord2.cursor.timestamp = activeRecordPayload2.timestamp;
+        await deliverAndFlush(module2, activeSession.sessionId);
         await pass2Promise;
 
         // Verify that only the new record was submitted (no replay/duplication of record 1)

@@ -596,6 +596,8 @@ describe("TrajectoryCaptureCoordinator", () => {
         pipeline,
         observationClient: mockObservationClient,
         attributionResolver,
+        // Each delivery uploads on its own; batching windows are covered in bounded-coalescing.
+        coalesceDwellMs: 0,
       });
 
       const ack1 = vi.fn(async () => {});
@@ -778,6 +780,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         pipeline,
         observationClient: mockObservationClient,
         attributionResolver,
+        coalesceDwellMs: 0,
       });
 
       const ack = vi.fn(async () => {});
@@ -908,6 +911,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         observationClient: mockObservationClient,
         // Resolver returns null -> generic session
         attributionResolver: async () => null,
+        coalesceDwellMs: 0,
       });
 
       const secretMarker = "SUPER_SECRET_PROMPT_PAYLOAD_12345";
@@ -1258,6 +1262,7 @@ describe("TrajectoryCaptureCoordinator", () => {
         pipeline,
         observationClient: mockObservationClient,
         attributionResolver: async () => null,
+        coalesceDwellMs: 0,
       });
 
       const promptRec = createPromptRecord(activeSession.sessionId, 1);
