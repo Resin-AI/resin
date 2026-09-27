@@ -3,6 +3,8 @@ import process from "node:process";
 import { CloudCredentialStore, type CloudRequestIdentity } from "@resin/observer";
 import {
   CONTROL_PLANE_FIELD_INVENTORY,
+  CONTROL_PLANE_HARNESS_KEYS_HEADER,
+  CONTROL_PLANE_OPEN_HARNESS_KEYS,
   type ControlPlaneDesiredState,
   ControlPlaneDesiredStateSchema,
   ControlPlaneEffectiveStateResponseSchema,
@@ -330,6 +332,7 @@ async function cloudRequest(
   try {
     const headers = {
       ...requestHeaders(identity),
+      [CONTROL_PLANE_HARNESS_KEYS_HEADER]: CONTROL_PLANE_OPEN_HARNESS_KEYS,
     };
     if (init.headers) {
       // SAFETY: Forwarding headers provided via RequestInit as header key-value map.

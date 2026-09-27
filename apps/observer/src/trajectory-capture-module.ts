@@ -1,8 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ClaudeHarnessAdapter, ClaudeRecordDecoder } from "@resin/adapter-claude-code";
-import { CodexHarnessAdapter, CodexRecordDecoder } from "@resin/adapter-codex";
-import { OmpHarnessAdapter, OmpRecordDecoder, readConfiguredOmpServers } from "@resin/adapter-omp";
 import type {
   LocalDatabaseConnection,
   LocalStateStore,
@@ -25,6 +22,7 @@ import {
 import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
+import { HARNESS_DEFINITIONS } from "./harness-registry.js";
 import type {
   DaemonModule,
   Logger,
@@ -95,6 +93,14 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
+/** Sessions of `file-activity` harnesses are backfilled whole and captured by transcript activity. */
+function capturesByFileActivity(session: HarnessSession): boolean {
+  return HARNESS_DEFINITIONS.some(
+    (definition) =>
+      definition.id === session.harnessId && definition.sessionCapture === "file-activity",
+  );
+}
+
 function sessionStartedDuringObservation(
   session: HarnessSession,
   startedAt: number | undefined,
@@ -107,7 +113,7 @@ function sessionStartedDuringObservation(
 }
 
 function captureInactiveSession(session: HarnessSession, startedAt: number): boolean {
-  if (session.harnessId !== "omp") {
+  if (!capturesByFileActivity(session)) {
     return sessionStartedDuringObservation(session, startedAt);
   }
   if (typeof session.metadata?.fileMtime !== "string") {
@@ -306,15 +312,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.telemetryEnabled = requestedTelemetryEnabled && this.privacyCheckpointHealthy;
 
     // 1. Decoders and Normalization Pipeline
-    this.decoders = options.decoders ?? [
-      new ClaudeRecordDecoder(),
-      new CodexRecordDecoder(),
-      // OMP's device paths are resolved against the server names the harness itself is configured
-      // with: the registry is read when a path needs it, so a server added mid-session is honored.
-      new OmpRecordDecoder({
-        deviceSurfaceServers: () => readConfiguredOmpServers().map((server) => server.name),
-      }),
-    ];
+    this.decoders =
+      options.decoders ?? HARNESS_DEFINITIONS.map((definition) => definition.createDecoder());
 
     let dbConnection: LocalDatabaseConnection | undefined;
     let sessionRepository: SessionRepository | undefined = options.sessionRepository;
@@ -345,11 +344,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
 
     // 2. Adapters and Observer Coordinator
-    this.adapters = options.adapters ?? [
-      new ClaudeHarnessAdapter(),
-      new CodexHarnessAdapter(),
-      new OmpHarnessAdapter({ activeOnly: false }),
-    ];
+    this.adapters =
+      options.adapters ?? HARNESS_DEFINITIONS.map((definition) => definition.createAdapter());
 
     this.cursorManager =
       options.cursorManager ??
@@ -367,7 +363,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         defaultMaxInFlightBatches: 100,
         defaultBackfillPolicy: { mode: "latest" },
         backfillPolicyForSession: (session: HarnessSession, startedAt?: number) =>
-          session.harnessId === "omp" || sessionStartedDuringObservation(session, startedAt)
+          capturesByFileActivity(session) || sessionStartedDuringObservation(session, startedAt)
             ? { mode: "all" }
             : undefined,
         captureInactiveSessions: captureInactiveSession,
@@ -767,7 +763,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       defaultMaxInFlightBatches: 100,
       defaultBackfillPolicy: { mode: "latest" },
       backfillPolicyForSession: (session: HarnessSession, startedAt?: number) =>
-        session.harnessId === "omp" || sessionStartedDuringObservation(session, startedAt)
+        capturesByFileActivity(session) || sessionStartedDuringObservation(session, startedAt)
           ? { mode: "all" }
           : undefined,
       captureInactiveSessions: captureInactiveSession,

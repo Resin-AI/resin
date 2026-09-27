@@ -789,7 +789,8 @@ describe("Command Broker Security & Isolation", () => {
       expect(parsed.node_opts).toBeUndefined();
       expect(parsed.py).toBeUndefined();
       expect(parsed.custom).toBe("allowed_value");
-    });
+      // Spawns many real interpreter processes (~3s alone); the 5s default is too tight under full-suite load.
+    }, 20_000);
     it("prevents secret mediation leakage in command lines, arguments, audit logs, and error messages", async () => {
       const auditEmitter = new BrokerAuditEmitter();
       const secretBroker = new SecretBroker({ auditEmitter });

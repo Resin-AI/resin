@@ -512,6 +512,42 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
     }
   });
 
+  it("recovers the full output OMP 18.x spilled for a byte-truncated Eval", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-byte-truncation-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const artifactRoot = path.join(tmpDir, "session");
+      const fullOutput = "Duplicates: [ 'wins', 'find' ]\nUnique count: 268\n";
+      await fsp.mkdir(artifactRoot);
+      await fsp.writeFile(path.join(artifactRoot, "32.eval.log"), fullOutput, "utf8");
+      // The shape OMP 18.x records when its output sink spills a cell's stream.
+      const payload = nativePythonResultPayload("call-byte-truncated", "Duplicates: [ 'wins'", {
+        truncation: {
+          direction: "tail",
+          truncatedBy: "bytes",
+          totalLines: 2,
+          totalBytes: 49,
+          outputLines: 1,
+          outputBytes: 20,
+          shownRange: { start: 1, end: 1 },
+          artifactId: "32",
+        },
+      });
+      await fsp.writeFile(transcriptPath, `${JSON.stringify(payload)}\n`, "utf8");
+
+      const source = new OmpSessionEventSource(sourceTestSession(transcriptPath, "byte-trunc"));
+      const records = await source.readNext();
+      await source.close();
+
+      expect(getOmpProgramObservation(records[0]!)).toEqual({
+        callId: "call-byte-truncated",
+        result: fullOutput,
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("retains an untruncated native Python cell as an explicit text-trim observation", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-python-short-"));
     try {
@@ -576,6 +612,8 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       const outsidePath = path.join(tmpDir, "outside.eval.log");
       await fsp.mkdir(artifactRoot);
       await fsp.writeFile(outsidePath, "outside fixture output\n", "utf8");
+      await fsp.writeFile(path.join(artifactRoot, "3.eval.log"), "one stream\n", "utf8");
+      await fsp.writeFile(path.join(artifactRoot, "4.eval.log"), "another stream\n", "utf8");
       try {
         await fsp.symlink(outsidePath, path.join(artifactRoot, "1.eval.log"));
       } catch {
@@ -591,8 +629,12 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
         nativePythonResultPayload("call-missing", "clipped fixture", {
           limits: { columnTruncated: { artifactId: "2" } },
         }),
-        nativePythonResultPayload("call-unknown-trunc", "clipped fixture", {
-          truncation: { artifactId: "1" },
+        nativePythonResultPayload("call-unreferenced-trunc", "clipped fixture", {
+          truncation: { direction: "tail", truncatedBy: "bytes" },
+        }),
+        nativePythonResultPayload("call-conflicting-trunc", "clipped fixture", {
+          truncation: { artifactId: "3" },
+          limits: { columnTruncated: { artifactId: "4" } },
         }),
       ];
       await fsp.writeFile(
@@ -605,12 +647,13 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       const records = await source.readNext();
       await source.close();
 
-      expect(records).toHaveLength(4);
+      expect(records).toHaveLength(5);
       expect(records.map((record) => getOmpProgramObservation(record))).toEqual([
         { callId: "call-invalid-ref", unavailable: true },
         { callId: "call-linked", unavailable: true },
         { callId: "call-missing", unavailable: true },
-        { callId: "call-unknown-trunc", unavailable: true },
+        { callId: "call-unreferenced-trunc", unavailable: true },
+        { callId: "call-conflicting-trunc", unavailable: true },
       ]);
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });

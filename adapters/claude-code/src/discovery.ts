@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { nowIso } from "@resin/contracts";
+import { nowIso } from "@resin/contracts/common";
 import type { ProbeInstallationOptions } from "@resin/harness-contracts";
 import {
   type ConfigFsBridge,
@@ -24,10 +24,8 @@ export type ExecFunction = (
   args: string[],
 ) => Promise<{ stdout: string; stderr: string }>;
 
-/**
- * Default supported versions for Claude Code CLI.
- */
-export const SUPPORTED_CLAUDE_VERSIONS = [">=0.1.0", ">=0.2.0", ">=1.0.0"];
+/** Claude Code versions qualified with the recorded fixtures under `tests/fixtures/recorded`. */
+export const CLAUDE_TESTED_VERSIONS: readonly string[] = ["2.1.283"];
 
 /**
  * Minimal semver comparator for Claude Code versions (e.g. "0.2.14", "1.0.0").
@@ -540,4 +538,116 @@ export async function detectClaudeWorkspaces(
   }
 
   return workspaces;
+}
+
+export interface ClaudeSubagentTranscript {
+  transcriptPath: string;
+  parentSessionId: string;
+  agentId: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Written within the last five minutes: attach as active. */
+  recent: boolean;
+  /** Identity the transcript and its `.meta.json` record: cwd, agent type, spawning tool call. */
+  head: Record<string, string>;
+}
+
+const SUBAGENT_FILE = /^agent-([A-Za-z0-9_-]+)\.jsonl$/;
+const subagentMetaSchema = z.object({
+  agentType: z.string().optional(),
+  toolUseId: z.string().optional(),
+});
+
+/**
+ * Lists the subagent transcripts of every session in one Claude project directory. A transcript
+ * counts only when its first complete record says it is that parent session's sidechain for that
+ * agent (`isSidechain`, `sessionId`, `agentId`), so a stray or foreign file is never attributed.
+ */
+export async function listClaudeSubagentTranscripts(
+  projectDir: string,
+  fsBridge: ConfigFsBridge = defaultFsBridge,
+): Promise<ClaudeSubagentTranscript[]> {
+  const candidates: Array<{ transcriptPath: string; parentSessionId: string; agentId: string }> =
+    [];
+  const addCandidate = (transcriptPath: string) => {
+    const parts = path.relative(projectDir, transcriptPath).split(path.sep);
+    const match = SUBAGENT_FILE.exec(parts.at(-1) ?? "");
+    if (parts.length < 3 || parts[0] === ".." || parts[1] !== "subagents" || match === null) return;
+    candidates.push({ transcriptPath, parentSessionId: parts[0]!, agentId: match[1]! });
+  };
+  if (fsBridge instanceof InMemoryConfigFsBridge) {
+    for (const filePath of Object.keys(fsBridge.dump())) addCandidate(path.normalize(filePath));
+  } else {
+    let sessionDirs: string[] = [];
+    try {
+      sessionDirs = (await fs.readdir(projectDir, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(projectDir, entry.name, "subagents"));
+    } catch {
+      return [];
+    }
+    for (const subagentsDir of sessionDirs) {
+      try {
+        for (const entry of await fs.readdir(subagentsDir, {
+          recursive: true,
+          withFileTypes: true,
+        })) {
+          if (entry.isFile()) addCandidate(path.join(entry.parentPath, entry.name));
+        }
+      } catch {
+        // Sessions without subagents have no subagents directory.
+      }
+    }
+  }
+
+  const transcripts: ClaudeSubagentTranscript[] = [];
+  for (const candidate of candidates) {
+    const content = await readProjectMetadata(candidate.transcriptPath, fsBridge);
+    if (!content) continue;
+    const firstLine = content.slice(0, content.indexOf("\n") + 1).trim();
+    let head: Record<string, string> | undefined;
+    try {
+      const record = transcriptMetadataSchema
+        .extend({ agentId: z.string() })
+        .safeParse(JSON.parse(firstLine));
+      if (
+        record.success &&
+        record.data.isSidechain === true &&
+        record.data.sessionId === candidate.parentSessionId &&
+        record.data.agentId === candidate.agentId
+      ) {
+        head = { cwd: record.data.cwd };
+      }
+    } catch {
+      // A first line still being written is read again on the next listing.
+    }
+    if (head === undefined) continue;
+    const metaPath = candidate.transcriptPath.replace(/\.jsonl$/, ".meta.json");
+    try {
+      const meta = subagentMetaSchema.safeParse(
+        JSON.parse((await fsBridge.readFile(metaPath)) ?? ""),
+      );
+      if (meta.success) {
+        if (meta.data.agentType) head.agentType = meta.data.agentType;
+        if (meta.data.toolUseId) head.parentToolCallId = meta.data.toolUseId;
+      }
+    } catch {
+      // The meta file is optional.
+    }
+    let createdAt = nowIso();
+    let updatedAt = createdAt;
+    let recent = true;
+    if (!(fsBridge instanceof InMemoryConfigFsBridge)) {
+      try {
+        const stat = await fs.stat(candidate.transcriptPath);
+        createdAt = stat.birthtime.toISOString();
+        updatedAt = stat.mtime.toISOString();
+        recent = Date.now() - stat.mtimeMs < 5 * 60 * 1000;
+      } catch {
+        continue;
+      }
+    }
+    transcripts.push({ ...candidate, createdAt, updatedAt, recent, head });
+  }
+  return transcripts;
 }

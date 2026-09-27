@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { OMP_TESTED_VERSIONS } from "../src/discovery.js";
 import { invokeOmpNativeTool } from "../src/native-tool-invoker.js";
 
 const roots: string[] = [];
@@ -36,5 +37,24 @@ describe("OMP native tool invocation", () => {
     await expect(
       invokeOmpNativeTool({ name: "not_a_builtin", cwd, parameters: {} }),
     ).rejects.toThrow(/not available in the installed harness SDK/);
+  });
+
+  it("runs against the SDK of the OMP release Resin qualified", async () => {
+    const manifest = new URL(
+      "../node_modules/@oh-my-pi/pi-coding-agent/package.json",
+      import.meta.url,
+    );
+    const sdk = JSON.parse(await readFile(manifest, "utf8")) as { version: string };
+    expect(OMP_TESTED_VERSIONS).toContain(sdk.version);
+  });
+
+  it("reports a built-in the pinned SDK no longer exports by name, without a host stack", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "resin-omp-native-"));
+    roots.push(cwd);
+    // Earlier 18.x sessions recorded a `search` built-in; the pinned SDK exports `grep` instead.
+    const failure = invokeOmpNativeTool({ name: "search", cwd, parameters: { pattern: "x" } });
+    await expect(failure).rejects.toThrow(
+      /^OMP native tool 'search' is not available in the installed harness SDK \(built-in tools: .*\bgrep\b.*\)$/,
+    );
   });
 });

@@ -61,14 +61,8 @@ describe("Platform Matrix Qualification Suite", () => {
       expect(V1_SUPPORT_MATRIX.platforms).toHaveLength(5);
 
       // Qualified AI Coding Harnesses
-      expect(V1_SUPPORT_MATRIX.harnesses["claude-code"].qualifiedVersions).toEqual([
-        "0.2.14",
-        "1.0.0",
-      ]);
-      expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"].qualifiedVersions).toEqual(["0.45.0"]);
-      expect(V1_SUPPORT_MATRIX.harnesses.omp.qualifiedVersions).toEqual(["0.12.5", "1.0.0"]);
-      expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"].transports).toEqual(["stdio", "sse"]);
-      expect(V1_SUPPORT_MATRIX.harnesses.omp.transports).toEqual([
+      expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"]?.transports).toEqual(["stdio", "sse"]);
+      expect(V1_SUPPORT_MATRIX.harnesses.omp?.transports).toEqual([
         "stdio",
         "sse",
         "websocket",

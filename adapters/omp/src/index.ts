@@ -8,3 +8,5 @@ export * from "./instructions.js";
 export * from "./refresh.js";
 export * from "./native-tool-invoker.js";
 export * from "./source.js";
+export * from "./harness.js";
+export * from "./install.js";

@@ -1,0 +1,26 @@
+{
+  "id": "prt_0dff3dac1002r0WLnB0FcH0xP5",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "messageID": "msg_0dff3d5e7001zq8bU0Vn4Ms4Vq",
+  "type": "tool",
+  "callID": "call_r7jiWF6Xz0KfH9xbVsjNibGF",
+  "tool": "read",
+  "state": {
+    "status": "completed",
+    "input": {
+      "filePath": "/workspace/project/README.md",
+      "limit": 2000
+    },
+    "output": "<path>/workspace/project/README.md</path>\n<type>file</type>\n<content>1: # Tiny demo\n2: \n3: A tiny demo project.\n4: \n\n(End of file - total 4 lines)\n</content>",
+    "title": "README.md",
+    "metadata": {
+      "preview": "# Tiny demo\n\nA tiny demo project.\n",
+      "truncated": false,
+      "loaded": []
+    },
+    "time": {
+      "start": 1790463695963,
+      "end": 1790463695978
+    }
+  }
+}

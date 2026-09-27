@@ -169,10 +169,11 @@ export class CatalogRefreshCoordinator {
       this.adapters.set("claude-code", {
         harnessId: "claude-code",
         getCapabilities: () => ({
-          supportsNativeListChange: false,
-          supportsContextNudge: true,
+          // Claude Code 2.1.283 re-lists tools on notifications/tools/list_changed mid-session.
+          supportsNativeListChange: true,
+          supportsContextNudge: false,
           requiresSessionRestart: false,
-          description: "Claude Code context notice nudge",
+          description: "Claude Code native tools/list_changed refresh",
         }),
       });
     }

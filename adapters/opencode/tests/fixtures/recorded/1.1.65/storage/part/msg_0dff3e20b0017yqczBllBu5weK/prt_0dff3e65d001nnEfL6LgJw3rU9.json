@@ -1,0 +1,27 @@
+{
+  "id": "prt_0dff3e65d001nnEfL6LgJw3rU9",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "messageID": "msg_0dff3e20b0017yqczBllBu5weK",
+  "type": "tool",
+  "callID": "call_dgQVT1C4VChaMlFweRSGVAXa",
+  "tool": "write",
+  "state": {
+    "status": "completed",
+    "input": {
+      "content": "fixture notes",
+      "filePath": "/workspace/project/notes.txt"
+    },
+    "output": "Wrote file successfully.",
+    "title": "notes.txt",
+    "metadata": {
+      "diagnostics": {},
+      "filepath": "/workspace/project/notes.txt",
+      "exists": false,
+      "truncated": false
+    },
+    "time": {
+      "start": 1790463698740,
+      "end": 1790463698743
+    }
+  }
+}

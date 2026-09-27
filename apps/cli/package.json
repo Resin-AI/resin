@@ -85,7 +85,13 @@
   "dependencies": {
     "@resin/adapter-claude-code": "workspace:*",
     "@resin/adapter-codex": "workspace:*",
+    "@resin/adapter-grok-build": "workspace:*",
+    "@resin/adapter-cursor-cli": "workspace:*",
+    "@resin/adapter-muse-code": "workspace:*",
+    "@resin/adapter-copilot-cli": "workspace:*",
     "@resin/adapter-omp": "workspace:*",
+    "@resin/adapter-opencode": "workspace:*",
+    "@resin/adapter-pi": "workspace:*",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
     "@resin/db": "workspace:*",

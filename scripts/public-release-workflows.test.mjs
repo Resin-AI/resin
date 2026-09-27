@@ -337,7 +337,7 @@ describe("Public Release Workflows Contract", () => {
         '"https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"',
       );
       expect(steps[packageStepIndex].run).toContain('--output-dir "$package_dir"');
-      expect(steps[packageStepIndex].run).toContain('"${#package_tarballs[@]}" -ne 13');
+      expect(steps[packageStepIndex].run).toContain('"${#package_tarballs[@]}" -ne 19');
     });
 
     it("mirrors runtime sources and verifies candidate before tar assembly", () => {
@@ -790,7 +790,7 @@ describe("Public Release Workflows Contract", () => {
       expect(freezeStep.run).toContain('--key-prefix "$KEY_PREFIX"');
     });
 
-    it("uses the 13 package tarballs from the trusted candidate without rebuilding from source", () => {
+    it("uses the 19 package tarballs from the trusted candidate without rebuilding from source", () => {
       const packageStep = job.steps.find(
         (s) => s.id === "package_fallback" || s.name?.includes("fallback package"),
       );
@@ -799,13 +799,13 @@ describe("Public Release Workflows Contract", () => {
 
       const script = packageStep.run;
       expect(script).toContain('cp -a packages/. "$staging_dir/"');
-      expect(script).toContain('"${#package_tarballs[@]}" -ne 13');
+      expect(script).toContain('"${#package_tarballs[@]}" -ne 19');
       expect(script).toContain('"$staging_dir/packages-manifest.json"');
       expect(script).not.toContain("pnpm run release:packages");
       expect(script).not.toMatch(/\$\{\{\s*inputs\./);
     });
 
-    it("uploads all 13 package fallback tarballs and machine-readable manifest to GitHub release alongside public artifacts", () => {
+    it("uploads all 19 package fallback tarballs and machine-readable manifest to GitHub release alongside public artifacts", () => {
       const uploadStep = job.steps.find(
         (s) => s.id === "upload_github_release" || s.name?.includes("Upload fallback package"),
       );
@@ -819,11 +819,11 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("--clobber");
     });
 
-    it("verifies package fallback covers exactly the 13 public packages without private/cloud artifacts", () => {
+    it("verifies package fallback covers exactly the 19 public packages without private/cloud artifacts", () => {
       const splitConfigPath = path.join(ROOT_DIR, "repository-split.json");
       const splitConfig = JSON.parse(fs.readFileSync(splitConfigPath, "utf-8"));
-      expect(splitConfig.publicPackageManifests).toHaveLength(13);
-      expect(splitConfig.publicPackages).toHaveLength(13);
+      expect(splitConfig.publicPackageManifests).toHaveLength(19);
+      expect(splitConfig.publicPackages).toHaveLength(19);
 
       const EXPECTED_PUBLIC_TARBALLS = [
         "resin-1.0.0.tgz",
@@ -838,6 +838,12 @@ describe("Public Release Workflows Contract", () => {
         "resin-adapter-claude-code-0.1.0.tgz",
         "resin-adapter-codex-0.1.0.tgz",
         "resin-adapter-omp-0.1.0.tgz",
+        "resin-adapter-pi-0.1.0.tgz",
+        "resin-adapter-cursor-cli-0.1.0.tgz",
+        "resin-adapter-grok-build-0.1.0.tgz",
+        "resin-adapter-muse-code-0.1.0.tgz",
+        "resin-adapter-opencode-0.1.0.tgz",
+        "resin-adapter-copilot-cli-0.1.0.tgz",
         "resin-test-fixtures-0.1.0.tgz",
       ];
 

@@ -6,7 +6,9 @@ import {
   CONTROL_PLANE_CADENCE_HEADER,
   CONTROL_PLANE_CADENCE_JITTER_RATIO,
   CONTROL_PLANE_FAST_POLL_INTERVAL_MS,
+  CONTROL_PLANE_HARNESS_KEYS_HEADER,
   CONTROL_PLANE_HEARTBEAT_INTERVAL_MS,
+  CONTROL_PLANE_OPEN_HARNESS_KEYS,
   CONTROL_PLANE_QUIET_POLL_INTERVAL_MS,
   CONTROL_PLANE_QUIET_POLL_THRESHOLD,
   type ControlPlaneAppliedField,
@@ -96,6 +98,7 @@ export class ControlPlaneClient {
         "x-device-id": identity.deviceId,
         "x-installation-id": identity.installationId,
         "x-protocol-version": PROTOCOL_VERSION,
+        [CONTROL_PLANE_HARNESS_KEYS_HEADER]: CONTROL_PLANE_OPEN_HARNESS_KEYS,
         ...init.headers,
       },
     });

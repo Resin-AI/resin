@@ -7,74 +7,33 @@ import {
 } from "@resin/harness-contracts";
 
 /**
- * Returns the refresh capability descriptor for Claude Code.
+ * Claude Code 2.1.283 re-lists an MCP server's tools when it sends `notifications/tools/list_changed`
+ * and announces the new names to the model mid-session (a `deferred_tools_delta` attachment; see
+ * the recorded `cf4ec19a-…` fixture), so a catalog change needs no nudge or restart.
  */
 export function getClaudeRefreshCapability(): RefreshCapability {
   return {
-    supportsNativeListChange: false,
-    supportsContextNudge: true,
+    supportsNativeListChange: true,
+    supportsContextNudge: false,
     requiresSessionRestart: false,
     description:
-      "Claude Code requires a context notice prompt nudge when MCP tool catalog updates occur during an active session.",
+      "Claude Code refreshes MCP tools on notifications/tools/list_changed during an active session.",
   };
 }
 
-/**
- * Generates a structured markdown context notice informing Claude of tool catalog updates.
- */
-export function generateClaudeContextNotice(changeSummary: CatalogChangeSummary): string {
-  const added =
-    changeSummary.addedToolIds.length > 0
-      ? changeSummary.addedToolIds.map((id) => `- \`${id}\``).join("\n")
-      : "- (none)";
-
-  const updated =
-    changeSummary.updatedToolIds.length > 0
-      ? changeSummary.updatedToolIds.map((id) => `- \`${id}\``).join("\n")
-      : "- (none)";
-
-  const removed =
-    changeSummary.removedToolIds.length > 0
-      ? changeSummary.removedToolIds.map((id) => `- \`${id}\``).join("\n")
-      : "- (none)";
-
-  return [
-    `# [Resin] Tool Catalog Update (v${changeSummary.catalogVersion})`,
-    "",
-    "The available MCP tool catalog for this workspace has been updated:",
-    "",
-    "### Added Tools",
-    added,
-    "",
-    "### Updated Tools",
-    updated,
-    "",
-    "### Removed Tools",
-    removed,
-    "",
-    "Please inspect newly added and updated tools before performing subsequent operations.",
-  ].join("\n");
-}
-
-/**
- * Notifies Claude Code of tool catalog changes via context notice generation.
- */
+/** Reports the native refresh Resin's gateway performs by emitting `tools/list_changed`. */
 export async function notifyClaudeCatalogRefresh(
   _workspace: HarnessWorkspace,
   changeSummary: CatalogChangeSummary,
 ): Promise<RefreshResult> {
-  const notice = generateClaudeContextNotice(changeSummary);
-
-  const affectedToolCount =
-    changeSummary.addedToolIds.length +
-    changeSummary.updatedToolIds.length +
-    changeSummary.removedToolIds.length;
-
-  return createRefreshResult("context_nudge", {
-    message: notice,
+  return createRefreshResult("native_list_change", {
+    message: "Claude Code re-lists Resin's tools when the gateway sends tools/list_changed.",
     catalogVersion: changeSummary.catalogVersion,
     appliedAt: changeSummary.timestamp,
-    affectedToolCount,
+    affectedToolCount:
+      changeSummary.addedToolIds.length +
+      changeSummary.updatedToolIds.length +
+      changeSummary.removedToolIds.length,
     details: {
       addedToolIds: changeSummary.addedToolIds,
       updatedToolIds: changeSummary.updatedToolIds,

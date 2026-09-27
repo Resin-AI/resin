@@ -1,0 +1,24 @@
+{
+  "id": "prt_0dff3ec68002IA5WZYtIlJl2u6",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "messageID": "msg_0dff3e7490014Cov8C0QCWjF89",
+  "type": "tool",
+  "callID": "call_fGPPOmVzbSYyiMrGOzqXCxe9",
+  "tool": "echo_echo",
+  "state": {
+    "status": "completed",
+    "input": {
+      "text": "ping"
+    },
+    "output": "echo: ping",
+    "title": "",
+    "metadata": {
+      "truncated": false
+    },
+    "time": {
+      "start": 1790463700192,
+      "end": 1790463700194
+    },
+    "attachments": []
+  }
+}

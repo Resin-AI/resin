@@ -1034,6 +1034,7 @@ export function projectEventToMetadataOnly(
       if (event.beforeHash !== undefined) editEvent.beforeHash = event.beforeHash;
       if (event.afterHash !== undefined) editEvent.afterHash = event.afterHash;
       if (event.diffStats !== undefined) editEvent.diffStats = event.diffStats;
+      if (event.producedByCallId !== undefined) editEvent.producedByCallId = event.producedByCallId;
       projected = editEvent;
       break;
     }
@@ -1087,6 +1088,8 @@ export function projectEventToMetadataOnly(
       };
       if (event.parentId !== undefined) subagentEvent.parentId = event.parentId;
       if (event.role !== undefined) subagentEvent.role = event.role;
+      if (event.producedByCallId !== undefined)
+        subagentEvent.producedByCallId = event.producedByCallId;
       projected = subagentEvent;
       break;
     }

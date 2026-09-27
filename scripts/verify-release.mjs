@@ -151,6 +151,12 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
       "@resin/adapter-claude-code",
       "@resin/adapter-codex",
       "@resin/adapter-omp",
+      "@resin/adapter-pi",
+      "@resin/adapter-cursor-cli",
+      "@resin/adapter-grok-build",
+      "@resin/adapter-muse-code",
+      "@resin/adapter-opencode",
+      "@resin/adapter-copilot-cli",
     ],
     privatePackages: ["@resin/cloud", "@resin/web", "@resin/cloud-contracts", "@resin/e2e"],
     publicReleasePackages: [
@@ -166,6 +172,12 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
       "@resin/adapter-claude-code",
       "@resin/adapter-codex",
       "@resin/adapter-omp",
+      "@resin/adapter-pi",
+      "@resin/adapter-cursor-cli",
+      "@resin/adapter-grok-build",
+      "@resin/adapter-muse-code",
+      "@resin/adapter-opencode",
+      "@resin/adapter-copilot-cli",
     ],
     cloudOnlyPaths: [
       "apps/cloud",
@@ -351,7 +363,17 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
     "harness-contracts",
     "db",
   ]);
-  const allowedAdapterDirs = new Set(["claude-code", "codex-cli", "omp"]);
+  const allowedAdapterDirs = new Set([
+    "claude-code",
+    "codex-cli",
+    "copilot-cli",
+    "cursor-cli",
+    "grok-build",
+    "muse-code",
+    "omp",
+    "opencode",
+    "pi",
+  ]);
   const allowedFixtureDirs = new Set(["test-fixtures"]);
 
   for (const entry of entries) {

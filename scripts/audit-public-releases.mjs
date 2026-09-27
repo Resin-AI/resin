@@ -47,6 +47,12 @@ export const CANONICAL_PUBLIC_RELEASE_PACKAGES = Object.freeze([
   "@resin/adapter-claude-code",
   "@resin/adapter-codex",
   "@resin/adapter-omp",
+  "@resin/adapter-pi",
+  "@resin/adapter-cursor-cli",
+  "@resin/adapter-grok-build",
+  "@resin/adapter-muse-code",
+  "@resin/adapter-opencode",
+  "@resin/adapter-copilot-cli",
 ]);
 
 export const CANONICAL_PRIVATE_PACKAGES = Object.freeze([

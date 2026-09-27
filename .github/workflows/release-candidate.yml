@@ -240,8 +240,8 @@ jobs:
             --output-dir "$package_dir"
           test -s "$package_dir/packages-manifest.json"
           mapfile -t package_tarballs < <(find "$package_dir" -maxdepth 1 -type f -name '*.tgz' -print)
-          if [ "${#package_tarballs[@]}" -ne 13 ]; then
-            echo "::error::Expected exactly 13 public fallback package tarballs, found ${#package_tarballs[@]}"
+          if [ "${#package_tarballs[@]}" -ne 19 ]; then
+            echo "::error::Expected exactly 19 public fallback package tarballs, found ${#package_tarballs[@]}"
             exit 1
           fi
 

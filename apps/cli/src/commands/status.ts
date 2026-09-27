@@ -1,15 +1,18 @@
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { probeClaudeInstallation } from "@resin/adapter-claude-code";
-import { probeCodexInstallation } from "@resin/adapter-codex";
-import { probeOmpInstallation } from "@resin/adapter-omp";
 import {
   type ProductionSafetyGateStatus,
   type SafetyAttestationRecord,
   SafetyAttestationRecordSchema,
 } from "@resin/contracts";
-import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import type { HarnessId } from "@resin/contracts";
+import {
+  type ConfigFsBridge,
+  type HarnessVersionClassification,
+  classifyHarnessVersion,
+  defaultFsBridge,
+} from "@resin/harness-contracts";
 import {
   type DaemonHealthReport,
   IpcClient,
@@ -28,10 +31,10 @@ import {
 } from "@resin/protocol";
 import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
+import { HARNESS_DEFINITIONS, isSupportedHarnessId } from "../harness-registry.js";
 import { getActiveVersion } from "../installer/asset-downloader.js";
 import {
   DEFAULT_GATEWAY_URL,
-  resolveHarnessConfigPath,
   resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "../installer/harness-config.js";
@@ -86,13 +89,6 @@ const RETENTION_HOLD_TYPES = {
   security_incident: true,
 } as const satisfies Record<"legal_hold" | "investigation" | "security_incident", true>;
 
-const HARNESS_DETAILS = {
-  "claude-code": "Claude Code",
-  "codex-cli": "Codex CLI",
-  omp: "Oh My Pi",
-} as const;
-
-type HarnessId = keyof typeof HARNESS_DETAILS;
 type OverallStatus = "healthy" | "degraded" | "stopped";
 type AccountStatus = CloudCredentialStatus | "local_only";
 type IpcErrorCode = "socket_missing" | "timeout" | "connection_failed" | "protocol_error";
@@ -260,6 +256,10 @@ export interface DaemonStatusSummary {
     configured: boolean;
     mcpAttached: boolean;
     status: "attached" | "unconfigured" | "not_installed" | "drift" | "error";
+    /** Installed version as reported by the harness; null when not installed or unreadable. */
+    version: string | null;
+    /** `version` against the definition's exact tested versions. */
+    versionStatus: HarnessVersionClassification;
     lastCheckedAt: string | null;
     recentAction: "discovered" | "reconciled" | "drift_detected" | "repair_failed" | null;
   }>;
@@ -725,7 +725,10 @@ export function formatStatusForTerminal(
   const agents = summary.harnesses
     .filter((harness) => harness.installed)
     .map((harness) => {
-      const name = escapeTerminalControls(harness.name);
+      const name =
+        harness.versionStatus === "untested"
+          ? `${escapeTerminalControls(harness.name)} ${escapeTerminalControls(harness.version ?? "")} (untested)`
+          : escapeTerminalControls(harness.name);
       if (harness.status === "drift" || harness.status === "error") return `${name} (needs repair)`;
       if (!harness.configured || !harness.mcpAttached || harness.status !== "attached") {
         return `${name} (needs setup)`;
@@ -936,7 +939,11 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
   lines.push("\n[Harness Integrations]");
   lines.push("  [Agent Harness Connections]");
   for (const harness of summary.harnesses) {
-    const installed = harness.installed ? "Installed" : "Not Installed";
+    const installed = !harness.installed
+      ? "Not Installed"
+      : harness.version === null
+        ? "Installed, version unknown"
+        : `Installed ${escapeTerminalControls(harness.version)}, ${harness.versionStatus}`;
     const attached = harness.configured ? "Configured (MCP Attached)" : "Not Configured";
     lines.push(`  - ${harness.name.padEnd(16)} [${installed}] - ${attached}`);
   }
@@ -1276,103 +1283,63 @@ async function collectHarnessStatuses(
   env: NodeJS.ProcessEnv,
   entryPath?: string,
 ): Promise<DaemonStatusSummary["harnesses"]> {
-  const claudePath = resolveHarnessConfigPath("claude-code", home, env);
-  const codexPath = resolveHarnessConfigPath("codex-cli", home, env);
-  const ompPath = resolveHarnessConfigPath("omp", home, env);
   const resinCommand =
     resolveLocalSourceResinCommand(env, entryPath) ?? resolveInstalledResinMcpCommand(home);
-  const [claudeProbe, codexProbe, ompProbe] = await Promise.all([
-    probeClaudeInstallation({ customConfigPath: claudePath }, fsBridge).catch(() => null),
-    probeCodexInstallation({
-      customConfigPath: codexPath,
-      env: { ...env, HOME: home },
-    }).catch(() => null),
-    probeOmpInstallation({
-      customConfigPath: ompPath,
-      env,
-      homeDir: home,
-    }).catch(() => null),
-  ]);
-  const [claudeConfigured, codexConfigured, ompConfigured] = await Promise.all([
-    verifyLiveHarnessConfig(fsBridge, claudePath, () =>
-      verifyHarnessRegistration({
-        harnessId: "claude-code",
-        targetPath: claudePath,
-        workspacePath: home,
-        gatewayUrl: DEFAULT_GATEWAY_URL,
-        command: resinCommand,
-        fsBridge,
-      }),
-    ),
-    verifyLiveHarnessConfig(fsBridge, codexPath, () =>
-      verifyHarnessRegistration({
-        harnessId: "codex-cli",
-        targetPath: codexPath,
-        workspacePath: home,
-        gatewayUrl: DEFAULT_GATEWAY_URL,
-        command: resinCommand,
-        fsBridge,
-      }),
-    ),
-    verifyLiveHarnessConfig(fsBridge, ompPath, () =>
-      verifyHarnessRegistration({
-        harnessId: "omp",
-        targetPath: ompPath,
-        workspacePath: home,
-        gatewayUrl: DEFAULT_GATEWAY_URL,
-        command: resinCommand,
-        fsBridge,
-      }),
-    ),
-  ]);
-
-  const live = {
-    "claude-code": {
-      installed: claudeProbe === null ? null : Boolean(claudeProbe.isInstalled),
-      configured: claudeConfigured,
-    },
-    "codex-cli": {
-      installed: codexProbe === null ? null : Boolean(codexProbe.isInstalled),
-      configured: codexConfigured,
-    },
-    omp: {
-      installed: ompProbe === null ? null : Boolean(ompProbe.isInstalled),
-      configured: ompConfigured,
-    },
-  } satisfies Record<HarnessId, { installed: boolean | null; configured: boolean | null }>;
-
-  // SAFETY: Known harness keys match HarnessId union.
-  return (Object.keys(HARNESS_DETAILS) as HarnessId[]).map((id) => {
-    const cachedHarness = cached.harnesses[id];
-    const installed = live[id].installed ?? cachedHarness?.installed ?? false;
-    const liveConfigured = live[id].configured;
-    const configured = liveConfigured ?? cachedHarness?.configured ?? false;
-    const useCachedDiagnostic = liveConfigured === null;
-    const drift =
-      useCachedDiagnostic &&
-      (cachedHarness?.condition === "drifted" ||
-        cachedHarness?.status === "drifted" ||
-        cachedHarness?.recentAction === "drift_detected");
-    const error = useCachedDiagnostic && cachedHarness?.recentAction === "repair_failed";
-    return {
-      id,
-      name: HARNESS_DETAILS[id],
-      installed,
-      configured,
-      mcpAttached: configured,
-      status: error
-        ? "error"
-        : drift
-          ? "drift"
-          : !installed
-            ? "not_installed"
-            : configured
-              ? "attached"
-              : "unconfigured",
-      lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
-      recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
-    };
-  });
+  return Promise.all(
+    HARNESS_DEFINITIONS.map(async (definition) => {
+      const id = definition.id;
+      const configPath = definition.mcpConfig.resolvePath(home, env);
+      const [probe, liveConfigured] = await Promise.all([
+        definition
+          .probeInstallation({ targetPath: configPath, home, env, fsBridge })
+          .catch(() => null),
+        verifyLiveHarnessConfig(fsBridge, configPath, () =>
+          verifyHarnessRegistration({
+            harnessId: id,
+            targetPath: configPath,
+            workspacePath: home,
+            gatewayUrl: DEFAULT_GATEWAY_URL,
+            command: resinCommand,
+            fsBridge,
+          }),
+        ),
+      ]);
+      const cachedHarness = cached.harnesses[id];
+      const installed =
+        (probe === null ? null : Boolean(probe.isInstalled)) ?? cachedHarness?.installed ?? false;
+      const versionStatus = installed
+        ? classifyHarnessVersion(probe?.version, definition.testedVersions)
+        : "unknown";
+      const configured = liveConfigured ?? cachedHarness?.configured ?? false;
+      const useCachedDiagnostic = liveConfigured === null;
+      const drift =
+        useCachedDiagnostic &&
+        (cachedHarness?.condition === "drifted" ||
+          cachedHarness?.status === "drifted" ||
+          cachedHarness?.recentAction === "drift_detected");
+      const error = useCachedDiagnostic && cachedHarness?.recentAction === "repair_failed";
+      return {
+        id,
+        name: definition.shortName,
+        installed,
+        configured,
+        mcpAttached: configured,
+        version: versionStatus === "unknown" ? null : (probe?.version ?? null),
+        versionStatus,
+        status: error
+          ? "error"
+          : drift
+            ? "drift"
+            : !installed
+              ? "not_installed"
+              : configured
+                ? "attached"
+                : "unconfigured",
+        lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
+        recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
+      };
+    }),
+  );
 }
 
 type UpdateJournalStatus = Omit<
@@ -1941,8 +1908,7 @@ function readRecoveryCategory(value: HealthValue): RecoveryFailureCategory | nul
 }
 
 function readHarnessId(value: HealthValue): HarnessId | null {
-  // SAFETY: String key membership in HARNESS_DETAILS maps to HarnessId.
-  return String(value) === value && value in HARNESS_DETAILS ? (value as HarnessId) : null;
+  return isSupportedHarnessId(value) ? value : null;
 }
 
 function readHarnessAction(

@@ -113,7 +113,7 @@ describe("Claude Code Transcript Decoder", () => {
     if (toolResultEvents[0].type === "tool_result") {
       expect(toolResultEvents[0].toolCallId).toBe("toolu_123");
       expect(toolResultEvents[0].toolName).toBe("grep");
-      expect(toolResultEvents[0].output).toBe("file1.ts\nfile2.ts");
+      expect(toolResultEvents[0].result).toBe("file1.ts\nfile2.ts");
       expect(toolResultEvents[0].isError).toBe(false);
     }
   });
@@ -141,9 +141,9 @@ describe("Claude Code Transcript Decoder", () => {
       model: "claude-3-7-sonnet",
     });
 
-    const events = decodeClaudeTranscriptLine(assistantLine, sessionId, 1);
-    // Should emit reasoning, text message, tool call, and specialized command exec
-    expect(events.length).toBeGreaterThanOrEqual(3);
+    const pending = new Map();
+    const events = decodeClaudeTranscriptLine(assistantLine, sessionId, 1, undefined, pending);
+    expect(events.map((e) => e.type)).toEqual(["model_reasoning", "message", "tool_call"]);
 
     const reasoning = events.find((e) => e.type === "model_reasoning");
     expect(reasoning).toBeDefined();
@@ -166,41 +166,34 @@ describe("Claude Code Transcript Decoder", () => {
       expect(toolCall.toolName).toBe("Bash");
     }
 
-    const commandExec = events.find((e) => e.type === "command_exec");
-    expect(commandExec).toBeDefined();
-    if (commandExec && commandExec.type === "command_exec") {
-      expect(commandExec.command).toBe("pnpm build");
-      expect(commandExec.workingDirectory).toBe("/root");
-    }
-  });
-
-  it("decodes file edits with modify and create types", () => {
-    const editLine = JSON.stringify({
-      type: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id: "toolu_edit_1",
-          name: "Edit",
-          input: {
-            file_path: "src/index.ts",
-            command: "modify",
-            old_str: "const a = 1;",
-            new_str: "const a = 2;",
-          },
+    // The command is reported once its result says how it exited.
+    const resultEvents = decodeClaudeTranscriptLine(
+      {
+        type: "user",
+        timestamp: "2026-09-26T00:00:03.000Z",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_bash_99",
+              content: "Exit code 2\nbuild failed",
+              is_error: true,
+            },
+          ],
         },
-      ],
+        toolUseResult: "Error: Exit code 2\nbuild failed",
+      },
+      sessionId,
+      2,
+      undefined,
+      pending,
+    );
+    // The Bash call and its result are the one recorded step; no separate command event.
+    expect(resultEvents.some((e) => e.type === "command_exec")).toBe(false);
+    expect(resultEvents.find((e) => e.type === "tool_result")).toMatchObject({
+      toolName: "Bash",
+      isError: true,
     });
-
-    const events = decodeClaudeTranscriptLine(editLine, sessionId, 1);
-    const fileEdit = events.find((e) => e.type === "file_edit");
-    expect(fileEdit).toBeDefined();
-    if (fileEdit && fileEdit.type === "file_edit") {
-      expect(fileEdit.filePath).toBe("src/index.ts");
-      expect(fileEdit.operation).toBe("update");
-      expect(fileEdit.diff).toContain("-const a = 1;");
-      expect(fileEdit.diff).toContain("+const a = 2;");
-    }
   });
 
   it("decodes compaction events and errors", () => {
@@ -571,26 +564,14 @@ describe("Claude Code Transcript Decoder", () => {
       };
 
       const events = decodeClaudeTranscriptLine(turnWithBashAndEdit, sessionId, 11);
-      // Events produced: model_reasoning, tool_call(Bash), command_exec(synthetic), tool_call(Edit), file_edit(synthetic), message(assistant)
-      expect(events.length).toBeGreaterThanOrEqual(5);
+      // Events produced: model_reasoning, tool_call(Bash), tool_call(Edit), message(assistant)
+      expect(events.length).toBeGreaterThanOrEqual(4);
 
       const messageEvents = events.filter((e) => e.type === "message");
-      const commandExecEvents = events.filter((e) => e.type === "command_exec");
-      const fileEditEvents = events.filter((e) => e.type === "file_edit");
 
       // message event receives providerUsage
       expect(messageEvents).toHaveLength(1);
       expect(messageEvents[0].type === "message" && messageEvents[0].providerUsage).toBeDefined();
-
-      // synthetic command_exec MUST NOT have providerUsage
-      for (const cmd of commandExecEvents) {
-        expect("providerUsage" in cmd && cmd.providerUsage).toBeFalsy();
-      }
-
-      // synthetic file_edit MUST NOT have providerUsage
-      for (const edit of fileEditEvents) {
-        expect("providerUsage" in edit && edit.providerUsage).toBeFalsy();
-      }
     });
 
     it("decodes explicit unavailable state cleanly", () => {

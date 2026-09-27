@@ -1,0 +1,30 @@
+{
+  "id": "msg_0dff3fa76001JQQm47cGQzPAkO",
+  "sessionID": "ses_f200c0ab8ffezEyenGnxw5g0Yn",
+  "role": "assistant",
+  "time": {
+    "created": 1790463703670,
+    "completed": 1790463704769
+  },
+  "parentID": "msg_0dff3f548001dHQ0huXL0JHrIE",
+  "modelID": "gpt-4.1",
+  "providerID": "github-copilot",
+  "mode": "general",
+  "agent": "general",
+  "path": {
+    "cwd": "/workspace/project",
+    "root": "/workspace/project"
+  },
+  "cost": 0,
+  "tokens": {
+    "total": 10562,
+    "input": 166,
+    "output": 28,
+    "reasoning": 0,
+    "cache": {
+      "read": 10368,
+      "write": 0
+    }
+  },
+  "finish": "tool-calls"
+}

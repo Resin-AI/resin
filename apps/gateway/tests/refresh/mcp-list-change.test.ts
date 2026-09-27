@@ -38,6 +38,33 @@ describe("CatalogRefreshCoordinator - MCP List Changed Notifications", () => {
     coordinator.destroy();
   });
 
+  it("refreshes Claude Code through list_changed alone with its built-in profile", async () => {
+    const conn = createMockConnection({
+      connectionId: "conn-claude",
+      harnessId: "claude-code",
+      workspaceId: "ws-claude",
+      supportsListChanged: true,
+      isInitialized: true,
+    });
+    const mockGateway: McpGatewayLike = {
+      getAllConnections: () => [conn.connection],
+      getConnection: () => conn.connection,
+      sendNotificationToConnection: vi.fn((_, notif) => conn.connection.sendMessage(notif)),
+    };
+    const coordinator = new CatalogRefreshCoordinator({ debounceMs: 0, gateway: mockGateway });
+
+    const attempts = await coordinator.triggerRefresh("ws-claude", 1, {
+      changedToolIds: ["new_tool"],
+    });
+
+    expect(attempts[0]?.primaryOutcome).toBe("native_sent");
+    expect(attempts[0]?.adapterNudgeSent).toBe(false);
+    expect(conn.notificationsReceived.map((entry) => entry.method)).toEqual([
+      "notifications/tools/list_changed",
+    ]);
+    coordinator.destroy();
+  });
+
   it("does not send MCP notification if client did not negotiate tools.listChanged capability", async () => {
     const conn = createMockConnection({
       connectionId: "conn-unnegotiated",

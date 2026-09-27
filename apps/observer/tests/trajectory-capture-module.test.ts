@@ -14,6 +14,7 @@ import type {
   RawHarnessRecord,
 } from "@resin/harness-contracts";
 import { type Mock, beforeEach, describe, expect, it, vi } from "vitest";
+import { HARNESS_DEFINITIONS } from "../src/harness-registry.js";
 import {
   CloudObservationClient,
   CloudRuntimeModule,
@@ -349,32 +350,17 @@ describe("TrajectoryCaptureRuntimeModule", () => {
   });
 
   describe("Constructor & Default Registrations", () => {
-    it("registers all three default adapters and decoders on construction", () => {
+    it("registers every registry harness's adapter and decoder on construction", () => {
       const module = new TrajectoryCaptureRuntimeModule();
 
       expect(module.id).toBe("trajectory-capture");
       expect(module.critical).toBe(false);
       expect(module.dependencies).toContain("cloud-runtime");
 
-      // Verify default adapters
-      const adapters = module.getAdapters();
-      expect(adapters.length).toBe(3);
-      const adapterIds = adapters.map((a) => a.id);
-      expect(adapterIds).toContain("claude-code");
-      expect(adapterIds).toContain("codex-cli");
-      expect(adapterIds).toContain("omp");
-
-      // Verify coordinator has adapters registered
-      const coordinatorAdapters = module.getObserverCoordinator().getAdapters();
-      expect(coordinatorAdapters.length).toBe(3);
-
-      // Verify default decoders
-      const decoders = module.getDecoders();
-      expect(decoders.length).toBe(3);
-      const decoderHarnessIds = decoders.map((d) => d.harnessId);
-      expect(decoderHarnessIds).toContain("claude-code");
-      expect(decoderHarnessIds).toContain("codex-cli");
-      expect(decoderHarnessIds).toContain("omp");
+      const registryIds = HARNESS_DEFINITIONS.map((definition) => definition.id);
+      expect(module.getAdapters().map((a) => a.id)).toEqual(registryIds);
+      expect(module.getObserverCoordinator().getAdapters()).toHaveLength(registryIds.length);
+      expect(module.getDecoders().map((d) => d.harnessId)).toEqual(registryIds);
     });
 
     it("wires observerCoordinator.onRecords to captureCoordinator.handleRecords", async () => {
@@ -433,7 +419,7 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       const health = await module.healthCheck();
       expect(health.status).toBe("ready");
       expect(health.details?.state).toBe("ready");
-      expect(health.details?.adaptersCount).toBe(3);
+      expect(health.details?.adaptersCount).toBe(HARNESS_DEFINITIONS.length);
 
       const diagnostics = await module.getDiagnostics();
       expect(diagnostics.id).toBe("trajectory-capture");

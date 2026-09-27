@@ -7,18 +7,18 @@ import { CatalogRefreshCoordinator, type McpGatewayLike } from "../../src/refres
 import { FakeRefreshAdapter, createMockConnection, createRefreshMatrix } from "./fake-matrix.js";
 
 describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
-  it("delivers context notice nudge for Claude Code harness", async () => {
-    const connClaude = createMockConnection({
-      connectionId: "conn-claude",
-      harnessId: "claude-code",
-      workspaceId: "ws-claude",
-      supportsListChanged: false, // Claude Code does not support native MCP list_changed
+  it("delivers a context notice nudge to a nudge-only harness", async () => {
+    const connNudge = createMockConnection({
+      connectionId: "conn-nudge",
+      harnessId: "nudge-only",
+      workspaceId: "ws-nudge",
+      supportsListChanged: false,
     });
 
     const matrix = createRefreshMatrix();
     const mockGateway: McpGatewayLike = {
-      getAllConnections: () => [connClaude.connection],
-      getConnection: () => connClaude.connection,
+      getAllConnections: () => [connNudge.connection],
+      getConnection: () => connNudge.connection,
       sendNotificationToConnection: vi.fn(),
     };
 
@@ -26,11 +26,11 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
       debounceMs: 0,
       gateway: mockGateway,
       adapters: {
-        "claude-code": matrix.claudeCode,
+        "nudge-only": matrix.nudgeOnly,
       },
     });
 
-    const attempts = await coordinator.triggerRefresh("ws-claude", 1, {
+    const attempts = await coordinator.triggerRefresh("ws-nudge", 1, {
       changedToolIds: ["fast_ast_grep"],
     });
 
@@ -39,7 +39,7 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
     expect(attempts[0]?.adapterNudgeSent).toBe(true);
     expect(attempts[0]?.mcpNotificationSent).toBe(false);
     expect(attempts[0]?.nudgePayload?.addedToolIds).toContain("fast_ast_grep");
-    expect(matrix.claudeCode.refreshCalls.length).toBe(1);
+    expect(matrix.nudgeOnly.refreshCalls.length).toBe(1);
 
     coordinator.destroy();
   });
@@ -157,7 +157,7 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
     // 1. Initial connection active during revision 1
     const conn1 = createMockConnection({
       connectionId: "conn-rev1",
-      harnessId: "claude-code",
+      harnessId: "nudge-only",
       workspaceId: "ws-recon",
       sessionId: "session-active",
       supportsListChanged: false,
@@ -174,7 +174,7 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
       debounceMs: 0,
       gateway: mockGateway,
       adapters: {
-        "claude-code": matrix.claudeCode,
+        "nudge-only": matrix.nudgeOnly,
       },
     });
 
@@ -184,7 +184,7 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
       changedToolIds: ["tool_v1"],
     });
 
-    expect(matrix.claudeCode.refreshCalls.length).toBe(1);
+    expect(matrix.nudgeOnly.refreshCalls.length).toBe(1);
 
     // 2. Repeat trigger of same revision 1 should be deduplicated
     await coordinator.triggerRefresh("ws-recon", 1, {
@@ -193,13 +193,13 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
     });
 
     // Still only 1 call
-    expect(matrix.claudeCode.refreshCalls.length).toBe(1);
+    expect(matrix.nudgeOnly.refreshCalls.length).toBe(1);
 
     // 3. Client disconnects and reconnects for a new session
     conn1.connection.close();
     const conn2 = createMockConnection({
       connectionId: "conn-reconnected",
-      harnessId: "claude-code",
+      harnessId: "nudge-only",
       workspaceId: "ws-recon",
       sessionId: "session-new",
       supportsListChanged: false,
@@ -212,8 +212,8 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
       changedToolIds: ["tool_v2"],
     });
 
-    expect(matrix.claudeCode.refreshCalls.length).toBe(2);
-    expect(matrix.claudeCode.refreshCalls[1]?.changeSummary.addedToolIds).toContain("tool_v2");
+    expect(matrix.nudgeOnly.refreshCalls.length).toBe(2);
+    expect(matrix.nudgeOnly.refreshCalls[1]?.changeSummary.addedToolIds).toContain("tool_v2");
 
     coordinator.destroy();
   });

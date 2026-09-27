@@ -144,6 +144,12 @@ describe("check-boundaries", () => {
       "@resin/adapter-claude-code",
       "@resin/adapter-codex",
       "@resin/adapter-omp",
+      "@resin/adapter-pi",
+      "@resin/adapter-cursor-cli",
+      "@resin/adapter-grok-build",
+      "@resin/adapter-muse-code",
+      "@resin/adapter-opencode",
+      "@resin/adapter-copilot-cli",
     ]);
 
     // Test fixture paths
