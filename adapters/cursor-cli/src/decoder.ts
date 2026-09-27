@@ -232,6 +232,10 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             ...base("subagent"),
             type: "subagent_lifecycle",
             subagentId,
+            // The task tool call that runs the subagent.
+            ...(stringField(payload, "tool_call_id")
+              ? { producedByCallId: stringField(payload, "tool_call_id") }
+              : {}),
             lifecycleType: event === "subagentStart" ? "start" : "settle",
             parentId: stringField(payload, "parent_conversation_id") ?? sessionId,
             role: stringField(payload, "subagent_type"),
@@ -282,6 +286,10 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
     const input = decodeMaybeJson(payload.tool_input);
     const output = decodeMaybeJson(payload.tool_output);
     const durationMs = nonNegativeInt(payload.duration);
+    // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
+    const exitCode =
+      SHELL_TOOL_NAMES[toolName] && !failed ? shellOutcome(output).exitCode : undefined;
+    const commandFailed = exitCode !== undefined && exitCode !== 0;
     const events: IntermediateSessionEvent[] = [
       {
         ...base("call"),
@@ -298,8 +306,12 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
         toolName,
         // A failed call's result is the error the agent was shown.
         result: failed ? (payload.error_message as string) : output,
-        isError: failed,
-        error: failed ? (payload.error_message as string) : undefined,
+        isError: failed || commandFailed,
+        error: failed
+          ? (payload.error_message as string)
+          : commandFailed
+            ? `exit code ${exitCode}`
+            : undefined,
         executionDurationMs: durationMs ?? 0,
         metadata: {
           ...base("result", 1).metadata,
@@ -308,22 +320,6 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
         },
       },
     ];
-    const command =
-      isRecord(input) && typeof input.command === "string" ? input.command : undefined;
-    if (SHELL_TOOL_NAMES[toolName] && command !== undefined) {
-      const outcome = failed ? {} : shellOutcome(output);
-      events.push({
-        ...base("exec", 2),
-        type: "command_exec",
-        command,
-        cwd:
-          isRecord(input) && typeof input.working_directory === "string"
-            ? input.working_directory
-            : undefined,
-        ...outcome,
-        durationMs: durationMs ?? 0,
-      });
-    }
     return events;
   }
 }

@@ -103,6 +103,7 @@ const PRESERVED_IDENTIFIER_FIELDS = new Set([
   "subagentId",
   "parentId",
   "callId",
+  "producedByCallId",
   "toolName",
   "filePath",
   "operation",

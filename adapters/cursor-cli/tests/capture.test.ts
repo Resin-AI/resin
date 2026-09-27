@@ -123,7 +123,6 @@ describe("decoder", () => {
       "model_reasoning",
       "tool_call",
       "tool_result",
-      "command_exec",
       "tool_call",
       "tool_result",
       "file_edit",
@@ -148,21 +147,15 @@ describe("decoder", () => {
       isError: false,
       executionDurationMs: 42,
     });
-    expect(events[5]).toMatchObject({
-      command: "wc -l README.md",
-      cwd: "/w",
-      exitCode: 0,
-      stdout: "3 README.md\n",
-    });
-    expect(events[7]).toMatchObject({
+    expect(events[6]).toMatchObject({
       callId: "call-read-2",
       isError: true,
       error: "File not found",
     });
-    expect(events[8]).toMatchObject({ filePath: "/w/notes.txt", operation: "create" });
-    expect(events[8]!.metadata?.edits).toEqual([{ oldString: "", newString: "hello\n" }]);
-    expect(events[9]).toMatchObject({ toolName: "mcp_demo_echo", parameters: { text: "ping" } });
-    expect(events[11]).toMatchObject({
+    expect(events[7]).toMatchObject({ filePath: "/w/notes.txt", operation: "create" });
+    expect(events[7]!.metadata?.edits).toEqual([{ oldString: "", newString: "hello\n" }]);
+    expect(events[8]).toMatchObject({ toolName: "mcp_demo_echo", parameters: { text: "ping" } });
+    expect(events[10]).toMatchObject({
       role: "assistant",
       content: "README.md has 3 lines.",
       providerUsage: {
@@ -172,13 +165,13 @@ describe("decoder", () => {
         availability: "partial",
       },
     });
-    expect(events[12]).toMatchObject({ triggerReason: "context_limit", tokensBefore: 180000 });
-    expect(events[13]).toMatchObject({
+    expect(events[11]).toMatchObject({ triggerReason: "context_limit", tokensBefore: 180000 });
+    expect(events[12]).toMatchObject({
       subagentId: "sub-1",
       parentId: "c1",
       lifecycleType: "start",
     });
-    expect(events[14]).toMatchObject({ errorType: "aborted" });
+    expect(events[13]).toMatchObject({ errorType: "aborted" });
     expect(events[1]).toMatchObject({ role: "user", content: "count the lines in README.md" });
   });
 

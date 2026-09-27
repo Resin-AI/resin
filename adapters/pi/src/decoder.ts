@@ -127,15 +127,6 @@ export function piCallId(toolCallId: string): string {
   return safe.length > 0 ? safe.slice(0, 128) : "_";
 }
 
-/** Exit code of a Pi `bash` tool result, from the status line Pi appends on failure. */
-function bashExitCode(output: string, isError: boolean): number {
-  if (!isError) return 0;
-  const exited = /Command exited with code (\d+)\s*$/.exec(output);
-  if (exited) return Number(exited[1]);
-  // Aborted or signal-terminated commands have no exit code; use the shell's SIGINT convention.
-  return /Command (aborted|terminated without an exit code)\s*$/.test(output) ? 130 : 1;
-}
-
 interface EntryContext {
   sessionId: string;
   timestamp: string;
@@ -486,8 +477,8 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
   }
 
   /**
-   * A tool result, plus the side effect it confirms: `bash` becomes a `command_exec` with the
-   * real exit status, and a successful `edit`/`write` becomes a `file_edit`. The call arguments
+   * A tool result, plus the side effect it confirms: a successful `edit`/`write` becomes a
+   * `file_edit`. The call arguments
    * come from the source, which saw the call earlier in the file.
    */
   private decodeToolResult(
@@ -527,21 +518,14 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
     ];
 
     const filePath = str(args?.path);
-    if (toolName === "bash" && args && str(args.command) !== undefined) {
-      events.push({
-        ...this.base(ctx, { toolCallId }),
-        type: "command_exec",
-        command: str(args.command) ?? "",
-        stdout: output,
-        exitCode: bashExitCode(output, isError),
-        durationMs,
-      });
-    } else if (toolName === "edit" && filePath && !isError) {
+    // A bash call is one step: its tool result above already records how the command exited.
+    if (toolName === "edit" && filePath && !isError) {
       const constructed = editDiff(filePath, args?.edits);
       const piDiff = str(details?.diff);
       events.push({
         ...this.base(ctx, { toolCallId }),
         type: "file_edit",
+        producedByCallId: piCallId(toolCallId),
         filePath,
         operation: "update",
         patch: piDiff ?? constructed.diff,
@@ -552,6 +536,7 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
       events.push({
         ...this.base(ctx, { toolCallId, bytesWritten: Buffer.byteLength(content, "utf8") }),
         type: "file_edit",
+        producedByCallId: piCallId(toolCallId),
         filePath,
         operation: "create",
         diffStats: {

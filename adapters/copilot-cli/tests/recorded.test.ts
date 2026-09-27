@@ -107,9 +107,16 @@ describe("Copilot CLI 1.0.88 recorded sessions", () => {
       ]),
     );
 
-    expect(ofType(events, "command_exec")).toMatchObject([
-      { command: "python3 calc.py", exitCode: 0 },
-    ]);
+    // A shell call is one step: its tool result records how the command ended.
+    expect(ofType(events, "command_exec")).toEqual([]);
+    const patches = new Set(
+      ofType(events, "tool_call").flatMap((call) =>
+        call.toolName === "apply_patch" ? [call.callId] : [],
+      ),
+    );
+    for (const edit of ofType(events, "file_edit")) {
+      expect(patches.has(edit.producedByCallId ?? "")).toBe(true);
+    }
     expect(
       ofType(events, "file_edit").map((e) => [e.filePath, e.action, e.linesAdded, e.linesRemoved]),
     ).toEqual([

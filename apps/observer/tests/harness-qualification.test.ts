@@ -18,9 +18,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { type NormalizedSessionEvent, parseAssistantStopReason } from "@resin/contracts";
+import {
+  type NormalizedSessionEvent,
+  parseAssistantStopReason,
+  readCodexCommandMetadata,
+} from "@resin/contracts";
 import type { HarnessDefinition, RawHarnessRecord } from "@resin/harness-contracts";
 import { afterAll, describe, expect, it } from "vitest";
+import { extractRawCommandStringFromEvent } from "../src/analytics/deterministic-command-sequence.js";
 import { InMemoryPrivateValueStore } from "../src/analytics/private-value-store.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
@@ -29,6 +34,7 @@ import {
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
 } from "../src/analytics/workflow-call-recorder.js";
+import { isWorkflowCallEvent, isWorkflowResultEvent } from "../src/analytics/workflow-carrier.js";
 import { HARNESS_DEFINITIONS } from "../src/harness-registry.js";
 import { isLocalWorkflowResultSuppressed } from "../src/normalization/local-workflow-payload.js";
 import {
@@ -64,6 +70,21 @@ const EXPECTED_PASSTHROUGH: Record<string, readonly string[]> = {
 };
 
 /**
+ * Actionable steps a harness records with no call behind them, so no call identity can exist.
+ * Cloud defers any workflow that contains one; each entry names why the record has no call.
+ */
+const EXPECTED_CALLLESS_STEPS: Record<string, (event: NormalizedSessionEvent) => boolean> = {
+  // `!command` typed by the user runs in Pi's shell directly; no model tool call exists.
+  pi: (event) => event.type === "command_exec" && event.metadata?.userShell === true,
+  // Cursor's afterFileEdit hook carries no tool_use_id, and its order against postToolUse is
+  // unspecified, so the edit cannot be attributed to a call.
+  "cursor-cli": (event) => event.type === "file_edit",
+  // Memory-reminder observers are side agents Muse starts itself, not through a model call.
+  "muse-code": (event) =>
+    event.type === "subagent_lifecycle" && event.role?.startsWith("observer") === true,
+};
+
+/**
  * Recorded sessions whose final turn never completes, so no settlement boundary is expected
  * after their last prompt. Keyed `<harness>/<version>`; values match discovered session ids.
  */
@@ -78,6 +99,12 @@ interface SessionCapture {
   readonly deadLetters: string[];
   /** Results the pipeline marked as an unknown outcome (no replay baseline by design). */
   readonly unknownOutcomeResults: Set<NormalizedSessionEvent>;
+  /** Shell tool calls as decoded, before the recorder replaced their arguments with references. */
+  readonly shellCalls: Array<{
+    readonly observed: NormalizedSessionEvent;
+    readonly command: string;
+    readonly parameters: Record<string, unknown>;
+  }>;
 }
 
 function adapterDirFor(definition: HarnessDefinition): string {
@@ -168,6 +195,7 @@ async function capture(
             events: [],
             deadLetters: [],
             unknownOutcomeResults: new Set(),
+            shellCalls: [],
           };
           for (const outcome of await pipeline.processBatch(records, context)) {
             if (outcome.status === "dead_letter") {
@@ -178,8 +206,23 @@ async function capture(
             }
             if (outcome.isDuplicate) continue;
             const unknownOutcome = isLocalWorkflowResultSuppressed(outcome.event);
+            const decodedParameters =
+              outcome.event.type === "tool_call"
+                ? structuredClone(outcome.event.parameters ?? {})
+                : undefined;
             const observed = recorder.observe(outcome.event, { workspaceId: session.workspaceId });
             if (unknownOutcome) result.unknownOutcomeResults.add(observed);
+            const command =
+              outcome.event.type === "tool_call"
+                ? extractRawCommandStringFromEvent(outcome.event)
+                : null;
+            if (command !== null && outcome.event.type === "tool_call") {
+              result.shellCalls.push({
+                observed,
+                command,
+                parameters: decodedParameters ?? {},
+              });
+            }
             result.events.push(observed);
           }
           captures.push(result);
@@ -201,12 +244,82 @@ function isSettlementBoundary(event: NormalizedSessionEvent): boolean {
   );
 }
 
+/**
+ * Why the Cloud-projected operation for an actionable step would lack a unique call identity, or
+ * undefined when it has one or is not an actionable step.
+ *
+ * Mirrors Cloud's workflow evidence projection, where each tool_call, command_exec, file_edit and
+ * subagent_lifecycle is an operation, and its admission rule that every operation has a unique
+ * call identity (otherwise the workflow is deferred: "projected operations must have unique call
+ * identities"). A tool_call is identified by its call id; a Codex native command or patch step by
+ * its native id; a Codex command linked to an audited wrapper call is covered by that call; a
+ * file_edit or subagent_lifecycle whose `producedByCallId` names its call is part of that call's
+ * operation; a subagent session's own lifecycle record is not an operation of that session.
+ * Anything else is a step Cloud cannot associate with a call.
+ */
+function operationIdentityProblem(
+  event: NormalizedSessionEvent,
+  seen: Set<string>,
+): string | undefined {
+  let identity: string;
+  if (event.type === "tool_call") {
+    identity = `call:${event.callId}`;
+  } else if (event.type === "command_exec") {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (native?.kind !== "command") return "command_exec has no call identity";
+    identity = native.association ? `covered:${event.eventId}` : `call:${native.nativeId}`;
+  } else if (event.type === "file_edit" || event.type === "subagent_lifecycle") {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (
+      event.type === "file_edit" &&
+      native?.kind === "file-change" &&
+      isWorkflowCallEvent(event) &&
+      isWorkflowResultEvent(event)
+    ) {
+      identity = `call:${native.nativeId}`;
+    } else if (event.producedByCallId !== undefined) {
+      // Part of the named call's step, whether or not that call is in this capture.
+      return undefined;
+    } else if (event.type === "subagent_lifecycle" && event.subagentId === event.sessionId) {
+      // A subagent session's own record of starting is not a step of that session's work.
+      return undefined;
+    } else {
+      return `${event.type} (${event.type === "file_edit" ? event.operation : event.lifecycleType}) has no call identity`;
+    }
+  } else {
+    return undefined;
+  }
+  if (seen.has(identity)) return `${event.type} repeats ${identity}`;
+  seen.add(identity);
+  return undefined;
+}
+
 /** Problems that would make Cloud detection miss or reject this session's work. */
 function qualificationProblems(key: string, sessions: SessionCapture[]): string[] {
   const problems: string[] = [];
   const passthroughAllowed = new Set(EXPECTED_PASSTHROUGH[key.split("/")[0]!] ?? []);
   for (const session of sessions) {
     const at = `${session.sessionId}`;
+    const identities = new Set<string>();
+    const callless = EXPECTED_CALLLESS_STEPS[key.split("/")[0]!];
+    for (const event of session.events) {
+      if (callless?.(event)) continue;
+      const problem = operationIdentityProblem(event, identities);
+      if (problem !== undefined) problems.push(`${at} ${problem}`);
+    }
+    for (const { observed, command, parameters } of session.shellCalls) {
+      // Shell commands become program steps whose program argument holds the exact source.
+      const carrier =
+        observed.type === "tool_call"
+          ? readWorkflowCallCarrier(observed.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
+          : undefined;
+      const program = carrier?.program;
+      const source = program?.argument === undefined ? undefined : parameters[program.argument];
+      if (program?.kind !== "shell" || typeof source !== "string" || source.trim() !== command) {
+        const name = observed.type === "tool_call" ? observed.toolName : observed.type;
+        problems.push(`${at} shell call ${name} is not a program step with its exact source`);
+      }
+    }
     for (const reason of session.deadLetters) problems.push(`${at} dead letter ${reason}`);
     for (const event of session.events) {
       if (event.type === "tool_call") {

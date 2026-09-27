@@ -126,6 +126,8 @@ export interface IntermediateFileEditEvent extends BaseIntermediateEventFields {
   linesRemoved?: number;
   bytesAdded?: number;
   bytesRemoved?: number;
+  /** The tool call id (as emitted on its `tool_call`) whose execution produced this event. */
+  producedByCallId?: string;
 }
 
 export interface IntermediateCompactionEvent extends BaseIntermediateEventFields {
@@ -172,6 +174,8 @@ export interface IntermediateSubagentLifecycleEvent extends BaseIntermediateEven
   parentId?: string;
   role?: string;
   reason?: string;
+  /** The tool call id (as emitted on its `tool_call`) whose execution produced this event. */
+  producedByCallId?: string;
 }
 
 export interface IntermediateSessionLifecycleEvent extends BaseIntermediateEventFields {

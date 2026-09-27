@@ -505,6 +505,7 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
           beforeHash: asString(p.beforeHash),
           afterHash: asString(p.afterHash),
           diffStats,
+          producedByCallId: asString(p.producedByCallId),
         };
       }
 
@@ -566,6 +567,7 @@ export class UniversalHarnessRecordDecoder implements HarnessRecordDecoder {
           parentId: asString(p.parentId) ?? asString(p.parentSessionId),
           role: asString(p.role),
           reason: asString(p.reason),
+          producedByCallId: asString(p.producedByCallId),
         };
       }
 

@@ -238,6 +238,11 @@ export const NormalizedFileEditEventSchema = z.object({
   beforeHash: Sha256DigestSchema.optional(),
   afterHash: Sha256DigestSchema.optional(),
   diffStats: FileDiffStatsSchema.optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional(),
 });
 
 export type NormalizedFileEditEvent = z.infer<typeof NormalizedFileEditEventSchema>;
@@ -296,6 +301,11 @@ export const NormalizedSubagentLifecycleEventSchema = z.object({
   parentId: IdentifierSchema.optional(),
   role: z.string().optional(),
   reason: z.string().optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional(),
 });
 
 export type NormalizedSubagentLifecycleEvent = z.infer<

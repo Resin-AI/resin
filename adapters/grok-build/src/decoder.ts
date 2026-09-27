@@ -70,6 +70,8 @@ interface OpenCall {
 
 interface SessionState {
   readonly calls: Map<string, OpenCall>;
+  /** The `spawn_subagent` call that started each child session, keyed by child session id. */
+  readonly subagentCalls: Map<string, string>;
   modelId?: string;
 }
 
@@ -187,7 +189,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     if (!update) return null;
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { calls: new Map() };
+      state = { calls: new Map(), subagentCalls: new Map() };
       this.sessions.set(sessionId, state);
     }
 
@@ -311,11 +313,19 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         const subagentId = asString(update.child_session_id) ?? asString(update.subagent_id);
         if (!subagentId) return null;
         const spawned = update.sessionUpdate === "subagent_spawned";
+        if (spawned) {
+          // Grok names no call on the spawn; it is the one `spawn_subagent` call still open.
+          const open = [...state.calls].filter(([, call]) => call.builtinName === "spawn_subagent");
+          if (open.length === 1) state.subagentCalls.set(subagentId, open[0]![0]);
+        }
+        const producedByCallId = state.subagentCalls.get(subagentId);
+        if (!spawned) state.subagentCalls.delete(subagentId);
         return [
           {
             ...base,
             type: "subagent_lifecycle",
             subagentId,
+            ...(producedByCallId ? { producedByCallId } : {}),
             lifecycleType: spawned
               ? "spawn"
               : update.status === "completed"
@@ -343,7 +353,14 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     if ((status !== "completed" && status !== "failed") || !toolCallId) return null;
     const call = state.calls.get(toolCallId);
     state.calls.delete(toolCallId);
-    const isError = status === "failed";
+    // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
+    const raw = asRecord(update.rawOutput);
+    const exitCode =
+      call && SHELL_TOOLS[call.builtinName] && raw?.type === "Bash"
+        ? asCount(raw.exit_code)
+        : undefined;
+    const commandFailed = status !== "failed" && exitCode !== undefined && exitCode !== 0;
+    const isError = status === "failed" || commandFailed;
     const output = resultText(update);
     const durationMs =
       call?.startedAtMs !== undefined && completedAtMs !== undefined
@@ -357,31 +374,10 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         ...(call ? { toolName: call.toolName } : {}),
         result: output ?? null,
         isError,
+        ...(commandFailed ? { error: `exit code ${exitCode}` } : {}),
         executionDurationMs: durationMs,
       },
     ];
-    const raw = asRecord(update.rawOutput);
-    if (call && SHELL_TOOLS[call.builtinName] && raw?.type === "Bash") {
-      const command = asString(raw.command) ?? asString(call.input?.command);
-      if (command) {
-        // `output` holds the raw process bytes; `output_for_prompt` prefixes the model-facing
-        // `exit: <code>` line and is only a fallback for versions without the byte array.
-        const stdout = Array.isArray(raw.output)
-          ? Buffer.from(
-              raw.output.filter((byte): byte is number => typeof byte === "number"),
-            ).toString("utf8")
-          : asString(raw.output_for_prompt);
-        events.push({
-          ...base,
-          type: "command_exec",
-          command,
-          ...(asString(raw.current_dir) ? { cwd: asString(raw.current_dir) } : {}),
-          ...(asCount(raw.exit_code) !== undefined ? { exitCode: asCount(raw.exit_code) } : {}),
-          ...(stdout ? { stdout } : {}),
-          durationMs,
-        });
-      }
-    }
     if (!isError) {
       for (const item of Array.isArray(update.content) ? update.content : []) {
         const diff = asRecord(item);
@@ -393,6 +389,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         events.push({
           ...base,
           type: "file_edit",
+          producedByCallId: toolCallId,
           filePath,
           operation: created ? "create" : "update",
           linesAdded: newText ? newText.split("\n").filter(Boolean).length : 0,

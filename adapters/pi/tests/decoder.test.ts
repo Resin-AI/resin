@@ -88,20 +88,32 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     );
     expect(mcpResult).toMatchObject({ result: "words: 3", isError: false });
 
-    expect(events.filter((event) => event.type === "command_exec")).toEqual([
-      expect.objectContaining({
-        command: "./greet.sh world",
-        stdout: "hello, world\n",
-        exitCode: 0,
-      }),
-    ]);
+    // A bash call is one step: its result is the record of the command, not a second event.
+    expect(events.filter((event) => event.type === "command_exec")).toEqual([]);
+    const bashCall = events.find(
+      (event) => event.type === "tool_call" && event.toolName === "bash",
+    );
+    expect(bashCall).toMatchObject({ parameters: { command: "./greet.sh world" } });
+    expect(
+      events.find(
+        (event) =>
+          event.type === "tool_result" &&
+          bashCall?.type === "tool_call" &&
+          event.callId === bashCall.callId,
+      ),
+    ).toMatchObject({ result: expect.stringContaining("hello, world"), isError: false });
+    // Each edit is part of the call that made it.
+    const callOf = (toolName: string) =>
+      events.find((event) => event.type === "tool_call" && event.toolName === toolName);
     expect(
       events.flatMap((event) =>
-        event.type === "file_edit" ? [[event.filePath, event.operation]] : [],
+        event.type === "file_edit"
+          ? [[event.filePath, event.operation, event.producedByCallId]]
+          : [],
       ),
     ).toEqual([
-      ["README.md", "update"],
-      ["NOTES.md", "create"],
+      ["README.md", "update", (callOf("edit") as { callId?: string } | undefined)?.callId],
+      ["NOTES.md", "create", (callOf("write") as { callId?: string } | undefined)?.callId],
     ]);
 
     const discovery = events.find((event) => event.type === "tool_discovery");
@@ -267,17 +279,13 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     }
   });
 
-  it("records bash exit status and duration from the call it answers", async () => {
+  it("records a bash failure and duration on the result of the call it answers", async () => {
     const events = await decodeFixture("rpc-branch-model-bash-abort-compaction.jsonl");
-    const aborted = events.find(
-      (event) => event.type === "command_exec" && event.command.startsWith("sleep 30"),
-    );
-    expect(aborted).toMatchObject({ exitCode: 130 });
     const abortedResult = events.find(
       (event) => event.type === "tool_result" && event.result === "Command aborted",
     );
     // Written 22:58:40.738 (call) → 22:58:42.245 (result).
-    expect(abortedResult).toMatchObject({ executionDurationMs: 1507 });
+    expect(abortedResult).toMatchObject({ isError: true, executionDurationMs: 1507 });
   });
 
   it("assigns unique, increasing causal sequences", async () => {

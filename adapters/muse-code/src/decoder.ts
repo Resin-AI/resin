@@ -46,6 +46,8 @@ interface SessionState {
   outcomes: Map<string, MuseToolOutcome>;
   patches: Map<string, { added?: number; removed?: number }>;
   mcpTools: Map<string, { server: string; tool: string }>;
+  /** The `subagent_spawn` call that started each subagent, keyed by Muse subagent id. */
+  subagentCalls: Map<string, string>;
   pendingUsage?: ProviderReportedUsage;
   /** The current run already ended the session with its completed terminal. */
   ended?: boolean;
@@ -137,6 +139,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         outcomes: new Map(),
         patches: new Map(),
         mcpTools: new Map(),
+        subagentCalls: new Map(),
       };
       this.sessions.set(sessionId, state);
     }
@@ -221,11 +224,21 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       case "subagent.control.child_session_bound": {
         const child = asString(body?.child_session_id);
         if (!child) return [];
+        const museSubagentId = asString(body?.subagent_id);
+        // Muse names no call on the binding; it belongs to the one spawn call not yet bound.
+        const bound = new Set(state.subagentCalls.values());
+        const unbound = [...state.calls].filter(
+          ([callId, call]) => call.toolName === "subagent_spawn" && !bound.has(callId),
+        );
+        const producedByCallId = unbound.length === 1 ? unbound[0]![0] : undefined;
+        if (museSubagentId && producedByCallId)
+          state.subagentCalls.set(museSubagentId, producedByCallId);
         return [
           {
             ...base,
             type: "subagent_lifecycle",
             subagentId: child,
+            ...(producedByCallId ? { producedByCallId } : {}),
             lifecycleType: "spawn",
             parentId: sessionId,
             role: "subagent",
@@ -237,11 +250,13 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         const subagentId = asString(body?.subagent_id);
         if (!subagentId) return [];
         const errorKind = asString(body?.error_kind);
+        const producedByCallId = state.subagentCalls.get(subagentId);
         return [
           {
             ...base,
             type: "subagent_lifecycle",
             subagentId,
+            ...(producedByCallId ? { producedByCallId } : {}),
             lifecycleType: errorKind ? "terminate" : "settle",
             parentId: sessionId,
             role: "subagent",
@@ -489,6 +504,12 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         ? "unknown"
         : state.outcomes.get(callId);
       const executionDurationMs = call ? elapsedMs(call.calledAt, base.timestamp) : 0;
+      // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
+      const exitCode =
+        call?.toolName === "bash" && !call.connection && outcome === "succeeded"
+          ? shellExitCode(text)
+          : undefined;
+      const commandFailed = exitCode !== undefined && exitCode !== 0;
       events.push({
         ...base,
         type: "tool_result",
@@ -496,7 +517,8 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         toolCallId: callId,
         ...(call ? { toolName: call.toolName } : {}),
         result: text,
-        isError: outcome !== "succeeded",
+        isError: outcome !== "succeeded" || commandFailed,
+        ...(commandFailed ? { error: `exit code ${exitCode}` } : {}),
         executionDurationMs,
         metadata: {
           museOutcome: outcome ?? "unknown",
@@ -504,10 +526,6 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         },
       });
       if (!call || outcome === undefined || outcome === "unknown") continue;
-      if (call.toolName === "bash" && !call.connection) {
-        const exec = this.decodeShellResult(text, call);
-        if (exec) events.push({ ...base, ...exec, durationMs: executionDurationMs });
-      }
       const operation = FILE_WRITE_TOOLS[call.toolName];
       const filePath = asString(call.parameters.path);
       if (operation && filePath && outcome === "succeeded" && !call.connection) {
@@ -515,6 +533,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         events.push({
           ...base,
           type: "file_edit",
+          producedByCallId: callId,
           filePath,
           operation,
           ...(patch?.added !== undefined ? { linesAdded: patch.added } : {}),
@@ -525,30 +544,15 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
     }
     return events;
   }
+}
 
-  private decodeShellResult(
-    text: string,
-    call: CallState,
-  ): Omit<
-    Extract<IntermediateSessionEvent, { type: "command_exec" }>,
-    "sessionId" | "timestamp"
-  > | null {
-    let parsed: Json | undefined;
-    try {
-      parsed = asRecord(JSON.parse(text));
-    } catch {
-      return null;
-    }
-    const exitCode = parsed?.exit_code;
-    const command = asString(parsed?.command) ?? asString(call.parameters.command);
-    if (!command || typeof exitCode !== "number") return null;
-    return {
-      type: "command_exec",
-      command,
-      exitCode,
-      ...(typeof parsed?.output === "string" ? { stdout: parsed.output } : {}),
-      ...(asString(call.parameters.workdir) ? { cwd: asString(call.parameters.workdir) } : {}),
-    };
+/** The exit status a Muse `bash` result reports, when it reports one. */
+function shellExitCode(text: string): number | undefined {
+  try {
+    const exitCode = asRecord(JSON.parse(text))?.exit_code;
+    return typeof exitCode === "number" ? exitCode : undefined;
+  } catch {
+    return undefined;
   }
 }
 

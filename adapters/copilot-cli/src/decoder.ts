@@ -239,6 +239,8 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
             ...base,
             type: "subagent_lifecycle",
             subagentId: asString(data.toolCallId) ?? event.id ?? `subagent-${sequence}`,
+            // The task tool call that runs the subagent.
+            ...(asString(data.toolCallId) ? { producedByCallId: asString(data.toolCallId) } : {}),
             lifecycleType,
             role: asString(data.agentName),
             reason: asString(data.error) ?? asString(data.agentDescription),
@@ -409,9 +411,12 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
     const startKey = `${base.sessionId}:${toolCallId}`;
     const start = toolCallId ? this.toolStarts.get(startKey) : undefined;
     this.toolStarts.delete(startKey);
-    const success = data.success === true;
     const result = asRecord(data.result);
     const error = asRecord(data.error);
+    // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
+    const exitCode = asRecord(data.shellExecution)?.exitCode;
+    const commandFailed = data.success === true && typeof exitCode === "number" && exitCode !== 0;
+    const success = data.success === true && !commandFailed;
     const output = asString(result?.content);
     const finishedAt = Date.parse(base.timestamp);
     // Both timestamps are Copilot's own; a completion without its start has no duration.
@@ -419,7 +424,7 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
       start && Number.isFinite(start.startedAt) && Number.isFinite(finishedAt)
         ? Math.max(0, finishedAt - start.startedAt)
         : undefined;
-    const errorMessage = asString(error?.message);
+    const errorMessage = commandFailed ? `exit code ${exitCode}` : asString(error?.message);
     const events: IntermediateSessionEvent[] = [
       {
         ...base,
@@ -446,29 +451,12 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
 
     if (!start || !success) return events;
 
-    const shell = asRecord(data.shellExecution);
-    const startArgs = asRecord(start.arguments);
-    if (start.toolName === "bash" || start.toolName === "powershell") {
-      const command = asString(startArgs?.command);
-      if (command !== undefined) {
-        const exitCode = shell?.exitCode;
-        events.push({
-          ...base,
-          type: "command_exec",
-          command,
-          ...(typeof exitCode === "number" ? { exitCode } : {}),
-          ...(durationMs !== undefined ? { durationMs } : {}),
-          ...(output !== undefined ? { stdout: output } : {}),
-          metadata: { ...base.metadata, toolCallId },
-        });
-      }
-    }
-
     if (start.toolName === "apply_patch" && typeof start.arguments === "string") {
       for (const file of parseCopilotApplyPatch(start.arguments)) {
         events.push({
           ...base,
           type: "file_edit",
+          ...(toolCallId ? { producedByCallId: toolCallId } : {}),
           filePath: file.movedTo ?? file.path,
           operation: file.action === "update" ? "patch" : file.action,
           action: file.action,

@@ -998,6 +998,8 @@ export class CodexSessionDecoder {
   private sequenceCounter: number;
   private lastEventId: string | null = null;
   private toolCallSeq = 0;
+  /** Code-mode `exec` calls awaiting their output; a collab item inside one was made by it. */
+  private readonly openExecCallIds = new Set<string>();
   private callMap = new Map<
     string,
     {
@@ -2055,6 +2057,9 @@ export class CodexSessionDecoder {
       default:
         return undefined;
     }
+    // The collab tool ran inside the one code-mode cell still open, when exactly one is.
+    const producedByCallId =
+      this.openExecCallIds.size === 1 ? [...this.openExecCallIds][0] : undefined;
     const events: NormalizedSessionEvent[] = [];
     for (const subagentId of receivers) {
       const lifecycleType = lifecycleFor(subagentId);
@@ -2066,6 +2071,7 @@ export class CodexSessionDecoder {
         lifecycleType,
         reason: tool,
       };
+      if (producedByCallId) event.producedByCallId = producedByCallId;
       if (parentId) event.parentId = parentId;
       const nickname = nicknames.get(subagentId);
       if (nickname) event.role = nickname;
@@ -3060,6 +3066,7 @@ export class CodexSessionDecoder {
         ...(header.metadata ? { metadata: header.metadata } : {}),
         callEvent: callEvt,
       });
+      if (rawExecSource !== undefined) this.openExecCallIds.add(toolCallId);
       events.push(callEvt);
       return events;
     }
@@ -3094,6 +3101,7 @@ export class CodexSessionDecoder {
         return events;
       }
       const callId = nativeCallId ?? asString(p.id) ?? generateEventId("call");
+      this.openExecCallIds.delete(callId);
       const callKey = this.nativeCallMapKey(callId, asObject(p.metadata));
       const exactCached = this.callMap.get(callKey);
       const cached = exactCached ?? this.callMap.get(callId);

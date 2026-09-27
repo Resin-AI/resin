@@ -109,10 +109,8 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       String(result.result).includes('"exit_code": 3'),
     );
     expect(failing?.isError).toBe(true);
-    expect(ofType(events, "command_exec").map((exec) => [exec.command, exec.exitCode])).toEqual([
-      ["ls && git status --short", 0],
-      ["exit 3", 3],
-    ]);
+    // A shell call is one step: its tool result records how the command ended.
+    expect(ofType(events, "command_exec")).toEqual([]);
     expect(
       ofType(events, "file_edit").map((edit) => [
         edit.filePath,

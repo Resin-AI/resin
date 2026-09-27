@@ -81,12 +81,11 @@ describe("recorded grok 1.0.13 sessions", () => {
       isError: false,
     });
 
-    expect(events.find((e) => e.type === "command_exec")).toMatchObject({
-      command: "ls",
-      exitCode: 0,
-      cwd: PROJECT,
-    });
+    // A shell call is one step: its tool result records how the command ended.
+    expect(events.find((e) => e.type === "command_exec")).toBeUndefined();
     const edits = events.flatMap((e) => (e.type === "file_edit" ? [e] : []));
+    const callIds = new Set(calls.map((call) => call.callId));
+    for (const edit of edits) expect(callIds.has(edit.producedByCallId ?? "")).toBe(true);
     expect(edits.map((e) => [path.basename(e.filePath), e.operation])).toEqual([
       ["calc.py", "update"],
       ["NOTES.md", "create"],

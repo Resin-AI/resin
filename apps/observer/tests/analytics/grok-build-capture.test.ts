@@ -57,7 +57,7 @@ async function capture() {
 }
 
 describe("Grok Build headless capture", () => {
-  it("normalizes every call, result, shell command and reasoning step", async () => {
+  it("normalizes every call, result and reasoning step", async () => {
     const { deadLetters, projected } = await capture();
     expect(deadLetters).toEqual([]);
     const calls = projected.filter((event) => event.type === "tool_call");
@@ -76,7 +76,8 @@ describe("Grok Build headless capture", () => {
         readWorkflowResultCarrier(result.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]),
       ).toBeDefined();
     }
-    expect(projected.filter((event) => event.type === "command_exec")).toHaveLength(4);
+    // Shell calls are single steps: no call-less command_exec accompanies them.
+    expect(projected.filter((event) => event.type === "command_exec")).toEqual([]);
     expect(projected.some((event) => event.type === "model_reasoning")).toBe(true);
   });
 
