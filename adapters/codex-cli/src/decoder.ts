@@ -325,7 +325,8 @@ function reportUnrecognizedExecOutput(text: string): void {
     if (UNIFIED_EXEC_OUTPUT_MARKER.test(each)) break;
   }
   const shape = header.join("|");
-  if (reportedUnrecognizedExecShapes.has(shape) || reportedUnrecognizedExecShapes.size >= 32) return;
+  if (reportedUnrecognizedExecShapes.has(shape) || reportedUnrecognizedExecShapes.size >= 32)
+    return;
   reportedUnrecognizedExecShapes.add(shape);
   process.emitWarning(
     `Unrecognized Codex exec output format (header: ${shape}); its result is recorded without a completion status`,

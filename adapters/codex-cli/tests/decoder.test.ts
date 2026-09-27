@@ -1970,7 +1970,8 @@ describe("Codex CLI Session Decoder", () => {
         }
         const reports = warn.mock.calls.filter(
           ([, options]) =>
-            (options as { code?: string } | undefined)?.code === "RESIN_CODEX_EXEC_OUTPUT_UNRECOGNIZED",
+            (options as { code?: string } | undefined)?.code ===
+            "RESIN_CODEX_EXEC_OUTPUT_UNRECOGNIZED",
         );
         expect(reports).toHaveLength(1);
         expect(String(reports[0]![0])).not.toMatch(/secret-value|12345|5e5e5e/);
@@ -2034,11 +2035,17 @@ describe("Codex CLI Session Decoder", () => {
         name: "parses the Codex 0.156.1 Code Mode exec header",
         output: [
           { type: "input_text", text: "Script completed\nWall time 1.2 seconds\nOutput:\n" },
-          { type: "input_text", text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}' },
+          {
+            type: "input_text",
+            text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}',
+          },
         ],
         fields: {},
         result: [
-          { type: "input_text", text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}' },
+          {
+            type: "input_text",
+            text: '{"chunk_id":"8c1d2e","wall_time_seconds":0.02,"exit_code":0}',
+          },
         ],
         outcome: "completed",
         isError: false,
