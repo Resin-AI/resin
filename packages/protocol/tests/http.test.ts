@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   ArtifactDownloadMetadataSchema,
   ArtifactDownloadRequestSchema,
+  CATALOG_CAPABILITIES_HEADER,
+  CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
   CatalogSnapshotRequestSchema,
   CatalogSnapshotResponseSchema,
+  CatalogSnapshotResultSchema,
+  CatalogSnapshotUnchangedResponseSchema,
   DeadLetterClassificationSchema,
   DeploymentStatusItemSchema,
   DeploymentStatusReportRequestSchema,
@@ -22,7 +26,71 @@ import {
   TelemetryMetricSchema,
   WorkspaceRegisterRequestSchema,
   WorkspaceRegisterResponseSchema,
+  isCatalogSnapshotUnchanged,
+  parseCatalogCapabilities,
 } from "../src/index.js";
+
+describe("Catalog snapshot unchanged contract", () => {
+  const fullSnapshot = {
+    snapshotVersion: "v7",
+    generatedAt: "2026-09-01T00:00:00.000Z",
+    checksum: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    tools: [],
+    activeDeployments: [],
+  };
+
+  it("names the capability header and token", () => {
+    expect(CATALOG_CAPABILITIES_HEADER).toBe("x-resin-catalog-capabilities");
+    expect(CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY).toBe("snapshot-unchanged-v1");
+  });
+
+  it("parses the capability list tolerantly", () => {
+    expect(parseCatalogCapabilities(undefined).size).toBe(0);
+    expect(parseCatalogCapabilities("").size).toBe(0);
+    const tokens = parseCatalogCapabilities(" future-thing ,, SNAPSHOT-UNCHANGED-v1 ,");
+    expect(tokens.has(CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY)).toBe(true);
+    expect(tokens.has("future-thing")).toBe(true);
+    expect(tokens.has("")).toBe(false);
+  });
+
+  it("accepts exactly the unchanged marker", () => {
+    const marker = { unchanged: true, snapshotVersion: "v7" };
+    expect(CatalogSnapshotUnchangedResponseSchema.parse(marker)).toEqual(marker);
+    expect(
+      CatalogSnapshotUnchangedResponseSchema.safeParse({ ...marker, unchanged: false }).success,
+    ).toBe(false);
+    expect(
+      CatalogSnapshotUnchangedResponseSchema.safeParse({ ...marker, snapshotVersion: "" }).success,
+    ).toBe(false);
+    expect(CatalogSnapshotUnchangedResponseSchema.safeParse({ ...marker, tools: [] }).success).toBe(
+      false,
+    );
+    expect(CatalogSnapshotUnchangedResponseSchema.safeParse({ unchanged: true }).success).toBe(
+      false,
+    );
+  });
+
+  it("discriminates a full snapshot from the unchanged marker", () => {
+    const unchanged = CatalogSnapshotResultSchema.parse({ unchanged: true, snapshotVersion: "v7" });
+    expect(isCatalogSnapshotUnchanged(unchanged)).toBe(true);
+    const full = CatalogSnapshotResultSchema.parse(fullSnapshot);
+    expect(isCatalogSnapshotUnchanged(full)).toBe(false);
+    expect(CatalogSnapshotResultSchema.safeParse({ snapshotVersion: "v7" }).success).toBe(false);
+  });
+
+  it("documents the header and the unchanged body on the snapshot route", () => {
+    const route = OPENAPI_V1_SPEC.paths["/v1/catalog/snapshot"].get;
+    expect(
+      route.parameters.some((p) => p.name === CATALOG_CAPABILITIES_HEADER && p.in === "header"),
+    ).toBe(true);
+    const body = route.responses["200"].content["application/json"].schema;
+    expect(JSON.stringify(body)).toContain("#/components/schemas/CatalogSnapshotUnchangedResponse");
+    expect(OPENAPI_V1_SPEC.components.schemas.CatalogSnapshotUnchangedResponse.required).toEqual([
+      "unchanged",
+      "snapshotVersion",
+    ]);
+  });
+});
 
 describe("HTTP OpenAPI & Request/Response Contracts", () => {
   it("defines a valid and complete OpenAPI 3.1 specification", () => {

@@ -44,9 +44,11 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
+import { DeviceSyncStore } from "./device-sync-store.js";
 import { loadLocalArtifactTrust } from "./local-artifact-trust.js";
 import { LocalArtifactExecutor } from "./local-executor.js";
 import { CloudInvocationRouter } from "./router.js";
+import { SharedCloudSync } from "./shared-sync.js";
 import {
   type ArtifactBytesDownloader,
   CloudCatalogSyncCoordinator,
@@ -77,6 +79,12 @@ export interface ProductionProxyRuntimeOptions {
    */
   bindWorkspaceLocks?: boolean;
   syncIntervalMs?: number;
+  /**
+   * Share each catalog snapshot and tool-access answer with the other gateways that use the same
+   * credential file, through `cloud-sync/` beside it (`<stateDir>/cloud-sync` by default), so one
+   * cloud call per interval serves all of them. Default true.
+   */
+  sharedCloudSync?: boolean;
   artifactCache?: ArtifactCache;
   transferClient?: ArtifactBytesDownloader;
   trustStore?: RuntimeTrustStore;
@@ -435,6 +443,18 @@ export async function createProductionProxyRuntime(
       onToolSyncError: options.onToolSyncError,
       onOfflineDegraded: options.onOfflineDegraded,
       isPinned: options.isPinned,
+      ...(options.sharedCloudSync === false
+        ? {}
+        : {
+            sharedSync: new SharedCloudSync({
+              // Gateways that share a credential file share its identity, so they share answers.
+              store: new DeviceSyncStore({
+                dir: path.join(path.dirname(credentialStore.getTokenFilePath()), "cloud-sync"),
+              }),
+              client,
+              identityProvider,
+            }),
+          }),
     });
     const backgroundTasks = new Set<Promise<unknown>>();
 
@@ -606,9 +626,9 @@ export async function createProductionProxyRuntime(
         ]);
         clearTimeout(timer);
       },
-      async sync(_syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
+      async sync(syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
         await Promise.all([...backgroundTasks]);
-        return await coordinator.sync();
+        return await coordinator.sync({ fresh: syncOpts?.force === true });
       },
     };
 

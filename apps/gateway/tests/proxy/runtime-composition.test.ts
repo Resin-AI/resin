@@ -956,4 +956,61 @@ describe("Production Runtime Composition & Credential Security", () => {
     expect(degradedReason).toBe("Degraded reason");
     expect(pinned).toBe(true);
   });
+
+  it("shares one cloud sync between runtimes that use the same credential file", async () => {
+    const claims = makeValidClaims();
+    const seed = new CloudCredentialStore({ tokenFilePath: tokenFile });
+    await seed.persist({
+      cloudUrl: "https://cloud.custom-origin.io",
+      accessToken: makeJwt(claims),
+      refreshToken: "rf_valid_123",
+      deviceId: claims.deviceId,
+      workspaceId: claims.workspaceId,
+    });
+    let catalogCalls = 0;
+    let accessCalls = 0;
+    const fetchFn: typeof fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/v1/account/tool-access") {
+        accessCalls++;
+        return Response.json({
+          schemaVersion: "1.0.0",
+          accountId: claims.accountId,
+          userId: claims.userId,
+          toolAccess: "allowed",
+        });
+      }
+      catalogCalls++;
+      return Response.json({
+        snapshotVersion: "v1.0.0",
+        generatedAt: new Date().toISOString(),
+        tools: [],
+        activeDeployments: [],
+        checksum: hashCanonicalContent({ tools: [], activeDeployments: [] }),
+      });
+    };
+    const runtimeFor = async (sharedCloudSync?: boolean) =>
+      await createProductionProxyRuntime({
+        credentialStore: new CloudCredentialStore({ tokenFilePath: tokenFile }),
+        registry: new ToolRegistry(),
+        home: tempDir,
+        resinHome,
+        fetchFn,
+        ...(sharedCloudSync === undefined ? {} : { sharedCloudSync }),
+      });
+
+    const first = await runtimeFor();
+    const second = await runtimeFor();
+    await first.sync();
+    await second.sync();
+    expect(catalogCalls).toBe(1);
+    expect(accessCalls).toBe(1);
+    expect(fs.statSync(path.join(resinHome, "cloud-sync")).isDirectory()).toBe(true);
+
+    const unshared = await runtimeFor(false);
+    await unshared.sync();
+    expect(catalogCalls).toBe(2);
+    expect(accessCalls).toBe(2);
+    await Promise.all([first.stop(), second.stop(), unshared.stop()]);
+  });
 });

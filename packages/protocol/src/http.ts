@@ -148,6 +148,64 @@ export const CatalogSnapshotResponseSchema = z.object({
 export type CatalogSnapshotResponse = z.infer<typeof CatalogSnapshotResponseSchema>;
 
 /**
+ * Request header a client sends to advertise optional catalog-snapshot behaviours it
+ * understands. The value is a comma-separated token list; servers must parse it tolerantly
+ * (trim whitespace, ignore empty and unknown tokens, match tokens case-insensitively).
+ */
+export const CATALOG_CAPABILITIES_HEADER = "x-resin-catalog-capabilities";
+
+/**
+ * Capability token: the client accepts {@link CatalogSnapshotUnchangedResponse} when the
+ * `currentVersion` it sent is still the server's current snapshot version.
+ */
+export const CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY = "snapshot-unchanged-v1";
+
+/**
+ * Parses a {@link CATALOG_CAPABILITIES_HEADER} value into its normalised token set.
+ */
+export function parseCatalogCapabilities(value: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  if (!value) return tokens;
+  for (const raw of value.split(",")) {
+    const token = raw.trim().toLowerCase();
+    if (token) tokens.add(token);
+  }
+  return tokens;
+}
+
+/**
+ * Reply to a client that advertised {@link CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY} and whose
+ * `currentVersion` equals the server's current snapshot version: the client keeps the snapshot
+ * it already holds. Sent as HTTP 200 `application/json`.
+ */
+export const CatalogSnapshotUnchangedResponseSchema = z
+  .object({
+    unchanged: z.literal(true),
+    snapshotVersion: CatalogSnapshotResponseSchema.shape.snapshotVersion,
+  })
+  .strict();
+
+export type CatalogSnapshotUnchangedResponse = z.infer<
+  typeof CatalogSnapshotUnchangedResponseSchema
+>;
+
+/**
+ * Every body `GET /v1/catalog/snapshot` can return to a client that sent the capability header.
+ */
+export const CatalogSnapshotResultSchema = z.union([
+  CatalogSnapshotResponseSchema,
+  CatalogSnapshotUnchangedResponseSchema,
+]);
+
+export type CatalogSnapshotResult = z.infer<typeof CatalogSnapshotResultSchema>;
+
+export function isCatalogSnapshotUnchanged(
+  result: CatalogSnapshotResult,
+): result is CatalogSnapshotUnchangedResponse {
+  return "unchanged" in result && result.unchanged === true;
+}
+
+/**
  * 5. Artifact Download & Verification.
  * Endpoint: GET /v1/artifacts/:digest/download
  */
@@ -508,13 +566,26 @@ export const OPENAPI_V1_SPEC = {
           { name: "workspaceId", in: "query", required: true, schema: { type: "string" } },
           { name: "deviceId", in: "query", required: true, schema: { type: "string" } },
           { name: "currentVersion", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: CATALOG_CAPABILITIES_HEADER,
+            in: "header",
+            required: false,
+            description: `Comma-separated capability tokens. With '${CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY}' and a currentVersion equal to the current snapshot version, the server replies with CatalogSnapshotUnchangedResponse instead of the full snapshot.`,
+            schema: { type: "string" },
+          },
         ],
         responses: {
           "200": {
-            description: "Catalog snapshot",
+            description:
+              "Catalog snapshot, or an unchanged marker when the client advertised the capability and already holds the current version",
             content: {
               "application/json": {
-                schema: { $ref: "#/components/schemas/CatalogSnapshotResponse" },
+                schema: {
+                  oneOf: [
+                    { $ref: "#/components/schemas/CatalogSnapshotResponse" },
+                    { $ref: "#/components/schemas/CatalogSnapshotUnchangedResponse" },
+                  ],
+                },
               },
             },
           },
@@ -663,6 +734,15 @@ export const OPENAPI_V1_SPEC = {
       ObservationBatchRequest: { type: "object" },
       ObservationBatchResponse: { type: "object" },
       CatalogSnapshotResponse: { type: "object" },
+      CatalogSnapshotUnchangedResponse: {
+        type: "object",
+        additionalProperties: false,
+        required: ["unchanged", "snapshotVersion"],
+        properties: {
+          unchanged: { const: true },
+          snapshotVersion: { type: "string", minLength: 1 },
+        },
+      },
       DeploymentStatusReportRequest: { type: "object" },
       DeploymentStatusReportResponse: { type: "object" },
       TelemetryBatchRequest: { type: "object" },
