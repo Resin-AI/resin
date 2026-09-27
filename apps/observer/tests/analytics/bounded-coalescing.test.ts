@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent, ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -667,8 +668,10 @@ function createUploadRecorder(options: { maxBatchSize?: number; maxBatchBytes?: 
       rejectedCount: 0,
     };
   });
+  const pipeline = new NormalizationPipeline();
+  pipeline.registerDecoder(new OmpRecordDecoder());
   const coordinator = new TrajectoryCaptureCoordinator({
-    pipeline: new NormalizationPipeline(),
+    pipeline,
     observationClient: createMockObservationClient({
       sendTrajectoryObservationBatch: vi.fn(),
       sendObservationBatch,
@@ -681,6 +684,59 @@ function createUploadRecorder(options: { maxBatchSize?: number; maxBatchBytes?: 
 
 function causalSequences(batch: readonly NormalizedSessionEvent[]): number[] {
   return batch.map((event) => event.causalRef.causalSequence);
+}
+
+/** An OMP transcript line: an assistant step, optionally requesting a tool call. */
+function createOmpRecord(
+  sessionId: string,
+  sequenceNumber: number,
+  message: Record<string, unknown>,
+): RawHarnessRecord {
+  const timestamp = new Date().toISOString();
+  return {
+    recordId: `rec_omp_${sequenceNumber}_${randomUUID().slice(0, 8)}`,
+    sessionId,
+    harnessId: "omp",
+    sequenceNumber,
+    timestamp,
+    recordType: "transcript_line",
+    rawPayload: JSON.stringify({
+      type: "message",
+      id: `m${sequenceNumber}`,
+      timestamp,
+      message,
+    }),
+    cursor: {
+      offset: sequenceNumber * 100,
+      line: sequenceNumber,
+      sequence: sequenceNumber,
+      timestamp,
+    },
+    metadata: {},
+  };
+}
+
+function ompAssistantRequestingTool(callId: string) {
+  return {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Checking the repository." },
+      { type: "toolCall", id: callId, name: "bash", arguments: { command: "ls" } },
+    ],
+  };
+}
+
+function ompToolResult(callId: string) {
+  return {
+    role: "toolResult",
+    toolCallId: callId,
+    toolName: "bash",
+    content: [{ type: "text", text: "README.md" }],
+  };
+}
+
+function ompAssistantReply() {
+  return { role: "assistant", content: [{ type: "text", text: "Everything is clean." }] };
 }
 
 describe("Observation upload policy (default window, caps and immediate triggers)", () => {
@@ -724,6 +780,84 @@ describe("Observation upload policy (default window, caps and immediate triggers
     expect(causalSequences(batches[0])).toEqual([1, 2]);
     expect(ack1).toHaveBeenCalledTimes(1);
     expect(ack2).toHaveBeenCalledTimes(1);
+  });
+
+  it("an assistant step that requests a tool call is mid-turn and keeps the full window", async () => {
+    const { batches, sendObservationBatch, coordinator } = createUploadRecorder();
+    const session = {
+      ...createMockHarnessSession("sess_policy_mid_turn", "active"),
+      harnessId: "omp",
+    };
+
+    await coordinator.handleRecords(
+      session,
+      [createOmpRecord(session.sessionId, 1, ompAssistantRequestingTool("call_1"))],
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    expect(sendObservationBatch).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(
+      OBSERVATION_UPLOAD_POLICY.windowMs - OBSERVATION_UPLOAD_POLICY.turnHintWindowMs,
+    );
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+    // The step really carried an assistant message and its tool request.
+    const types = batches[0].map((event) =>
+      event.type === "message" ? `message:${event.role}` : event.type,
+    );
+    expect(types).toContain("message:assistant");
+    expect(types).toContain("tool_call");
+  });
+
+  it("an assistant reply after the tool results settles the turn and shortens the window", async () => {
+    const { batches, sendObservationBatch, coordinator } = createUploadRecorder();
+    const session = {
+      ...createMockHarnessSession("sess_policy_settled", "active"),
+      harnessId: "omp",
+    };
+
+    await coordinator.handleRecords(
+      session,
+      [
+        createOmpRecord(session.sessionId, 1, ompAssistantRequestingTool("call_1")),
+        createOmpRecord(session.sessionId, 2, ompToolResult("call_1")),
+      ],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await coordinator.handleRecords(
+      session,
+      [createOmpRecord(session.sessionId, 3, ompAssistantReply())],
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs - 1);
+    expect(sendObservationBatch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+    expect(batches[0].length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("a delivery ending in a settled reply shortens the window even if it began mid-turn", async () => {
+    const { sendObservationBatch, coordinator } = createUploadRecorder();
+    const session = {
+      ...createMockHarnessSession("sess_policy_settled_same_delivery", "active"),
+      harnessId: "omp",
+    };
+
+    await coordinator.handleRecords(
+      session,
+      [
+        createOmpRecord(session.sessionId, 1, ompAssistantRequestingTool("call_1")),
+        createOmpRecord(session.sessionId, 2, ompToolResult("call_1")),
+        createOmpRecord(session.sessionId, 3, ompAssistantReply()),
+      ],
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
   });
 
   it("a turn hint never lengthens a window that ends sooner than the hint bound", async () => {

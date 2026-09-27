@@ -37,8 +37,12 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
  * ~6 events each, so the fixed per-request cost dominated. A longer window amortizes it over more
  * events while bounded latency is kept for detection:
  * - `windowMs`: a batch is sent at most 15 s after its first buffered event.
- * - `turnHintWindowMs`: a settled turn (assistant reply/completion) no longer forces a send; it
- *   shortens the remaining window to at most 5 s so detection still sees the turn promptly.
+ * - `turnHintWindowMs`: turn boundaries no longer force a send. A settled turn (an assistant reply
+ *   that requests no tool call, i.e. the agent now waits on the user) shortens the remaining
+ *   window to at most 5 s so the cloud's detection gate sees it promptly. Assistant steps that
+ *   request tools are mid-turn and keep the full window: in agent sessions nearly every step is
+ *   an assistant message, and replaying local sessions showed hinting on every step would keep
+ *   ~62% of today's uploads versus ~40% when only settled turns hint.
  * - Session end, terminal lifecycle events and shutdown/stop (`waitForIdle`/`flush`) still send
  *   immediately; unsent records are never acknowledged to the tailer, so nothing is lost.
  * - `maxEvents`/`maxBytes`: send early once a batch is large. Cloud ingestion allows at most 1,000
@@ -1021,7 +1025,7 @@ export class TrajectoryCaptureCoordinator {
           }
         } else {
           this.scheduleGenericFlush(sessionId, buffer, "window", this.coalesceDwellMs);
-          if (this.isTurnHint(records, validEvents)) {
+          if (this.isSettledTurn(records, validEvents)) {
             this.shortenGenericFlushWindow(sessionId, buffer, this.turnHintDwellMs);
           }
         }
@@ -1082,26 +1086,50 @@ export class TrajectoryCaptureCoordinator {
     );
   }
 
-  /** A settled turn (assistant reply or completion): shortens the window, never forces a send. */
-  private isTurnHint(
+  /**
+   * A settled turn: the delivery ends with an assistant reply that requests no tool call, so the
+   * agent is waiting on the user. That is what the cloud's detection gate needs promptly, so it
+   * shortens the window; an assistant step that requests tools keeps the full window because the
+   * agent carries on. Tool calls requested by the same source record share its causal sequence.
+   */
+  private isSettledTurn(
     records: readonly RawHarnessRecord[],
     events: readonly NormalizedSessionEvent[],
   ): boolean {
-    for (const record of records) {
+    let lastToolCallSequence = Number.NEGATIVE_INFINITY;
+    for (const ev of events) {
+      if (ev.type === "tool_call") {
+        lastToolCallSequence = Math.max(lastToolCallSequence, ev.causalRef.causalSequence);
+      }
+    }
+    if (
+      events.some(
+        (ev) =>
+          ev.type === "message" &&
+          ev.role === "assistant" &&
+          ev.causalRef.causalSequence > lastToolCallSequence,
+      )
+    ) {
+      return true;
+    }
+    // Record-level completion markers carry no call detail; trust them only when this delivery
+    // requested no tool at all.
+    if (lastToolCallSequence !== Number.NEGATIVE_INFINITY) {
+      return false;
+    }
+    return records.some((record) => {
       if (record.recordType === "completion") {
         return true;
       }
       const rawPayload = record.rawPayload;
-      if (rawPayload && typeof rawPayload === "object") {
-        if ("type" in rawPayload && rawPayload.type === "completion") {
-          return true;
-        }
-        if ("role" in rawPayload && rawPayload.role === "assistant") {
-          return true;
-        }
+      if (!rawPayload || typeof rawPayload !== "object") {
+        return false;
       }
-    }
-    return events.some((ev) => ev.type === "message" && ev.role === "assistant");
+      return (
+        ("type" in rawPayload && rawPayload.type === "completion") ||
+        ("role" in rawPayload && rawPayload.role === "assistant")
+      );
+    });
   }
 
   private scheduleGenericFlush(
