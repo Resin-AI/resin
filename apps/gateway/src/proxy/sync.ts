@@ -13,10 +13,11 @@ import {
   normalizeSha256,
 } from "@resin/contracts";
 import type { LocalPreactivationChecker, SigningKeyStore } from "@resin/observer";
-import type {
-  AccountToolAccessResponse,
-  CatalogSnapshotResponse,
-  StreamCatalogInvalidation,
+import {
+  type AccountToolAccessResponse,
+  type CatalogSnapshotResponse,
+  type StreamCatalogInvalidation,
+  ValidationError,
 } from "@resin/protocol";
 import {
   type ArtifactCache,
@@ -38,8 +39,9 @@ import type { RegistryTool } from "../registry/types.js";
 import { computeManifestDigest } from "../registry/validator.js";
 import type { CloudCatalogCache } from "./cache.js";
 import type { CloudCircuitBreaker } from "./circuit-breaker.js";
-import type { CloudCatalogClient } from "./client.js";
+import type { CatalogSnapshotFetchResult, CloudCatalogClient } from "./client.js";
 import type { CloudInvocationRouter } from "./router.js";
+import type { SharedCloudSync } from "./shared-sync.js";
 import type { ManagedToolAccess, ManagedToolConfirmation } from "./tool-access.js";
 
 export interface LockedSyncIdentity extends TrustIdentity {
@@ -103,6 +105,11 @@ export interface CloudCatalogSyncOptions {
   allowDevKeys?: boolean;
   isPinned?: (toolId: string) => boolean;
   managedToolAccess?: ManagedToolAccess;
+  /**
+   * Shares catalog and tool-access answers with the other gateways of this OS user, so one cloud
+   * call per interval serves all of them. Without it every sync calls the cloud directly.
+   */
+  sharedSync?: SharedCloudSync;
 }
 
 export interface ToolLockTuple {
@@ -115,6 +122,19 @@ export interface ToolLockTuple {
 }
 
 const ZERO_DIGEST = "0".repeat(64);
+
+/** A tool the last clean reconciliation left active, with the digests it was activated under. */
+interface SettledTool {
+  toolId: string;
+  version: string;
+  expected?: { manifestDigest?: string; artifactDigest?: string; envelopeDigest?: string };
+}
+
+interface SettledReconcile {
+  fingerprint: string;
+  activeTools: SettledTool[];
+}
+
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 
 function workspaceScopeId(workspaceId: string | undefined): string {
@@ -169,6 +189,11 @@ export class CloudCatalogSyncCoordinator {
   private inFlightSync: Promise<CatalogSnapshotResponse> | null = null;
   private readonly options: CloudCatalogSyncOptions;
   private catalogSyncEnabled = true;
+  /**
+   * Fingerprint of everything the last downstream reconciliation read, recorded only when it
+   * left nothing to retry. An unchanged catalog skips reconciliation while this still matches.
+   */
+  private settledReconcile?: SettledReconcile;
 
   constructor(options: CloudCatalogSyncOptions) {
     this.options = options;
@@ -215,6 +240,7 @@ export class CloudCatalogSyncCoordinator {
    * manager and workspace scope are supplied when the workspace becomes ready.
    */
   bindWorkspace(binding: WorkspaceSyncBinding): void {
+    this.settledReconcile = undefined;
     if (binding.workspaceId !== undefined) {
       this.workspaceId = binding.workspaceId;
     }
@@ -231,10 +257,11 @@ export class CloudCatalogSyncCoordinator {
   }
 
   /**
-   * Performs an immediate sync cycle (deduplicating concurrent callers).
+   * Performs an immediate sync cycle (deduplicating concurrent callers). `fresh` refuses a peer
+   * gateway's shared answer that predates this call, for example after an invalidation.
    */
-  async sync(): Promise<CatalogSnapshotResponse> {
-    return this.runSync(true);
+  async sync(options: { fresh?: boolean } = {}): Promise<CatalogSnapshotResponse> {
+    return this.runSync(true, options.fresh === true);
   }
 
   setCatalogSyncEnabled(enabled: boolean): void {
@@ -255,7 +282,7 @@ export class CloudCatalogSyncCoordinator {
     };
   }
 
-  private async runSync(includeCatalog: boolean): Promise<CatalogSnapshotResponse> {
+  private async runSync(includeCatalog: boolean, fresh = false): Promise<CatalogSnapshotResponse> {
     if (this.inFlightSync) return this.inFlightSync;
     this.inFlightSync = (async () => {
       const access = this.options.managedToolAccess;
@@ -269,7 +296,9 @@ export class CloudCatalogSyncCoordinator {
         const observedConfirmation = access.captureConfirmation?.();
         let confirmation: AccountToolAccessResponse | null = null;
         try {
-          confirmation = await this.client.fetchToolAccess(access.identity);
+          confirmation = this.options.sharedSync
+            ? await this.options.sharedSync.fetchToolAccess(access.identity, this.intervalMs)
+            : await this.client.fetchToolAccess(access.identity);
         } catch (error) {
           this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
         }
@@ -293,6 +322,7 @@ export class CloudCatalogSyncCoordinator {
           this.activeConfirmation = observedConfirmation;
         }
         if (access.isInactive()) {
+          this.settledReconcile = undefined;
           this.cache.clear();
           try {
             await access.cleanup(this.registry);
@@ -312,7 +342,7 @@ export class CloudCatalogSyncCoordinator {
         }
       }
       if (includeCatalog && this.catalogSyncEnabled) {
-        return await this.syncCatalogOnce();
+        return await this.syncCatalogOnce(fresh);
       }
       if (includeCatalog && this.lockManager) {
         return await this.executeOfflineSync();
@@ -331,26 +361,27 @@ export class CloudCatalogSyncCoordinator {
     return this.sync();
   }
 
-  private async syncCatalogOnce(): Promise<CatalogSnapshotResponse> {
+  private async syncCatalogOnce(fresh = false): Promise<CatalogSnapshotResponse> {
     if (this.circuitBreaker && !this.circuitBreaker.canExecute()) {
       this.options.onSyncCircuitBroken?.();
       return this.executeOfflineSync();
     }
 
     try {
-      const cachedSnapshot = this.cache.getSnapshot(this.workspaceId);
-      let snapshot: CatalogSnapshotResponse;
+      const cachedSnapshot = this.cache.getSnapshot(this.workspaceId) ?? undefined;
+      let fetched: { snapshot: CatalogSnapshotResponse; unchanged: boolean };
       try {
-        snapshot = await this.client.fetchCatalogSnapshot({
-          currentVersion: cachedSnapshot?.snapshotVersion,
-        });
+        fetched = await this.fetchCatalog(cachedSnapshot, fresh);
       } catch (fetchError: unknown) {
         this.options.onSyncError?.(
           fetchError instanceof Error ? fetchError : new Error(String(fetchError)),
         );
         return await this.executeOfflineSync();
       }
+      const { snapshot, unchanged } = fetched;
 
+      // An unchanged answer is a current sync too: re-ingesting the held snapshot restarts its
+      // freshness windows exactly as a refetch of the same bytes would.
       if (snapshot.tools && snapshot.tools.length > 0) {
         this.cache.setSnapshot(snapshot, { workspaceId: this.workspaceId });
       }
@@ -370,16 +401,15 @@ export class CloudCatalogSyncCoordinator {
         }
       }
 
-      if (this.lockManager) {
-        await this.syncLockedToolsWithCatalog(snapshot);
-      } else if (this.autoRegisterInRegistry && this.registry && snapshot.tools) {
-        await this.reconcileRegistry(snapshot.tools);
+      if (!unchanged || !this.reconcileSettled(snapshot)) {
+        await this.reconcileSnapshot(snapshot);
       }
 
       this.options.onSyncSuccess?.(snapshot);
 
       return snapshot;
     } catch (error: unknown) {
+      this.settledReconcile = undefined;
       const normalizedError = error instanceof Error ? error : new Error(String(error));
 
       if (this.circuitBreaker) {
@@ -393,9 +423,169 @@ export class CloudCatalogSyncCoordinator {
   }
 
   /**
+   * Fetches the catalog relative to the snapshot this gateway holds. `unchanged` is accepted only
+   * for exactly that version; any other `unchanged` is a protocol error, answered by one full
+   * refetch that does not advertise the capability.
+   */
+  private async fetchCatalog(
+    held: CatalogSnapshotResponse | undefined,
+    fresh: boolean,
+  ): Promise<{ snapshot: CatalogSnapshotResponse; unchanged: boolean }> {
+    const result: CatalogSnapshotFetchResult = this.options.sharedSync
+      ? await this.options.sharedSync.fetchCatalog({
+          current: held,
+          maxAgeMs: this.intervalMs,
+          fresh,
+        })
+      : await this.client.fetchCatalogSnapshotResult({
+          currentVersion: held?.snapshotVersion,
+          acceptUnchanged: true,
+        });
+    if (result.kind === "snapshot") {
+      return { snapshot: result.snapshot, unchanged: false };
+    }
+    if (held && result.snapshotVersion === held.snapshotVersion) {
+      return { snapshot: held, unchanged: true };
+    }
+    this.options.onSyncError?.(
+      new ValidationError(
+        `Cloud answered 'unchanged' for catalog version '${result.snapshotVersion}' but this gateway ${
+          held ? `holds '${held.snapshotVersion}'` : "holds no snapshot"
+        }; refetching the full snapshot`,
+      ),
+    );
+    const snapshot = await this.client.fetchCatalogSnapshot({
+      currentVersion: held?.snapshotVersion,
+    });
+    return { snapshot, unchanged: false };
+  }
+
+  /**
+   * Runs downstream reconciliation for a snapshot and, when it leaves nothing to retry (no failed,
+   * degraded or held-back tool), records what it read so an unchanged catalog can skip the next one.
+   */
+  private async reconcileSnapshot(snapshot: CatalogSnapshotResponse): Promise<void> {
+    this.settledReconcile = undefined;
+    let activeTools: SettledTool[];
+    if (this.lockManager) {
+      const summary = await this.syncLockedToolsWithCatalog(snapshot);
+      if (
+        summary.failed.length > 0 ||
+        summary.degraded.length > 0 ||
+        summary.newerAvailable.length > 0
+      ) {
+        return;
+      }
+      // Fingerprint the lock this reconciliation ended with instead of reading it again.
+      const reconciledLock = summary.lock;
+      const inputs = reconciledLock && this.reconcileInputs(snapshot, reconciledLock);
+      if (!reconciledLock || !inputs) return;
+      activeTools = summary.activated.flatMap((name) => {
+        const entry = reconciledLock.tools[name];
+        return entry
+          ? [
+              {
+                toolId: entry.toolId,
+                version: entry.version,
+                expected: {
+                  manifestDigest: entry.manifestDigest,
+                  artifactDigest: entry.artifactDigest,
+                  envelopeDigest: entry.envelopeDigest,
+                },
+              },
+            ]
+          : [];
+      });
+      this.settledReconcile = { fingerprint: inputs.fingerprint, activeTools };
+      return;
+    }
+    if (this.autoRegisterInRegistry && this.registry && snapshot.tools) {
+      if (!(await this.reconcileRegistry(snapshot.tools))) return;
+      activeTools = snapshot.tools.map((tool) => ({ toolId: tool.id, version: tool.version }));
+    } else {
+      activeTools = [];
+    }
+    const inputs = this.reconcileInputs(snapshot);
+    if (inputs) {
+      this.settledReconcile = { fingerprint: inputs.fingerprint, activeTools };
+    }
+  }
+
+  /**
+   * Whether reconciling `snapshot` again would change nothing: the last clean reconciliation read
+   * the same snapshot, lock, workspace and access proof, and every tool it activated is still active.
+   */
+  private reconcileSettled(snapshot: CatalogSnapshotResponse): boolean {
+    const settled = this.settledReconcile;
+    const workspaceId = this.workspaceId;
+    if (!settled || !workspaceId) return false;
+    const inputs = this.reconcileInputs(snapshot);
+    if (!inputs || inputs.fingerprint !== settled.fingerprint) return false;
+    const registry = this.registry;
+    if (!registry) return true;
+    return settled.activeTools.every(
+      (tool) =>
+        registry.isToolActiveForWorkspace?.(
+          tool.toolId,
+          tool.version,
+          workspaceId,
+          tool.expected,
+        ) === true,
+    );
+  }
+
+  private reconcileInputs(
+    snapshot: CatalogSnapshotResponse,
+    reconciledLock?: V1ToolLock,
+  ): { fingerprint: string } | undefined {
+    if (!this.workspaceId) return undefined;
+    let lock: V1ToolLock | undefined = reconciledLock;
+    if (this.lockManager && !lock) {
+      try {
+        lock = this.lockManager.read();
+      } catch {
+        return undefined;
+      }
+    }
+    const confirmation = this.activeConfirmation;
+    const fingerprint = hashCanonicalContent({
+      snapshotVersion: snapshot.snapshotVersion,
+      checksum: snapshot.checksum,
+      workspaceId: this.workspaceId,
+      lockPath: this.lockManager?.lockPath,
+      // Only what reconciliation acts on, so an equal lock fingerprints equally however it was read.
+      lock: lock && {
+        projectId: lock.projectId,
+        tools: Object.fromEntries(
+          Object.entries(lock.tools).map(([name, entry]) => [
+            name,
+            {
+              toolId: entry.toolId,
+              version: entry.version,
+              manifestDigest: entry.manifestDigest,
+              artifactDigest: entry.artifactDigest,
+              envelopeDigest: entry.envelopeDigest,
+              status: entry.status,
+            },
+          ]),
+        ),
+      },
+      confirmation: confirmation && {
+        cloudUrl: confirmation.cloudUrl,
+        accountId: confirmation.accountId,
+        userId: confirmation.userId,
+        toolAccess: confirmation.toolAccess,
+        revocationId: confirmation.revocationId,
+      },
+    });
+    return { fingerprint };
+  }
+
+  /**
    * Executes offline synchronization using local lockfile, cached artifacts, and trust store.
    */
   private async executeOfflineSync(): Promise<CatalogSnapshotResponse> {
+    this.settledReconcile = undefined;
     if (this.lockManager) {
       await this.reconcileLockedToolsOffline();
     }
@@ -447,7 +637,7 @@ export class CloudCatalogSyncCoordinator {
    */
   private async syncLockedToolsWithCatalog(
     snapshot: CatalogSnapshotResponse,
-  ): Promise<LockedToolSyncSummary> {
+  ): Promise<LockedToolSyncSummary & { lock?: V1ToolLock }> {
     if (!this.lockManager) {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
@@ -456,6 +646,7 @@ export class CloudCatalogSyncCoordinator {
     this.bindRegistryLock(currentLock);
 
     const newerAvailable: string[] = [];
+    const reconcileFailures: string[] = [];
 
     if (snapshot.tools && snapshot.tools.length > 0) {
       for (const manifest of snapshot.tools) {
@@ -545,6 +736,7 @@ export class CloudCatalogSyncCoordinator {
               manifest.name,
               reconcileError instanceof Error ? reconcileError : new Error(String(reconcileError)),
             );
+            reconcileFailures.push(manifest.name);
             continue;
           }
         }
@@ -587,7 +779,12 @@ export class CloudCatalogSyncCoordinator {
     }
     this.bindRegistryLock(currentLock);
     const summary = await this.activateLockedEntries(currentLock, snapshot, true);
-    return summary;
+    return {
+      ...summary,
+      failed: [...summary.failed, ...reconcileFailures],
+      newerAvailable,
+      lock: currentLock,
+    };
   }
 
   /**
@@ -1017,6 +1214,7 @@ export class CloudCatalogSyncCoordinator {
     if (event.workspaceId && event.workspaceId !== this.workspaceId && event.workspaceId !== "*") {
       return;
     }
+    this.settledReconcile = undefined;
 
     if (event.reason === "emergency_revocation" || event.reason === "tool_deprecated") {
       const toolIds: string[] = Array.isArray(event.toolIds) ? event.toolIds : [];
@@ -1049,19 +1247,21 @@ export class CloudCatalogSyncCoordinator {
         });
       }
     } else if (this.autoRegisterInRegistry) {
-      await this.sync();
+      await this.sync({ fresh: true });
     }
   }
 
   /**
-   * Registers/updates all cloud tools in ToolRegistry (legacy/unlocked helper).
+   * Registers/updates all cloud tools in ToolRegistry (legacy/unlocked helper). Returns whether
+   * every tool was registered and activated in a bound workspace.
    */
-  private async reconcileRegistry(tools: ToolManifest[]): Promise<void> {
+  private async reconcileRegistry(tools: ToolManifest[]): Promise<boolean> {
     if (!this.registry) {
-      return;
+      return false;
     }
 
     const workspaceId = this.workspaceId;
+    let allActivated = workspaceId !== undefined;
     for (const tool of tools) {
       const meta = tool.metadata && tool.metadata instanceof Object ? tool.metadata : undefined;
       const metaManifestDigest =
@@ -1123,6 +1323,7 @@ export class CloudCatalogSyncCoordinator {
           await this.registry.activateToolVersion(tool.id, tool.version, workspaceId);
         } catch {
           // Ignore activation failure for legacy reconcile
+          allActivated = false;
         }
       }
     }
@@ -1138,6 +1339,7 @@ export class CloudCatalogSyncCoordinator {
       changedToolIds: tools.map((t) => t.id),
       timestamp: new Date().toISOString(),
     });
+    return allActivated;
   }
 }
 
