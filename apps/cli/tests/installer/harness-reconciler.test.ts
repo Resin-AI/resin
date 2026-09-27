@@ -1419,6 +1419,9 @@ describe("Codex guidance reconciliation", () => {
     });
     const content = await bridge.readFile(agentsPath);
     expect(content?.startsWith("# User rules\n\n<!-- resin:codex-guidance:start -->")).toBe(true);
+    // Direct tool calling defers learned tools behind tool_search; Code Mode nests them in exec.
+    expect(content).toContain("call `tool_search`");
+    expect(content).toContain("text(ALL_TOOLS.filter(");
 
     const again = await reconcileCodex(bridge, false);
     expect(again.results[0]).toMatchObject({ changed: false, guidance: { action: "unchanged" } });

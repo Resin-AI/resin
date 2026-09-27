@@ -4,6 +4,7 @@ import {
   applyManagedBlock,
   defaultFsBridge,
 } from "@resin/harness-contracts";
+import { ompMcpToolName } from "./device-surface.js";
 import { resolveOmpHome } from "./discovery.js";
 
 export const DEFAULT_APPEND_SYSTEM_FILENAME = path.join("agent", "APPEND_SYSTEM.md");
@@ -49,12 +50,11 @@ const OMP_CATALOG_MARKERS: ManagedBlockMarkers = {
 
 /**
  * Renders the per-tool invocation convention for Oh My Pi sessions.
- * OMP surfaces MCP tools as `xd://mcp__<server>_<tool>` paths: writing JSON
+ * OMP surfaces MCP tools as `xd://<registered tool name>` paths: writing JSON
  * args to the path invokes the tool; reading it returns its documentation.
  */
 export function renderOmpInvocationSnippet(toolName: string, serverName: string): string {
-  const server = serverName.replace(/-/g, "_");
-  const path = `xd://mcp__${server}_${toolName}`;
+  const path = `xd://${ompMcpToolName(serverName, toolName)}`;
   return [
     `- **Invoke**: write the JSON arguments to \`${path}\` (e.g. \`write\` \`{"path": "${path}", "content": "{}"}\` when the tool takes no inputs).`,
     `- **Docs**: \`read\` \`${path}\` returns the tool's documentation.`,

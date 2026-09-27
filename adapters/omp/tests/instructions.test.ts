@@ -19,6 +19,25 @@ describe("renderOmpInvocationSnippet", () => {
     expect(snippet).toContain("write");
     expect(snippet).toContain("read");
   });
+
+  // The expected path is OMP's own spelling: `Bun.hash` of the prefixed name, cut at 64.
+  it("points at the name OMP registers when the prefixed tool name exceeds 64 characters", () => {
+    const toolName = "summarize_release_bundle_pipeline_failures_for_every_workspace";
+    const snippet = renderOmpInvocationSnippet(toolName, "resin");
+    const devicePath = "xd://mcp__resin_summarize_release_bundle_pipeline_failures_f_34nx232x";
+    expect(`mcp__resin_${toolName}`.length).toBeGreaterThan(64);
+    expect(snippet).toContain(`\`${devicePath}\``);
+    expect(snippet).not.toContain(`xd://mcp__resin_${toolName}`);
+  });
+
+  it("spells the server and tool the way OMP normalizes them", () => {
+    expect(renderOmpInvocationSnippet("resin_Git-Status", "resin-dev")).toContain(
+      "`xd://mcp__resin_dev_resin_git_status`",
+    );
+    expect(renderOmpInvocationSnippet("resin_git_status", "resin")).toContain(
+      "`xd://mcp__resin_git_status`",
+    );
+  });
 });
 
 describe("buildOmpCatalogInstructionsBlock", () => {
