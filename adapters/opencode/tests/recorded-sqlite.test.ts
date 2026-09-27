@@ -108,7 +108,7 @@ describe("OpenCode 1.18.32 recorded SQLite store", () => {
     const subagent = events.filter((e) => e.type === "subagent_lifecycle");
     expect(subagent.map((e) => [e.lifecycleType, e.subagentId, e.parentId])).toEqual([
       ["spawn", CHILD, MAIN],
-      ["end", CHILD, MAIN],
+      ["settle", CHILD, MAIN],
     ]);
   });
 

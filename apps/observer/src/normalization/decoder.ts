@@ -120,7 +120,7 @@ function asCompactionTrigger<T>(
 
 function asSubagentLifecycleType<T>(
   val: T,
-): "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" | "end" | "crash" {
+): "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" {
   const s = asString(val);
   if (
     s === "spawn" ||
@@ -128,14 +128,12 @@ function asSubagentLifecycleType<T>(
     s === "pause" ||
     s === "resume" ||
     s === "terminate" ||
-    s === "settle" ||
-    s === "end" ||
-    s === "crash"
+    s === "settle"
   ) {
     return s;
   }
-  if (s === "complete") return "settle";
-  if (s === "error") return "crash";
+  if (s === "complete" || s === "end") return "settle";
+  if (s === "error" || s === "crash") return "terminate";
   if (s === "kill") return "terminate";
   return "spawn";
 }

@@ -356,7 +356,13 @@ export function decodeClaudeTranscriptLine(
   timestamp = new Date().toISOString(),
   pendingCalls: PendingClaudeToolCalls = new Map(),
 ): IntermediateSessionEvent[] {
-  const events = decodeLineEvents(lineOrPayload, sessionId, sequenceNumber, timestamp, pendingCalls);
+  const events = decodeLineEvents(
+    lineOrPayload,
+    sessionId,
+    sequenceNumber,
+    timestamp,
+    pendingCalls,
+  );
   // Every event of one line shares the line's sequence; its position within the line keeps each
   // one distinct (a tool result and the command it completed would otherwise collide).
   if (events.length > 1) {
@@ -484,15 +490,7 @@ function decodeLineEvents(
     asString(payload.subagentId) !== undefined
   ) {
     const rawLifecycle = asString(payload.lifecycleType)?.toLowerCase();
-    let lifecycleType:
-      | "spawn"
-      | "start"
-      | "pause"
-      | "resume"
-      | "terminate"
-      | "settle"
-      | "end"
-      | "crash" = "spawn";
+    let lifecycleType: "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" = "spawn";
 
     if (
       rawLifecycle === "spawn" ||
@@ -500,11 +498,13 @@ function decodeLineEvents(
       rawLifecycle === "pause" ||
       rawLifecycle === "resume" ||
       rawLifecycle === "terminate" ||
-      rawLifecycle === "settle" ||
-      rawLifecycle === "end" ||
-      rawLifecycle === "crash"
+      rawLifecycle === "settle"
     ) {
       lifecycleType = rawLifecycle;
+    } else if (rawLifecycle === "end") {
+      lifecycleType = "settle";
+    } else if (rawLifecycle === "crash") {
+      lifecycleType = "terminate";
     } else if (rawType.includes("start")) {
       lifecycleType = "start";
     } else if (
@@ -573,9 +573,10 @@ function decodeLineEvents(
           type: "compaction",
           sessionId,
           timestamp: recordTime,
-          triggerReason:
-            trigger === "manual" ? "manual" : trigger === "auto" ? "context_limit" : undefined,
-          tokensBefore: asNumber(compact?.preTokens),
+          triggerReason: trigger === "manual" ? "manual" : "context_limit",
+          // 2.1.x boundaries record only the pre-compaction size; an unrecorded size is 0.
+          tokensBefore: asNumber(compact?.preTokens) ?? 0,
+          tokensAfter: asNumber(compact?.postTokens) ?? 0,
           originalTokenCount: asNumber(compact?.preTokens) ?? 0,
           compactedTokenCount: asNumber(compact?.postTokens) ?? 0,
         },
@@ -963,7 +964,10 @@ function decodeLineEvents(
     const stopReason = asString(asObject(payload.message)?.stop_reason);
     if (stopReason) {
       for (const event of assistantTurnEvents) {
-        event.metadata = { ...event.metadata, [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: stopReason };
+        event.metadata = {
+          ...event.metadata,
+          [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: stopReason,
+        };
       }
     }
 

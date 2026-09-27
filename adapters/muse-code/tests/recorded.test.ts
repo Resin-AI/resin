@@ -176,7 +176,7 @@ describe("muse 1.4.0 interrupted side effects are never successes", () => {
     const events = await decodeLog(logPath("abort", ABORT_ID), ABORT_ID);
     const [result] = ofType(events, "tool_result");
     expect(result?.toolName).toBe("bash");
-    expect(result?.isError).toBeUndefined();
+    expect(result?.isError).toBe(true);
     expect(result?.metadata?.museOutcome).toBe("unknown");
     expect(ofType(events, "command_exec")).toHaveLength(0);
   });
@@ -192,7 +192,7 @@ describe("muse 1.4.0 interrupted side effects are never successes", () => {
     const after = await decodeLog(logPath("kill", KILL_ID), KILL_ID);
     const [result] = ofType(after, "tool_result");
     expect(String(result?.result)).toContain("The outcome is unknown");
-    expect(result?.isError).toBeUndefined();
+    expect(result?.isError).toBe(true);
     expect(result?.metadata?.museOutcome).toBe("unknown");
     expect(ofType(after, "command_exec")).toHaveLength(0);
     expect(ofType(after, "session_lifecycle").map((event) => event.lifecycleType)).toContain(

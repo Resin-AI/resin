@@ -204,6 +204,9 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
             eventId: payload.part.id,
             timestamp: iso(payload.message.time?.created, fallbackTime),
             triggerReason: payload.part.auto === true ? "context_limit" : "manual",
+            // OpenCode's compaction part records no token counts.
+            tokensBefore: 0,
+            tokensAfter: 0,
             metadata: { messageId: payload.message.id },
           },
         ];
@@ -447,7 +450,7 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         timestamp,
         subagentId: childSession,
         parentId: sessionId,
-        lifecycleType: isError ? "crash" : "end",
+        lifecycleType: isError ? "terminate" : "settle",
       });
     }
     return events;

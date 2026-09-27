@@ -261,7 +261,7 @@ function mentionsTools(node: AstNode): boolean {
  * callbacks that never mention `tools` passed to a pure array method (`ALL_TOOLS.filter(t => …)`):
  * with no `tools` reference, even a deferred callback cannot start a command. Nothing can defer,
  * alias `tools`, or construct objects, and the only calls are `text`, `String`, `tools.*`,
- * `Promise.allSettled`, and the pure methods below. Anything else is not proven.
+ * `Promise.allSettled`, callback-free `JSON.stringify`/`JSON.parse`, and the pure methods below. Anything else is not proven.
  */
 export function settlesBeforeCompletion(source: string): boolean {
   if (source.length > 32_768) return false;
@@ -407,6 +407,14 @@ export function settlesBeforeCompletion(source: string): boolean {
         const member = memberName(callee);
         if (member !== undefined && isNamed(member.object, "tools")) break;
         if (isSettlement(node)) break;
+        // `JSON.stringify(result)` / `JSON.parse(text)` without a reviver or replacer callback.
+        if (
+          member !== undefined &&
+          isNamed(member.object, "JSON") &&
+          (member.property === "stringify" || member.property === "parse") &&
+          (node.arguments as AstNode[]).every((arg) => arg.type !== "ArrowFunctionExpression")
+        )
+          break;
         if (member !== undefined && Object.hasOwn(PURE_METHODS, member.property)) {
           const args = node.arguments as AstNode[];
           if (
