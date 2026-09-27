@@ -25,6 +25,13 @@ export const WORKFLOW_CALL_IDENTITY_SLOT = "callable:v1";
  */
 export const WORKFLOW_CALL_ORDER_SLOT = "order:v1";
 
+/**
+ * Demonstration slot holding whether a recorded call completed successfully (`"succeeded"`): an
+ * error result, a non-zero exit or a suppressed result is `"failed"`. Absent for calls recorded
+ * before the recorder kept it, or whose result never arrived.
+ */
+export const WORKFLOW_CALL_OUTCOME_SLOT = "outcome:v1";
+
 /** Demonstration slot holding one whole recorded argument of a call. */
 export function workflowCallArgumentSlot(argument: string): string {
   return `argument:${argument}`;

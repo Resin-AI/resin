@@ -23,6 +23,8 @@ import {
   type WorkflowJsonValue,
   type WorkflowStep,
   type WorkflowValuePath,
+  recordedPosixShell,
+  shellAndChainSegmentText,
   workflowValidationPlanDigest,
 } from "@resin/contracts";
 import {
@@ -154,6 +156,8 @@ async function localDemonstration(
   const located: Array<{ step: WorkflowStep; calls: LocalRecordedCall[] }> = [];
   const incoherent = new Set<string>();
   const named = new Set<string>();
+  // A chain's segments name its one call in turn: segment i may name the call segment i-1 named.
+  const segmentNamed = new Map<string, number>();
   for (const step of recordedSteps) {
     const callIds = callIdsByStep.get(step.id);
     if (callIds === undefined) continue;
@@ -161,10 +165,16 @@ async function localDemonstration(
     const calls: LocalRecordedCall[] = [];
     for (const callId of callIds) {
       // One recorded call is one step of one iteration; the held-out run is a different run.
-      if (named.has(callId) || (label === "held-out" && baselineIds.has(callId))) {
+      const continuesChain =
+        step.segment !== undefined && segmentNamed.get(callId) === step.segment.index - 1;
+      if (
+        (named.has(callId) && !continuesChain) ||
+        (label === "held-out" && baselineIds.has(callId))
+      ) {
         incoherent.add(step.id);
       }
       named.add(callId);
+      if (step.segment !== undefined) segmentNamed.set(callId, step.segment.index);
       const call = await localCalls.lookup(callId);
       if (call === undefined) return undefined;
       calls.push(call);
@@ -193,18 +203,22 @@ async function localDemonstration(
     const iteration = located.map(({ step, calls }) => ({ step, call: calls[item]! }));
     const sessionId = iteration[0]!.call.sessionId;
     if (iteration.some(({ call }) => call.sessionId !== sessionId)) return undefined;
-    // Recorded order: each step's call was recorded after the previous step's, by one recorder.
-    let previous: LocalRecordedCall["sequence"];
+    // Recorded order: each step's call was recorded after the previous step's, by one recorder;
+    // a chain's later segment is the same call as the segment before it.
+    let previous: LocalRecordedCall | undefined;
     for (const { step, call } of iteration) {
       const sequence = call.sequence;
+      const sameChain =
+        step.segment !== undefined && step.segment.index > 0 && previous?.callId === call.callId;
       if (
         sequence === undefined ||
-        (previous !== undefined &&
-          (sequence.epoch !== previous.epoch || sequence.index <= previous.index))
+        (previous?.sequence !== undefined &&
+          !sameChain &&
+          (sequence.epoch !== previous.sequence.epoch || sequence.index <= previous.sequence.index))
       ) {
         unordered.add(step.id);
       }
-      previous = sequence ?? previous;
+      if (sequence !== undefined) previous = call;
     }
     iterations.push(iterationDemonstration(iteration, planRoots));
   }
@@ -219,16 +233,25 @@ function iterationDemonstration(
   located: ReadonlyArray<{ step: WorkflowStep; call: LocalRecordedCall }>,
   planRoots: ReadonlyMap<string, string>,
 ): LocalDemonstration {
+  // A segment this device cannot re-split exactly as the plan did is not in its recording.
+  const calls = located.flatMap(({ step, call }) => {
+    const segment = step.segment === undefined ? call : segmentCall(step, call);
+    return segment === undefined ? [] : [{ step, call: segment }];
+  });
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
-  // calls. A token or leaf it traces to an earlier recorded output must be read by the plan.
+  // calls. A token or leaf it traces to an earlier recorded output must be read by the plan. A
+  // chain printed its output once, after its last segment: no earlier segment produced any of it.
   const derivation = deriveNativeCalls(
-    located.map(({ step, call }) => ({
+    calls.map(({ step, call }) => ({
       callId: call.callId,
       stepId: step.id,
       toolName: call.callable.name,
       runtime: step.callable.runtime,
       arguments: call.arguments,
-      ...(call.result === undefined ? {} : { result: call.result.value }),
+      ...(call.result === undefined ||
+      (step.segment !== undefined && step.segment.index < step.segment.count - 1)
+        ? {}
+        : { result: call.result.value }),
       ...(call.callable.program === undefined
         ? {}
         : {
@@ -258,7 +281,7 @@ function iterationDemonstration(
     observed: [],
     calls: [],
   };
-  for (const { step, call } of located) {
+  for (const { step, call } of calls) {
     const stepId = step.id;
     demonstration.calls.push({ stepId, callIds: [call.callId] });
     for (const [argument, reference] of Object.entries(call.argumentReferences)) {
@@ -281,6 +304,28 @@ function iterationDemonstration(
     });
   }
   return { recording, demonstration };
+}
+
+/**
+ * The recorded call of one segment of a recorded `&&` chain: the chain's call with the segment's
+ * text as its program. Only a chain that completed — its exit status zero, so every segment ran —
+ * in a POSIX shell, re-split by this device into the plan's segment count under the plan's splitter
+ * version, has segments; anything else leaves the segment unrecorded and so missed. Each segment
+ * answers with the chain's recorded output, which only the last segment's readers may read.
+ */
+function segmentCall(step: WorkflowStep, call: LocalRecordedCall): LocalRecordedCall | undefined {
+  const program = call.callable.program;
+  if (
+    step.segment === undefined ||
+    !call.succeeded ||
+    call.result === undefined ||
+    program?.kind !== "shell"
+  )
+    return undefined;
+  if (recordedPosixShell(call.callable.name, call.arguments) === undefined) return undefined;
+  const text = shellAndChainSegmentText(call.arguments[program.argument], step.segment);
+  if (text === undefined) return undefined;
+  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
 }
 
 /** The JSON type of the value at `path`; undefined when absent, null, or not a declarable type. */

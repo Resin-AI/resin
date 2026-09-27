@@ -336,6 +336,13 @@ export type WorkflowStep = {
    */
   optional?: { input: string };
   /**
+   * The step is one command of a recorded shell `&&` chain (see `shell-and-chain.ts`): segment
+   * `index` of `count`, split by splitter `version`. Every segment of the chain is a step of its own
+   * with the chain's callId, its exact segment text as its program, in chain order. Only the last
+   * segment's result may be read: the recording observed the chain's output as a whole.
+   */
+  segment?: { index: number; count: number; version: number };
+  /**
    * Where this step came from. Absent or `recorded`: a call the recording executed. `derivation`:
    * a small Python program a model wrote to compute values from the caller inputs (see
    * `derivation-steps.ts`).
@@ -928,6 +935,110 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
       }
     }
   }
+  if (Array.isArray(workflow.candidates)) {
+    for (const candidate of workflow.candidates) {
+      if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
+    }
+  }
+}
+
+/**
+ * Segment steps of one recorded chain: steps sharing a callId are exactly its segments `0..count-1`,
+ * adjacent and in order, of one shell program, one count and one splitter version; no step shares
+ * a callId otherwise, and nothing reads a segment's result but the chain's last segment's.
+ */
+function validateWorkflowSegments(workflow: Record<string, unknown>, errors: string[]): void {
+  const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  const nonFinal = new Set<string>();
+  const seen = new Set<string>();
+  for (let position = 0; position < steps.length; position += 1) {
+    const step = steps[position]!;
+    const stepId = String(step.id);
+    const callId = step.callId;
+    const sharing = steps.filter((other) => other !== step && other.callId === callId);
+    if (!Object.hasOwn(step, "segment")) {
+      if (sharing.length > 0) errors.push(`step ${stepId} shares its callId with another step`);
+      continue;
+    }
+    const segment = step.segment;
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    if (
+      !isPlainObject(segment) ||
+      !hasOnlyKeys(segment, ["index", "count", "version"]) ||
+      !Number.isSafeInteger(segment.index) ||
+      !Number.isSafeInteger(segment.count) ||
+      !Number.isSafeInteger(segment.version) ||
+      (segment.count as number) < 2 ||
+      (segment.index as number) < 0 ||
+      (segment.index as number) >= (segment.count as number) ||
+      program?.kind !== "shell"
+    ) {
+      errors.push(
+        `step ${stepId} segment must be an index below a count of two or more of a shell program`,
+      );
+      continue;
+    }
+    const programArgument = Array.isArray(step.arguments)
+      ? step.arguments.find((entry) => isPlainObject(entry) && entry.name === program.argument)
+      : undefined;
+    const source = isPlainObject(programArgument) ? programArgument.source : undefined;
+    const template =
+      isPlainObject(source) && source.kind === "template" ? source.template : undefined;
+    // A segment runs its own text of the recorded chain, sliced from the chain's original source,
+    // so its program argument must be the projected program naming that source.
+    if (
+      !isPlainObject(template) ||
+      template.type !== "program" ||
+      typeof template.sourceReference !== "string" ||
+      !isPlainObject(template.source) ||
+      template.source.type !== "literal" ||
+      template.source.value !== program.source
+    ) {
+      errors.push(`step ${stepId} segment must carry its projected program text`);
+      continue;
+    }
+    if (seen.has(String(callId))) continue;
+    seen.add(String(callId));
+    const chain = steps.slice(position, position + (segment.count as number));
+    const whole =
+      chain.length === segment.count &&
+      sharing.length === (segment.count as number) - 1 &&
+      chain.every(
+        (other, index) =>
+          other.callId === callId &&
+          isPlainObject(other.segment) &&
+          other.segment.index === index &&
+          other.segment.count === segment.count &&
+          other.segment.version === segment.version,
+      );
+    if (!whole) {
+      errors.push(
+        `call ${String(callId)} must be split into all its segments, adjacent and in order`,
+      );
+      continue;
+    }
+    for (const other of chain.slice(0, -1)) nonFinal.add(String(other.id));
+  }
+  if (nonFinal.size === 0) return;
+  const walk = (node: unknown, where: string): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, where);
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    const shape = typeof node.type === "string" ? node.type : node.kind;
+    if (shape === "literal") return;
+    if (
+      (shape === "result" || shape === "extract") &&
+      typeof node.stepId === "string" &&
+      nonFinal.has(node.stepId)
+    ) {
+      errors.push(`${where} binds the result of segment step ${node.stepId}, not its chain's last`);
+    }
+    for (const entry of Object.values(node)) walk(entry, where);
+  };
+  for (const step of steps) walk(step.arguments, `step ${String(step.id)}`);
   if (Array.isArray(workflow.candidates)) {
     for (const candidate of workflow.candidates) {
       if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
@@ -1684,6 +1795,7 @@ export function validateRecordedWorkflow(value: unknown): {
     validateDemonstration("heldOut", value.heldOut, order, declaredPrivates, errors);
   }
   validateWorkflowOptionalSteps(value, errors);
+  validateWorkflowSegments(value, errors);
   // A derivation was never executed by the recording, so no demonstration can have observed it.
   for (const label of ["baseline", "heldOut"] as const) {
     const demonstration = value[label];

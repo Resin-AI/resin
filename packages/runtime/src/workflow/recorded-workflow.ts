@@ -16,6 +16,7 @@ import {
   extractPrintedValue,
   parseExtractLocator,
   programTokenValueAt,
+  segmentOriginal,
   tokenizeProgram,
   validateWorkflowProgramProjection,
   workflowSinkStepIds,
@@ -218,7 +219,16 @@ async function originalProgramText(
         argumentName,
       );
     }
-    return original;
+    // A segment step runs its own command of the recorded chain, never the whole chain.
+    const segment = segmentOriginal(step, argumentName, original);
+    if (typeof segment !== "string") {
+      throw new WorkflowBindingError(
+        "the original program is not the recorded chain this segment was split from",
+        step.id,
+        argumentName,
+      );
+    }
+    return segment;
   }
   const sourceText = await resolveLeaf(template.source);
   if (typeof sourceText !== "string") {

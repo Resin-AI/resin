@@ -61,6 +61,7 @@ import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
 import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
+  WORKFLOW_CALL_OUTCOME_SLOT,
   workflowCallArgumentSlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
@@ -1648,11 +1649,17 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (
+        const succeeded =
           event.isError === false &&
           !suppressResult &&
-          !isLocalWorkflowResultSuppressed(publicEvent)
-        ) {
+          !isLocalWorkflowResultSuppressed(publicEvent);
+        this.localReference(
+          succeeded ? "succeeded" : "failed",
+          event.sessionId,
+          call.callId,
+          WORKFLOW_CALL_OUTCOME_SLOT,
+        );
+        if (succeeded) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
         }

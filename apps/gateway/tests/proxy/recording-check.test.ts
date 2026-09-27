@@ -51,6 +51,7 @@ type Turn =
       parameters: Record<string, unknown>;
       result: string;
       connection?: string;
+      failed?: boolean;
     };
 
 /** Records turns as one session would have produced them; nothing is executed. */
@@ -97,7 +98,7 @@ function record(
       callId: turn.callId,
       toolName: turn.toolName,
       result: turn.result,
-      isError: false,
+      isError: turn.failed === true,
       executionDurationMs: 1,
     });
   }
@@ -676,6 +677,111 @@ describe("a held-out command whose harness chose its own non-program arguments",
       check("inventory-check", "inventory", "Checking billing database", "services/db"),
     );
     expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+  });
+});
+
+describe("a held-out run of one segment of a recorded && chain", () => {
+  const OTHER = "recording-check-chain-session";
+  /** The report job as one OMP bash call ran it: a setup segment, then the report itself. */
+  const report = (callId: string, chain: string, failed = false): Turn[] => [
+    { user: "Produce the monthly report" },
+    { callId, toolName: "bash", parameters: { command: chain }, result: "done\n", failed },
+  ];
+  const EMEA = "mkdir -p out && ./reportctl render --region EMEA";
+  /** The plan's one chain step split into its segments, as the cloud projects and splits it. */
+  function segmented(plan: RecordedWorkflow, texts: string[], version = 1): RecordedWorkflow {
+    const step = plan.steps[0]!;
+    const argument = step.arguments.find((entry) => entry.name === "command")!;
+    const source = argument.source as { kind: "template"; template: { reference: string } };
+    const steps = texts.map((text, index) => ({
+      ...step,
+      id: `${step.id}-${index}`,
+      segment: { index, count: texts.length, version },
+      callable: { ...step.callable, program: { ...step.callable.program!, source: text } },
+      arguments: [
+        {
+          ...argument,
+          source: {
+            kind: "template" as const,
+            template: {
+              type: "program" as const,
+              language: "shell" as const,
+              source: { type: "literal" as const, value: text },
+              sourceReference: source.template.reference,
+              protectedTokens: [],
+              holes: [],
+            },
+          },
+        },
+      ],
+    }));
+    return { ...plan, steps, candidates: [] };
+  }
+  async function ask(heldOut: Turn[], version = 1) {
+    const store = new InMemoryPrivateValueStore();
+    const recorded = record(store, report("emea", EMEA));
+    record(store, heldOut, owner, OTHER);
+    const plan = segmented(recorded, ["mkdir -p out", "./reportctl render --region EMEA"], version);
+    delete (plan as { baseline?: unknown }).baseline;
+    const region = tokenizeProgram("shell", plan.steps[1]!.callable.program!.source).findIndex(
+      (token) => token.raw === "EMEA",
+    );
+    const candidate: WorkflowBindingCandidate = {
+      stepId: plan.steps[1]!.id,
+      argument: "command",
+      path: ["tokens", region],
+      proposed: { kind: "input", name: "region", type: "string" },
+      reason: "varies-across-executions",
+      missing: "a demonstration with a different value",
+    };
+    return validator(store, { sessions: [SESSION, OTHER] })({
+      ...plan,
+      candidates: [candidate],
+      heldOut: {
+        inputs: [],
+        observed: [],
+        calls: plan.steps.map((step) => ({
+          stepId: step.id,
+          callIds: [heldOut[1]!.callId as string],
+        })),
+      },
+    });
+  }
+  const second = (answer: Awaited<ReturnType<typeof ask>>) =>
+    answer.verification?.missed.map((entry) => entry.stepId).some((id) => id.endsWith("-1"));
+
+  it("confirms the report segment's region from the other session's chain", async () => {
+    const answer = await ask(report("apac", "mkdir -p out && ./reportctl render --region APAC"));
+    expect(answer.verification?.status).toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+  });
+
+  it.each([
+    [
+      "the chain exited non-zero",
+      report("apac", "mkdir -p out && ./reportctl render --region APAC", true),
+      1,
+    ],
+    [
+      "the chain split into another count",
+      report("apac", "mkdir -p out && ./reportctl render --region APAC && ls"),
+      1,
+    ],
+    [
+      "the segment ran other text",
+      report("apac", "mkdir -p out && ./reportctl draw --region APAC"),
+      1,
+    ],
+    [
+      "the plan was split by another splitter version",
+      report("apac", "mkdir -p out && ./reportctl render --region APAC"),
+      2,
+    ],
+  ])("misses the segment when %s", async (_, heldOut, version) => {
+    const answer = await ask(heldOut, version);
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(second(answer)).toBe(true);
     expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
   });
 });

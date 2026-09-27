@@ -10,6 +10,7 @@ import {
 import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
+  WORKFLOW_CALL_OUTCOME_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -36,6 +37,8 @@ export interface LocalRecordedCall {
   };
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
+  /** True only when this device recorded that the call completed successfully. */
+  succeeded: boolean;
   /** Absent when the recording kept no successful result for the call. */
   result?: { value: WorkflowJsonValue; reference: string; comparison?: "text-trim" };
   /**
@@ -266,6 +269,12 @@ export function createLocalCallIdentity(options: {
         workspaceId,
       );
       const sequence = order === undefined ? undefined : RecordedCallOrder.safeParse(order.value);
+      const outcome = ownedValue(
+        store,
+        referenceFor(WORKFLOW_CALL_OUTCOME_SLOT),
+        match.representation,
+        workspaceId,
+      );
       const workspaceRoot = discovered.get(match.sessionId);
       return {
         sessionId: match.sessionId,
@@ -273,6 +282,7 @@ export function createLocalCallIdentity(options: {
         callable,
         arguments: args,
         argumentReferences,
+        succeeded: outcome?.value === "succeeded",
         ...(result === undefined ? {} : { result }),
         ...(sequence?.success === true ? { sequence: sequence.data } : {}),
         ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
