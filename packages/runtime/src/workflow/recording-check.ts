@@ -10,6 +10,7 @@
  * code a check runs is a model-written derivation step, through the adapter the caller supplies.
  */
 
+import path from "node:path";
 import {
   type WorkflowJsonValue,
   type WorkflowStep,
@@ -44,6 +45,14 @@ export interface RecordedCall {
    * not read, so it is refused rather than verified.
    */
   hiddenDependencies: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
+  /**
+   * The workspace roots the two sides' working directories stand for: `recorded` is the root of the
+   * session that made this call, `plan` the root of the session the plan's own call ran in. Given
+   * both, a working directory is compared as the place it names within its own root — `.`, the
+   * root's absolute path, and an omitted one are the same — so a repeat recorded in a session that
+   * spelled its directory differently is still the same call. Absent, directories compare as text.
+   */
+  roots?: { recorded: string; plan: string };
 }
 
 /**
@@ -155,13 +164,18 @@ const PROGRAM_CONTEXT_ARGUMENTS: Record<string, true> = {
   patch: true,
 };
 
+/** The working-directory arguments among them: each names a place relative to its session's root. */
+const WORKING_DIRECTORY_ARGUMENTS = ["workdir", "cwd"] as const;
+
 /**
  * The arguments of a call that the check compares: every argument of a call without a program, and
- * the program argument and its context arguments of a process or program call.
+ * the program argument and its context arguments of a process or program call — with each working
+ * directory, when `root` is known, as the place it names under that root.
  */
 function comparedArguments(
   step: WorkflowStep,
   args: Record<string, WorkflowJsonValue>,
+  root: string | undefined,
 ): Record<string, WorkflowJsonValue> {
   const program = step.callable.program;
   const runtime = step.callable.runtime;
@@ -171,11 +185,18 @@ function comparedArguments(
   ) {
     return args;
   }
-  return Object.fromEntries(
+  const compared = Object.fromEntries(
     Object.entries(args).filter(
       ([name]) => name === program.argument || Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name),
     ),
   );
+  if (root === undefined) return compared;
+  for (const name of WORKING_DIRECTORY_ARGUMENTS) {
+    const value = compared[name] ?? ".";
+    if (typeof value !== "string") continue;
+    compared[name] = path.posix.relative(root, path.posix.resolve(root, value));
+  }
+  return compared;
 }
 
 /** Why a resolved call is not the recorded one; undefined when it is. */
@@ -191,8 +212,8 @@ function mismatch(step: WorkflowStep, request: RecordedCallRequest, recorded: Re
   }
   if (
     !deepEqual(
-      comparedArguments(step, request.arguments),
-      comparedArguments(step, recorded.arguments),
+      comparedArguments(step, request.arguments, recorded.roots?.plan),
+      comparedArguments(step, recorded.arguments, recorded.roots?.recorded),
     )
   ) {
     return "resolves to arguments the recording did not pass";

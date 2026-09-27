@@ -658,6 +658,17 @@ describe("a held-out command whose harness chose its own non-program arguments",
     expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
   });
 
+  it("reproduces the other session's call when it spelled the project directory absolutely", async () => {
+    const store = new InMemoryPrivateValueStore();
+    // The harness adapter discovers every session under the workspace root `/nonexistent`.
+    const answer = await heldOutAsk(
+      store,
+      check("inventory-check", "inventory", "Checking inventory integrity", "/nonexistent"),
+    );
+    expect(answer.verification?.status).toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+  });
+
   it("still misses the call when the other session ran it in another directory", async () => {
     const store = new InMemoryPrivateValueStore();
     const answer = await heldOutAsk(
