@@ -587,6 +587,14 @@ export class LocalMcpGateway {
         // Cloud degradation during initialization degrades safely without preventing local MCP initialization
       }
     }
+    // The catalog may have changed while this harness was not connected, which raises no change
+    // event; render its learned-tool instructions from the catalog as it is now.
+    void this.refreshCoordinator?.syncConnectionInstructions(connection).catch((error: unknown) => {
+      this.logger?.(
+        "warn",
+        `Learned-tool instructions sync failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
 
     return {
       protocolVersion: LATEST_PROTOCOL_VERSION,

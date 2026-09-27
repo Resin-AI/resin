@@ -56,6 +56,17 @@ export function renderCatalogInstructions(
     .trim();
 }
 
+function harnessWorkspace(conn: McpConnection, harnessId: string): HarnessWorkspace {
+  return {
+    workspaceId: conn.workspaceContext.workspaceId,
+    name: conn.workspaceContext.name || conn.workspaceContext.workspaceId,
+    rootPath: conn.workspaceContext.canonicalRoot,
+    configPath: path.join(conn.workspaceContext.canonicalRoot, ".config"),
+    harnessId,
+    metadata: {},
+  };
+}
+
 /**
  * Outcome priority order for selecting the primary outcome of a refresh attempt.
  */
@@ -159,6 +170,21 @@ export class CatalogRefreshCoordinator {
     if (options.registry) {
       this.attachRegistry(options.registry);
     }
+  }
+
+  /**
+   * Renders the learned-tool instructions for a newly initialized connection from the workspace's
+   * current catalog. Change events rewrite them afterwards; this covers a catalog that changed while
+   * no client was connected, which raises no event.
+   */
+  async syncConnectionInstructions(conn: McpConnection): Promise<void> {
+    const adapter = this.adapters.get(conn.harnessId);
+    if (!adapter?.syncCatalogInstructions || !this.gateway?.listLearnedTools) return;
+    const learned = await this.gateway.listLearnedTools(conn.workspaceContext);
+    await adapter.syncCatalogInstructions(harnessWorkspace(conn, conn.harnessId), {
+      markdown: renderCatalogInstructions(learned),
+      toolNames: learned.map((tool) => tool.name),
+    });
   }
 
   /**
@@ -409,14 +435,7 @@ export class CatalogRefreshCoordinator {
         });
 
         if (adapter?.notifyCatalogRefresh) {
-          const workspace: HarnessWorkspace = {
-            workspaceId: conn.workspaceContext.workspaceId,
-            name: conn.workspaceContext.name || conn.workspaceContext.workspaceId,
-            rootPath: conn.workspaceContext.canonicalRoot,
-            configPath: path.join(conn.workspaceContext.canonicalRoot, ".config"),
-            harnessId,
-            metadata: {},
-          };
+          const workspace = harnessWorkspace(conn, harnessId);
           const contextUpdatePayload =
             scope.sessionId !== undefined
               ? {

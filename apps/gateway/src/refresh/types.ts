@@ -108,6 +108,15 @@ export interface RefreshAdapterHandler {
     workspace: HarnessWorkspace,
     changeSummary: CatalogChangeSummary,
   ): Promise<RefreshResult>;
+  /**
+   * Writes the harness's learned-tool instructions from the workspace's current catalog when a
+   * connection initializes, so a catalog that changed while the harness was not connected is not
+   * advertised stale. Empty `markdown` means the workspace has no learned tools.
+   */
+  syncCatalogInstructions?(
+    workspace: HarnessWorkspace,
+    instructions: { markdown: string; toolNames: string[] },
+  ): Promise<void>;
   getCapabilities?(): RefreshCapability;
 }
 

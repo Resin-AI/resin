@@ -6,6 +6,8 @@ import stream from "node:stream";
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "../src/bin/mcp-shim.js";
 import type { LocalMcpGateway } from "../src/gateway.js";
+import { RESIN_LEARNED_TOOL_META } from "../src/protocol/types.js";
+import type { GatewayRouter } from "../src/router.js";
 import { McpStdioShim, checkDaemonReachable } from "../src/shim/stdio-bridge.js";
 
 describe("Stdio Shim & Bridge Lifecycle", () => {
@@ -144,61 +146,125 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     }
   });
 
-  it("keeps OMP's learned-tool block current when started without --harness", async () => {
-    // `resin init` registers OMP as plain `resin mcp`; the harness is known only from the client name.
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-omp-"));
-    const appendSystem = path.join(home, ".omp", "agent", "APPEND_SYSTEM.md");
+  // `resin init` registers OMP as plain `resin mcp`; the harness is known only from the client name.
+  async function withOmpHome(
+    body: (home: { root: string; appendSystem: string }) => Promise<void>,
+  ): Promise<void> {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-omp-"));
+    const appendSystem = path.join(root, ".omp", "agent", "APPEND_SYSTEM.md");
     fs.mkdirSync(path.dirname(appendSystem), { recursive: true });
-    fs.writeFileSync(
-      appendSystem,
-      "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
-    );
     const previousOmpHome = process.env.RESIN_OMP_HOME;
-    process.env.RESIN_OMP_HOME = path.join(home, ".omp");
+    process.env.RESIN_OMP_HOME = path.join(root, ".omp");
+    try {
+      await body({ root, appendSystem });
+    } finally {
+      if (previousOmpHome === undefined) delete process.env.RESIN_OMP_HOME;
+      else process.env.RESIN_OMP_HOME = previousOmpHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  /** Connects an OMP client to a standalone shim and returns once the connection is initialized. */
+  async function connectOmp(root: string, router?: GatewayRouter): Promise<McpStdioShim> {
     const stdin = new stream.PassThrough();
     const shim = new McpStdioShim({
-      socketPath: path.join(os.tmpdir(), `test-absent-omp-${Date.now()}.sock`),
+      socketPath: path.join(os.tmpdir(), `test-absent-omp-${Date.now()}-${Math.random()}.sock`),
       standaloneFallback: true,
       maxStartupAttempts: 0,
-      home,
-      resinHome: path.join(home, ".resin"),
+      home: root,
+      resinHome: path.join(root, ".resin"),
+      ...(router === undefined ? {} : { router }),
       stdin,
       stdout: new stream.PassThrough(),
       stderr: new stream.PassThrough(),
       cwd: os.tmpdir(),
     });
-    try {
-      await shim.start();
-      stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2025-06-18",
-            clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
-            capabilities: {},
-          },
-        })}\n`,
+    await shim.start();
+    stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+          capabilities: {},
+        },
+      })}\n`,
+    );
+    const gateway = (shim as unknown as { activeGateway: LocalMcpGateway }).activeGateway;
+    await expect.poll(() => gateway.getAllConnections()[0]?.isInitialized).toBe(true);
+    expect(gateway.getAllConnections()[0]!.harnessId).toBe("omp");
+    return shim;
+  }
+
+  function learnedToolsRouter(tools: Array<{ name: string; description: string }>): GatewayRouter {
+    return {
+      listTools: async () => [
+        { name: "manage_tools", inputSchema: { type: "object" } },
+        ...tools.map((tool) => ({
+          ...tool,
+          inputSchema: { type: "object" as const },
+          _meta: { [RESIN_LEARNED_TOOL_META]: true },
+        })),
+      ],
+      callTool: async () => ({ content: [] }),
+    };
+  }
+
+  it("drops a stale OMP learned-tool block when OMP connects to an empty catalog", async () => {
+    // The tool was retired while OMP was not running, so no catalog change event will arrive.
+    await withOmpHome(async ({ root, appendSystem }) => {
+      fs.writeFileSync(
+        appendSystem,
+        "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
       );
-      // A catalog change reaches the connection the OMP client opened; the catalog holds no learned
-      // tools now, so the refresh leaves only the user's own text. The shim keeps its gateway
-      // private; the test reads it to raise the change a cloud sync would.
-      const shimInternals = shim as unknown as { activeGateway: LocalMcpGateway };
-      const gateway = shimInternals.activeGateway;
-      await expect.poll(() => gateway.getAllConnections()[0]?.isInitialized).toBe(true);
-      const connection = gateway.getAllConnections()[0]!;
-      expect(connection.harnessId).toBe("omp");
-      await gateway.refreshCoordinator!.triggerRefresh(connection.workspaceContext.workspaceId, 1, {
-        changedToolIds: ["retired_tool"],
-      });
-      await expect.poll(() => fs.readFileSync(appendSystem, "utf8")).toBe("User notes\n");
-    } finally {
-      await shim.stop();
-      if (previousOmpHome === undefined) delete process.env.RESIN_OMP_HOME;
-      else process.env.RESIN_OMP_HOME = previousOmpHome;
-      fs.rmSync(home, { recursive: true, force: true });
-    }
+      const shim = await connectOmp(root);
+      try {
+        await expect.poll(() => fs.readFileSync(appendSystem, "utf8")).toBe("User notes\n");
+      } finally {
+        await shim.stop();
+      }
+    });
+  }, 30_000);
+
+  it("lists exactly the current learned tools when OMP connects, and leaves an identical block alone", async () => {
+    await withOmpHome(async ({ root, appendSystem }) => {
+      fs.writeFileSync(
+        appendSystem,
+        "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
+      );
+      const router = learnedToolsRouter([
+        { name: "fast_lint", description: "Lints the workspace." },
+        { name: "fast_build", description: "Builds the workspace." },
+      ]);
+      const headings = () =>
+        [...fs.readFileSync(appendSystem, "utf8").matchAll(/^### `([^`]+)`$/gm)].map((m) => m[1]);
+
+      const first = await connectOmp(root, router);
+      try {
+        await expect.poll(headings).toEqual(["fast_lint", "fast_build"]);
+        expect(fs.readFileSync(appendSystem, "utf8").startsWith("User notes\n")).toBe(true);
+      } finally {
+        await first.stop();
+      }
+
+      // Back-date the file so any rewrite would move its mtime.
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(appendSystem, past, past);
+      const before = fs.statSync(appendSystem).mtimeMs;
+      const contentBefore = fs.readFileSync(appendSystem, "utf8");
+
+      const second = await connectOmp(root, router);
+      try {
+        // Let the connect-time sync run to completion before checking it wrote nothing.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(fs.statSync(appendSystem).mtimeMs).toBe(before);
+        expect(fs.readFileSync(appendSystem, "utf8")).toBe(contentBefore);
+      } finally {
+        await second.stop();
+      }
+    });
   }, 30_000);
 
   it("reports actionable error when daemon is absent and standalone fallback disabled", async () => {
