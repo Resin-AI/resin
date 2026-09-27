@@ -91,20 +91,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    services:
-      postgres:
-        image: postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
-        env:
-          POSTGRES_DB: resin_test
-          POSTGRES_USER: resin_test
-          POSTGRES_PASSWORD: resin_test_password
-        ports:
-          - 5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
     outputs:
       commit_sha: ${{ steps.checkout.outputs.commit }}
     steps:
@@ -163,8 +149,6 @@ jobs:
         run: pnpm build
 
       - name: Run unit test shard
-        env:
-          TEST_DATABASE_URL: postgresql://resin_test:resin_test_password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/resin_test
         run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
   ci-gate:
