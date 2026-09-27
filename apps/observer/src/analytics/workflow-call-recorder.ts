@@ -184,6 +184,8 @@ interface LocalExecution {
   heldOut?: WorkflowCallHeldOut;
   /** Words of the instruction that started this execution: the values its request named. */
   requestWords: ReadonlySet<string>;
+  /** Input names already proposed for this execution's values, so a later derivation keeps them. */
+  inputNames?: ReadonlyMap<string, string>;
 }
 
 /** Executions kept per session: enough to recognise a repeat, bounded so a long session cannot grow. */
@@ -1327,6 +1329,7 @@ export class WorkflowCallRecorder {
     // What the calls of this execution establish about their own arguments.
     const index = calls.indexOf(call);
     const ownStepId = index < 0 ? undefined : `local${index}`;
+    const execution = state.executions.find((entry) => entry.index === call.executionIndex);
     const derivation = deriveNativeCalls(
       calls.map((entry, position) => ({
         callId: entry.callId,
@@ -1337,8 +1340,10 @@ export class WorkflowCallRecorder {
         ...(entry.result === undefined ? {} : { result: entry.result }),
         ...(entry.program === undefined ? {} : { program: entry.program }),
       })),
-      state.executions.find((execution) => execution.index === call.executionIndex)?.requestWords,
+      execution?.requestWords,
+      execution?.inputNames,
     );
+    if (execution !== undefined) execution.inputNames = derivation.inputNames;
     if (index < 0) return { dependsOnCallIds, candidates };
     for (const candidate of derivation.candidates) {
       // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.

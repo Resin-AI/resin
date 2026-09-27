@@ -94,6 +94,11 @@ export interface NativeDerivation {
   candidates: WorkflowBindingCandidate[];
   /** Values printed by an earlier call; proposals only once their locator is stored privately. */
   extracts: DerivedExtract[];
+  /**
+   * The input name each program value was offered as (keyed by value), including the names it was
+   * given. Passing it to the next derivation of the same growing recording keeps every name.
+   */
+  inputNames: ReadonlyMap<string, string>;
 }
 
 /**
@@ -306,6 +311,12 @@ function heredocStart(language: ProgramLanguage, text: string): number {
 export function deriveNativeCalls(
   calls: readonly DerivationCall[],
   requestWords: ReadonlySet<string> = new Set(),
+  /**
+   * Names an earlier derivation of this recording already gave. A value can first be offered at a
+   * call before a later one, once a later call shares it; without these, that value would take a
+   * name an earlier call's proposal already used for a different value.
+   */
+  givenInputNames: ReadonlyMap<string, string> = new Map(),
 ): NativeDerivation {
   const derived: DerivedCall[] = [];
   const candidates: WorkflowBindingCandidate[] = [];
@@ -316,8 +327,8 @@ export function deriveNativeCalls(
    * The input each program value was offered as, in order of first appearance, so the same value
    * anywhere in the recording is one input and a name, once given, never changes as calls arrive.
    */
-  const programInputs = new Map<string, string>();
-  const programInputNames = new Set<string>();
+  const programInputs = new Map<string, string>(givenInputNames);
+  const programInputNames = new Set<string>(givenInputNames.values());
   /** Values a file edit's added lines were offered as inputs for. */
   const patchInputValues = new Set<string>();
   /** Every typed primitive leaf shown before each call's result arrived. */
@@ -807,7 +818,7 @@ export function deriveNativeCalls(
     used[family] += 1;
     candidates.push(candidate);
   }
-  return { calls: derived, candidates, extracts };
+  return { calls: derived, candidates, extracts, inputNames: programInputs };
 }
 
 /** Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash. */
