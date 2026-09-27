@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
-import { type NormalizedSessionEvent, NormalizedSessionEventSchema } from "@resin/contracts";
+import {
+  type NormalizedSessionEvent,
+  NormalizedSessionEventSchema,
+  isHarnessIntrospectionProgram,
+} from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { ExponentialBackoff } from "@resin/protocol";
 import { z } from "zod";
 import { AuthRecoveryError, ResourceForbiddenError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
+import { localWorkflowEvent } from "../normalization/local-workflow-payload.js";
 import {
   NormalizationPipeline,
   type PipelineProcessContext,
@@ -16,6 +21,7 @@ import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
+import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { MetadataEventProjector } from "./metadata-event-projector.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
@@ -120,6 +126,8 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(JsonValueSchema),
   ]),
 );
+
+const MAX_HARNESS_INTROSPECTION_SESSIONS = 256;
 
 const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
 
@@ -317,6 +325,8 @@ export class TrajectoryCaptureCoordinator {
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
   private workflowCallRecorder: WorkflowCallRecorder;
+  /** Per session, the calls dropped as harness introspection, so their results and edits drop too. */
+  private readonly harnessIntrospectionCallIds = new Map<string, Set<string>>();
   private readonly metadataEventProjector = new MetadataEventProjector();
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
@@ -422,6 +432,48 @@ export class TrajectoryCaptureCoordinator {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Whether an event belongs to a program that introspects Resin or the agent harness (see
+   * `isHarnessIntrospectionProgram`). Such a call, the result answering it and anything it produced
+   * never reach a recorder, the local sink or the cloud: a tool learned from them describes the
+   * observer, not the user's work. Classification reads the local original, never a redacted view.
+   */
+  private isHarnessIntrospection(event: NormalizedSessionEvent): boolean {
+    const dropped = this.harnessIntrospectionCallIds.get(event.sessionId);
+    if (event.type === "tool_result") return dropped?.has(event.callId) === true;
+    if (event.type === "file_edit") {
+      return event.producedByCallId !== undefined && dropped?.has(event.producedByCallId) === true;
+    }
+    if (event.type !== "tool_call" && event.type !== "command_exec") return false;
+    const original = localWorkflowEvent(event) ?? event;
+    const command = extractRawCommandStringFromEvent(original);
+    const parameters = original.type === "tool_call" ? original.parameters : undefined;
+    const language =
+      typeof parameters?.language === "string" ? parameters.language.trim().toLowerCase() : "";
+    const introspects =
+      command !== null
+        ? isHarnessIntrospectionProgram(command, "shell")
+        : typeof parameters?.code === "string" &&
+          isHarnessIntrospectionProgram(
+            parameters.code,
+            language === "py" || language === "python" ? "python" : "javascript",
+          );
+    if (!introspects) return false;
+    if (event.type === "tool_call") {
+      if (dropped === undefined) {
+        this.harnessIntrospectionCallIds.set(event.sessionId, new Set([event.callId]));
+        // Bounded like the recorders' per-session state: the oldest session's entries go first.
+        if (this.harnessIntrospectionCallIds.size > MAX_HARNESS_INTROSPECTION_SESSIONS) {
+          const oldest = this.harnessIntrospectionCallIds.keys().next().value;
+          if (oldest !== undefined) this.harnessIntrospectionCallIds.delete(oldest);
+        }
+      } else {
+        dropped.add(event.callId);
+      }
+    }
+    return true;
   }
 
   private async isTelemetryAuthorized(
@@ -694,7 +746,7 @@ export class TrajectoryCaptureCoordinator {
             if (res.status === "dead_letter" || (res.status === "success" && res.isDuplicate)) {
               continue;
             }
-            if (res.event) {
+            if (res.event && !this.isHarnessIntrospection(res.event)) {
               try {
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
@@ -904,7 +956,7 @@ export class TrajectoryCaptureCoordinator {
                   ev.type === "session_lifecycle" &&
                   (ev.lifecycleType === "end" || ev.lifecycleType === "crash");
               }
-              if (!res.isDuplicate) {
+              if (!res.isDuplicate && !this.isHarnessIntrospection(ev)) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
                 // the identical carrier-bearing event.
                 validEvents.push(
