@@ -554,7 +554,8 @@ describe("Computation capture integration (native fixtures through the real pipe
         }
       }
     }
-  });
+    // Runs every fixture family through the real decoder and pipeline: ~5 s on a loaded CI runner.
+  }, 30_000);
 
   it("produces substantive evidence on both surfaces for the python definition/use families", async () => {
     const family = families.find((entry) => entry.familyId === "record-join-lineage")!;
@@ -811,7 +812,7 @@ describe("Computation capture integration (native fixtures through the real pipe
         }
       }
     }
-  });
+  }, 30_000);
 
   it("resolves a referenced observed script body for the executing cell", async () => {
     // A helper script authored first, then executed: the executing cell resolves the freshly
@@ -881,7 +882,7 @@ describe("Computation capture integration (native fixtures through the real pipe
         }
       }
     }
-  });
+  }, 30_000);
 
   it("clears observed source state when telemetry is withdrawn at the privacy boundary", async () => {
     const joinFamily = families.find((family) => family.familyId === "record-join-lineage")!;
