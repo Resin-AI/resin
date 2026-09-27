@@ -26,11 +26,11 @@ export const WORKFLOW_CALL_IDENTITY_SLOT = "callable:v1";
 export const WORKFLOW_CALL_ORDER_SLOT = "order:v1";
 
 /**
- * Demonstration slot holding whether a recorded call completed successfully (`"succeeded"`): an
- * error result, a non-zero exit or a suppressed result is `"failed"`. Absent for calls recorded
- * before the recorder kept it, or whose result never arrived.
+ * Demonstration slot holding the exit status a recorded shell call reported, as a number: kept only
+ * where the harness establishes it (a native command's exit code; an OMP bash call, whose tool
+ * reports an error for any non-zero exit, is 0 when it did not). Never any output.
  */
-export const WORKFLOW_CALL_OUTCOME_SLOT = "outcome:v1";
+export const WORKFLOW_CALL_EXIT_CODE_SLOT = "exit-code:v1";
 
 /** Demonstration slot holding one whole recorded argument of a call. */
 export function workflowCallArgumentSlot(argument: string): string {

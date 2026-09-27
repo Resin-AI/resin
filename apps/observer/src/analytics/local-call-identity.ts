@@ -8,9 +8,9 @@ import {
   resolvePrivateReference,
 } from "./private-value-store.js";
 import {
+  WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
-  WORKFLOW_CALL_OUTCOME_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -37,8 +37,8 @@ export interface LocalRecordedCall {
   };
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
-  /** True only when this device recorded that the call completed successfully. */
-  succeeded: boolean;
+  /** The exit status this device recorded for a shell call, when the harness established one. */
+  exitCode?: number;
   /** Absent when the recording kept no successful result for the call. */
   result?: { value: WorkflowJsonValue; reference: string; comparison?: "text-trim" };
   /**
@@ -269,9 +269,9 @@ export function createLocalCallIdentity(options: {
         workspaceId,
       );
       const sequence = order === undefined ? undefined : RecordedCallOrder.safeParse(order.value);
-      const outcome = ownedValue(
+      const exit = ownedValue(
         store,
-        referenceFor(WORKFLOW_CALL_OUTCOME_SLOT),
+        referenceFor(WORKFLOW_CALL_EXIT_CODE_SLOT),
         match.representation,
         workspaceId,
       );
@@ -282,7 +282,9 @@ export function createLocalCallIdentity(options: {
         callable,
         arguments: args,
         argumentReferences,
-        succeeded: outcome?.value === "succeeded",
+        ...(typeof exit?.value === "number" && Number.isSafeInteger(exit.value)
+          ? { exitCode: exit.value }
+          : {}),
         ...(result === undefined ? {} : { result }),
         ...(sequence?.success === true ? { sequence: sequence.data } : {}),
         ...(workspaceRoot === undefined ? {} : { workspaceRoot }),

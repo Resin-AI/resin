@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
@@ -52,6 +53,8 @@ type Turn =
       result: string;
       connection?: string;
       failed?: boolean;
+      /** Recorded through the OMP decoder's proven bash interface. */
+      ompBash?: boolean;
     };
 
 /** Records turns as one session would have produced them; nothing is executed. */
@@ -92,6 +95,9 @@ function record(
       toolName: turn.toolName,
       parameters: turn.parameters,
       ...(turn.connection === undefined ? {} : { connection: turn.connection }),
+      ...(turn.ompBash === true
+        ? { metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash" } }
+        : {}),
     });
     emit({
       type: "tool_result",
@@ -684,9 +690,16 @@ describe("a held-out command whose harness chose its own non-program arguments",
 describe("a held-out run of one segment of a recorded && chain", () => {
   const OTHER = "recording-check-chain-session";
   /** The report job as one OMP bash call ran it: a setup segment, then the report itself. */
-  const report = (callId: string, chain: string, failed = false): Turn[] => [
+  const report = (callId: string, chain: string, failed = false, ompBash = true): Turn[] => [
     { user: "Produce the monthly report" },
-    { callId, toolName: "bash", parameters: { command: chain }, result: "done\n", failed },
+    {
+      callId,
+      toolName: "bash",
+      parameters: { command: chain },
+      result: "done\n",
+      failed,
+      ompBash,
+    },
   ];
   const EMEA = "mkdir -p out && ./reportctl render --region EMEA";
   /** The plan's one chain step split into its segments, as the cloud projects and splits it. */
@@ -761,6 +774,11 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     [
       "the chain exited non-zero",
       report("apac", "mkdir -p out && ./reportctl render --region APAC", true),
+      1,
+    ],
+    [
+      "the harness recorded no exit status",
+      report("apac", "mkdir -p out && ./reportctl render --region APAC", false, false),
       1,
     ],
     [

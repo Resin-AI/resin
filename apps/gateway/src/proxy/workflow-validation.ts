@@ -317,13 +317,14 @@ function segmentCall(step: WorkflowStep, call: LocalRecordedCall): LocalRecorded
   const program = call.callable.program;
   if (
     step.segment === undefined ||
-    !call.succeeded ||
+    call.exitCode !== 0 ||
     call.result === undefined ||
     program?.kind !== "shell"
   )
     return undefined;
-  if (recordedPosixShell(call.callable.name, call.arguments) === undefined) return undefined;
-  const text = shellAndChainSegmentText(call.arguments[program.argument], step.segment);
+  const shell = recordedPosixShell(call.callable.name, call.arguments);
+  if (shell === undefined) return undefined;
+  const text = shellAndChainSegmentText(shell, call.arguments[program.argument], step.segment);
   if (text === undefined) return undefined;
   return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
 }

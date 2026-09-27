@@ -2,15 +2,22 @@
  * Splitting a recorded POSIX shell program at its top-level `&&` operators, so each command of a
  * chain can be compared, held out and replayed as a step of its own.
  *
- * A chain is split only where running its segments one after another, each aborting the rest on a
- * non-zero exit, is exactly what the shell did: no segment may change shell state a later segment
- * sees (`cd`, `export`, a bare assignment, ...), read the status of an earlier one (`$?`, `$!`,
- * `$_`, `PIPESTATUS`), or sit in any construct other than a plain `&&` list (`;`, `||`, `|`, `&`,
- * a newline, a comment, a heredoc, a continuation, a subshell, a substitution or a brace group).
- * Anything else stays one program. A chain whose recorded exit status is zero ran every segment.
+ * The splitter is an allowlist, not a parser: a program splits only when all of it is written in a
+ * tiny grammar in which every shell (bash, zsh, dash) reads it the same way and running its segments
+ * one after another, each aborting the rest on a non-zero exit, is exactly what the chain did.
  *
- * Segments are exact byte ranges of the recorded source. The splitter carries a version: a device
- * whose splitter version differs from the one a plan was split with admits none of its segments.
+ * - Printable ASCII only; the only blanks are space and tab.
+ * - Outside quotes, none of `$ \ `` # ! ( ) { } < > * ? [ ] ~ ; | % ^`, no `&` but the `&&`
+ *   separators, and no word starting with `=`.
+ * - Quotes are plain single-quoted strings (POSIX has no escapes inside them) and double-quoted
+ *   strings drawn from the same safe set (no `$`, backtick, backslash or `!` inside).
+ * - Every segment's first word, quotes removed, is an external command: never a builtin, keyword or
+ *   special word of bash, zsh or dash, never an assignment, never an option.
+ *
+ * Anything else stays one program. Segments are exact byte ranges of the recorded source, and the
+ * segments re-joined with the recorded separators are the source byte for byte. The splitter carries
+ * a version: a device whose splitter version differs from the one a plan was split with admits
+ * none of its segments.
  */
 
 import type { WorkflowStep } from "./recorded-workflow.js";
@@ -26,69 +33,172 @@ const POSIX_SHELLS: Readonly<Record<string, true>> = {
   dash: true,
 };
 
-/** Builtins that change state a later segment of the same shell would see. */
-const STATE_CHANGING_COMMANDS: Readonly<Record<string, true>> = {
-  export: true,
-  unset: true,
-  set: true,
-  shopt: true,
-  alias: true,
-  unalias: true,
-  source: true,
-  ".": true,
-  exec: true,
-  trap: true,
-  umask: true,
-  ulimit: true,
-  cd: true,
-  pushd: true,
-  popd: true,
-  declare: true,
-  typeset: true,
-  local: true,
-  readonly: true,
-  eval: true,
-  hash: true,
-  enable: true,
-};
-
 /**
- * Reserved words: a segment that starts a compound command is not a plain command. A Set, since
- * `then` cannot be an object key here.
+ * Every builtin, reserved word and special word of bash 5, zsh 5 and dash (their manuals' builtin
+ * and reserved-word lists). A segment starting with one never splits: a builtin may change state a
+ * later segment sees, or read state an earlier one set.
  */
-const RESERVED_WORDS: ReadonlySet<string> = new Set([
-  "if",
-  "then",
-  "elif",
-  "else",
-  "fi",
-  "for",
-  "while",
-  "until",
-  "do",
-  "done",
-  "case",
-  "esac",
-  "select",
-  "function",
-  "time",
-  "coproc",
+const SHELL_WORDS: ReadonlySet<string> = new Set([
+  // Reserved words and special words.
   "!",
   "[[",
+  "]]",
   "{",
   "}",
+  "case",
+  "coproc",
+  "do",
+  "done",
+  "elif",
+  "else",
+  "end",
+  "esac",
+  "fi",
+  "for",
+  "foreach",
+  "function",
+  "if",
+  "in",
+  "nocorrect",
+  "noglob",
+  "repeat",
+  "select",
+  "then",
+  "time",
+  "until",
+  "while",
+  "-",
+  // bash builtins.
+  ".",
+  ":",
+  "[",
+  "alias",
+  "bg",
+  "bind",
+  "break",
+  "builtin",
+  "caller",
+  "cd",
+  "command",
+  "compgen",
+  "complete",
+  "compopt",
+  "continue",
+  "declare",
+  "dirs",
+  "disown",
+  "echo",
+  "enable",
+  "eval",
+  "exec",
+  "exit",
+  "export",
+  "false",
+  "fc",
+  "fg",
+  "getopts",
+  "hash",
+  "help",
+  "history",
+  "jobs",
+  "kill",
+  "let",
+  "local",
+  "logout",
+  "mapfile",
+  "popd",
+  "printf",
+  "pushd",
+  "pwd",
+  "read",
+  "readarray",
+  "readonly",
+  "return",
+  "set",
+  "shift",
+  "shopt",
+  "source",
+  "suspend",
+  "test",
+  "times",
+  "trap",
+  "true",
+  "type",
+  "typeset",
+  "ulimit",
+  "umask",
+  "unalias",
+  "unset",
+  "wait",
+  // zsh builtins beyond bash's.
+  "autoload",
+  "bindkey",
+  "bye",
+  "cap",
+  "chdir",
+  "clone",
+  "comparguments",
+  "compcall",
+  "compctl",
+  "compdescribe",
+  "compfiles",
+  "compgroups",
+  "compquote",
+  "comptags",
+  "comptry",
+  "compvalues",
+  "disable",
+  "echotc",
+  "echoti",
+  "emulate",
+  "float",
+  "functions",
+  "getcap",
+  "getln",
+  "integer",
+  "limit",
+  "log",
+  "print",
+  "private",
+  "pushln",
+  "r",
+  "rehash",
+  "sched",
+  "setcap",
+  "setopt",
+  "stat",
+  "unfunction",
+  "unhash",
+  "unlimit",
+  "unsetopt",
+  "vared",
+  "whence",
+  "where",
+  "which",
+  "zcompile",
+  "zformat",
+  "zftp",
+  "zle",
+  "zmodload",
+  "zparseopts",
+  "zprof",
+  "zpty",
+  "zregexparse",
+  "zsocket",
+  "zstyle",
+  "ztcp",
 ]);
 
-/** Parameters holding the status of an earlier command. */
-const STATUS_PARAMETER = /\$(?:\?|!|_(?![A-Za-z0-9_])|\{[?!_]\})|PIPESTATUS/;
-
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\+)?=/;
+/** Characters never allowed outside single quotes. */
+const UNSAFE = new Set("$\\`#!(){}<>*?[]~;|%^");
+/** Characters never allowed inside double quotes. */
+const UNSAFE_IN_DOUBLE_QUOTES = new Set("$\\`!");
 
 export interface ShellAndChainSegment {
   /** Half-open [start, end) offsets of the segment's text in the recorded source. */
   start: number;
   end: number;
-  /** The segment exactly as recorded, without the whitespace around it. */
+  /** The segment exactly as recorded, without the blanks around it. */
   text: string;
 }
 
@@ -97,9 +207,11 @@ export interface ShellAndChain {
   segments: ShellAndChainSegment[];
 }
 
+const isBlank = (char: string): boolean => char === " " || char === "\t";
+
 /**
- * The words of one segment, as a shell would split it (quotes removed only for comparison), or
- * `undefined` when the segment is not a plain command.
+ * A segment's words with their quotes removed, or undefined when the segment is not in the grammar.
+ * Offsets outside quotes were already checked by the chain scan.
  */
 function segmentWords(text: string): string[] | undefined {
   const words: string[] = [];
@@ -107,7 +219,7 @@ function segmentWords(text: string): string[] | undefined {
   let inWord = false;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index]!;
-    if (char === " " || char === "\t") {
+    if (isBlank(char)) {
       if (inWord) words.push(word);
       word = "";
       inWord = false;
@@ -121,99 +233,60 @@ function segmentWords(text: string): string[] | undefined {
       index = close;
       continue;
     }
-    if (char === "\\") {
-      word += text[index + 1] ?? "";
-      index += 1;
-      continue;
-    }
     word += char;
   }
   if (inWord) words.push(word);
   return words;
 }
 
-/** Whether a segment is a plain command that changes no state a later segment could see. */
-function isPlainCommand(text: string): boolean {
-  const words = segmentWords(text);
-  if (words === undefined) return false;
-  let position = 0;
-  // `VAR=x cmd` sets VAR for cmd alone; a segment of assignments only sets it for the shell.
-  while (position < words.length && ASSIGNMENT.test(words[position]!)) position += 1;
-  let command = words[position];
-  if (command === undefined) return false;
-  if (RESERVED_WORDS.has(command)) return false;
-  // `builtin cd` and `command cd` still run the builtin.
-  while ((command === "builtin" || command === "command") && position + 1 < words.length) {
-    position += 1;
-    command = words[position]!;
-  }
-  return STATE_CHANGING_COMMANDS[command] !== true;
+/** Whether a segment runs an external command, the only kind of segment a chain splits into. */
+function runsExternalCommand(text: string): boolean {
+  const first = segmentWords(text)?.[0];
+  return (
+    first !== undefined &&
+    first.length > 0 &&
+    !SHELL_WORDS.has(first) &&
+    !first.startsWith("-") &&
+    !first.includes("=")
+  );
 }
 
 /**
- * The top-level `&&` segments of a recorded shell program, or `undefined` when the program is not
- * a chain of two or more plain commands under the rules above, or `shell` is not a POSIX shell.
+ * The top-level `&&` segments of a recorded program, or `undefined` when `shell` is not a POSIX
+ * shell, or the program is not a chain of two or more external commands in the grammar above.
  */
 export function splitShellAndChain(shell: string, source: string): ShellAndChain | undefined {
   if (POSIX_SHELLS[shell] !== true) return undefined;
-  if (STATUS_PARAMETER.test(source)) return undefined;
   const cuts: Array<[number, number]> = [];
   let quote: "'" | '"' | undefined;
+  let wordStart = true;
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index]!;
+    const code = char.charCodeAt(0);
+    if (char !== "\t" && (code < 0x20 || code > 0x7e)) return undefined;
     if (quote === "'") {
       if (char === "'") quote = undefined;
       continue;
     }
     if (quote === '"') {
-      if (char === "\\") {
-        // `\` then a newline continues the line even inside double quotes.
-        if (source[index + 1] === "\n" || source[index + 1] === "\r") return undefined;
-        index += 1;
-      } else if (char === '"') quote = undefined;
-      else if (char === "`" || (char === "$" && source[index + 1] === "(")) return undefined;
+      if (char === '"') quote = undefined;
+      else if (UNSAFE_IN_DOUBLE_QUOTES.has(char)) return undefined;
       continue;
     }
-    switch (char) {
-      case "'":
-      case '"':
-        quote = char;
-        break;
-      case "\\":
-        if (index + 1 >= source.length || source[index + 1] === "\n" || source[index + 1] === "\r")
-          return undefined;
-        index += 1;
-        break;
-      case "&":
-        if (source[index + 1] === "&") {
-          cuts.push([index, index + 2]);
-          index += 1;
-        } else if (source[index - 1] !== ">" && source[index - 1] !== "<") {
-          // A lone `&` backgrounds a command; `>&` and `<&` duplicate a descriptor.
-          return undefined;
-        }
-        break;
-      case "\n":
-      case "\r":
-      case ";":
-      case "|":
-      case "`":
-      case "(":
-      case ")":
-      case "{":
-      case "}":
-      case "#":
-        return undefined;
-      case "<":
-        // A heredoc or herestring is text a later line feeds in; never split around it.
-        if (source[index + 1] === "<") return undefined;
-        break;
-      case "$":
-        if (source[index + 1] === "(" || source[index + 1] === "{") return undefined;
-        break;
-      default:
-        break;
+    if (isBlank(char)) {
+      wordStart = true;
+      continue;
     }
+    if (char === "&") {
+      if (source[index + 1] !== "&") return undefined;
+      cuts.push([index, index + 2]);
+      index += 1;
+      wordStart = true;
+      continue;
+    }
+    if (UNSAFE.has(char) || (wordStart && char === "=")) return undefined;
+    wordStart = false;
+    if (char === "'" || char === '"') quote = char;
   }
   if (quote !== undefined || cuts.length === 0) return undefined;
   const segments: ShellAndChainSegment[] = [];
@@ -221,31 +294,59 @@ export function splitShellAndChain(shell: string, source: string): ShellAndChain
   for (const [cutStart, cutEnd] of [...cuts, [source.length, source.length] as [number, number]]) {
     let start = from;
     let end = cutStart;
-    while (start < end && /\s/.test(source[start]!)) start += 1;
-    while (end > start && /\s/.test(source[end - 1]!)) end -= 1;
+    while (start < end && isBlank(source[start]!)) start += 1;
+    while (end > start && isBlank(source[end - 1]!)) end -= 1;
     if (start === end) return undefined;
     const text = source.slice(start, end);
-    if (!isPlainCommand(text)) return undefined;
+    if (!runsExternalCommand(text)) return undefined;
     segments.push({ start, end, text });
     from = cutEnd;
   }
+  // Defence in depth: the segments and the recorded separators between them are the source.
+  let rejoined = source.slice(0, segments[0]!.start);
+  for (const [index, segment] of segments.entries()) {
+    rejoined += segment.text;
+    const next = segments[index + 1];
+    const separator = source.slice(segment.end, next?.start ?? source.length);
+    if (next !== undefined && !/^[ \t]*&&[ \t]*$/.test(separator)) return undefined;
+    if (next === undefined && !/^[ \t]*$/.test(separator)) return undefined;
+    rejoined += separator;
+  }
+  if (!/^[ \t]*$/.test(source.slice(0, segments[0]!.start)) || rejoined !== source)
+    return undefined;
   return { version: SHELL_AND_CHAIN_SPLITTER_VERSION, segments };
 }
 
 /**
- * The text of one segment of a recorded POSIX shell chain, re-split under this splitter: undefined
- * when the recorded source is not text, does not split, or was split by another splitter version or
- * into another number of segments. The caller establishes that the recorded shell is POSIX.
+ * The text of one segment of a recorded chain, re-split under this splitter for the recorded
+ * `shell`: undefined when the recorded source is not text, does not split, or was split by another
+ * splitter version or into another number of segments.
  */
 export function shellAndChainSegmentText(
+  shell: string,
   source: unknown,
   segment: { index: number; count: number; version: number },
 ): string | undefined {
   if (typeof source !== "string" || segment.version !== SHELL_AND_CHAIN_SPLITTER_VERSION)
     return undefined;
-  const chain = splitShellAndChain("sh", source);
+  const chain = splitShellAndChain(shell, source);
   if (chain === undefined || chain.segments.length !== segment.count) return undefined;
   return chain.segments[segment.index]?.text;
+}
+
+/**
+ * Whether a segment only creates directories — `mkdir -p` and plain path words — the one setup a
+ * chain may run or omit without changing what its other segments do.
+ */
+export function isOptionalSetupSegment(text: string): boolean {
+  const words = segmentWords(text);
+  return (
+    words !== undefined &&
+    words.length >= 3 &&
+    words[0] === "mkdir" &&
+    words[1] === "-p" &&
+    words.slice(2).every((word) => word.length > 0 && !word.startsWith("-"))
+  );
 }
 
 /**
@@ -264,7 +365,8 @@ export function recordedPosixShell(
 /**
  * What one argument of a step ran, given the original text its recording holds: for a segment
  * step's program argument, that segment of the recorded chain (undefined when the original does not
- * split as the step was split); otherwise the original itself.
+ * split as the step was split); otherwise the original itself. The recording check admitted the
+ * segment only under the recorded POSIX shell; the grammar reads the same in every POSIX shell.
  */
 export function segmentOriginal(
   step: Pick<WorkflowStep, "segment" | "callable">,
@@ -272,5 +374,5 @@ export function segmentOriginal(
   original: unknown,
 ): unknown {
   if (step.segment === undefined || step.callable.program?.argument !== argument) return original;
-  return shellAndChainSegmentText(original, step.segment);
+  return shellAndChainSegmentText("sh", original, step.segment);
 }
