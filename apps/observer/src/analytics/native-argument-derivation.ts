@@ -758,8 +758,7 @@ export function deriveNativeCalls(
         // recorded text.
         chosen.sort((left, right) => left.start - right.start);
         const slots = new Set(offered);
-        const budget =
-          MAX_CANDIDATES_PER_FAMILY - inputUsed[family] + (wholeIndex >= 0 ? 1 : 0);
+        const budget = MAX_CANDIDATES_PER_FAMILY - inputUsed[family] + (wholeIndex >= 0 ? 1 : 0);
         const offerable = chosen
           .filter((match) => {
             const slot = programInputs.get(scalarKey(match.needle)) ?? `\u0000${match.needle}`;

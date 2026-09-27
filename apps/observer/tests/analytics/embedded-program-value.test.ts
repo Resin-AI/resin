@@ -347,8 +347,14 @@ describe("a value embedded in a recorded program", () => {
       [
         // `2` becomes an input here, and `1.4.2` ends with it.
         shell("step0", "find projects/alpha projects/beta -maxdepth 2 -type f"),
-        shell("step1", `sha256sum -c dist/alpha-1.4.2.tar.gz.sha256 dist/beta-0.9.0.tar.gz.sha256 && ${verify}`),
-        shell("step2", `sha256sum -c alpha-1.4.2.tar.gz.sha256 beta-0.9.0.tar.gz.sha256 && ${verify}`),
+        shell(
+          "step1",
+          `sha256sum -c dist/alpha-1.4.2.tar.gz.sha256 dist/beta-0.9.0.tar.gz.sha256 && ${verify}`,
+        ),
+        shell(
+          "step2",
+          `sha256sum -c alpha-1.4.2.tar.gz.sha256 beta-0.9.0.tar.gz.sha256 && ${verify}`,
+        ),
       ],
       new Set(["alpha", "beta"]),
     );
@@ -356,12 +362,16 @@ describe("a value embedded in a recorded program", () => {
     // By its spans step2 has offered six inputs, so no `2` span can replace the whole offer: the
     // script's versions stay bound to the inputs the command's file names carry.
     const embedded = derivation.candidates.flatMap((candidate) =>
-      candidate.stepId === "step2" && candidate.path[2] === "embedded" && candidate.proposed.kind === "input"
+      candidate.stepId === "step2" &&
+      candidate.path[2] === "embedded" &&
+      candidate.proposed.kind === "input"
         ? [[candidate.path[3], candidate.proposed.name]]
         : [],
     );
     const spans = derivation.candidates.flatMap((candidate) =>
-      candidate.stepId === "step2" && candidate.path[2] === "span" && candidate.proposed.kind === "input"
+      candidate.stepId === "step2" &&
+      candidate.path[2] === "span" &&
+      candidate.proposed.kind === "input"
         ? [[candidate.path[1], candidate.proposed.name]]
         : [],
     );
