@@ -3,6 +3,8 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   isHarnessIntrospectionProgram,
+  readCodexCommandMetadata,
+  referencesHarnessState,
 } from "@resin/contracts";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { ExponentialBackoff } from "@resin/protocol";
@@ -128,6 +130,7 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 const MAX_HARNESS_INTROSPECTION_SESSIONS = 256;
+const MAX_HARNESS_INTROSPECTION_CALLS = 4096;
 
 const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
 
@@ -325,8 +328,14 @@ export class TrajectoryCaptureCoordinator {
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
   private workflowCallRecorder: WorkflowCallRecorder;
-  /** Per session, the calls dropped as harness introspection, so their results and edits drop too. */
-  private readonly harnessIntrospectionCallIds = new Map<string, Set<string>>();
+  /**
+   * Per session (least recently used first), the calls dropped as harness introspection, so their
+   * results and edits drop too, and the calls kept, so their results never fall back to text.
+   */
+  private readonly harnessIntrospectionCalls = new Map<
+    string,
+    { dropped: Set<string>; seen: Set<string> }
+  >();
   private readonly metadataEventProjector = new MetadataEventProjector();
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
@@ -439,15 +448,43 @@ export class TrajectoryCaptureCoordinator {
    * `isHarnessIntrospectionProgram`). Such a call, the result answering it and anything it produced
    * never reach a recorder, the local sink or the cloud: a tool learned from them describes the
    * observer, not the user's work. Classification reads the local original, never a redacted view.
+   *
+   * A result or edit whose call this process never saw (capture resumed after a restart) cannot be
+   * paired, so it is dropped when its own text names Resin's tool namespace or harness home state.
    */
   private isHarnessIntrospection(event: NormalizedSessionEvent): boolean {
-    const dropped = this.harnessIntrospectionCallIds.get(event.sessionId);
-    if (event.type === "tool_result") return dropped?.has(event.callId) === true;
-    if (event.type === "file_edit") {
-      return event.producedByCallId !== undefined && dropped?.has(event.producedByCallId) === true;
+    let calls = this.harnessIntrospectionCalls.get(event.sessionId);
+    if (calls === undefined) {
+      calls = { dropped: new Set(), seen: new Set() };
+      // Least recently used session state goes first, like the recorders' per-session state.
+      if (this.harnessIntrospectionCalls.size >= MAX_HARNESS_INTROSPECTION_SESSIONS) {
+        const oldest = this.harnessIntrospectionCalls.keys().next().value;
+        if (oldest !== undefined) this.harnessIntrospectionCalls.delete(oldest);
+      }
+    } else {
+      this.harnessIntrospectionCalls.delete(event.sessionId);
     }
-    if (event.type !== "tool_call" && event.type !== "command_exec") return false;
+    this.harnessIntrospectionCalls.set(event.sessionId, calls);
     const original = localWorkflowEvent(event) ?? event;
+
+    if (original.type === "tool_result" || original.type === "file_edit") {
+      const codex = readCodexCommandMetadata(original.metadata);
+      const callIds = [
+        original.type === "tool_result" ? original.callId : original.producedByCallId,
+        codex?.kind === "result" ? codex.association?.callId : undefined,
+      ].filter((callId): callId is string => callId !== undefined);
+      if (callIds.some((callId) => calls.dropped.has(callId))) return true;
+      if (callIds.some((callId) => calls.seen.has(callId))) return false;
+      const text =
+        original.type === "file_edit"
+          ? `${original.filePath}\n${original.patch ?? ""}`
+          : typeof original.result === "string"
+            ? original.result
+            : JSON.stringify(original.result ?? null);
+      return referencesHarnessState(text);
+    }
+    if (original.type !== "tool_call" && original.type !== "command_exec") return false;
+
     const command = extractRawCommandStringFromEvent(original);
     const parameters = original.type === "tool_call" ? original.parameters : undefined;
     const language =
@@ -460,20 +497,23 @@ export class TrajectoryCaptureCoordinator {
             parameters.code,
             language === "py" || language === "python" ? "python" : "javascript",
           );
-    if (!introspects) return false;
-    if (event.type === "tool_call") {
-      if (dropped === undefined) {
-        this.harnessIntrospectionCallIds.set(event.sessionId, new Set([event.callId]));
-        // Bounded like the recorders' per-session state: the oldest session's entries go first.
-        if (this.harnessIntrospectionCallIds.size > MAX_HARNESS_INTROSPECTION_SESSIONS) {
-          const oldest = this.harnessIntrospectionCallIds.keys().next().value;
-          if (oldest !== undefined) this.harnessIntrospectionCallIds.delete(oldest);
-        }
-      } else {
-        dropped.add(event.callId);
+    const codex =
+      original.type === "command_exec" ? readCodexCommandMetadata(original.metadata) : undefined;
+    const callIds =
+      original.type === "tool_call"
+        ? [original.callId]
+        : codex?.kind === "command"
+          ? [codex.nativeId, ...(codex.association ? [codex.association.callId] : [])]
+          : [];
+    const record = introspects ? calls.dropped : calls.seen;
+    for (const callId of callIds) {
+      record.add(callId);
+      if (record.size > MAX_HARNESS_INTROSPECTION_CALLS) {
+        const oldest = record.values().next().value;
+        if (oldest !== undefined) record.delete(oldest);
       }
     }
-    return true;
+    return introspects;
   }
 
   private async isTelemetryAuthorized(
@@ -942,6 +982,8 @@ export class TrajectoryCaptureCoordinator {
             }
             if (res.status === "success" && res.event) {
               const ev = res.event;
+              // A dropped event never becomes the tail a later synthetic event continues from.
+              if (this.isHarnessIntrospection(ev)) continue;
               const seq = ev.causalRef?.causalSequence ?? 0;
               const stepIndex = ev.causalRef?.stepIndex ?? 0;
               if (
@@ -956,7 +998,7 @@ export class TrajectoryCaptureCoordinator {
                   ev.type === "session_lifecycle" &&
                   (ev.lifecycleType === "end" || ev.lifecycleType === "crash");
               }
-              if (!res.isDuplicate && !this.isHarnessIntrospection(ev)) {
+              if (!res.isDuplicate) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
                 // the identical carrier-bearing event.
                 validEvents.push(
