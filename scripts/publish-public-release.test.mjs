@@ -38,6 +38,7 @@ import {
   deriveInvalidationPath,
   derivePublicUrl,
   freeze,
+  installWithStaleChannelRetry,
   loadInstallerResults,
   mirrorRuntimes,
   normalizeKeyPrefix,
@@ -3548,5 +3549,63 @@ describe("publish-public-release", () => {
         await new Promise((resolve) => server.close(resolve));
       }
     });
+  });
+});
+
+describe("installWithStaleChannelRetry", () => {
+  function harness(versions) {
+    let clock = 0;
+    const logs = [];
+    let calls = 0;
+    const attempt = async () => {
+      const next = versions[Math.min(calls++, versions.length - 1)];
+      if (next instanceof Error) throw next;
+      return next;
+    };
+    const options = {
+      expectedVersion: "1.0.88",
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      log: (line) => logs.push(line),
+    };
+    return { attempt, options, logs, calls: () => calls, elapsed: () => clock };
+  }
+
+  it("retries a stale channel until the promoted version is served", async () => {
+    const h = harness(["1.0.87", "1.0.87", "1.0.88"]);
+    await expect(installWithStaleChannelRetry(h.attempt, h.options)).resolves.toBe("1.0.88");
+    expect(h.calls()).toBe(3);
+    expect(h.logs).toHaveLength(2);
+    expect(h.logs[0]).toContain("stale channel served 1.0.87, expected 1.0.88");
+  });
+
+  it("fails a persistently stale channel once the 120 s budget is spent", async () => {
+    const h = harness(["1.0.87"]);
+    await expect(installWithStaleChannelRetry(h.attempt, h.options)).rejects.toThrow(
+      "Installed version 1.0.87 does not match expected release version 1.0.88 (channel still stale after 120000 ms)",
+    );
+    expect(h.elapsed()).toBeLessThanOrEqual(120_000);
+    expect(h.calls()).toBe(25);
+  });
+
+  it("fails immediately on a digest mismatch without retrying", async () => {
+    const h = harness([new Error("SHA-256 digest mismatch for resin-linux-x64")]);
+    await expect(installWithStaleChannelRetry(h.attempt, h.options)).rejects.toThrow(
+      "digest mismatch",
+    );
+    expect(h.calls()).toBe(1);
+    expect(h.logs).toHaveLength(0);
+  });
+
+  it("fails immediately on a newer or unrelated version", async () => {
+    for (const version of ["1.0.89", "garbage"]) {
+      const h = harness([version]);
+      await expect(installWithStaleChannelRetry(h.attempt, h.options)).rejects.toThrow(
+        `Installed version ${version} does not match`,
+      );
+      expect(h.calls()).toBe(1);
+    }
   });
 });

@@ -90,6 +90,54 @@ export const INSTALLER_FILENAMES = Object.freeze([
 
 export const CONTRACTED_INSTALLERS = Object.freeze(["posix", "powershell"]);
 
+function compareReleaseVersions(a, b) {
+  const parse = (v) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v));
+    return match ? match.slice(1).map(Number) : null;
+  };
+  const left = parse(a);
+  const right = parse(b);
+  if (!left || !right) return null;
+  for (let i = 0; i < 3; i++) {
+    if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Runs a post-promotion install check, retrying only while it installs an older
+ * release than expected: the CDN edge may still serve the previous channels.json
+ * (max-age 60 plus invalidation time). `attempt` resolves to the installed version;
+ * any thrown error, or a newer or unrelated version, fails immediately.
+ */
+export async function installWithStaleChannelRetry(attempt, options) {
+  const {
+    expectedVersion,
+    label = "installer",
+    budgetMs = 120_000,
+    intervalMs = 5_000,
+    now = Date.now,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    log = console.log,
+  } = options;
+  const deadline = now() + budgetMs;
+  for (let retry = 1; ; retry++) {
+    const installedVersion = await attempt();
+    if (installedVersion === expectedVersion) return installedVersion;
+    const message = `Installed version ${installedVersion} does not match expected release version ${expectedVersion}`;
+    if (compareReleaseVersions(installedVersion, expectedVersion) !== -1) {
+      throw new Error(message);
+    }
+    if (now() + intervalMs > deadline) {
+      throw new Error(`${message} (channel still stale after ${budgetMs} ms)`);
+    }
+    log(
+      `${label}: stale channel served ${installedVersion}, expected ${expectedVersion}; retry ${retry} in ${intervalMs} ms`,
+    );
+    await sleep(intervalMs);
+  }
+}
+
 /**
  * Loads and parses installer results if passed as a file path or JSON string.
  */
