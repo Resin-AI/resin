@@ -5729,6 +5729,25 @@ var init_code_command = __esm({
   }
 });
 
+// adapters/codex-cli/dist/file-change.js
+var ChangeSchema, FileChangeItemSchema;
+var init_file_change = __esm({
+  "adapters/codex-cli/dist/file-change.js"() {
+    "use strict";
+    init_zod();
+    ChangeSchema = external_exports.discriminatedUnion("type", [
+      external_exports.object({ type: external_exports.literal("update"), unified_diff: external_exports.string(), move_path: external_exports.null() }).strict(),
+      external_exports.object({ type: external_exports.literal("add"), content: external_exports.string() }).strict(),
+      external_exports.object({ type: external_exports.literal("delete"), content: external_exports.string() }).strict()
+    ]);
+    FileChangeItemSchema = external_exports.object({
+      type: external_exports.literal("FileChange"),
+      status: external_exports.literal("completed"),
+      changes: external_exports.record(external_exports.string(), ChangeSchema)
+    });
+  }
+});
+
 // adapters/codex-cli/dist/decoder.js
 var CodexTranscriptValueSchema, CodexTranscriptPayloadSchema, CodexDecoderOptionsSchema;
 var init_decoder3 = __esm({
@@ -5737,6 +5756,7 @@ var init_decoder3 = __esm({
     init_dist();
     init_zod();
     init_code_command();
+    init_file_change();
     CodexTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
       external_exports.string(),
       external_exports.number(),
@@ -5872,11 +5892,12 @@ var init_refresh4 = __esm({
 });
 
 // adapters/omp/dist/source.js
-var MAX_OMP_PROGRAM_ARTIFACT_BYTES;
+var MAX_OMP_PROGRAM_ARTIFACT_BYTES, FORK_HEADER_SCAN_BYTES;
 var init_source4 = __esm({
   "adapters/omp/dist/source.js"() {
     "use strict";
     MAX_OMP_PROGRAM_ARTIFACT_BYTES = 1 * 1024 * 1024;
+    FORK_HEADER_SCAN_BYTES = 64 * 1024;
   }
 });
 
@@ -5988,6 +6009,13 @@ var init_dist5 = __esm({
   }
 });
 
+// apps/cli/src/installer/codex-instructions.ts
+var init_codex_instructions = __esm({
+  "apps/cli/src/installer/codex-instructions.ts"() {
+    "use strict";
+  }
+});
+
 // apps/cli/src/installer/harness-config.ts
 var SUPPORTED_HARNESS_IDS;
 var init_harness_config = __esm({
@@ -5998,6 +6026,7 @@ var init_harness_config = __esm({
     init_dist4();
     init_dist();
     init_dist5();
+    init_codex_instructions();
     SUPPORTED_HARNESS_IDS = ["claude-code", "codex-cli", "omp"];
   }
 });
@@ -6022,6 +6051,7 @@ var init_harness_reconciler = __esm({
     "use strict";
     init_dist();
     init_zod();
+    init_codex_instructions();
     init_harness_config();
     HarnessJsonValueSchema = external_exports.lazy(
       () => external_exports.union([
