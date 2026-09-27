@@ -13,6 +13,7 @@ import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CloudIdentityProvider, CloudRequestIdentity } from "./client.js";
 import type { LocalArtifactExecutor } from "./local-executor.js";
 import type { ManagedToolAccess } from "./tool-access.js";
+import { WORKFLOW_CAPABILITIES, WORKFLOW_CAPABILITIES_HEADER } from "./workflow-capabilities.js";
 export interface TraceContext {
   traceId: string;
   spanId: string;
@@ -460,6 +461,7 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
           "X-Parent-Span-Id": context.traceContext?.parentSpanId || "",
           "X-Sampled": context.traceContext?.sampled ? "1" : "0",
           "X-Deadline": String(context.deadline),
+          [WORKFLOW_CAPABILITIES_HEADER]: WORKFLOW_CAPABILITIES,
         };
         if (id) {
           headers.Authorization = `Bearer ${id.accessToken}`;

@@ -31,6 +31,7 @@ import {
 import { z } from "zod";
 import { computeManifestDigest } from "../registry/validator.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
+import { WORKFLOW_CAPABILITIES, WORKFLOW_CAPABILITIES_HEADER } from "./workflow-capabilities.js";
 
 export interface CloudRequestIdentity {
   cloudUrl: string;
@@ -502,6 +503,7 @@ export class CloudCatalogClient {
         if (advertiseUnchanged) {
           headers[CATALOG_CAPABILITIES_HEADER] = CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY;
         }
+        headers[WORKFLOW_CAPABILITIES_HEADER] = WORKFLOW_CAPABILITIES;
         return headers;
       };
 
@@ -709,6 +711,7 @@ export class CloudCatalogClient {
         const headers: Record<string, string> = {
           Accept: "application/octet-stream, application/x-tar, application/gzip",
           "x-protocol-version": PROTOCOL_VERSION,
+          [WORKFLOW_CAPABILITIES_HEADER]: WORKFLOW_CAPABILITIES,
         };
         if (id) {
           headers.Authorization = `Bearer ${id.accessToken}`;
