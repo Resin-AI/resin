@@ -7587,80 +7587,16 @@ function ompNamePart(value, fallback) {
   const part = value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
   return part.length > 0 ? part : fallback;
 }
-function wyhashMum(a, b) {
-  const product = a * b;
-  return [product & WYHASH_MASK, product >> 64n];
-}
-function wyhashMix(a, b) {
-  const [low, high] = wyhashMum(a, b);
-  return low ^ high;
-}
-function wyhash(text) {
-  const bytes = new TextEncoder().encode(text);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const read64 = (at) => view.getBigUint64(at, true);
-  const read32 = (at) => BigInt(view.getUint32(at, true));
-  const length = bytes.length;
-  const seedState = wyhashMix(WYHASH_SECRET[0], WYHASH_SECRET[1]);
-  const state = [seedState, seedState, seedState];
-  let a;
-  let b;
-  if (length <= 16) {
-    if (length >= 4) {
-      const end = length - 4;
-      const quarter = length >> 3 << 2;
-      a = read32(0) << 32n | read32(quarter);
-      b = read32(end) << 32n | read32(end - quarter);
-    } else if (length > 0) {
-      a = BigInt(bytes[0]) << 16n | BigInt(bytes[length >> 1]) << 8n | BigInt(bytes[length - 1]);
-      b = 0n;
-    } else {
-      a = 0n;
-      b = 0n;
-    }
-  } else {
-    let offset = 0;
-    if (length >= 48) {
-      for (; offset + 48 < length; offset += 48) {
-        for (let lane = 0; lane < 3; lane++) {
-          state[lane] = wyhashMix(read64(offset + 16 * lane) ^ WYHASH_SECRET[lane + 1], read64(offset + 16 * lane + 8) ^ state[lane]);
-        }
-      }
-      state[0] = state[0] ^ state[1] ^ state[2];
-    }
-    for (; offset + 16 < length; offset += 16) {
-      state[0] = wyhashMix(read64(offset) ^ WYHASH_SECRET[1], read64(offset + 8) ^ state[0]);
-    }
-    a = read64(length - 16);
-    b = read64(length - 8);
-  }
-  [a, b] = wyhashMum(a ^ WYHASH_SECRET[1], b ^ state[0]);
-  return wyhashMix(a ^ WYHASH_SECRET[0] ^ BigInt(length), b ^ WYHASH_SECRET[1]);
-}
 function ompMcpToolName(serverName, toolName) {
   const server = ompNamePart(serverName, "server");
   const tool = ompNamePart(toolName, "tool");
-  const name = `mcp__${server}_${tool.startsWith(`${server}_`) ? tool.slice(server.length + 1) : tool}`;
-  if (name.length <= OMP_TOOL_NAME_MAX_LENGTH)
-    return name;
-  const digest = wyhash(name).toString(36).slice(0, OMP_TOOL_NAME_HASH_LENGTH);
-  return `${name.slice(0, OMP_TOOL_NAME_MAX_LENGTH - digest.length - 1)}_${digest}`;
+  return `mcp__${server}_${tool.startsWith(`${server}_`) ? tool.slice(server.length + 1) : tool}`;
 }
-var OMP_TOOL_NAME_MAX_LENGTH, OMP_TOOL_NAME_HASH_LENGTH, WYHASH_MASK, WYHASH_SECRET;
 var init_device_surface = __esm({
   "adapters/omp/dist/device-surface.js"() {
     "use strict";
     init_config_planner7();
     init_discovery7();
-    OMP_TOOL_NAME_MAX_LENGTH = 64;
-    OMP_TOOL_NAME_HASH_LENGTH = 8;
-    WYHASH_MASK = (1n << 64n) - 1n;
-    WYHASH_SECRET = [
-      0xa0761d6478bd642fn,
-      0xe7037ed1a0b428dbn,
-      0x8ebc6af09c88c6e3n,
-      0x589965cc75374cc3n
-    ];
   }
 });
 
