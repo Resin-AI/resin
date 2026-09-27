@@ -143,6 +143,11 @@ export interface ProductionProxyRuntime {
    * otherwise never sees tools a fresh install has not synced yet.
    */
   catalogSettled?(timeoutMs: number): Promise<void>;
+  /**
+   * Resolves once the workspace's catalog is known: the cloud answered, or there is no cloud and the
+   * local registry is the whole catalog. Never resolves while the cloud stays unreachable.
+   */
+  whenCatalogLoaded?(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   sync(options?: { force?: boolean }): Promise<CatalogSnapshotResponse | null>;
@@ -626,6 +631,9 @@ export async function createProductionProxyRuntime(
         ]);
         clearTimeout(timer);
       },
+      whenCatalogLoaded(): Promise<void> {
+        return coordinator.whenCatalogLoaded();
+      },
       async sync(syncOpts?: { force?: boolean }): Promise<CatalogSnapshotResponse | null> {
         await Promise.all([...backgroundTasks]);
         return await coordinator.sync({ fresh: syncOpts?.force === true });
@@ -685,6 +693,10 @@ export async function createProductionProxyRuntime(
 
     async stop(): Promise<void> {
       // Safe no-op
+    },
+
+    async whenCatalogLoaded(): Promise<void> {
+      // Without cloud credentials the local registry is the whole catalog.
     },
 
     async sync(): Promise<CatalogSnapshotResponse | null> {

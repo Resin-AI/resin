@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { OmpHarnessAdapter, getOmpRefreshCapability } from "@resin/adapter-omp";
+import {
+  OmpHarnessAdapter,
+  applyOmpCatalogInstructions,
+  getOmpRefreshCapability,
+} from "@resin/adapter-omp";
 import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection, type LocalStateStore, createLocalStateStore } from "@resin/db";
@@ -441,6 +445,9 @@ export class McpStdioShim {
             getCapabilities: getOmpRefreshCapability,
             notifyCatalogRefresh: (workspace, changeSummary) =>
               new OmpHarnessAdapter().notifyCatalogRefresh(workspace, changeSummary),
+            syncCatalogInstructions: async (_workspace, instructions) => {
+              await applyOmpCatalogInstructions(instructions);
+            },
           },
         },
       },
