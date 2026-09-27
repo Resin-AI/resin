@@ -270,6 +270,36 @@ jobs:
             echo "::error::Candidate archive missing required installer assets"
             exit 1
           fi
+
+      - name: Verify candidate CI run passed on the exact release SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="qualification/production-release-evidence.json"
+          ci_run_id="$(jq -r '.ciRunId // empty' "$evidence")"
+          if [[ ! "$ci_run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::Candidate evidence $evidence has no valid ciRunId: '$ci_run_id'"
+            exit 1
+          fi
+          if [ "$(jq -r '.commitSha' "$evidence")" != "$RELEASE_SHA" ]; then
+            echo "::error::Candidate evidence is not bound to promotion SHA $RELEASE_SHA"
+            exit 1
+          fi
+          run_info="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id")"
+          run_repo="$(echo "$run_info" | jq -r '.head_repository.full_name // (.head_repository_owner.login + "/" + .head_repository.name)')"
+          run_path="$(echo "$run_info" | jq -r '.path')"
+          run_sha="$(echo "$run_info" | jq -r '.head_sha')"
+          run_status="$(echo "$run_info" | jq -r '.status')"
+          run_conclusion="$(echo "$run_info" | jq -r '.conclusion')"
+          if [ "$run_repo" != "$GITHUB_REPOSITORY" ] || [ "$run_path" != ".github/workflows/ci.yml" ] || [ "$run_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::CI run $ci_run_id ($run_repo $run_path $run_sha) is not ci.yml on $GITHUB_REPOSITORY@$RELEASE_SHA"
+            exit 1
+          fi
+          if [ "$run_status" != "completed" ] || [ "$run_conclusion" != "success" ]; then
+            echo "::error::CI run $ci_run_id is $run_status/$run_conclusion (must be completed/success before promotion)"
+            exit 1
+          fi
+          echo "CI run $ci_run_id passed on $RELEASE_SHA"
       - name: Create draft GitHub release
         if: ${{ inputs.environment == 'production' }}
         id: create_github_release
